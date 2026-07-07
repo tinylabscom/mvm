@@ -294,3 +294,221 @@ The target user-visible shape is:
 - Live evidence records prepared warm-claim, prepared snapshot-restore,
   prepared cold-direct-boot, builder warm-claim, and builder snapshot-restore
   timings.
+
+## Slice 1 — tracer bullet: seed the persistent builder store from a verified pack
+
+**Status: designed 2026-07-06; not yet built.**
+
+The first vertical proves the whole pack path end-to-end while landing
+independently of the two unmerged mega-stacks (Plan 214 backend unification and
+Plan 227 hvf snapshot/restore). It slices WS-B, WS-C, and WS-F thin and defers
+E/G/H/I/J/K.
+
+### Framing decisions (settled in brainstorm)
+
+- **Backend-agnostic artifacts, hvf lands first.** Pack artifacts (builder base
+  disk, builder kernel, seeded store image) come from the shared
+  `nix/images/builder-vm/` flake and are byte-identical across backends, so the
+  manifest lists every compatible backend in `backend_compatibility`. The local
+  fast-boot/seed path is wired for the hvf backend first (macOS-26 default, no
+  Homebrew prerequisites, and the strategic destination); libkrun/Linux wiring is
+  a later additive slice.
+- **`PackBackend` gains an `hvf` variant.** `verify_pack_at` matches
+  `backend_compatibility` against `LocalPackPolicy.backend`, so the enum must be
+  able to name the in-house/HVF backend regardless of the agnostic framing. This
+  is the one schema change slice 1 makes.
+- **Value comes from the seeded store, not a memory snapshot.** hvf has no
+  snapshot primitive yet (Plan 227 WS-E). With the Stage 0 store now persistent
+  on macOS, the cost a pack eliminates is the multi-minute Stage 0 store
+  population, not VM boot. Slice 1 therefore ships no memory snapshot and no
+  resident warm-standby.
+- **Warm is measured, not assumed.** After the seeded store lands, slice 1 boots
+  the hvf builder cold with the warm store and measures it live on available
+  hardware. Resident warm-standby (a full hvf resident host-VM lifecycle) becomes
+  slice 2, gated on that measurement showing cold-boot is insufficient.
+- **Seed format: ready-to-mount ext4 Nix-store image.** The pack ships a
+  materialized store image, not a NAR closure. The fast path is then verify +
+  place + write the persistent-store reuse marker — zero seed-boot — reusing the
+  reuse machinery already on main. A NAR-import variant is a later refinement if
+  ADR-097 ratification demands strict NARs-only publishing.
+- **Seed scope: the default `dev up` / `build image` dev-shell closure.** The
+  first-hit path for a fresh install. Private flakes and OCI still route through
+  the normal builder path; OCI `run --image` is already builder-VM-free
+  (materialized in-process host-side) and needs no pack.
+- **Rollout: opt-in `MVM_BUILDER_PACK=1`.** Default path stays byte-identical
+  until the live measurement proves the pack path, then a later slice flips the
+  default. Source-checkout builds never take the pack path (they build from
+  in-repo flakes); the flag is a no-op wherever `find_builder_vm_flake()` returns
+  a local flake, enforced the same way release-artifact download is gated today.
+
+### ADR-097 amendments this slice requires
+
+ADR-097 is Proposed; slice 1 ratifies it with two edits (a separate docs change):
+
+1. Add the in-house/HVF backend to the backend set packs may target.
+2. Clarify §5 so a content-addressed, deterministically-rebuildable store image
+   is a publishable Nix output, not host-derived local-only state. Memory
+   snapshots remain local-only. `pack-hash-as-identity` is unchanged.
+
+### Units (each independently testable)
+
+**Progress:** Unit 1 landed (`PackBuilder` producer + `PackBackend::Hvf`). Unit 2
+landed (content-addressed `pack_cache` — verify + atomic promote). Unit 3 landed
+as the corrected **attested builder-image download materializer** (see the "Slice 1
+correction" section) — flag-gated on `MVM_BUILDER_PACK`, offline-tested. Follow-up
+F landed the **configurable trust root** (`mvm-core::pack_trust` + a
+`mvm_keys_dir()/pack-trust.json` loaded on the host): the attested path now
+verifies against a real on-disk trust root instead of an empty store, proven
+end-to-end (produce → promote → resolve → verify → materialize), with an absent or
+malformed trust file staying inert and falling through to the plain download. An
+embedded release-key default (so it works with no config) remains for the
+release/trust workstream.
+
+**Unit 1 — pack producer (WS-B thin).** A CI/release step plus a local
+example/xtask tool that takes the builder-VM flake outputs (base disk + builder
+kernel) and a materialized seeded store image for the dev-shell closure, and
+emits a signed `Builder` `PackManifest` + file set. Consumes the existing
+`mvm_core::packs` types unchanged except the new `PackBackend::Hvf`. Output: one
+`aarch64-darwin` builder pack.
+Tests: produced pack round-trips through `verify_pack_at` green; tamper on each
+file + manifest field goes red.
+
+**Unit 2 — content-addressed pack cache (WS-C thin).** `place → quarantine dir →
+verify_pack_at → atomic rename-promote` under `mvm_core::config` cache helpers
+(`mvm_cache_dir`), permission-hardened (0700). Interface:
+`resolve_pack(kind, arch, backend) -> Result<VerifiedPackDir>`.
+Tests: interrupted download, partial extraction, atomic promotion, permission
+hardening, poisoned-entry rejection — all with a locally-produced pack, no
+network.
+
+**Unit 3 — seed materializer + flag-gated hvf boot (WS-F thin).** Given a
+`VerifiedPackDir`, lay the seeded store image + base disk into the
+`~/.cache/mvm/builder-vm/` layout the persistent-store reuse path recognizes,
+write the reuse marker, then boot the hvf builder with the warm store behind
+`MVM_BUILDER_PACK=1`. Emit phase timing to capture the live measurement.
+Tests: materialize lands the exact layout + marker the reuse path expects;
+flag-off = byte-identical default path; source-checkout = no-op. Live: one
+measured `dev up` with the pack vs. cold Stage 0 on this Mac.
+
+### Data flow
+
+```
+release CI -> signed builder pack -> download -> quarantine -> verify_pack_at
+  -> atomic promote -> materialize seeded store + reuse marker
+  -> hvf boot (warm store, MVM_BUILDER_PACK=1) -> measured first build
+```
+
+### Slice-2 trigger
+
+If the measured hvf cold-boot-with-warm-store is too slow to feel "warm," slice 2
+adds a resident hvf warm-standby (an `HvfPersistentHostVm` lifecycle + warm
+claim, analogous to the libkrun resident builder), reusing the backend-agnostic
+`mvm_core::residency` policy layer. Otherwise slice 1 already delivered warm.
+
+### Deferred follow-ups (surfaced during Unit 1 review)
+
+- **Typed output hashes are attested, not cross-checked.** The verifier validates
+  that per-file hashes match content, but the typed `kernel_hash` / `rootfs_hash`
+  / `builder_image_hash` etc. are caller-asserted and never re-derived from the
+  named files by either the producer or `verify_pack_at`. A pack could therefore
+  carry a typed output hash that disagrees with the file it names and still
+  verify. Low risk for slice 1 (the file-level hash still pins every byte), but
+  the producer should eventually derive the typed hashes from the file set, or
+  the verifier should cross-check them. Tracked here, not fixed in slice 1.
+- **Quarantine orphans have no reaper.** The pack-cache promote path stages into
+  a `.incoming/<unique>` quarantine dir and cleans it on the error path, but a
+  panic or process kill between the copy and the atomic rename leaves the
+  quarantine dir behind. Readers skip `.incoming`, so this is disk-usage only, not
+  a correctness or safety issue. A sweep of stale quarantine dirs belongs with the
+  existing prefix-agnostic cache reaper rather than in this slice.
+
+## Slice 1 correction (2026-07-06): Stage-0 target retired → attested builder download
+
+Recon during Unit 3 design (plus an isolated live probe) invalidated the
+original Unit 3 target and re-pointed the slice. Recorded here so the earlier
+"seed the persistent builder store" framing above is understood as superseded
+for the installed path.
+
+### What we learned
+
+- **The builder-image acquisition path is source-vs-installed split.**
+  `resolve_builder_vm_bootstrap_action` returns `BuildFromSource` (which runs
+  Stage 0 — the multi-minute Nix store population) only on a **source checkout**;
+  an **installed binary** with no in-repo builder flake takes `DownloadPublished`
+  and never runs Stage 0. The pack path is (correctly) a no-op on source
+  checkouts, so a Stage-0-store materializer would have **no consumer on the
+  installed binaries the pack is for**. The multi-minute figure motivating the
+  slice was a source-checkout cost.
+- **The installed builder's base `/nix/store` ships inside `rootfs.ext4`** as the
+  overlay lowerdir (`mvm-host-vm-init` mounts `/nix` = overlay(seed lowerdir,
+  persistent `nix-store-<arch>.img` upperdir)). The upperdir is formatted empty
+  on first boot and holds only net-new paths. So there is no separately-seedable
+  base store; the base closure rides in the published rootfs seed, already
+  Nix-DB-registered via `/nix-path-registration`.
+- **`DownloadPublished` already delivers the fast base but with no attestation.**
+  `download_builder_vm_image` fetches `vmlinux` + `rootfs.ext4` under a plain
+  per-arch SHA-256 checksum — no signature, no content-addressing, no revocation.
+  That is the real gap the pack schema (Unit 1) + verified cache (Unit 2) close.
+
+### Corrected Unit 3 — attested builder-image download (supersedes the Stage-0-seed materializer)
+
+Unit 3 becomes the **attested-download materializer**: given a verified Builder
+`VerifiedPackDir` carrying `vmlinux` + `rootfs.ext4` (+ `kernels/`, `cmdline.txt`),
+place them into `BUILDER_DIR/<arch>` — the exact directory `DownloadPublished`
+writes — and write the `.mvm-source.sha256` / `.mvm-artifacts.sha256` /
+`.mvm-provenance.json` markers so `builder_vm_source_cache_ready` reports ready
+and the next resolve takes `UseCached`. Gated behind `MVM_BUILDER_PACK=1`; a no-op
+on source checkouts (`find_builder_vm_flake().is_ok()`) and byte-identical to
+today when off. The flag routes the `DownloadPublished` arm
+(`perform_builder_vm_download_published`) through the materializer instead of the
+plain checksum fetch.
+
+Offline-testable exactly like Units 1–2: promote a synthetic Builder pack via
+`PackBuilder`/`pack_cache::promote`, materialize into a temp `out_dir`, and assert
+the placed files + markers make `builder_vm_source_cache_ready` return true; plus
+flag-parse and source-checkout-no-op predicate tests. The **network fetch** of the
+attested pack from a release channel (trust store + URL scheme) is deferred to the
+release/trust workstreams (WS-B/I) — this unit is the local verify-and-place core.
+
+### Speed spun out to a measurement-gated pipeline follow-up
+
+"Fast first build" is decoupled from provenance. The installed first-build cost is
+the closure delta beyond the published rootfs seed; the structurally-clean lever is
+**fattening that published seed closure** at build time (delivered through the
+existing download + the attested pack above), not a runtime store materializer. It
+must be sized by a clean benchmark on a quiet box (the shared dev box was too
+contended, and an isolated harness broke the builder's virtiofs share wiring), so
+it is tracked as a follow-up, not part of this slice.
+
+### Deferred follow-ups (surfaced during Unit 3 review)
+
+- **Attested materializer writes markers the installed path ignores.** The
+  installed-binary readiness gate is `validate_builder_vm_stage0_artifacts`
+  (placed `vmlinux` + `rootfs.ext4`), not the `.mvm-source.sha256` fingerprint
+  marker — that marker is only consulted on the source-checkout path, which the
+  pack path excludes. The materializer currently reuses the shared source-cache
+  sidecar writer, so it emits superfluous markers and, worse, stamps
+  `.mvm-provenance.json` with `source_kind: "source_checkout_stage0"` — wrong for a
+  verified download. Cleanup: place the two artifacts + validate against the
+  installed gate, and either drop the sidecar write on this path or thread a
+  distinct attested-origin kind through the shared readiness predicate (which the
+  source-checkout path also depends on). Cosmetic-only today (the label never gates
+  the installed readiness decision), so deferred. **Revisited: still deferred.** The
+  only atomic stage→rename primitive (`promote_builder_vm_stage0_cache`) hard-requires
+  all three sidecars — it bails when the fingerprint/artifact-digest/provenance
+  markers are missing or mismatched and re-asserts `builder_vm_source_cache_ready`
+  after the rename — and the source-checkout local-build path calls the same
+  function. Dropping the sidecar write on the attested path would require forking that
+  primitive or loosening its shared contract, so it is not cleanly separable and stays
+  deferred until the attested-origin kind is threaded through the shared predicate.
+- **Attested materializer is production-inert until trust keys land.** The verify
+  context is built with an empty trust store and empty allowed-channels, so on a
+  real binary `resolve_pack` always returns `None` and the flag path falls through
+  to the plain checksum download (fail-open, safe). The end-to-end verify→place
+  chain is proven under test injection; wiring the real release-channel trust store
+  + policy is the release/trust workstream, not this slice.
+- **`policy_hash` convention is duplicated producer↔consumer.** ✅ Resolved.
+  Extracted `mvm_core::packs::host_pack_policy_hash(arch)` (single owner, unit-tested
+  against a known arch); the producer (`mvm-build::builder_pack`) and the host consumer
+  (`mvm-cli` `host_pack_verify_inputs`) both call it instead of recomputing
+  `Sha256Hex::from_bytes(arch.nix_system().as_bytes())` inline.

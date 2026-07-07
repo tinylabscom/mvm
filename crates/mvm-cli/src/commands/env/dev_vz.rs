@@ -36,6 +36,16 @@ const DEV_VZ_ACTIVITY_FILE: &str = "last-activity-unix-secs";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
+/// Env var opting an installed binary into the attested-pack acceleration path:
+/// place a verified builder-image pack into the cache in lieu of the plain
+/// checksum download. Truthy: `1`, `true`, `yes`, `on`. Off/unset ⇒ the download
+/// path is byte-identical to today. Ignored on a source checkout (which builds
+/// the builder image locally and never fetches published artifacts).
+#[cfg(any(
+    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+    test
+))]
+const MVM_BUILDER_PACK_ENV: &str = "MVM_BUILDER_PACK";
 #[cfg(feature = "builder-vm")]
 const DEV_BASE_PROVENANCE_FILE: &str = "dev-base.json";
 /// Absolute path the builder-VM rootfs must carry for the steady-state
@@ -2516,6 +2526,20 @@ impl Drop for BuildHeartbeat {
 fn perform_builder_vm_download_published(arch: &str, out_dir: &str) -> Result<()> {
     #[cfg(feature = "release-artifact-bootstrap")]
     {
+        // Prefer a signed, content-addressed builder pack over the plain
+        // checksum download when opted in. The pack is an accelerator, never a
+        // hard dependency: no compatible verified pack (or any error placing
+        // one) falls through to the download below.
+        #[cfg(feature = "builder-vm")]
+        if attested_builder_pack::attested_builder_pack_selected() {
+            match attested_builder_pack::attempt_attested_builder_pack(arch, out_dir) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => ui::warn(&format!(
+                    "Attested builder pack unavailable ({error:#}); falling back to download."
+                )),
+            }
+        }
         ui::info(&format!(
             "Builder VM image not in cache; downloading published prebuilt for v{}...",
             env!("CARGO_PKG_VERSION")
@@ -2558,6 +2582,753 @@ fn resolve_builder_vm_bootstrap_action(
     match builder_flake {
         Ok(flake_dir) => Ok(BuilderVmBootstrapAction::BuildFromSource { flake_dir }),
         Err(_) => Ok(BuilderVmBootstrapAction::DownloadPublished),
+    }
+}
+
+/// Attested builder-image pack materializer: given a locally-verified builder
+/// pack, place its `vmlinux` + `rootfs.ext4` (+ `cmdline.txt`) into the cache
+/// dir the `DownloadPublished` path writes and stamp the readiness sidecars so
+/// the next resolve takes `UseCached` with no Stage 0 and no network. The plain
+/// checksum download pins bytes but carries no signature; this closes that gap
+/// while staying a pure accelerator — anything short of a fully verified,
+/// compatible pack falls through to the download untouched.
+///
+/// Placement reuses the Stage 0 promotion machinery verbatim: stage the files in
+/// a same-filesystem sibling dir, write the identical sidecar set the readiness
+/// check reads back, then let [`promote_builder_vm_stage0_cache`] do the atomic
+/// rename + final readiness assertion — so the markers can never drift from the
+/// predicate that gates them.
+///
+/// Gated on `all(release-artifact-bootstrap, builder-vm)` (plus `test`): the only
+/// caller is the published-download arm, and it also needs the `builder-vm`
+/// sidecar writers. A source checkout never reaches here.
+#[cfg(any(
+    all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+    test
+))]
+mod attested_builder_pack {
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    use anyhow::{Context, Result};
+
+    use mvm_core::arch::GuestArch;
+    use mvm_core::config::mvm_keys_dir;
+    use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, resolve_pack};
+    use mvm_core::pack_trust::{PackTrustConfig, load_pack_trust_config};
+    use mvm_core::packs::{
+        HostCapability, LocalPackPolicy, PackBackend, PackKind, host_pack_policy_hash,
+    };
+
+    use super::{
+        promote_builder_vm_stage0_cache, unique_builder_vm_stage0_staging_dir,
+        write_builder_vm_cache_sidecars,
+    };
+    use crate::ui;
+
+    /// Truthy-parse for [`MVM_BUILDER_PACK`](super::MVM_BUILDER_PACK_ENV): `1`,
+    /// `true`, `yes`, `on` (case-insensitive, trimmed). Everything else —
+    /// including `0`, `false`, the empty string, and a missing value — is `false`.
+    /// Lifted out so both arms are unit-testable without touching process env.
+    pub(super) fn builder_pack_requested_for(raw: Option<&str>) -> bool {
+        matches!(
+            raw.map(|s| s.trim().to_ascii_lowercase()).as_deref(),
+            Some("1" | "true" | "yes" | "on"),
+        )
+    }
+
+    fn builder_pack_requested() -> bool {
+        builder_pack_requested_for(std::env::var(super::MVM_BUILDER_PACK_ENV).ok().as_deref())
+    }
+
+    /// Whether the attested-pack path should be attempted ahead of the plain
+    /// download. Requires the opt-in flag AND an installed binary: a source
+    /// checkout (`find_builder_vm_flake().is_ok()`) always builds the builder
+    /// image locally and must never take a published-artifact shortcut.
+    pub(super) fn attested_builder_pack_selected() -> bool {
+        builder_pack_requested() && super::find_builder_vm_flake().is_err()
+    }
+
+    /// Local verification context for host builder packs. `trust` is the
+    /// operator's on-disk [`PackTrustConfig`] (loaded from `pack-trust.json` in
+    /// the keys dir); it answers both "is this signer trusted?" and "is it
+    /// revoked?". An empty config (no publishers) trusts no key and allows no
+    /// channel, so every promoted pack fails verification and the caller falls
+    /// back to the download — fail-open on availability, never on trust.
+    struct HostPackVerifyInputs {
+        policy: LocalPackPolicy,
+        trust: PackTrustConfig,
+    }
+
+    /// Load the on-disk trust config, folding both the absent and the malformed
+    /// case into the inert empty config. A missing file is the expected default;
+    /// a broken file must never brick `dev up`, so we warn and stay inert — the
+    /// pack path then trusts nothing and falls through to the plain download. It
+    /// can never trust an unverified pack, so failing open here is safe.
+    fn load_host_pack_trust() -> PackTrustConfig {
+        match load_pack_trust_config(&mvm_keys_dir().join("pack-trust.json")) {
+            Ok(Some(config)) => config,
+            Ok(None) => PackTrustConfig::default(),
+            Err(error) => {
+                ui::warn(&format!(
+                    "Ignoring malformed pack trust config ({error}); attested builder \
+                     packs stay inert and dev up falls back to the download."
+                ));
+                PackTrustConfig::default()
+            }
+        }
+    }
+
+    fn host_pack_verify_inputs(arch: GuestArch) -> HostPackVerifyInputs {
+        let trust = load_host_pack_trust();
+        HostPackVerifyInputs {
+            policy: LocalPackPolicy {
+                host_arch: arch,
+                backend: PackBackend::Hvf,
+                host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
+                policy_hash: host_pack_policy_hash(arch),
+                allowed_channels: trust.allowed_channels(),
+                now: chrono::Utc::now(),
+            },
+            trust,
+        }
+    }
+
+    /// Entry point for the download arm: build the host verification context,
+    /// resolve a compatible verified builder pack, and place it. `Ok(true)` when
+    /// a pack was materialized (caller skips the download); `Ok(false)` when none
+    /// is available. Errors are placement failures the caller logs before falling
+    /// back — resolution finding nothing is `Ok(false)`, never an error.
+    pub(super) fn attempt_attested_builder_pack(arch: &str, out_dir: &str) -> Result<bool> {
+        let target_arch: GuestArch = arch
+            .parse()
+            .with_context(|| format!("unsupported builder pack arch {arch}"))?;
+        let inputs = host_pack_verify_inputs(target_arch);
+        // The config answers both trust and revocation queries, so it is passed
+        // as the trust store and the revocation checker.
+        let ctx = PackVerifyCtx::new(&inputs.policy, &inputs.trust, &inputs.trust);
+        resolve_and_materialize_builder_pack(target_arch, Path::new(out_dir), &ctx)
+    }
+
+    /// Resolve a compatible verified builder pack against `ctx` and materialize
+    /// it into `out_dir`. Split from [`attempt_attested_builder_pack`] so a test
+    /// can inject a context whose trust store actually accepts a locally-minted
+    /// pack (the production context trusts no keys yet).
+    fn resolve_and_materialize_builder_pack(
+        arch: GuestArch,
+        out_dir: &Path,
+        ctx: &PackVerifyCtx<'_>,
+    ) -> Result<bool> {
+        match resolve_pack(PackKind::Builder, arch, PackBackend::Hvf, ctx)
+            .context("resolving attested builder pack from the local cache")?
+        {
+            Some(verified) => {
+                let fingerprint = materialize_builder_pack(&verified, out_dir)?;
+                ui::success(&format!(
+                    "Placed attested builder VM image from verified pack {}.",
+                    short_hash(&fingerprint)
+                ));
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    fn short_hash(hash: &str) -> &str {
+        &hash[..hash.len().min(12)]
+    }
+
+    /// Place the verified pack's builder-image files into `out_dir` atomically and
+    /// stamp the readiness sidecars, returning the fingerprint the sidecars were
+    /// keyed on (the pack's content-addressed hash). On any failure the staging
+    /// dir is removed and `out_dir` is left untouched — a partial placement never
+    /// publishes a dir that falsely reads ready.
+    pub(super) fn materialize_builder_pack(
+        verified: &VerifiedPackDir,
+        out_dir: &Path,
+    ) -> Result<String> {
+        // The pack's content-addressed hash is a stable, attested fingerprint: it
+        // re-derives identically on every resolve, so the readiness sidecars pin
+        // this exact pack's identity into the cache dir.
+        let fingerprint = verified.verified.pack_hash.as_str().to_string();
+        let staging = unique_builder_vm_stage0_staging_dir(out_dir)?;
+        // A recycled pid could leave a prior crashed run's dir at this path; start
+        // clean so no un-attested extra files ride the rename into the cache.
+        let _ = std::fs::remove_dir_all(&staging);
+        let outcome =
+            place_and_promote_builder_pack(&verified.root, &staging, out_dir, &fingerprint);
+        if outcome.is_err() {
+            let _ = std::fs::remove_dir_all(&staging);
+        }
+        outcome.map(|()| fingerprint)
+    }
+
+    fn place_and_promote_builder_pack(
+        pack_root: &Path,
+        staging: &Path,
+        out_dir: &Path,
+        fingerprint: &str,
+    ) -> Result<()> {
+        std::fs::create_dir_all(staging)
+            .with_context(|| format!("creating builder pack staging dir {}", staging.display()))?;
+        copy_builder_pack_artifacts(pack_root, staging)?;
+        // Reuses the shared sidecar writer so the markers can never drift from the
+        // readiness predicate that reads them. That writer stamps a provenance
+        // "kind" describing the local-build origin; here the origin is instead a
+        // verified download, so the recorded kind is imprecise. Correcting it means
+        // threading a distinct kind through the shared readiness predicate that the
+        // local-build path also depends on, so it is left for a focused follow-up.
+        write_builder_vm_cache_sidecars(staging, fingerprint)?;
+        // The atomic rename + final readiness assertion; also the idempotency and
+        // poisoned-final replacement the reuse path already handles.
+        promote_builder_vm_stage0_cache(staging, out_dir, fingerprint)
+            .context("promoting the materialized builder pack into the cache")
+    }
+
+    /// Copy the readiness-relevant builder-image files out of the verified pack.
+    /// `vmlinux` + `rootfs.ext4` are required (a builder pack that omits them is
+    /// malformed); `cmdline.txt` is optional and copied when present so the
+    /// artifact-digest sidecar covers it. The pack's own manifest sidecar and any
+    /// carried markers are deliberately not copied — the markers are regenerated
+    /// from these bytes so they can never disagree with the readiness check.
+    fn copy_builder_pack_artifacts(pack_root: &Path, dest: &Path) -> Result<()> {
+        for name in ["vmlinux", "rootfs.ext4"] {
+            let src = pack_root.join(name);
+            if !src.exists() {
+                anyhow::bail!(
+                    "attested builder pack at {} is missing required artifact {name}",
+                    pack_root.display()
+                );
+            }
+            std::fs::copy(&src, dest.join(name))
+                .with_context(|| format!("copying builder pack artifact {name}"))?;
+        }
+        let cmdline = pack_root.join("cmdline.txt");
+        if cmdline.exists() {
+            std::fs::copy(&cmdline, dest.join("cmdline.txt"))
+                .context("copying builder pack cmdline.txt")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod attested_builder_pack_tests {
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    use base64::Engine as _;
+    use chrono::{DateTime, TimeZone, Utc};
+    use ed25519_dalek::{SigningKey, VerifyingKey};
+
+    use mvm_core::arch::GuestArch;
+    use mvm_core::config::mvm_keys_dir;
+    use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, promote, resolve_pack};
+    use mvm_core::pack_trust::{PackTrustConfig, TrustedPublisher};
+    use mvm_core::packs::{
+        HostCapability, LocalPackPolicy, PackBackend, PackBuilder, PackInputs, PackKind,
+        PackManifest, PackMetadata, PackOutputHashes, PackProvenanceMeta, PackRevocationChecker,
+        PackTrustMeta, PackTrustStore, PolicyCompatibility, ReproducibilityStatus,
+        RevocationStatus, SbomReference, Sha256Hex, SignatureValidity, VerifiedPack,
+    };
+    use mvm_core::plan::bundle::KeyId;
+    use mvm_core::util::test_env::TestEnv;
+    use tempfile::TempDir;
+
+    use super::attested_builder_pack::{
+        attempt_attested_builder_pack, attested_builder_pack_selected, builder_pack_requested_for,
+        materialize_builder_pack,
+    };
+    use super::{
+        MVM_BUILDER_PACK_ENV, builder_vm_source_cache_ready, validate_builder_vm_stage0_artifacts,
+    };
+
+    const EXT4_MAGIC_OFFSET: usize = 1024 + 56;
+
+    /// Write a `(vmlinux, rootfs.ext4)` pair that satisfies the Stage 0 artifact
+    /// floor (`≥1 MiB` kernel, `≥4 MiB` ext4-magic rootfs) the readiness check
+    /// and promotion path enforce. Deterministic bytes keep a minted pack's hash
+    /// stable across runs.
+    fn write_valid_builder_artifacts(dir: &std::path::Path) {
+        std::fs::create_dir_all(dir).expect("mkdir artifacts");
+        std::fs::write(dir.join("vmlinux"), vec![0x7f; 1024 * 1024 + 1]).expect("write vmlinux");
+        std::fs::write(dir.join("rootfs.ext4"), rootfs_bytes(4 * 1024 * 1024 + 1)).expect("rootfs");
+    }
+
+    fn rootfs_bytes(len: usize) -> Vec<u8> {
+        let mut rootfs = vec![0u8; len];
+        rootfs[EXT4_MAGIC_OFFSET] = 0x53;
+        rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
+        rootfs
+    }
+
+    /// A directly-built `VerifiedPackDir` over `root`. Bypasses promote/resolve so
+    /// the materializer can be unit-tested in isolation; `full_chain_*` covers the
+    /// real mint → promote → resolve → materialize path.
+    fn verified_pack_dir(root: &std::path::Path) -> VerifiedPackDir {
+        VerifiedPackDir {
+            root: root.to_path_buf(),
+            verified: VerifiedPack {
+                pack_hash: Sha256Hex::from_bytes(b"builder-pack-direct-fingerprint"),
+                file_count: 2,
+                signer_key_id: KeyId("test-key".to_string()),
+            },
+        }
+    }
+
+    #[test]
+    fn materialize_places_builder_files_and_marks_cache_ready() {
+        let pack = TempDir::new().expect("pack tempdir");
+        write_valid_builder_artifacts(pack.path());
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = out.path().join("builder-vm").join("aarch64");
+        let verified = verified_pack_dir(pack.path());
+
+        let fingerprint = materialize_builder_pack(&verified, &out_dir).expect("materialize");
+
+        assert!(out_dir.join("vmlinux").exists(), "vmlinux placed");
+        assert!(out_dir.join("rootfs.ext4").exists(), "rootfs placed");
+        assert_eq!(fingerprint, verified.verified.pack_hash.as_str());
+        assert!(
+            builder_vm_source_cache_ready(&out_dir, &fingerprint),
+            "materialized dir must read cache-ready for its declared fingerprint"
+        );
+        // The pack path only runs on installed binaries, and their readiness gate
+        // is the placed-artifact check (vmlinux + rootfs.ext4), not the
+        // source-checkout fingerprint marker. Assert the gate the acquisition path
+        // actually consults when no builder flake is present.
+        assert!(
+            validate_builder_vm_stage0_artifacts(&out_dir).is_ok(),
+            "materialized dir must satisfy the installed-binary readiness gate"
+        );
+    }
+
+    #[test]
+    fn materialize_is_atomic_partial_failure_leaves_no_ready_dir() {
+        let pack = TempDir::new().expect("pack tempdir");
+        std::fs::create_dir_all(pack.path()).expect("mkdir");
+        // Valid kernel but an undersized rootfs: the copy succeeds, then the
+        // promotion's artifact-floor check fails — after some staging work but
+        // before the atomic publish.
+        std::fs::write(pack.path().join("vmlinux"), vec![0x7f; 1024 * 1024 + 1]).expect("vmlinux");
+        std::fs::write(pack.path().join("rootfs.ext4"), rootfs_bytes(4096)).expect("small rootfs");
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = out.path().join("builder-vm").join("aarch64");
+        let verified = verified_pack_dir(pack.path());
+
+        materialize_builder_pack(&verified, &out_dir).expect_err("undersized rootfs must fail");
+
+        assert!(
+            !builder_vm_source_cache_ready(&out_dir, verified.verified.pack_hash.as_str()),
+            "a failed materialize must not leave a cache-ready dir"
+        );
+        // No staging leftover next to out_dir.
+        let builder_vm_root = out.path().join("builder-vm");
+        if let Ok(entries) = std::fs::read_dir(&builder_vm_root) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                assert!(
+                    !name.contains("stage0-"),
+                    "staging leftover after failed materialize: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_chain_promote_resolve_materialize_marks_cache_ready() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        let key = signing_key();
+        let manifest = builder_pack_manifest(staged.path(), &key);
+
+        let trust = trust_store(&key);
+        let rev = good_revocations();
+        let policy = hvf_policy();
+        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+
+        promote(staged.path(), &manifest, &ctx).expect("promote");
+        let verified = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("compatible pack found");
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = out
+            .path()
+            .join("builder-vm")
+            .join(GuestArch::host().to_string());
+        let fingerprint = materialize_builder_pack(&verified, &out_dir).expect("materialize");
+
+        assert_eq!(fingerprint, manifest.outputs.pack_hash.as_str());
+        assert!(out_dir.join("vmlinux").exists());
+        assert!(out_dir.join("rootfs.ext4").exists());
+        assert!(builder_vm_source_cache_ready(&out_dir, &fingerprint));
+    }
+
+    #[test]
+    fn builder_pack_requested_truthy_falsey_none() {
+        for raw in ["1", "true", "yes", "on", "TRUE", "  On  "] {
+            assert!(
+                builder_pack_requested_for(Some(raw)),
+                "{raw:?} should be truthy"
+            );
+        }
+        for raw in ["0", "false", "no", "off", "", "disabled"] {
+            assert!(
+                !builder_pack_requested_for(Some(raw)),
+                "{raw:?} should be falsey"
+            );
+        }
+        assert!(!builder_pack_requested_for(None), "missing value is falsey");
+    }
+
+    #[test]
+    fn attested_builder_pack_selected_skips_on_source_checkout_and_flag_off() {
+        // The test binary is compiled from a source checkout, so
+        // `find_builder_vm_flake()` resolves — the pack path must be skipped even
+        // with the flag on, mirroring the release-artifact download gate.
+        let mut env = TestEnv::new();
+        env.set(MVM_BUILDER_PACK_ENV, "1");
+        assert!(
+            !attested_builder_pack_selected(),
+            "source checkout must skip the pack path even with the flag on"
+        );
+        env.remove(MVM_BUILDER_PACK_ENV);
+        assert!(
+            !attested_builder_pack_selected(),
+            "flag off must skip the pack path"
+        );
+    }
+
+    #[test]
+    fn attempt_falls_through_when_no_pack_promoted() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = out.path().join("builder-vm").join("aarch64");
+
+        let placed = attempt_attested_builder_pack("aarch64", out_dir.to_str().expect("utf-8"))
+            .expect("attempt is fail-open, not an error");
+        assert!(
+            !placed,
+            "no promoted pack ⇒ no materialization ⇒ fall through"
+        );
+        assert!(!out_dir.exists(), "fall-through must not touch out_dir");
+    }
+
+    // ---- pack-minting scaffolding (mirrors the pack_cache test fixtures) ----
+
+    fn utc(y: i32, m: u32, d: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(y, m, d, 0, 0, 0)
+            .single()
+            .expect("valid timestamp")
+    }
+
+    fn hash(value: &str) -> Sha256Hex {
+        Sha256Hex::from_bytes(value.as_bytes())
+    }
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[13u8; 32])
+    }
+
+    fn builder_pack_manifest(root: &std::path::Path, key: &SigningKey) -> PackManifest {
+        let kernel = std::fs::read(root.join("vmlinux")).expect("read vmlinux");
+        let image = std::fs::read(root.join("rootfs.ext4")).expect("read rootfs");
+        PackBuilder::new(root, builder_metadata(), key)
+            .files(["vmlinux", "rootfs.ext4"])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(&kernel)),
+                builder_image_hash: Some(Sha256Hex::from_bytes(&image)),
+                ..Default::default()
+            })
+            .build()
+            .expect("build pack")
+    }
+
+    fn builder_metadata() -> PackMetadata {
+        PackMetadata {
+            kind: PackKind::Builder,
+            target_arch: GuestArch::host(),
+            backend_compatibility: vec![PackBackend::Hvf, PackBackend::Libkrun],
+            required_host_capabilities: vec![HostCapability("vsock".to_string())],
+            policy_compatibility: PolicyCompatibility {
+                policy_hash: hash("policy"),
+                local_rebuild_required: false,
+                allowed_channels: vec!["stable".to_string()],
+            },
+            inputs: PackInputs {
+                flake_locks: Vec::new(),
+                derivations: Vec::new(),
+                nar_hashes: Vec::new(),
+                oci_images: Vec::new(),
+                setup_commands: Vec::new(),
+                source_revisions: Vec::new(),
+                toolchain_versions: BTreeMap::new(),
+            },
+            provenance: PackProvenanceMeta {
+                builder_identity: "ci-builder".to_string(),
+                build_environment_identity: "github-actions".to_string(),
+                build_timestamp: utc(2026, 6, 23),
+                reproducibility: ReproducibilityStatus::Reproduced,
+                sbom: SbomReference {
+                    uri: "https://example.test/sbom.spdx.json".to_string(),
+                    sha256: hash("sbom"),
+                },
+            },
+            trust: PackTrustMeta {
+                expires_at: utc(2027, 12, 31),
+                revocation_channel: "https://example.test/revocations.json".to_string(),
+                channel_identity: "stable".to_string(),
+                mirror_identity: None,
+                transparency_log: None,
+            },
+            signature: SignatureValidity {
+                signed_at: utc(2026, 6, 24),
+                expires_at: utc(2027, 12, 31),
+            },
+        }
+    }
+
+    fn hvf_policy() -> LocalPackPolicy {
+        LocalPackPolicy {
+            host_arch: GuestArch::host(),
+            backend: PackBackend::Hvf,
+            host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
+            policy_hash: hash("policy"),
+            allowed_channels: BTreeSet::from(["stable".to_string()]),
+            now: utc(2026, 6, 25),
+        }
+    }
+
+    struct MapTrustStore {
+        keys: HashMap<KeyId, VerifyingKey>,
+    }
+
+    impl PackTrustStore for MapTrustStore {
+        fn verifying_key(&self, key_id: &KeyId) -> Option<VerifyingKey> {
+            self.keys.get(key_id).copied()
+        }
+    }
+
+    fn trust_store(key: &SigningKey) -> MapTrustStore {
+        MapTrustStore {
+            keys: HashMap::from([(
+                KeyId::from_pubkey(&key.verifying_key()),
+                key.verifying_key(),
+            )]),
+        }
+    }
+
+    struct AlwaysGood;
+
+    impl PackRevocationChecker for AlwaysGood {
+        fn status(&self, _key_id: &KeyId, _pack_hash: &Sha256Hex) -> RevocationStatus {
+            RevocationStatus::Good
+        }
+    }
+
+    fn good_revocations() -> AlwaysGood {
+        AlwaysGood
+    }
+
+    // ---- on-disk trust config wiring (the F2 de-inert proof) ----
+
+    /// The policy hash `host_pack_verify_inputs` derives for the running host —
+    /// the value a pack's `policy_compatibility.policy_hash` must equal for the
+    /// production verify context to admit it.
+    fn host_policy_hash() -> Sha256Hex {
+        Sha256Hex::from_bytes(GuestArch::host().nix_system().as_bytes())
+    }
+
+    /// Builder-pack metadata whose policy hash matches what the production path
+    /// derives (the shared `builder_metadata` pins an unrelated `"policy"`
+    /// hash), so a pack minted from it is admissible by the on-disk-config ctx.
+    fn attested_builder_metadata() -> PackMetadata {
+        let mut meta = builder_metadata();
+        meta.policy_compatibility.policy_hash = host_policy_hash();
+        meta
+    }
+
+    fn attested_builder_manifest(root: &std::path::Path, key: &SigningKey) -> PackManifest {
+        let kernel = std::fs::read(root.join("vmlinux")).expect("read vmlinux");
+        let image = std::fs::read(root.join("rootfs.ext4")).expect("read rootfs");
+        PackBuilder::new(root, attested_builder_metadata(), key)
+            .files(["vmlinux", "rootfs.ext4"])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(&kernel)),
+                builder_image_hash: Some(Sha256Hex::from_bytes(&image)),
+                ..Default::default()
+            })
+            .build()
+            .expect("build pack")
+    }
+
+    /// A host policy matching `host_pack_verify_inputs` but with caller-chosen
+    /// channels — used to promote the pack into the cache with a permissive
+    /// in-test context, so the *on-disk config* is the gate under test.
+    fn attested_host_policy(channels: &[&str]) -> LocalPackPolicy {
+        LocalPackPolicy {
+            host_arch: GuestArch::host(),
+            backend: PackBackend::Hvf,
+            host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
+            policy_hash: host_policy_hash(),
+            allowed_channels: channels.iter().map(|c| c.to_string()).collect(),
+            now: utc(2026, 6, 25),
+        }
+    }
+
+    /// Mint + promote a `"stable"`-channel builder pack signed by `key` into the
+    /// (env-isolated) cache, trusting `key` for the promote step only.
+    fn promote_attested_pack(key: &SigningKey, staged: &std::path::Path) -> PackManifest {
+        let manifest = attested_builder_manifest(staged, key);
+        let trust = trust_store(key);
+        let rev = good_revocations();
+        let policy = attested_host_policy(&["stable"]);
+        let ctx = PackVerifyCtx::new(&policy, &trust, &rev);
+        promote(staged, &manifest, &ctx).expect("promote");
+        manifest
+    }
+
+    fn trust_config(key: &SigningKey, channels: &[&str]) -> PackTrustConfig {
+        PackTrustConfig {
+            publishers: vec![TrustedPublisher {
+                pubkey_base64: base64::engine::general_purpose::STANDARD
+                    .encode(key.verifying_key().to_bytes()),
+                channels: channels.iter().map(|c| c.to_string()).collect(),
+            }],
+            revocations: Vec::new(),
+        }
+    }
+
+    /// Write `config` to `pack-trust.json` under the env-isolated keys dir — the
+    /// exact path `host_pack_verify_inputs` reads.
+    fn write_trust_config(config: &PackTrustConfig) {
+        let path = mvm_keys_dir().join("pack-trust.json");
+        std::fs::create_dir_all(path.parent().expect("keys dir parent")).expect("mkdir keys");
+        std::fs::write(&path, serde_json::to_vec(config).expect("serialize")).expect("write trust");
+    }
+
+    fn host_arch_str() -> String {
+        GuestArch::host().to_string()
+    }
+
+    fn host_out_dir(root: &std::path::Path) -> std::path::PathBuf {
+        root.join("builder-vm").join(host_arch_str())
+    }
+
+    /// The de-inert proof: a pack signed by a key the on-disk `pack-trust.json`
+    /// trusts on the pack's channel is resolved, materialized into `out_dir`,
+    /// and the dir passes the installed-path readiness gate — end to end through
+    /// the real `attempt_attested_builder_pack` entrypoint the flag hook calls.
+    #[test]
+    fn end_to_end_trusted_pack_materializes_and_marks_cache_ready() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let data = TempDir::new().expect("data tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        let key = signing_key();
+        promote_attested_pack(&key, staged.path());
+        write_trust_config(&trust_config(&key, &["stable"]));
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = host_out_dir(out.path());
+        let placed =
+            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
+                .expect("attempt ok");
+
+        assert!(placed, "trusted pack must materialize");
+        assert!(out_dir.join("vmlinux").exists(), "vmlinux placed");
+        assert!(out_dir.join("rootfs.ext4").exists(), "rootfs placed");
+        assert!(
+            validate_builder_vm_stage0_artifacts(&out_dir).is_ok(),
+            "materialized dir must satisfy the installed-binary readiness gate"
+        );
+    }
+
+    #[test]
+    fn absent_trust_config_stays_inert() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let data = TempDir::new().expect("data tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        promote_attested_pack(&signing_key(), staged.path());
+        // No pack-trust.json: the empty config trusts nothing.
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = host_out_dir(out.path());
+        let placed =
+            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
+                .expect("attempt is fail-open");
+
+        assert!(!placed, "absent config ⇒ nothing trusted ⇒ fall through");
+        assert!(!out_dir.exists(), "fall-through must not touch out_dir");
+    }
+
+    #[test]
+    fn untrusted_key_is_rejected() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let data = TempDir::new().expect("data tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        promote_attested_pack(&signing_key(), staged.path());
+        // Trust a different key than the one that signed the pack.
+        let other = SigningKey::from_bytes(&[71u8; 32]);
+        write_trust_config(&trust_config(&other, &["stable"]));
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = host_out_dir(out.path());
+        let placed =
+            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
+                .expect("attempt is fail-open");
+
+        assert!(
+            !placed,
+            "unknown signer ⇒ fail-closed on trust ⇒ fall through"
+        );
+        assert!(!out_dir.exists(), "untrusted signer must not materialize");
+    }
+
+    #[test]
+    fn disallowed_channel_is_rejected() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let data = TempDir::new().expect("data tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_DATA_DIR", data.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        let key = signing_key();
+        promote_attested_pack(&key, staged.path());
+        // Trust the signer, but only for "beta"; the pack declares "stable".
+        write_trust_config(&trust_config(&key, &["beta"]));
+
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = host_out_dir(out.path());
+        let placed =
+            attempt_attested_builder_pack(&host_arch_str(), out_dir.to_str().expect("utf-8"))
+                .expect("attempt is fail-open");
+
+        assert!(!placed, "disallowed channel ⇒ fall through");
+        assert!(!out_dir.exists(), "channel mismatch must not materialize");
     }
 }
 

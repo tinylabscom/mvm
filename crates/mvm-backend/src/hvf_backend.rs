@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use mvm_build::hvf_supervisor::{HvfDisk, HvfSupervisorConfig};
+use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
 use mvm_core::vm_backend::{
     VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
@@ -38,6 +38,16 @@ pub(crate) const PID_FILE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Raw HVF (`Hypervisor.framework`) backend. macOS / Apple-silicon only.
 pub struct HvfBackend;
 
+fn hvf_console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<ConsoleDataSocket> {
+    crate::workload_runner::spec_map::console_data_sockets(state_dir, dev_console)
+        .into_iter()
+        .map(|(guest_port, host_socket)| ConsoleDataSocket {
+            guest_port,
+            host_socket,
+        })
+        .collect()
+}
+
 pub(crate) fn read_pid(path: &Path) -> Option<libc::pid_t> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
@@ -47,24 +57,45 @@ pub(crate) fn pid_alive(pid: libc::pid_t) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
 }
 
-/// SIGTERM a recorded pid, then SIGKILL if it lingers past a short grace. The
-/// supervisor installs no SIGTERM handler, so the default action terminates it
-/// and the HVF VM dies with it. Shared by the `VmBackend` stop path and the
-/// hvf driver's `kill`.
+fn reap_child_if_exited(pid: libc::pid_t) -> bool {
+    let mut status = 0;
+    // SAFETY: `waitpid` with WNOHANG only reaps this process's child if it has
+    // exited; for non-child PIDs it returns ECHILD and leaves the liveness check
+    // to `kill(pid, 0)`.
+    unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) == pid }
+}
+
+fn wait_for_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if reap_child_if_exited(pid) || !pid_alive(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// SIGTERM a recorded pid, then SIGKILL if it lingers past a short grace. When
+/// the supervisor is still this process's child, reap it with `waitpid` so an
+/// already-exited zombie does not look alive for the full grace window.
+/// Shared by the `VmBackend` stop path and the hvf driver's `kill`.
 pub(crate) fn terminate_pid(pid: libc::pid_t) {
     // SAFETY: signalling a pid we recorded from our own supervisor.
     unsafe {
         libc::kill(pid, libc::SIGTERM);
     }
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while pid_alive(pid) && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(50));
+    if wait_for_pid_exit(pid, Duration::from_secs(5)) {
+        return;
     }
     if pid_alive(pid) {
         // SAFETY: same pid.
         unsafe {
             libc::kill(pid, libc::SIGKILL);
         }
+        let _ = wait_for_pid_exit(pid, Duration::from_millis(500));
     }
 }
 
@@ -89,10 +120,44 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
             return Ok(candidate);
         }
     }
+    // Workspace `target/{release,debug}` fallback, mirroring the substitution
+    // endpoint resolver: a source checkout that builds the root `mvmctl` bin
+    // without also building this per-VM helper still resolves it, instead of
+    // hard-failing on one binary while silently reaching for a stale copy of
+    // the other.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if let Some(workspace_root) = manifest_dir.parent().and_then(Path::parent) {
+        for variant in ["release", "debug"] {
+            let candidate = workspace_root
+                .join("target")
+                .join(variant)
+                .join("mvm-hvf-supervisor");
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
     bail!(
-        "mvm-hvf-supervisor binary not found (looked at $MVM_HVF_SUPERVISOR_PATH \
-         and alongside the current exe)"
+        "mvm-hvf-supervisor binary not found (looked at $MVM_HVF_SUPERVISOR_PATH, \
+         alongside the current exe, and <workspace>/target/{{release,debug}})"
     )
+}
+
+/// Rebuild command for the hvf per-VM supervisor bin. `cargo run` rebuilds only
+/// `mvmctl`, never this separate `mvm-vm-host` bin.
+const HVF_AUX_REBUILD_CMD: &str = "cargo build -p mvm-vm-host --bin mvm-hvf-supervisor";
+
+/// Warn once, before spawning, when the resolved supervisor predates the running
+/// `mvmctl` — the `cargo run` skew where the supervisor was left unrebuilt. On
+/// this path staleness is a silent behavioural regression (a stale agent bridge
+/// still boots cleanly, then wedges the guest agent), so unlike the vz path there
+/// is no early crash to hang a hint on; this makes it self-diagnosing up front.
+pub(crate) fn warn_if_supervisor_stale(supervisor: &Path) {
+    if let Some(hint) =
+        crate::supervisor_stale::supervisor_stale_hint(supervisor, HVF_AUX_REBUILD_CMD)
+    {
+        ui::warn(&hint);
+    }
 }
 
 fn vms_root() -> PathBuf {
@@ -247,6 +312,16 @@ impl VmBackend for HvfBackend {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
+        // Interactive PTY runs (`machine run -it`) pre-open the console data
+        // ports so the host can attach a shell; the supervisor binds them under
+        // `<state_dir>/vsock/`. Create the dir up front so the bind can't miss.
+        let console_data_sockets = hvf_console_data_sockets(&state_dir, config.dev_console);
+        if !console_data_sockets.is_empty() {
+            let vsock_dir = state_dir.join("vsock");
+            std::fs::create_dir_all(&vsock_dir)
+                .with_context(|| format!("create console vsock dir {}", vsock_dir.display()))?;
+        }
+
         let cfg = HvfSupervisorConfig {
             kernel: PathBuf::from(kernel),
             // Workload path: the supervisor's default cmdline (`init=/init`) is the
@@ -264,12 +339,13 @@ impl VmBackend for HvfBackend {
             agent_socket: Some(agent_socket),
             substitution_socket: None,
             egress_relay_socket,
-            console_data_sockets: vec![],
+            console_data_sockets,
         };
         let json = serde_json::to_string(&cfg)
             .map_err(|e| anyhow!("serialize HvfSupervisorConfig: {e}"))?;
 
         let supervisor = resolve_supervisor_path()?;
+        warn_if_supervisor_stale(&supervisor);
         ui::info(&format!(
             "Starting HVF VM '{}' via {}...",
             config.name,
@@ -462,12 +538,47 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_hint_names_the_supervisor_bin() {
+        // The whole point of the stale warning is telling the user the exact
+        // command; guard against the bin name drifting out of the hint.
+        assert!(HVF_AUX_REBUILD_CMD.contains("mvm-hvf-supervisor"));
+        assert!(HVF_AUX_REBUILD_CMD.contains("mvm-vm-host"));
+    }
+
+    #[test]
+    fn warn_if_supervisor_stale_is_silent_for_unreadable_path() {
+        // No mtime → no hint → no panic (don't guess on a missing binary).
+        warn_if_supervisor_stale(Path::new("/nonexistent/mvm-hvf-supervisor"));
+    }
+
+    #[test]
     fn vsock_is_capable_pause_snapshot_are_not() {
         let c = HvfBackend.capabilities();
         assert!(c.vsock, "vsock is live-proven");
         assert!(!c.pause_resume);
         assert!(!c.snapshots);
         assert!(!c.tap_networking);
+    }
+
+    #[test]
+    fn console_data_sockets_empty_when_dev_console_disabled() {
+        let sockets = hvf_console_data_sockets(Path::new("/state/hvf"), false);
+        assert!(sockets.is_empty());
+    }
+
+    #[test]
+    fn console_data_sockets_populated_when_dev_console_enabled() {
+        let sockets = hvf_console_data_sockets(Path::new("/state/hvf"), true);
+        assert_eq!(
+            sockets.len(),
+            mvm_guest::vsock::DEV_CONSOLE_DATA_PORT_COUNT as usize
+        );
+        let first = sockets.first().expect("first console socket");
+        assert_eq!(first.guest_port, mvm_guest::vsock::CONSOLE_PORT_BASE + 1);
+        assert_eq!(
+            first.host_socket,
+            PathBuf::from("/state/hvf/vsock/vsock-20001.sock")
+        );
     }
 
     #[test]
@@ -485,11 +596,64 @@ mod tests {
     }
 
     #[test]
+    fn terminate_pid_reaps_child_without_grace_timeout() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+
+        let started = Instant::now();
+        terminate_pid(pid);
+        let elapsed = started.elapsed();
+
+        let _ = child.wait();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "terminate_pid took {elapsed:?}, expected it to reap the child before the grace timeout"
+        );
+        assert!(!pid_alive(pid));
+    }
+
+    #[test]
     fn supervisor_path_env_must_point_at_a_file() {
         // SAFETY: single-threaded test mutation of a process env var.
         unsafe { std::env::set_var("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor") };
         let r = resolve_supervisor_path();
         unsafe { std::env::remove_var("MVM_HVF_SUPERVISOR_PATH") };
         assert!(r.is_err());
+    }
+
+    #[test]
+    fn hvf_console_data_sockets_empty_for_sealed_boot() {
+        // A sealed prod boot (dev_console = false) opens no console listeners.
+        assert!(hvf_console_data_sockets(Path::new("/tmp/state"), false).is_empty());
+    }
+
+    #[test]
+    fn hvf_console_data_sockets_match_dev_console_transport_paths() {
+        let state = Path::new("/tmp/state");
+        let socks = hvf_console_data_sockets(state, true);
+        assert!(
+            !socks.is_empty(),
+            "an interactive run pre-opens console ports"
+        );
+        // The guest ports are exactly the dev console data range.
+        let got: Vec<u32> = socks.iter().map(|s| s.guest_port).collect();
+        let want: Vec<u32> = mvm_guest::vsock::dev_console_data_ports().collect();
+        assert_eq!(got, want);
+        // Each host UDS is `<state_dir>/vsock/vsock-<port>.sock`, the exact path
+        // `DevConsoleTransport` dials — a drift here silently breaks PTY attach.
+        for s in &socks {
+            assert_eq!(
+                s.host_socket,
+                state
+                    .join("vsock")
+                    .join(mvm_core::config::vsock_socket_filename(s.guest_port)),
+            );
+        }
     }
 }

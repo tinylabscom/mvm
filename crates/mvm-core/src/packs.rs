@@ -9,12 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -42,6 +42,7 @@ pub enum PackBackend {
     Vz,
     Qemu,
     Docker,
+    Hvf,
 }
 
 impl fmt::Display for PackBackend {
@@ -52,6 +53,7 @@ impl fmt::Display for PackBackend {
             PackBackend::Vz => "vz",
             PackBackend::Qemu => "qemu",
             PackBackend::Docker => "docker",
+            PackBackend::Hvf => "hvf",
         })
     }
 }
@@ -167,6 +169,15 @@ pub struct PolicyCompatibility {
     pub policy_hash: Sha256Hex,
     pub local_rebuild_required: bool,
     pub allowed_channels: Vec<String>,
+}
+
+/// The `policy_compatibility.policy_hash` convention a host pack (Builder,
+/// Runtime) is pinned to: sha256 of the arch's nix system string. Both the
+/// producer (baked into the manifest) and the host verifier (derived and
+/// compared) MUST call this so the convention has a single owner and cannot
+/// silently drift between the two sides.
+pub fn host_pack_policy_hash(arch: GuestArch) -> Sha256Hex {
+    Sha256Hex::from_bytes(arch.nix_system().as_bytes())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -573,19 +584,26 @@ fn validate_file_paths(manifest: &PackManifest) -> Result<(), PackVerifyError> {
         if !seen.insert(file.path.clone()) {
             return Err(PackVerifyError::DuplicateFile(file.path.clone()));
         }
-        if file.path.is_empty() || file.path.contains('\\') {
-            return Err(PackVerifyError::UnsafeFilePath(file.path.clone()));
-        }
-        let path = Path::new(&file.path);
-        if path.is_absolute()
-            || path
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-        {
+        if !pack_path_is_safe(&file.path) {
             return Err(PackVerifyError::UnsafeFilePath(file.path.clone()));
         }
     }
     Ok(())
+}
+
+/// A pack file path must be a relative, normal-component path with no escape:
+/// non-empty, no backslash, not absolute, and no `..`/root/prefix components. The
+/// producer checks this before reading a file so bytes outside the pack root are
+/// never hashed or attested; the verifier checks it before trusting a manifest.
+fn pack_path_is_safe(path: &str) -> bool {
+    if path.is_empty() || path.contains('\\') {
+        return false;
+    }
+    let path = Path::new(path);
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 fn validate_signature_bundle(manifest: &PackManifest) -> Result<(), PackVerifyError> {
@@ -653,8 +671,20 @@ pub enum PackManifestError {
     InvalidSha256Hex(String),
     #[error("invalid OCI digest {0:?}")]
     InvalidOciDigest(String),
+    #[error("file {path:?} could not be hashed: {reason}")]
+    FileHash { path: String, reason: String },
+    // Boxed: `PackVerifyError::Manifest` already carries a `PackManifestError`, so
+    // embedding it by value would make the type infinitely sized.
+    #[error("produced pack failed validation: {0}")]
+    Invalid(#[source] Box<PackVerifyError>),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+impl From<PackVerifyError> for PackManifestError {
+    fn from(error: PackVerifyError) -> Self {
+        PackManifestError::Invalid(Box::new(error))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -728,6 +758,196 @@ pub enum PackVerifyError {
     Manifest(#[from] PackManifestError),
 }
 
+/// Manifest metadata a `PackBuilder` stamps into the produced pack. Every field
+/// maps directly to a `PackManifest` field except the hash-derived outputs, which
+/// the builder computes from the file set, and `signing_key_id`, which the builder
+/// derives from the signing key.
+#[derive(Debug, Clone)]
+pub struct PackMetadata {
+    pub kind: PackKind,
+    pub target_arch: GuestArch,
+    pub backend_compatibility: Vec<PackBackend>,
+    pub required_host_capabilities: Vec<HostCapability>,
+    pub policy_compatibility: PolicyCompatibility,
+    pub inputs: PackInputs,
+    pub provenance: PackProvenanceMeta,
+    pub trust: PackTrustMeta,
+    pub signature: SignatureValidity,
+}
+
+/// Non-hash provenance the caller supplies; the signature bundle is assembled by
+/// the builder.
+#[derive(Debug, Clone)]
+pub struct PackProvenanceMeta {
+    pub builder_identity: String,
+    pub build_environment_identity: String,
+    pub build_timestamp: DateTime<Utc>,
+    pub reproducibility: ReproducibilityStatus,
+    pub sbom: SbomReference,
+}
+
+/// Trust metadata minus `signing_key_id`, which the builder derives from the key.
+#[derive(Debug, Clone)]
+pub struct PackTrustMeta {
+    pub expires_at: DateTime<Utc>,
+    pub revocation_channel: String,
+    pub channel_identity: String,
+    pub mirror_identity: Option<String>,
+    pub transparency_log: Option<TransparencyLogReference>,
+}
+
+/// Validity window stamped onto the produced signature.
+#[derive(Debug, Clone)]
+pub struct SignatureValidity {
+    pub signed_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Typed output hashes the caller already knows for the assembled artifacts. The
+/// per-file `PackOutputs.files` and `pack_hash` are computed by the builder; these
+/// carry the closure/rootfs/kernel-level identities the manifest also records.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackOutputHashes {
+    pub closure_hash: Option<Sha256Hex>,
+    pub rootfs_hash: Option<Sha256Hex>,
+    pub kernel_hash: Option<Sha256Hex>,
+    pub initramfs_hash: Option<Sha256Hex>,
+    pub agent_rootfs_hash: Option<Sha256Hex>,
+    pub builder_image_hash: Option<Sha256Hex>,
+}
+
+/// Inverse of `verify_pack_at`: hashes a file set under `root`, computes the pack
+/// hash, and signs the manifest so `verify_pack_at` accepts the result. Files are
+/// addressed by their in-pack relative path and hashed with the same helper the
+/// verifier uses, so producer and verifier can never drift.
+pub struct PackBuilder<'a> {
+    root: PathBuf,
+    metadata: PackMetadata,
+    output_hashes: PackOutputHashes,
+    files: Vec<String>,
+    signing_key: &'a SigningKey,
+}
+
+impl<'a> PackBuilder<'a> {
+    pub fn new(
+        root: impl Into<PathBuf>,
+        metadata: PackMetadata,
+        signing_key: &'a SigningKey,
+    ) -> Self {
+        Self {
+            root: root.into(),
+            metadata,
+            output_hashes: PackOutputHashes::default(),
+            files: Vec::new(),
+            signing_key,
+        }
+    }
+
+    /// Add one file by its path relative to the pack root.
+    pub fn file(mut self, path: impl Into<String>) -> Self {
+        self.files.push(path.into());
+        self
+    }
+
+    /// Add several files by their paths relative to the pack root.
+    pub fn files(mut self, paths: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.files.extend(paths.into_iter().map(Into::into));
+        self
+    }
+
+    pub fn output_hashes(mut self, hashes: PackOutputHashes) -> Self {
+        self.output_hashes = hashes;
+        self
+    }
+
+    pub fn build(self) -> Result<PackManifest, PackManifestError> {
+        let files = self.hash_files()?;
+        let signing_key_id = KeyId::from_pubkey(&self.signing_key.verifying_key());
+        let outputs = PackOutputs {
+            pack_hash: Sha256Hex::new(EMPTY_PACK_HASH)?,
+            files,
+            closure_hash: self.output_hashes.closure_hash,
+            rootfs_hash: self.output_hashes.rootfs_hash,
+            kernel_hash: self.output_hashes.kernel_hash,
+            initramfs_hash: self.output_hashes.initramfs_hash,
+            agent_rootfs_hash: self.output_hashes.agent_rootfs_hash,
+            builder_image_hash: self.output_hashes.builder_image_hash,
+        };
+        let provenance = PackProvenance {
+            builder_identity: self.metadata.provenance.builder_identity,
+            build_environment_identity: self.metadata.provenance.build_environment_identity,
+            build_timestamp: self.metadata.provenance.build_timestamp,
+            reproducibility: self.metadata.provenance.reproducibility,
+            sbom: self.metadata.provenance.sbom,
+            signature_bundle: SignatureBundle {
+                format: SignatureFormat::Ed25519,
+                payload: SignaturePayload::ManifestV1,
+                signatures: Vec::new(),
+            },
+        };
+        let trust = TrustMetadata {
+            signing_key_id: signing_key_id.clone(),
+            expires_at: self.metadata.trust.expires_at,
+            revocation_channel: self.metadata.trust.revocation_channel,
+            channel_identity: self.metadata.trust.channel_identity,
+            mirror_identity: self.metadata.trust.mirror_identity,
+            transparency_log: self.metadata.trust.transparency_log,
+        };
+        let mut manifest = PackManifest {
+            schema_version: PACK_SCHEMA_VERSION,
+            kind: self.metadata.kind,
+            target_arch: self.metadata.target_arch,
+            backend_compatibility: self.metadata.backend_compatibility,
+            required_host_capabilities: self.metadata.required_host_capabilities,
+            policy_compatibility: self.metadata.policy_compatibility,
+            inputs: self.metadata.inputs,
+            outputs,
+            provenance,
+            trust,
+        };
+        // Refuse to sign a manifest the verifier would reject for missing the
+        // outputs this kind requires, rather than shipping a dead signed pack.
+        validate_required_outputs(&manifest)?;
+        manifest.outputs.pack_hash = manifest.computed_pack_hash()?;
+        let signature = self.signing_key.sign(&manifest.signature_payload_bytes()?);
+        manifest
+            .provenance
+            .signature_bundle
+            .signatures
+            .push(PackSignature {
+                key_id: signing_key_id,
+                signature_base64: B64.encode(signature.to_bytes()),
+                signed_at: self.metadata.signature.signed_at,
+                expires_at: self.metadata.signature.expires_at,
+            });
+        Ok(manifest)
+    }
+
+    fn hash_files(&self) -> Result<Vec<PackFile>, PackManifestError> {
+        self.files
+            .iter()
+            .map(|path| {
+                // Reject escapes before touching the filesystem so nothing outside
+                // the pack root is ever read or attested.
+                if !pack_path_is_safe(path) {
+                    return Err(PackVerifyError::UnsafeFilePath(path.clone()).into());
+                }
+                let (sha256, size_bytes) = hash_file(&self.root.join(path)).map_err(|reason| {
+                    PackManifestError::FileHash {
+                        path: path.clone(),
+                        reason,
+                    }
+                })?;
+                Ok(PackFile {
+                    path: path.clone(),
+                    sha256,
+                    size_bytes,
+                })
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -738,6 +958,20 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn host_pack_policy_hash_matches_sha256_of_nix_system() {
+        // Guards the one convention both producer and verifier share. If this
+        // value changes, every previously produced host pack stops verifying.
+        assert_eq!(
+            host_pack_policy_hash(GuestArch::Aarch64),
+            Sha256Hex::from_bytes(b"aarch64-linux")
+        );
+        assert_eq!(
+            host_pack_policy_hash(GuestArch::X86_64),
+            Sha256Hex::from_bytes(b"x86_64-linux")
+        );
+    }
 
     struct MapTrustStore {
         keys: HashMap<KeyId, VerifyingKey>,
@@ -1085,6 +1319,244 @@ mod tests {
         f.manifest.provenance.signature_bundle.signatures[0].expires_at = utc(2026, 1, 1);
         let err = verify(&f).expect_err("expired signature rejected");
         assert!(matches!(err, PackVerifyError::ExpiredSignature { .. }));
+    }
+
+    fn empty_inputs() -> PackInputs {
+        PackInputs {
+            flake_locks: Vec::new(),
+            derivations: Vec::new(),
+            nar_hashes: Vec::new(),
+            oci_images: Vec::new(),
+            setup_commands: Vec::new(),
+            source_revisions: Vec::new(),
+            toolchain_versions: BTreeMap::new(),
+        }
+    }
+
+    /// Common producer metadata for `kind`, hvf-compatible and matching `hvf_policy`.
+    fn producer_metadata(kind: PackKind) -> PackMetadata {
+        PackMetadata {
+            kind,
+            target_arch: GuestArch::host(),
+            backend_compatibility: vec![PackBackend::Hvf, PackBackend::Libkrun],
+            required_host_capabilities: vec![HostCapability("vsock".to_string())],
+            policy_compatibility: PolicyCompatibility {
+                policy_hash: hash("policy"),
+                local_rebuild_required: false,
+                allowed_channels: vec!["stable".to_string()],
+            },
+            inputs: empty_inputs(),
+            provenance: PackProvenanceMeta {
+                builder_identity: "ci-builder".to_string(),
+                build_environment_identity: "github-actions".to_string(),
+                build_timestamp: utc(2026, 6, 23),
+                reproducibility: ReproducibilityStatus::Reproduced,
+                sbom: SbomReference {
+                    uri: "https://example.test/sbom.spdx.json".to_string(),
+                    sha256: hash("sbom"),
+                },
+            },
+            trust: PackTrustMeta {
+                expires_at: utc(2026, 12, 31),
+                revocation_channel: "https://example.test/revocations.json".to_string(),
+                channel_identity: "stable".to_string(),
+                mirror_identity: None,
+                transparency_log: None,
+            },
+            signature: SignatureValidity {
+                signed_at: utc(2026, 6, 24),
+                expires_at: utc(2026, 12, 31),
+            },
+        }
+    }
+
+    /// Produce a `Builder` pack via `PackBuilder` whose artifacts live under `dir`,
+    /// compatible with the hvf backend. Returns the signed manifest.
+    fn produced_hvf_builder_pack(dir: &TempDir) -> PackManifest {
+        fs::write(dir.path().join("kernel"), b"builder-kernel").expect("write kernel");
+        fs::write(dir.path().join("builder.img"), b"builder-image").expect("write builder");
+        let key = signing_key();
+        PackBuilder::new(dir.path(), producer_metadata(PackKind::Builder), &key)
+            .files(["kernel", "builder.img"])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(b"builder-kernel")),
+                builder_image_hash: Some(Sha256Hex::from_bytes(b"builder-image")),
+                ..Default::default()
+            })
+            .build()
+            .expect("produce pack")
+    }
+
+    /// Produce a `Runtime` pack, exercising the kernel + initramfs required-output
+    /// branch the `Builder` fixture doesn't reach.
+    fn produced_runtime_pack(dir: &TempDir) -> PackManifest {
+        fs::write(dir.path().join("kernel"), b"runtime-kernel").expect("write kernel");
+        fs::write(dir.path().join("initramfs"), b"runtime-initramfs").expect("write initramfs");
+        let key = signing_key();
+        PackBuilder::new(dir.path(), producer_metadata(PackKind::Runtime), &key)
+            .files(["kernel", "initramfs"])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(b"runtime-kernel")),
+                initramfs_hash: Some(Sha256Hex::from_bytes(b"runtime-initramfs")),
+                ..Default::default()
+            })
+            .build()
+            .expect("produce runtime pack")
+    }
+
+    fn hvf_policy() -> LocalPackPolicy {
+        LocalPackPolicy {
+            host_arch: GuestArch::host(),
+            backend: PackBackend::Hvf,
+            host_capabilities: BTreeSet::from([HostCapability("vsock".to_string())]),
+            policy_hash: hash("policy"),
+            allowed_channels: BTreeSet::from(["stable".to_string()]),
+            now: utc(2026, 6, 24),
+        }
+    }
+
+    fn hvf_trust_store() -> MapTrustStore {
+        let key = signing_key();
+        let key_id = KeyId::from_pubkey(&key.verifying_key());
+        MapTrustStore {
+            keys: HashMap::from([(key_id, key.verifying_key())]),
+        }
+    }
+
+    #[test]
+    fn produced_pack_verifies_on_hvf_policy() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_hvf_builder_pack(&dir);
+        let revocations = StaticRevocation {
+            status: RevocationStatus::Good,
+        };
+        let verified = verify_pack_at(
+            &manifest,
+            dir.path(),
+            &hvf_policy(),
+            &hvf_trust_store(),
+            &revocations,
+        )
+        .expect("produced pack verifies");
+        assert_eq!(verified.file_count, 2);
+        assert_eq!(verified.pack_hash, manifest.outputs.pack_hash);
+        assert_eq!(
+            verified.signer_key_id,
+            KeyId::from_pubkey(&signing_key().verifying_key())
+        );
+    }
+
+    #[test]
+    fn produced_pack_roundtrips_serde() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_hvf_builder_pack(&dir);
+        let json = serde_json::to_string(&manifest).expect("serialize");
+        let recovered: PackManifest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(recovered, manifest);
+    }
+
+    #[test]
+    fn produced_pack_rejects_file_tamper() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_hvf_builder_pack(&dir);
+        fs::write(dir.path().join("kernel"), b"tampered-kernel").expect("tamper file");
+        let revocations = StaticRevocation {
+            status: RevocationStatus::Good,
+        };
+        let err = verify_pack_at(
+            &manifest,
+            dir.path(),
+            &hvf_policy(),
+            &hvf_trust_store(),
+            &revocations,
+        )
+        .expect_err("tampered file rejected");
+        assert!(matches!(
+            err,
+            PackVerifyError::FileSizeMismatch { .. } | PackVerifyError::FileHashMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn produced_pack_rejects_manifest_tamper() {
+        let dir = TempDir::new().expect("tempdir");
+        let mut manifest = produced_hvf_builder_pack(&dir);
+        // Re-stamp the pack hash so the tampered field passes the hash gate and the
+        // failure lands squarely on the signature check.
+        manifest.provenance.builder_identity = "attacker".to_string();
+        manifest.outputs.pack_hash = manifest.computed_pack_hash().expect("pack hash");
+        let revocations = StaticRevocation {
+            status: RevocationStatus::Good,
+        };
+        let err = verify_pack_at(
+            &manifest,
+            dir.path(),
+            &hvf_policy(),
+            &hvf_trust_store(),
+            &revocations,
+        )
+        .expect_err("tampered manifest rejected");
+        assert!(matches!(err, PackVerifyError::SignatureInvalid));
+    }
+
+    #[test]
+    fn produced_runtime_pack_verifies_on_hvf_policy() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = produced_runtime_pack(&dir);
+        let revocations = StaticRevocation {
+            status: RevocationStatus::Good,
+        };
+        let verified = verify_pack_at(
+            &manifest,
+            dir.path(),
+            &hvf_policy(),
+            &hvf_trust_store(),
+            &revocations,
+        )
+        .expect("produced runtime pack verifies");
+        assert_eq!(verified.file_count, 2);
+        assert_eq!(
+            verified.signer_key_id,
+            KeyId::from_pubkey(&signing_key().verifying_key())
+        );
+    }
+
+    #[test]
+    fn build_rejects_missing_required_output_hash() {
+        let dir = TempDir::new().expect("tempdir");
+        fs::write(dir.path().join("kernel"), b"builder-kernel").expect("write kernel");
+        fs::write(dir.path().join("builder.img"), b"builder-image").expect("write builder");
+        let key = signing_key();
+        // Builder kind requires builder_image_hash + kernel_hash; supply neither.
+        let result = PackBuilder::new(dir.path(), producer_metadata(PackKind::Builder), &key)
+            .files(["kernel", "builder.img"])
+            .build();
+        assert!(matches!(
+            result,
+            Err(PackManifestError::Invalid(inner))
+                if matches!(*inner, PackVerifyError::MissingOutputHash(_))
+        ));
+    }
+
+    #[test]
+    fn build_rejects_unsafe_file_path_before_hashing() {
+        let dir = TempDir::new().expect("tempdir");
+        let key = signing_key();
+        // The traversal target is never created; an `UnsafeFilePath` (not a
+        // `FileHash`) error proves `build()` refused before any read outside root.
+        let result = PackBuilder::new(dir.path(), producer_metadata(PackKind::Builder), &key)
+            .file("../escape")
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(hash("kernel")),
+                builder_image_hash: Some(hash("builder")),
+                ..Default::default()
+            })
+            .build();
+        assert!(matches!(
+            result,
+            Err(PackManifestError::Invalid(inner))
+                if matches!(*inner, PackVerifyError::UnsafeFilePath(_))
+        ));
     }
 
     fn resign(manifest: &mut PackManifest) {

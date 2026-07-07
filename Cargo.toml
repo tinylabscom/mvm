@@ -550,6 +550,29 @@ template-registry-s3 = [
     "mvm-cli/template-registry-s3",
 ]
 
+# ── Two product surfaces (the only two knobs a consumer should touch) ─────────
+# There are exactly two things this project ships: what the host machine runs to
+# host sandboxes, and what a user runs to drive them. Every capability flag above
+# rolls up into one of these. Build the host runtime with `--features host`; the
+# user client is `default`. Individual flags above remain only as internal
+# implementation detail (they gate real per-OS/platform code) — they are not the
+# consumer-facing surface. New consumer-facing behaviour joins `host` or `user`;
+# a third top-level product knob is a design error.
+#
+# `host` — everything the host machine runs to boot/manage/secure/build sandboxes.
+# Platform-neutral: backends auto-detect at runtime (the `VmBackend` trait). A
+# host that uses the libkrun backend adds `libkrun-sys`/`libkrun-live` on top;
+# the macOS-26 HVF host needs neither, so they are not in the base umbrella.
+host = [
+    "builder-vm",
+    "pure-mkfs",
+    "custom-dns",
+    "hostd-transport",
+    "template-registry-s3",
+]
+# `user` — everything a user runs to create/drive sandboxes (the client).
+user = ["manifest-verify"]
+
 [profile.release]
 opt-level = 3
 strip = true

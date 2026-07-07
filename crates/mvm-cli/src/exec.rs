@@ -467,6 +467,19 @@ pub fn transient_run_dev_console(pty: bool, verity_path: Option<&str>) -> bool {
     pty && verity_path.is_none()
 }
 
+/// Remove the transient `--add-dir` staging dir, but only when extras were
+/// actually staged. `build_dir_image_ro` builds those ext4 images inside the
+/// builder Linux env (it needs `mkfs`/`mount`), so cleanup routes back through
+/// that env — and a run with no `--add-dir` never created the dir. Skipping the
+/// call there keeps a plain OCI/workload run from waking a builder VM just to
+/// `rm -rf` a path that does not exist.
+fn clean_add_dir_staging(add_dirs: &[AddDir], staging_dir: &str) {
+    if add_dirs.is_empty() {
+        return;
+    }
+    let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+}
+
 /// Decide whether snapshot restore is safe for this request.
 ///
 /// Only enabled for the trivial case: a registered template (so the image
@@ -667,11 +680,10 @@ fn run_inner(
         backend.capabilities().snapshots,
     );
 
-    // Probe for the verity sidecar alongside the rootfs: production
-    // microVMs ship `rootfs.verity` + `rootfs.roothash` next to
-    // `rootfs.ext4`. Their absence is the dev-VM exemption. Files live
-    // inside the VM, so we can't `Path::exists()` them from the host —
-    // shell out into the VM instead.
+    // Probe for the verity sidecar alongside the rootfs: production microVMs
+    // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
+    // absence is the dev-VM exemption. This is host-local and side-effect-free;
+    // foreground OCI launches must never boot the builder/dev VM just to probe.
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
 
     // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
@@ -816,7 +828,7 @@ fn run_inner(
     if !booted {
         ui::info(&format!("Booting transient VM '{vm_name}'..."));
         if let Err(e) = backend.start(&start_config) {
-            let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+            clean_add_dir_staging(&req.add_dirs, &staging_dir);
             return Err(e).context("starting transient microVM");
         }
     }
@@ -869,7 +881,7 @@ fn run_inner(
         }
     }
 
-    let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+    clean_add_dir_staging(&req.add_dirs, &staging_dir);
     let t_torn_down = timing.then(std::time::Instant::now);
 
     // Emit the phase breakdown when every seam was marked (i.e. timing was
@@ -1974,5 +1986,57 @@ mod tests {
     #[test]
     fn non_interactive_sealed_run_leaves_dev_console_unset() {
         assert!(!transient_run_dev_console(false, Some("/rootfs.verity")));
+    }
+
+    #[test]
+    fn staging_cleanup_skipped_without_add_dirs() {
+        let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_for_handler = calls.clone();
+        let _handler = mvm::shell_mock::install_handler(move |_script: &str| {
+            calls_for_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            mvm::shell_mock::MockResponse {
+                exit_code: 0,
+                stdout: String::new(),
+            }
+        });
+
+        clean_add_dir_staging(&[], "/tmp/mvm-staging");
+
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "no --add-dir means no builder cleanup command"
+        );
+    }
+
+    #[test]
+    fn staging_cleanup_enabled_with_add_dirs() {
+        let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let scripts_for_handler = scripts.clone();
+        let _handler = mvm::shell_mock::install_handler(move |script: &str| {
+            scripts_for_handler
+                .lock()
+                .expect("mutex must not be poisoned")
+                .push(script.to_string());
+            mvm::shell_mock::MockResponse {
+                exit_code: 0,
+                stdout: String::new(),
+            }
+        });
+        let add_dir = AddDir {
+            host_path: "/tmp/host".to_string(),
+            guest_path: "/mnt/host".to_string(),
+            read_only: true,
+        };
+
+        clean_add_dir_staging(&[add_dir], "/tmp/mvm-staging");
+
+        let scripts = scripts.lock().expect("mutex must not be poisoned");
+        assert_eq!(scripts.len(), 1, "one cleanup command must be issued");
+        assert!(
+            scripts[0].contains("rm -rf /tmp/mvm-staging"),
+            "cleanup command must remove the staging directory: {}",
+            scripts[0]
+        );
     }
 }

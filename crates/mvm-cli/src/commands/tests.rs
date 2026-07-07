@@ -3826,18 +3826,17 @@ fn exits_early(argv: &[&str]) -> bool {
 #[test]
 fn state_touching_commands_trigger_entry_convergence() {
     // Lifecycle mutate/read commands run the cheap converge pass.
-    // (`up` was retired — `machine run` and `machine start` are the
-    // lifecycle-entry points; they route through MachineAction which
-    // touches_vm_state returns true for.)
+    // (`up` was retired — named/persistent `machine run` and `machine start` are
+    // the lifecycle-entry points.)
     assert!(touches(&[
         "mvmctl",
         "machine",
         "run",
         "--image",
         "alpine:latest",
-        "--",
-        "sh"
+        "-d"
     ]));
+    assert!(touches(&["mvmctl", "machine", "start", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "stop", "--all"]));
     assert!(touches(&["mvmctl", "machine", "console", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "pause", "myvm"]));
@@ -3856,6 +3855,27 @@ fn read_only_and_vm_agnostic_commands_skip_entry_convergence() {
     // `ls --all` must preserve registry-only stopped rows for rendering.
     assert!(!touches(&["mvmctl", "ls", "--all"]));
     assert!(!touches(&["mvmctl", "ls", "--all", "--json"]));
+    // Foreground transient image runs are throwaway launches. They must not
+    // auto-resume unrelated dev/persistent machines before booting the image.
+    assert!(!touches(&[
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--",
+        "sh"
+    ]));
+    assert!(!touches(&[
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "-it",
+        "--",
+        "/bin/sh"
+    ]));
     // `reconcile` is the convergence verb itself — must not double-run on entry.
     assert!(!touches(&["mvmctl", "reconcile"]));
     assert!(!touches(&["mvmctl", "reconcile", "--dry-run"]));
