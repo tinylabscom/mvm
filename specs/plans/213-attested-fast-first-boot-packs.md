@@ -154,9 +154,22 @@ The target user-visible shape is:
       pack and before injecting secrets.
 - [ ] Record snapshot derivation events with parent pack hash, backend id,
       backend version, memory/CPU shape, policy hash, and agent readiness proof.
-- [ ] Prefer warm-standby claim for prepared runs; fall back to local snapshot
+- [x] Prefer warm-standby claim for prepared runs; fall back to local snapshot
       restore; fall back to prepared cold direct boot; fall back to builder
       prepare only when required.
+      **Finding:** the warm-standby claim, replenish, and saved-state-snapshot
+      path is source-agnostic — it derives its compatibility key from the
+      resolved `VmStartConfig` (kernel + rootfs + resources), never from the
+      `ImageSource` variant. A pack-sourced prebuilt launch therefore already
+      participates in the warm pool and saved-state snapshot exactly like any
+      admitted workload, with no pack-specific plumbing; a dedicated
+      template-style snapshot path for prebuilt sources would duplicate the
+      existing saved-state standby mechanism (rejected as redundant). Locked in
+      by `runtime_pack_prebuilt_config_is_warm_eligible_and_keys_on_pack_identity`
+      (asserts a pack config keys on the pack's own kernel identity and stays
+      claim-eligible). Backend caveat: warm-pool participation is bounded by which
+      VMM implements the standby pool (libkrun today); extending it to the other
+      workload backends is separate backend work, not a pack concern.
 - [ ] Dispatch commands over the guest agent transport rather than SSH or
       network readiness.
 - [ ] Add tests proving prepared launches do not invoke the builder VM path.

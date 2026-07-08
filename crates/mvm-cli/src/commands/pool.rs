@@ -521,6 +521,41 @@ mod tests {
     }
 
     #[test]
+    fn runtime_pack_prebuilt_config_is_warm_eligible_and_keys_on_pack_identity() {
+        // A verified runtime pack resolves to a prebuilt kernel + rootfs that
+        // land in an ordinary VmStartConfig — the same shape as eligible_cfg().
+        // The warm-pool compat is derived from that config, never from the image
+        // source, so a pack participates in the warm pool (and its saved-state
+        // snapshot) like any other admitted workload. This locks that in: a
+        // future refactor that special-cased the image source would break it.
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = tmp.path().join("vmlinux");
+        std::fs::write(&kernel, b"pack-kernel").unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"pack-rootfs").unwrap();
+
+        let mut cfg = eligible_cfg();
+        cfg.kernel_path = Some(kernel.to_string_lossy().into_owned());
+        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
+
+        // Firecracker keys on the pack's own vmlinux sha; the rootfs is attached
+        // at claim, so the base compat stays image-agnostic.
+        let fc = AnyBackend::from_hypervisor("firecracker");
+        let want = compat_for_launch(fc.as_vm_backend(), &cfg, None).unwrap();
+        assert_eq!(want.kernel_sha256, sha256_hex_of(b"pack-kernel"));
+        assert_eq!(want.vcpus, 2);
+        assert_eq!(want.mem_mib, 1024);
+        assert_eq!(want.image_sha256, None);
+
+        // libkrun boots its bundled kernel, so a pack claims any kernel-matched
+        // libkrun standby and attaches the pack rootfs on claim.
+        let lk = AnyBackend::from_hypervisor("libkrun");
+        let lk_want = compat_for_launch(lk.as_vm_backend(), &cfg, None).unwrap();
+        assert_eq!(lk_want.kernel_sha256, LIBKRUN_BUNDLED_KERNEL_ID);
+        assert_eq!(lk_want.image_sha256, None);
+    }
+
+    #[test]
     fn try_warm_claim_cold_without_admitted_plan() {
         let b = AnyBackend::from_hypervisor("libkrun");
         let mut c = eligible_cfg();
