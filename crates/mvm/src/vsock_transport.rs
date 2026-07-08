@@ -116,11 +116,11 @@ impl VsockTransport for LibkrunTransport {
     }
 }
 
-/// Connects through the Vz supervisor's per-port vsock listener.
+/// Connects through a per-VM supervisor's per-port vsock listener.
 ///
-/// `VzBackend` starts the Swift supervisor with a `VsockProxy` that
-/// listens under `<vm_state_dir>/vsock/` and forwards each connection to
-/// the guest's vsock port, so a host client connects directly with no
+/// The supervisor listens under `<vm_state_dir>/vsock/` and forwards each
+/// connection to the guest's vsock port, so a host client connects directly
+/// with no
 /// port handshake — the libkrun shape, one subdir deeper. The path is the
 /// single-source-of-truth [`mvm_core::config::vm_vz_vsock_port_socket`].
 pub struct VzTransport {

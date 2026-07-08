@@ -1662,9 +1662,9 @@ pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
 /// host don't clobber each other's job dirs even if they hit
 /// the same second.
 ///
-/// `pub(crate)` so the parallel `vz_builder::VzBuilderVm`
-/// driver can reuse the same per-job ID shape; the two backends
-/// share a cache root, so collisions on it would corrupt each
+/// `pub(crate)` so a parallel builder driver could reuse the same
+/// per-job ID shape; backends share a cache root, so collisions on it
+/// would corrupt each
 /// other's job dirs.
 pub(crate) fn unique_job_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};

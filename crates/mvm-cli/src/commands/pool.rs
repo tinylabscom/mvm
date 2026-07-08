@@ -15,7 +15,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
 use mvm_backend::backend::AnyBackend;
-use mvm_backend::catalog::BackendKind;
 use mvm_backend::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
@@ -397,15 +396,11 @@ pub fn reap_stale_standbys_best_effort() {
 }
 
 fn should_replenish_inline(
-    backend_kind: BackendKind,
     supports_standby_pool: bool,
     warm_pool_size: u32,
     has_virtiofs_root: bool,
 ) -> bool {
-    warm_pool_size > 0
-        && supports_standby_pool
-        && backend_kind != BackendKind::Vz
-        && !has_virtiofs_root
+    warm_pool_size > 0 && supports_standby_pool && !has_virtiofs_root
 }
 
 /// Top the pool back up toward `cfg.warm_pool_size` after a launch (the no-daemon
@@ -417,12 +412,7 @@ fn should_replenish_inline(
 /// is skipped for Vz (pool warm is manual); `supports_standby_pool()` stays true so
 /// `try_warm_claim` still fires.
 pub fn replenish_after_launch(backend: &AnyBackend, cfg: &VmStartConfig) -> Result<u32> {
-    // Vz replenish boots a seed VM + captures its memory, and may need the
-    // builder VM to resolve default image artifacts. Keep that work explicit
-    // via `pool warm` so a foreground launch never races a detached rewarm for
-    // the same builder resources.
     if !should_replenish_inline(
-        backend.kind(),
         backend.supports_standby_pool(),
         cfg.warm_pool_size,
         cfg.virtiofs_root.is_some(),
@@ -557,32 +547,11 @@ mod tests {
     }
 
     #[test]
-    fn inline_replenish_skips_zero_unsupported_and_vz() {
-        assert!(!should_replenish_inline(
-            BackendKind::Libkrun,
-            true,
-            0,
-            false
-        ));
-        assert!(!should_replenish_inline(
-            BackendKind::Libkrun,
-            false,
-            1,
-            false
-        ));
-        assert!(!should_replenish_inline(BackendKind::Vz, true, 1, false));
-        assert!(!should_replenish_inline(
-            BackendKind::Libkrun,
-            true,
-            1,
-            true
-        ));
-        assert!(should_replenish_inline(
-            BackendKind::Libkrun,
-            true,
-            1,
-            false
-        ));
+    fn inline_replenish_skips_zero_unsupported_and_virtiofs_root() {
+        assert!(!should_replenish_inline(true, 0, false));
+        assert!(!should_replenish_inline(false, 1, false));
+        assert!(!should_replenish_inline(true, 1, true));
+        assert!(should_replenish_inline(true, 1, false));
     }
 
     #[test]
@@ -605,31 +574,6 @@ mod tests {
         let b = fresh_binding_nonce();
         assert_eq!(a.len(), 64);
         assert_ne!(a, b);
-    }
-
-    #[test]
-    fn paired_kernel_prefers_sibling_vmlinux_else_default() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("dev");
-        std::fs::create_dir_all(&dir).unwrap();
-        let rootfs = dir.join("rootfs.ext4");
-        std::fs::write(&rootfs, b"r").unwrap();
-
-        // No sibling kernel yet → fall back to the supplied default.
-        assert_eq!(
-            paired_kernel_for_rootfs(&rootfs, "/default/vmlinux"),
-            "/default/vmlinux",
-        );
-
-        // Sibling `vmlinux` present → pair with it (so the standby's kernel_sha
-        // matches the launch's, which boots that same sibling): a dev rootfs
-        // pairs with the dev kernel, not the prod one.
-        let sib = dir.join("vmlinux");
-        std::fs::write(&sib, b"k").unwrap();
-        assert_eq!(
-            paired_kernel_for_rootfs(&rootfs, "/default/vmlinux"),
-            sib.to_string_lossy(),
-        );
     }
 
     #[test]
@@ -1044,27 +988,14 @@ fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<
         ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Prod)
             .context("resolve default-microvm kernel for the warm pool")?;
     let vcpus = u8::try_from(cfg.default_cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
-    // Vz needs an image; libkrun does not. Resolve: explicit --rootfs > env var > default.
-    let image = if backend.kind() == BackendKind::Vz {
-        let path = rootfs_override
-            .map(str::to_string)
-            .or_else(|| std::env::var("MVM_POOL_ROOTFS").ok())
-            .unwrap_or(default_rootfs);
-        Some(std::path::PathBuf::from(path))
-    } else {
-        None
-    };
-    // A Vz saved-standby must boot the kernel that pairs with ITS rootfs variant
-    // — the `vmlinux` shipped beside the rootfs (dev rootfs ↔ dev kernel, prod ↔
-    // prod). The claiming launch computes its compat `kernel_sha256` from that
-    // same sibling kernel, so baking an unrelated kernel (the former always-prod
-    // resolution) makes the claim fail open to cold boot even when the image
-    // matches — exactly the dev `up` / transient-`run` miss. libkrun is
-    // image-agnostic (its kernel identity is a constant) and keeps the default.
-    let kernel = match &image {
-        Some(img) => std::path::PathBuf::from(paired_kernel_for_rootfs(img, &default_kernel)),
-        None => std::path::PathBuf::from(default_kernel),
-    };
+    // The warm-pool backends (Firecracker standby, libkrun) are image-agnostic
+    // here — their kernel identity is fixed — so a warm standby boots the default
+    // kernel and needs no baked rootfs image. `--rootfs` / `MVM_POOL_ROOTFS`
+    // remain accepted but are unused now that the Vz backend (the only one that
+    // baked a per-standby image) is removed.
+    let _ = (rootfs_override, default_rootfs);
+    let image = None;
+    let kernel = std::path::PathBuf::from(default_kernel);
     Ok(WarmShape {
         backend,
         backend_name,
@@ -1073,21 +1004,6 @@ fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<
         vcpus,
         mem_mib: cfg.default_memory_mib,
     })
-}
-
-/// The kernel that pairs with a default-microVM `rootfs`: the `vmlinux` shipped
-/// beside it in its variant directory. A Vz saved-standby must boot the same
-/// kernel the claiming launch will (which is this sibling), or its
-/// `kernel_sha256` never matches and the warm claim fails open to cold boot.
-/// Falls back to `default_kernel` when no sibling exists (a non-default
-/// `--rootfs`).
-fn paired_kernel_for_rootfs(rootfs: &Path, default_kernel: &str) -> String {
-    rootfs
-        .parent()
-        .map(|d| d.join("vmlinux"))
-        .filter(|k| k.exists())
-        .map(|k| k.to_string_lossy().into_owned())
-        .unwrap_or_else(|| default_kernel.to_string())
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {

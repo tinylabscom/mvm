@@ -10,7 +10,6 @@ use mvm_core::vm_backend::{RequiredCapabilities, VmCapabilities};
 use crate::backend::{AnyBackend, FirecrackerBackend};
 use crate::libkrun::LibkrunBackend;
 use crate::qemu::QemuBackend;
-use crate::vz::VzBackend;
 
 /// No backend could be selected: every candidate lacked a required capability.
 /// Carries the per-candidate shortfall so the caller gets a recovery action
@@ -60,10 +59,9 @@ impl AnyBackend {
     /// Mirrors the production-first preference; platform *availability* is a
     /// separate concern handled by [`AnyBackend::auto_select`]. The in-memory
     /// mock is excluded — it is a test double, never selected for a workload.
-    fn capability_candidates() -> [AnyBackend; 4] {
+    fn capability_candidates() -> [AnyBackend; 3] {
         [
             AnyBackend::Firecracker(FirecrackerBackend),
-            AnyBackend::Vz(VzBackend),
             AnyBackend::Libkrun(LibkrunBackend),
             AnyBackend::Qemu(QemuBackend),
         ]
