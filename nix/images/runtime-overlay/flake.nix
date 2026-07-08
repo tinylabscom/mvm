@@ -117,7 +117,7 @@
       # the two in lock-step or `mvmctl up` admission fails.
       # `xtask check-runtime-overlay-version` (a CI gate)
       # asserts this match so the pin can't silently go stale.
-      overlayVersion = "0.16.1";
+      overlayVersion = "0.17.0";
 
       # mvm-guest binaries — agent + seccomp shim + verity-init.
       # `mvm-verity-init` is the initrd PID 1; it lives in the

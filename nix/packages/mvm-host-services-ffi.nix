@@ -17,7 +17,7 @@
 
 pkgs.rustPlatform.buildRustPackage {
   pname = "mvm-host-services-ffi";
-  version = "0.16.1";
+  version = "0.17.0";
 
   src = mvmSrc;
 
