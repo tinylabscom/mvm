@@ -404,3 +404,26 @@ curl -L -o ~/.cache/mvm/revocations/revoked-versions.json.bundle \
 ```
 
 For air-gapped hosts that can never reach github.com, see [Air-gapped Bootstrap](airgapped-bootstrap).
+
+### "Pack revocation list failed verification"
+
+The fetched builder-pack recall list did not verify against the project's
+`revocations.yml` OIDC identity, so mvmctl ignored it and fell back to the
+operator's local `pack-trust.json` revocations only. Refresh the cached pair
+manually if you need the public recall channel immediately:
+
+```bash
+mkdir -p ~/.cache/mvm/pack-revocations
+curl -L -o ~/.cache/mvm/pack-revocations/pack-revocations.json \
+  https://github.com/tinylabscom/mvm/releases/download/revocations/pack-revocations.json
+curl -L -o ~/.cache/mvm/pack-revocations/pack-revocations.json.bundle \
+  https://github.com/tinylabscom/mvm/releases/download/revocations/pack-revocations.json.bundle
+```
+
+### "Could not refresh pack revocation list … using cached copy"
+
+Network failure during the 24-hour builder-pack recall refresh. mvmctl tolerates
+up to 7 days of cached staleness before it drops back to the on-disk
+`pack-trust.json` revocations only. Refresh the cached pair with the same
+commands above, or keep operating on the local trust policy until the public
+channel is reachable again.

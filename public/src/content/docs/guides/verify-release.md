@@ -161,6 +161,14 @@ cosign verify-blob \
 
 The revocations tag is signed by a *separate* OIDC identity (`revocations.yml`) so a leaked image-signing cert can't fabricate a permissive recall, and vice versa. Domain separation by design.
 
+Published builder packs use the same `revocations` channel for additive
+recalls. When the installed attested builder-pack path is active, `mvmctl`
+refreshes `pack-revocations.json` and `pack-revocations.json.bundle` into
+`~/.cache/mvm/pack-revocations/` every 24 hours, tolerates up to 7 days of
+offline staleness, treats `404` as bootstrap state, and unions any fetched
+entries with the operator's local `pack-trust.json` revocations. A fetched list
+that fails cosign verification is ignored rather than applied.
+
 ### Emergency escape hatches
 
 Two environment variables disable parts of the verification pipeline. Both print loud warnings; both are documented for emergency rotation only:
