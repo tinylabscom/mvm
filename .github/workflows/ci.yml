@@ -231,6 +231,15 @@ jobs:
       - name: Run tests
         run: cargo nextest run --workspace --all-targets
 
+      - name: Run dev-shell agent handler tests
+        # The default workspace run builds the guest agent without `dev-shell`,
+        # so the dev-tier handlers (exec, run-code, run-detached) and their
+        # tests are compiled out. Run mvm-guest with the feature on so the
+        # detached-workload handler is actually exercised on every PR — a fresh
+        # agent that links the handler but can't run the workload would slip an
+        # all-default run.
+        run: cargo nextest run -p mvm-guest --features dev-shell
+
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
         run: cargo test --workspace --doc

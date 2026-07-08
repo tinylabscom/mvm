@@ -1063,7 +1063,7 @@ fn resolve_warm_shape(cfg: &MvmConfig, rootfs_override: Option<&str>) -> Result<
     // image-agnostic (its kernel identity is a constant) and keeps the default.
     let kernel = match &image {
         Some(img) => std::path::PathBuf::from(paired_kernel_for_rootfs(img, &default_kernel)),
-        None => std::path::PathBuf::from(default_kernel),
+        None => std::path::PathBuf::from(&default_kernel),
     };
     Ok(WarmShape {
         backend,

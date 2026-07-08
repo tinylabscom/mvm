@@ -79,10 +79,9 @@ dev-check:
 test:
     cargo nextest run --workspace
 
-# Fast inner-loop / fresh-worktree run: skips the embedded host-vm binary
-# cross-compile (cargo zigbuild --release) in mvm-cli/build.rs. Safe for
-# everything except builder-VM boot — the env-gated E2E tests need the
-# real binaries and the `e2e-core-demo` recipe never sets this var.
+# Non-release builds now skip the embedded host-vm binary cross-compile by
+# default. Keep this explicit recipe as the "always stub" path when a caller
+# wants to force the fast mode even after opting into real embeds elsewhere.
 test-fast:
     MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace
 
