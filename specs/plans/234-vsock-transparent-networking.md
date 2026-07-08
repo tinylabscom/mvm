@@ -1,6 +1,6 @@
 # Plan 234 — Transparent networking over vsock
 
-**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, packaged guest bridge binary, dependency-light host authority core, host runner/connector/policy-adapter substrate, host authority process contract, backend host authority spawn, backend port-5254 relay, and the gated live CLI smoke harness landed.
+**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, packaged guest bridge binary, dependency-light host authority core, host runner/connector/policy-adapter substrate, host authority process contract, backend host authority spawn, backend port-5254 relay, gated live CLI smoke harness, and C1 deny/no-network seam coverage landed.
 
 **Owner directive:** workload networking remains a vsock-mediated capability. The guest gets normal application-visible networking behavior, but the host remains the only authority that opens real network sockets, performs DNS, terminates TLS for secret-bearing flows, applies egress policy, records audit, and emits attestable evidence.
 
@@ -74,6 +74,8 @@
       Run the gated live microVM DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd` in the approved microVM environment and fix any failures it exposes.
 - [ ] **C1 — Add DNS plus TCP MVP.**
       Support A/AAAA DNS answers, synthetic IP mapping, TCP connect/data/close, allow-host default port handling, denied-host failure behavior, and bounded backpressure.
+- [x] **C1a — Prove denied/no-network DNS and TCP at the full in-process seam.**
+      Extend the `guest,host` acceptance coverage so a deny-all host authority returns a guest-visible refused DNS packet without allocating a synthetic address, and a denied TCP open returns a guest-visible RST without invoking the host connector. Validation: `cargo fmt --all -- --check`; `cargo test -p mvm-net --features guest,host -- --test-threads=1` (54 tests); `cargo clippy -p mvm-net --all-targets --features guest,host -- -D warnings`.
 - [ ] **C2 — Add mandatory TLS transform for secret-bearing flows.**
       Use a per-VM name-constrained trust root in the guest and a host-only private key in the transform authority; terminate guest TLS, originate upstream TLS, and fail closed on certificate-pinned clients or unsupported ALPN.
 - [ ] **C3 — Add plugin-like transform pipeline.**

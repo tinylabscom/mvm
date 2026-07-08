@@ -473,7 +473,8 @@ mod tests {
     use crate::guest_packet::{GuestPacketTranslator, GuestPacketTranslatorConfig};
     #[cfg(feature = "host")]
     use crate::host::{
-        AllowAllHostPolicy, HostAuthority, HostRoute, HostTcpConnector, NoopHostAuditSink,
+        AllowAllHostPolicy, DenyAllHostPolicy, HostAuthority, HostRoute, HostTcpConnector,
+        NoopHostAuditSink,
     };
     use crate::proto::{
         CloseReason, DnsAnswer, DnsName, DnsRecordData, DnsRecordType, DnsResponse,
@@ -488,6 +489,7 @@ mod tests {
     const IPPROTO_TCP: u8 = 6;
     const IPPROTO_UDP: u8 = 17;
     const IPV4_TTL: u8 = 64;
+    const TCP_RST_ACK: u8 = 0x14;
 
     #[derive(Debug, Default)]
     struct MockAuthority {
@@ -741,6 +743,20 @@ mod tests {
             sum = (sum & 0xffff) + (sum >> 16);
         }
         !(sum as u16)
+    }
+
+    fn dns_response_rcode(packet: &[u8]) -> u8 {
+        let dns = IPV4_MIN_HEADER_LEN + UDP_HEADER_LEN;
+        packet[dns + 3] & 0x0f
+    }
+
+    fn dns_answer_count(packet: &[u8]) -> u16 {
+        let dns = IPV4_MIN_HEADER_LEN + UDP_HEADER_LEN;
+        u16::from_be_bytes([packet[dns + 6], packet[dns + 7]])
+    }
+
+    fn tcp_response_flags(packet: &[u8]) -> u8 {
+        packet[IPV4_MIN_HEADER_LEN + 13]
     }
 
     fn query_id_from_last_dns(pump: &GuestBridgePump<MockAuthority>) -> crate::proto::QueryId {
@@ -1229,6 +1245,80 @@ mod tests {
             authority.tcp_connector_mut().sends,
             vec![(flow_id, request.to_vec(), false)]
         );
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn guest_dns_denial_returns_refused_packet_without_synthetic_mapping() {
+        let mut pump = pump();
+        let mut sink = MockSink::default();
+        let mut authority = HostAuthority::new(
+            DenyAllHostPolicy,
+            NoopHostAuditSink,
+            RecordingConnector::default(),
+        );
+
+        let dns_packet = udp_ipv4_packet(
+            40000,
+            DEFAULT_HOST_GATEWAY,
+            DNS_PORT,
+            &dns_query_payload(0x1234, "blocked.example", 1),
+        );
+        assert_eq!(pump.send_outbound_packet(&dns_packet), Ok(1));
+        let dns_responses = authority
+            .handle_message(pop_sent_message(&mut pump))
+            .expect("deny-all DNS produces a refusal response");
+        assert!(
+            authority.dns_map().is_empty(),
+            "denied DNS must not allocate a synthetic address"
+        );
+        for message in dns_responses {
+            pump.apply_authority_message(&mut sink, message)
+                .expect("guest pump applies refused DNS response");
+        }
+
+        assert_eq!(sink.packets.len(), 1);
+        assert_eq!(
+            dns_response_rcode(&sink.packets[0]),
+            5,
+            "DNS response code must be REFUSED"
+        );
+        assert_eq!(dns_answer_count(&sink.packets[0]), 0);
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn guest_denied_tcp_open_receives_rst_without_connector_open() {
+        let mut pump = pump();
+        let mut sink = MockSink::default();
+        let target = Ipv4Addr::new(198, 19, 0, 44);
+        pump.translator_mut()
+            .remember_synthetic_host(target, DnsName::new("blocked.example").unwrap());
+        let mut authority = HostAuthority::new(
+            DenyAllHostPolicy,
+            NoopHostAuditSink,
+            RecordingConnector::default(),
+        );
+
+        let syn_packet = tcp_ipv4_packet(target, 443, 0x02, &[]);
+        assert_eq!(pump.send_outbound_packet(&syn_packet), Ok(1));
+        let open_responses = authority
+            .handle_message(pop_sent_message(&mut pump))
+            .expect("deny-all TCP produces a denied open response");
+        assert!(
+            authority.tcp_connector_mut().opens.is_empty(),
+            "denied TCP must not invoke the host connector"
+        );
+        for message in open_responses {
+            pump.apply_authority_message(&mut sink, message)
+                .expect("guest pump applies denied TCP response");
+        }
+
+        assert_eq!(sink.packets.len(), 1);
+        assert_eq!(sink.packets[0][9], IPPROTO_TCP);
+        assert_eq!(&sink.packets[0][12..16], &target.octets());
+        assert_eq!(&sink.packets[0][16..20], &DEFAULT_GUEST_ADDRESS.octets());
+        assert_eq!(tcp_response_flags(&sink.packets[0]), TCP_RST_ACK);
     }
 
     #[test]
