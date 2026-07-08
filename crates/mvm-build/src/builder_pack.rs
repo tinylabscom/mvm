@@ -29,8 +29,13 @@ use thiserror::Error;
 pub const KERNEL_FILE: &str = "vmlinux";
 /// In-pack path of the builder rootfs image.
 pub const ROOTFS_FILE: &str = "rootfs.ext4";
-/// In-pack path of a runtime pack's initramfs.
-pub const INITRAMFS_FILE: &str = "initramfs";
+/// In-pack path of a runtime pack's dm-verity hash tree, carried so the launch
+/// can boot the rootfs verity-sealed (runtime tamper detection, not just the
+/// download-time content hash).
+pub const VERITY_FILE: &str = "rootfs.verity";
+/// In-pack path of the rootfs's dm-verity root hash — the value the launch pins
+/// on the kernel cmdline.
+pub const ROOTHASH_FILE: &str = "rootfs.roothash";
 /// Self-describing manifest written next to the artifacts so a produced pack dir
 /// can be published as-is. Distinct from the cache's own `.pack-manifest.json`
 /// sidecar, and never a declared pack file.
@@ -79,15 +84,22 @@ pub struct BuildBuilderPackParams {
 }
 
 /// Inputs to [`build_keyless_runtime_pack`]. Mirrors [`BuildBuilderPackParams`]
-/// but carries a runtime pack's artifacts (`vmlinux` + `initramfs`) instead of
-/// the builder VM's disk image. Every timestamp is an input, keeping the
-/// producer pure.
+/// but carries a runtime pack's artifacts (`vmlinux` + a verity-sealed workload
+/// `rootfs.ext4` + its dm-verity hash tree + root hash) instead of the builder
+/// VM's disk image. Carrying the verity tree and root hash keeps claim 3
+/// (a tampered rootfs fails to boot) on a pack-sourced launch — the pack's
+/// content hash attests the bytes once, dm-verity re-checks every block at read
+/// time. Every timestamp is an input, keeping the producer pure.
 #[derive(Debug, Clone)]
 pub struct BuildRuntimePackParams {
     /// Source `vmlinux` on disk; copied into the pack as [`KERNEL_FILE`].
     pub vmlinux: PathBuf,
-    /// Source initramfs on disk; copied into the pack as [`INITRAMFS_FILE`].
-    pub initramfs: PathBuf,
+    /// Source workload rootfs on disk; copied into the pack as [`ROOTFS_FILE`].
+    pub rootfs: PathBuf,
+    /// Source dm-verity hash tree; copied into the pack as [`VERITY_FILE`].
+    pub verity: PathBuf,
+    /// Source dm-verity root-hash file; copied into the pack as [`ROOTHASH_FILE`].
+    pub roothash: PathBuf,
     /// Architecture the artifacts target.
     pub target_arch: GuestArch,
     /// Publish channel; becomes `TrustMetadata.channel_identity`.
@@ -235,7 +247,7 @@ pub fn build_keyless_builder_pack(
 
 /// A keyless (Sigstore-authority) Runtime pack: the manifest plus the path of
 /// the file its signable bytes were written to, exactly as [`KeylessBuilderPack`]
-/// but for a runtime pack (kernel + initramfs).
+/// but for a runtime pack (kernel + verity-sealed rootfs + verity tree + root hash).
 #[derive(Debug, Clone)]
 pub struct KeylessRuntimePack {
     pub manifest: PackManifest,
@@ -243,12 +255,14 @@ pub struct KeylessRuntimePack {
 }
 
 /// Keyless counterpart of the builder producer for a `Runtime` pack: copies
-/// `vmlinux` + `initramfs` into `out_dir`, hashes them into the typed
-/// `kernel_hash` / `initramfs_hash` outputs a `Runtime` pack requires, assembles
-/// the manifest via `PackBuilder::new_keyless` (no ed25519 key, no in-manifest
-/// signature), and writes `manifest.canonical_bytes()` verbatim to
-/// `out_dir/manifest.json` — the exact bytes a release pipeline signs out of band
-/// and a keyless verifier re-derives at verify time. Never signs anything.
+/// `vmlinux` + the workload `rootfs.ext4` + its dm-verity hash tree + root hash
+/// into `out_dir`, hashes the kernel + rootfs into the typed `kernel_hash` /
+/// `agent_rootfs_hash` outputs a `Runtime` pack requires, assembles the manifest
+/// via `PackBuilder::new_keyless` (no ed25519 key, no in-manifest signature), and
+/// writes `manifest.canonical_bytes()` verbatim to `out_dir/manifest.json` — the
+/// exact bytes a release pipeline signs out of band and a keyless verifier
+/// re-derives at verify time. The verity tree + root hash ride as attested pack
+/// files so the launch can boot the rootfs verity-sealed. Never signs anything.
 pub fn build_keyless_runtime_pack(
     params: &BuildRuntimePackParams,
     identity: &str,
@@ -258,17 +272,19 @@ pub fn build_keyless_runtime_pack(
 
     let kernel_dest = out_dir.join(KERNEL_FILE);
     copy_file(&params.vmlinux, &kernel_dest)?;
-    let initramfs_dest = out_dir.join(INITRAMFS_FILE);
-    copy_file(&params.initramfs, &initramfs_dest)?;
+    let rootfs_dest = out_dir.join(ROOTFS_FILE);
+    copy_file(&params.rootfs, &rootfs_dest)?;
+    copy_file(&params.verity, &out_dir.join(VERITY_FILE))?;
+    copy_file(&params.roothash, &out_dir.join(ROOTHASH_FILE))?;
 
     let kernel_hash = sha256_file(&kernel_dest)?;
-    let initramfs_hash = sha256_file(&initramfs_dest)?;
+    let rootfs_hash = sha256_file(&rootfs_dest)?;
 
     let manifest = PackBuilder::new_keyless(out_dir, runtime_metadata(params), identity)
-        .files([KERNEL_FILE, INITRAMFS_FILE])
+        .files([KERNEL_FILE, ROOTFS_FILE, VERITY_FILE, ROOTHASH_FILE])
         .output_hashes(PackOutputHashes {
             kernel_hash: Some(kernel_hash),
-            initramfs_hash: Some(initramfs_hash),
+            agent_rootfs_hash: Some(rootfs_hash),
             ..Default::default()
         })
         .build()?;
@@ -319,7 +335,7 @@ fn builder_metadata(params: &BuildBuilderPackParams) -> PackMetadata {
 
 /// Assemble the [`PackMetadata`] a produced Runtime pack carries — the same
 /// hvf/vsock host contract as a builder pack, but `kind = Runtime` so the
-/// verifier requires the runtime output hashes (kernel + initramfs).
+/// verifier requires the runtime output hashes (kernel + agent-rootfs).
 fn runtime_metadata(params: &BuildRuntimePackParams) -> PackMetadata {
     PackMetadata {
         kind: PackKind::Runtime,
@@ -454,16 +470,22 @@ mod tests {
         }
     }
 
-    /// Write synthetic `vmlinux` + `initramfs` sources and return runtime
-    /// producer params pointing at them.
+    /// Write synthetic `vmlinux` + `rootfs` + verity tree + root hash sources and
+    /// return runtime producer params pointing at them.
     fn runtime_params_in(src: &TempDir) -> BuildRuntimePackParams {
         let vmlinux = src.path().join("vmlinux.src");
-        let initramfs = src.path().join("initramfs.src");
+        let rootfs = src.path().join("rootfs.src");
+        let verity = src.path().join("verity.src");
+        let roothash = src.path().join("roothash.src");
         fs::write(&vmlinux, KERNEL_BYTES).expect("write kernel src");
-        fs::write(&initramfs, b"runtime-initramfs-bytes").expect("write initramfs src");
+        fs::write(&rootfs, ROOTFS_BYTES).expect("write rootfs src");
+        fs::write(&verity, b"verity-hash-tree-bytes").expect("write verity src");
+        fs::write(&roothash, b"deadbeefroothash").expect("write roothash src");
         BuildRuntimePackParams {
             vmlinux,
-            initramfs,
+            rootfs,
+            verity,
+            roothash,
             target_arch: GuestArch::host(),
             channel: CHANNEL.to_string(),
             builder_identity: "ci-builder".to_string(),
@@ -495,10 +517,15 @@ mod tests {
         let m = &produced.manifest;
         assert_eq!(m.kind, PackKind::Runtime);
         let files: Vec<&str> = m.outputs.files.iter().map(|f| f.path.as_str()).collect();
-        assert!(files.contains(&KERNEL_FILE) && files.contains(&INITRAMFS_FILE));
-        // A Runtime pack requires kernel + initramfs (or agent-rootfs) hashes.
+        // The pack carries kernel + rootfs + the verity tree + root hash, so the
+        // launch can boot the rootfs verity-sealed.
+        assert!(files.contains(&KERNEL_FILE));
+        assert!(files.contains(&ROOTFS_FILE));
+        assert!(files.contains(&VERITY_FILE));
+        assert!(files.contains(&ROOTHASH_FILE));
+        // A Runtime pack requires kernel + (initramfs | agent-rootfs) hashes.
         assert!(m.outputs.kernel_hash.is_some());
-        assert!(m.outputs.initramfs_hash.is_some());
+        assert!(m.outputs.agent_rootfs_hash.is_some());
         // Keyless: no in-manifest signature, and the written file is the exact
         // signable bytes (canonical), so an out-of-band signature stays valid.
         assert!(m.provenance.signature_bundle.signatures.is_empty());
