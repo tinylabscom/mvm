@@ -316,6 +316,13 @@ impl VmBackend for HvfBackend {
                 .with_context(|| format!("create console vsock dir {}", vsock_dir.display()))?;
         }
 
+        // Per-VM host-services broker UDS: the same path the host-agent daemon binds
+        // below when it registers this VM. Threading it into the supervisor wires the
+        // guest-side `BROKER_PORT` relay so a guest `host.audit.v1` call reaches the
+        // broker, matching the other backends. Computed once, reused for the register
+        // call below.
+        let broker_listen_socket = mvm_core::config::vm_hvf_broker_socket(&config.name);
+
         let cfg = HvfSupervisorConfig {
             kernel: PathBuf::from(kernel),
             // Workload path: the supervisor's default cmdline (`init=/init`) is the
@@ -333,6 +340,7 @@ impl VmBackend for HvfBackend {
             agent_socket: Some(agent_socket),
             substitution_socket: None,
             egress_relay_socket,
+            broker_socket: Some(broker_listen_socket.clone()),
             console_data_sockets,
         };
         let json = serde_json::to_string(&cfg)
@@ -392,20 +400,19 @@ impl VmBackend for HvfBackend {
 
         // Register an admitted workload with the per-tenant host-agent daemon,
         // same as libkrun/vz: the daemon starts tracking this VM and binds its
-        // BROKER_PORT socket. The guest-side BROKER_PORT bridge is not yet wired
-        // on this backend — the supervisor config carries no broker-listen field
-        // and the vsock dispatcher routes only the workload-exit and egress ports
-        // — so `host.audit.v1` is registered here but not yet reachable from the
-        // guest on this backend (host->guest agent RPC over GUEST_AGENT_PORT is
-        // unaffected). Registration keeps daemon-side tracking + lifecycle parity
-        // with the other backends and makes the guest bridge a drop-in follow-up.
-        // Unlike libkrun/vz there is no per-VM broker-fork fallback here, so
-        // MVM_HOST_AGENT_DAEMON=0 selects nothing — this backend is daemon-only.
-        // Best-effort: a registration failure is logged, never a launch rollback
-        // (the workload still runs). The guard reaps the registration if a later
-        // start step fails; defused once the VM is confirmed up (the stop path
-        // then owns teardown).
-        let broker_listen_socket = mvm_core::config::vm_hvf_broker_socket(&config.name);
+        // BROKER_PORT socket. The guest-side BROKER_PORT bridge is wired on this
+        // backend too — the supervisor config carries `broker_socket`
+        // (`broker_listen_socket` above) and the vsock dispatcher relays
+        // BROKER_PORT to it — so a guest `host.audit.v1` call reaches the broker
+        // here just as it does on libkrun/vz (host->guest agent RPC over
+        // GUEST_AGENT_PORT is a separate path). Registration keeps daemon-side
+        // tracking + lifecycle parity with the other backends. Unlike libkrun/vz
+        // there is no per-VM broker-fork fallback here, so MVM_HOST_AGENT_DAEMON=0
+        // selects nothing — this backend is daemon-only. Best-effort: a
+        // registration failure is logged, never a launch rollback (the workload
+        // still runs). The guard reaps the registration if a later start step
+        // fails; defused once the VM is confirmed up (the stop path then owns
+        // teardown).
         let mut host_agent_guard =
             match crate::host_agent_spawn::register_host_agent_services_if_admitted(
                 crate::host_agent_spawn::HostAgentServicesParams {
