@@ -482,6 +482,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hmac"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -626,7 +632,7 @@ dependencies = [
 
 [[package]]
 name = "libkrun-sys"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "bindgen",
  "libc",
@@ -691,7 +697,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 
 [[package]]
 name = "mvm-core"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -700,6 +706,7 @@ dependencies = [
  "chrono",
  "ed25519-dalek",
  "fs2",
+ "hex",
  "hmac",
  "ipnet",
  "keyring",
@@ -707,6 +714,7 @@ dependencies = [
  "regex",
  "secrecy",
  "serde",
+ "serde_jcs",
  "serde_json",
  "sha2",
  "tar",
@@ -930,6 +938,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "ryu-js"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6518fc26bced4d53678a22d6e423e9d8716377def84545fe328236e3af070e7f"
+
+[[package]]
 name = "secrecy"
 version = "0.10.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -973,6 +987,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "serde_jcs"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cacecf649bc1a7c5f0e299cc813977c6a78116abda2b93b1ee01735b71ead9a8"
+dependencies = [
+ "ryu-js",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

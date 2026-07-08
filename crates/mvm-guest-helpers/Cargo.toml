@@ -28,7 +28,6 @@ name = "mvm-egress-client"
 path = "src/bin/mvm-egress-client.rs"
 
 [dependencies]
-mvm-core.workspace = true
 anyhow.workspace = true
 libc.workspace = true
 serde.workspace = true

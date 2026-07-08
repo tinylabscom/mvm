@@ -337,6 +337,13 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     reference: &str,
     prod: bool,
 ) -> Result<ResolvedOciRunImage> {
+    // Rootfs materialization can fall back to a builder VM (a flat dir the
+    // in-process ext4 writer can't emit), and an abnormally-exited builder can
+    // orphan its gvproxy sidecar to the init process. `up` / `dev up` reap the
+    // previous run's corpses at startup; the run-image path is the other place
+    // a builder VM spawns, so give it the same sweep before we might add one.
+    crate::commands::env::dev_vz::sweep_orphaned_vm_helpers_on_startup();
+
     // Local sources route to their own ingest; a registry reference falls
     // through to the cache-or-pull path below.
     match source::ImageSource::classify(reference)? {
@@ -379,11 +386,36 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     };
     let rootfs_path = safe_cache_path(cache_root, rootfs_relative)?;
     if !rootfs_path.is_file() {
-        bail!(
-            "cached OCI image {} rootfs is missing at {}",
-            image.reference,
-            rootfs_path.display()
-        );
+        // Self-heal a cache whose index still records a materialized rootfs but
+        // whose `rootfs.ext4` has since vanished (an interrupted prune, a
+        // partial GC, a manual delete). If the unpacked layer tree survives,
+        // re-run the same seal `image pull` performs — network-free, from the
+        // cached layers — rather than failing the run. Only when the unpacked
+        // tree is gone too is this a genuine cache loss the user must re-pull.
+        match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
+            Some(unpacked_root) => {
+                inject_runtime_and_materialize(
+                    cache_root,
+                    &unpacked_root,
+                    &rootfs_path,
+                    &image.reference,
+                )
+                .with_context(|| {
+                    format!(
+                        "re-materializing missing rootfs for cached OCI image {} from {}",
+                        image.reference,
+                        unpacked_root.display()
+                    )
+                })?;
+            }
+            None => bail!(
+                "cached OCI image {} rootfs is missing at {} and its unpacked \
+                 layers are gone; run `mvmctl image pull {}` to re-fetch",
+                image.reference,
+                rootfs_path.display(),
+                image.reference
+            ),
+        }
     }
     let trust = match trust_from_pull {
         Some(trust) => trust,
@@ -1860,6 +1892,42 @@ mod tests {
         assert_eq!(
             resolved.provenance.layer_digests,
             vec!["sha256:layer".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolve_run_image_missing_rootfs_without_unpacked_layers_asks_for_repull() {
+        // The index records a materialized rootfs whose ext4 has vanished AND
+        // whose unpacked layer tree is also gone — genuine cache loss. The run
+        // fails with an actionable re-pull instruction, not the old bare
+        // "rootfs is missing" bail. (The self-heal path, where the unpacked
+        // tree survives and the rootfs is re-materialized network-free, is
+        // covered by a live HVF boot; re-materialization runs the real ext4
+        // writer, which a unit test cannot cheaply stage.)
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        image.runtime_tag = Some(oci_runtime_tag());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        // Deliberately write neither the rootfs.ext4 nor the unpacked tree.
+
+        let err = resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
+            .expect_err("missing rootfs with no unpacked layers must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("mvmctl image pull"),
+            "error should tell the user to re-pull: {msg}"
+        );
+        assert!(
+            msg.contains("unpacked"),
+            "error should explain the unpacked layers are gone: {msg}"
         );
     }
 

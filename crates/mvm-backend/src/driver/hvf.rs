@@ -160,6 +160,8 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         agent_socket: vsock_socket(spec, GUEST_AGENT_PORT),
         substitution_socket: None,
         egress_relay_socket,
+        // Builder/dev VMs run no admitted workload, so no host-services broker.
+        broker_socket: None,
         console_data_sockets,
     })
 }

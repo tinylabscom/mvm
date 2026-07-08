@@ -108,6 +108,12 @@ pub struct HvfSupervisorConfig {
     /// VM. `None` ⇒ the in-loop-gated paths (raw egress / gated substitution).
     #[serde(default)]
     pub egress_relay_socket: Option<PathBuf>,
+    /// Per-VM host-services broker UDS. When set, the supervisor wires `BROKER_PORT`
+    /// as a pure relay to it — the socket the per-tenant host-agent daemon bound for
+    /// this VM — so a guest `host.audit.v1` call reaches the broker exactly as on the
+    /// other backends. `None` ⇒ `BROKER_PORT` fails closed (no broker reachable).
+    #[serde(default)]
+    pub broker_socket: Option<PathBuf>,
     /// Dev-only console data sockets: one entry per guest vsock data port the
     /// console driver may connect to. Empty for sealed prod configs (claim 15).
     /// Populated by the driver when `VmStartConfig.dev_console` is true.
@@ -147,6 +153,7 @@ mod tests {
             agent_socket: Some("/state/hvf-agent.sock".into()),
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
+            broker_socket: Some("/state/hvf-broker.sock".into()),
             console_data_sockets: vec![],
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -164,6 +171,7 @@ mod tests {
         assert_eq!(cfg.agent_socket, None);
         assert_eq!(cfg.substitution_socket, None);
         assert_eq!(cfg.egress_relay_socket, None);
+        assert_eq!(cfg.broker_socket, None);
     }
 
     #[test]
@@ -201,6 +209,7 @@ mod tests {
             agent_socket: None,
             substitution_socket: None,
             egress_relay_socket: None,
+            broker_socket: None,
             console_data_sockets: vec![
                 ConsoleDataSocket {
                     guest_port: 20001,

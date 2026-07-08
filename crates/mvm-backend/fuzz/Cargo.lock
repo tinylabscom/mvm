@@ -1241,7 +1241,7 @@ dependencies = [
 
 [[package]]
 name = "libkrun-sys"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "bindgen",
  "libc",
@@ -1362,7 +1362,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backend"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "block2",
@@ -1409,7 +1409,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1441,7 +1441,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -1474,7 +1474,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-guest"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1493,7 +1493,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-network"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "mvm-core",
  "mvm-sdk",
@@ -1501,7 +1501,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "base64",
  "flate2",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-storage"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "anyhow",
  "async-trait",

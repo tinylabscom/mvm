@@ -154,13 +154,19 @@ fn symlink_cycles_are_stored_verbatim() {
     }
 }
 
-/// A single directory with more entries than fit one 4 KiB block is refused with
-/// `DirTooLarge` — the writer's single-block-directory limit, an `Err`, never a
-/// panic or a truncated directory.
+/// A directory with far more entries than fit one 4 KiB block materializes as a
+/// linear multi-block directory (no htree): it builds, mounts, and the
+/// independent reader lists every entry back across the block boundaries — never
+/// a panic, a truncated directory, or an entry lost at a block seam.
 #[test]
-fn directory_over_one_block_is_rejected() {
-    let mut nodes = Vec::new();
-    for i in 0..400 {
+fn directory_over_one_block_spans_multiple_blocks() {
+    const N: usize = 400;
+    let mut nodes = vec![Node::Dir {
+        path: "/big".into(),
+        mode: 0o755,
+        xattrs: Vec::new(),
+    }];
+    for i in 0..N {
         nodes.push(Node::File {
             path: format!("/big/f{i:04}"),
             mode: 0o644,
@@ -168,14 +174,35 @@ fn directory_over_one_block_is_rejected() {
             xattrs: Vec::new(),
         });
     }
-    nodes.push(Node::Dir {
-        path: "/big".into(),
-        mode: 0o755,
-        xattrs: Vec::new(),
-    });
+
+    let fs = mount(build_image(&nodes).expect("over-full directory builds as multi-block"));
+    let (big_ino, ft) = find(&list_dir(&fs, 2), "big").expect("/big present");
+    assert_eq!(ft, DirEntryType::Directory);
+
+    // The directory inode must occupy more than one block.
+    let (inode, _) = fs.read_inode_verified(big_ino).expect("read /big inode");
     assert!(
-        matches!(build_image(&nodes), Err(Ext4Error::DirTooLarge(_))),
-        "an over-full directory must return DirTooLarge"
+        inode.size > 4096,
+        "/big should span multiple blocks, got size {}",
+        inode.size
+    );
+
+    // Every child reads back across all blocks — none lost at a boundary.
+    let entries = list_dir(&fs, big_ino);
+    for i in 0..N {
+        let name = format!("f{i:04}");
+        assert!(
+            find(&entries, &name).is_some(),
+            "child {name} missing from multi-block directory"
+        );
+    }
+    let children = entries
+        .iter()
+        .filter(|(name, _, _)| name != "." && name != "..")
+        .count();
+    assert_eq!(
+        children, N,
+        "unexpected child count in multi-block directory"
     );
 }
 
@@ -185,7 +212,6 @@ use fs_ext4::block_io::BlockDevice;
 use fs_ext4::dir::{self, DirEntryType};
 use fs_ext4::file_io;
 use fs_ext4::fs::Filesystem;
-use mvm_ext4::Ext4Error;
 use std::sync::Arc;
 
 struct MemDev(Vec<u8>);
@@ -209,9 +235,10 @@ fn mount(image: Vec<u8>) -> Filesystem {
 fn list_dir(fs: &Filesystem, ino: u32) -> Vec<(String, u32, DirEntryType)> {
     let (inode, _) = fs.read_inode_verified(ino).expect("read dir inode");
     let data = file_io::read_all(fs, &inode).expect("read dir data");
-    dir::parse_block(&data, true)
-        .expect("parse dir block")
-        .into_iter()
+    // A linear directory is a sequence of independent 4 KiB blocks; parse each
+    // so a multi-block directory reads back every entry, not just block 0's.
+    data.chunks(4096)
+        .flat_map(|block| dir::parse_block(block, true).expect("parse dir block"))
         .map(|e| {
             (
                 String::from_utf8_lossy(&e.name).into_owned(),

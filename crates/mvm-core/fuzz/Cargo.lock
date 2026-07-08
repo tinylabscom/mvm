@@ -555,7 +555,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "mvm-core"
-version = "0.16.1"
+version = "0.17.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",

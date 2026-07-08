@@ -14,7 +14,7 @@ fn capacity_limits_are_classified_for_fallback() {
             ino: 12,
             extents: 9,
         },
-        Ext4Error::DirTooLarge("/big".into()),
+        Ext4Error::XattrTooLarge { ino: 7 },
     ];
     for e in capacity {
         assert!(e.is_capacity_limit(), "{e:?} should be a capacity limit");
