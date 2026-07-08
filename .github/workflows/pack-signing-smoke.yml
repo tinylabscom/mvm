@@ -111,3 +111,23 @@ jobs:
           cargo run --release -p mvm-core --example verify-signed-manifest --features manifest-verify -- \
             --manifest smoke/image-manifest.json --bundle smoke/image-manifest.json.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+      - name: Round-trip a pack revocation list through its verifier
+        # The revocation list is signed + verified through the same Rust stack.
+        # Sign a real list and verify it through the fetch-path entrypoint
+        # (pack_revocation::verify_pack_revocation_list), so this smoke also
+        # guards the revocation channel's signing format.
+        run: |
+          set -euo pipefail
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > smoke/pack-revocations.json <<JSON
+          {"schema_version":1,"revocations":[],"issued_at":"${now}","not_after":"2099-01-01T00:00:00Z"}
+          JSON
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/pack-revocations.json.bundle \
+            smoke/pack-revocations.json
+          cargo run --release -p mvm-core --example verify-pack-revocation-list --features manifest-verify -- \
+            --list smoke/pack-revocations.json --bundle smoke/pack-revocations.json.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"

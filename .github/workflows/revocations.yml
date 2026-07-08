@@ -1,0 +1,86 @@
+name: Publish pack revocation list
+
+# Signs and publishes the pack revocation list to the `revocations` release.
+# Triggered by force-updating the `revocations` tag after editing the
+# checked-in source list. The cosign certificate's SAN is this workflow file
+# bound to the `revocations` tag, which is exactly the identity a released
+# mvmctl reconstructs in `release_trust::revocation_keyless_trust()` — a
+# dedicated identity so a leaked release-signing cert can't fabricate a
+# permissive revocation list, and vice versa.
+on:
+  push:
+    tags:
+      - "revocations"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  CARGO_TERM_COLOR: always
+  # How long a published list stays fresh. The consumer refuses a list whose
+  # not_after has passed, so this bounds how long a stalled pipeline can leave
+  # a stale list trusted; re-publish (re-tag) well before it lapses.
+  VALID_DAYS: "30"
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Build the revocation list (stamp validity window)
+        run: |
+          set -euo pipefail
+          now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          not_after="$(date -u -d "+${VALID_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)"
+          jq --arg now "$now" --arg not_after "$not_after" \
+            '. + {issued_at: $now, not_after: $not_after}' \
+            packaging/release/pack-revocations.source.json > pack-revocations.json
+          echo "built pack-revocations.json (issued_at=$now not_after=$not_after)"
+
+      - name: Keyless-sign the revocation list
+        run: |
+          set -euo pipefail
+          # --new-bundle-format emits the Sigstore bundle the Rust verifier
+          # parses; legacy --bundle is rejected by that stack.
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle pack-revocations.json.bundle \
+            pack-revocations.json
+
+      - name: Self-verify the signed list through the Rust verifier
+        env:
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          # Refuse to publish a list a released binary could not verify: check
+          # the freshly-signed bundle through the exact fetch-path entrypoint,
+          # against this job's own OIDC identity.
+          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/revocations.yml@${REF}"
+          cargo run --release -p mvm-core --example verify-pack-revocation-list --features manifest-verify -- \
+            --list pack-revocations.json --bundle pack-revocations.json.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+      - name: Publish to the revocations release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Idempotent: create the release on first publish, then clobber the
+          # two assets on every re-publish so consumers always fetch the latest.
+          gh release view revocations --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1 \
+            || gh release create revocations --repo "${GITHUB_REPOSITORY}" \
+                 --title "Pack revocations" --notes "Signed pack revocation list."
+          gh release upload revocations \
+            pack-revocations.json pack-revocations.json.bundle \
+            --repo "${GITHUB_REPOSITORY}" --clobber
