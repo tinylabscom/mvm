@@ -14,6 +14,11 @@ name = "mvm-guest-netd"
 path = "src/bin/mvm-guest-netd.rs"
 required-features = ["guest-linux-runner"]
 
+[[bin]]
+name = "mvm-host-netd"
+path = "src/bin/mvm-host-netd.rs"
+required-features = ["host-netd"]
+
 [features]
 default = ["proto"]
 guest = ["proto"]
@@ -21,6 +26,7 @@ guest-linux = ["guest", "dep:libc"]
 guest-linux-runner = ["guest-linux", "wire-json"]
 host = ["proto"]
 host-mvm-core = ["host", "dep:mvm-core"]
+host-netd = ["host-runner", "host-std", "host-mvm-core"]
 host-runner = ["host", "wire-json"]
 host-std = ["host"]
 proto = []

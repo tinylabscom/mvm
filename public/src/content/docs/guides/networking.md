@@ -42,7 +42,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
-| 5254 | `mvm-net` frames | Transparent networking authority stream (guest side packaged; host authority runner wiring pending) |
+| 5254 | `mvm-net` frames | Transparent networking authority stream (guest side packaged; host process contract packaged; backend wiring pending) |
 
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
 
@@ -120,12 +120,16 @@ The host authority pieces are landing behind opt-in `mvm-net` features. The
 processes bounded length-prefixed authority frames over a caller-supplied
 stream. `host-std` provides a standard-library TCP connector that can connect to
 a policy-supplied pinned upstream IP. `host-mvm-core` adapts canonical
-`mvm-core` network policy projection plus DNS pins into host admission.
+`mvm-core` network policy projection plus DNS pins into host admission. The
+`host-netd` feature packages the internal `mvm-host-netd` process contract: it
+loads explicit JSON policy/pin config, reads length-prefixed `mvm-net` frames
+from stdin, writes responses to stdout, and emits structured JSON audit lines
+to stderr.
 
-This is not yet wired into `mvmctl machine run`. Until the host runner
-binary and backend integration land, the default HVF path remains vsock-only
-without ordinary guest-visible DNS/TCP/UDP/ICMP networking for tools inside the
-VM.
+This is not yet wired into `mvmctl machine run`. Until backend integration
+spawns/connects `mvm-host-netd` to each VM's actual vsock authority stream, the
+default HVF path remains vsock-only without ordinary guest-visible
+DNS/TCP/UDP/ICMP networking for tools inside the VM.
 
 ## Security Profiles
 

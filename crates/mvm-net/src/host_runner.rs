@@ -11,7 +11,7 @@ use crate::host::{
     HostAuditSink, HostAuthority, HostAuthorityError, HostNetworkPolicy, HostTcpConnector,
 };
 use crate::proto::NetMessage;
-use crate::wire_json::{JsonWireError, JsonWireRead, LengthPrefixedJsonAuthority};
+use crate::wire_json::{JsonWireConfig, JsonWireError, JsonWireRead, LengthPrefixedJsonAuthority};
 
 pub const DEFAULT_MAX_HOST_MESSAGES_PER_RUN: usize = 1024;
 
@@ -201,6 +201,62 @@ where
     }
 }
 
+#[derive(Debug)]
+pub struct SplitJsonHostWire<R, W> {
+    reader: LengthPrefixedJsonAuthority<R>,
+    writer: LengthPrefixedJsonAuthority<W>,
+}
+
+impl<R, W> SplitJsonHostWire<R, W> {
+    pub fn new(reader: R, writer: W) -> Self {
+        Self::with_config(reader, writer, JsonWireConfig::default())
+    }
+
+    pub fn with_config(reader: R, writer: W, config: JsonWireConfig) -> Self {
+        Self {
+            reader: LengthPrefixedJsonAuthority::with_config(reader, config.clone()),
+            writer: LengthPrefixedJsonAuthority::with_config(writer, config),
+        }
+    }
+
+    pub fn reader_mut(&mut self) -> &mut LengthPrefixedJsonAuthority<R> {
+        &mut self.reader
+    }
+
+    pub fn writer_mut(&mut self) -> &mut LengthPrefixedJsonAuthority<W> {
+        &mut self.writer
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        LengthPrefixedJsonAuthority<R>,
+        LengthPrefixedJsonAuthority<W>,
+    ) {
+        (self.reader, self.writer)
+    }
+}
+
+impl<R, W> HostAuthorityWire for SplitJsonHostWire<R, W>
+where
+    R: Read,
+    W: Write,
+{
+    type Error = JsonWireError;
+
+    fn receive_message(&mut self) -> Result<HostAuthorityRead, Self::Error> {
+        match self.reader.read_message()? {
+            JsonWireRead::Message(message) => Ok(HostAuthorityRead::Message(message)),
+            JsonWireRead::WouldBlock => Ok(HostAuthorityRead::WouldBlock),
+            JsonWireRead::Closed => Ok(HostAuthorityRead::Closed),
+        }
+    }
+
+    fn send_message(&mut self, message: NetMessage) -> Result<(), Self::Error> {
+        self.writer.write_message(message)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -366,6 +422,38 @@ mod tests {
         assert!(matches!(
             HostAuthorityWire::receive_message(&mut source).unwrap(),
             HostAuthorityRead::Message(NetMessage::Hello(_))
+        ));
+    }
+
+    #[test]
+    fn split_json_host_wire_reads_and_writes_distinct_streams() {
+        let mut encoded = LengthPrefixedJsonAuthority::new(std::io::Cursor::new(Vec::new()));
+        encoded
+            .write_message(NetMessage::Hello(Hello::new(
+                EndpointRole::Guest,
+                vec![Capability::Dns],
+            )))
+            .unwrap();
+        let input = std::io::Cursor::new(encoded.into_inner().into_inner());
+        let output = std::io::Cursor::new(Vec::new());
+        let mut wire = SplitJsonHostWire::new(input, output);
+
+        assert!(matches!(
+            wire.receive_message().unwrap(),
+            HostAuthorityRead::Message(NetMessage::Hello(_))
+        ));
+        wire.send_message(NetMessage::HelloAck(crate::proto::HelloAck::new(vec![
+            Capability::Dns,
+        ])))
+        .unwrap();
+
+        let (_, output) = wire.into_parts();
+        let mut decoded = LengthPrefixedJsonAuthority::new(std::io::Cursor::new(
+            output.into_inner().into_inner(),
+        ));
+        assert!(matches!(
+            decoded.read_message().unwrap(),
+            JsonWireRead::Message(NetMessage::HelloAck(_))
         ));
     }
 }

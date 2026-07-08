@@ -305,6 +305,8 @@ impl HostAuditSink for NoopHostAuditSink {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "serde", serde(tag = "event", rename_all = "snake_case"))]
 pub enum HostAuditEvent {
     HandshakeAccepted {
         guest_capabilities: Vec<Capability>,
