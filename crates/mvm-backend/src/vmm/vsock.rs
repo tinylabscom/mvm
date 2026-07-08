@@ -73,6 +73,17 @@ impl VsockShared {
         self.handlers.set_substitution_activity(counter);
     }
 
+    pub fn set_transparent_net_endpoint(&mut self, path: &std::path::Path) {
+        self.handlers.set_transparent_net_endpoint(path);
+    }
+
+    pub fn set_transparent_net_activity(
+        &mut self,
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        self.handlers.set_transparent_net_activity(counter);
+    }
+
     pub fn set_broker_endpoint(&mut self, path: &std::path::Path) {
         self.handlers.set_broker_endpoint(path);
     }
@@ -220,6 +231,19 @@ impl VirtioVsock {
 
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_substitution_activity(counter);
+        self.notify_io();
+    }
+
+    pub fn set_transparent_net_endpoint(&mut self, path: &std::path::Path) {
+        self.lock().set_transparent_net_endpoint(path);
+        self.notify_io();
+    }
+
+    pub fn set_transparent_net_activity(
+        &mut self,
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        self.lock().set_transparent_net_activity(counter);
         self.notify_io();
     }
 
@@ -479,6 +503,83 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(rw, b"93.184.216.34:80");
+        assert!(d.lifecycle.received.is_empty());
+        assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+    }
+
+    #[test]
+    fn transparent_net_port_relays_frame_to_endpoint_and_back() {
+        use std::io::{Read, Write};
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("mvm-net-authority.sock");
+
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let n = c.read(&mut buf).unwrap();
+            let mut reply = b"NET:".to_vec();
+            reply.extend_from_slice(&buf[..n]);
+            c.write_all(&reply).unwrap();
+            buf[..n].to_vec()
+        });
+
+        let mut d = dev();
+        d.set_transparent_net_endpoint(&sock);
+
+        let raw = b"authority-frame".to_vec();
+        let rw = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 2400,
+            dst_port: crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT,
+            len: raw.len() as u32,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(rw, &raw);
+
+        assert!(d.lifecycle.received.is_empty());
+        assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_CREDIT_UPDATE));
+
+        let got_by_authority = server.join().unwrap();
+        assert_eq!(got_by_authority, raw);
+
+        let mut reply = None;
+        for _ in 0..200 {
+            let _ = d.service_host_io();
+            if let Some((h, payload)) = d
+                .transport
+                .pending_rx
+                .iter()
+                .find(|(h, _)| h.op == OP_RW && h.dst_port == 2400)
+            {
+                reply = Some((*h, payload.clone()));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (h, payload) = reply.expect("authority reply framed back to the guest");
+        assert_eq!(h.src_port, crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT);
+        assert!(payload.starts_with(b"NET:"));
+    }
+
+    #[test]
+    fn transparent_net_port_resets_without_endpoint() {
+        let mut d = dev();
+        let rw = VsockHdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 2500,
+            dst_port: crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT,
+            len: 16,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(rw, b"authority-frame");
         assert!(d.lifecycle.received.is_empty());
         assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
     }

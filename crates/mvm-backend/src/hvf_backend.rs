@@ -604,6 +604,7 @@ impl VmBackend for HvfBackend {
             agent_socket: Some(agent_socket),
             substitution_socket: None,
             egress_relay_socket,
+            transparent_net_socket: None,
             broker_socket: Some(broker_listen_socket.clone()),
             network_tunnel_socket,
             console_data_sockets,

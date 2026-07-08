@@ -6,9 +6,10 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::config::{vm_vsock_port_socket_at, vm_vz_vsock_port_socket_at};
 use mvm_core::vm_backend::VmStartConfig;
-use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports};
+use mvm_guest::vsock::{GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports};
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
+use crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT;
 
 /// The ordered virtio-blk list for a sealed workload: the read-only rootfs at
 /// `/dev/vda` (slot 0), its dm-verity Merkle sidecar at `/dev/vdb` (slot 1) when
@@ -59,9 +60,9 @@ pub fn workload_blocks(config: &VmStartConfig) -> Vec<BlockDev> {
 pub struct WorkloadSockets<'a> {
     /// Agent RPC: the host dials the guest agent listening on `GUEST_AGENT_PORT`.
     pub agent: &'a Path,
-    /// Egress gateway: the guest dials `EGRESS_PORT`; the host-side bridge
-    /// (claim-10 gate + substitution) listens here — the sole path off the box.
-    pub egress_gateway: &'a Path,
+    /// Transparent network authority: the guest bridge dials
+    /// `TRANSPARENT_NET_VSOCK_PORT`; the host authority owns every real socket.
+    pub transparent_network: &'a Path,
     /// Workload exit: the guest dials `WORKLOAD_EXIT_PORT` to report its exit code.
     pub exit: &'a Path,
     /// Optional packet-tunnel host socket for the future guest-TUN ↔ host-worker
@@ -74,8 +75,9 @@ pub struct WorkloadSockets<'a> {
 }
 
 /// The standing vsock ports every workload VM carries: the agent RPC channel the
-/// host dials, the two channels the guest dials (egress + exit), and — only when
-/// `dev_console` is set — the pre-opened interactive console data ports.
+/// host dials, the two channels the guest dials (transparent network + exit),
+/// and — only when `dev_console` is set — the pre-opened interactive console
+/// data ports.
 pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
     let mut ports = vec![
         VsockPort {
@@ -84,8 +86,8 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
             direction: VsockDirection::HostDials,
         },
         VsockPort {
-            guest_port: EGRESS_PORT,
-            host_uds: socks.egress_gateway.into(),
+            guest_port: TRANSPARENT_NET_VSOCK_PORT,
+            host_uds: socks.transparent_network.into(),
             direction: VsockDirection::GuestDials,
         },
         VsockPort {
@@ -178,7 +180,7 @@ pub fn workload_spec(inputs: &WorkloadSpecInputs) -> VmmSpec {
         console: ConsoleCapture {
             log_path: inputs.console_log.clone(),
         },
-        // A workload is untrusted: it must route egress through the gated endpoint.
+        // A workload is untrusted: it must route networking through the host authority.
         trusted_builder: false,
     }
 }
@@ -265,14 +267,14 @@ mod tests {
     fn workload_vsock_ports_wire_the_three_standing_channels_with_correct_direction() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            transparent_network: Path::new("/run/net.sock"),
             exit: Path::new("/run/workload.exit"),
             network_tunnel: None,
             console_data: Vec::new(),
         };
         let ports = workload_vsock_ports(&socks);
 
-        // Agent: host dials the guest; egress + exit: the guest dials the host.
+        // Agent: host dials the guest; network + exit: the guest dials the host.
         let by_port: std::collections::HashMap<u32, &VsockPort> =
             ports.iter().map(|p| (p.guest_port, p)).collect();
 
@@ -280,9 +282,9 @@ mod tests {
         assert_eq!(agent.direction, VsockDirection::HostDials);
         assert_eq!(agent.host_uds, PathBuf::from("/run/agent.sock"));
 
-        let egress = by_port[&EGRESS_PORT];
-        assert_eq!(egress.direction, VsockDirection::GuestDials);
-        assert_eq!(egress.host_uds, PathBuf::from("/run/egress.sock"));
+        let net = by_port[&TRANSPARENT_NET_VSOCK_PORT];
+        assert_eq!(net.direction, VsockDirection::GuestDials);
+        assert_eq!(net.host_uds, PathBuf::from("/run/net.sock"));
 
         let exit = by_port[&WORKLOAD_EXIT_PORT];
         assert_eq!(exit.direction, VsockDirection::GuestDials);
@@ -292,7 +294,7 @@ mod tests {
     fn sample_sockets() -> WorkloadSockets<'static> {
         WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            transparent_network: Path::new("/run/net.sock"),
             exit: Path::new("/run/workload.exit"),
             network_tunnel: None,
             console_data: Vec::new(),
@@ -426,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn console_data_sockets_paths_follow_vz_convention() {
+    fn console_data_sockets_paths_follow_vsock_subdir_convention() {
         use mvm_guest::vsock::CONSOLE_PORT_BASE;
         let state_dir = Path::new("/state/myvm");
         let sockets = console_data_sockets(state_dir, true);
@@ -456,7 +458,7 @@ mod tests {
         let console_data = console_data_sockets(state_dir, true);
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            transparent_network: Path::new("/run/mvm-net.sock"),
             exit: Path::new("/run/workload.exit"),
             network_tunnel: None,
             console_data,
@@ -484,7 +486,7 @@ mod tests {
     fn workload_vsock_ports_without_dev_console_carries_only_three_ports() {
         let socks = WorkloadSockets {
             agent: Path::new("/run/agent.sock"),
-            egress_gateway: Path::new("/run/egress.sock"),
+            transparent_network: Path::new("/run/mvm-net.sock"),
             exit: Path::new("/run/workload.exit"),
             network_tunnel: None,
             console_data: Vec::new(),
@@ -505,7 +507,7 @@ mod tests {
             config: &cfg,
             sockets: WorkloadSockets {
                 agent: Path::new("/run/agent.sock"),
-                egress_gateway: Path::new("/run/egress.sock"),
+                transparent_network: Path::new("/run/mvm-net.sock"),
                 exit: Path::new("/run/workload.exit"),
                 network_tunnel: None,
                 console_data,

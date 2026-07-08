@@ -2,10 +2,9 @@
 //! on Linux via the shared `vmm` device model). Identity and capabilities
 //! delegate to the proven `HvfBackend`. `boot` maps a policy-free `VmmSpec` to a
 //! relay supervisor config, spawns `mvm-hvf-supervisor`, and returns a live
-//! handle. The claim-10 egress gate and secret substitution live in the
-//! host-side endpoint the caller binds to the spec's `EGRESS_PORT` socket; the
-//! driver only wires that socket through as the supervisor's egress relay — it
-//! carries no policy and never sees a `NetworkPolicy`.
+//! handle. Transparent networking lives in the host authority the caller binds
+//! to the spec's transparent-network socket; the driver only wires that socket
+//! through as a byte relay and never sees a `NetworkPolicy`.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -18,18 +17,18 @@ use mvm_core::config::{vm_state_dir, vm_vz_vsock_port_socket_at};
 use mvm_core::vm_backend::{
     SnapshotCapability, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
-use mvm_guest::vsock::{CONSOLE_PORT_BASE, EGRESS_PORT, GUEST_AGENT_PORT, dev_console_data_ports};
+use mvm_guest::vsock::{CONSOLE_PORT_BASE, GUEST_AGENT_PORT, dev_console_data_ports};
 
 use crate::driver::spec::KernelImage;
 use crate::driver::{DuplexStream, RunningVm, VmmDriver, VmmSpec};
 use crate::hvf_backend::{
     self, HvfBackend, PID_FILE_NAME, PID_FILE_TIMEOUT, resolve_supervisor_path,
 };
+use crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT;
 
 /// The first-party VMM driver: pure VMM mechanics, no policy and no admission.
-/// It boots what a `VmmSpec` describes and relays the guest's egress port to the
-/// host-side bridge; the claim-10 gate and substitution live in that bridge, not
-/// here.
+/// It boots what a `VmmSpec` describes and relays the guest's transparent-network
+/// port to the host-side authority; policy and audit live in that authority.
 pub struct HvfDriver {
     backend: HvfBackend,
 }
@@ -85,10 +84,10 @@ fn vsock_socket(spec: &VmmSpec, guest_port: u32) -> Option<PathBuf> {
 }
 
 /// Map a policy-free `VmmSpec` to a relay `HvfSupervisorConfig`: the supervisor
-/// wires the guest's `EGRESS_PORT` straight to the host-side endpoint bound at
-/// `egress_relay_socket`, which owns the claim-10 gate and substitution. The
-/// spec MUST carry that egress socket — an hvf workload has no other path
-/// off the box, so a spec without it fails closed rather than booting ungated.
+/// wires the guest bridge's transparent-network port straight to the host
+/// authority. The spec MUST carry that socket for workloads — an hvf workload
+/// has no other ordinary network path, so a spec without it fails closed rather
+/// than booting with an invisible network gap.
 fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<HvfSupervisorConfig> {
     let kernel = match &spec.kernel {
         KernelImage::Path(p) => p.clone(),
@@ -113,17 +112,12 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         })
         .collect();
 
-    // Guests that need host egress carry an explicit EGRESS_PORT relay socket in
-    // the spec. Workloads must provide one; trusted builders now provide the same
-    // vsock relay so every backend uses one egress path.
-    let egress_relay_socket = match vsock_socket(spec, EGRESS_PORT) {
-        Some(socket) => Some(socket),
-        None if spec.trusted_builder => None,
-        None => {
-            return Err(anyhow!(
-                "hvf workload spec is missing the EGRESS_PORT vsock relay socket"
-            ));
-        }
+    let transparent_net_socket = if spec.trusted_builder {
+        None
+    } else {
+        Some(vsock_socket(spec, TRANSPARENT_NET_VSOCK_PORT).ok_or_else(|| {
+            anyhow!("hvf workload spec is missing the transparent network vsock relay socket")
+        })?)
     };
 
     // An empty spec cmdline means "use the supervisor's workload default"
@@ -161,7 +155,8 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         timeout_secs: paths.timeout_secs,
         agent_socket: vsock_socket(spec, GUEST_AGENT_PORT),
         substitution_socket: None,
-        egress_relay_socket,
+        egress_relay_socket: None,
+        transparent_net_socket,
         // Builder/dev VMs run no admitted workload, so no host-services broker.
         broker_socket: None,
         // Builder/dev VMs carry no admitted egress tunnel.
@@ -367,9 +362,9 @@ mod tests {
     use super::*;
     use crate::driver::{BlockDev, ConsoleCapture, VsockDirection, VsockPort};
 
-    fn egress_port(uds: &str) -> VsockPort {
+    fn transparent_net_port(uds: &str) -> VsockPort {
         VsockPort {
-            guest_port: EGRESS_PORT,
+            guest_port: TRANSPARENT_NET_VSOCK_PORT,
             host_uds: uds.into(),
             direction: VsockDirection::GuestDials,
         }
@@ -425,11 +420,11 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_wires_egress_relay_and_agent_leaves_substitution_none() {
+    fn relay_config_wires_transparent_net_and_agent_leaves_substitution_none() {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![
-                egress_port("/run/egress.sock"),
+                transparent_net_port("/run/mvm-net.sock"),
                 agent_port("/run/agent.sock"),
             ],
             vec![],
@@ -439,9 +434,10 @@ mod tests {
         assert_eq!(cfg.kernel, PathBuf::from("/img/Image"));
         assert_eq!(cfg.initramfs, Some(PathBuf::from("/img/initrd.cpio")));
         assert_eq!(
-            cfg.egress_relay_socket,
-            Some(PathBuf::from("/run/egress.sock"))
+            cfg.transparent_net_socket,
+            Some(PathBuf::from("/run/mvm-net.sock"))
         );
+        assert_eq!(cfg.egress_relay_socket, None);
         assert_eq!(cfg.agent_socket, Some(PathBuf::from("/run/agent.sock")));
         assert_eq!(cfg.substitution_socket, None);
         assert!(cfg.vsock);
@@ -457,7 +453,7 @@ mod tests {
         // default, so its cmdline must reach the supervisor verbatim.
         let mut spec = spec_with(
             KernelImage::Path("/img/Image".into()),
-            vec![egress_port("/run/egress.sock")],
+            vec![transparent_net_port("/run/mvm-net.sock")],
             vec![],
         );
         spec.cmdline = "  console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init  ".into();
@@ -478,7 +474,7 @@ mod tests {
     fn relay_config_maps_blocks_to_disks_in_slot_order_carrying_ro_and_ephemeral() {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
-            vec![egress_port("/run/egress.sock")],
+            vec![transparent_net_port("/run/mvm-net.sock")],
             vec![
                 // Out of slot order, mixed flags — proves sorting + per-disk policy
                 // pass through verbatim (a builder's persistent nix-store is
@@ -510,27 +506,23 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_trusted_builder_uses_the_same_egress_relay() {
+    fn relay_config_trusted_builder_needs_no_transparent_net_relay() {
         let mut spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![
                 agent_port("/run/agent.sock"),
-                egress_port("/run/egress.sock"),
+                transparent_net_port("/run/mvm-net.sock"),
             ],
             vec![],
         );
         spec.trusted_builder = true;
         let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
-        assert_eq!(
-            cfg.egress_relay_socket,
-            Some(PathBuf::from("/run/egress.sock"))
-        );
+        assert_eq!(cfg.egress_relay_socket, None);
+        assert_eq!(cfg.transparent_net_socket, None);
     }
 
     #[test]
-    fn relay_config_missing_egress_port_fails_closed() {
-        // No EGRESS_PORT: the hvf VMM has no other path off the box, so this
-        // must not boot an ungated guest.
+    fn relay_config_missing_transparent_net_port_fails_closed() {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![agent_port("/run/agent.sock")],
@@ -540,7 +532,7 @@ mod tests {
             .err()
             .unwrap()
             .to_string();
-        assert!(err.contains("EGRESS_PORT"), "unexpected error: {err}");
+        assert!(err.contains("transparent network"), "unexpected error: {err}");
     }
 
     #[test]
@@ -548,7 +540,7 @@ mod tests {
         // HVF has no bundled kernel; the spec must name an explicit Image.
         let spec = spec_with(
             KernelImage::Bundled,
-            vec![egress_port("/run/egress.sock")],
+            vec![transparent_net_port("/run/mvm-net.sock")],
             vec![],
         );
         assert!(relay_supervisor_config(&spec, &sample_paths()).is_err());
@@ -675,7 +667,7 @@ mod tests {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![
-                egress_port("/run/egress.sock"),
+                transparent_net_port("/run/mvm-net.sock"),
                 agent_port("/run/agent.sock"),
                 console_vsock_port(20001, "/state/vsock/vsock-20001.sock"),
                 console_vsock_port(20002, "/state/vsock/vsock-20002.sock"),
@@ -698,7 +690,7 @@ mod tests {
         let spec = spec_with(
             KernelImage::Path("/img/Image".into()),
             vec![
-                egress_port("/run/egress.sock"),
+                transparent_net_port("/run/mvm-net.sock"),
                 agent_port("/run/agent.sock"),
             ],
             vec![],

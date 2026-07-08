@@ -143,8 +143,9 @@ pub struct KernelBootResult {
 
 /// Host-supplied boot inputs the supervisor threads into a guest: the vsock
 /// channels (per-VM host→guest agent RPC socket, substitution-endpoint socket,
-/// egress relay UDS) plus the kernel cmdline. Bundled so the boot entry stays
-/// under the argument-count lint. The two socket paths fall back to the
+/// egress relay UDS, transparent network authority UDS) plus the kernel
+/// cmdline. Bundled so the boot entry stays under the argument-count lint. The
+/// agent/substitution socket paths fall back to the
 /// `MVM_HVF_{AGENT,SUBSTITUTION}_SOCKET` env hooks when `None` (dev/live drivers);
 /// the productionized path threads them through the supervisor config.
 #[derive(Default)]
@@ -155,6 +156,10 @@ pub struct HostChannels {
     /// endpoint gates (claim-10) and substitutes secrets. `None` ⇒ egress fails
     /// closed at the bridge (an hvf VM must always carry a relay socket).
     pub egress_relay: Option<PathBuf>,
+    /// Per-VM transparent network authority UDS. When set, guest vsock port 5254
+    /// relays here; the authority owns DNS, TCP, UDP, ICMP, policy, and audit.
+    /// `None` means port 5254 fails closed at the bridge.
+    pub transparent_net_socket: Option<PathBuf>,
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
     /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
@@ -506,6 +511,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 agent_socket: channels.agent_socket,
                 substitution_socket: channels.substitution_socket,
                 egress_relay: channels.egress_relay,
+                transparent_net_socket: channels.transparent_net_socket,
                 broker_socket: channels.broker_socket,
                 network_tunnel_socket: channels.network_tunnel_socket,
                 console_data_sockets: channels.console_data_sockets,
@@ -539,6 +545,8 @@ struct RunInputs {
     /// Per-VM egress bridge UDS. When set, `EGRESS_PORT` relays here — the
     /// endpoint is the sole gate + substituter.
     egress_relay: Option<PathBuf>,
+    /// Per-VM transparent network authority UDS. When set, port 5254 relays here.
+    transparent_net_socket: Option<PathBuf>,
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
@@ -568,6 +576,7 @@ unsafe fn run(
         agent_socket,
         substitution_socket,
         egress_relay,
+        transparent_net_socket,
         broker_socket,
         network_tunnel_socket,
         console_data_sockets,
@@ -740,6 +749,12 @@ unsafe fn run(
             if let Some(relay) = egress_relay.as_ref().or(substitution_socket.as_ref()) {
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);
+            }
+            // Transparent networking: the guest bridge dials vsock port 5254 and
+            // the host authority owns all real networking, policy, and audit.
+            if let Some(net) = transparent_net_socket.as_ref() {
+                v.set_transparent_net_activity(egress_active.clone());
+                v.set_transparent_net_endpoint(net);
             }
             // Host-services broker (BROKER_PORT): a pure relay to the per-VM broker
             // UDS the host-agent daemon bound, so a guest `host.audit.v1` call

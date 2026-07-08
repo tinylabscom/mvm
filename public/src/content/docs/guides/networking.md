@@ -42,7 +42,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
-| 5254 | `mvm-net` frames | Transparent networking authority stream (guest side packaged; host process contract packaged; backend wiring pending) |
+| 5254 | `mvm-net` frames | Transparent networking authority stream (backend relay wired; guest auto-launch pending) |
 
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
 
@@ -128,11 +128,14 @@ audit lines.
 
 Backend integration has started: the workload-runner path can spawn and reap
 `mvm-host-netd`, write its admitted policy/DNS-pin config, and capture its audit
-JSONL under the VM state directory. This is not end-to-end `mvmctl machine run`
-networking yet. Until VM startup launches the guest bridge and connects guest
-vsock port `5254` to that host authority stream, the default HVF path remains
-vsock-only without ordinary guest-visible DNS/TCP/UDP/ICMP networking for tools
-inside the VM.
+JSONL under the VM state directory. The in-house HVF path now also threads a
+dedicated `transparent_net_socket` into the supervisor and relays guest vsock
+port `5254` byte-for-byte to that authority, failing closed when the authority
+is absent.
+
+This is not end-to-end `mvmctl machine run` networking yet. Until VM startup
+launches the guest bridge inside the guest, ordinary tools in the VM still do
+not see DNS/TCP/UDP/ICMP networking on the default HVF path.
 
 ## Security Profiles
 

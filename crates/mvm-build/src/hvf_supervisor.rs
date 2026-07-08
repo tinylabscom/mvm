@@ -108,6 +108,11 @@ pub struct HvfSupervisorConfig {
     /// VM. `None` ⇒ the in-loop-gated paths (raw egress / gated substitution).
     #[serde(default)]
     pub egress_relay_socket: Option<PathBuf>,
+    /// Per-VM transparent network authority UDS. When set, the supervisor wires
+    /// guest vsock port `5254` as a pure byte relay to this host authority.
+    /// `None` ⇒ the transparent network port fails closed.
+    #[serde(default)]
+    pub transparent_net_socket: Option<PathBuf>,
     /// Per-VM host-services broker UDS. When set, the supervisor wires `BROKER_PORT`
     /// as a pure relay to it — the socket the per-tenant host-agent daemon bound for
     /// this VM — so a guest `host.audit.v1` call reaches the broker exactly as on the
@@ -160,6 +165,7 @@ mod tests {
             agent_socket: Some("/state/hvf-agent.sock".into()),
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
+            transparent_net_socket: Some("/state/mvm-net-authority.sock".into()),
             broker_socket: Some("/state/hvf-broker.sock".into()),
             network_tunnel_socket: Some("/state/vsock-5302.sock".into()),
             console_data_sockets: vec![],
@@ -179,6 +185,7 @@ mod tests {
         assert_eq!(cfg.agent_socket, None);
         assert_eq!(cfg.substitution_socket, None);
         assert_eq!(cfg.egress_relay_socket, None);
+        assert_eq!(cfg.transparent_net_socket, None);
         assert_eq!(cfg.broker_socket, None);
         assert_eq!(cfg.network_tunnel_socket, None);
     }
@@ -218,6 +225,7 @@ mod tests {
             agent_socket: None,
             substitution_socket: None,
             egress_relay_socket: None,
+            transparent_net_socket: None,
             broker_socket: None,
             network_tunnel_socket: None,
             console_data_sockets: vec![

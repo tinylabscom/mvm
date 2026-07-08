@@ -19,6 +19,9 @@ pub const HOST_NETD_PID_FILE: &str = "mvm-host-netd.pid";
 pub const HOST_NETD_CONFIG_FILE: &str = "mvm-host-netd.json";
 pub const HOST_NETD_SOCKET_FILE: &str = "mvm-net-authority.sock";
 pub const HOST_NETD_AUDIT_FILE: &str = "mvm-host-netd.audit.jsonl";
+/// Guest bridge authority port. Mirrors `mvm-net`'s guest bridge default without
+/// linking `mvm-net` into `mvm-backend`.
+pub const TRANSPARENT_NET_VSOCK_PORT: u32 = 5254;
 pub const DEFAULT_DNS_PIN_TTL: Duration = Duration::from_secs(3600);
 pub const HOST_NETD_READY_TIMEOUT: Duration = Duration::from_secs(10);
 

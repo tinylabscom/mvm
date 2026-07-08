@@ -1,6 +1,6 @@
 # Plan 234 — Transparent networking over vsock
 
-**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, packaged guest bridge binary, dependency-light host authority core, host runner/connector/policy-adapter substrate, and host authority process contract landed.
+**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, packaged guest bridge binary, dependency-light host authority core, host runner/connector/policy-adapter substrate, host authority process contract, backend host authority spawn, and backend port-5254 relay landed.
 
 **Owner directive:** workload networking remains a vsock-mediated capability. The guest gets normal application-visible networking behavior, but the host remains the only authority that opens real network sockets, performs DNS, terminates TLS for secret-bearing flows, applies egress policy, records audit, and emits attestable evidence.
 
@@ -58,6 +58,8 @@
       Spawn or attach `mvm-host-netd` from the VM backend/supervisor path, bind it to the actual per-VM vsock authority stream, generate the admitted policy/pin config, collect its structured audit output, and fail closed if the process, transport, policy projection, or audit path is unavailable.
 - [x] **B2b2b1 — Add host authority UDS listener and backend spawn/reap seam.**
       Add `mvm-host-netd --listen-uds` for a per-VM authority stream, generate the host daemon JSON config with admitted network policy and DNS pins, spawn the process through the existing aux-bin resolver, collect structured audit output to a per-VM JSONL file, record/reap its pid and socket, wire the workload runner's production endpoint spawner to the new authority socket, and keep `mvm-backend` from linking `mvm-net`.
+- [x] **B2b2b2a — Route guest vsock port 5254 to the host authority stream.**
+      Thread the spawned `mvm-host-netd` authority socket through the workload `VmmSpec`, HVF supervisor JSON, `HostChannels`, and in-house virtio-vsock device; relay guest port `5254` byte-for-byte to the authority; and fail closed with `OP_RST` when no authority is wired.
 - [ ] **B2b2b2 — Connect the guest bridge to the backend authority stream.**
       Launch/package the guest `mvm-guest-netd` sidecar in VM startup, connect guest vsock port `5254` to the spawned host authority stream, supervise both ends across boot failure and stop, and add the first end-to-end guest DNS/TCP acceptance path.
 - [ ] **C1 — Add DNS plus TCP MVP.**

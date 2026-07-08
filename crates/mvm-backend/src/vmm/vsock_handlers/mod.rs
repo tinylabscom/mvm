@@ -130,6 +130,12 @@ impl VsockHandlerRegistry {
             Box::new(StreamRelayHandler::new(mvm_guest::vsock::BROKER_PORT)),
         );
         guest_ports.insert(
+            crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT,
+            Box::new(StreamRelayHandler::new(
+                crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT,
+            )),
+        );
+        guest_ports.insert(
             mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
             Box::new(StreamRelayHandler::new(
                 mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
@@ -188,6 +194,23 @@ impl VsockHandlerRegistry {
     pub(crate) fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.guest_handler_mut::<StreamRelayHandler>(mvm_guest::vsock::BROKER_PORT)
             .expect("broker handler present")
+            .bridge
+            .set_activity(counter);
+    }
+
+    pub(crate) fn set_transparent_net_endpoint(&mut self, path: &Path) {
+        self.guest_handler_mut::<StreamRelayHandler>(crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT)
+            .expect("transparent network handler present")
+            .bridge
+            .set_endpoint(path);
+    }
+
+    pub(crate) fn set_transparent_net_activity(
+        &mut self,
+        counter: Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        self.guest_handler_mut::<StreamRelayHandler>(crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT)
+            .expect("transparent network handler present")
             .bridge
             .set_activity(counter);
     }

@@ -45,13 +45,13 @@ pub struct EndpointSpawnRequest<'a> {
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
-    /// Raw TCP egress (no secrets) vs the WireRequest substitution protocol.
+    /// Legacy raw/Wire protocol hint retained until secret substitution moves into
+    /// the transparent network transform path.
     pub raw_egress: bool,
 }
 
-/// Stand up the per-VM gating endpoint; return the host UDS the guest's
-/// EGRESS_PORT relays to. The one host-side egress bridge (claim-10 gate +
-/// claims 12/13 substitution).
+/// Stand up the per-VM network authority; return the host UDS the guest's
+/// transparent network vsock port relays to.
 pub trait EndpointSpawner: Send + Sync {
     fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf>;
 }
@@ -143,7 +143,7 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
                 network_policy: Some(&inputs.config.network_policy),
             })?;
 
-        let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {
+        let authority_uds = self.spawner.spawn(&EndpointSpawnRequest {
             vm_name: &inputs.config.name,
             state_dir: &state_dir,
             tenant: inputs.tenant,
@@ -158,7 +158,7 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
             config: inputs.config,
             sockets: WorkloadSockets {
                 agent: &socks.agent,
-                egress_gateway: &egress_uds,
+                transparent_network: &authority_uds,
                 exit: &socks.exit,
                 network_tunnel: socks.network_tunnel,
                 console_data: socks.console_data,
@@ -240,8 +240,8 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
 
     fn stop(&self, id: &VmId) -> Result<()> {
         // Reap the per-VM secrets endpoint first, so a crashed VM's
-        // decrypted-secret process can't outlive the guest. Idempotent + a no-op
-        // when the VM spawned none.
+        // network authority process can't outlive the guest. Idempotent + a no-op
+        // when the VM spawned none; the legacy endpoint reap stays for older state.
         reap_mvm_net_authority(&vm_state_dir(&id.0));
         reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
         reap_network_tunnel_worker(&vm_state_dir(&id.0));
@@ -319,8 +319,8 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> WorkloadBackend
     for WorkloadRunner<D, S>
 {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        // The runner always routes egress through the per-VM vsock UDS endpoint —
-        // the sole gate off the box. No transparent :80/:443 terminator.
+        // The runner always routes network authority traffic through a per-VM vsock
+        // UDS endpoint. No separate transparent :80/:443 terminator.
         EgressSubstitutionTransport::VsockUdsChannel
     }
 }
@@ -330,10 +330,9 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use mvm_core::plan::{SecretBinding, SecretSource};
-    use mvm_guest::vsock::EGRESS_PORT;
-
     use crate::driver::mock::MockDriver;
+    use crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT;
+    use mvm_core::plan::{SecretBinding, SecretSource};
 
     /// An `EndpointSpawner` test double: records the request it was handed and
     /// returns a canned UDS without spawning any process. `Mutex` (not `RefCell`)
@@ -388,16 +387,16 @@ mod tests {
         }
     }
 
-    fn egress_host_uds(spec: &crate::driver::VmmSpec) -> &Path {
+    fn transparent_net_host_uds(spec: &crate::driver::VmmSpec) -> &Path {
         spec.vsock
             .iter()
-            .find(|p| p.guest_port == EGRESS_PORT)
+            .find(|p| p.guest_port == TRANSPARENT_NET_VSOCK_PORT)
             .map(|p| p.host_uds.as_path())
-            .expect("spec carries an EGRESS_PORT vsock channel")
+            .expect("spec carries the transparent network vsock channel")
     }
 
     #[test]
-    fn start_workload_threads_endpoint_uds_into_egress_port() {
+    fn start_workload_threads_authority_uds_into_transparent_net_port() {
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner =
@@ -421,8 +420,8 @@ mod tests {
         assert_eq!(specs.len(), 1);
         let spec = &specs[0];
 
-        // The endpoint UDS the spawner returned is wired to EGRESS_PORT.
-        assert_eq!(egress_host_uds(spec), Path::new("/run/ep.sock"));
+        // The authority UDS the spawner returned is wired to the network port.
+        assert_eq!(transparent_net_host_uds(spec), Path::new("/run/ep.sock"));
         // The sealed rootfs lands at /dev/vda.
         assert_eq!(spec.blocks[0].device_node(), "/dev/vda");
         assert_eq!(spec.blocks[0].source, PathBuf::from("/img/rootfs.ext4"));
