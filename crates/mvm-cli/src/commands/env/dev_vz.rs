@@ -56,6 +56,10 @@ use kernel::format_compile_elapsed;
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
+#[cfg(any(feature = "release-artifact-bootstrap", test))]
+use stage0_cache::builder_vm_artifact_names;
+#[cfg(feature = "release-artifact-bootstrap")]
+use stage0_cache::download_builder_vm_image;
 pub(in crate::commands) use stage0_cache::{
     Stage0SweepOutcome, stage0_bootstrap_in_flight, sweep_orphaned_stage0_staging_dirs,
 };
@@ -66,7 +70,7 @@ use stage0_cache::{
 };
 #[cfg(test)]
 use stage0_cache::{
-    builder_vm_artifact_names, builder_vm_source_cache_ready, fold_embedded_binary_identity,
+    builder_vm_source_cache_ready, fold_embedded_binary_identity,
     is_orphan_stage0_staging_dir_name, stage0_bootstrap_in_flight_at,
     sweep_orphaned_stage0_staging_dirs_at, write_builder_vm_artifact_digest_manifest,
     write_builder_vm_source_cache_provenance, write_builder_vm_source_fingerprint,
