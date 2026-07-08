@@ -9,6 +9,12 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(feature = "host-std")]
+use std::{
+    io::{self, Write},
+    net::{Shutdown, SocketAddr, TcpStream, ToSocketAddrs},
+    time::Duration,
+};
 
 use crate::proto::{
     Capability, CloseFlow, CloseReason, DatagramStatus, Denial, DenialReason, DnsAnswer, DnsName,
@@ -186,13 +192,17 @@ impl HostAuthorityConfigBuilder {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostAdmission {
-    Allowed,
+    Allowed(HostRoute),
     Denied(Denial),
 }
 
 impl HostAdmission {
     pub const fn allowed() -> Self {
-        Self::Allowed
+        Self::Allowed(HostRoute::unresolved())
+    }
+
+    pub const fn allowed_with_route(route: HostRoute) -> Self {
+        Self::Allowed(route)
     }
 
     pub fn denied(reason: DenialReason) -> Self {
@@ -200,7 +210,28 @@ impl HostAdmission {
     }
 
     pub fn is_allowed(&self) -> bool {
-        matches!(self, Self::Allowed)
+        matches!(self, Self::Allowed(_))
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct HostRoute {
+    upstream_ip: Option<IpAddr>,
+}
+
+impl HostRoute {
+    pub const fn unresolved() -> Self {
+        Self { upstream_ip: None }
+    }
+
+    pub const fn resolved_ip(upstream_ip: IpAddr) -> Self {
+        Self {
+            upstream_ip: Some(upstream_ip),
+        }
+    }
+
+    pub const fn upstream_ip(self) -> Option<IpAddr> {
+        self.upstream_ip
     }
 }
 
@@ -240,19 +271,19 @@ pub struct AllowAllHostPolicy;
 
 impl HostNetworkPolicy for AllowAllHostPolicy {
     fn decide_dns(&mut self, _query: &DnsQuery) -> HostAdmission {
-        HostAdmission::Allowed
+        HostAdmission::allowed()
     }
 
     fn decide_tcp_open(&mut self, _open: &OpenTcp) -> HostAdmission {
-        HostAdmission::Allowed
+        HostAdmission::allowed()
     }
 
     fn decide_udp_datagram(&mut self, _datagram: &UdpDatagram) -> HostAdmission {
-        HostAdmission::Allowed
+        HostAdmission::allowed()
     }
 
     fn decide_icmp_echo(&mut self, _request: &IcmpEchoRequest) -> HostAdmission {
-        HostAdmission::Allowed
+        HostAdmission::allowed()
     }
 }
 
@@ -300,6 +331,7 @@ pub enum HostAuditEvent {
         flow_id: u64,
         host: String,
         port: u16,
+        upstream_ip: Option<IpAddr>,
     },
     TcpOpenDenied {
         flow_id: u64,
@@ -311,6 +343,7 @@ pub enum HostAuditEvent {
         flow_id: u64,
         host: String,
         port: u16,
+        upstream_ip: Option<IpAddr>,
         error: TransportError,
     },
     TcpBytesForwarded {
@@ -345,7 +378,12 @@ pub enum HostAuditEvent {
 }
 
 pub trait HostTcpConnector {
-    fn open(&mut self, flow_id: FlowId, target: &Target) -> Result<(), TransportError>;
+    fn open(
+        &mut self,
+        flow_id: FlowId,
+        target: &Target,
+        route: &HostRoute,
+    ) -> Result<(), TransportError>;
 
     fn send(&mut self, chunk: &StreamChunk) -> Result<(), TransportError>;
 
@@ -356,7 +394,12 @@ pub trait HostTcpConnector {
 pub struct RefusingTcpConnector;
 
 impl HostTcpConnector for RefusingTcpConnector {
-    fn open(&mut self, _flow_id: FlowId, _target: &Target) -> Result<(), TransportError> {
+    fn open(
+        &mut self,
+        _flow_id: FlowId,
+        _target: &Target,
+        _route: &HostRoute,
+    ) -> Result<(), TransportError> {
         Err(TransportError::ProtocolError)
     }
 
@@ -366,6 +409,150 @@ impl HostTcpConnector for RefusingTcpConnector {
 
     fn close(&mut self, _flow_id: FlowId, _reason: CloseReason) -> Result<(), TransportError> {
         Ok(())
+    }
+}
+
+#[cfg(feature = "host-std")]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StdTcpConnectorConfig {
+    connect_timeout: Option<Duration>,
+}
+
+#[cfg(feature = "host-std")]
+impl StdTcpConnectorConfig {
+    pub fn builder() -> StdTcpConnectorConfigBuilder {
+        StdTcpConnectorConfigBuilder::default()
+    }
+
+    pub const fn connect_timeout(&self) -> Option<Duration> {
+        self.connect_timeout
+    }
+}
+
+#[cfg(feature = "host-std")]
+#[derive(Debug, Clone, Default)]
+pub struct StdTcpConnectorConfigBuilder {
+    connect_timeout: Option<Duration>,
+}
+
+#[cfg(feature = "host-std")]
+impl StdTcpConnectorConfigBuilder {
+    pub fn connect_timeout(mut self, connect_timeout: Duration) -> Self {
+        self.connect_timeout = Some(connect_timeout);
+        self
+    }
+
+    pub fn build(self) -> StdTcpConnectorConfig {
+        StdTcpConnectorConfig {
+            connect_timeout: self.connect_timeout,
+        }
+    }
+}
+
+#[cfg(feature = "host-std")]
+#[derive(Debug, Default)]
+pub struct StdTcpConnector {
+    config: StdTcpConnectorConfig,
+    streams: HashMap<FlowId, TcpStream>,
+}
+
+#[cfg(feature = "host-std")]
+impl StdTcpConnector {
+    pub fn new() -> Self {
+        Self::with_config(StdTcpConnectorConfig::default())
+    }
+
+    pub fn with_config(config: StdTcpConnectorConfig) -> Self {
+        Self {
+            config,
+            streams: HashMap::new(),
+        }
+    }
+
+    pub fn config(&self) -> &StdTcpConnectorConfig {
+        &self.config
+    }
+
+    pub fn open_flow_count(&self) -> usize {
+        self.streams.len()
+    }
+
+    fn connect_target(
+        &self,
+        target: &Target,
+        route: &HostRoute,
+    ) -> Result<TcpStream, TransportError> {
+        if let Some(ip) = route.upstream_ip() {
+            return self.connect_addr(SocketAddr::new(ip, target.port()));
+        }
+        let mut last_error = None;
+        for addr in (target.host(), target.port())
+            .to_socket_addrs()
+            .map_err(map_tcp_io_error)?
+        {
+            match self.connect_addr(addr) {
+                Ok(stream) => return Ok(stream),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        Err(last_error.unwrap_or(TransportError::DnsFailed))
+    }
+
+    fn connect_addr(&self, addr: SocketAddr) -> Result<TcpStream, TransportError> {
+        match self.config.connect_timeout() {
+            Some(timeout) => TcpStream::connect_timeout(&addr, timeout),
+            None => TcpStream::connect(addr),
+        }
+        .map_err(map_tcp_io_error)
+    }
+}
+
+#[cfg(feature = "host-std")]
+impl HostTcpConnector for StdTcpConnector {
+    fn open(
+        &mut self,
+        flow_id: FlowId,
+        target: &Target,
+        route: &HostRoute,
+    ) -> Result<(), TransportError> {
+        if self.streams.contains_key(&flow_id) {
+            return Err(TransportError::ProtocolError);
+        }
+        let stream = self.connect_target(target, route)?;
+        stream.set_nodelay(true).map_err(map_tcp_io_error)?;
+        self.streams.insert(flow_id, stream);
+        Ok(())
+    }
+
+    fn send(&mut self, chunk: &StreamChunk) -> Result<(), TransportError> {
+        let stream = self
+            .streams
+            .get_mut(&chunk.flow_id)
+            .ok_or(TransportError::ProtocolError)?;
+        stream.write_all(&chunk.bytes).map_err(map_tcp_io_error)?;
+        if chunk.end_stream {
+            stream.shutdown(Shutdown::Write).map_err(map_tcp_io_error)?;
+        }
+        Ok(())
+    }
+
+    fn close(&mut self, flow_id: FlowId, _reason: CloseReason) -> Result<(), TransportError> {
+        if let Some(stream) = self.streams.remove(&flow_id) {
+            let _ = stream.shutdown(Shutdown::Both);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(feature = "host-std")]
+fn map_tcp_io_error(err: io::Error) -> TransportError {
+    match err.kind() {
+        io::ErrorKind::ConnectionRefused => TransportError::Refused,
+        io::ErrorKind::ConnectionReset => TransportError::Reset,
+        io::ErrorKind::TimedOut => TransportError::TimedOut,
+        io::ErrorKind::NotFound | io::ErrorKind::InvalidInput => TransportError::DnsFailed,
+        io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof => TransportError::Reset,
+        _ => TransportError::Unreachable,
     }
 }
 
@@ -550,7 +737,7 @@ where
                     denial: Some(denial),
                 })])
             }
-            HostAdmission::Allowed => {
+            HostAdmission::Allowed(_) => {
                 self.record(HostAuditEvent::DnsAllowed {
                     query_id: query.query_id.get(),
                     name: query.name.as_str().to_string(),
@@ -606,13 +793,14 @@ where
                     flow_id, denial,
                 ))])
             }
-            HostAdmission::Allowed => {
+            HostAdmission::Allowed(route) => {
                 self.record(HostAuditEvent::TcpOpenAllowed {
                     flow_id: flow_id.get(),
                     host: target.host().to_string(),
                     port: target.port(),
+                    upstream_ip: route.upstream_ip(),
                 })?;
-                match self.tcp.open(flow_id, &target) {
+                match self.tcp.open(flow_id, &target, &route) {
                     Ok(()) => {
                         self.open_tcp_flows.insert(flow_id, target.clone());
                         Ok(vec![NetMessage::TcpOpenResult(TcpOpenResult::opened(
@@ -624,6 +812,7 @@ where
                             flow_id: flow_id.get(),
                             host: target.host().to_string(),
                             port: target.port(),
+                            upstream_ip: route.upstream_ip(),
                             error,
                         })?;
                         Ok(vec![NetMessage::TcpOpenResult(TcpOpenResult::failed(
@@ -708,7 +897,7 @@ where
                     status: DatagramStatus::Denied(denial),
                 })])
             }
-            HostAdmission::Allowed => {
+            HostAdmission::Allowed(_) => {
                 self.record(HostAuditEvent::UdpUnsupported {
                     flow_id: datagram.flow_id.get(),
                     host: datagram.target.host().to_string(),
@@ -740,7 +929,7 @@ where
                     denial: Some(denial),
                 })])
             }
-            HostAdmission::Allowed => {
+            HostAdmission::Allowed(_) => {
                 self.record(HostAuditEvent::IcmpUnsupported {
                     query_id: request.query_id.get(),
                     host: request.host.as_str().to_string(),
@@ -773,6 +962,112 @@ fn accepted_capabilities(guest: &[Capability], config: &HostAuthorityConfig) -> 
 
 fn add_ipv4_offset(base: Ipv4Addr, offset: u32) -> Option<Ipv4Addr> {
     u32::from(base).checked_add(offset).map(Ipv4Addr::from)
+}
+
+#[cfg(feature = "host-mvm-core")]
+#[derive(Debug, Clone)]
+pub struct MvmCoreNetworkPolicy {
+    egress: mvm_core::policy::projection::CanonicalEgress,
+    pins: mvm_core::policy::dns_pin::DnsPinRegistry,
+}
+
+#[cfg(feature = "host-mvm-core")]
+impl MvmCoreNetworkPolicy {
+    pub fn from_network_policy(
+        policy: &mvm_core::policy::network_policy::NetworkPolicy,
+        pins: mvm_core::policy::dns_pin::DnsPinRegistry,
+        now: &str,
+    ) -> Result<Self, mvm_core::policy::projection::ProjectionError> {
+        let egress = mvm_core::policy::projection::canonicalize_network_policy(policy, &pins, now)?;
+        Ok(Self { egress, pins })
+    }
+
+    pub fn fail_closed() -> Self {
+        Self {
+            egress: mvm_core::policy::projection::CanonicalEgress::Rules(Vec::new()),
+            pins: mvm_core::policy::dns_pin::DnsPinRegistry::new(),
+        }
+    }
+
+    pub fn egress(&self) -> &mvm_core::policy::projection::CanonicalEgress {
+        &self.egress
+    }
+
+    pub fn pins(&self) -> &mvm_core::policy::dns_pin::DnsPinRegistry {
+        &self.pins
+    }
+
+    fn decide_host_port(
+        &self,
+        proto: mvm_core::policy::projection::Proto,
+        host: &str,
+        port: u16,
+    ) -> HostAdmission {
+        if let Ok(ip) = host.parse::<IpAddr>() {
+            return if self.egress.permits(&proto, ip, port) {
+                HostAdmission::allowed_with_route(HostRoute::resolved_ip(ip))
+            } else {
+                HostAdmission::denied(DenialReason::HostNotAllowed)
+            };
+        }
+        let Some(pin) = self.pins.lookup(host) else {
+            return HostAdmission::denied(DenialReason::HostNotAllowed);
+        };
+        pin.ips
+            .iter()
+            .copied()
+            .find(|ip| self.egress.permits(&proto, *ip, port))
+            .map(|ip| HostAdmission::allowed_with_route(HostRoute::resolved_ip(ip)))
+            .unwrap_or_else(|| HostAdmission::denied(DenialReason::HostNotAllowed))
+    }
+
+    fn has_admitted_pin(&self, host: &str) -> bool {
+        self.pins
+            .lookup(host)
+            .is_some_and(|pin| !pin.ips.is_empty())
+    }
+}
+
+#[cfg(feature = "host-mvm-core")]
+impl HostNetworkPolicy for MvmCoreNetworkPolicy {
+    fn decide_dns(&mut self, query: &DnsQuery) -> HostAdmission {
+        match self.egress {
+            mvm_core::policy::projection::CanonicalEgress::Unrestricted => {
+                if self.has_admitted_pin(query.name.as_str()) {
+                    HostAdmission::allowed()
+                } else {
+                    HostAdmission::denied(DenialReason::HostNotAllowed)
+                }
+            }
+            mvm_core::policy::projection::CanonicalEgress::Rules(_) => {
+                if self.has_admitted_pin(query.name.as_str()) {
+                    HostAdmission::allowed()
+                } else {
+                    HostAdmission::denied(DenialReason::HostNotAllowed)
+                }
+            }
+        }
+    }
+
+    fn decide_tcp_open(&mut self, open: &OpenTcp) -> HostAdmission {
+        self.decide_host_port(
+            mvm_core::policy::projection::Proto::Tcp,
+            open.target.host(),
+            open.target.port(),
+        )
+    }
+
+    fn decide_udp_datagram(&mut self, datagram: &UdpDatagram) -> HostAdmission {
+        self.decide_host_port(
+            mvm_core::policy::projection::Proto::Udp,
+            datagram.target.host(),
+            datagram.target.port(),
+        )
+    }
+
+    fn decide_icmp_echo(&mut self, _request: &IcmpEchoRequest) -> HostAdmission {
+        HostAdmission::denied(DenialReason::ProtocolNotAllowed)
+    }
 }
 
 #[cfg(test)]
@@ -815,10 +1110,10 @@ mod tests {
     impl StaticPolicy {
         fn allow_all() -> Self {
             Self {
-                dns: HostAdmission::Allowed,
-                tcp: HostAdmission::Allowed,
-                udp: HostAdmission::Allowed,
-                icmp: HostAdmission::Allowed,
+                dns: HostAdmission::allowed(),
+                tcp: HostAdmission::allowed(),
+                udp: HostAdmission::allowed(),
+                icmp: HostAdmission::allowed(),
             }
         }
 
@@ -878,7 +1173,7 @@ mod tests {
 
     #[derive(Debug)]
     struct RecordingTcpConnector {
-        opens: Vec<(u64, String, u16)>,
+        opens: Vec<(u64, String, u16, HostRoute)>,
         sends: Vec<(u64, Vec<u8>, bool)>,
         closes: Vec<(u64, CloseReason)>,
         open_result: Result<(), TransportError>,
@@ -907,9 +1202,18 @@ mod tests {
     }
 
     impl HostTcpConnector for RecordingTcpConnector {
-        fn open(&mut self, flow_id: FlowId, target: &Target) -> Result<(), TransportError> {
-            self.opens
-                .push((flow_id.get(), target.host().to_string(), target.port()));
+        fn open(
+            &mut self,
+            flow_id: FlowId,
+            target: &Target,
+            _route: &HostRoute,
+        ) -> Result<(), TransportError> {
+            self.opens.push((
+                flow_id.get(),
+                target.host().to_string(),
+                target.port(),
+                *_route,
+            ));
             self.open_result
         }
 
@@ -1073,7 +1377,12 @@ mod tests {
 
         assert_eq!(
             authority.tcp_connector_mut().opens,
-            vec![(11, "api.example.com".to_string(), 443)]
+            vec![(
+                11,
+                "api.example.com".to_string(),
+                443,
+                HostRoute::unresolved()
+            )]
         );
         assert_eq!(
             responses,
@@ -1089,6 +1398,7 @@ mod tests {
                     flow_id: 11,
                     host: "api.example.com".to_string(),
                     port: 443,
+                    upstream_ip: None,
                 })
         );
     }
@@ -1256,6 +1566,107 @@ mod tests {
             matches!(err, HostAuthorityError::Audit(message) if message == "audit unavailable")
         );
         assert!(authority.tcp_connector_mut().opens.is_empty());
+    }
+
+    #[cfg(feature = "host-mvm-core")]
+    #[test]
+    fn mvm_core_policy_adapter_returns_pinned_tcp_route() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "api.example.com",
+            vec!["203.0.113.10".parse().unwrap()],
+            "2026-07-08T00:00:00Z",
+            "2026-07-09T00:00:00Z",
+        ));
+        let mut policy = MvmCoreNetworkPolicy::from_network_policy(
+            &NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
+            pins,
+            "2026-07-08T12:00:00Z",
+        )
+        .unwrap();
+
+        assert!(
+            policy
+                .decide_dns(&dns_query("api.example.com"))
+                .is_allowed()
+        );
+        assert_eq!(
+            policy.decide_tcp_open(&open_tcp("api.example.com", 443)),
+            HostAdmission::allowed_with_route(HostRoute::resolved_ip(
+                "203.0.113.10".parse().unwrap()
+            ))
+        );
+        assert!(matches!(
+            policy.decide_tcp_open(&open_tcp("api.example.com", 80)),
+            HostAdmission::Denied(Denial {
+                reason: DenialReason::HostNotAllowed,
+                ..
+            })
+        ));
+    }
+
+    #[cfg(feature = "host-mvm-core")]
+    #[test]
+    fn mvm_core_policy_adapter_fails_closed_without_required_pin() {
+        use mvm_core::policy::dns_pin::DnsPinRegistry;
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+        use mvm_core::policy::projection::ProjectionError;
+
+        let err = MvmCoreNetworkPolicy::from_network_policy(
+            &NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
+            DnsPinRegistry::new(),
+            "2026-07-08T12:00:00Z",
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, ProjectionError::MissingPin { host } if host == "api.example.com"));
+    }
+
+    #[cfg(feature = "host-std")]
+    #[test]
+    fn std_tcp_connector_uses_resolved_route_and_forwards_bytes() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let join = thread::spawn(move || {
+            let (mut stream, peer) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            (peer.ip(), bytes)
+        });
+
+        let mut connector = StdTcpConnector::new();
+        let route = HostRoute::resolved_ip("127.0.0.1".parse().unwrap());
+        let target = Target::new("route-should-win.invalid", port).unwrap();
+        connector.open(flow_id(31), &target, &route).unwrap();
+        connector
+            .send(&StreamChunk::new(
+                flow_id(31),
+                FlowDirection::GuestToHost,
+                0,
+                b"hello".to_vec(),
+            ))
+            .unwrap();
+        connector
+            .send(
+                &StreamChunk::new(flow_id(31), FlowDirection::GuestToHost, 5, Vec::new())
+                    .with_end_stream(),
+            )
+            .unwrap();
+        connector
+            .close(flow_id(31), CloseReason::GuestClosed)
+            .unwrap();
+
+        let (peer_ip, bytes) = join.join().unwrap();
+        assert_eq!(peer_ip, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(bytes, b"hello");
+        assert_eq!(connector.open_flow_count(), 0);
     }
 
     fn dns_response_ip(messages: &[NetMessage]) -> Ipv4Addr {

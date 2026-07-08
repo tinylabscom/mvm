@@ -115,15 +115,17 @@ feature. It configures a Linux TUN interface, installs the synthetic default
 route and resolver, connects to host vsock port `5254`, and pumps bounded
 `mvm-net` protocol frames over that single authority stream.
 
-The dependency-light host authority core exists behind the `mvm-net` crate's
-`host` feature. It validates guest handshakes, allocates synthetic DNS A records,
-applies policy decisions before connector calls, and records DNS/flow audit
-events. The concrete host vsock runner, canonical policy adapter, and real host
-TCP connector are still pending.
+The host authority pieces are landing behind opt-in `mvm-net` features. The
+`host` feature provides the dependency-light authority core. `host-runner`
+processes bounded length-prefixed authority frames over a caller-supplied
+stream. `host-std` provides a standard-library TCP connector that can connect to
+a policy-supplied pinned upstream IP. `host-mvm-core` adapts canonical
+`mvm-core` network policy projection plus DNS pins into host admission.
 
 This is not yet wired into `mvmctl machine run`. Until the host runner
-integration lands, the default HVF path remains vsock-only without ordinary
-guest-visible DNS/TCP/UDP/ICMP networking for tools inside the VM.
+binary and backend integration land, the default HVF path remains vsock-only
+without ordinary guest-visible DNS/TCP/UDP/ICMP networking for tools inside the
+VM.
 
 ## Security Profiles
 

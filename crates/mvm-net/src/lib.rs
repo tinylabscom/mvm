@@ -24,6 +24,9 @@ pub mod guest_linux;
 #[cfg(feature = "host")]
 pub mod host;
 
+#[cfg(feature = "host-runner")]
+pub mod host_runner;
+
 #[cfg(feature = "proto")]
 pub mod proto;
 
