@@ -21,6 +21,9 @@ pub mod guest_pump;
 #[cfg(feature = "guest-linux")]
 pub mod guest_linux;
 
+#[cfg(feature = "host")]
+pub mod host;
+
 #[cfg(feature = "proto")]
 pub mod proto;
 

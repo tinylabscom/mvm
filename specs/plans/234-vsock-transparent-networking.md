@@ -1,6 +1,6 @@
 # Plan 234 — Transparent networking over vsock
 
-**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, and packaged guest bridge binary landed.
+**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, packaged guest bridge binary, and dependency-light host authority core landed.
 
 **Owner directive:** workload networking remains a vsock-mediated capability. The guest gets normal application-visible networking behavior, but the host remains the only authority that opens real network sockets, performs DNS, terminates TLS for secret-bearing flows, applies egress policy, records audit, and emits attestable evidence.
 
@@ -44,6 +44,10 @@
       Add the lean guest entrypoint that loads its bridge config, runs the Linux executor plus guest runner, reports startup/runtime failures clearly, and can be embedded into guest images without pulling host-side networking code.
 - [ ] **B2 — Build the host network authority.**
       Add the host-side module and binary that accepts the per-VM vsock stream, owns synthetic DNS/IP mapping, reuses the canonical network policy projection, opens real host sockets only after admission, and records flow-open/flow-close audit events.
+- [x] **B2a — Add the dependency-light host authority core.**
+      Add `mvm-net::host` behind an opt-in `host` feature with a pure host-side authority state machine: protocol handshake admission, synthetic A-record mapping, DNS/TCP/UDP/ICMP policy decisions, flow-open/flow-close audit events, and a TCP connector trait that is invoked only after policy admission. Keep default/no-default/host normal dependency trees dependency-light.
+- [ ] **B2b — Add the concrete host runner and policy adapter.**
+      Add the per-VM vsock listener/stream runner, length-prefixed wire integration, canonical `mvm-core` policy projection adapter behind an explicit opt-in feature, real host TCP connector, and host authority binary entrypoint. The runner must open real host sockets only after B2a admission succeeds and must fail closed on audit or policy construction errors.
 - [ ] **C1 — Add DNS plus TCP MVP.**
       Support A/AAAA DNS answers, synthetic IP mapping, TCP connect/data/close, allow-host default port handling, denied-host failure behavior, and bounded backpressure.
 - [ ] **C2 — Add mandatory TLS transform for secret-bearing flows.**

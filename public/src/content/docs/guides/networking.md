@@ -42,7 +42,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
-| 5254 | `mvm-net` frames | Transparent networking authority stream (guest side packaged; host authority wiring pending) |
+| 5254 | `mvm-net` frames | Transparent networking authority stream (guest side packaged; host authority runner wiring pending) |
 
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
 
@@ -115,9 +115,15 @@ feature. It configures a Linux TUN interface, installs the synthetic default
 route and resolver, connects to host vsock port `5254`, and pumps bounded
 `mvm-net` protocol frames over that single authority stream.
 
-This is not yet wired into `mvmctl machine run`. Until the host authority and
-runner integration land, the default HVF path remains vsock-only without
-ordinary guest-visible DNS/TCP/UDP/ICMP networking for tools inside the VM.
+The dependency-light host authority core exists behind the `mvm-net` crate's
+`host` feature. It validates guest handshakes, allocates synthetic DNS A records,
+applies policy decisions before connector calls, and records DNS/flow audit
+events. The concrete host vsock runner, canonical policy adapter, and real host
+TCP connector are still pending.
+
+This is not yet wired into `mvmctl machine run`. Until the host runner
+integration lands, the default HVF path remains vsock-only without ordinary
+guest-visible DNS/TCP/UDP/ICMP networking for tools inside the VM.
 
 ## Security Profiles
 
