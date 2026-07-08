@@ -90,8 +90,6 @@ pub enum Ext4Error {
     MissingParent(String),
     /// A path was empty or not rooted at `/`.
     BadPath(String),
-    /// A directory's entries did not fit the single-block assumption.
-    DirTooLarge(String),
     /// A node's parent path resolves to a non-directory (e.g. a regular file
     /// or symlink), so the node could never be reached on a mounted image.
     NotADirectory(String),
@@ -122,9 +120,6 @@ impl std::fmt::Display for Ext4Error {
                 write!(f, "node {p} has no parent directory in the input")
             }
             Ext4Error::BadPath(p) => write!(f, "bad path {p:?} (must be absolute)"),
-            Ext4Error::DirTooLarge(p) => {
-                write!(f, "directory {p} has too many entries for one block")
-            }
             Ext4Error::NotADirectory(p) => {
                 write!(f, "parent of {p} is not a directory")
             }
@@ -151,7 +146,6 @@ impl Ext4Error {
             self,
             Ext4Error::TooLarge { .. }
                 | Ext4Error::FileTooFragmented { .. }
-                | Ext4Error::DirTooLarge(_)
                 | Ext4Error::XattrTooLarge { .. }
         )
     }
@@ -206,7 +200,7 @@ impl Node {
 }
 
 /// One contiguous run of physical blocks backing a logical range of a file
-/// (or the single block of a directory / long symlink). `len` is in blocks and
+/// (or the data blocks of a directory / long symlink). `len` is in blocks and
 /// never exceeds a group's data region, so it always fits ext4's 15-bit
 /// initialized-extent length.
 #[derive(Debug, Clone, Copy)]
@@ -546,13 +540,14 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
     for p in planned.iter_mut() {
         let nblocks = match p.kind {
             Kind::Dir => {
-                // "." + ".." + children must fit one block (single-block dirs).
-                let need = dir_bytes(&p.children);
-                if need > BLOCK_SIZE as usize {
-                    return Err(Ext4Error::DirTooLarge(format!("ino {}", p.ino)));
-                }
-                p.size = BLOCK_SIZE as u64;
-                1
+                // Linear (non-htree) directory: "." + ".." + children pack into
+                // as many blocks as they need, none crossing a block boundary.
+                // The kernel and the fs_ext4 reader read this without an htree
+                // index. A directory large enough to fragment past the extent
+                // tree fails as `FileTooFragmented`, same as an oversized file.
+                let nblocks = dir_block_count(&p.children);
+                p.size = nblocks as u64 * BLOCK_SIZE as u64;
+                nblocks
             }
             Kind::File => p.size.div_ceil(BLOCK_SIZE as u64) as u32,
             Kind::Symlink => {
@@ -625,7 +620,7 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
     for p in &planned {
         write_inode(&mut img, &layout, p);
         match p.kind {
-            Kind::Dir => write_dir_block(&mut img, p),
+            Kind::Dir => write_dir_blocks(&mut img, p),
             Kind::File => write_file_blocks(&mut img, p),
             Kind::Symlink => {
                 if let Some(ext) = p.extents.first() {
@@ -660,13 +655,36 @@ fn leaves_for(num_extents: usize) -> usize {
     }
 }
 
-fn dir_bytes(children: &[(String, u32, u8)]) -> usize {
-    // "." (12) + ".." (12) + each child rounded to 4.
-    let mut n = 12 + 12;
-    for (name, _, _) in children {
-        n += dirent_len(name.len());
+/// Block index (0-based) each ordered dirent lands in for a linear directory:
+/// "." , "..", then `children` in order. An entry never crosses a block
+/// boundary, so a block that can't fit the next entry pads out and the entry
+/// starts the following block. The returned vec is parallel to the entry
+/// sequence [`write_dir_blocks`] emits, so sizing and writing never disagree.
+fn dir_block_layout(children: &[(String, u32, u8)]) -> Vec<u32> {
+    // "." and ".." lead every directory; both encode to a 12-byte dirent.
+    let name_lens = [1usize, 2]
+        .into_iter()
+        .chain(children.iter().map(|(name, _, _)| name.len()));
+    let mut blocks = Vec::new();
+    let mut blk = 0u32;
+    let mut used = 0usize;
+    for nl in name_lens {
+        let need = dirent_len(nl);
+        if used + need > BLOCK_SIZE as usize {
+            blk += 1;
+            used = 0;
+        }
+        used += need;
+        blocks.push(blk);
     }
-    n
+    blocks
+}
+
+/// Number of 4 KiB blocks a linear directory of `children` occupies.
+fn dir_block_count(children: &[(String, u32, u8)]) -> u32 {
+    dir_block_layout(children)
+        .last()
+        .map_or(1, |&last| last + 1)
 }
 
 fn dirent_len(name_len: usize) -> usize {
@@ -947,20 +965,41 @@ fn write_extent_leaves(img: &mut Image, inode_header: usize, p: &Planned) {
     }
 }
 
-fn write_dir_block(img: &mut Image, p: &Planned) {
-    let Some(ext) = p.extents.first() else {
+fn write_dir_blocks(img: &mut Image, p: &Planned) {
+    // Physical blocks backing this directory, in logical order.
+    let phys: Vec<u32> = p
+        .extents
+        .iter()
+        .flat_map(|ext| (0..ext.len).map(move |i| ext.phys + i))
+        .collect();
+    if phys.is_empty() {
         return;
-    };
-    let base = img.block_off(ext.phys);
+    }
+    // Entries in the exact order `dir_block_layout` assumed: "." , "..", children.
+    let mut entries: Vec<(u32, &str, u8)> = Vec::with_capacity(2 + p.children.len());
+    entries.push((p.ino, ".", FT_DIR));
+    entries.push((p.parent, "..", FT_DIR));
+    entries.extend(
+        p.children
+            .iter()
+            .map(|(name, ino, ft)| (*ino, name.as_str(), *ft)),
+    );
+    let layout = dir_block_layout(&p.children);
+    debug_assert_eq!(entries.len(), layout.len());
+
+    let mut cur = 0u32;
     let mut pos = 0usize;
-    // "." -> self
-    pos += put_dirent(img, base + pos, p.ino, ".", FT_DIR, false);
-    // ".." -> parent
-    let dotdot_last = p.children.is_empty();
-    pos += put_dirent(img, base + pos, p.parent, "..", FT_DIR, dotdot_last);
-    for (i, (name, child, ft)) in p.children.iter().enumerate() {
-        let last = i + 1 == p.children.len();
-        pos += put_dirent(img, base + pos, *child, name, *ft, last);
+    for (i, (ino, name, ft)) in entries.iter().enumerate() {
+        let blk = layout[i];
+        if blk != cur {
+            cur = blk;
+            pos = 0;
+        }
+        // The last entry in each block pads its rec_len to the block end, so no
+        // dirent straddles a block boundary (an ext4 linear-directory invariant).
+        let last_in_block = i + 1 == entries.len() || layout[i + 1] != blk;
+        let base = img.block_off(phys[blk as usize]);
+        pos += put_dirent(img, base + pos, *ino, name, *ft, last_in_block);
     }
 }
 
