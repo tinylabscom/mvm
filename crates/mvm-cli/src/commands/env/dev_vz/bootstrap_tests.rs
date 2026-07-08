@@ -1,3 +1,4 @@
+use super::stage0_cache::validate_builder_vm_stage0_artifacts;
 use super::*;
 
 #[cfg(test)]

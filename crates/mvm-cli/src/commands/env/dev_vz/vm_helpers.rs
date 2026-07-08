@@ -79,7 +79,7 @@ pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<Rea
 /// Quiet on the happy path and swallows errors because a sweep failure
 /// must never block a launch.
 pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
-    match reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ false, false) {
+    match reap_orphaned_vm_helpers(false) {
         Ok(o) if o.killed > 0 => crate::ui::info(&format!(
             "Reaped {} orphaned VM helper(s) left by a prior run.",
             o.killed
