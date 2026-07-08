@@ -133,11 +133,14 @@ dedicated `transparent_net_socket` into the supervisor and relays guest vsock
 port `5254` byte-for-byte to that authority, failing closed when the authority
 is absent. OCI image injection now includes `mvm-guest-netd` with the guest
 agent and netinit, and the injected PID 1 starts it only when the HVF boot path
-adds `mvm.netd=1` because a transparent-network authority socket is present.
+adds `mvm.netd=1` because a transparent-network authority socket is present. If
+that token is present but netd is missing or exits during startup, PID 1 refuses
+to start the guest agent instead of silently running the workload without the
+requested network path.
 
 This is not end-to-end supported `mvmctl machine run` networking yet. The
-remaining work is live guest-to-host supervision and the first DNS/TCP
-acceptance proof through `mvm-guest-netd` and `mvm-host-netd`; until that lands,
+remaining work is the first DNS/TCP acceptance proof through `mvm-guest-netd`
+and `mvm-host-netd` plus live stop/reap proof for both sides; until that lands,
 ordinary tools in the VM still must not rely on transparent networking on the
 default HVF path.
 

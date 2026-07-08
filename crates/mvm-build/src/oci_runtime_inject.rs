@@ -79,6 +79,154 @@ pub enum RuntimeInjectionProfile {
     RuntimeLean,
 }
 
+/// PID-1 init baked into an OCI rootfs so `run --image` has a vsock control
+/// plane. POSIX `sh` (busybox `ash` in alpine and friends).
+///
+/// Contract, in order:
+/// 1. Mount `/proc`, `/sys`, `/dev` (+ `devpts`, `tmpfs` for `/run`, `/tmp`).
+/// 2. Create the `/mvm/runtime` overlay mount point.
+/// 3. Mount each `machine run --volume` host share (`mvm.uvols=` cmdline).
+/// 4. Run the guest-side network defense (netinit), overlay copy first.
+/// 5. If `mvm.netd=1` is present, fork the transparent-network bridge.
+/// 6. Fork the agent (overlay copy first, baked fallback) and idle.
+pub fn oci_init_script() -> String {
+    r#"#!/bin/sh
+# mvm OCI runtime init. The mvm guest agent is the sole control plane:
+# this PID 1 mounts the pseudo-filesystems, brings up guest-side network
+# defense, then forks the agent and idles. The OCI image entrypoint runs
+# only under the agent (over vsock), never as PID 1.
+set -u
+
+mount -t proc     none /proc    2>/dev/null || true
+mount -t sysfs    none /sys     2>/dev/null || true
+mount -t devtmpfs none /dev     2>/dev/null || true
+mkdir -p /dev/pts /dev/shm /run /tmp /mvm/runtime 2>/dev/null || true
+mount -t devpts none /dev/pts 2>/dev/null || true
+mount -t tmpfs  none /run     2>/dev/null || true
+mount -t tmpfs  none /tmp     2>/dev/null || true
+
+# User volumes (machine run --volume). The host encoded
+# mvm.uvols=<tag>:<hex(guest_path)>:<ro|rw>:<fs|blk>;... onto the kernel
+# cmdline (mvm_core::vm_backend::encode_user_volumes_cmdline); mount each
+# virtio-fs share at its guest path.
+MVM_UVOLS=$(sed -n 's/.*\bmvm\.uvols=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+if [ -n "$MVM_UVOLS" ]; then
+  echo "$MVM_UVOLS" | tr ';' '\n' | while IFS=: read -r utag uhex umode ukind; do
+    [ -n "$utag" ] || continue
+    [ -n "$uhex" ] || continue
+    upath=$(printf '%b' "$(echo "$uhex" | sed 's/../\\x&/g')")
+    [ -n "$upath" ] || continue
+    if [ "$ukind" = blk ]; then
+      echo "mvm-oci-init: user disk volume for '$upath' attached (guest auto-mount of disks not wired)"
+      continue
+    fi
+    mkdir -p "$upath" 2>/dev/null || true
+    if [ "$umode" = ro ]; then
+      mount -t virtiofs -o ro "$utag" "$upath" \
+        && echo "mvm-oci-init: mounted user volume $utag at $upath (ro)" \
+        || echo "mvm-oci-init: user volume $utag -> $upath failed (mountpoint must exist on the ro rootfs)"
+    else
+      mount -t virtiofs "$utag" "$upath" \
+        && echo "mvm-oci-init: mounted user volume $utag at $upath (rw)" \
+        || echo "mvm-oci-init: user volume $utag -> $upath failed (mountpoint must exist on the ro rootfs)"
+    fi
+  done
+fi
+
+# Egress CA (TLS-substitution trust). The host encoded mvm.egress_ca=<hex(PEM)>
+# onto the kernel cmdline (only when egress substitution is configured); decode
+# it to /run/mvm/ca-bundle.crt so the workload trusts the per-VM egress CA
+# alongside the image's baked roots.
+MVM_EGRESS_CA_HEX=$(sed -n 's/.*\bmvm\.egress_ca=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+if [ -n "$MVM_EGRESS_CA_HEX" ]; then
+  mkdir -p /run/mvm 2>/dev/null || true
+  printf '%b' "$(echo "$MVM_EGRESS_CA_HEX" | sed 's/../\\x&/g')" > /run/mvm/egress-ca.crt
+  mvm_baked=
+  for mvm_c in /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem /etc/ssl/certs/ca-bundle.crt; do
+    [ -f "$mvm_c" ] && { mvm_baked="$mvm_c"; break; }
+  done
+  if [ -n "$mvm_baked" ] && cat "$mvm_baked" /run/mvm/egress-ca.crt > /run/mvm/ca-bundle.crt 2>/dev/null; then
+    :
+  else
+    cp /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt 2>/dev/null || true
+  fi
+  chmod 0644 /run/mvm/egress-ca.crt /run/mvm/ca-bundle.crt 2>/dev/null || true
+  echo "mvm-oci-init: installed per-VM egress CA"
+fi
+
+# Verb grant (plan-bound agent verb capabilities). The host encoded
+# mvm.verb_grant=<hex(JSON envelope)> onto the kernel cmdline; decode it to
+# the tmpfs so the agent can pin + enforce it before serving RPC.
+MVM_VERB_GRANT_HEX=$(sed -n 's/.*\bmvm\.verb_grant=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+if [ -n "$MVM_VERB_GRANT_HEX" ]; then
+  mkdir -p /run/mvm 2>/dev/null || true
+  printf '%b' "$(echo "$MVM_VERB_GRANT_HEX" | sed 's/../\\x&/g')" > /run/mvm/verb-grant.json
+  chmod 0644 /run/mvm/verb-grant.json 2>/dev/null || true
+  echo "mvm-oci-init: provisioned verb-grant"
+fi
+
+# Guest-side network defense — prefer the overlay-resident netinit.
+MVM_NETINIT=
+if [ -x /mvm/runtime/netinit ]; then
+  MVM_NETINIT=/mvm/runtime/netinit
+elif [ -x /usr/local/bin/mvm-guest-netinit ]; then
+  MVM_NETINIT=/usr/local/bin/mvm-guest-netinit
+fi
+if [ -n "$MVM_NETINIT" ]; then
+  "$MVM_NETINIT" || echo "mvm-oci-init: netinit exited nonzero; continuing"
+fi
+
+# Transparent networking bridge. It configures a TUN/default route, so it is
+# strictly opt-in via the backend-provided kernel cmdline token.
+MVM_NETD_REQUIRED=0
+MVM_NETD_STARTED=0
+MVM_NETD_ENABLED=$(sed -n 's/.*\bmvm\.netd=\([^ ]*\).*/\1/p' /proc/cmdline 2>/dev/null)
+if [ "$MVM_NETD_ENABLED" = 1 ]; then
+  MVM_NETD_REQUIRED=1
+  MVM_GUEST_NETD=
+  if [ -x /mvm/runtime/netd ]; then
+    MVM_GUEST_NETD=/mvm/runtime/netd
+  elif [ -x /usr/local/bin/mvm-guest-netd ]; then
+    MVM_GUEST_NETD=/usr/local/bin/mvm-guest-netd
+  fi
+  if [ -n "$MVM_GUEST_NETD" ]; then
+    "$MVM_GUEST_NETD" &
+    MVM_GUEST_NETD_PID=$!
+    sleep 1
+    if kill -0 "$MVM_GUEST_NETD_PID" 2>/dev/null; then
+      MVM_NETD_STARTED=1
+    else
+      echo "mvm-oci-init: mvm guest netd exited during startup; control plane unavailable" >&2
+    fi
+  else
+    echo "mvm-oci-init: mvm.netd=1 but no mvm guest netd present; networking unavailable" >&2
+  fi
+fi
+
+# The agent is the control plane. Prefer the overlay-resident agent
+# (Firecracker verity overlay); fall back to the baked-in copy when no overlay
+# is attached.
+MVM_AGENT=
+if [ -x /mvm/runtime/agent ]; then
+  MVM_AGENT=/mvm/runtime/agent
+elif [ -x /usr/local/bin/mvm-guest-agent ]; then
+  MVM_AGENT=/usr/local/bin/mvm-guest-agent
+fi
+if [ "$MVM_NETD_REQUIRED" = 1 ] && [ "$MVM_NETD_STARTED" != 1 ]; then
+  echo "mvm-oci-init: not starting guest agent because transparent networking failed to start" >&2
+elif [ -n "$MVM_AGENT" ]; then
+  "$MVM_AGENT" &
+else
+  echo "mvm-oci-init: no mvm guest agent present; control plane unavailable" >&2
+fi
+
+while :; do
+  /bin/sh -c 'sleep 2147483647' 2>/dev/null || sleep 86400 || break
+done
+"#
+    .to_string()
+}
+
 /// Inject the mvm runtime into the OCI-unpacked `rootfs_dir`.
 ///
 /// Idempotent: re-running overwrites the injected files. Returns the paths
@@ -235,6 +383,95 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), io::Error> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn init_script_mounts_pseudofs_and_forks_agent() {
+        let s = oci_init_script();
+        assert!(s.starts_with("#!/bin/sh"));
+        assert!(s.contains("mount -t proc"));
+        assert!(s.contains("mount -t sysfs"));
+        assert!(s.contains("mount -t devtmpfs"));
+        assert!(s.contains("/mvm/runtime"));
+        assert!(s.contains("/mvm/runtime/agent"));
+        assert!(s.contains("/usr/local/bin/mvm-guest-agent"));
+        assert!(s.contains("mvm.netd=1"));
+        assert!(s.contains("/mvm/runtime/netd"));
+        assert!(s.contains("/usr/local/bin/mvm-guest-netd"));
+        assert!(s.contains("\"$MVM_AGENT\" &"));
+        let netinit_at = s.find("mvm-guest-netinit").expect("netinit referenced");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            netinit_at < agent_fork_at,
+            "netinit must run before the agent fork"
+        );
+    }
+
+    #[test]
+    fn init_script_starts_guest_netd_only_when_cmdline_enables_it() {
+        let s = oci_init_script();
+        assert!(s.contains("MVM_NETD_ENABLED=$(sed -n 's/.*\\bmvm\\.netd="));
+        assert!(s.contains("if [ \"$MVM_NETD_ENABLED\" = 1 ]; then"));
+        assert!(s.contains("\"$MVM_GUEST_NETD\" &"));
+        assert!(s.contains("MVM_NETD_REQUIRED=1"));
+        assert!(s.contains("kill -0 \"$MVM_GUEST_NETD_PID\""));
+        assert!(s.contains("not starting guest agent because transparent networking failed"));
+        let netinit_at = s.find("mvm-guest-netinit").expect("netinit referenced");
+        let netd_fork_at = s.find("\"$MVM_GUEST_NETD\" &").expect("netd fork");
+        let agent_gate_at = s
+            .find("if [ \"$MVM_NETD_REQUIRED\" = 1 ]")
+            .expect("agent guarded by netd startup status");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            netinit_at < netd_fork_at,
+            "netinit must run before netd configures the route"
+        );
+        assert!(
+            netd_fork_at < agent_gate_at && agent_gate_at < agent_fork_at,
+            "agent startup must be gated on netd after the netd launch attempt"
+        );
+    }
+
+    #[test]
+    fn init_script_mounts_user_volumes_before_the_agent() {
+        let s = oci_init_script();
+        assert!(s.contains("mvm.uvols="));
+        assert!(s.contains("mount -t virtiofs -o ro"));
+        assert!(s.contains("mount -t virtiofs \"$utag\""));
+        assert!(s.contains("mkdir -p \"$upath\""));
+        assert!(s.contains("guest auto-mount of disks not wired"));
+        let uvols_at = s.find("mvm.uvols=").expect("uvols parse");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            uvols_at < agent_fork_at,
+            "user volumes must mount before the agent fork"
+        );
+    }
+
+    #[test]
+    fn init_script_decodes_verb_grant_before_the_agent() {
+        let s = oci_init_script();
+        assert!(s.contains("mvm.verb_grant="));
+        assert!(s.contains("/run/mvm/verb-grant.json"));
+        let grant_at = s.find("mvm.verb_grant=").expect("verb_grant parse");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            grant_at < agent_fork_at,
+            "verb grant must be decoded before the agent fork"
+        );
+    }
+
+    #[test]
+    fn init_script_decodes_egress_ca_before_the_agent() {
+        let s = oci_init_script();
+        assert!(s.contains("mvm.egress_ca="));
+        assert!(s.contains("/run/mvm/ca-bundle.crt"));
+        let ca_at = s.find("mvm.egress_ca=").expect("egress_ca parse");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            ca_at < agent_fork_at,
+            "egress CA must be decoded before the agent fork"
+        );
+    }
 
     fn fake_bins(dir: &Path) -> MvmRuntimeBinaries {
         let oci_init = dir.join("oci-init.bin");

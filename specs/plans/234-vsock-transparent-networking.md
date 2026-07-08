@@ -62,8 +62,10 @@
       Thread the spawned `mvm-host-netd` authority socket through the workload `VmmSpec`, HVF supervisor JSON, `HostChannels`, and in-house virtio-vsock device; relay guest port `5254` byte-for-byte to the authority; and fail closed with `OP_RST` when no authority is wired.
 - [x] **B2b2b2b — Package and auto-launch the guest bridge for transparent networking.**
       Include `mvm-guest-netd` in the OCI runtime injection set, source-checkout guest-runtime cache, shipped `mvmctl` embedded binaries, and prebuilt install path; have the injected PID 1 start it only when `mvm.netd=1` is present; and have the HVF boot path append that token only when a transparent-network authority socket is wired.
+- [x] **B2b2b2c — Fail closed when requested guest netd cannot stay up.**
+      When `mvm.netd=1` is present, make the injected PID 1 treat `mvm-guest-netd` as required: it records the started pid, verifies the process survives startup, and refuses to start the guest agent if netd is missing or exits immediately.
 - [ ] **B2b2b2 — Connect the guest bridge to the backend authority stream.**
-      Finish live guest-to-host authority supervision across boot failure and stop, then add the first end-to-end guest DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd`.
+      Add the first end-to-end guest DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd`, then prove live stop/reap behavior for both sides.
 - [ ] **C1 — Add DNS plus TCP MVP.**
       Support A/AAAA DNS answers, synthetic IP mapping, TCP connect/data/close, allow-host default port handling, denied-host failure behavior, and bounded backpressure.
 - [ ] **C2 — Add mandatory TLS transform for secret-bearing flows.**
