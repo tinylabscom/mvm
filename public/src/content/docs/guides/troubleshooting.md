@@ -280,32 +280,31 @@ mvmctl dev up --cpus 8 --memory 16
 Force a specific backend:
 ```bash
 mvmctl machine run --flake . --hypervisor firecracker
-mvmctl machine run --flake . --hypervisor vz
+mvmctl machine run --flake . --hypervisor hvf
 mvmctl machine run --flake . --hypervisor libkrun
 mvmctl machine run --flake . --hypervisor qemu    # dev/test, no /dev/kvm
 mvmctl doctor   # check available backends
 ```
 
-### macOS: first-run codesigning for `hvf`, `vz`, and `libkrun`
+### macOS: first-run codesigning for `hvf` and `libkrun`
 
-The macOS backends — `hvf` (the default), `vz`, and `libkrun` — need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
+The macOS backends — `hvf` (the default) and `libkrun` — need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
 
-- `com.apple.security.virtualization` — required by `Virtualization.framework` (the `vz` backend).
 - `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `hvf` and `libkrun` backends).
 
-On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both entitlements and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `hvf`, `vz`, and `libkrun` does not re-sign.
+On the **first** run of either backend, `mvmctl` ad-hoc signs itself with the entitlement and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `hvf` and `libkrun` does not re-sign.
 
 What you'll see on the first run:
 
 ```
 $ mvmctl machine run --flake . --hypervisor hvf
-INFO Signing binary with virtualization + hypervisor entitlements...
+INFO Signing binary with hypervisor entitlement...
 …starts the VM…
 ```
 
-On macOS 14+ the ad-hoc signature is accepted by Gatekeeper without an extra prompt. If you had previously installed `mvmctl` from a Homebrew bottle signed against an older entitlement set (virtualization only), the re-spawn will trigger once on the next run after upgrade to lift the binary to both entitlements; subsequent runs are silent.
+On macOS 14+ the ad-hoc signature is accepted by Gatekeeper without an extra prompt. If you had previously installed `mvmctl` from a Homebrew bottle signed against a different entitlement set, the re-spawn will trigger once on the next run after upgrade to lift the binary to the hypervisor entitlement; subsequent runs are silent.
 
-To pre-sign in CI (skip the re-spawn entirely), set `MVM_SIGNED=1` once the binary on disk already carries both entitlements — the wrapper trusts the env var and skips the codesign probe.
+To pre-sign in CI (skip the re-spawn entirely), set `MVM_SIGNED=1` once the binary on disk already carries the hypervisor entitlement — the wrapper trusts the env var and skips the codesign probe.
 
 If the signing step itself fails, check that the Xcode command-line tools are installed:
 

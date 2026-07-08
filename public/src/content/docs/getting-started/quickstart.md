@@ -55,7 +55,7 @@ This single command detects your platform and handles everything. **Builds run i
 3. Drops you into a dev shell
 
 **On macOS 26+ Apple Silicon:**
-1. Selects Apple Virtualization.framework (the `vz` backend, bundled with the OS)
+1. Selects the HVF backend (Hypervisor.framework, vsock-only, no Homebrew deps)
 2. Boots the builder microVM there; `nix build` runs inside it
 3. Drops you into a dev shell
 

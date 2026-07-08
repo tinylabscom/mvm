@@ -17,7 +17,7 @@ mvm's job is to let you run **untrusted code** — third-party software, AI-gene
 ├───────────────────────────────────────────────────────────┤
 │ L2 — VMM (Firecracker, Rust, seccomp-jailed)              │
 ├───────────────────────────────────────────────────────────┤
-│ L1 — Host + hypervisor (KVM / Apple VZ / HVF)             │
+│ L1 — Host + hypervisor (KVM / HVF)                        │
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -63,8 +63,7 @@ mvm runs on multiple backends. Not all backends carry all seven claims. The tier
 |---|---|---|---|---|---|---|
 | **Firecracker** (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-002. All seven claims hold. |
 | **HVF** (macOS 26+ Apple Silicon — auto-default) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 (verified boot) partial; `Hypervisor.framework`, vsock-only egress (no guest NIC). The macOS-26 auto-default. |
-| **Vz** (macOS 26+ Apple Silicon — opt-in) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same claims as HVF; Apple AVF API on the same `Hypervisor.framework` primitive. Opt-in (`--hypervisor vz`), sunsetting. |
-| **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same as HVF/Vz. |
+| **libkrun** (Linux KVM, macOS Apple Silicon HVF) | ✅ | ✅ | ⚠️ | ✅ | ✅ | Tier 2 — same as HVF. |
 | **QEMU** (Linux KVM/TCG) | ✅ | ⚠️ | ⚠️ | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (`--hypervisor qemu`; the no-`/dev/kvm` path via TCG software emulation). Never selected by `mvmd`. |
 
 ✅ = layer fully enforced.  ⚠️ = layer partial (named exception).  ❌ = layer collapsed (claim does not apply).
@@ -76,7 +75,7 @@ mvm has **no Tier 3** and no container/Docker fallback. A shared-kernel containe
 ### Choosing a tier
 
 - **Production / untrusted code** → Tier 1. Linux + KVM + Firecracker. No exceptions.
-- **macOS dev or CI on Apple Silicon** → Tier 2 (Vz or libkrun). Verified boot is the open item.
+- **macOS dev or CI on Apple Silicon** → Tier 2 (HVF or libkrun). Verified boot is the open item.
 - **Linux dev/test without `/dev/kvm`** → Tier 2 QEMU (`--hypervisor qemu`, TCG software emulation). A real microVM, slower; dev/test only.
 - **macOS Intel / native Windows** → unsupported for local microVM isolation today (no container fallback). WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
 

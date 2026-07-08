@@ -39,8 +39,7 @@ pub struct BridgeConfigJson {
 
     /// `~/.mvm/audit/gateway-<vm>.sock` — subscriber socket the
     /// bridge binds at startup so `nc -U <path>` consumers see the
-    /// live NDJSON flow-event tail. Same shape as the libkrun /
-    /// Vz drainer paths.
+    /// live NDJSON flow-event tail. Same shape as the libkrun path.
     pub audit_socket: PathBuf,
 
     /// `~/.mvm/keys/` — directory containing the host signer key.

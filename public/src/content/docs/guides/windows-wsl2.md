@@ -10,7 +10,7 @@ This page captures WSL2 research notes for future Windows support. WSL2 is **not
 WSL2 is a real Linux kernel running under Hyper-V, but mvm does not yet treat it as a supported backend. A future WSL2 path would require nested KVM to be present and tested in CI. From inside a capable WSL2 distro:
 
 - **`/dev/kvm` may be available** on some Windows 11/WSL2 combinations. When it is missing, mvm cannot run the Linux KVM path.
-- **Filesystem is real Linux ext4**. APFS-style copy-on-write isn't here yet (Sprint 47 Plan D ships APFS CoW for macOS Vz; WSL2's ext4 will fall back to byte-copy in `mvm-runtime::vm::cow::reflink_or_copy`), but everything functionally works.
+- **Filesystem is real Linux ext4**. APFS-style copy-on-write isn't here yet (Sprint 47 Plan D ships APFS CoW for macOS; WSL2's ext4 will fall back to byte-copy in `mvm-runtime::vm::cow::reflink_or_copy`), but everything functionally works.
 - **Networking is bridged** through Hyper-V's vmswitch. Port forwarding from Windows host to a WSL2 distro is automatic for `127.0.0.1` binds; mvm guests behind the WSL2 distro need an additional hop, covered below.
 
 The cost is one nested VM hop: workload runs inside a microVM, inside WSL2, inside Hyper-V on the Windows host. We do not currently publish performance or support guarantees for that stack.

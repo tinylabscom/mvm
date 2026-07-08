@@ -60,8 +60,8 @@ enforced.
 
 ## Kernel formats: why there's no boot-protocol code
 
-Every backend mvm targets — Firecracker, libkrun, and the Tier-2 Vz/QEMU
-paths — is a **direct-boot** VMM: it loads an uncompressed ELF `vmlinux`
+Every backend mvm targets — Firecracker, HVF, libkrun, and the Tier-2 QEMU
+path — is a **direct-boot** VMM: it loads an uncompressed ELF `vmlinux`
 (x86_64) or a flat arm64 `Image` and jumps straight to the kernel entry point.
 None of them run the x86 real-mode setup stub, the UEFI/PE handoff, or construct
 a `boot_params` page. So mvm carries **none** of that machinery, and `KernelFormat`

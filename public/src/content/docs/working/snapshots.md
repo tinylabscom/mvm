@@ -10,7 +10,7 @@ Cold mode means a workload is not currently consuming a running guest, but it ha
 | Path | Backend | Commands | Status |
 | --- | --- | --- | --- |
 | Sealed instance snapshot | Firecracker | `mvmctl pause`, `mvmctl resume`, `mvmctl snapshot ls`, `mvmctl snapshot rm` | Shipped for the Firecracker snapshot path. |
-| Memory checkpoint (vm-full) | Vz | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore`, `mvmctl checkpoint ls`, `mvmctl checkpoint rm` | Shipped on supported macOS versions. |
+| Memory checkpoint (vm-full) | Firecracker (Linux) | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore`, `mvmctl checkpoint ls`, `mvmctl checkpoint rm` | Currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore. |
 | Pool instance sleep | Firecracker pool lifecycle | internal pool lifecycle APIs | Implemented in pool lifecycle; public docs should stay tied to the CLI surface. |
 
 Other backends may support stop/start without machine-state recovery. Do not assume snapshot or checkpoint support unless the active backend reports it.
@@ -40,9 +40,9 @@ mvmctl snapshot ls
 mvmctl snapshot rm agent-sandbox
 ```
 
-## Vz memory checkpoints
+## Full-VM memory checkpoints
 
-On supported macOS hosts, Vz memory checkpoints capture full guest state:
+Full-VM memory checkpoints capture full guest state. They are currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore:
 
 ```sh
 mvmctl checkpoint create agent-sandbox --class vm-full
@@ -69,7 +69,7 @@ mvmctl checkpoint fork agent-sandbox --name <checkpoint-name> --into new-sandbox
 ## Security implications
 
 - Snapshot files contain guest memory and runtime state. Treat them as sensitive.
-- Restore integrity is backend-specific: Firecracker uses the sealed instance envelope; Vz uses audit-chain hash comparison.
+- Restore integrity is backend-specific: Firecracker uses the sealed instance envelope; full-VM checkpoints use audit-chain hash comparison.
 - Deleting a snapshot removes the recovery artifact but does not by itself prove storage-level erasure.
 - Snapshots can preserve credentials or derived tokens that existed inside the guest at snapshot time.
 

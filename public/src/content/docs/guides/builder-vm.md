@@ -83,7 +83,7 @@ mvmctl build --flake .
 mvmctl machine run --flake . --hypervisor hvf
 ```
 
-On macOS 26+ the default runtime backend is HVF (Hypervisor.framework, vsock-only); `--hypervisor vz` opts into Apple Virtualization instead. The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
+On macOS 26+ the default runtime backend is HVF (Hypervisor.framework, vsock-only). The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
 
 For development convenience, `mvmctl run` combines the two phases:
 
