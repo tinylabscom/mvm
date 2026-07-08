@@ -346,8 +346,65 @@ let out = client.exec_machine(&machine.id, vec!["uname".into(), "-sr".into()]).a
 println!("{}", String::from_utf8_lossy(&out.stdout));
 ```
 
-The same facade is what the CLI, the GUI/studio, and the fleet orchestrator all
-consume — one surface, every frontend.
+The same facade is what the CLI, the desktop **studio** GUI, and the fleet
+orchestrator (**mvmd**) all consume — one surface, every frontend.
+
+#### Embedding mvm — studio, mvmd, and custom frontends
+
+There are two integration seams, depending on what you're building.
+
+**Driving machines from a frontend** (the desktop studio, a custom GUI/CLI, a web
+service): link `mvm-client` and go through the `MvmClient` trait. `connect(Target)`
+picks the transport; the returned `Box<dyn MvmClient>` behaves identically either
+way, so the same UI code drives a local host or a remote fleet:
+
+```rust
+use mvm_client::{connect, MvmClient, Target};
+
+// In-process — this host's microVMs, auto-selected VMM. No daemon required.
+let local = connect(Target::Local)?;              // == mvm_client_local::LocalBackend::new()
+
+// Remote — a hosted fleet or a local sidecar, over REST (needs feature `remote`).
+let remote = connect(Target::Gateway {
+    base_url: "https://fleet.example.com".into(),
+    token: std::env::var("MVM_TOKEN")?,
+})?;
+
+// Identical methods on both: create / run / start / stop / remove, exec, logs, reconfigure.
+for m in remote.list_machines(Default::default()).await? {
+    println!("{}", m.id);
+}
+```
+
+The **studio** desktop app is exactly this pattern — a `GatewayBackend` by
+default, or the in-process `LocalBackend` when built `--features local` with
+`MVM_STUDIO_BACKEND=local` — one `dyn MvmClient` behind its Tauri commands. Its
+`Cargo.toml`:
+
+```toml
+mvm-client       = { path = "../mvm/crates/mvm-client", features = ["remote"] }
+mvm-client-local = { path = "../mvm/crates/mvm-client-local" }   # optional, gated by a `local` feature
+```
+
+**Embedding the runtime in a host-side daemon** (the **mvmd** fleet orchestrator,
+or your own controller that manages instances directly): link the `mvmctl`
+library facade for the runtime types, the host shell seam, and the gated
+host↔guest IPC transport. Keep `default-features = false` so no async runtime is
+pulled in unless you opt into the transport:
+
+```toml
+mvmctl = { path = "../mvm", default-features = false, features = ["hostd-transport"] }
+```
+
+```rust
+use mvmctl::core::{instance::InstanceStatus, pool::Role, protocol};
+use mvmctl::runtime::shell;   // host command-execution seam
+```
+
+`mvmd` reconciles pools/instances and reaches each guest agent over the
+`hostd-transport` protocol through this seam, while workload-driving frontends
+stay on the `MvmClient` facade above. Rule of thumb: **drive sandboxes → `MvmClient`;
+run the host that hosts them → the `mvmctl` facade.**
 
 ---
 
