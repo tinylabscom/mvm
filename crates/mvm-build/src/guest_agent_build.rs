@@ -1,5 +1,5 @@
-//! Host-side source of the guest agent, netinit, and egress-client binaries baked into an
-//! OCI rootfs ([`crate::oci_runtime_inject`]).
+//! Host-side source of the guest runtime binaries baked into an OCI rootfs
+//! ([`crate::oci_runtime_inject`]).
 //!
 //! An mkGuest rootfs gets the agent from a nix build inside the builder
 //! VM. An arbitrary OCI image has no nix build of its own, so for the
@@ -41,9 +41,31 @@ pub enum GuestAgentBuildError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuestAgentLayout {
     pub dir: PathBuf,
+    pub oci_init: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
     pub egress_client: PathBuf,
+    pub entrypoint_runner: PathBuf,
+}
+
+/// Built guest runtime binary paths ready to install into the cache.
+#[derive(Debug, Clone, Copy)]
+pub struct GuestRuntimeBinaryPaths<'a> {
+    pub oci_init: &'a Path,
+    pub agent: &'a Path,
+    pub netinit: &'a Path,
+    pub egress_client: &'a Path,
+    pub entrypoint_runner: &'a Path,
+}
+
+/// Embedded guest runtime binary bytes ready to install into the cache.
+#[derive(Debug, Clone, Copy)]
+pub struct GuestRuntimeBinaryBytes<'a> {
+    pub oci_init: &'a [u8],
+    pub agent: &'a [u8],
+    pub netinit: &'a [u8],
+    pub egress_client: &'a [u8],
+    pub entrypoint_runner: &'a [u8],
 }
 
 /// Cache segment keying the agent build variant. The `run --image` path needs
@@ -62,22 +84,30 @@ impl GuestAgentLayout {
             .join(arch.to_string())
             .join(AGENT_VARIANT);
         Self {
+            oci_init: dir.join("mvm-oci-init"),
             agent: dir.join("mvm-guest-agent"),
             netinit: dir.join("mvm-guest-netinit"),
             egress_client: dir.join("mvm-egress-client"),
+            entrypoint_runner: dir.join("mvm-oci-entrypoint"),
             dir,
         }
     }
 
     fn is_complete(&self) -> bool {
-        self.agent.is_file() && self.netinit.is_file() && self.egress_client.is_file()
+        self.oci_init.is_file()
+            && self.agent.is_file()
+            && self.netinit.is_file()
+            && self.egress_client.is_file()
+            && self.entrypoint_runner.is_file()
     }
 
     fn binaries(&self) -> MvmRuntimeBinaries {
         MvmRuntimeBinaries {
+            oci_init: self.oci_init.clone(),
             agent: self.agent.clone(),
             netinit: self.netinit.clone(),
             egress_client: self.egress_client.clone(),
+            entrypoint_runner: self.entrypoint_runner.clone(),
         }
     }
 }
@@ -115,7 +145,7 @@ impl GuestAgentBuildSpec {
         musl_target_triple(self.arch)
     }
 
-    /// `cargo zigbuild` argv. Builds both guest bins with `dev-shell`
+    /// `cargo zigbuild` argv. Builds the guest runtime bins with `dev-shell`
     /// (the `run --image` exec path uses the dev-shell-gated handler,
     /// matching `nix/packages/mvm-guest-agent.nix`).
     pub fn argv(&self) -> Vec<String> {
@@ -136,6 +166,10 @@ impl GuestAgentBuildSpec {
             "mvm-guest-agent".to_string(),
             "--bin".to_string(),
             "mvm-guest-netinit".to_string(),
+            "--bin".to_string(),
+            "mvm-oci-init".to_string(),
+            "--bin".to_string(),
+            "mvm-oci-entrypoint".to_string(),
             "-p".to_string(),
             "mvm-guest-helpers".to_string(),
             "--bin".to_string(),
@@ -148,8 +182,9 @@ impl GuestAgentBuildSpec {
     /// Paths the build drops the binaries at under the workspace target
     /// dir.
     pub fn output_dir(&self) -> PathBuf {
-        self.workspace_root
-            .join("target")
+        std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| self.workspace_root.join("target"))
             .join(self.target_triple())
             .join("release")
     }
@@ -168,26 +203,37 @@ pub fn resolve_or_build_guest_binaries(
         return Ok(layout.binaries());
     }
     let spec = GuestAgentBuildSpec::new(workspace_root.to_path_buf(), arch);
-    let (agent, netinit, egress_client) = build_guest_binaries(&spec)?;
-    install_into_cache(&agent, &netinit, &egress_client, cache_root, version, arch)
+    let built = build_guest_binaries(&spec)?;
+    install_into_cache(
+        GuestRuntimeBinaryPaths {
+            oci_init: &built.0,
+            agent: &built.1,
+            netinit: &built.2,
+            egress_client: &built.3,
+            entrypoint_runner: &built.4,
+        },
+        cache_root,
+        version,
+        arch,
+    )
 }
 
 /// Copy already-built guest binaries into the cache and return the
 /// cached paths. Lets a caller that already has the binaries (e.g. a
 /// prior `cargo zigbuild`) pre-warm the cache without rebuilding.
 pub fn install_into_cache(
-    agent_src: &Path,
-    netinit_src: &Path,
-    egress_client_src: &Path,
+    src: GuestRuntimeBinaryPaths<'_>,
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
 ) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
     let layout = GuestAgentLayout::under(cache_root, version, arch);
     std::fs::create_dir_all(&layout.dir)?;
-    install_one(agent_src, &layout.agent)?;
-    install_one(netinit_src, &layout.netinit)?;
-    install_one(egress_client_src, &layout.egress_client)?;
+    install_one(src.oci_init, &layout.oci_init)?;
+    install_one(src.agent, &layout.agent)?;
+    install_one(src.netinit, &layout.netinit)?;
+    install_one(src.egress_client, &layout.egress_client)?;
+    install_one(src.entrypoint_runner, &layout.entrypoint_runner)?;
     Ok(layout.binaries())
 }
 
@@ -206,18 +252,18 @@ pub fn cached_guest_binaries(
 /// build time) into the cache. The end-user path: a shipped mvmctl has no
 /// source checkout to cross-compile from, so it writes the embedded bytes here.
 pub fn install_prebuilt_guest_binaries(
-    agent_bytes: &[u8],
-    netinit_bytes: &[u8],
-    egress_client_bytes: &[u8],
+    bytes: GuestRuntimeBinaryBytes<'_>,
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
 ) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
     let layout = GuestAgentLayout::under(cache_root, version, arch);
     std::fs::create_dir_all(&layout.dir)?;
-    write_exec(&layout.agent, agent_bytes)?;
-    write_exec(&layout.netinit, netinit_bytes)?;
-    write_exec(&layout.egress_client, egress_client_bytes)?;
+    write_exec(&layout.oci_init, bytes.oci_init)?;
+    write_exec(&layout.agent, bytes.agent)?;
+    write_exec(&layout.netinit, bytes.netinit)?;
+    write_exec(&layout.egress_client, bytes.egress_client)?;
+    write_exec(&layout.entrypoint_runner, bytes.entrypoint_runner)?;
     Ok(layout.binaries())
 }
 
@@ -240,7 +286,7 @@ fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
 /// Run `cargo zigbuild` for the spec, returning the built binary paths.
 pub fn build_guest_binaries(
     spec: &GuestAgentBuildSpec,
-) -> Result<(PathBuf, PathBuf, PathBuf), GuestAgentBuildError> {
+) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf), GuestAgentBuildError> {
     let argv = spec.argv();
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
@@ -265,15 +311,23 @@ pub fn build_guest_binaries(
         });
     }
     let dir = spec.output_dir();
+    let oci_init = dir.join("mvm-oci-init");
     let agent = dir.join("mvm-guest-agent");
     let netinit = dir.join("mvm-guest-netinit");
     let egress_client = dir.join("mvm-egress-client");
-    for p in [&agent, &netinit, &egress_client] {
+    let entrypoint_runner = dir.join("mvm-oci-entrypoint");
+    for p in [
+        &oci_init,
+        &agent,
+        &netinit,
+        &egress_client,
+        &entrypoint_runner,
+    ] {
         if !p.is_file() {
             return Err(GuestAgentBuildError::OutputMissing(p.clone()));
         }
     }
-    Ok((agent, netinit, egress_client))
+    Ok((oci_init, agent, netinit, egress_client, entrypoint_runner))
 }
 
 /// `rustup which rustc` path, or `None` if rustup isn't installed.
@@ -313,30 +367,43 @@ mod tests {
     fn install_prebuilt_then_cached_round_trips() {
         let cache = tempfile::tempdir().unwrap();
         let arch = GuestArch::Aarch64;
+        let version = env!("CARGO_PKG_VERSION");
 
         // Nothing cached yet.
-        assert!(cached_guest_binaries(cache.path(), "9.9.9", arch).is_none());
+        assert!(cached_guest_binaries(cache.path(), version, arch).is_none());
 
         // Install embedded-style bytes, then the cache lookup finds them.
         let bins = install_prebuilt_guest_binaries(
-            b"fake-agent-elf",
-            b"fake-netinit-elf",
-            b"fake-egress-client-elf",
+            GuestRuntimeBinaryBytes {
+                oci_init: b"fake-oci-init-elf",
+                agent: b"fake-agent-elf",
+                netinit: b"fake-netinit-elf",
+                egress_client: b"fake-egress-client-elf",
+                entrypoint_runner: b"fake-entrypoint-runner-elf",
+            },
             cache.path(),
-            "9.9.9",
+            version,
             arch,
         )
         .expect("install prebuilt");
+        assert!(bins.oci_init.is_file());
         assert!(bins.agent.is_file());
         assert!(bins.netinit.is_file());
         assert!(bins.egress_client.is_file());
+        assert!(bins.entrypoint_runner.is_file());
+        assert_eq!(std::fs::read(&bins.oci_init).unwrap(), b"fake-oci-init-elf");
         assert_eq!(std::fs::read(&bins.agent).unwrap(), b"fake-agent-elf");
         assert_eq!(
             std::fs::read(&bins.egress_client).unwrap(),
             b"fake-egress-client-elf"
         );
+        assert_eq!(
+            std::fs::read(&bins.entrypoint_runner).unwrap(),
+            b"fake-entrypoint-runner-elf"
+        );
 
-        let cached = cached_guest_binaries(cache.path(), "9.9.9", arch).expect("now cached");
+        let cached = cached_guest_binaries(cache.path(), version, arch).expect("now cached");
+        assert_eq!(cached.oci_init, bins.oci_init);
         assert_eq!(cached.agent, bins.agent);
         // Executable bit is set on the installed binary.
         #[cfg(unix)]
@@ -364,25 +431,21 @@ mod tests {
 
     #[test]
     fn layout_is_versioned_arched_and_variant_keyed() {
-        let l = GuestAgentLayout::under(Path::new("/c"), "0.16.1", GuestArch::Aarch64);
+        let version = env!("CARGO_PKG_VERSION");
+        let l = GuestAgentLayout::under(Path::new("/c"), version, GuestArch::Aarch64);
+        let expected_dir = PathBuf::from("/c")
+            .join("guest-agent")
+            .join(version)
+            .join("aarch64")
+            .join("dev-shell");
         // The `dev-shell` segment keys the variant so a stale same-version agent
         // built without dev-shell is never reused for the exec-capable request.
-        assert_eq!(
-            l.dir,
-            PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell")
-        );
-        assert_eq!(
-            l.agent,
-            PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell/mvm-guest-agent")
-        );
-        assert_eq!(
-            l.netinit,
-            PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell/mvm-guest-netinit")
-        );
-        assert_eq!(
-            l.egress_client,
-            PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell/mvm-egress-client")
-        );
+        assert_eq!(l.dir, expected_dir);
+        assert_eq!(l.oci_init, l.dir.join("mvm-oci-init"));
+        assert_eq!(l.agent, l.dir.join("mvm-guest-agent"));
+        assert_eq!(l.netinit, l.dir.join("mvm-guest-netinit"));
+        assert_eq!(l.egress_client, l.dir.join("mvm-egress-client"));
+        assert_eq!(l.entrypoint_runner, l.dir.join("mvm-oci-entrypoint"));
     }
 
     #[test]
@@ -394,6 +457,8 @@ mod tests {
         assert!(argv.contains(&"aarch64-unknown-linux-musl".to_string()));
         assert!(argv.contains(&"mvm-guest-agent".to_string()));
         assert!(argv.contains(&"mvm-guest-netinit".to_string()));
+        assert!(argv.contains(&"mvm-oci-init".to_string()));
+        assert!(argv.contains(&"mvm-oci-entrypoint".to_string()));
         assert!(argv.contains(&"mvm-egress-client".to_string()));
         assert!(argv.contains(&"mvm-guest-helpers".to_string()));
         assert!(argv.contains(&"mvm-guest/dev-shell".to_string()));
@@ -407,31 +472,45 @@ mod tests {
     #[test]
     fn install_and_resolve_round_trips_from_cache() {
         let tmp = tempfile::tempdir().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
+        let oci_init_src = tmp.path().join("i");
         let agent_src = tmp.path().join("a");
         let netinit_src = tmp.path().join("n");
         let egress_client_src = tmp.path().join("e");
+        let entrypoint_runner_src = tmp.path().join("r");
+        std::fs::write(&oci_init_src, b"INIT").unwrap();
         std::fs::write(&agent_src, b"AGENT").unwrap();
         std::fs::write(&netinit_src, b"NETINIT").unwrap();
         std::fs::write(&egress_client_src, b"EGRESS").unwrap();
+        std::fs::write(&entrypoint_runner_src, b"RUNNER").unwrap();
         let cache = tmp.path().join("cache");
 
         let installed = install_into_cache(
-            &agent_src,
-            &netinit_src,
-            &egress_client_src,
+            GuestRuntimeBinaryPaths {
+                oci_init: &oci_init_src,
+                agent: &agent_src,
+                netinit: &netinit_src,
+                egress_client: &egress_client_src,
+                entrypoint_runner: &entrypoint_runner_src,
+            },
             &cache,
-            "0.16.1",
+            version,
             GuestArch::Aarch64,
         )
         .expect("install");
+        assert_eq!(std::fs::read(&installed.oci_init).unwrap(), b"INIT");
         assert_eq!(std::fs::read(&installed.agent).unwrap(), b"AGENT");
         assert_eq!(std::fs::read(&installed.egress_client).unwrap(), b"EGRESS");
+        assert_eq!(
+            std::fs::read(&installed.entrypoint_runner).unwrap(),
+            b"RUNNER"
+        );
 
         // A subsequent resolve hits the cache and never builds (the
         // workspace path is bogus; if it built it would fail).
         let resolved = resolve_or_build_guest_binaries(
             &cache,
-            "0.16.1",
+            version,
             GuestArch::Aarch64,
             Path::new("/nonexistent-workspace"),
         )
@@ -442,12 +521,17 @@ mod tests {
     #[test]
     fn install_rejects_missing_source() {
         let tmp = tempfile::tempdir().unwrap();
+        let version = env!("CARGO_PKG_VERSION");
         let err = install_into_cache(
-            &tmp.path().join("missing-agent"),
-            &tmp.path().join("missing-netinit"),
-            &tmp.path().join("missing-egress-client"),
+            GuestRuntimeBinaryPaths {
+                oci_init: &tmp.path().join("missing-oci-init"),
+                agent: &tmp.path().join("missing-agent"),
+                netinit: &tmp.path().join("missing-netinit"),
+                egress_client: &tmp.path().join("missing-egress-client"),
+                entrypoint_runner: &tmp.path().join("missing-entrypoint-runner"),
+            },
             &tmp.path().join("cache"),
-            "0.16.1",
+            version,
             GuestArch::Aarch64,
         )
         .unwrap_err();

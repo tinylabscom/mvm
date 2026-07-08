@@ -43,6 +43,8 @@ pub struct OciArchiveImage {
     pub manifest_digest: String,
     /// `sha256:<hex>` of the image config blob.
     pub config_digest: String,
+    /// Digest-verified image config JSON blob.
+    pub config_bytes: Vec<u8>,
     /// `architecture` from the image config (`amd64`, `arm64`, …).
     pub architecture: String,
     /// `os` from the image config — always `linux` (others are refused).
@@ -153,6 +155,7 @@ pub fn read_oci_archive<R: Read>(
     Ok(OciArchiveImage {
         manifest_digest,
         config_digest,
+        config_bytes: config_bytes.to_vec(),
         architecture: config.architecture,
         os: config.os,
         layers,
