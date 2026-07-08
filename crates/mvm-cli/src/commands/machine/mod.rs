@@ -147,18 +147,24 @@ impl MachineAction {
 pub(in crate::commands) struct MachineRunArgs {
     /// OCI image reference to boot (pulled or reused from the local cache).
     /// Required for a fresh boot; optional when reconnecting to an existing
-    /// persistent machine by `--name`. Mutually exclusive with `--manifest`
-    /// and `--flake`.
-    #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake"])]
+    /// persistent machine by `--name`. Mutually exclusive with `--manifest`,
+    /// `--flake`, and `--runtime-pack`.
+    #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake", "runtime_pack"])]
     pub image: Option<String>,
     /// Pre-built manifest slot (path to `mvm.toml`, its directory, or a slot
-    /// name). Mutually exclusive with `--image` and `--flake`.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake"])]
+    /// name). Mutually exclusive with `--image`, `--flake`, and
+    /// `--runtime-pack`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake", "runtime_pack"])]
     pub manifest: Option<String>,
     /// Nix flake reference — build in the builder VM, then boot the result.
-    /// Mutually exclusive with `--image` and `--manifest`.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest"])]
+    /// Mutually exclusive with `--image`, `--manifest`, and `--runtime-pack`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest", "runtime_pack"])]
     pub flake: Option<String>,
+    /// Boot from a verified attested runtime pack in the local cache instead
+    /// of building/pulling an image. Its own image source: mutually
+    /// exclusive with `--image`, `--manifest`, and `--flake`.
+    #[arg(long, conflicts_with_all = ["image", "manifest", "flake"])]
+    pub runtime_pack: bool,
     /// Flake package variant (with `--flake`). Omit to use flake default.
     #[arg(long, value_name = "PROFILE", requires = "flake")]
     pub flake_profile: Option<String>,
@@ -326,6 +332,7 @@ impl MachineRunArgs {
             pty: false,
             vm_name: self.name,
             image: self.image,
+            runtime_pack: self.runtime_pack,
             net: self.net,
             allow_host: self.allow_host,
             cpus: self.cpus,
@@ -403,12 +410,16 @@ impl MachineRunArgs {
     }
 
     /// Fresh-boot modes (transient, interactive-transient) have no spec to fall
-    /// back on, so an image, manifest, or flake is mandatory.
+    /// back on, so an image, manifest, flake, or runtime pack is mandatory.
     fn require_image_for_fresh_boot(&self) -> Result<()> {
-        if self.image.is_none() && self.manifest.is_none() && self.flake.is_none() {
+        if self.image.is_none()
+            && self.manifest.is_none()
+            && self.flake.is_none()
+            && !self.runtime_pack
+        {
             bail!(
-                "machine run needs `--image <ref>`, `--manifest <path>`, or `--flake <path>` \
-                 to boot a new machine"
+                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, or \
+                 `--runtime-pack` to boot a new machine"
             );
         }
         Ok(())
@@ -2726,6 +2737,7 @@ pub(in crate::commands) fn boot_persistent_by_name(
             // reuses the existing spec, so these only apply on a --flake recreate.
             image: None,
             manifest: None,
+            runtime_pack: false,
             flake_profile: None,
             net: false,
             allow_host: Vec::new(),
@@ -3080,6 +3092,29 @@ mod tests {
         let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
         assert_eq!(args.image.as_deref(), Some("alpine"));
         assert_eq!(args.argv, vec!["echo", "hello"]);
+    }
+
+    #[test]
+    fn run_parses_runtime_pack_flag_and_forwards_to_run_args() {
+        let args = parse_run(&["run", "--runtime-pack", "--", "true"]).expect("parse");
+        assert!(args.runtime_pack);
+        let run = args.into_run_args();
+        assert!(run.runtime_pack);
+    }
+
+    #[test]
+    fn run_runtime_pack_conflicts_with_image_manifest_and_flake() {
+        let err = parse_run(&["run", "--runtime-pack", "--image", "alpine", "--", "true"])
+            .expect_err("--runtime-pack conflicts with --image");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let err = parse_run(&["run", "--runtime-pack", "--manifest", "base", "--", "true"])
+            .expect_err("--runtime-pack conflicts with --manifest");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+        let err = parse_run(&["run", "--runtime-pack", "--flake", ".", "--", "true"])
+            .expect_err("--runtime-pack conflicts with --flake");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
