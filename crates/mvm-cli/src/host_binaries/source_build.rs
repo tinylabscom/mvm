@@ -160,11 +160,17 @@ pub(crate) fn load_stage0_init_bytes(cache_root: &Path) -> Result<Vec<u8>, HostB
 }
 
 fn build_host_binaries(spec: &HostBinaryBuildSpec) -> Result<PathBuf, HostBinaryBuildError> {
+    let zigbuild_xdg_cache_home = spec.target_dir.join("xdg-cache");
+    let cargo_zigbuild_cache_root = zigbuild_xdg_cache_home.join("cargo-zigbuild");
+    prime_cargo_zigbuild_probe_source_at(&cargo_zigbuild_probe_source_path_under(
+        &cargo_zigbuild_cache_root,
+    ))?;
     let argv = spec.argv();
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(&spec.workspace_root)
-        .env("CARGO_TARGET_DIR", &spec.target_dir);
+        .env("CARGO_TARGET_DIR", &spec.target_dir)
+        .env("XDG_CACHE_HOME", &zigbuild_xdg_cache_home);
     if let Some(rustc) = rustup_rustc() {
         cmd.env("RUSTC", rustc);
     }
@@ -190,6 +196,24 @@ fn build_host_binaries(spec: &HostBinaryBuildSpec) -> Result<PathBuf, HostBinary
         }
     }
     Ok(dir)
+}
+
+fn prime_cargo_zigbuild_probe_source_at(path: &Path) -> Result<(), HostBinaryBuildError> {
+    if path.is_file() {
+        return Ok(());
+    }
+    let parent = path.parent().ok_or_else(|| {
+        HostBinaryBuildError::OutputMissing(PathBuf::from(".intentionally-empty-file.c"))
+    })?;
+    std::fs::create_dir_all(parent)?;
+    std::fs::write(path, [])?;
+    Ok(())
+}
+
+fn cargo_zigbuild_probe_source_path_under(cache_root: &Path) -> PathBuf {
+    cache_root
+        .join(env!("MVM_PINNED_CARGO_ZIGBUILD"))
+        .join(".intentionally-empty-file.c")
 }
 
 fn source_checkout_root() -> Option<PathBuf> {
@@ -267,6 +291,16 @@ fn set_exec(_path: &Path) -> Result<(), HostBinaryBuildError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prime_cargo_zigbuild_probe_source_creates_empty_file() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let probe = cargo_zigbuild_probe_source_path_under(tmp.path());
+        prime_cargo_zigbuild_probe_source_at(&probe).expect("prime cargo-zigbuild probe source");
+
+        let bytes = std::fs::read(&probe).expect("read probe source");
+        assert!(bytes.is_empty(), "probe source should stay empty");
+    }
 
     #[test]
     fn layout_is_versioned_and_arch_scoped() {

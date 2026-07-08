@@ -226,9 +226,10 @@ fn build_default_microvm_via_libkrun(
         .to_path_buf();
 
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir =
-        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
-            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+        std::path::Path::new(&host_bins_cache),
+    )
+    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating default-microvm dev out dir {out_dir}"))?;
