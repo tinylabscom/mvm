@@ -2097,6 +2097,210 @@ fn try_fetch_revocation_list() -> Result<Option<mvm_core::crypto::image_verify::
     Ok(Some(list))
 }
 
+/// Fetch + verify the project's signed *pack* revocation list, caching it
+/// under `~/.cache/mvm/pack-revocations/`. Same channel and cache policy as
+/// [`try_fetch_revocation_list`] (the dev-image recall list) — 24h refresh,
+/// 7d offline tolerance, 404 treated as bootstrap state — but backs the
+/// attested builder-pack path instead: a fetched entry augments (never
+/// replaces) the operator's on-disk `pack-trust.json` revocation list.
+///
+/// Only meaningful with the `manifest-verify` feature, which carries the
+/// crypto that verifies a fetched list against the revocations-tag
+/// identity — a build without it never calls this fn at all (the sole
+/// call site in [`super::attested_builder_pack`] lives inside its own
+/// `manifest-verify`-gated block), so the on-disk config alone governs
+/// revocation there. This fn is gated identically (`manifest-verify` plus
+/// `release-artifact-bootstrap` + `builder-vm`, or test) so it compiles
+/// exactly when something calls it.
+///
+/// Never hard-fails: a missing, stale-beyond-7-days, or unverifiable list
+/// is fail-open on *availability* (caller proceeds with config-only
+/// revocation enforcement), while a list that fails signature
+/// verification is never applied (fail-closed on *trust*).
+#[cfg(all(
+    feature = "manifest-verify",
+    any(
+        all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+        test
+    )
+))]
+fn try_fetch_pack_revocation_list() -> Result<Option<mvm_core::pack_revocation::PackRevocationList>>
+{
+    use std::time::{Duration, SystemTime};
+
+    let cache_dir = format!("{}/pack-revocations", mvm_core::config::mvm_cache_dir());
+    std::fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("creating pack-revocations cache dir {cache_dir}"))?;
+    let cache_json = format!("{cache_dir}/pack-revocations.json");
+    let cache_bundle = format!("{cache_dir}/pack-revocations.json.bundle");
+
+    let cache_age = std::fs::metadata(&cache_json)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .unwrap_or(Duration::from_secs(u64::MAX));
+
+    let twenty_four_hours = Duration::from_secs(24 * 60 * 60);
+    let seven_days = Duration::from_secs(7 * 24 * 60 * 60);
+
+    if cache_age > twenty_four_hours {
+        let base = "https://github.com/tinylabscom/mvm/releases/download/revocations";
+        let json_url = format!("{base}/pack-revocations.json");
+        let bundle_url = format!("{base}/pack-revocations.json.bundle");
+
+        match url_exists(&json_url) {
+            Ok(true) => {
+                let tmp_json =
+                    tempfile::NamedTempFile::new().context("creating pack revocations tempfile")?;
+                let tmp_bundle = tempfile::NamedTempFile::new()
+                    .context("creating pack revocations bundle tempfile")?;
+                let tmp_json_path = tmp_json.path().to_string_lossy().into_owned();
+                let tmp_bundle_path = tmp_bundle.path().to_string_lossy().into_owned();
+                let download_result = download_file(&json_url, &tmp_json_path)
+                    .and_then(|()| download_file(&bundle_url, &tmp_bundle_path));
+                match download_result {
+                    Ok(()) => {
+                        std::fs::copy(&tmp_json_path, &cache_json)
+                            .context("caching pack-revocations.json")?;
+                        std::fs::copy(&tmp_bundle_path, &cache_bundle)
+                            .context("caching pack-revocations.json.bundle")?;
+                    }
+                    Err(e) if cache_age <= seven_days => {
+                        ui::warn(&format!(
+                            "Could not refresh pack revocation list ({e}); using cached \
+                             copy (last refreshed {} hours ago).",
+                            cache_age.as_secs() / 3600
+                        ));
+                    }
+                    Err(e) => {
+                        ui::warn(&format!(
+                            "Could not refresh pack revocation list ({e}) and no fresh \
+                             cache is available; proceeding without fetched-list \
+                             enforcement."
+                        ));
+                        return Ok(None);
+                    }
+                }
+            }
+            Ok(false) => {
+                // 404: no pack-revocations entry has been published yet.
+                // Bootstrap state — don't cache this; a future refresh
+                // picks up the first published list.
+                return Ok(None);
+            }
+            Err(e) if cache_age <= seven_days => {
+                ui::warn(&format!(
+                    "Could not probe pack revocation list ({e}); using cached copy."
+                ));
+            }
+            Err(e) => {
+                ui::warn(&format!(
+                    "Could not probe pack revocation list ({e}) and no fresh cache is \
+                     available; proceeding without fetched-list enforcement."
+                ));
+                return Ok(None);
+            }
+        }
+    }
+
+    load_cached_pack_revocation_list(
+        std::path::Path::new(&cache_json),
+        std::path::Path::new(&cache_bundle),
+        chrono::Utc::now(),
+    )
+}
+
+/// Read + keyless-verify a cached pack revocation list from the two sidecar
+/// files [`try_fetch_pack_revocation_list`] maintains. Split out so the
+/// cache-read-and-verify step is unit-testable without touching the
+/// network: an absent cache pair and a verification failure both fold to
+/// `Ok(None)` (fail-open on availability), while a successfully verified
+/// list is returned as `Ok(Some(_))`.
+#[cfg(all(
+    feature = "manifest-verify",
+    any(
+        all(feature = "release-artifact-bootstrap", feature = "builder-vm"),
+        test
+    )
+))]
+fn load_cached_pack_revocation_list(
+    cache_json: &std::path::Path,
+    cache_bundle: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<mvm_core::pack_revocation::PackRevocationList>> {
+    if !cache_json.exists() || !cache_bundle.exists() {
+        return Ok(None);
+    }
+
+    let json_bytes = std::fs::read(cache_json).context("reading cached pack-revocations.json")?;
+    let bundle_bytes =
+        std::fs::read(cache_bundle).context("reading cached pack-revocations.json.bundle")?;
+
+    if std::env::var_os("MVM_SKIP_COSIGN_VERIFY").is_some() {
+        // Same emergency-rotation escape hatch as the dev-image revocation
+        // list: parse without verifying the signature.
+        let list: mvm_core::pack_revocation::PackRevocationList =
+            serde_json::from_slice(&json_bytes)
+                .context("parsing pack revocations JSON without signature verification")?;
+        return Ok(Some(list));
+    }
+
+    match mvm_core::pack_revocation::verify_pack_revocation_list(
+        &json_bytes,
+        &bundle_bytes,
+        &mvm_core::release_trust::revocation_keyless_trust(),
+        now,
+    ) {
+        Ok(list) => Ok(Some(list)),
+        Err(error) => {
+            ui::warn(&format!(
+                "Pack revocation list failed verification ({error}); proceeding without \
+                 fetched-list enforcement."
+            ));
+            Ok(None)
+        }
+    }
+}
+
+#[cfg(all(test, feature = "manifest-verify"))]
+mod pack_revocation_cache_tests {
+    use super::load_cached_pack_revocation_list;
+
+    #[test]
+    fn absent_cache_files_fail_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json = dir.path().join("pack-revocations.json");
+        let bundle = dir.path().join("pack-revocations.json.bundle");
+
+        let result = load_cached_pack_revocation_list(&json, &bundle, chrono::Utc::now())
+            .expect("absent cache is not an error");
+        assert!(
+            result.is_none(),
+            "no cached list should mean no fetched-list enforcement"
+        );
+    }
+
+    #[test]
+    fn garbage_bundle_fails_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json = dir.path().join("pack-revocations.json");
+        let bundle = dir.path().join("pack-revocations.json.bundle");
+        std::fs::write(
+            &json,
+            br#"{"schema_version":1,"revocations":[],"issued_at":"2026-01-01T00:00:00Z","not_after":"2027-01-01T00:00:00Z"}"#,
+        )
+        .expect("write json");
+        std::fs::write(&bundle, b"not a real cosign bundle").expect("write bundle");
+
+        let result = load_cached_pack_revocation_list(&json, &bundle, chrono::Utc::now())
+            .expect("a bad bundle must not be a hard error");
+        assert!(
+            result.is_none(),
+            "a list that fails signature verification must never be applied"
+        );
+    }
+}
+
 /// `mvmctl dev import-image` — sideload a verified dev image from local files.
 ///
 /// Runs the same cosign + SHA-256 + version-pin + max-age +
@@ -2881,7 +3085,35 @@ mod attested_builder_pack {
         {
             let keyless = mvm_core::release_trust::release_keyless_trust(env!("CARGO_PKG_VERSION"));
             let policy = keyless_release_policy(&inputs.policy);
-            let ctx = PackVerifyCtx::keyless(&policy, &keyless, &inputs.trust);
+            // A fetched, project-signed pack revocation list augments the
+            // operator's on-disk trust config rather than replacing it: a
+            // pack revoked by either source is refused. A fetch failure
+            // (network, stale-beyond-tolerance, bad signature) falls back
+            // to the config alone — availability never gates trust. Gated
+            // on `fetch_on_miss` for the same reason the release-pack fetch
+            // below is: a caller that opts into local-cache-only resolution
+            // (tests) must never reach the network.
+            let fetched_revocations = if fetch_on_miss {
+                match super::try_fetch_pack_revocation_list() {
+                    Ok(list) => list,
+                    Err(error) => {
+                        ui::warn(&format!(
+                            "Could not fetch the pack revocation list ({error:#}); falling \
+                             back to the on-disk trust config only."
+                        ));
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let mut revocation_sources: Vec<&dyn mvm_core::packs::PackRevocationChecker> =
+                vec![&inputs.trust];
+            if let Some(fetched) = fetched_revocations.as_ref() {
+                revocation_sources.insert(0, fetched);
+            }
+            let revocations = mvm_core::pack_revocation::CombinedRevocations(revocation_sources);
+            let ctx = PackVerifyCtx::keyless(&policy, &keyless, &revocations);
             if resolve_and_materialize_builder_pack(target_arch, out_dir, &ctx)? {
                 return Ok(true);
             }
