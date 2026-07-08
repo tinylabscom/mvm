@@ -556,6 +556,7 @@ mod tests {
                 channels: channels.iter().map(|c| c.to_string()).collect(),
             }],
             revocations: vec![],
+            ..Default::default()
         }
     }
 

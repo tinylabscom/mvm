@@ -137,6 +137,27 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `CARGO_TARGET_DIR=/tmp/mvm-size-target` for `mvm-vm-host` and
       `mvm-hostd`, then `stat -f '%N %z'` and per-binary `cargo bloat
       --release --crates --locked --target-dir /tmp/mvm-size-target -n 8`.
+- [x] 2026-07-08 Plan 213 §I mirror config + fetch-policy modes: the operator
+      `pack-trust.json` config (`mvm_core::pack_trust::PackTrustConfig`) now
+      carries `mirror: Option<String>` + `fetch_mode: PackFetchMode`
+      (`online` default / `offline_pinned` / `mirror_only` /
+      `local_rebuild_required`), and a pure `resolve_pack_download_base`
+      resolver picks the download base (or `None` when the policy forbids a
+      fetch, erring loudly only when `mirror_only` has no mirror
+      configured). The attested builder-pack download in
+      `crates/mvm-cli/src/commands/env/dev_vz/bootstrap.rs` now honors it
+      instead of a hardcoded GitHub release host, falling back to the
+      existing cache/builder-VM path when fetch is disabled. Deferred: the
+      key-rotation validity window, the plain non-pack builder-VM image
+      download's hardcoded host, and the revocation-list fetch's own
+      hardcoded host — see the plan's §I progress note. Validation:
+      `cargo fmt --all -- --check`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo build --workspace --all-targets`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo build -p mvm-cli --features
+      release-artifact-bootstrap,manifest-verify`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run -p mvm-core --lib
+      pack_trust` (26 passed); `MVM_SKIP_EMBED_BINARIES=1 cargo clippy
+      --workspace --all-targets -- -D warnings` all green.
 - [x] 2026-07-06 internal `mvm-cli` modularity cleanup: `commands::run()` now delegates startup sequencing to small helpers and command execution to a trait-backed dispatcher in `crates/mvm-cli/src/commands/dispatch.rs`, and `crates/mvm-cli/src/commands/image/trust.rs` now owns the OCI registry-auth / cosign trust helpers previously in `image/mod.rs`. Validation used `MVM_SKIP_EMBED_BINARIES=1` for local dev-only build-script bypass: `cargo fmt --all`, targeted `cargo test -p mvm-cli --lib commands::tests::internal_helper_commands_short_circuit_before_startup_side_effects`, and `cargo clippy -p mvm-cli --all-targets -- -D warnings` green.
 - [x] 2026-07-08 OCI `--image` NIC-less vsock-egress activation: the runtime-injected guest `/init` now bakes and starts `mvm-egress-client`, exports SOCKS proxy env vars, and the embedded/cacheable guest runtime includes the third guest binary end-to-end. The final activation is now driven by the **requested outbound policy** (`--net` / `--allow-host`), not a hidden `MVM_VSOCK_EGRESS` toggle: `mvmctl` selects only backends that honestly provide `{ vsock, no_guest_nic, host_vsock_proxy }`, injects/records the proxy env vars automatically, and refuses incapable backends instead of silently degrading to a guest NIC. The same gate now covers persistent OCI-backed boots (`machine run -d --image ...` and `machine start` on an image-backed machine), so stored machine lifecycles cannot slip back onto the legacy NIC/gateway path after a safe transient dry-run. Today that means `hvf`; incapable backends are refused before boot. `ping` remains unsupported because ICMP is not tunneled. Validation: `cargo fmt --all --check`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo check -p mvm-core -p mvm-backend -p mvm-cli -p mvm`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-core allows_egress_covers_every_shape --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-backend vsock_egress_cmdline_token_only_when_policy_allows_egress --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli receipt_env_keys_include_injected_oci_proxy_vars --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli machine_start_backend_selection_refuses_firecracker_for_oci_egress --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo clippy -p mvm-core -p mvm-backend -p mvm-cli -p mvm --tests -- -D warnings` green.
 - [x] 2026-07-08 current-surface docs/spec scrub for Vz deletion: current roadmap and contributor docs now describe HVF + Firecracker + libkrun as the live workload/backend surface, stop advertising Vz as a current backend choice, and align the macOS contributor story around HVF/libkrun instead of Vz.

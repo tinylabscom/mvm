@@ -32,6 +32,30 @@ pub struct PackTrustConfig {
     pub publishers: Vec<TrustedPublisher>,
     #[serde(default)]
     pub revocations: Vec<RevokedPack>,
+    /// Enterprise mirror base URL for pack + revocation downloads. When set,
+    /// downloads target `<mirror>/<asset>` instead of the default release host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mirror: Option<String>,
+    /// How pack artifacts may be acquired. Governs whether a network fetch is
+    /// allowed at all and from where.
+    #[serde(default)]
+    pub fetch_mode: PackFetchMode,
+}
+
+/// Operator policy for how attested pack artifacts may be acquired. Read
+/// alongside `PackTrustConfig::mirror` by [`resolve_pack_download_base`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PackFetchMode {
+    /// Download from the mirror if configured, else the default release host.
+    #[default]
+    Online,
+    /// Never download; use only already-cached, promoted packs.
+    OfflinePinned,
+    /// Download only from the configured mirror; never the default host.
+    MirrorOnly,
+    /// Never download a pack; always build locally in the builder VM.
+    LocalRebuildRequired,
 }
 
 /// One publisher's verifying key and the channels it may publish to. The pubkey
@@ -142,6 +166,32 @@ pub(crate) fn revocation_status(
     RevocationStatus::Good
 }
 
+/// Resolve the base URL a pack/revocation download should target, or `None`
+/// when the policy forbids a network fetch (the caller then uses the local
+/// cache or the builder VM). `default_base` is the project's release host.
+/// Errors only when the policy REQUIRES a mirror that is not configured —
+/// a misconfiguration that must fail loudly, not silently fall back to the
+/// default host.
+pub fn resolve_pack_download_base(
+    config: &PackTrustConfig,
+    default_base: &str,
+) -> Result<Option<String>, PackTrustError> {
+    match config.fetch_mode {
+        PackFetchMode::Online => Ok(Some(
+            config
+                .mirror
+                .clone()
+                .unwrap_or_else(|| default_base.to_string()),
+        )),
+        PackFetchMode::MirrorOnly => config
+            .mirror
+            .clone()
+            .map(Some)
+            .ok_or(PackTrustError::MirrorRequired),
+        PackFetchMode::OfflinePinned | PackFetchMode::LocalRebuildRequired => Ok(None),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PackTrustError {
     #[error("trust config could not be read: {0}")]
@@ -150,6 +200,8 @@ pub enum PackTrustError {
     Parse(#[from] serde_json::Error),
     #[error("trusted publisher pubkey is malformed: {0}")]
     MalformedPubkey(String),
+    #[error("fetch_mode=mirror_only requires a configured mirror")]
+    MirrorRequired,
 }
 
 #[cfg(test)]
@@ -191,6 +243,7 @@ mod tests {
                 publisher(&signing_key(2), &["stable"]),
             ],
             revocations: vec![],
+            ..Default::default()
         }
     }
 
@@ -220,6 +273,32 @@ mod tests {
         let json = serde_json::to_string(&config).expect("serialize");
         let recovered: PackTrustConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(recovered, config);
+    }
+
+    #[test]
+    fn config_roundtrips_with_mirror_and_each_fetch_mode() {
+        for fetch_mode in [
+            PackFetchMode::Online,
+            PackFetchMode::OfflinePinned,
+            PackFetchMode::MirrorOnly,
+            PackFetchMode::LocalRebuildRequired,
+        ] {
+            let mut config = sample_config();
+            config.mirror = Some("https://mirror.example.test/packs".to_string());
+            config.fetch_mode = fetch_mode;
+            let json = serde_json::to_string(&config).expect("serialize");
+            let recovered: PackTrustConfig = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(recovered, config, "fetch_mode {fetch_mode:?} roundtrips");
+        }
+    }
+
+    #[test]
+    fn mirror_and_fetch_mode_default_when_omitted() {
+        let json = serde_json::to_string(&sample_config().publishers).expect("serialize");
+        let raw = format!(r#"{{"publishers": {json}, "revocations": []}}"#);
+        let config: PackTrustConfig = serde_json::from_str(&raw).expect("deserialize");
+        assert_eq!(config.mirror, None);
+        assert_eq!(config.fetch_mode, PackFetchMode::Online);
     }
 
     #[test]
@@ -269,6 +348,7 @@ mod tests {
                 channels: vec!["stable".to_string()],
             }],
             revocations: vec![],
+            ..Default::default()
         };
         fs::write(&path, serde_json::to_vec(&config).expect("json")).expect("write");
         assert!(matches!(
@@ -287,6 +367,7 @@ mod tests {
                 channels: vec!["stable".to_string()],
             }],
             revocations: vec![],
+            ..Default::default()
         };
         fs::write(&path, serde_json::to_vec(&config).expect("json")).expect("write");
         assert!(matches!(
@@ -333,6 +414,7 @@ mod tests {
                 pack_hash: None,
                 reason: "key compromised".to_string(),
             }],
+            ..Default::default()
         };
         assert!(matches!(
             config.status(&key_id, &Sha256Hex::from_bytes(b"anything")),
@@ -356,6 +438,7 @@ mod tests {
                 pack_hash: Some(bad.clone()),
                 reason: "bad build".to_string(),
             }],
+            ..Default::default()
         };
         assert!(matches!(
             config.status(&key_id, &bad),
@@ -456,6 +539,7 @@ mod tests {
         let config = PackTrustConfig {
             publishers: vec![publisher(&key, &["stable"])],
             revocations: vec![],
+            ..Default::default()
         };
         let policy = policy_for(&["stable"]);
         // The config is fed as BOTH trust store and revocation checker.
@@ -477,6 +561,7 @@ mod tests {
         let config = PackTrustConfig {
             publishers: vec![publisher(&signing_key(22), &["stable"])],
             revocations: vec![],
+            ..Default::default()
         };
         let policy = policy_for(&["stable"]);
         let err = verify_pack_at(&manifest, dir.path(), &policy, &config, &config)
@@ -492,6 +577,7 @@ mod tests {
         let config = PackTrustConfig {
             publishers: vec![publisher(&key, &["stable"])],
             revocations: vec![],
+            ..Default::default()
         };
         // Policy allows only "beta"; the pack publishes to "stable".
         let policy = policy_for(&["beta"]);
@@ -512,10 +598,80 @@ mod tests {
                 pack_hash: None,
                 reason: "key compromised".to_string(),
             }],
+            ..Default::default()
         };
         let policy = policy_for(&["stable"]);
         let err = verify_pack_at(&manifest, dir.path(), &policy, &config, &config)
             .expect_err("revoked signer rejected");
         assert!(matches!(err, PackVerifyError::Revoked { .. }));
+    }
+
+    const DEFAULT_BASE: &str = "https://github.com/tinylabscom/mvm/releases/download/v0.0.0";
+    const MIRROR_BASE: &str = "https://mirror.example.test/packs";
+
+    fn config_with(mirror: Option<&str>, fetch_mode: PackFetchMode) -> PackTrustConfig {
+        PackTrustConfig {
+            mirror: mirror.map(str::to_string),
+            fetch_mode,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_online_uses_default_base_without_mirror() {
+        let config = config_with(None, PackFetchMode::Online);
+        assert_eq!(
+            resolve_pack_download_base(&config, DEFAULT_BASE).expect("resolves"),
+            Some(DEFAULT_BASE.to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_online_prefers_mirror_when_set() {
+        let config = config_with(Some(MIRROR_BASE), PackFetchMode::Online);
+        assert_eq!(
+            resolve_pack_download_base(&config, DEFAULT_BASE).expect("resolves"),
+            Some(MIRROR_BASE.to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_mirror_only_uses_mirror_when_set() {
+        let config = config_with(Some(MIRROR_BASE), PackFetchMode::MirrorOnly);
+        assert_eq!(
+            resolve_pack_download_base(&config, DEFAULT_BASE).expect("resolves"),
+            Some(MIRROR_BASE.to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_mirror_only_errs_without_mirror() {
+        let config = config_with(None, PackFetchMode::MirrorOnly);
+        assert!(matches!(
+            resolve_pack_download_base(&config, DEFAULT_BASE),
+            Err(PackTrustError::MirrorRequired)
+        ));
+    }
+
+    #[test]
+    fn resolve_offline_pinned_forbids_fetch_regardless_of_mirror() {
+        for mirror in [None, Some(MIRROR_BASE)] {
+            let config = config_with(mirror, PackFetchMode::OfflinePinned);
+            assert_eq!(
+                resolve_pack_download_base(&config, DEFAULT_BASE).expect("resolves"),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_local_rebuild_required_forbids_fetch_regardless_of_mirror() {
+        for mirror in [None, Some(MIRROR_BASE)] {
+            let config = config_with(mirror, PackFetchMode::LocalRebuildRequired);
+            assert_eq!(
+                resolve_pack_download_base(&config, DEFAULT_BASE).expect("resolves"),
+                None
+            );
+        }
     }
 }

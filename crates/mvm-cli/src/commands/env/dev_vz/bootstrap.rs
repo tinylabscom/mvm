@@ -314,6 +314,8 @@ pub(in crate::commands) mod attested_builder_pack {
     #[cfg(feature = "manifest-verify")]
     use mvm_core::pack_cache::promote;
     use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, resolve_pack};
+    #[cfg(feature = "manifest-verify")]
+    use mvm_core::pack_trust::resolve_pack_download_base;
     use mvm_core::pack_trust::{PackTrustConfig, load_pack_trust_config};
     #[cfg(feature = "manifest-verify")]
     use mvm_core::packs::{COSIGN_BUNDLE_FILE_NAME, PackManifest};
@@ -463,8 +465,28 @@ pub(in crate::commands) mod attested_builder_pack {
     /// process-local tempdir; `promote` only ever copies out of it (never
     /// renames it), so it need not share a filesystem with the pack cache,
     /// and its `Drop` cleans it up on any early return here.
+    ///
+    /// The download base honors the operator's `pack-trust.json` `mirror` +
+    /// `fetch_mode`: `Ok(None)` means the fetch policy forbids a network
+    /// fetch entirely, and the caller falls back to the local cache or the
+    /// builder VM instead of treating it as an error.
     #[cfg(feature = "manifest-verify")]
-    fn fetch_release_builder_pack_staging(arch: &str) -> Result<tempfile::TempDir> {
+    fn fetch_release_builder_pack_staging(arch: &str) -> Result<Option<tempfile::TempDir>> {
+        let trust = load_host_pack_trust();
+        let version = env!("CARGO_PKG_VERSION");
+        let default_base =
+            format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
+        let base_url = match resolve_pack_download_base(&trust, &default_base)? {
+            Some(base_url) => base_url,
+            None => {
+                ui::info(&format!(
+                    "Pack fetch disabled by fetch_mode={:?}; using cache or builder VM.",
+                    trust.fetch_mode
+                ));
+                return Ok(None);
+            }
+        };
+
         let staging = tempfile::Builder::new()
             .prefix("mvm-builder-pack-")
             .tempdir()
@@ -472,8 +494,6 @@ pub(in crate::commands) mod attested_builder_pack {
         let names = builder_vm_artifact_names(arch);
         let manifest_name = format!("builder-vm-{arch}.pack-manifest.json");
         let bundle_name = format!("{manifest_name}.bundle");
-        let version = env!("CARGO_PKG_VERSION");
-        let base_url = format!("https://github.com/tinylabscom/mvm/releases/download/v{version}");
 
         let manifest_dest = staging
             .path()
@@ -516,7 +536,7 @@ pub(in crate::commands) mod attested_builder_pack {
             .into_owned();
         let _ = download_file(&format!("{base_url}/{}", names.cmdline), &cmdline_dest);
 
-        Ok(staging)
+        Ok(Some(staging))
     }
 
     /// Fetch the release channel's published builder pack and promote it into
@@ -524,11 +544,15 @@ pub(in crate::commands) mod attested_builder_pack {
     /// are fail-open: any error is logged and swallowed here, never
     /// propagated, so [`attempt_attested_builder_pack`] always falls
     /// back to the plain checksum download rather than hard-failing `dev up`
-    /// on a network hiccup or a broken publish.
+    /// on a network hiccup or a broken publish. When the fetch policy
+    /// forbids a network fetch, the staging step already logged why and this
+    /// returns without downloading anything — the existing cache/builder-VM
+    /// fallback path then runs, same as a fetch failure.
     #[cfg(feature = "manifest-verify")]
     fn fetch_and_promote_release_builder_pack(arch: &str, ctx: &PackVerifyCtx<'_>) {
         let staging = match fetch_release_builder_pack_staging(arch) {
-            Ok(staging) => staging,
+            Ok(Some(staging)) => staging,
+            Ok(None) => return,
             Err(error) => {
                 ui::warn(&format!(
                     "Fetching the published builder pack failed ({error:#}); \

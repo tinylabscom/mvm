@@ -265,9 +265,9 @@ snapshot) is gated on §C (the content-addressed pack download cache) and §F
 - [ ] Add revocation metadata fetching and offline-cache behavior.
 - [ ] Add key rotation support that accepts overlapping keys only within an
       explicit policy window.
-- [ ] Add enterprise mirror configuration for pack downloads and revocation
+- [x] Add enterprise mirror configuration for pack downloads and revocation
       metadata.
-- [ ] Add policy modes for online default, offline pinned, mirror-only, and
+- [x] Add policy modes for online default, offline pinned, mirror-only, and
       local-rebuild-required operation.
 - [ ] Add tests for revoked artifacts, expired artifacts, stale revocation
       metadata, mirror mismatch, offline pinned launch, and local-rebuild
@@ -284,6 +284,61 @@ snapshot) is gated on §C (the content-addressed pack download cache) and §F
       operator's `pack-trust.json` revocations.
 - [x] Tests: absent cache pair and a garbage cosign bundle both fail open on
       availability while refusing to apply an unverifiable fetched list.
+
+#### §I progress — mirror config + fetch-policy modes (2026-07-08)
+
+- [x] `PackTrustConfig` (the operator's `pack-trust.json`) carries a new
+      `mirror: Option<String>` and `fetch_mode: PackFetchMode` (`online`
+      default, `offline_pinned`, `mirror_only`, `local_rebuild_required`),
+      both `#[serde(default)]` so existing configs keep working unmodified.
+      `mvm_core::pack_trust::resolve_pack_download_base(config, default_base)`
+      is the pure resolver: online prefers the mirror when set, else the
+      release host; mirror-only requires a mirror and errs loudly
+      (`PackTrustError::MirrorRequired`) when misconfigured rather than
+      silently falling back to the public host; offline-pinned and
+      local-rebuild-required both return `None` so the caller skips the
+      network and falls through to the local pack cache or the builder VM.
+- [x] The attested builder-pack download
+      (`fetch_release_builder_pack_staging` /
+      `fetch_and_promote_release_builder_pack` in
+      `crates/mvm-cli/src/commands/env/dev_vz/bootstrap.rs`) resolves its
+      base URL through the config instead of a hardcoded release host.
+      A forbidding fetch mode logs a notice and returns without touching
+      the network; the existing cache/builder-VM fallback then runs
+      unchanged.
+- [x] Tests: `mvm-core::pack_trust` — serde roundtrip with mirror set under
+      each fetch mode, defaulting when the fields are omitted from an
+      on-disk config, and the resolver's full mode × mirror-set/unset
+      matrix (8 cases).
+
+**Deferred, named here rather than implemented:**
+
+- Item 3 (key rotation window — overlapping signing keys valid only within
+  an explicit policy window) is a separate trust-model change: it adds
+  per-identity validity windows to the keyless identity set, not to the
+  operator's `pack-trust.json`. There is no active rotation today, so it
+  stays a design note until a rotation is actually needed. Sketch: extend
+  the embedded keyless identity template with `valid_from` / `valid_until`
+  per signer, and have `mvm_core::release_trust` reject a signature whose
+  signer's window doesn't cover the pack's `signed_at`.
+- The **plain (non-pack) builder-VM image download**
+  (`download_builder_vm_image` in
+  `crates/mvm-cli/src/commands/env/dev_vz/stage0_cache.rs`) also hardcodes
+  the release host. Routing it through `resolve_pack_download_base` needs
+  a signature change (`Result<()>` → something the "policy forbids fetch"
+  case can express) plus a new terminal error message at its sole call
+  site (`perform_builder_vm_download_published`), since — unlike the pack
+  path — there is no further fallback once that call is reached. Left as a
+  follow-up so this task stays scoped to the attested-pack path.
+- The **revocation-list fetch** (`pack_revocation`'s
+  `pack-revocations.json` refresh) still targets its own hardcoded host;
+  rerouting it through the same resolver is a follow-up once the plain
+  builder-VM path above is wired, so the mirror covers every network leg
+  in one pass instead of two.
+- Item 7 (docs): the config surface is `mirror` + `fetch_mode` on
+  `~/.mvm/keys/pack-trust.json`, documented above; a full narrative
+  ("channel pinning, mirror setup, offline operation, revocation
+  behavior") stays open per the unchecked box.
 
 ### J. Metrics, proof gates, and regression tests
 
