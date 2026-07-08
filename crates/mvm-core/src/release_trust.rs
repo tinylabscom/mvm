@@ -36,6 +36,27 @@ pub fn release_keyless_trust(version: &str) -> KeylessTrust {
     }
 }
 
+/// Identity for the workflow that signs the pack revocation list. Unlike
+/// `RELEASE_IDENTITY_TEMPLATES`, this carries no `{version}` placeholder — a
+/// revocation list applies across every released version, so its signing
+/// identity is bound to a dedicated `revocations` tag instead of a
+/// per-release one. A separate identity from the release workflow also means
+/// a leaked release-signing cert can't forge a revocation entry.
+const REVOCATION_IDENTITY_TEMPLATES: &[&str] =
+    &["https://github.com/tinylabscom/mvm/.github/workflows/revocations.yml@refs/tags/revocations"];
+
+/// Build the keyless trust root a stock binary uses to verify the fetched
+/// pack revocation list.
+pub fn revocation_keyless_trust() -> KeylessTrust {
+    KeylessTrust {
+        accepted_identities: REVOCATION_IDENTITY_TEMPLATES
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        issuer: RELEASE_OIDC_ISSUER.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -66,5 +87,31 @@ mod tests {
         let t = release_keyless_trust("0.17.0");
         assert_eq!(t.issuer, RELEASE_OIDC_ISSUER);
         assert_eq!(t.accepted_identities, accepted_release_identities("0.17.0"));
+    }
+
+    #[test]
+    fn revocation_keyless_trust_uses_release_issuer() {
+        let t = revocation_keyless_trust();
+        assert_eq!(t.issuer, RELEASE_OIDC_ISSUER);
+    }
+
+    #[test]
+    fn revocation_keyless_trust_identities_target_revocations_tag() {
+        let t = revocation_keyless_trust();
+        assert!(
+            t.accepted_identities
+                .iter()
+                .any(|i| i.contains("revocations.yml@refs/tags/revocations"))
+        );
+    }
+
+    #[test]
+    fn revocation_keyless_trust_has_no_version_placeholder() {
+        let t = revocation_keyless_trust();
+        assert!(
+            t.accepted_identities
+                .iter()
+                .all(|i| !i.contains("{version}"))
+        );
     }
 }
