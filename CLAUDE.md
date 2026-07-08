@@ -30,18 +30,27 @@ package manager (or build passt from source — see ADR-055 references).
 
 `mvmctl doctor` probes the right gateway per OS and emits install hints when missing.
 
-For source-checkout contributors only: zig + cargo-zigbuild are needed
-at `cargo build`-of-mvmctl time so `crates/mvm-cli/build.rs` can
+For source-checkout contributors only: a **pinned** zig + cargo-zigbuild are
+needed at `cargo build`-of-mvmctl time so `crates/mvm-cli/build.rs` can
 cross-compile the embedded host-vm binaries (`mvm-host-vm-init`,
 `mvm-egress-proxy`) as static `aarch64-unknown-linux-musl` (the
 builder VM rootfs has no dynamic loader). See Plan 115 / ADR-065.
 
+Provision it with one command — it installs the exact pinned zig (from the
+`ziglang` PyPI package, read out of `[workspace.metadata.mvm.toolchain]`) plus
+the musl rust targets:
+
 ```sh
-brew install zig
-cargo install cargo-zigbuild
+just toolchain-embed
 ```
 
-End-users running a downloaded mvmctl don't need either tool — the
+Do **not** `brew install zig`: Homebrew's zig drifts to newer releases that are
+incompatible with the pinned `cargo-zigbuild` and fail with a cryptic
+`CacheCheckFailed`. `build.rs` auto-detects the `ziglang`-installed zig and, if
+the pinned zig is missing, errors with the exact fix. Override the zig binary
+with `MVM_EMBED_ZIG=/path/to/zig` if needed.
+
+End-users running a downloaded mvmctl don't need any of this — the
 binaries are already embedded.
 
 **macOS 26+ Apple Silicon** users need no Homebrew prerequisites for the HVF builder (the auto-detect default on that tier — see "Builder backend selection" below). The `slp/krun/*` Homebrew trio is only required if you explicitly opt into libkrun via `--builder libkrun` or `MVM_BUILDER_BACKEND=libkrun`.
