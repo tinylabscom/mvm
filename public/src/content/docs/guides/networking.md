@@ -131,11 +131,15 @@ Backend integration has started: the workload-runner path can spawn and reap
 JSONL under the VM state directory. The in-house HVF path now also threads a
 dedicated `transparent_net_socket` into the supervisor and relays guest vsock
 port `5254` byte-for-byte to that authority, failing closed when the authority
-is absent.
+is absent. OCI image injection now includes `mvm-guest-netd` with the guest
+agent and netinit, and the injected PID 1 starts it only when the HVF boot path
+adds `mvm.netd=1` because a transparent-network authority socket is present.
 
-This is not end-to-end `mvmctl machine run` networking yet. Until VM startup
-launches the guest bridge inside the guest, ordinary tools in the VM still do
-not see DNS/TCP/UDP/ICMP networking on the default HVF path.
+This is not end-to-end supported `mvmctl machine run` networking yet. The
+remaining work is live guest-to-host supervision and the first DNS/TCP
+acceptance proof through `mvm-guest-netd` and `mvm-host-netd`; until that lands,
+ordinary tools in the VM still must not rely on transparent networking on the
+default HVF path.
 
 ## Security Profiles
 

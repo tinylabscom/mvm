@@ -43,6 +43,7 @@ const RAM_BASE: u64 = 0x8000_0000;
 /// Default guest RAM (512 MiB) when the caller specifies none — enough for a
 /// demo/agent boot. A builder overrides it (a `nix build` OOMs at 512 MiB).
 const DEFAULT_RAM_SIZE: usize = 0x2000_0000;
+const TRANSPARENT_NET_CMDLINE_TOKEN: &str = "mvm.netd=1";
 
 /// Guest RAM in bytes for `mem_mib` MiB, or the default when `mem_mib` is 0.
 /// A MiB is a multiple of the 16 KiB hypervisor page size, so the result is
@@ -312,6 +313,16 @@ pub fn boot_kernel(
     )
 }
 
+fn append_cmdline_token(cmdline: &mut String, token: &str) {
+    if cmdline.split_whitespace().any(|existing| existing == token) {
+        return;
+    }
+    if !cmdline.trim().is_empty() {
+        cmdline.push(' ');
+    }
+    cmdline.push_str(token);
+}
+
 /// Like [`boot_kernel`], but stops as soon as `stop` is set — a
 /// persistent-until-stop VM — and drives egress + the agent/substitution channels
 /// through the caller-supplied [`HostChannels`] (the supervisor builds them from
@@ -453,6 +464,9 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
             bootargs.push(' ');
             bootargs.push_str(extra);
         }
+    }
+    if channels.transparent_net_socket.is_some() {
+        append_cmdline_token(&mut bootargs, TRANSPARENT_NET_CMDLINE_TOKEN);
     }
     let initrd_bounds = initramfs.map(|rd| {
         (
@@ -936,6 +950,26 @@ mod tests {
             without.contains("console=ttyAMA0"),
             "console wired: {without}"
         );
+    }
+
+    #[test]
+    fn append_cmdline_token_adds_token_once() {
+        let mut args = "console=ttyAMA0 root=/dev/vda".to_string();
+        append_cmdline_token(&mut args, TRANSPARENT_NET_CMDLINE_TOKEN);
+        assert_eq!(args, "console=ttyAMA0 root=/dev/vda mvm.netd=1");
+
+        append_cmdline_token(&mut args, TRANSPARENT_NET_CMDLINE_TOKEN);
+        assert_eq!(
+            args, "console=ttyAMA0 root=/dev/vda mvm.netd=1",
+            "token append must be idempotent"
+        );
+    }
+
+    #[test]
+    fn append_cmdline_token_handles_empty_base() {
+        let mut args = String::new();
+        append_cmdline_token(&mut args, TRANSPARENT_NET_CMDLINE_TOKEN);
+        assert_eq!(args, "mvm.netd=1");
     }
 
     #[test]

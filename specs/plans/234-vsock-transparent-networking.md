@@ -60,8 +60,10 @@
       Add `mvm-host-netd --listen-uds` for a per-VM authority stream, generate the host daemon JSON config with admitted network policy and DNS pins, spawn the process through the existing aux-bin resolver, collect structured audit output to a per-VM JSONL file, record/reap its pid and socket, wire the workload runner's production endpoint spawner to the new authority socket, and keep `mvm-backend` from linking `mvm-net`.
 - [x] **B2b2b2a — Route guest vsock port 5254 to the host authority stream.**
       Thread the spawned `mvm-host-netd` authority socket through the workload `VmmSpec`, HVF supervisor JSON, `HostChannels`, and in-house virtio-vsock device; relay guest port `5254` byte-for-byte to the authority; and fail closed with `OP_RST` when no authority is wired.
+- [x] **B2b2b2b — Package and auto-launch the guest bridge for transparent networking.**
+      Include `mvm-guest-netd` in the OCI runtime injection set, source-checkout guest-runtime cache, shipped `mvmctl` embedded binaries, and prebuilt install path; have the injected PID 1 start it only when `mvm.netd=1` is present; and have the HVF boot path append that token only when a transparent-network authority socket is wired.
 - [ ] **B2b2b2 — Connect the guest bridge to the backend authority stream.**
-      Launch/package the guest `mvm-guest-netd` sidecar in VM startup, connect guest vsock port `5254` to the spawned host authority stream, supervise both ends across boot failure and stop, and add the first end-to-end guest DNS/TCP acceptance path.
+      Finish live guest-to-host authority supervision across boot failure and stop, then add the first end-to-end guest DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd`.
 - [ ] **C1 — Add DNS plus TCP MVP.**
       Support A/AAAA DNS answers, synthetic IP mapping, TCP connect/data/close, allow-host default port handling, denied-host failure behavior, and bounded backpressure.
 - [ ] **C2 — Add mandatory TLS transform for secret-bearing flows.**
