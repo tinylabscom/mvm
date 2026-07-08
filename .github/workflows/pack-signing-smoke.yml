@@ -56,8 +56,12 @@ jobs:
       - name: Keyless-sign the manifest with cosign
         run: |
           set -euo pipefail
+          # --new-bundle-format emits the Sigstore bundle (with
+          # verificationMaterial) the Rust verifier parses; legacy --bundle is
+          # rejected by that stack.
           cosign sign-blob \
             --yes \
+            --new-bundle-format \
             --bundle smoke/pack-manifest.json.bundle \
             smoke/pack-manifest.json
 
@@ -74,4 +78,36 @@ jobs:
           set -euo pipefail
           cargo run --release -p mvm-core --example verify-pack-signature --features manifest-verify -- \
             --manifest smoke/pack-manifest.json --bundle smoke/pack-manifest.json.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
+      - name: Round-trip an image manifest through the dev-image verifier
+        # The same Rust stack backs the dev-image download signature check
+        # (image_verify::verify_manifest), which hard-fails on a bundle it
+        # cannot parse. Sign a real image manifest and verify it through that
+        # exact entrypoint, so this smoke also guards the dev-image trust path.
+        run: |
+          set -euo pipefail
+          cat > smoke/image-manifest.json <<'JSON'
+          {
+            "schema_version": 1,
+            "version": "0.0.0-smoke",
+            "arch": "x86_64",
+            "variant": "dev",
+            "rootfs_format": "ext4",
+            "artifacts": [{"name": "dev-rootfs-x86_64.ext4", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+            "nix_store_hash": "smoke",
+            "source_git_sha": "smoke",
+            "flake_locks": {},
+            "addressed_advisories": [],
+            "built_at": "2026-01-01T00:00:00Z",
+            "not_after": "2099-01-01T00:00:00Z"
+          }
+          JSON
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/image-manifest.json.bundle \
+            smoke/image-manifest.json
+          cargo run --release -p mvm-core --example verify-signed-manifest --features manifest-verify -- \
+            --manifest smoke/image-manifest.json --bundle smoke/image-manifest.json.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"

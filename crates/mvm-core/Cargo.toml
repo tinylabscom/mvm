@@ -144,6 +144,12 @@ required-features = ["schema"]
 name = "verify-pack-signature"
 required-features = ["manifest-verify"]
 
+# Same purpose for the image-manifest signature path (the dev-image download
+# verifier), calling `image_verify::verify_manifest` directly.
+[[example]]
+name = "verify-signed-manifest"
+required-features = ["manifest-verify"]
+
 [dev-dependencies]
 # `OsRng` for generating fresh ed25519 keys in signed_config tests
 # without committing static fixtures. (Also a non-dev dep above for the
