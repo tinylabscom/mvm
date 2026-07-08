@@ -318,7 +318,7 @@ fn parse_auth_challenge(header: Option<&str>) -> Result<BearerChallenge, OciErro
     })
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(serde::Deserialize)]
 struct TokenResponse {
     token: Option<String>,
     access_token: Option<String>,
