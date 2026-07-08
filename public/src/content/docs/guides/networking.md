@@ -138,13 +138,14 @@ that token is present but netd is missing or exits during startup, PID 1 refuses
 to start the guest agent instead of silently running the workload without the
 requested network path. The first in-process acceptance harness now drives raw
 guest DNS and TCP packets through `GuestBridgePump`, a real `HostAuthority`, and
-a recording TCP connector.
+a recording TCP connector. Host-side stop now reaps the recorded
+`mvm-host-netd` process with bounded SIGTERM-to-SIGKILL cleanup and removes the
+authority pid/socket state.
 
 This is not end-to-end supported `mvmctl machine run` networking yet. The
 remaining work is live microVM DNS/TCP proof through `mvm-guest-netd` and
-`mvm-host-netd` plus live stop/reap proof for both sides; until that lands,
-ordinary tools in the VM still must not rely on transparent networking on the
-default HVF path.
+`mvm-host-netd`; until that lands, ordinary tools in the VM still must not rely
+on transparent networking on the default HVF path.
 
 ## Security Profiles
 

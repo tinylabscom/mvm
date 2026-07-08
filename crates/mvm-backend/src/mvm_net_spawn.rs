@@ -24,6 +24,7 @@ pub const HOST_NETD_AUDIT_FILE: &str = "mvm-host-netd.audit.jsonl";
 pub const TRANSPARENT_NET_VSOCK_PORT: u32 = 5254;
 pub const DEFAULT_DNS_PIN_TTL: Duration = Duration::from_secs(3600);
 pub const HOST_NETD_READY_TIMEOUT: Duration = Duration::from_secs(10);
+pub const HOST_NETD_REAP_GRACE_TIMEOUT: Duration = Duration::from_millis(500);
 
 fn resolve_host_netd_path() -> Result<PathBuf> {
     crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
@@ -176,9 +177,9 @@ fn resolve_rule_ips(host: &str, port: u16) -> Result<Vec<IpAddr>> {
 
 pub fn reap_mvm_net_authority(state_dir: &Path) {
     if let Some(pid) = read_pid(&state_dir.join(HOST_NETD_PID_FILE))
-        && pid_alive(pid)
+        && pid_alive_or_reap(pid)
     {
-        kill(pid, libc::SIGTERM);
+        terminate_recorded_pid(pid);
     }
     let _ = std::fs::remove_file(state_dir.join(HOST_NETD_PID_FILE));
     let _ = std::fs::remove_file(state_dir.join(HOST_NETD_SOCKET_FILE));
@@ -188,9 +189,16 @@ fn read_pid(path: &Path) -> Option<libc::pid_t> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-fn pid_alive(pid: libc::pid_t) -> bool {
+fn pid_alive_or_reap(pid: libc::pid_t) -> bool {
+    if reap_exited_child(pid) {
+        return false;
+    }
     // SAFETY: signal 0 probes existence/permission without delivering a signal.
-    unsafe { libc::kill(pid, 0) == 0 }
+    let rc = unsafe { libc::kill(pid, 0) };
+    if rc == 0 {
+        return true;
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn kill(pid: libc::pid_t, sig: libc::c_int) {
@@ -198,6 +206,35 @@ fn kill(pid: libc::pid_t, sig: libc::c_int) {
     unsafe {
         libc::kill(pid, sig);
     }
+}
+
+fn terminate_recorded_pid(pid: libc::pid_t) {
+    kill(pid, libc::SIGTERM);
+    if wait_for_pid_exit(pid, HOST_NETD_REAP_GRACE_TIMEOUT) {
+        return;
+    }
+    kill(pid, libc::SIGKILL);
+    let _ = wait_for_pid_exit(pid, HOST_NETD_REAP_GRACE_TIMEOUT);
+}
+
+fn wait_for_pid_exit(pid: libc::pid_t, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !pid_alive_or_reap(pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+fn reap_exited_child(pid: libc::pid_t) -> bool {
+    let mut status = 0;
+    // SAFETY: waitpid with WNOHANG observes/reaps only this recorded child pid.
+    let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    rc == pid
 }
 
 #[cfg(test)]
@@ -283,5 +320,31 @@ mod tests {
         assert!(!dir.join(HOST_NETD_PID_FILE).exists());
         assert!(!dir.join(HOST_NETD_SOCKET_FILE).exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reap_mvm_net_authority_kills_recorded_process_and_cleans_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join(HOST_NETD_SOCKET_FILE);
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("trap '' TERM; while :; do sleep 1; done")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as libc::pid_t;
+        std::fs::write(dir.path().join(HOST_NETD_PID_FILE), pid.to_string()).unwrap();
+        assert!(pid_alive_or_reap(pid), "stub authority should be running");
+
+        reap_mvm_net_authority(dir.path());
+
+        assert!(
+            !pid_alive_or_reap(pid),
+            "reap must terminate even a SIGTERM-ignoring authority"
+        );
+        assert!(!dir.path().join(HOST_NETD_PID_FILE).exists());
+        assert!(!dir.path().join(HOST_NETD_SOCKET_FILE).exists());
+        let _ = child.kill();
+        let _ = child.wait();
     }
 }

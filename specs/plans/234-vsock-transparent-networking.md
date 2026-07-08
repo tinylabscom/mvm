@@ -66,8 +66,10 @@
       When `mvm.netd=1` is present, make the injected PID 1 treat `mvm-guest-netd` as required: it records the started pid, verifies the process survives startup, and refuses to start the guest agent if netd is missing or exits immediately.
 - [x] **B2b2b2d — Add the first in-process guest DNS/TCP acceptance path.**
       Add a `guest,host` feature test that drives raw guest DNS and TCP packets through `GuestBridgePump`, a real `HostAuthority`, and a recording TCP connector, proving synthetic DNS allocation, guest TCP open mapping back to the DNS name, SYN-ACK synthesis, and guest-to-host TCP data forwarding without booting a VM.
+- [x] **B2b2b2e — Bound host authority stop/reap behavior.**
+      Make `reap_mvm_net_authority` terminate the recorded `mvm-host-netd` pid with SIGTERM, wait for exit, escalate to SIGKILL on timeout, reap child zombies when possible, and remove pid/socket state; cover a SIGTERM-ignoring stub process in unit tests.
 - [ ] **B2b2b2 — Connect the guest bridge to the backend authority stream.**
-      Prove live stop/reap behavior for both sides and add a live microVM DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd`.
+      Add a live microVM DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd`.
 - [ ] **C1 — Add DNS plus TCP MVP.**
       Support A/AAAA DNS answers, synthetic IP mapping, TCP connect/data/close, allow-host default port handling, denied-host failure behavior, and bounded backpressure.
 - [ ] **C2 — Add mandatory TLS transform for secret-bearing flows.**
