@@ -872,7 +872,10 @@ mod tests {
             &[("q", "rust async"), ("count", "10")],
         )
         .unwrap();
-        assert_eq!(url.as_str(), "https://example.com/search?q=rust+async&count=10");
+        assert_eq!(
+            url.as_str(),
+            "https://example.com/search?q=rust+async&count=10"
+        );
     }
 
     #[test]
