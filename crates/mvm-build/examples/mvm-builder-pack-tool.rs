@@ -77,16 +77,17 @@ fn main() -> ExitCode {
 fn usage() {
     eprintln!(
         "usage: mvm-builder-pack-tool \\\n\
-         \x20 --vmlinux <path> --arch <x86_64|aarch64> \\\n\
-         \x20 (--rootfs <path> | --kind runtime --initramfs <path>) \\\n\
+         \x20 --vmlinux <path> --rootfs <path> --arch <x86_64|aarch64> \\\n\
+         \x20 [--kind runtime --verity <path> --roothash <path>] \\\n\
          \x20 --channel <name> --out-dir <dir> \\\n\
          \x20 --sbom <path> --revocation-channel <url> \\\n\
          \x20 (--signing-key <hex-file> | --keyless --identity <SAN>) \\\n\
          \x20 [--builder-identity <s>] [--build-env <s>] \\\n\
          \x20 [--valid-days <n>] [--mirror-identity <s>] [--sbom-uri <url>]\n\
          \n\
-         --kind defaults to builder (needs --rootfs); --kind runtime needs \
-         --initramfs and is keyless-only (--keyless --identity).\n\
+         --kind defaults to builder; --kind runtime additionally needs \
+         --verity and --roothash (the workload rootfs's dm-verity tree + root \
+         hash) and is keyless-only (--keyless --identity).\n\
          --sbom-uri overrides the manifest's SBOM reference uri with a \
          published location (e.g. a release download URL) instead of the \
          default file:// path of the local --sbom file; the sha256 is \
@@ -104,16 +105,21 @@ fn run(rest: &[String]) -> Result<(), String> {
 
     if parsed.runtime {
         // Runtime packs are keyless-only; `parse_args` guarantees --keyless
-        // --identity and --initramfs when --kind runtime.
+        // --identity, --rootfs, --verity, and --roothash when --kind runtime.
         let identity = parsed
             .identity
             .expect("parse_args guarantees --identity for --kind runtime");
-        let initramfs = parsed
-            .initramfs
-            .expect("parse_args guarantees --initramfs for --kind runtime");
+        let verity = parsed
+            .verity
+            .expect("parse_args guarantees --verity for --kind runtime");
+        let roothash = parsed
+            .roothash
+            .expect("parse_args guarantees --roothash for --kind runtime");
         let params = BuildRuntimePackParams {
             vmlinux: parsed.vmlinux,
-            initramfs,
+            rootfs: parsed.rootfs,
+            verity,
+            roothash,
             target_arch: parsed.arch,
             channel: parsed.channel,
             builder_identity: parsed.builder_identity,
@@ -141,12 +147,9 @@ fn run(rest: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let rootfs = parsed
-        .rootfs
-        .expect("parse_args guarantees --rootfs for a builder pack");
     let params = BuildBuilderPackParams {
         vmlinux: parsed.vmlinux,
-        rootfs,
+        rootfs: parsed.rootfs,
         target_arch: parsed.arch,
         channel: parsed.channel,
         builder_identity: parsed.builder_identity,
@@ -199,11 +202,13 @@ fn run(rest: &[String]) -> Result<(), String> {
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedArgs {
     vmlinux: PathBuf,
-    /// Builder pack artifact (`--rootfs`). `Some` for a builder pack, `None` for
-    /// a runtime pack (which carries `initramfs` instead).
-    rootfs: Option<PathBuf>,
-    /// Runtime pack artifact (`--initramfs`). `Some` iff `--kind runtime`.
-    initramfs: Option<PathBuf>,
+    /// Root filesystem: the builder VM disk for a builder pack, or the
+    /// verity-sealed workload rootfs for a runtime pack. Required for both.
+    rootfs: PathBuf,
+    /// Runtime pack dm-verity hash tree (`--verity`). `Some` iff `--kind runtime`.
+    verity: Option<PathBuf>,
+    /// Runtime pack dm-verity root-hash file (`--roothash`). `Some` iff runtime.
+    roothash: Option<PathBuf>,
     /// `--kind runtime`. A runtime pack is keyless-only (no ed25519 producer).
     runtime: bool,
     arch: GuestArch,
@@ -239,17 +244,22 @@ fn parse_args(rest: &[String]) -> Result<ParsedArgs, String> {
                 .to_string(),
         );
     }
-    // Each kind carries exactly one image artifact: a builder pack's rootfs or a
-    // runtime pack's initramfs.
-    let (rootfs, initramfs) = if runtime {
-        (None, Some(PathBuf::from(required(rest, "initramfs")?)))
+    // Both kinds carry a rootfs; a runtime pack additionally carries the
+    // dm-verity hash tree + root hash so the launch can boot it verity-sealed.
+    let rootfs = PathBuf::from(required(rest, "rootfs")?);
+    let (verity, roothash) = if runtime {
+        (
+            Some(PathBuf::from(required(rest, "verity")?)),
+            Some(PathBuf::from(required(rest, "roothash")?)),
+        )
     } else {
-        (Some(PathBuf::from(required(rest, "rootfs")?)), None)
+        (None, None)
     };
     Ok(ParsedArgs {
         vmlinux: PathBuf::from(required(rest, "vmlinux")?),
         rootfs,
-        initramfs,
+        verity,
+        roothash,
         runtime,
         arch: required(rest, "arch")?
             .parse::<GuestArch>()
@@ -357,13 +367,15 @@ mod tests {
         ])
     }
 
-    /// A runtime pack: `--kind runtime --initramfs ...` (no `--rootfs`) and
+    /// A runtime pack: `--kind runtime` with `--rootfs --verity --roothash` and
     /// keyless (`--keyless --identity ...`).
     fn runtime_args() -> Vec<String> {
         let mut a = args(&[
             ("vmlinux", "/tmp/vmlinux"),
             ("kind", "runtime"),
-            ("initramfs", "/tmp/initramfs"),
+            ("rootfs", "/tmp/rootfs.ext4"),
+            ("verity", "/tmp/rootfs.verity"),
+            ("roothash", "/tmp/rootfs.roothash"),
             ("arch", "aarch64"),
             ("channel", "stable"),
             ("out-dir", "/tmp/out"),
@@ -379,15 +391,26 @@ mod tests {
     }
 
     #[test]
-    fn parses_runtime_kind_with_initramfs_and_keyless() {
+    fn parses_runtime_kind_with_rootfs_verity_roothash_and_keyless() {
         let parsed = parse_args(&runtime_args()).expect("parse runtime");
         assert!(parsed.runtime);
-        assert_eq!(parsed.initramfs, Some(PathBuf::from("/tmp/initramfs")));
-        assert_eq!(parsed.rootfs, None);
+        assert_eq!(parsed.rootfs, PathBuf::from("/tmp/rootfs.ext4"));
+        assert_eq!(parsed.verity, Some(PathBuf::from("/tmp/rootfs.verity")));
+        assert_eq!(parsed.roothash, Some(PathBuf::from("/tmp/rootfs.roothash")));
         assert_eq!(
             parsed.identity.as_deref(),
             Some("https://example.test/wf.yml@refs/tags/v1")
         );
+    }
+
+    #[test]
+    fn runtime_kind_requires_verity_and_roothash() {
+        // A runtime pack must carry the dm-verity tree + root hash.
+        let mut a = runtime_args();
+        let idx = a.iter().position(|x| x == "--verity").unwrap();
+        a.drain(idx..idx + 2);
+        let err = parse_args(&a).expect_err("runtime requires verity");
+        assert!(err.contains("verity"), "got: {err}");
     }
 
     #[test]
@@ -396,7 +419,9 @@ mod tests {
         let a = args(&[
             ("vmlinux", "/tmp/vmlinux"),
             ("kind", "runtime"),
-            ("initramfs", "/tmp/initramfs"),
+            ("rootfs", "/tmp/rootfs.ext4"),
+            ("verity", "/tmp/rootfs.verity"),
+            ("roothash", "/tmp/rootfs.roothash"),
             ("arch", "aarch64"),
             ("channel", "stable"),
             ("out-dir", "/tmp/out"),
@@ -415,8 +440,9 @@ mod tests {
     fn parses_required_args_with_defaults() {
         let parsed = parse_args(&full_args()).expect("parse");
         assert_eq!(parsed.vmlinux, PathBuf::from("/tmp/vmlinux"));
-        assert_eq!(parsed.rootfs, Some(PathBuf::from("/tmp/rootfs.ext4")));
+        assert_eq!(parsed.rootfs, PathBuf::from("/tmp/rootfs.ext4"));
         assert!(!parsed.runtime);
+        assert_eq!(parsed.verity, None);
         assert_eq!(parsed.arch, GuestArch::Aarch64);
         assert_eq!(parsed.channel, "stable");
         assert_eq!(parsed.sbom, PathBuf::from("/tmp/sbom.json"));
