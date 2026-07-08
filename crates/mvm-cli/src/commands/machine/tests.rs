@@ -155,8 +155,14 @@ fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecurityS
     assert_eq!(summary.preflight_command, summary.receipt_command);
     assert!(summary.preflight_command.contains("argv_len=3"));
     assert!(!summary.preflight_command.contains("echo ok"));
-    assert_eq!(summary.preflight_env_keys, ["MODE", "TOKEN"]);
-    assert_eq!(summary.receipt_env_keys, summary.preflight_env_keys);
+    assert_eq!(
+        sdk_fixture_env_keys(&summary.preflight_env_keys),
+        ["MODE", "TOKEN"]
+    );
+    assert_eq!(
+        sdk_fixture_env_keys(&summary.receipt_env_keys),
+        ["MODE", "TOKEN"]
+    );
     assert_eq!(summary.preflight_add_dirs, summary.receipt_add_dirs);
     assert_eq!(summary.preflight_add_dirs.len(), 1);
     let add_dir = &summary.preflight_add_dirs[0];
@@ -165,6 +171,26 @@ fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecurityS
     assert!(!add_dir.host_path_sha256.contains("/tmp/mvm-sdk-src"));
     assert_eq!(summary.preflight_timeout_secs, 30);
     assert_eq!(summary.receipt_timeout_secs, 30);
+}
+
+fn sdk_fixture_env_keys(keys: &[String]) -> Vec<&str> {
+    keys.iter()
+        .map(String::as_str)
+        .filter(|key| !is_oci_proxy_env_key(key))
+        .collect()
+}
+
+fn is_oci_proxy_env_key(key: &str) -> bool {
+    matches!(
+        key,
+        "ALL_PROXY"
+            | "HTTP_PROXY"
+            | "HTTPS_PROXY"
+            | "NO_PROXY"
+            | "http_proxy"
+            | "https_proxy"
+            | "no_proxy"
+    )
 }
 
 fn assert_manifest_fixture_reaches_unknown_key_gate(mut sdk_args: Vec<String>) {
@@ -817,8 +843,12 @@ fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
     let run = parse_owned_run(&sdk_args)
         .expect("sdk args parse as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
-        .expect("CLI receipt input accepts SDK args");
+    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
+        &run,
+        "hvf",
+        "firecracker",
+    )
+    .expect("CLI receipt input accepts SDK args");
 
     assert_eq!(
         summary.preflight_network_posture,
@@ -858,8 +888,12 @@ fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
     let run = parse_owned_run(&sdk_args)
         .expect("sdk args parse as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
-        .expect("CLI receipt input accepts SDK args");
+    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
+        &run,
+        "hvf",
+        "firecracker",
+    )
+    .expect("CLI receipt input accepts SDK args");
 
     assert_sdk_run_admission_inputs(summary);
 }
@@ -888,8 +922,12 @@ fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture(
     let run = parse_owned_run(&sdk_args)
         .expect("Python/TypeScript SDK fixture parses as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
-        .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
+        &run,
+        "hvf",
+        "firecracker",
+    )
+    .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 
     assert_eq!(
         summary.preflight_network_posture,
@@ -912,8 +950,12 @@ fn python_typescript_machine_run_fixture_matches_cli_admission_and_receipt_input
     let run = parse_owned_run(&sdk_args)
         .expect("Python/TypeScript SDK fixture parses as CLI machine run")
         .into_run_args();
-    let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
-        .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+    let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
+        &run,
+        "hvf",
+        "firecracker",
+    )
+    .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 
     assert_sdk_run_admission_inputs(summary);
 }

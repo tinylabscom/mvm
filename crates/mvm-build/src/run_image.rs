@@ -14,12 +14,13 @@ use anyhow::{Context, Result};
 use crate::oci_runtime_inject::MvmRuntimeBinaries;
 use crate::rootfs::MaterializeExt4Input;
 
-/// Guest-agent binaries (`mvm-guest-agent` + `mvm-guest-netinit`) embedded in
-/// the host binary at build time — the end-user fallback for a shipped mvmctl
-/// with no source checkout to cross-compile from.
+/// Guest runtime binaries embedded in the host binary at build time — the
+/// end-user fallback for a shipped mvmctl with no source checkout to
+/// cross-compile from.
 pub struct PrebuiltGuestBinaries<'a> {
     pub agent: &'a [u8],
     pub netinit: &'a [u8],
+    pub egress_client: &'a [u8],
 }
 
 /// Inject the mvm runtime into `unpacked_root`, materialize it into `output` (a
@@ -95,7 +96,12 @@ fn resolve_guest_binaries(
 
     if let Some(p) = prebuilt {
         return crate::guest_agent_build::install_prebuilt_guest_binaries(
-            p.agent, p.netinit, cache_root, version, arch,
+            p.agent,
+            p.netinit,
+            p.egress_client,
+            cache_root,
+            version,
+            arch,
         )
         .context("install the embedded guest agent binaries");
     }

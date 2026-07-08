@@ -10,9 +10,10 @@
 //! This module is the host-side fix. It runs against the unpacked OCI
 //! tree *before* it is sealed into `rootfs.ext4`, baking in:
 //!
-//! - `/usr/local/bin/mvm-guest-agent` + `/usr/local/bin/mvm-guest-netinit`
-//!   — the cross-compiled guest binaries (the agent is the sole control
-//!   plane; netinit installs the guest-side network defense).
+//! - `/usr/local/bin/mvm-guest-agent`, `/usr/local/bin/mvm-guest-netinit`, and
+//!   `/usr/local/bin/mvm-egress-client` — the cross-compiled guest binaries
+//!   (the agent is the sole control plane; netinit installs the guest-side
+//!   network defense; the egress client talks to the host over vsock).
 //! - `/init` — PID 1. Mounts the pseudo-filesystems, runs netinit, then
 //!   forks the agent and idles. The OCI image's own entrypoint never
 //!   runs as PID 1; it only ever runs *under* the agent, over vsock —
@@ -45,11 +46,14 @@ pub struct MvmRuntimeBinaries {
     pub agent: PathBuf,
     /// Static guest netinit binary (`mvm-guest-netinit`).
     pub netinit: PathBuf,
+    /// Static guest egress shim (`mvm-egress-client`).
+    pub egress_client: PathBuf,
 }
 
 /// Where the injected guest binaries land inside the rootfs.
 const AGENT_DEST: &str = "usr/local/bin/mvm-guest-agent";
 const NETINIT_DEST: &str = "usr/local/bin/mvm-guest-netinit";
+const EGRESS_CLIENT_DEST: &str = "usr/local/bin/mvm-egress-client";
 
 /// PID-1 init baked into an OCI rootfs so `run --image` has a vsock
 /// control plane. POSIX `sh` (busybox `ash` in alpine and friends).
@@ -164,6 +168,30 @@ if [ -n "$MVM_NETINIT" ]; then
   "$MVM_NETINIT" || echo "mvm-oci-init: netinit exited nonzero; continuing"
 fi
 
+# Decode the vsock-egress opt-in. Eligible workload backends set
+# mvm.vsock_egress=1 on the kernel cmdline; export the env var the
+# egress-client stage keys on. Absent token => no-op.
+if /bin/busybox grep -qE ' mvm\.vsock_egress=1( |$)' /proc/cmdline 2>/dev/null; then
+  export MVM_VSOCK_EGRESS=1
+fi
+
+# Start the guest-side SOCKS5 -> vsock egress shim when this boot requested
+# vsock-mediated egress. The workload itself runs under the agent and does not
+# inherit PID 1's environment, so the host also injects matching proxy vars on
+# the exec/request path; these shell exports keep the boot contract explicit and
+# cover any direct child that does inherit from PID 1.
+if [ -n "$MVM_VSOCK_EGRESS" ] && [ -x /usr/local/bin/mvm-egress-client ]; then
+  /bin/busybox ip link set lo up 2>/dev/null || true
+  /usr/local/bin/mvm-egress-client &
+  export ALL_PROXY="socks5h://127.0.0.1:1080"
+  export HTTP_PROXY="$ALL_PROXY"
+  export HTTPS_PROXY="$ALL_PROXY"
+  export http_proxy="$ALL_PROXY"
+  export https_proxy="$ALL_PROXY"
+  export NO_PROXY="localhost,127.0.0.1,::1"
+  export no_proxy="$NO_PROXY"
+fi
+
 # The agent is the control plane. Prefer the overlay-resident agent
 # (Firecracker verity overlay); fall back to the baked-in copy
 # (libkrun/Vz). Both are exec-tested so a half-attached overlay still
@@ -225,8 +253,10 @@ pub fn inject_mvm_runtime(
     std::fs::create_dir_all(&bin_dir)?;
     let agent_dest = rootfs_dir.join(AGENT_DEST);
     let netinit_dest = rootfs_dir.join(NETINIT_DEST);
+    let egress_client_dest = rootfs_dir.join(EGRESS_CLIENT_DEST);
     copy_exec(&bins.agent, &agent_dest)?;
     copy_exec(&bins.netinit, &netinit_dest)?;
+    copy_exec(&bins.egress_client, &egress_client_dest)?;
 
     // PID 1.
     let init_dest = rootfs_dir.join("init");
@@ -236,6 +266,7 @@ pub fn inject_mvm_runtime(
         init: init_dest,
         agent: agent_dest,
         netinit: netinit_dest,
+        egress_client: egress_client_dest,
         runtime_mount_point: runtime_dir,
     })
 }
@@ -246,6 +277,7 @@ pub struct InjectedPaths {
     pub init: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
+    pub egress_client: PathBuf,
     pub runtime_mount_point: PathBuf,
 }
 
@@ -296,6 +328,7 @@ mod tests {
         // Overlay-preferring agent resolution, baked fallback.
         assert!(s.contains("/mvm/runtime/agent"));
         assert!(s.contains("/usr/local/bin/mvm-guest-agent"));
+        assert!(s.contains("/usr/local/bin/mvm-egress-client"));
         // Agent is forked (control plane), not exec'd — PID 1 must idle.
         assert!(s.contains("\"$MVM_AGENT\" &"));
         // Netinit before the agent.
@@ -382,12 +415,44 @@ mod tests {
         );
     }
 
+    #[test]
+    fn init_script_starts_vsock_egress_client_and_sets_proxy_before_the_agent() {
+        let s = oci_init_script();
+        assert!(
+            s.contains("mvm.vsock_egress=1"),
+            "init must parse the vsock egress cmdline token"
+        );
+        assert!(
+            s.contains("/usr/local/bin/mvm-egress-client &"),
+            "init must fork the egress client when requested"
+        );
+        assert!(
+            s.contains("ALL_PROXY=\"socks5h://127.0.0.1:1080\""),
+            "init must export the SOCKS proxy URL"
+        );
+        assert!(s.contains("NO_PROXY=\"localhost,127.0.0.1,::1\""));
+        let egress_at = s
+            .find("/usr/local/bin/mvm-egress-client &")
+            .expect("egress client fork");
+        let agent_fork_at = s.find("\"$MVM_AGENT\" &").expect("agent fork");
+        assert!(
+            egress_at < agent_fork_at,
+            "egress client must start before the agent fork"
+        );
+    }
+
     fn fake_bins(dir: &Path) -> MvmRuntimeBinaries {
         let agent = dir.join("agent.bin");
         let netinit = dir.join("netinit.bin");
+        let egress_client = dir.join("egress-client.bin");
         std::fs::write(&agent, b"\x7fELF-agent").unwrap();
         std::fs::write(&netinit, b"\x7fELF-netinit").unwrap();
-        MvmRuntimeBinaries { agent, netinit }
+        std::fs::write(&egress_client, b"\x7fELF-egress-client").unwrap();
+        MvmRuntimeBinaries {
+            agent,
+            netinit,
+            egress_client,
+        }
     }
 
     #[test]
@@ -407,6 +472,11 @@ mod tests {
         assert_eq!(std::fs::read(&injected.agent).unwrap(), b"\x7fELF-agent");
         assert!(is_executable(&injected.agent));
         assert!(is_executable(&injected.netinit));
+        assert_eq!(
+            std::fs::read(&injected.egress_client).unwrap(),
+            b"\x7fELF-egress-client"
+        );
+        assert!(is_executable(&injected.egress_client));
         // Overlay mount point exists on disk.
         assert!(injected.runtime_mount_point.is_dir());
         assert!(root.join("mvm/runtime").is_dir());
@@ -428,6 +498,7 @@ mod tests {
         // A second inject (e.g. cache reuse) must not error on existing files.
         let second = inject_mvm_runtime(&root, &bins).expect("second inject");
         assert!(is_executable(&second.agent));
+        assert!(is_executable(&second.egress_client));
     }
 
     #[test]

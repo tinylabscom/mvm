@@ -198,6 +198,8 @@ impl VmBackend for VzBackend {
             snapshots: macos_supports_vz_snapshots(),
             vsock: true,
             tap_networking: false,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
             // `VZVirtioTraditionalMemoryBalloon` is wired by the Swift
             // supervisor; live adjustment goes through the control
             // socket's BALLOON verb.
@@ -263,21 +265,35 @@ impl VmBackend for VzBackend {
                     .into_owned();
         }
 
-        // Spawn host-side gvproxy so the supervisor has something to connect to.
-        // VzBackend is stateless; the child is detached
-        // (PID file under state dir lets `stop()` find it later).
-        let gvproxy_info = host_gvproxy::spawn_detached(&state_dir)
-            .map_err(|e| anyhow!("spawn host-side gvproxy for Vz VM '{}': {e}", config.name))?;
+        let vsock_raw_egress = vz_vsock_egress_cmdline_token(config, &state_dir).is_some();
 
         // Vz config build. The `?` propagates allowlist failures from
         // `audit_substrate::compute_audit_substrate` for unsafe tenant_id /
         // vm_name values.
-        let mut cfg = build_supervisor_config(&launch_config, kernel, &state_dir, &gvproxy_info)?;
+        let gvproxy_info =
+            if vsock_raw_egress {
+                None
+            } else {
+                Some(host_gvproxy::spawn_detached(&state_dir).map_err(|e| {
+                    anyhow!("spawn host-side gvproxy for Vz VM '{}': {e}", config.name)
+                })?)
+            };
+        let mut cfg =
+            build_supervisor_config(&launch_config, kernel, &state_dir, gvproxy_info.as_ref())?;
         // Attach the rootfs writable for the per-instance clone; verity/sealed
         // stays read-only (the builder defaults read-only).
         if !sealed && let Some(disk) = cfg.disks.iter_mut().find(|d| d.id == "rootfs") {
             disk.read_only = false;
         }
+
+        // Bind the per-VM gating endpoint before boot so the guest reaches a
+        // live fail-closed egress socket the instant it dials EGRESS_PORT.
+        let mut endpoint_guard = spawn_vz_egress_endpoint_if_needed(
+            &config.name,
+            &state_dir,
+            &config.network_policy,
+            config.tenant_id.as_deref().unwrap_or(""),
+        )?;
 
         // Spawn the `mvm-bridge` sibling between gvproxy and the Vz
         // VM boot. Closes the Vz audit carve-out: the drainer binds
@@ -288,7 +304,11 @@ impl VmBackend for VzBackend {
         // on early return / panic between here and the supervisor's PID
         // file appearing; after a clean boot the guard is `detach()`ed
         // and the drainer is reaped by `stop()` via its own PID file.
-        let mut drainer_guard = spawn_vz_drainer(config)?;
+        let mut drainer_guard = if cfg.network.is_some() {
+            Some(spawn_vz_drainer(config)?)
+        } else {
+            None
+        };
         let pid_file = state_dir.join(PID_FILE_NAME);
         // Stale-PID-file cleanup from a previous crashed supervisor so
         // the wait-loop below detects the *new* one unambiguously.
@@ -390,22 +410,15 @@ impl VmBackend for VzBackend {
         // PID for `stop()` to reap. A failure here is non-fatal: the
         // VM is already running. We log + leave the drainer attached;
         // the next `stop()` walks both PID files anyway.
-        if let Err(e) = detach_and_persist_drainer(&state_dir, &mut drainer_guard) {
+        if let Some(guard) = drainer_guard.as_mut()
+            && let Err(e) = detach_and_persist_drainer(&state_dir, guard)
+        {
             tracing::warn!(
                 vm = %config.name,
                 error = %e,
                 "detach/persist mvm-bridge PID failed (non-fatal); guard remains attached"
             );
         }
-
-        // The supervisor is up (PID file written) and its host-listen proxy is
-        // bound. Spawn the egress substitution endpoint if the admitted plan
-        // carries secrets so the guest's egress can resolve placeholders
-        // host-side (the guest never holds the real secret). The guard reaps the
-        // endpoint on any early return below; defused once the VM is confirmed up
-        // (the `stop` path then owns teardown). A secret-free plan is a defused
-        // no-op.
-        let mut endpoint_guard = spawn_vz_egress_endpoint_if_needed(&config.name, &state_dir)?;
 
         // Spawn the per-VM host-services broker (+ its audit-signer) for an
         // admitted workload so the guest can reach `host.audit.v1` over
@@ -830,7 +843,7 @@ impl VzBackend {
             state_dir: state_dir.clone(),
         };
 
-        let cfg = build_supervisor_config(config, kernel, &state_dir, &gvproxy_info)?;
+        let cfg = build_supervisor_config(config, kernel, &state_dir, Some(&gvproxy_info))?;
         let pid_file = state_dir.join(PID_FILE_NAME);
         let _ = std::fs::remove_file(&pid_file);
 
@@ -1851,7 +1864,7 @@ fn gateway_audit_socket_path(vm_name: &str) -> String {
 /// `mvm-host-vm-init` mounts user volumes at their guest paths. No-op
 /// (returns the default cmdline unchanged) when there are no volumes.
 /// Harmless for workload guests (mkGuest `/init` ignores the param).
-fn vz_cmdline_with_user_volumes(config: &VmStartConfig) -> String {
+fn vz_cmdline_with_user_volumes(config: &VmStartConfig, state_dir: &Path) -> String {
     let mut cmdline = DEFAULT_CMDLINE.to_string();
     if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
         cmdline.push(' ');
@@ -1862,6 +1875,10 @@ fn vz_cmdline_with_user_volumes(config: &VmStartConfig) -> String {
         cmdline.push_str(&token);
     }
     if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
+    if let Some(token) = vz_vsock_egress_cmdline_token(config, state_dir) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -1894,21 +1911,41 @@ fn remove_instance_rootfs(vm_name: &str) {
 fn spawn_vz_egress_endpoint_if_needed(
     vm_name: &str,
     state_dir: &Path,
+    network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
+    config_tenant: &str,
 ) -> Result<crate::substitution_spawn::EndpointGuard> {
     use crate::substitution_spawn::{
         EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
-    let Some((secrets, redaction, tenant)) =
-        crate::egress_shared::decode_plan_secrets_from_state(state_dir)?
-    else {
-        return Ok(EndpointGuard::defused());
+    let default_redaction = mvm_core::policy::RedactionPolicy::default();
+    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let (secrets, redaction, tenant, raw_egress): (
+        &[_],
+        &mvm_core::policy::RedactionPolicy,
+        &str,
+        bool,
+    ) = match &decoded {
+        Some((secrets, redaction, tenant)) => {
+            (secrets.as_slice(), redaction, tenant.as_str(), false)
+        }
+        None if network_policy.allows_egress() => (
+            &[],
+            &default_redaction,
+            if config_tenant.is_empty() {
+                "local"
+            } else {
+                config_tenant
+            },
+            true,
+        ),
+        None => return Ok(EndpointGuard::defused()),
     };
     spawn_substitution_endpoint(SubstitutionSpawnParams {
         vm_name,
         state_dir,
-        tenant: &tenant,
-        secrets: &secrets,
-        redaction: &redaction,
+        tenant,
+        secrets,
+        redaction,
         // Vz routes guest→host through the per-VM UDS the supervisor's
         // host-listen proxy forwards into; the endpoint binds it under `vsock/`.
         transport: EndpointTransport::Uds {
@@ -1916,17 +1953,27 @@ fn spawn_vz_egress_endpoint_if_needed(
         },
         terminator_listen: None,
         tls_intermediate: None,
-        network_policy: None,
-        raw_egress: false,
+        network_policy: if raw_egress {
+            Some(network_policy)
+        } else {
+            None
+        },
+        raw_egress,
     })?;
     Ok(EndpointGuard::new(vm_name))
+}
+
+fn vz_vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
+    (config.network_policy.allows_egress()
+        && !crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
+    .then(|| "mvm.vsock_egress=1".to_string())
 }
 
 fn build_supervisor_config(
     config: &VmStartConfig,
     kernel: &str,
     state_dir: &Path,
-    gvproxy: &host_gvproxy::HostGvproxyInfo,
+    gvproxy: Option<&host_gvproxy::HostGvproxyInfo>,
 ) -> Result<vz::SupervisorConfig> {
     // `tenant_id` flows into the per-VM audit-chain path that the host-services
     // broker spawns against, even on the no-bridge path where the substrate
@@ -2009,7 +2056,7 @@ fn build_supervisor_config(
         pid_file_name: Some(PID_FILE_NAME.to_string()),
         kernel: vz::KernelConfig {
             path: kernel.to_string(),
-            cmdline: vz_cmdline_with_user_volumes(config),
+            cmdline: vz_cmdline_with_user_volumes(config, state_dir),
             initrd_path: config.initrd_path.clone(),
         },
         resources: vz::ResourceConfig {
@@ -2055,7 +2102,7 @@ fn build_supervisor_config(
         // `~/.mvm/audit/gateway-events-<vm>.sock` so a future
         // run_supervisor_with_bridge-style entry point on the Vz
         // side can bind that listener and consume the stream.
-        network: Some(vz::NetworkConfig::Gvproxy {
+        network: gvproxy.map(|gvproxy| vz::NetworkConfig::Gvproxy {
             socket_path: gvproxy.socket_path.to_string_lossy().into_owned(),
             mac: host_gvproxy::derive_mac(&config.name),
             // Only request the claim-10 audit bridge when the drainer will
@@ -2893,8 +2940,8 @@ mod tests {
             socket_path: state_dir.join("gvproxy.sock"),
             pid: 0,
         };
-        let built =
-            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+        let built = build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, Some(&gvproxy_info))
+            .expect("build");
 
         assert_eq!(built.name, "smoke");
         assert_eq!(built.kernel.path, "/abs/vmlinux");
@@ -2987,8 +3034,13 @@ mod tests {
     fn vz_substitution_not_spawned_when_no_secrets() {
         let tmp = tempfile::tempdir().unwrap();
         // Empty state dir: no plan.json at all.
-        let guard = spawn_vz_egress_endpoint_if_needed("vz-no-secrets-vm", tmp.path())
-            .expect("no-secrets path must succeed");
+        let guard = spawn_vz_egress_endpoint_if_needed(
+            "vz-no-secrets-vm",
+            tmp.path(),
+            &mvm_core::policy::network_policy::NetworkPolicy::deny_all(),
+            "local",
+        )
+        .expect("no-secrets path must succeed");
         assert!(
             guard.vm_name.is_none(),
             "a secret-free plan must yield a defused (no-op) guard"
@@ -2998,6 +3050,31 @@ mod tests {
             !tmp.path()
                 .join(crate::substitution_spawn::SUBST_PID_FILE)
                 .exists()
+        );
+    }
+
+    #[test]
+    fn build_supervisor_config_omits_guest_nic_when_oci_egress_is_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = VmStartConfig {
+            name: "vz-vsock-egress".into(),
+            cpus: 1,
+            memory_mib: 256,
+            kernel_path: Some("/abs/vmlinux".into()),
+            rootfs_path: "/abs/rootfs.ext4".into(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+                mvm_core::network_policy::HostPort::new("example.com", 443),
+            ]),
+            ..Default::default()
+        };
+        let built = build_supervisor_config(&cfg, "/abs/vmlinux", tmp.path(), None).expect("build");
+        assert!(
+            built.network.is_none(),
+            "vsock-egrss mode must omit the guest NIC"
+        );
+        assert!(
+            built.kernel.cmdline.contains("mvm.vsock_egress=1"),
+            "cmdline must activate the in-guest egress shim"
         );
     }
 
@@ -3021,8 +3098,8 @@ mod tests {
             socket_path: state_dir.join("gvproxy.sock"),
             pid: 0,
         };
-        let built =
-            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+        let built = build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, Some(&gvproxy_info))
+            .expect("build");
 
         assert!(
             built
@@ -3055,8 +3132,9 @@ mod tests {
         };
         plain.kernel_path = Some("/abs/vmlinux".into());
         plain.rootfs_path = "/abs/rootfs.ext4".into();
-        let built_plain = build_supervisor_config(&plain, "/abs/vmlinux", state_dir, &gvproxy_info)
-            .expect("build");
+        let built_plain =
+            build_supervisor_config(&plain, "/abs/vmlinux", state_dir, Some(&gvproxy_info))
+                .expect("build");
         assert!(
             !built_plain
                 .vsock
@@ -3088,8 +3166,8 @@ mod tests {
             socket_path: state_dir.join("gvproxy.sock"),
             pid: 0,
         };
-        let built =
-            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+        let built = build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, Some(&gvproxy_info))
+            .expect("build");
         match built.network {
             Some(vz::NetworkConfig::Gvproxy {
                 events_ingest_socket_path,
@@ -3134,8 +3212,8 @@ mod tests {
             socket_path: state_dir.join("gvproxy.sock"),
             pid: 0,
         };
-        let built =
-            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+        let built = build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, Some(&gvproxy_info))
+            .expect("build");
 
         // rootfs (RO) + the disk volume.
         assert_eq!(built.disks.len(), 2);
@@ -3179,8 +3257,8 @@ mod tests {
             socket_path: state_dir.join("gvproxy.sock"),
             pid: 0,
         };
-        let built =
-            build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info).expect("build");
+        let built = build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, Some(&gvproxy_info))
+            .expect("build");
         assert_eq!(built.disks[0].id, "rootfs");
         assert!(
             built.disks[0].read_only,
@@ -3209,7 +3287,7 @@ mod tests {
             socket_path: state_dir.join("gvproxy.sock"),
             pid: 0,
         };
-        let err = build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, &gvproxy_info)
+        let err = build_supervisor_config(&cfg, "/abs/vmlinux", state_dir, Some(&gvproxy_info))
             .expect_err("unsafe tenant must error");
         let msg = err.to_string();
         assert!(

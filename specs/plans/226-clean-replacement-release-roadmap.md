@@ -90,6 +90,24 @@ fallback + macOS-13-25 backend; `passt` remains untouched (Linux only).
   *builder* VM's own egress for `nix` fetches — with gvproxy gone the in-house /
   libkrun builder must have a working egress path (vsock or otherwise). Confirm
   covered or add a task.
+  - [x] 2026-07-08 guest-side activation slice landed for OCI `--image` runs: the
+        runtime-injected `/init` now bakes and starts `mvm-egress-client`,
+        exports proxy envs, the embedded/cacheable guest runtime includes the
+        egress client binary, HVF threads `mvm.vsock_egress=1` on eligible
+        boots, and the OCI exec path records/injects matching proxy env vars.
+  - [x] 2026-07-08 activation follow-through landed: OCI `--image` runs with
+        outbound egress enabled (`--net` / `--allow-host`) now select only a
+        backend that can honestly provide `{ vsock, no_guest_nic,
+        host_vsock_proxy }`; incapable backends are refused instead of silently
+        degrading to a guest NIC. Vz now omits the guest NIC/gvproxy entirely
+        on this raw OCI path and boots with the host egress endpoint already
+        listening, so the in-guest shim fails closed if the endpoint is absent.
+        The same selector now gates persistent OCI-backed machine boots
+        (`machine run -d --image ...` and `machine start` on an image-backed
+        machine), closing the remaining stored-lifecycle fallback onto the
+        legacy NIC path.
+        Remaining WS-N scope: builder egress, libkrun default-on cutover, and
+        global gvproxy deletion.
 
 - **WS-A — Delete the Vz path.** Remove `mvm-backend/src/vz.rs` (~4.3k),
   `vz_control.rs`, `mvm-vm-host/src/vz_objc.rs` (~2.3k), the `mvm-vz-supervisor`

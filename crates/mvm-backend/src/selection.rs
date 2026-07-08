@@ -8,6 +8,7 @@
 use mvm_core::vm_backend::{RequiredCapabilities, VmCapabilities};
 
 use crate::backend::{AnyBackend, FirecrackerBackend};
+use crate::hvf_backend::HvfBackend;
 use crate::libkrun::LibkrunBackend;
 use crate::qemu::QemuBackend;
 use crate::vz::VzBackend;
@@ -60,9 +61,10 @@ impl AnyBackend {
     /// Mirrors the production-first preference; platform *availability* is a
     /// separate concern handled by [`AnyBackend::auto_select`]. The in-memory
     /// mock is excluded — it is a test double, never selected for a workload.
-    fn capability_candidates() -> [AnyBackend; 4] {
+    fn capability_candidates() -> [AnyBackend; 5] {
         [
             AnyBackend::Firecracker(FirecrackerBackend),
+            AnyBackend::Hvf(HvfBackend),
             AnyBackend::Vz(VzBackend),
             AnyBackend::Libkrun(LibkrunBackend),
             AnyBackend::Qemu(QemuBackend),
@@ -85,6 +87,27 @@ impl AnyBackend {
             .into_iter()
             .nth(index)
             .expect("first_capable returns an in-range index"))
+    }
+
+    /// Select the most-preferred backend whose capabilities satisfy `required`
+    /// **and** which is actually available on this host, failing closed with
+    /// the per-candidate shortfall otherwise.
+    pub fn select_capable_available(
+        required: &RequiredCapabilities,
+    ) -> Result<AnyBackend, SelectionError> {
+        let mut shortfalls = Vec::new();
+        for backend in Self::capability_candidates() {
+            if !backend.is_available().unwrap_or(false) {
+                shortfalls.push((backend.name().to_string(), vec!["unavailable"]));
+                continue;
+            }
+            let missing = backend.capabilities().shortfall(required);
+            if missing.is_empty() {
+                return Ok(backend);
+            }
+            shortfalls.push((backend.name().to_string(), missing));
+        }
+        Err(SelectionError { shortfalls })
     }
 }
 

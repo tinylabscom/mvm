@@ -485,6 +485,7 @@ fn embedded_guest_binaries() -> Option<mvm_build::run_image::PrebuiltGuestBinari
     Some(mvm_build::run_image::PrebuiltGuestBinaries {
         agent: find("mvm-guest-agent")?,
         netinit: find("mvm-guest-netinit")?,
+        egress_client: find("mvm-egress-client")?,
     })
 }
 

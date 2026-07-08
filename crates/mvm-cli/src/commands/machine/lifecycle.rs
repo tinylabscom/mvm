@@ -158,7 +158,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         volumes: &volume_cfg,
         network_policy,
         auth: machine_start_plan_auth_policy(&spec),
-        hypervisor_override: args.hypervisor.as_deref(),
+        backend_name: &effective_hypervisor,
         no_supervisor: args.no_supervisor,
         kernel_path,
         agent_verb: spec.agent_verb.clone(),

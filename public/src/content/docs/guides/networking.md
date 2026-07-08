@@ -11,7 +11,7 @@ Networking differs by backend:
 |---------|-------------|----------|-------------|
 | Firecracker (Linux native) | TAP device | 172.16.0.2/30 | Direct via TAP |
 | HVF (macOS 26+, default) | vsock-only | — | Guest I/O over vsock; no guest NIC |
-| Vz (macOS 26+, opt-in) | vmnet | DHCP-assigned | Via vmnet bridge |
+| Vz (macOS 26+, opt-in) | vmnet by default; vsock-only for OCI egress | DHCP-assigned when vmnet is present | Via vmnet bridge, or host-vsock proxy on the NIC-less OCI path |
 | libkrun (macOS) | TSI (transparent socket impl) | host-loopback | Via per-port vsock listeners |
 | microvm.nix | TAP device | 172.16.0.2/30 | Direct via TAP |
 
@@ -78,6 +78,21 @@ mvmctl machine run --flake . \
     --allow-host github.com:443 \
     --allow-host api.openai.com:443
 ```
+
+`--allow-host` is a **TCP host:port** policy, not a general-purpose network
+grant. A bare host defaults to port `443`, so `--allow-host google.com` means
+"allow TCP to `google.com:443`". On OCI-backed runs that request outbound
+egress (`--net` or `--allow-host`) — both transient `machine run --image ...`
+and persistent `machine run -d --image ...` / `machine start <name>` for an
+image-backed machine — `mvmctl` now selects only backends that can keep the
+guest **NIC-less** and proxy outbound traffic over the host-vsock egress
+endpoint. The injected guest runtime starts `mvm-egress-client` and the runtime
+sets standard proxy env vars to its loopback SOCKS listener automatically.
+Today that contract is provided by `hvf` and `vz`; if no available backend can
+provide it, the start is refused up front instead of silently degrading to a
+guest NIC. This enables tools such as `curl` and `wget`; it does **not** add
+raw ICMP, so `ping google.com` is still expected to fail. Use an HTTP/TCP probe
+as the smoke test instead.
 
 Network policies are enforced via iptables FORWARD rules on the bridge interface (Firecracker backend on Linux). DNS (port 53) is always allowed so domain resolution works. Rules are automatically cleaned up when the VM stops. On macOS backends, policies are enforced at the host-side layer rather than via iptables.
 
