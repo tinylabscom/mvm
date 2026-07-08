@@ -10,11 +10,17 @@ use std::fmt;
 use crate::guest_packet::{GuestPacketError, GuestPacketTranslator};
 use crate::proto::NetMessage;
 
+pub const DEFAULT_MAX_TUN_PACKET_BYTES: usize = 65_535;
+pub const DEFAULT_MAX_AUTHORITY_MESSAGES_PER_TICK: usize = 64;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestPumpError {
     Packet(GuestPacketError),
+    PacketSource(String),
     Authority(String),
     PacketSink(String),
+    InvalidLoopConfig(&'static str),
+    InvalidPacketRead { bytes: usize, capacity: usize },
     UnsupportedAuthorityMessage(&'static str),
 }
 
@@ -22,8 +28,16 @@ impl fmt::Display for GuestPumpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Packet(err) => write!(f, "{err}"),
+            Self::PacketSource(err) => write!(f, "guest packet source failed: {err}"),
             Self::Authority(err) => write!(f, "authority transport failed: {err}"),
             Self::PacketSink(err) => write!(f, "guest packet sink failed: {err}"),
+            Self::InvalidLoopConfig(reason) => {
+                write!(f, "invalid guest pump loop config: {reason}")
+            }
+            Self::InvalidPacketRead { bytes, capacity } => write!(
+                f,
+                "guest packet source returned invalid read size {bytes}; buffer capacity is {capacity}"
+            ),
             Self::UnsupportedAuthorityMessage(message) => {
                 write!(
                     f,
@@ -48,10 +62,34 @@ pub trait GuestAuthority {
     fn send_message(&mut self, message: NetMessage) -> Result<(), Self::Error>;
 }
 
+pub trait GuestAuthorityReceiver: GuestAuthority {
+    fn receive_message(&mut self) -> Result<AuthorityRead, Self::Error>;
+}
+
 pub trait GuestPacketSink {
     type Error: fmt::Display;
 
     fn write_packet(&mut self, packet: &[u8]) -> Result<(), Self::Error>;
+}
+
+pub trait GuestPacketSource {
+    type Error: fmt::Display;
+
+    fn read_packet(&mut self, buffer: &mut [u8]) -> Result<GuestPacketRead, Self::Error>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthorityRead {
+    Message(NetMessage),
+    WouldBlock,
+    Closed,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum GuestPacketRead {
+    Packet { bytes: usize },
+    WouldBlock,
+    Closed,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -59,6 +97,196 @@ pub enum AuthorityMessageOutcome {
     WrotePacket { bytes: usize },
     DroppedWithoutPacket,
     IgnoredControl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuestPumpLoopConfig {
+    max_tun_packet_bytes: usize,
+    max_authority_messages_per_tick: usize,
+}
+
+impl GuestPumpLoopConfig {
+    pub fn builder() -> GuestPumpLoopConfigBuilder {
+        GuestPumpLoopConfigBuilder::default()
+    }
+
+    pub const fn max_tun_packet_bytes(&self) -> usize {
+        self.max_tun_packet_bytes
+    }
+
+    pub const fn max_authority_messages_per_tick(&self) -> usize {
+        self.max_authority_messages_per_tick
+    }
+}
+
+impl Default for GuestPumpLoopConfig {
+    fn default() -> Self {
+        Self::builder()
+            .build()
+            .expect("default guest pump loop config is valid")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct GuestPumpLoopConfigBuilder {
+    max_tun_packet_bytes: usize,
+    max_authority_messages_per_tick: usize,
+}
+
+impl Default for GuestPumpLoopConfigBuilder {
+    fn default() -> Self {
+        Self {
+            max_tun_packet_bytes: DEFAULT_MAX_TUN_PACKET_BYTES,
+            max_authority_messages_per_tick: DEFAULT_MAX_AUTHORITY_MESSAGES_PER_TICK,
+        }
+    }
+}
+
+impl GuestPumpLoopConfigBuilder {
+    pub fn max_tun_packet_bytes(mut self, max_tun_packet_bytes: usize) -> Self {
+        self.max_tun_packet_bytes = max_tun_packet_bytes;
+        self
+    }
+
+    pub fn max_authority_messages_per_tick(
+        mut self,
+        max_authority_messages_per_tick: usize,
+    ) -> Self {
+        self.max_authority_messages_per_tick = max_authority_messages_per_tick;
+        self
+    }
+
+    pub fn build(self) -> Result<GuestPumpLoopConfig, GuestPumpError> {
+        if self.max_tun_packet_bytes == 0 {
+            return Err(GuestPumpError::InvalidLoopConfig(
+                "max_tun_packet_bytes must be non-zero",
+            ));
+        }
+        if self.max_tun_packet_bytes > DEFAULT_MAX_TUN_PACKET_BYTES {
+            return Err(GuestPumpError::InvalidLoopConfig(
+                "max_tun_packet_bytes cannot exceed the IPv4 packet size limit",
+            ));
+        }
+        if self.max_authority_messages_per_tick == 0 {
+            return Err(GuestPumpError::InvalidLoopConfig(
+                "max_authority_messages_per_tick must be non-zero",
+            ));
+        }
+        Ok(GuestPumpLoopConfig {
+            max_tun_packet_bytes: self.max_tun_packet_bytes,
+            max_authority_messages_per_tick: self.max_authority_messages_per_tick,
+        })
+    }
+}
+
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct GuestPumpTick {
+    pub guest_packets_read: usize,
+    pub outbound_messages_sent: usize,
+    pub authority_messages_read: usize,
+    pub guest_packets_written: usize,
+    pub guest_closed: bool,
+    pub authority_closed: bool,
+}
+
+impl GuestPumpTick {
+    pub const fn is_idle(&self) -> bool {
+        self.guest_packets_read == 0
+            && self.outbound_messages_sent == 0
+            && self.authority_messages_read == 0
+            && self.guest_packets_written == 0
+            && !self.guest_closed
+            && !self.authority_closed
+    }
+
+    pub const fn should_stop(&self) -> bool {
+        self.guest_closed || self.authority_closed
+    }
+}
+
+#[derive(Debug)]
+pub struct GuestPumpLoop {
+    config: GuestPumpLoopConfig,
+    packet_buffer: Vec<u8>,
+}
+
+impl GuestPumpLoop {
+    pub fn new(config: GuestPumpLoopConfig) -> Self {
+        let packet_buffer = vec![0; config.max_tun_packet_bytes];
+        Self {
+            config,
+            packet_buffer,
+        }
+    }
+
+    pub fn config(&self) -> &GuestPumpLoopConfig {
+        &self.config
+    }
+
+    pub fn tick<A, Source, Sink>(
+        &mut self,
+        pump: &mut GuestBridgePump<A>,
+        source: &mut Source,
+        sink: &mut Sink,
+    ) -> Result<GuestPumpTick, GuestPumpError>
+    where
+        A: GuestAuthorityReceiver,
+        Source: GuestPacketSource,
+        Sink: GuestPacketSink,
+    {
+        let mut tick = GuestPumpTick::default();
+        match source
+            .read_packet(&mut self.packet_buffer)
+            .map_err(|err| GuestPumpError::PacketSource(err.to_string()))?
+        {
+            GuestPacketRead::Packet { bytes } => {
+                if bytes == 0 || bytes > self.packet_buffer.len() {
+                    return Err(GuestPumpError::InvalidPacketRead {
+                        bytes,
+                        capacity: self.packet_buffer.len(),
+                    });
+                }
+                tick.guest_packets_read = 1;
+                tick.outbound_messages_sent =
+                    pump.send_outbound_packet(&self.packet_buffer[..bytes])?;
+            }
+            GuestPacketRead::WouldBlock => {}
+            GuestPacketRead::Closed => {
+                tick.guest_closed = true;
+            }
+        }
+
+        for _ in 0..self.config.max_authority_messages_per_tick {
+            match pump
+                .authority_mut()
+                .receive_message()
+                .map_err(|err| GuestPumpError::Authority(err.to_string()))?
+            {
+                AuthorityRead::Message(message) => {
+                    tick.authority_messages_read += 1;
+                    if matches!(
+                        pump.apply_authority_message(sink, message)?,
+                        AuthorityMessageOutcome::WrotePacket { .. }
+                    ) {
+                        tick.guest_packets_written += 1;
+                    }
+                }
+                AuthorityRead::WouldBlock => break,
+                AuthorityRead::Closed => {
+                    tick.authority_closed = true;
+                    break;
+                }
+            }
+        }
+
+        Ok(tick)
+    }
+}
+
+impl Default for GuestPumpLoop {
+    fn default() -> Self {
+        Self::new(GuestPumpLoopConfig::default())
+    }
 }
 
 #[derive(Debug)]
@@ -178,6 +406,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr};
 
     use super::*;
@@ -185,7 +414,8 @@ mod tests {
     use crate::guest_packet::{GuestPacketTranslator, GuestPacketTranslatorConfig};
     use crate::proto::{
         DnsAnswer, DnsName, DnsRecordData, DnsRecordType, DnsResponse, DnsResponseCode,
-        FlowDirection, FlowId, IcmpEchoResponse, IcmpEchoStatus, StreamChunk, TcpOpenResult,
+        EndpointRole, FlowDirection, FlowId, Hello, IcmpEchoResponse, IcmpEchoStatus, StreamChunk,
+        TcpOpenResult,
     };
 
     const DNS_PORT: u16 = 53;
@@ -199,7 +429,9 @@ mod tests {
     #[derive(Debug, Default)]
     struct MockAuthority {
         sent: Vec<NetMessage>,
+        incoming: VecDeque<AuthorityRead>,
         fail: Option<&'static str>,
+        receive_fail: Option<&'static str>,
     }
 
     impl GuestAuthority for MockAuthority {
@@ -211,6 +443,18 @@ mod tests {
             }
             self.sent.push(message);
             Ok(())
+        }
+    }
+
+    impl GuestAuthorityReceiver for MockAuthority {
+        fn receive_message(&mut self) -> Result<AuthorityRead, Self::Error> {
+            if let Some(err) = self.receive_fail {
+                return Err(err);
+            }
+            Ok(self
+                .incoming
+                .pop_front()
+                .unwrap_or(AuthorityRead::WouldBlock))
         }
     }
 
@@ -229,6 +473,50 @@ mod tests {
             }
             self.packets.push(packet.to_vec());
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    enum MockSourceRead {
+        Packet(Vec<u8>),
+        InvalidSize(usize),
+        WouldBlock,
+        Closed,
+        Fail(&'static str),
+    }
+
+    #[derive(Debug, Default)]
+    struct MockSource {
+        reads: VecDeque<MockSourceRead>,
+    }
+
+    impl MockSource {
+        fn with_reads(reads: impl IntoIterator<Item = MockSourceRead>) -> Self {
+            Self {
+                reads: reads.into_iter().collect(),
+            }
+        }
+    }
+
+    impl GuestPacketSource for MockSource {
+        type Error = &'static str;
+
+        fn read_packet(&mut self, buffer: &mut [u8]) -> Result<GuestPacketRead, Self::Error> {
+            match self.reads.pop_front().unwrap_or(MockSourceRead::WouldBlock) {
+                MockSourceRead::Packet(packet) => {
+                    if packet.len() > buffer.len() {
+                        return Err("packet larger than buffer");
+                    }
+                    buffer[..packet.len()].copy_from_slice(&packet);
+                    Ok(GuestPacketRead::Packet {
+                        bytes: packet.len(),
+                    })
+                }
+                MockSourceRead::InvalidSize(bytes) => Ok(GuestPacketRead::Packet { bytes }),
+                MockSourceRead::WouldBlock => Ok(GuestPacketRead::WouldBlock),
+                MockSourceRead::Closed => Ok(GuestPacketRead::Closed),
+                MockSourceRead::Fail(err) => Err(err),
+            }
         }
     }
 
@@ -381,6 +669,169 @@ mod tests {
     }
 
     #[test]
+    fn loop_tick_reads_guest_packet_and_sends_authority_message() {
+        let packet = udp_ipv4_packet(
+            40000,
+            DEFAULT_HOST_GATEWAY,
+            DNS_PORT,
+            &dns_query_payload(0x1234, "example.com", 1),
+        );
+        let mut source = MockSource::with_reads([MockSourceRead::Packet(packet)]);
+        let mut sink = MockSink::default();
+        let mut pump = pump();
+        let mut pump_loop = GuestPumpLoop::default();
+
+        let tick = pump_loop.tick(&mut pump, &mut source, &mut sink).unwrap();
+
+        assert_eq!(tick.guest_packets_read, 1);
+        assert_eq!(tick.outbound_messages_sent, 1);
+        assert_eq!(tick.authority_messages_read, 0);
+        assert_eq!(tick.guest_packets_written, 0);
+        assert!(!tick.is_idle());
+        assert!(!tick.should_stop());
+        assert!(matches!(
+            pump.authority().sent.first(),
+            Some(NetMessage::DnsQuery(query)) if query.name.as_str() == "example.com"
+        ));
+        assert!(sink.packets.is_empty());
+    }
+
+    #[test]
+    fn loop_tick_applies_bounded_authority_messages() {
+        let mut pump = pump();
+        pump.authority_mut()
+            .incoming
+            .push_back(AuthorityRead::Message(NetMessage::Hello(Hello::new(
+                EndpointRole::Host,
+                Vec::new(),
+            ))));
+        pump.authority_mut()
+            .incoming
+            .push_back(AuthorityRead::Message(NetMessage::Hello(Hello::new(
+                EndpointRole::Host,
+                Vec::new(),
+            ))));
+        pump.authority_mut()
+            .incoming
+            .push_back(AuthorityRead::Message(NetMessage::Hello(Hello::new(
+                EndpointRole::Host,
+                Vec::new(),
+            ))));
+        let config = GuestPumpLoopConfig::builder()
+            .max_authority_messages_per_tick(2)
+            .build()
+            .unwrap();
+        let mut pump_loop = GuestPumpLoop::new(config);
+        let mut source = MockSource::with_reads([MockSourceRead::WouldBlock]);
+        let mut sink = MockSink::default();
+
+        let tick = pump_loop.tick(&mut pump, &mut source, &mut sink).unwrap();
+
+        assert_eq!(tick.authority_messages_read, 2);
+        assert_eq!(pump.authority().incoming.len(), 1);
+        assert_eq!(tick.guest_packets_written, 0);
+        assert!(!tick.is_idle());
+    }
+
+    #[test]
+    fn loop_tick_writes_authority_response_packets() {
+        let mut pump = pump();
+        let packet = udp_ipv4_packet(
+            40000,
+            DEFAULT_HOST_GATEWAY,
+            DNS_PORT,
+            &dns_query_payload(0x1234, "example.com", 1),
+        );
+        pump.send_outbound_packet(&packet).unwrap();
+        let query_id = query_id_from_last_dns(&pump);
+        pump.authority_mut()
+            .incoming
+            .push_back(AuthorityRead::Message(NetMessage::DnsResponse(
+                DnsResponse {
+                    query_id,
+                    code: DnsResponseCode::Ok,
+                    answers: vec![DnsAnswer {
+                        name: DnsName::new("example.com").unwrap(),
+                        record_type: DnsRecordType::A,
+                        data: DnsRecordData::Ip(IpAddr::V4(Ipv4Addr::new(198, 19, 0, 2))),
+                        ttl_seconds: 60,
+                    }],
+                    denial: None,
+                },
+            )));
+        let mut source = MockSource::with_reads([MockSourceRead::WouldBlock]);
+        let mut sink = MockSink::default();
+        let mut pump_loop = GuestPumpLoop::default();
+
+        let tick = pump_loop.tick(&mut pump, &mut source, &mut sink).unwrap();
+
+        assert_eq!(tick.authority_messages_read, 1);
+        assert_eq!(tick.guest_packets_written, 1);
+        assert_eq!(sink.packets.len(), 1);
+    }
+
+    #[test]
+    fn loop_tick_reports_closed_edges() {
+        let mut pump = pump();
+        pump.authority_mut()
+            .incoming
+            .push_back(AuthorityRead::Closed);
+        let mut source = MockSource::with_reads([MockSourceRead::Closed]);
+        let mut sink = MockSink::default();
+        let mut pump_loop = GuestPumpLoop::default();
+
+        let tick = pump_loop.tick(&mut pump, &mut source, &mut sink).unwrap();
+
+        assert!(tick.guest_closed);
+        assert!(tick.authority_closed);
+        assert!(tick.should_stop());
+    }
+
+    #[test]
+    fn loop_tick_fails_closed_on_source_errors_and_invalid_sizes() {
+        let mut pump = pump();
+        let mut source = MockSource::with_reads([MockSourceRead::Fail("read failed")]);
+        let mut sink = MockSink::default();
+        let mut pump_loop = GuestPumpLoop::default();
+
+        assert_eq!(
+            pump_loop.tick(&mut pump, &mut source, &mut sink),
+            Err(GuestPumpError::PacketSource("read failed".to_string()))
+        );
+
+        let mut source = MockSource::with_reads([MockSourceRead::InvalidSize(0)]);
+        assert_eq!(
+            pump_loop.tick(&mut pump, &mut source, &mut sink),
+            Err(GuestPumpError::InvalidPacketRead {
+                bytes: 0,
+                capacity: DEFAULT_MAX_TUN_PACKET_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn loop_config_rejects_unbounded_or_zero_values() {
+        assert!(matches!(
+            GuestPumpLoopConfig::builder()
+                .max_tun_packet_bytes(0)
+                .build(),
+            Err(GuestPumpError::InvalidLoopConfig(_))
+        ));
+        assert!(matches!(
+            GuestPumpLoopConfig::builder()
+                .max_tun_packet_bytes(DEFAULT_MAX_TUN_PACKET_BYTES + 1)
+                .build(),
+            Err(GuestPumpError::InvalidLoopConfig(_))
+        ));
+        assert!(matches!(
+            GuestPumpLoopConfig::builder()
+                .max_authority_messages_per_tick(0)
+                .build(),
+            Err(GuestPumpError::InvalidLoopConfig(_))
+        ));
+    }
+
+    #[test]
     fn dns_response_from_authority_writes_guest_packet() {
         let mut pump = pump();
         let packet = udp_ipv4_packet(
@@ -451,7 +902,9 @@ mod tests {
             GuestPacketTranslator::default(),
             MockAuthority {
                 sent: Vec::new(),
+                incoming: VecDeque::new(),
                 fail: Some("closed"),
+                receive_fail: None,
             },
         );
         let packet = udp_ipv4_packet(

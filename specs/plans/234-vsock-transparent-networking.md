@@ -1,6 +1,6 @@
 # Plan 234 — Transparent networking over vsock
 
-**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, and TCP response synthesis landed.
+**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, and bounded pump loop substrate landed.
 
 **Owner directive:** workload networking remains a vsock-mediated capability. The guest gets normal application-visible networking behavior, but the host remains the only authority that opens real network sockets, performs DNS, terminates TLS for secret-bearing flows, applies egress policy, records audit, and emits attestable evidence.
 
@@ -34,8 +34,10 @@
       Add `mvm-net::guest_pump` behind the existing `guest` feature. Wire the packet translator to generic authority and packet-sink traits; send outbound translated `mvm-net` protocol messages to the authority; write synthesized DNS and ICMP echo responses back to the guest sink; ignore handshake control messages; and keep unsupported transport authority responses fail-closed until protocol-specific synthesis lands.
 - [x] **B1c2b — Add stateful TCP response synthesis.**
       Extend `mvm-net::guest_packet` with TCP flow state keyed by both guest 4-tuple and `FlowId`; synthesize authority `TcpOpenResult` messages into SYN-ACK or RST-ACK packets; synthesize ordered host-to-guest `TcpData` chunks into PSH/ACK or FIN/ACK packets; synthesize host closes into FIN/RST packets; reject wrong-direction, out-of-order, unknown-flow, and over-limit chunks; and wire `mvm-net::guest_pump` to write those TCP packets back to the guest sink.
-- [ ] **B1c2c — Add the concrete TUN/vsock bridge loop.**
-      Add the real pump that reads from the TUN fd, writes protocol frames to the vsock authority, consumes host responses, synthesizes TCP replies to the guest, and enforces bounded backpressure across both directions.
+- [x] **B1c2c — Add bounded guest pump loop substrate.**
+      Extend `mvm-net::guest_pump` with a reusable `GuestPumpLoop` and `GuestPumpLoopConfig`; own one bounded TUN packet buffer; add testable source/authority-receive traits; process at most one guest packet and a bounded number of authority messages per tick; report idle/closed edges; reject source errors, invalid read sizes, zero limits, and over-IPv4 packet buffers without adding dependencies.
+- [ ] **B1c2d — Add the concrete Linux TUN/vsock fd adapters and runner.**
+      Add the real runner that reads from the Linux TUN fd, writes protocol frames to the vsock authority stream, consumes host responses, synthesizes TCP replies to the guest, and enforces bounded backpressure across both directions.
 - [ ] **B2 — Build the host network authority.**
       Add the host-side module and binary that accepts the per-VM vsock stream, owns synthetic DNS/IP mapping, reuses the canonical network policy projection, opens real host sockets only after admission, and records flow-open/flow-close audit events.
 - [ ] **C1 — Add DNS plus TCP MVP.**
