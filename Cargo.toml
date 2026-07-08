@@ -220,9 +220,7 @@ toml = "0.8"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 clap_mangen = "0.2"
-colored = "3"
 indicatif = "0.18"
-inquire = "0.9"
 
 # HTTP client. Keep the workspace on a single reqwest line so the direct
 # callers and `oci-client` share one HTTP/TLS stack instead of compiling both

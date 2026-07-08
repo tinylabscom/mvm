@@ -741,18 +741,34 @@ fn build_exec_request(
                     }),
                 }
             }
-            (None, None) => {
-                ui::info("No --manifest specified; using bundled default microVM image.");
-                let (kernel_path, rootfs_path) =
-                    ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
-                crate::exec::ImageSource::Prebuilt {
-                    kernel_path,
-                    rootfs_path,
-                    initrd_path: None,
-                    label: "default-microvm".to_string(),
-                    virtiofs_oci_root: None,
+            (None, None) => match super::runtime_pack::try_runtime_pack_image_source(prod) {
+                Some(src) => {
+                    let label = match &src {
+                        crate::exec::ImageSource::Prebuilt { label, .. } => label.clone(),
+                        crate::exec::ImageSource::Template(name) => name.clone(),
+                    };
+                    ui::info(&format!(
+                        "Instant boot from verified runtime pack ({label}); \
+                             skipping the build."
+                    ));
+                    src
                 }
-            }
+                None => {
+                    ui::info(
+                        "No verified runtime pack cached; building the bundled default \
+                             microVM in the builder VM.",
+                    );
+                    let (kernel_path, rootfs_path) =
+                        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+                    crate::exec::ImageSource::Prebuilt {
+                        kernel_path,
+                        rootfs_path,
+                        initrd_path: None,
+                        label: "default-microvm".to_string(),
+                        virtiofs_oci_root: None,
+                    }
+                }
+            },
         }
     };
     Ok(crate::exec::ExecRequest {

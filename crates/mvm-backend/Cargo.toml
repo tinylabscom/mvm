@@ -54,12 +54,9 @@ mvm-build = { workspace = true, features = ["builder-vm"] }
 libkrun-sys.workspace = true
 mio.workspace = true
 # Folded in with the former mvm-base crate: the base substrate's ui
-# (colored/indicatif/inquire spinners + prompts) and secret handling
-# (secrecy). Crypto helpers come from mvm_core::crypto, already available
-# via the mvm-core dep above.
-colored.workspace = true
-indicatif.workspace = true
-inquire.workspace = true
+# (ANSI output, in-house spinners + prompts) and secret handling (secrecy).
+# Crypto helpers come from mvm_core::crypto, already available via the
+# mvm-core dep above.
 secrecy.workspace = true
 
 anyhow.workspace = true

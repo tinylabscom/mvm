@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use flate2::read::GzDecoder;
+use mvm_build::oci_runtime_inject::OciEntrypointConfig;
 use mvm_build::rootfs::MaterializeExt4Input;
 use mvm_oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
@@ -311,20 +312,11 @@ pub(in crate::commands) fn oci_cache_root() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_cache_dir()).join("oci")
 }
 
-/// Bump when the injected OCI runtime (guest agent, netinit, or `/init`
-/// script) changes such that already-materialized rootfs images must be
-/// re-sealed. Folded with the crate version into [`oci_runtime_tag`]; a
-/// stale rootfs then re-materializes instead of booting an outdated agent.
-/// Epoch 1 introduces the dev-shell exec handler in the OCI agent. Epoch 2 adds
-/// the detached-workload handler — a rootfs sealed with an older agent would
-/// reject the run-detached request, so it must re-materialize.
-const OCI_RUNTIME_EPOCH: u32 = 2;
-
 /// Identity of the guest runtime the running mvmctl bakes into an OCI rootfs.
 /// Cheap and build-free (no agent cross-compile) so it can gate the cache-hit
 /// path without forcing a rebuild on hosts that only have a warm rootfs cache.
 fn oci_runtime_tag() -> String {
-    format!("{}.{}", env!("CARGO_PKG_VERSION"), OCI_RUNTIME_EPOCH)
+    env!("CARGO_PKG_VERSION").to_string()
 }
 
 /// Whether a cached image's materialized rootfs can be booted as-is: it must
@@ -334,16 +326,59 @@ fn cached_rootfs_is_current(cached: &CachedOciImage, runtime_tag: &str) -> bool 
     cached.rootfs_path.is_some() && cached.runtime_tag.as_deref() == Some(runtime_tag)
 }
 
+#[derive(Debug, Deserialize)]
+struct OciImageConfig {
+    #[serde(default)]
+    config: OciImageConfigInner,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OciImageConfigInner {
+    #[serde(default, rename = "Entrypoint")]
+    entrypoint: Option<Vec<String>>,
+    #[serde(default, rename = "Cmd")]
+    cmd: Option<Vec<String>>,
+    #[serde(default, rename = "Env")]
+    env: Vec<String>,
+    #[serde(default, rename = "WorkingDir")]
+    working_dir: Option<String>,
+}
+
+fn oci_entrypoint_from_config_bytes(bytes: &[u8]) -> Result<Option<OciEntrypointConfig>> {
+    let config: OciImageConfig = serde_json::from_slice(bytes).context("parse OCI image config")?;
+    let mut argv = config.config.entrypoint.unwrap_or_default();
+    argv.extend(config.config.cmd.unwrap_or_default());
+    if argv.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(OciEntrypointConfig {
+        argv,
+        env: config.config.env,
+        working_dir: config.config.working_dir.filter(|dir| !dir.is_empty()),
+    }))
+}
+
+fn oci_entrypoint_from_cache_path(
+    cache_root: &Path,
+    config_path: Option<&str>,
+) -> Result<Option<OciEntrypointConfig>> {
+    let Some(config_path) = config_path else {
+        return Ok(None);
+    };
+    let path = safe_cache_path(cache_root, config_path)?;
+    let bytes = fs::read(&path).with_context(|| format!("read OCI config {}", path.display()))?;
+    oci_entrypoint_from_config_bytes(&bytes)
+}
+
 pub(in crate::commands) fn resolve_or_pull_run_image(
     cache_root: &Path,
     reference: &str,
     prod: bool,
 ) -> Result<ResolvedOciRunImage> {
-    // Rootfs materialization can fall back to a builder VM (a flat dir the
-    // in-process ext4 writer can't emit), and an abnormally-exited builder can
-    // orphan its gvproxy sidecar to the init process. `up` / `dev up` reap the
-    // previous run's corpses at startup; the run-image path is the other place
-    // a builder VM spawns, so give it the same sweep before we might add one.
+    // Rootfs materialization can fall back to a builder VM when the in-process
+    // ext4 writer cannot faithfully emit a tree. `up` / `dev up` reap previous
+    // helper processes at startup; the run-image path is the other place a
+    // builder VM can spawn, so give it the same sweep before we might add one.
     crate::commands::env::dev_vz::sweep_orphaned_vm_helpers_on_startup();
 
     // Local sources route to their own ingest; a registry reference falls
@@ -401,6 +436,8 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
                     &unpacked_root,
                     &rootfs_path,
                     &image.reference,
+                    oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?
+                        .as_ref(),
                 )
                 .with_context(|| {
                     format!(
@@ -461,12 +498,14 @@ fn inject_runtime_and_materialize(
     unpacked_root: &Path,
     rootfs_abs: &Path,
     image_label: &str,
+    entrypoint: Option<&OciEntrypointConfig>,
 ) -> Result<()> {
     mvm_build::run_image::inject_and_materialize(
         cache_root,
         unpacked_root,
         rootfs_abs,
         image_label,
+        entrypoint,
         embedded_guest_binaries(),
     )
 }
@@ -483,9 +522,11 @@ fn embedded_guest_binaries() -> Option<mvm_build::run_image::PrebuiltGuestBinari
             .filter(|b| !b.is_empty())
     };
     Some(mvm_build::run_image::PrebuiltGuestBinaries {
+        oci_init: find("mvm-oci-init")?,
         agent: find("mvm-guest-agent")?,
         netinit: find("mvm-guest-netinit")?,
         egress_client: find("mvm-egress-client")?,
+        entrypoint_runner: find("mvm-oci-entrypoint")?,
     })
 }
 
@@ -573,11 +614,13 @@ fn ingest_archive_from_reader<R: Read>(
 
     let rootfs_rel = format!("rootfs/{manifest_hex}-{}/rootfs.ext4", oci_runtime_tag());
     let rootfs_abs = cache_root.join(&rootfs_rel);
+    let entrypoint = oci_entrypoint_from_config_bytes(&image.config_bytes)?;
     inject_runtime_and_materialize(
         cache_root,
         &unpacked_root,
         &rootfs_abs,
         &image.manifest_digest,
+        entrypoint.as_ref(),
     )?;
 
     let provenance = OciProvenance {
@@ -970,6 +1013,7 @@ fn pull_image_ref(
         &unpacked_root,
         &rootfs_abs,
         &image_ref.canonical(),
+        oci_entrypoint_from_cache_path(cache_root, config_path.as_deref())?.as_ref(),
     )?;
 
     let provenance = OciProvenance {
@@ -2358,5 +2402,48 @@ require_signatures = false
         let index = load_index(tmp.path()).expect("load index");
         assert_eq!(index.images.len(), 1);
         assert_eq!(index.images[0].reference, "docker.io/library/busybox:1");
+    }
+
+    #[test]
+    fn oci_entrypoint_combines_entrypoint_and_cmd_without_shell() {
+        let config = br#"{
+          "config": {
+            "Entrypoint": ["/usr/bin/python3", "-m", "app"],
+            "Cmd": ["--port", "8080"],
+            "Env": ["PATH=/custom/bin", "APP_ENV=prod"],
+            "WorkingDir": "/srv/app"
+          }
+        }"#;
+
+        let entrypoint = oci_entrypoint_from_config_bytes(config)
+            .expect("parse")
+            .expect("entrypoint present");
+
+        assert_eq!(
+            entrypoint.argv,
+            ["/usr/bin/python3", "-m", "app", "--port", "8080"]
+        );
+        assert_eq!(entrypoint.env, ["PATH=/custom/bin", "APP_ENV=prod"]);
+        assert_eq!(entrypoint.working_dir.as_deref(), Some("/srv/app"));
+    }
+
+    #[test]
+    fn oci_entrypoint_uses_cmd_when_entrypoint_absent() {
+        let config = br#"{"config":{"Cmd":["/bin/myapp","serve"]}}"#;
+
+        let entrypoint = oci_entrypoint_from_config_bytes(config)
+            .expect("parse")
+            .expect("cmd becomes argv");
+
+        assert_eq!(entrypoint.argv, ["/bin/myapp", "serve"]);
+    }
+
+    #[test]
+    fn oci_entrypoint_absent_for_scratch_config_without_cmd() {
+        let config = br#"{"architecture":"amd64","os":"linux","config":{}}"#;
+
+        let entrypoint = oci_entrypoint_from_config_bytes(config).expect("parse");
+
+        assert!(entrypoint.is_none());
     }
 }

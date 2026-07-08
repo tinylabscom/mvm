@@ -41,7 +41,8 @@ plan 25 sequences the work into six independently-shippable workstreams.
       revocations. Validation: focused `pack_revocation_cache_tests` under
       `mvm-cli` plus the PR's green CI matrix.
 - [x] 2026-07-06 internal `mvm-cli` modularity cleanup: `commands::run()` now delegates startup sequencing to small helpers and command execution to a trait-backed dispatcher in `crates/mvm-cli/src/commands/dispatch.rs`, and `crates/mvm-cli/src/commands/image/trust.rs` now owns the OCI registry-auth / cosign trust helpers previously in `image/mod.rs`. Validation used `MVM_SKIP_EMBED_BINARIES=1` for local dev-only build-script bypass: `cargo fmt --all`, targeted `cargo test -p mvm-cli --lib commands::tests::internal_helper_commands_short_circuit_before_startup_side_effects`, and `cargo clippy -p mvm-cli --all-targets -- -D warnings` green.
-- [x] 2026-07-08 OCI `--image` NIC-less vsock-egress activation: the runtime-injected guest `/init` now bakes and starts `mvm-egress-client`, exports SOCKS proxy env vars, and the embedded/cacheable guest runtime includes the third guest binary end-to-end. The final activation is now driven by the **requested outbound policy** (`--net` / `--allow-host`), not a hidden `MVM_VSOCK_EGRESS` toggle: `mvmctl` selects only backends that honestly provide `{ vsock, no_guest_nic, host_vsock_proxy }`, injects/records the proxy env vars automatically, and refuses incapable backends instead of silently degrading to a guest NIC. The same gate now covers persistent OCI-backed boots (`machine run -d --image ...` and `machine start` on an image-backed machine), so stored machine lifecycles cannot slip back onto the legacy NIC/gateway path after a safe transient dry-run. Today that means `hvf` and `vz`; on the Vz raw OCI path the guest NIC/gvproxy are omitted entirely and the per-VM host egress endpoint is live before boot so the shim fails closed if the endpoint is absent. `ping` remains unsupported because ICMP is not tunneled. Validation: `cargo fmt --all --check`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo check -p mvm-core -p mvm-backend -p mvm-cli -p mvm`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-core allows_egress_covers_every_shape --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-backend vsock_egress_cmdline_token_only_when_policy_allows_egress --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-backend build_supervisor_config_omits_guest_nic_when_oci_egress_is_enabled --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-backend vz_substitution_not_spawned_when_no_secrets --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli receipt_env_keys_include_injected_oci_proxy_vars --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli machine_start_preflight_refuses_firecracker_for_oci_egress --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo clippy -p mvm-core -p mvm-backend -p mvm-cli -p mvm --tests -- -D warnings` green.
+- [x] 2026-07-08 OCI `--image` NIC-less vsock-egress activation: the runtime-injected guest `/init` now bakes and starts `mvm-egress-client`, exports SOCKS proxy env vars, and the embedded/cacheable guest runtime includes the third guest binary end-to-end. The final activation is now driven by the **requested outbound policy** (`--net` / `--allow-host`), not a hidden `MVM_VSOCK_EGRESS` toggle: `mvmctl` selects only backends that honestly provide `{ vsock, no_guest_nic, host_vsock_proxy }`, injects/records the proxy env vars automatically, and refuses incapable backends instead of silently degrading to a guest NIC. The same gate now covers persistent OCI-backed boots (`machine run -d --image ...` and `machine start` on an image-backed machine), so stored machine lifecycles cannot slip back onto the legacy NIC/gateway path after a safe transient dry-run. Today that means `hvf`; incapable backends are refused before boot. `ping` remains unsupported because ICMP is not tunneled. Validation: `cargo fmt --all --check`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo check -p mvm-core -p mvm-backend -p mvm-cli -p mvm`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-core allows_egress_covers_every_shape --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-backend vsock_egress_cmdline_token_only_when_policy_allows_egress --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli receipt_env_keys_include_injected_oci_proxy_vars --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli machine_start_backend_selection_refuses_firecracker_for_oci_egress --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo clippy -p mvm-core -p mvm-backend -p mvm-cli -p mvm --tests -- -D warnings` green.
+- [x] 2026-07-08 current-surface docs/spec scrub for Vz deletion: current roadmap and contributor docs now describe HVF + Firecracker + libkrun as the live workload/backend surface, stop advertising Vz as a current backend choice, and align the macOS contributor story around HVF/libkrun instead of Vz.
 - [x] 2026-07-07 release helper-bundle hardening: source-checkout HVF and substitution helpers now rebuild from explicit source-input freshness instead of emitting the stale `mvmctl` mtime warning; `install.sh`, the Homebrew formula, `mvmctl update`, and release verification now install/enforce `mvm-hvf-supervisor` and `mvm-substitution-endpoint` alongside `mvmctl`; install/release docs distinguish full helper-bundle installs from CLI-only `cargo install`. Validation: `cargo fmt --all`; `cargo test -p mvm-backend aux_bin --lib`; focused updater tests; `bash -n` for touched shell scripts; `ruby -c packaging/homebrew/mvmctl.rb.tmpl`; synthetic positive/negative `verify-release-assets.sh` tarball checks; `cargo check -p mvm-backend -p mvm-cli --all-targets`; `cargo clippy -p mvm-backend -p mvm-cli --all-targets -- -D warnings`; `MVM_DATA_DIR=/tmp/... cargo test -p mvm --lib -- --test-threads=1` green. Full serial `cargo test --workspace -- --test-threads=1` reached one unrelated host-posture failure in `doctor::tests::collect_security_posture_returns_a_real_tier` (`Unknown` on this host).
 - [x] 2026-07-07 #1527 HVF density follow-up: raw-HVF kernel boot now reserves guest RAM as anonymous demand-zero memory and maps the configured kernel file over the kernel load window with `MAP_PRIVATE | MAP_FIXED` instead of copying the `Image` into per-VM private RAM. Live macOS-26 Apple Silicon measurement with a temporary guest-agent initramfs showed baseline `main` at 569.6 MiB per idle supervisor (1,139.2 MiB for two) vs. the file-backed branch at 40.9 MiB for one / 81.9 MiB for two, with `vmmap` showing the exact `vmlinux` path as a private-COW file mapping. No Vz, gvproxy, TAP, bridge, guest NIC, guest IP, or Firecracker networking work was introduced. Issue triage also closed stale #1227 and completed #1388; #1264/#1280/#1283/#1366/#1404/#1462/#1478 remain useful under the current no-guest-NIC/vsock-only direction.
 
@@ -3565,6 +3566,76 @@ that stops a third surface reappearing. Everything below hangs off that spine.
   surfaces + the library API; every public item carries a doc example (kept
   green by `just test-doc`); `just` recipes for the common flows. Best-in-class
   "use it as a library" story.
+- [ ] **P7 — Dependency surface reduction (security-driven).** The workspace
+  carries ~734 crates — every one is attack surface and a potential supply-chain
+  CVE, which is a direct, stated security concern (not just tidiness). Beyond
+  P1's *unused*-dep removal, audit the *used* deps: for each direct dependency,
+  measure how much of it we actually consume. Categorize:
+  **(a) unused** → remove (P1); **(b) barely-used** (a single function or a
+  handful) → reimplement in-house behind a small, focused, tested module **or**
+  swap for a lighter-weight / `std` alternative; **(c) heavy-but-justified** →
+  keep, with a one-line rationale recorded. Prioritize by risk: unmaintained
+  crates, large transitive footprints, duplicate crates at multiple versions, and
+  categories that pull broad native/parsing surface. Every removal/replacement is
+  evidence-driven (`cargo tree -i`, actual call-site count) and tested, and must
+  **not** weaken any security claim — claim 7's `cargo-audit` + `deny.toml`
+  posture is the backstop, and a reimplementation is only worth it when it is
+  *simpler and auditable*, never a subtle re-bug. Ratchet: a **dependency-count
+  budget** in CI so the total can't silently grow, plus `cargo deny` on every PR.
+  - [x] **Slice 1 (2026-07-08):** removed `inquire` workspace-wide. Evidence:
+    only three prompt call-sites remained (`mvm::ui::confirm`, the destructive
+    `DELETE-EVERYTHING` prompt, and secret entry). Replaced them with tiny
+    in-house prompt helpers over `std::io` + `libc` termios echo suppression
+    for hidden secret input, preserving the no-echo secret posture. Result:
+    `inquire` and its transitive terminal stack (`crossterm`,
+    `crossterm_winapi`, `signal-hook`, `signal-hook-mio`, `fuzzy-matcher`,
+    `derive_more`, `document-features`, `convert_case`, `litrs`,
+    `unicode-segmentation`) drop out of `Cargo.lock`. Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend`, targeted
+    `mvm-backend` UI tests, `cargo test -p mvm-cli --lib`, and
+    `cargo clippy -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`.
+  - [ ] **Slice 2 (2026-07-08):** removed `colored` and stale direct manifest
+    edges from `mvm`. Evidence: `colored` had one real consumer
+    (`mvm-backend::base::ui`) and `mvm` still declared `colored` /
+    `indicatif` directly even though `mvm::ui` is only a re-export of
+    `mvm-backend::base::ui`. Replaced the `colored` calls with a tiny
+    terminal-aware ANSI helper inside `mvm-backend::base::ui`, keeping
+    color off for non-TTY output and preserving the existing spinner path
+    (`indicatif`). Result: `colored` drops out of `Cargo.lock`, the direct
+    `mvm` manifest no longer carries dead `colored` / `indicatif` edges,
+    and `mvm-hostd`'s `web_search` path no longer relies on reqwest's
+    optional `.query()` method (it now builds query URLs explicitly, which
+    keeps the lean reqwest feature set intact). Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend -p mvm-hostd`,
+    targeted `mvm-backend` UI tests, targeted `mvm-hostd` web-search tests,
+    and `cargo clippy -p mvm-cli -p mvm-backend -p mvm-hostd --lib --tests -- -D warnings`.
+    Final closeout is pending a less-restricted host run of
+    `cargo test -p mvm-cli --lib`; in this sandbox the remaining failures are
+    permission-denied test fixtures that bind local sockets / write under
+    `/var/tmp`, not compile or logic regressions from this slice.
+  - [x] **Slice 3 (2026-07-08):** unified `which` to the workspace's single
+    `which 7` version. Evidence: `cargo tree -p mvmctl -i which@6.0.3` showed
+    `mvm-build` as the lone remaining `which 6` root, and its call-sites only
+    use the stable `which::which(...)` API already used elsewhere in the
+    workspace. Swapped `crates/mvm-build/Cargo.toml` from `which = "6"` to
+    `which.workspace = true`, which drops `which 6` from `Cargo.lock` and
+    reduces the `mvmctl` normal-dependency closure count from 859 to 853.
+    Verified with `cargo fmt --check`, `cargo check -p mvm-build -p mvm-cli -p mvm-backend`,
+    `cargo clippy -p mvm-build -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`,
+    and closure remeasurement via `cargo tree`.
+  - [x] **Slice 4 (2026-07-08):** removed `indicatif` from the shared CLI/UI
+    path. Evidence: `cargo tree -p mvmctl -i indicatif` showed a single UI-only
+    root through `mvm-backend::base::ui` and the thin CLI wrapper; call-sites
+    only use a cloneable spinner with `set_message` and `finish_and_clear`.
+    Replaced it with a tiny in-house spinner handle in
+    `mvm-backend::base::ui`, updated the CLI wrapper to re-export that handle,
+    and swapped the dev-builder heartbeat type plumbing accordingly. Result:
+    `indicatif` drops out of `Cargo.lock`, along with its exclusive closure
+    pieces such as `console` and `unit-prefix`, and the `mvmctl`
+    normal-dependency closure count falls from 853 to 845. Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend`,
+    targeted `mvm-backend` UI tests, `cargo clippy -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`,
+    and closure remeasurement via `cargo tree`.
 
 ### Scoping decisions to confirm before execution (front-loaded)
 
@@ -3580,7 +3651,7 @@ here so execution doesn't guess:
    (no back-compat obligation), so hard deletion is on the table; confirm the
    keep-list.
 4. **One sprint vs several** — P1/P2 are safe and fast; P3/P4 are larger. Likely
-   sequence P1 → P2 → P4 → P3 → P5 → P6.
+   sequence P1 → P7 → P2 → P4 → P3 → P5 → P6.
 
 ### Exit criteria
 
@@ -3590,8 +3661,10 @@ here so execution doesn't guess:
   `cargo clippy --workspace -- -D warnings` clean.
 - CLI verb count reduced with a snapshot test guarding it.
 - `mvmd` orchestrates a network of ≥2 mvm hosts via the facade (smoke test).
-- New CI ratchets live: crate-count budget, `cargo public-api` snapshots,
-  `cargo machete`.
+- Dependency count materially reduced from ~734 (target set in the scoping call);
+  barely-used deps reimplemented or replaced with a recorded rationale.
+- New CI ratchets live: crate-count budget, **dependency-count budget**,
+  `cargo public-api` snapshots, `cargo machete`, `cargo deny`.
 
 > **Does Plan 230 (this session's work) make this sprint harder? No — it is
 > Phase 0.** It supplies the decision rule (host/user/scaffolding), the

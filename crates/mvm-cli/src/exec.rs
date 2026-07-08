@@ -246,20 +246,72 @@ pub(crate) fn select_exec_backend(
     image_requested: bool,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> Result<AnyBackend> {
-    if image_requested && network_policy.allows_egress() {
-        return AnyBackend::select_capable_available(&RequiredCapabilities {
-            vsock: true,
-            no_guest_nic: true,
-            host_vsock_proxy: true,
-            ..Default::default()
-        })
-        .map_err(|e| {
-            anyhow!(
-                "OCI --image runs with outbound egress enabled require a NIC-less host-vsock-proxy backend: {e}"
-            )
-        });
+    let backend_name = select_backend_name_for_egress(
+        None,
+        image_requested,
+        network_policy,
+        "OCI --image runs with outbound egress enabled",
+    )?;
+    Ok(AnyBackend::from_hypervisor(&backend_name))
+}
+
+pub(crate) fn select_backend_name_for_egress(
+    backend_override: Option<&str>,
+    image_requested: bool,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
+    workload: &str,
+) -> Result<String> {
+    if let Some(backend_name) = backend_override {
+        validate_backend_for_egress(backend_name, image_requested, network_policy, workload)?;
+        return Ok(backend_name.to_string());
     }
-    Ok(AnyBackend::auto_select())
+
+    if !requires_vsock_proxy_backend(image_requested, network_policy) {
+        return Ok(AnyBackend::auto_select().name().to_string());
+    }
+
+    AnyBackend::select_capable_available(&vsock_proxy_backend_requirements())
+        .map(|backend| backend.name().to_string())
+        .map_err(|e| anyhow!("{workload} require a NIC-less host-vsock-proxy backend: {e}"))
+}
+
+pub(crate) fn validate_backend_for_egress(
+    backend_name: &str,
+    image_requested: bool,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
+    workload: &str,
+) -> Result<()> {
+    if !requires_vsock_proxy_backend(image_requested, network_policy) {
+        return Ok(());
+    }
+
+    let missing = AnyBackend::from_hypervisor(backend_name)
+        .capabilities()
+        .shortfall(&vsock_proxy_backend_requirements());
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "{workload} require a NIC-less host-vsock-proxy backend; backend {backend_name} lacks [{}]",
+        missing.join(", ")
+    );
+}
+
+fn requires_vsock_proxy_backend(
+    image_requested: bool,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
+) -> bool {
+    image_requested && network_policy.allows_egress()
+}
+
+fn vsock_proxy_backend_requirements() -> RequiredCapabilities {
+    RequiredCapabilities {
+        vsock: true,
+        no_guest_nic: true,
+        host_vsock_proxy: true,
+        ..Default::default()
+    }
 }
 
 fn request_uses_vsock_proxy_backend(req: &ExecRequest) -> bool {
