@@ -109,24 +109,37 @@ impl PackTrustStore for PackTrustConfig {
 
 impl PackRevocationChecker for PackTrustConfig {
     fn status(&self, key_id: &KeyId, pack_hash: &Sha256Hex) -> RevocationStatus {
-        for entry in &self.revocations {
-            if &entry.key_id != key_id {
-                continue;
-            }
-            // A pinned pack_hash revokes only that pack; an unpinned entry
-            // revokes the whole key.
-            let matches = match &entry.pack_hash {
-                Some(pinned) => pinned == pack_hash,
-                None => true,
-            };
-            if matches {
-                return RevocationStatus::Revoked {
-                    reason: entry.reason.clone(),
-                };
-            }
-        }
-        RevocationStatus::Good
+        revocation_status(&self.revocations, key_id, pack_hash)
     }
+}
+
+/// Shared revocation-list scan: an entry whose `key_id` matches and whose
+/// `pack_hash` is unset (whole-key) or equal to `pack_hash` (pinned) revokes.
+/// Factored out so `pack_revocation::PackRevocationList` — the fetched,
+/// project-signed counterpart to this operator-owned config — can reuse the
+/// exact same matching rule instead of drifting a second copy.
+pub(crate) fn revocation_status(
+    revocations: &[RevokedPack],
+    key_id: &KeyId,
+    pack_hash: &Sha256Hex,
+) -> RevocationStatus {
+    for entry in revocations {
+        if &entry.key_id != key_id {
+            continue;
+        }
+        // A pinned pack_hash revokes only that pack; an unpinned entry
+        // revokes the whole key.
+        let matches = match &entry.pack_hash {
+            Some(pinned) => pinned == pack_hash,
+            None => true,
+        };
+        if matches {
+            return RevocationStatus::Revoked {
+                reason: entry.reason.clone(),
+            };
+        }
+    }
+    RevocationStatus::Good
 }
 
 #[derive(Debug, Error)]

@@ -50,6 +50,7 @@ pub mod migration;
 pub mod naming;
 pub mod observability;
 pub mod pack_cache;
+pub mod pack_revocation;
 pub mod pack_trust;
 pub mod packs;
 /// Compiled-in release-signing identity: the OIDC issuer and identity
