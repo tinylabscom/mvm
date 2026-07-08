@@ -546,3 +546,13 @@ sleep 25; ./target/debug/mvmctl machine ls            # unhealthy → restart(s)
 **Type consistency:** `ProbeResult`/`HealthState`/`HealthAction`/`HealthPolicy`/`HealthTracker`/`fold` (Task 1) are used verbatim in Tasks 5/6; `record_readiness` (Task 2) is called in Task 5; `GuestExec`/`ExecOutcome`/`probe_with` (Task 3) are consumed in Task 5; `map_state`/`health_cell` map the same `InstanceReadiness` variants across Tasks 4/5. `mvm-core` must not reference `mvm-sdk` (Task 1 holds raw numbers; the caller builds `HealthPolicy`). ✓
 
 **Known risk:** Task 0 (HVF daemon wiring) can turn up a BLOCKED — the design's fallback (probe thread in the per-VM supervisor) is a different plan; escalate rather than force it.
+
+---
+
+## Follow-ups (post-merge)
+
+Tracked here as they land off the merged phase-C branch.
+
+- [x] **Chain-signed health audit.** Task 7 shipped the transition/restart audit as structured `tracing` only, because the daemon holds just the signer's *public* key (the private key lives in the supervised signer-helper — the process moat). Resolved by routing health events through the same signer-helper `AppendEntry` path the guest-facing `host.audit.v1` already uses: a new `HealthAuditSink` (snapshotted from the daemon under one brief lock, then moved into the blocking probe pass) appends each transition/restart to the VM's per-VM workload chain, tamper-evident on the same chain `mvmctl trust audit` verifies. Entries carry the host-asserted `host` category — the signer-helper's `append` now honors an allow-listed caller category instead of hard-coding `workload_audit`, so host health events stay distinguishable from a workload's own emissions (the guest can't spoof it: every append path stamps the category host-side). Threaded into the prober via a `HealthAudit` seam so transitions stay unit-testable. Files: `crates/mvm-hostd/src/audit_signer/helper.rs`, `crates/mvm-hostd/src/broker/daemon.rs`, `crates/mvm-hostd/src/health_probe.rs`, `crates/mvm-hostd/src/host_agent_idle.rs`.
+- [ ] **HVF signer-helper `BROKER_PORT` guest bridge.** Guest-side `host.audit.v1` still isn't routed on HVF (`HvfSupervisorConfig` carries no broker-listen field; the HVF vsock dispatcher routes only workload-exit/egress). The host-emitted health audit above needs no guest bridge, but guest-originated audit parity with libkrun/vz on HVF remains open.
+- [ ] **HVF supervisor teardown reliability.** `mvm-hvf-supervisor` orphaning after stop/rm dents restart reliability on HVF; needs a live-hardware root-cause (blocked while a parallel session shares `~/.mvm`).

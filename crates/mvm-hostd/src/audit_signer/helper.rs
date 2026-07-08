@@ -149,14 +149,34 @@ impl SignerHelper {
                 message: "append workload does not match registered signer helper workload".into(),
             };
         }
+        // Category is host-set on every append path: the workload-facing
+        // `host.audit.v1` broker forces `workload_audit`, and the daemon's own
+        // health watcher sets `host` — the guest never supplies it. Honor the
+        // caller's category (falling back to the workload default when unset)
+        // so host-asserted health entries stay distinguishable from
+        // workload-asserted ones; the chain re-validates it against the
+        // allow-list, so an unknown category still fails closed here.
+        let category = if req.category.is_empty() {
+            WORKLOAD_AUDIT_CATEGORY.to_string()
+        } else {
+            req.category
+        };
+        if !crate::audit_signer::category::is_allowed(&category) {
+            return SignerHelperResponse::Err {
+                request_id,
+                code: AuditSignerErrorCode::InvalidRequest,
+                message: "append category not in allow-list".into(),
+            };
+        }
         debug!(
             vm_id = %req.vm_id,
             workload_id = %vm.workload_id,
             request_id = %request_id,
+            category = %category,
             "signer helper appending entry"
         );
         let entry = CanonicalEntry {
-            category: WORKLOAD_AUDIT_CATEGORY.into(),
+            category,
             correlation_id: req.correlation_id,
             fields: req.fields,
             prev_hash: vm.chain.head().to_string(),
@@ -332,6 +352,110 @@ mod tests {
             correlation_id: format!("brk-{request_id}"),
             fields: serde_json::json!({"event": request_id}),
         })
+    }
+
+    fn append_req_with_category(
+        vm_id: &str,
+        request_id: &str,
+        category: &str,
+    ) -> SignerHelperRequest {
+        SignerHelperRequest::AppendEntry(SignerHelperAppendEntry {
+            request_id: request_id.into(),
+            vm_id: vm_id.into(),
+            category: category.into(),
+            ts: "2026-06-17T00:00:00Z".into(),
+            workload_id: format!("wl-{vm_id}"),
+            tenant_id: "local".into(),
+            session_id: "sess-1".into(),
+            correlation_id: format!("brk-{request_id}"),
+            fields: serde_json::json!({"event": request_id}),
+        })
+    }
+
+    /// Read a per-VM chain file and return its entries' decoded JCS bytes as one
+    /// string. Each on-disk line stores the entry base64-encoded in `canonical`,
+    /// so category assertions must decode it rather than grep the raw line.
+    fn chain_lines(dir: &Path, vm_id: &str) -> String {
+        use base64::Engine;
+        let raw =
+            std::fs::read_to_string(dir.join(format!("local.{vm_id}.workload.jsonl"))).unwrap();
+        raw.lines()
+            .map(|line| {
+                let v: serde_json::Value = serde_json::from_str(line).unwrap();
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(v["canonical"].as_str().unwrap())
+                    .unwrap();
+                String::from_utf8(bytes).unwrap()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn append_honors_allowlisted_host_category() {
+        // A host-asserted health entry (category "host") must be recorded as
+        // "host" — not silently reclassified as a workload emission.
+        let dir = tempdir().unwrap();
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
+        helper.dispatch(register_req(dir.path(), "vm-h", "local"));
+
+        let resp = helper.dispatch(append_req_with_category("vm-h", "a1", "host"));
+        assert!(
+            matches!(resp, SignerHelperResponse::Ok { .. }),
+            "got {resp:?}"
+        );
+
+        let chain = chain_lines(dir.path(), "vm-h");
+        assert!(
+            chain.contains("\"category\":\"host\""),
+            "host category must be recorded, got: {chain}"
+        );
+        assert!(
+            !chain.contains("workload_audit"),
+            "host entry must not be reclassified as workload_audit"
+        );
+    }
+
+    #[test]
+    fn append_defaults_empty_category_to_workload_audit() {
+        // An older caller that leaves the category unset still lands on the
+        // workload default (backward-safe fallback).
+        let dir = tempdir().unwrap();
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
+        helper.dispatch(register_req(dir.path(), "vm-e", "local"));
+
+        let resp = helper.dispatch(append_req_with_category("vm-e", "a1", ""));
+        assert!(
+            matches!(resp, SignerHelperResponse::Ok { .. }),
+            "got {resp:?}"
+        );
+
+        let chain = chain_lines(dir.path(), "vm-e");
+        assert!(
+            chain.contains("\"category\":\"workload_audit\""),
+            "empty category must default to workload_audit, got: {chain}"
+        );
+    }
+
+    #[test]
+    fn append_rejects_category_outside_allow_list() {
+        // A category not in the allow-list fails closed rather than seeding the
+        // chain with something downstream tooling won't recognise.
+        let dir = tempdir().unwrap();
+        let mut helper = SignerHelper::new("local", Some(key_path(dir.path())));
+        helper.dispatch(register_req(dir.path(), "vm-x", "local"));
+
+        let resp = helper.dispatch(append_req_with_category("vm-x", "a1", "totally-bogus"));
+        assert!(
+            matches!(
+                resp,
+                SignerHelperResponse::Err {
+                    code: AuditSignerErrorCode::InvalidRequest,
+                    ..
+                }
+            ),
+            "unlisted category must be refused, got {resp:?}"
+        );
     }
 
     #[test]

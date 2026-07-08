@@ -12,11 +12,12 @@
 //! `Unhealthy` after `retries`, and earns a bounded restart. A clean
 //! disappearance from the live set is treated as possibly-intentional (a
 //! `machine stop` early-deregisters and then erases the registry entry), so
-//! it triggers no restart. Health-state transitions and restart decisions
-//! are recorded as structured `tracing` events (`vm`/`event`/`state`
-//! fields); wiring them into the chain-signed audit log is a follow-up — the
-//! existing `AuditEmitter` binds every entry to a signed `ExecutionPlan`,
-//! which this bare-VM-name probe loop doesn't hold.
+//! it triggers no restart. Health-state transitions and restart decisions are
+//! recorded two ways: structured `tracing` events (`vm`/`event`/`state`
+//! fields) for host logs, and — via the [`HealthAudit`] seam — chain-signed
+//! entries on each VM's per-VM workload chain, so the health history is
+//! tamper-evident on the same chain `mvmctl trust audit` verifies. The seam
+//! keeps the probe loop unit-testable without a live signer helper.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -140,6 +141,22 @@ pub trait Restarter {
     fn restart(&self, vm_name: &str);
 }
 
+/// Seam over "record a chain-signed health-audit entry for this VM," so the
+/// prober's transition/restart bookkeeping stays unit-testable without a live
+/// signer helper. The real impl (the daemon's `HealthAuditSink`) appends to the
+/// VM's per-VM workload chain; `fields` carries the event name + state.
+pub trait HealthAudit {
+    fn record(&self, vm_name: &str, fields: serde_json::Value);
+}
+
+/// A [`HealthAudit`] that drops every entry. Used where health probing runs
+/// without a chain (tests that only assert state transitions).
+pub struct NoAudit;
+
+impl HealthAudit for NoAudit {
+    fn record(&self, _vm_name: &str, _fields: serde_json::Value) {}
+}
+
 /// Real [`Restarter`] impl: fire-and-forgets `mvmctl machine restart
 /// <vm_name>` as a detached child process. Never waits on the child — a
 /// restart that hangs must not block the health watcher's own loop.
@@ -212,11 +229,8 @@ pub fn map_state(state: HealthState) -> InstanceReadiness {
     }
 }
 
-/// Emit a structured event for a health-state transition. Best-effort
-/// observability: the daemon has no reachable chain-signed audit surface for
-/// a bare VM name (the existing `AuditEmitter` binds every entry to a signed
-/// `ExecutionPlan`, which this probe loop never holds), so this logs a
-/// structured `tracing` event instead — see the module doc comment.
+/// Emit a structured `tracing` event for a health-state transition — the host-
+/// log companion to the chain-signed entry the [`HealthAudit`] seam records.
 fn log_health_transition(vm: &str, new_state: HealthState) {
     match new_state {
         HealthState::Healthy => {
@@ -229,6 +243,22 @@ fn log_health_transition(vm: &str, new_state: HealthState) {
             tracing::info!(vm = %vm, event = "health.transition", state = ?new_state, "healthcheck transitioned to starting");
         }
     }
+}
+
+/// Lower-case wire name for a health state, used in audit-entry fields.
+fn state_str(state: HealthState) -> &'static str {
+    match state {
+        HealthState::Starting => "starting",
+        HealthState::Healthy => "healthy",
+        HealthState::Unhealthy => "unhealthy",
+    }
+}
+
+/// Build the `fields` payload for a health audit entry: the event name plus the
+/// current state. The category (`host`) is stamped by the sink; this is the
+/// per-entry detail an audit reader greps.
+fn health_fields(event: &str, state: HealthState) -> serde_json::Value {
+    serde_json::json!({ "event": event, "state": state_str(state) })
 }
 
 /// Per-VM health probing over the daemon's live registration set.
@@ -270,6 +300,7 @@ impl HealthProber {
         live_vm_ids: &[String],
         now_unix: u64,
         exec: &dyn GuestExec,
+        audit: &dyn HealthAudit,
     ) -> Vec<(String, HealthAction)> {
         // Retire a tracker only when the machine is genuinely no longer a
         // managed healthchecked machine — its spec is gone or no longer declares
@@ -335,6 +366,7 @@ impl HealthProber {
             let new_state = entry.0.state;
             if new_state != previous_state {
                 log_health_transition(vm, new_state);
+                audit.record(vm, health_fields("health.transition", new_state));
             }
             record_readiness(vm, map_state(new_state));
 
@@ -347,6 +379,7 @@ impl HealthProber {
                         state = ?new_state,
                         "healthcheck unhealthy; restart requested"
                     );
+                    audit.record(vm, health_fields("health.restart", new_state));
                     actions.push((vm.clone(), action));
                 }
                 HealthAction::GiveUp => {
@@ -356,6 +389,7 @@ impl HealthProber {
                         state = ?new_state,
                         "healthcheck unhealthy; restart budget exhausted"
                     );
+                    audit.record(vm, health_fields("health.give_up", new_state));
                     actions.push((vm.clone(), action));
                 }
             }
@@ -508,7 +542,7 @@ mod tests {
         // window. The third failed probe flips Unhealthy and asks for a restart.
         let mut actions = Vec::new();
         for i in 0..3u64 {
-            actions.extend(prober.tick(&vms, 1000 + i * 30, &exec));
+            actions.extend(prober.tick(&vms, 1000 + i * 30, &exec, &NoAudit));
         }
 
         assert!(
@@ -523,6 +557,84 @@ mod tests {
         );
     }
 
+    /// Captures every health-audit entry the prober records, so tests can
+    /// assert the chain-signed observability fires on the right events.
+    struct CapturingAudit(std::cell::RefCell<Vec<(String, serde_json::Value)>>);
+    impl CapturingAudit {
+        fn new() -> Self {
+            Self(std::cell::RefCell::new(Vec::new()))
+        }
+    }
+    impl HealthAudit for CapturingAudit {
+        fn record(&self, vm_name: &str, fields: serde_json::Value) {
+            self.0.borrow_mut().push((vm_name.to_string(), fields));
+        }
+    }
+
+    #[test]
+    fn tick_records_chain_audit_on_transition() {
+        // The first passing probe moves Starting → Healthy — a transition — and
+        // must emit a chain-signed health.transition entry alongside the log.
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+        save_machine_spec(&spec_with_hc("api", Some(hc())), true).unwrap();
+
+        let audit = CapturingAudit::new();
+        let mut prober = HealthProber::new();
+        prober.tick(
+            &["api".to_string()],
+            1000,
+            &Fake(ExecOutcome::Exited(0)),
+            &audit,
+        );
+
+        let events = audit.0.borrow();
+        assert!(
+            events.iter().any(|(vm, f)| vm == "api"
+                && f["event"] == "health.transition"
+                && f["state"] == "healthy"),
+            "expected a health.transition/healthy audit entry, got {events:?}"
+        );
+    }
+
+    #[test]
+    fn tick_records_chain_audit_on_restart_request() {
+        // A wedged (unreachable) service flips Unhealthy after the retry budget
+        // and requests a restart; that decision must be recorded on the chain.
+        let tmp = tempfile::tempdir().unwrap();
+        let _env = data_env(tmp.path());
+        save_machine_spec(&spec_with_hc("svc", Some(hc())), true).unwrap();
+
+        let audit = CapturingAudit::new();
+        let mut prober = HealthProber::new();
+        let unreachable = Fake(ExecOutcome::Unreachable);
+        let vms = vec!["svc".to_string()];
+
+        let mut requested = false;
+        for i in 0..10u64 {
+            let actions = prober.tick(&vms, 1000 + i * 30, &unreachable, &audit);
+            if actions
+                .iter()
+                .any(|(_, a)| matches!(a, HealthAction::Restart))
+            {
+                requested = true;
+                break;
+            }
+        }
+        assert!(
+            requested,
+            "expected a restart request within the retry budget"
+        );
+
+        let events = audit.0.borrow();
+        assert!(
+            events
+                .iter()
+                .any(|(vm, f)| vm == "svc" && f["event"] == "health.restart"),
+            "expected a health.restart audit entry, got {events:?}"
+        );
+    }
+
     #[test]
     fn tick_skips_machine_without_healthcheck() {
         let tmp = tempfile::tempdir().unwrap();
@@ -531,7 +643,12 @@ mod tests {
         save_machine_spec(&spec_with_hc("bare", None), true).unwrap();
 
         let mut prober = HealthProber::new();
-        let actions = prober.tick(&["bare".to_string()], 1000, &Fake(ExecOutcome::Exited(0)));
+        let actions = prober.tick(
+            &["bare".to_string()],
+            1000,
+            &Fake(ExecOutcome::Exited(0)),
+            &NoAudit,
+        );
 
         assert!(actions.is_empty());
         assert!(!prober.trackers.contains_key("bare"));
@@ -551,7 +668,12 @@ mod tests {
         reg.save(&rpath).unwrap();
 
         let mut prober = HealthProber::new();
-        let actions = prober.tick(&["api".to_string()], 1000, &Fake(ExecOutcome::Exited(0)));
+        let actions = prober.tick(
+            &["api".to_string()],
+            1000,
+            &Fake(ExecOutcome::Exited(0)),
+            &NoAudit,
+        );
 
         assert!(actions.is_empty(), "a pass should not request a restart");
         let loaded = VmNameRegistry::load(&rpath).unwrap();
@@ -569,14 +691,19 @@ mod tests {
         save_machine_spec(&spec_with_hc("gone", Some(hc())), true).unwrap();
 
         let mut prober = HealthProber::new();
-        prober.tick(&["gone".to_string()], 1000, &Fake(ExecOutcome::Exited(1)));
+        prober.tick(
+            &["gone".to_string()],
+            1000,
+            &Fake(ExecOutcome::Exited(1)),
+            &NoAudit,
+        );
         assert!(prober.trackers.contains_key("gone"));
 
         // A momentary absence from the live set (e.g. a restart's stop→start
         // window) must NOT drop the tracker: its restart budget has to survive
         // the gap, or a broken service crash-loops past its cap. The absent VM
         // is not probed, so it also earns no new restart.
-        let actions = prober.tick(&[], 1100, &Fake(ExecOutcome::Exited(1)));
+        let actions = prober.tick(&[], 1100, &Fake(ExecOutcome::Exited(1)), &NoAudit);
         assert!(
             prober.trackers.contains_key("gone"),
             "a briefly-absent healthchecked machine keeps its tracker"
@@ -589,7 +716,7 @@ mod tests {
         // Once the machine's spec no longer declares a healthcheck it is
         // genuinely no longer managed, so its tracker is retired.
         save_machine_spec(&spec_with_hc("gone", None), true).unwrap();
-        prober.tick(&[], 1200, &Fake(ExecOutcome::Exited(1)));
+        prober.tick(&[], 1200, &Fake(ExecOutcome::Exited(1)), &NoAudit);
         assert!(
             !prober.trackers.contains_key("gone"),
             "dropping the healthcheck retires the tracker"
@@ -614,7 +741,7 @@ mod tests {
 
         let mut actions = Vec::new();
         for i in 0..3u64 {
-            actions.extend(prober.tick(&vms, 1000 + i * 30, &unreachable));
+            actions.extend(prober.tick(&vms, 1000 + i * 30, &unreachable, &NoAudit));
         }
 
         assert!(
@@ -665,7 +792,7 @@ mod tests {
         // the future. Running the full tick→act cycle each pass mirrors the
         // watcher loop; the restart must NOT fire on the instant it was set.
         for now in [1000u64, 1030, 1060] {
-            prober.tick(&vms, now, &exec);
+            prober.tick(&vms, now, &exec, &NoAudit);
             prober.act(&vms, now, &restarter);
         }
         assert!(
@@ -688,7 +815,7 @@ mod tests {
         // A later tick, still before the next probe-due window (t=1090), fires
         // the pending restart exactly once and consumes the gate. This is the
         // path the old `act` never reached — the bug left it dead.
-        prober.tick(&vms, gate, &exec);
+        prober.tick(&vms, gate, &exec, &NoAudit);
         prober.act(&vms, gate, &restarter);
         assert_eq!(*restarter.calls.lock().unwrap(), vec!["web".to_string()]);
         assert!(
@@ -703,7 +830,7 @@ mod tests {
         );
 
         // Further ticks at/after the gate do not re-fire the consumed restart.
-        prober.tick(&vms, gate + 1, &exec);
+        prober.tick(&vms, gate + 1, &exec, &NoAudit);
         prober.act(&vms, gate + 1, &restarter);
         assert_eq!(
             restarter.calls.lock().unwrap().len(),
@@ -732,7 +859,7 @@ mod tests {
         // Drive to Unhealthy with a pending, not-yet-fired gate (act on the
         // setting instant defers, so nothing fires during the drive).
         for now in [1000u64, 1030, 1060] {
-            prober.tick(&vms, now, &exec);
+            prober.tick(&vms, now, &exec, &NoAudit);
             prober.act(&vms, now, &restarter);
         }
         let gate = prober
@@ -785,12 +912,12 @@ mod tests {
 
         // Drive to the first restart (Unhealthy, restart_attempts=1 at t=1060).
         for now in [1000u64, 1030, 1060] {
-            prober.tick(&vms, now, &exec);
+            prober.tick(&vms, now, &exec, &NoAudit);
             prober.act(&vms, now, &restarter);
         }
         assert_eq!(prober.trackers.get("web").unwrap().0.restart_attempts, 1);
         // The gate fires on a later, non-probe tick.
-        prober.tick(&vms, 1062, &exec);
+        prober.tick(&vms, 1062, &exec, &NoAudit);
         prober.act(&vms, 1062, &restarter);
         assert_eq!(
             restarter.calls.lock().unwrap().len(),
@@ -801,7 +928,7 @@ mod tests {
         // Restart window: the machine deregisters (absent from live set) for a
         // couple of ticks. The tracker — and its restart_attempts — must survive.
         for now in [1064u64, 1066] {
-            prober.tick(&[], now, &exec);
+            prober.tick(&[], now, &exec, &NoAudit);
             prober.act(&[], now, &restarter);
         }
         assert!(
@@ -819,7 +946,7 @@ mod tests {
         let mut now = 1068u64;
         let mut gave_up = false;
         while now < 1600 && !gave_up {
-            let actions = prober.tick(&vms, now, &exec);
+            let actions = prober.tick(&vms, now, &exec, &NoAudit);
             prober.act(&vms, now, &restarter);
             if actions
                 .iter()
@@ -848,7 +975,7 @@ mod tests {
 
         // Ticking on past give-up spawns no further restarts.
         for _ in 0..5u64 {
-            prober.tick(&vms, now, &exec);
+            prober.tick(&vms, now, &exec, &NoAudit);
             prober.act(&vms, now, &restarter);
             now += 30;
         }
@@ -875,7 +1002,7 @@ mod tests {
         // Unhealthy flip earns another restart attempt.
         let mut now = 1000u64;
         for _ in 0..3u64 {
-            prober.tick(&vms, now, &exec);
+            prober.tick(&vms, now, &exec, &NoAudit);
             now += 30;
         }
         // Tracker is now Unhealthy with restart_attempts == 1. Keep failing
@@ -883,7 +1010,7 @@ mod tests {
         // the next fail after that yields GiveUp.
         let mut last_actions = Vec::new();
         for _ in 0..6u64 {
-            last_actions = prober.tick(&vms, now, &exec);
+            last_actions = prober.tick(&vms, now, &exec, &NoAudit);
             now += 30;
         }
 
