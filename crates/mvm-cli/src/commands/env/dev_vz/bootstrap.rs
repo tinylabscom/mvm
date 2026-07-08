@@ -403,7 +403,7 @@ pub(in crate::commands) mod attested_builder_pack {
     /// carried by the embedded identity template, not by anything the operator
     /// configures — so it must be allowed independent of `pack-trust.json`.
     #[cfg(feature = "manifest-verify")]
-    pub(super) fn keyless_release_policy(base: &LocalPackPolicy) -> LocalPackPolicy {
+    pub(in crate::commands) fn keyless_release_policy(base: &LocalPackPolicy) -> LocalPackPolicy {
         let mut policy = base.clone();
         policy
             .allowed_channels
@@ -422,7 +422,7 @@ pub(in crate::commands) mod attested_builder_pack {
     /// valid bytes there, so this signals a caller bug rather than an
     /// untrusted-publisher condition.
     #[cfg(feature = "manifest-verify")]
-    pub(super) fn promote_staged_builder_pack(
+    pub(in crate::commands) fn promote_staged_builder_pack(
         staging: &Path,
         ctx: &PackVerifyCtx<'_>,
     ) -> Result<Option<VerifiedPackDir>> {
