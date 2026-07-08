@@ -1803,7 +1803,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -2565,7 +2564,7 @@ dependencies = [
  "mvm-sdk",
  "nix",
  "rand 0.8.6",
- "reqwest 0.12.28",
+ "reqwest 0.13.3",
  "serde",
  "serde_json",
  "sha2",
@@ -2609,7 +2608,7 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "rand 0.8.6",
- "reqwest 0.12.28",
+ "reqwest 0.13.3",
  "secrecy",
  "serde",
  "serde_json",
@@ -2659,7 +2658,7 @@ dependencies = [
  "rand 0.8.6",
  "rcgen",
  "regex",
- "reqwest 0.12.28",
+ "reqwest 0.13.3",
  "rustls",
  "schemars",
  "secrecy",
@@ -2762,7 +2761,7 @@ dependencies = [
  "mvm-verify",
  "rand 0.8.6",
  "regex",
- "reqwest 0.12.28",
+ "reqwest 0.13.3",
  "rustix 1.1.4",
  "rustls",
  "seccompiler",
@@ -3700,7 +3699,6 @@ checksum = "eddd3ca559203180a307f12d114c268abf583f59b03cb906fd0b3ff8646c1147"
 dependencies = [
  "base64",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "h2",
@@ -3733,7 +3731,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams 0.4.2",
  "web-sys",
- "webpki-roots",
 ]
 
 [[package]]
@@ -3744,6 +3741,7 @@ checksum = "62e0021ea2c22aed41653bc7e1419abb2c97e038ff2c33d0e1309e49a97deec0"
 dependencies = [
  "base64",
  "bytes",
+ "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -5363,15 +5361,6 @@ name = "webpki-root-certs"
 version = "1.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f31141ce3fc3e300ae89b78c0dd67f9708061d1d2eda54b8209346fd6be9a92c"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
 dependencies = [
  "rustls-pki-types",
 ]

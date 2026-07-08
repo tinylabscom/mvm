@@ -1,3 +1,6 @@
+#[path = "build_embed_mode.rs"]
+mod build_embed_mode;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -55,23 +58,22 @@ fn main() {
     // plain-`cargo build` fast-path was once tried on the false premise that
     // the bins are C-free; it broke CI, which has no musl-gcc.)
 
-    // Fast path for local test/dev iteration: skip the nested
-    // `cargo zigbuild --release` cross-compile of the host-vm binaries and
-    // bake zero-byte stubs instead. Cuts the dominant cold-build tax on
-    // macOS (and any fresh worktree) for everyone who isn't exercising a
-    // builder-VM boot. The only consumers that read the *bytes* are the
-    // env-gated boot/E2E tests (`MVM_E2E_SMOKE`, libkrun lifecycle), which
-    // are skipped in a default `cargo test`/`nextest` run — and the
-    // `e2e-core-demo` recipe never sets this var, so a stub build can't
-    // masquerade as a passing E2E. NEVER set this in CI release builds:
-    // the shipped mvmctl must embed the real reproducible binaries
-    // (claim 11).
-    let skip_embed = std::env::var("MVM_SKIP_EMBED_BINARIES").as_deref() == Ok("1");
+    // Build policy:
+    // - `MVM_SKIP_EMBED_BINARIES=1` always skips the nested cross-compile.
+    // - `MVM_EMBED_BINARIES=1` always performs the real embed, even in dev/test.
+    // - Otherwise, release builds embed the real binaries and non-release
+    //   builds bake zero-byte stubs.
+    //
+    // This keeps production artifacts reproducible by default while removing
+    // the dominant cold-build tax from ordinary `cargo check`/`cargo test`
+    // contributor workflows.
+    let skip_embed = should_skip_embed_binaries();
     println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_BINARIES");
     if skip_embed {
         println!(
-            "cargo:warning=MVM_SKIP_EMBED_BINARIES=1: embedding zero-byte host-vm \
-             stubs; builder-VM boot is unavailable in this build"
+            "cargo:warning=embedding zero-byte host-vm stubs for this non-release build; \
+             set MVM_EMBED_BINARIES=1 to force real embedded binaries"
         );
     }
 
@@ -157,6 +159,14 @@ struct Pin {
     zig: String,
     cargo_zigbuild: String,
     target: String,
+}
+
+fn should_skip_embed_binaries() -> bool {
+    build_embed_mode::should_skip_embed_binaries(
+        std::env::var("PROFILE").ok().as_deref(),
+        std::env::var("MVM_SKIP_EMBED_BINARIES").ok().as_deref(),
+        std::env::var("MVM_EMBED_BINARIES").ok().as_deref(),
+    )
 }
 
 fn read_pinned_toolchain(root: &Path) -> Pin {

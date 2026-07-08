@@ -4038,8 +4038,9 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         .ok_or_else(|| anyhow::anyhow!("stage0-init not in the embedded host binaries"))?;
     if stage0_init.bytes.is_empty() {
         anyhow::bail!(
-            "embedded stage0-init is a zero-byte stub — this mvmctl was built with \
-             MVM_SKIP_EMBED_BINARIES=1 and cannot seed Stage 0; rebuild without it"
+            "embedded stage0-init is a zero-byte stub — this mvmctl was built without \
+             real embedded host binaries and cannot seed Stage 0; rebuild with \
+             MVM_EMBED_BINARIES=1 or use a release build"
         );
     }
     mvm_build::stage0::materialize_root_dir(&root_dir, stage0_init.bytes)
@@ -4380,8 +4381,9 @@ pub(crate) fn build_kernel_via_stage0(
         .ok_or_else(|| anyhow::anyhow!("stage0-init not in the embedded host binaries"))?;
     if stage0_init.bytes.is_empty() {
         anyhow::bail!(
-            "embedded stage0-init is a zero-byte stub — this mvmctl was built with \
-             MVM_SKIP_EMBED_BINARIES=1 and cannot seed Stage 0; rebuild without it"
+            "embedded stage0-init is a zero-byte stub — this mvmctl was built without \
+             real embedded host binaries and cannot seed Stage 0; rebuild with \
+             MVM_EMBED_BINARIES=1 or use a release build"
         );
     }
     mvm_build::stage0::materialize_root_dir(&root_dir, stage0_init.bytes)
