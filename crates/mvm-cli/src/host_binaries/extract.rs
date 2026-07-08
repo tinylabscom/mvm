@@ -36,10 +36,10 @@ pub fn ensure_extracted(cache_root: &Path) -> std::io::Result<PathBuf> {
 }
 
 /// Like [`ensure_extracted`], but refuses a stub build — the zero-byte
-/// binaries baked when mvmctl is compiled with `MVM_SKIP_EMBED_BINARIES=1`
-/// (the fast local test/dev path). Call this from any path that actually
-/// boots a VM from the embedded binaries so a fast-test build fails fast
-/// with a clear message instead of an opaque builder-VM boot failure.
+/// binaries baked into non-release builds unless `MVM_EMBED_BINARIES=1`
+/// overrides the fast path. Call this from any path that actually boots a VM
+/// from the embedded binaries so a stub build fails fast with a clear message
+/// instead of an opaque builder-VM boot failure.
 pub fn ensure_extracted_for_boot(cache_root: &Path) -> std::io::Result<PathBuf> {
     let dir = ensure_extracted(cache_root)?;
     for bin in EMBEDDED.iter() {
@@ -48,8 +48,8 @@ pub fn ensure_extracted_for_boot(cache_root: &Path) -> std::io::Result<PathBuf> 
                 std::io::ErrorKind::InvalidData,
                 format!(
                     "embedded host-vm binary `{}` is a zero-byte stub — this mvmctl was \
-                     built with MVM_SKIP_EMBED_BINARIES=1 (fast test build) and cannot boot \
-                     a builder VM; rebuild without that env var",
+                     built without real embedded host binaries and cannot boot a builder VM; \
+                     rebuild with MVM_EMBED_BINARIES=1 or use a release build",
                     bin.name
                 ),
             ));
