@@ -967,19 +967,27 @@ pub struct PackOutputHashes {
     pub builder_image_hash: Option<Sha256Hex>,
 }
 
+/// The signing authority a `PackBuilder` assembles under. Carried at
+/// construction rather than as an `Option<&SigningKey>` field so the two build
+/// shapes — ed25519-keyed and keyless (Sigstore) — cannot be mismatched: there
+/// is exactly one `build()` method, and which signing path it takes is fixed
+/// the moment the builder is constructed, not decided by which finisher method
+/// happens to get called.
+enum PackSigner<'a> {
+    Ed25519(&'a SigningKey),
+    Keyless { identity: String },
+}
+
 /// Inverse of `verify_pack_at`: hashes a file set under `root`, computes the pack
 /// hash, and signs the manifest so `verify_pack_at` accepts the result. Files are
 /// addressed by their in-pack relative path and hashed with the same helper the
 /// verifier uses, so producer and verifier can never drift.
-///
-/// `signing_key` is absent for a keyless (Sigstore-authority) build: construct
-/// with `new_keyless` and finish with `build_sigstore` instead of `build`.
 pub struct PackBuilder<'a> {
     root: PathBuf,
     metadata: PackMetadata,
     output_hashes: PackOutputHashes,
     files: Vec<String>,
-    signing_key: Option<&'a SigningKey>,
+    signer: PackSigner<'a>,
 }
 
 impl<'a> PackBuilder<'a> {
@@ -993,20 +1001,27 @@ impl<'a> PackBuilder<'a> {
             metadata,
             output_hashes: PackOutputHashes::default(),
             files: Vec::new(),
-            signing_key: Some(signing_key),
+            signer: PackSigner::Ed25519(signing_key),
         }
     }
 
     /// Keyless counterpart to `new`: no ed25519 key, since the produced manifest
     /// carries no in-manifest signature — the detached cosign bundle a release
-    /// pipeline signs separately is authoritative. Finish with `build_sigstore`.
-    pub fn new_keyless(root: impl Into<PathBuf>, metadata: PackMetadata) -> Self {
+    /// pipeline signs separately is authoritative. `identity` is the release
+    /// identity the manifest's `signing_key_id` is derived from.
+    pub fn new_keyless(
+        root: impl Into<PathBuf>,
+        metadata: PackMetadata,
+        identity: impl Into<String>,
+    ) -> Self {
         Self {
             root: root.into(),
             metadata,
             output_hashes: PackOutputHashes::default(),
             files: Vec::new(),
-            signing_key: None,
+            signer: PackSigner::Keyless {
+                identity: identity.into(),
+            },
         }
     }
 
@@ -1027,35 +1042,48 @@ impl<'a> PackBuilder<'a> {
         self
     }
 
+    /// Assembles and, for the ed25519 authority, signs the manifest. Which
+    /// path runs is fixed by the `PackSigner` chosen at construction time:
+    ///
+    /// - `Ed25519`: signs the assembled manifest under the held key and
+    ///   appends the resulting signature to the bundle.
+    /// - `Keyless`: stamps a `Sigstore`-authority manifest with an
+    ///   identity-derived `signing_key_id` and an empty in-manifest signature
+    ///   list, and leaves it unsigned. The caller (a release pipeline) signs
+    ///   `manifest.canonical_bytes()` out of band with `cosign sign-blob` and
+    ///   ships the detached bundle as the pack's authority.
     pub fn build(self) -> Result<PackManifest, PackManifestError> {
-        let signing_key = self
-            .signing_key
-            .expect("PackBuilder::build requires a signing key; construct via PackBuilder::new, or use build_sigstore for a keyless pack");
-        let signing_key_id = KeyId::from_pubkey(&signing_key.verifying_key());
+        // Read the signer through a borrow first so `self` stays whole for the
+        // `assemble` call below — `&SigningKey` is `Copy`, so this doesn't move
+        // anything out of `self.signer`.
+        let (signing_key_id, signature_format, signing_key) = match &self.signer {
+            PackSigner::Ed25519(signing_key) => (
+                KeyId::from_pubkey(&signing_key.verifying_key()),
+                SignatureFormat::Ed25519,
+                Some(*signing_key),
+            ),
+            PackSigner::Keyless { identity } => (
+                KeyId::from_identity(identity),
+                SignatureFormat::Sigstore,
+                None,
+            ),
+        };
         let signature_validity = self.metadata.signature.clone();
-        let mut manifest = self.assemble(signing_key_id.clone(), SignatureFormat::Ed25519)?;
-        let signature = signing_key.sign(&manifest.signature_payload_bytes()?);
-        manifest
-            .provenance
-            .signature_bundle
-            .signatures
-            .push(PackSignature {
-                key_id: signing_key_id,
-                signature_base64: B64.encode(signature.to_bytes()),
-                signed_at: signature_validity.signed_at,
-                expires_at: signature_validity.expires_at,
-            });
+        let mut manifest = self.assemble(signing_key_id.clone(), signature_format)?;
+        if let Some(signing_key) = signing_key {
+            let signature = signing_key.sign(&manifest.signature_payload_bytes()?);
+            manifest
+                .provenance
+                .signature_bundle
+                .signatures
+                .push(PackSignature {
+                    key_id: signing_key_id,
+                    signature_base64: B64.encode(signature.to_bytes()),
+                    signed_at: signature_validity.signed_at,
+                    expires_at: signature_validity.expires_at,
+                });
+        }
         Ok(manifest)
-    }
-
-    /// Keyless counterpart to `build`: stamps a `Sigstore`-authority manifest
-    /// with an identity-derived `signing_key_id` and an empty in-manifest
-    /// signature list, and leaves it unsigned. The caller (a release pipeline)
-    /// signs `manifest.canonical_bytes()` out of band with `cosign sign-blob`
-    /// and ships the detached bundle as the pack's authority.
-    pub fn build_sigstore(self, identity: &str) -> Result<PackManifest, PackManifestError> {
-        let signing_key_id = KeyId::from_identity(identity);
-        self.assemble(signing_key_id, SignatureFormat::Sigstore)
     }
 
     /// Shared assembly for both authority shapes: hash the declared files,
@@ -1782,21 +1810,25 @@ mod tests {
     const SIGSTORE_IDENTITY: &str =
         "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.17.0";
 
-    /// Produce a `Builder` pack via `PackBuilder::new_keyless` +
-    /// `build_sigstore`, exercising the same file set as
-    /// `produced_hvf_builder_pack` but with no ed25519 key.
+    /// Produce a `Builder` pack via `PackBuilder::new_keyless` + `build`,
+    /// exercising the same file set as `produced_hvf_builder_pack` but with no
+    /// ed25519 key.
     fn produced_keyless_builder_pack(dir: &TempDir) -> PackManifest {
         fs::write(dir.path().join("kernel"), b"builder-kernel").expect("write kernel");
         fs::write(dir.path().join("builder.img"), b"builder-image").expect("write builder");
-        PackBuilder::new_keyless(dir.path(), producer_metadata(PackKind::Builder))
-            .files(["kernel", "builder.img"])
-            .output_hashes(PackOutputHashes {
-                kernel_hash: Some(Sha256Hex::from_bytes(b"builder-kernel")),
-                builder_image_hash: Some(Sha256Hex::from_bytes(b"builder-image")),
-                ..Default::default()
-            })
-            .build_sigstore(SIGSTORE_IDENTITY)
-            .expect("produce keyless pack")
+        PackBuilder::new_keyless(
+            dir.path(),
+            producer_metadata(PackKind::Builder),
+            SIGSTORE_IDENTITY,
+        )
+        .files(["kernel", "builder.img"])
+        .output_hashes(PackOutputHashes {
+            kernel_hash: Some(Sha256Hex::from_bytes(b"builder-kernel")),
+            builder_image_hash: Some(Sha256Hex::from_bytes(b"builder-image")),
+            ..Default::default()
+        })
+        .build()
+        .expect("produce keyless pack")
     }
 
     #[test]
