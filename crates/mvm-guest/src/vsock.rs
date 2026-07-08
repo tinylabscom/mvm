@@ -249,6 +249,27 @@ pub enum GuestRequest {
         #[serde(default)]
         env: Vec<(String, String)>,
     },
+    /// Run an arbitrary argv as a detached workload (dev-only).
+    ///
+    /// Mirrors how the image's `/init` runs its baked entrypoint, but
+    /// driven from the agent and non-blocking: the agent spawns the
+    /// program in its own session (`setsid`), with stdin from
+    /// `/dev/null` and stdout/stderr on the guest console (which the
+    /// host backend captures to `console.log`), returns an immediate
+    /// `DetachedStarted { pid }` ack, and a reaper reports the
+    /// workload's exit code to the host's workload-exit port when it
+    /// finishes — so the VM powers off once the workload exits
+    /// (docker `-d` semantics). Unlike `Exec`, the workload's lifetime
+    /// is not bound to this request's connection.
+    RunDetached {
+        /// The program and its arguments. `argv[0]` is the program;
+        /// resolved via PATH when not absolute.
+        argv: Vec<String>,
+        /// Env vars injected after `env_clear()` (plus a minimal safe
+        /// base). Empty when omitted on the wire.
+        #[serde(default)]
+        env: Vec<(String, String)>,
+    },
     /// Signal post-restore: rotate the VMGenID, then remount drives and
     /// restart services. `token` is the host-minted generation token for this
     /// resume; the guest feeds it to its `GenIdReseeder` so two clones of one
@@ -575,6 +596,7 @@ impl GuestRequest {
             Self::Exec { .. } => "exec",
             Self::ExecBatch { .. } => "exec-batch",
             Self::RunEntrypoint { .. } => "run-entrypoint",
+            Self::RunDetached { .. } => "run-detached",
             Self::PostRestore { .. } => "post-restore",
             Self::FsDiff => "fs-diff",
             Self::StartPortForward { .. } => "start-port-forward",
@@ -787,6 +809,7 @@ impl GuestRequest {
             GuestRequest::Exec { .. } => Verb::Exec,
             GuestRequest::ExecBatch { .. } => Verb::ExecBatch,
             GuestRequest::RunEntrypoint { .. } => Verb::RunEntrypoint,
+            GuestRequest::RunDetached { .. } => Verb::RunDetached,
             GuestRequest::PostRestore { .. } => Verb::PostRestore,
             GuestRequest::FsDiff => Verb::FsDiff,
             GuestRequest::StartPortForward { .. } => Verb::StartPortForward,
@@ -859,6 +882,7 @@ impl GuestRequest {
             // RPC surface is DevOnly in v1.
             GuestRequest::Exec { .. }
             | GuestRequest::ExecBatch { .. }
+            | GuestRequest::RunDetached { .. }
             | GuestRequest::FsDiff
             | GuestRequest::StartPortForward { .. }
             | GuestRequest::StartUnixSocketForward { .. }
@@ -1012,6 +1036,11 @@ pub enum GuestResponse {
     /// Buffered outcomes of an `ExecBatch` call (dev-shell only), one per
     /// command in request order (truncated at the first non-zero exit).
     ExecBatchResult { outcomes: Vec<ExecOutcomeWire> },
+    /// Ack for a `RunDetached` call: the detached workload was spawned
+    /// with the given guest PID. The workload runs independently of this
+    /// request's connection; its exit is later reported to the host's
+    /// workload-exit port by the agent's reaper.
+    DetachedStarted { pid: i32 },
     /// Post-restore acknowledgement.
     PostRestoreAck {
         success: bool,
@@ -1127,6 +1156,7 @@ name_enum! {
     pub enum Verb {
         ProtocolHello, WorkerStatus, SleepPrep, Wake, Ping, IntegrationStatus,
         CheckpointIntegrations, ProbeStatus, PrimedStatus, Exec, ExecBatch, RunEntrypoint,
+        RunDetached,
         PostRestore,
         FsDiff, StartPortForward, StartUnixSocketForward, ConsoleOpen,
         ConsoleClose, ConsoleResize, EntrypointStatus, ReadinessStatus, FsRead,
@@ -1144,7 +1174,7 @@ name_enum! {
         ProtocolHelloAck, ProtocolMismatch, WorkerStatus, SleepPrepAck, WakeAck,
         Pong, Error, UnsupportedInProfile, VerbNotAuthorized, IntegrationStatusReport,
         CheckpointResult, ProbeStatusReport, PrimedStatusReport, EntrypointEvent, ExecEvent,
-        ExecBatchResult,
+        ExecBatchResult, DetachedStarted,
         PostRestoreAck, FsDiffResult, PortForwardStarted,
         UnixSocketForwardStarted, ConsoleOpened, ConsoleExited, ConsoleResized,
         EntrypointStatusReport,
@@ -1217,6 +1247,7 @@ impl Verb {
             Verb::Exec => stream(&[R::ExecEvent]),
             Verb::ExecBatch => unary(&[R::ExecBatchResult]),
             Verb::RunEntrypoint => stream(&[R::EntrypointEvent]),
+            Verb::RunDetached => unary(&[R::DetachedStarted]),
             Verb::PostRestore => unary(&[R::PostRestoreAck]),
             Verb::FsDiff => unary(&[R::FsDiffResult]),
             Verb::StartPortForward => unary(&[R::PortForwardStarted]),
@@ -1270,6 +1301,7 @@ impl GuestResponse {
             GuestResponse::EntrypointEvent(_) => ResponseVariant::EntrypointEvent,
             GuestResponse::ExecEvent(_) => ResponseVariant::ExecEvent,
             GuestResponse::ExecBatchResult { .. } => ResponseVariant::ExecBatchResult,
+            GuestResponse::DetachedStarted { .. } => ResponseVariant::DetachedStarted,
             GuestResponse::PostRestoreAck { .. } => ResponseVariant::PostRestoreAck,
             GuestResponse::FsDiffResult { .. } => ResponseVariant::FsDiffResult,
             GuestResponse::PortForwardStarted { .. } => ResponseVariant::PortForwardStarted,
@@ -3030,6 +3062,34 @@ where
     read_exec_stream(stream, on_event)
 }
 
+/// Send a `RunDetached` request and read its single `DetachedStarted`
+/// ack, returning the detached workload's guest PID.
+///
+/// Non-streaming: the workload runs independently of this connection, so
+/// there is exactly one response frame. Its exit is reported to the
+/// host's workload-exit port by the agent's reaper, not over this
+/// stream. Like `Exec`, `RunDetached` carries no `GuestCapability` — the
+/// agent gates it at compile time via the `dev-shell` feature — so this
+/// does a plain protocol hello.
+pub fn send_run_detached(
+    stream: &mut UnixStream,
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+) -> Result<i32> {
+    let _ = negotiate_protocol(stream, Vec::new())?;
+    let req = GuestRequest::RunDetached { argv, env };
+    write_frame(stream, &req)?;
+    let resp: GuestResponse = read_frame(stream)?;
+    match resp {
+        GuestResponse::DetachedStarted { pid } => Ok(pid),
+        GuestResponse::Error { message } => bail!("guest agent error: {message}"),
+        GuestResponse::VerbNotAuthorized { verb } => {
+            Err(RpcError::VerbNotAuthorized { verb }.into())
+        }
+        other => bail!("expected DetachedStarted for RunDetached, got {other:?}"),
+    }
+}
+
 /// Read an `ExecEvent` response stream from `stream`: invoke `on_event`
 /// for each non-terminal chunk, return the terminal `Exit`. The caller
 /// must have already done the protocol hello and written the request
@@ -4659,6 +4719,150 @@ mod tests {
         }
     }
 
+    // -------------------------------------------------------------------
+    // RunDetached wire protocol
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_run_detached_request_roundtrip() {
+        let req = GuestRequest::RunDetached {
+            argv: vec!["/bin/sh".into(), "-lc".into(), "true".into()],
+            env: vec![("FOO".into(), "bar".into())],
+        };
+        let json = serde_json::to_string(&req).expect("serialize");
+        let decoded: GuestRequest = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            GuestRequest::RunDetached { argv, env } => {
+                assert_eq!(argv, vec!["/bin/sh", "-lc", "true"]);
+                assert_eq!(env, vec![("FOO".into(), "bar".into())]);
+            }
+            other => panic!("expected RunDetached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_detached_request_env_defaults_empty_when_omitted() {
+        // `env` is `#[serde(default)]`: a frame without it decodes to an
+        // empty env, matching the fuzz-seed shape.
+        let json = r#"{"RunDetached":{"argv":["/bin/sh","-lc","true"]}}"#;
+        let decoded: GuestRequest = serde_json::from_str(json).expect("deserialize");
+        match decoded {
+            GuestRequest::RunDetached { argv, env } => {
+                assert_eq!(argv, vec!["/bin/sh", "-lc", "true"]);
+                assert!(env.is_empty());
+            }
+            other => panic!("expected RunDetached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_run_detached_request_rejects_unknown_field() {
+        let json = r#"{"RunDetached":{"argv":["/bin/true"],"env":[],"oops":1}}"#;
+        let err = serde_json::from_str::<GuestRequest>(json).unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn test_detached_started_response_roundtrip() {
+        let resp = GuestResponse::DetachedStarted { pid: 4242 };
+        let json = serde_json::to_string(&resp).expect("serialize");
+        let decoded: GuestResponse = serde_json::from_str(&json).expect("deserialize");
+        match decoded {
+            GuestResponse::DetachedStarted { pid } => assert_eq!(pid, 4242),
+            other => panic!("expected DetachedStarted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_detached_classifies_dev_only() {
+        let req = GuestRequest::RunDetached {
+            argv: vec!["/bin/true".into()],
+            env: vec![],
+        };
+        assert!(matches!(req.class(), RequestClass::DevOnly));
+        assert_eq!(req.kind_name(), "run-detached");
+        assert!(!req.allowed_in(AgentProfile::SealedProd));
+        assert!(req.allowed_in(AgentProfile::Dev));
+    }
+
+    #[test]
+    fn test_send_run_detached_returns_pid() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            // Hello prelude.
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            match req {
+                GuestRequest::ProtocolHello {
+                    host_protocol_version,
+                    min_supported_version,
+                    host_version,
+                    requested_capabilities,
+                } => {
+                    let resp = protocol_hello_response(
+                        host_protocol_version,
+                        min_supported_version,
+                        &host_version,
+                        &requested_capabilities,
+                    );
+                    write_frame(&mut guest, &resp).unwrap();
+                }
+                other => panic!("expected ProtocolHello, got {other:?}"),
+            }
+            // The RunDetached frame, then ack with a pid.
+            let req: GuestRequest = read_frame(&mut guest).unwrap();
+            match req {
+                GuestRequest::RunDetached { argv, env } => {
+                    assert_eq!(argv, vec!["/bin/echo", "hi"]);
+                    assert_eq!(env, vec![("K".to_string(), "V".to_string())]);
+                    write_frame(&mut guest, &GuestResponse::DetachedStarted { pid: 777 }).unwrap();
+                }
+                other => panic!("expected RunDetached, got {other:?}"),
+            }
+        });
+
+        let pid = send_run_detached(
+            &mut host,
+            vec!["/bin/echo".into(), "hi".into()],
+            vec![("K".into(), "V".into())],
+        )
+        .expect("send_run_detached should return the pid");
+        guest_thread.join().unwrap();
+        assert_eq!(pid, 777);
+    }
+
+    #[test]
+    fn test_send_run_detached_maps_agent_error() {
+        let (mut host, mut guest) = UnixStream::pair().unwrap();
+
+        let guest_thread = std::thread::spawn(move || {
+            let _hello: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: PROTOCOL_VERSION,
+                    min_supported_version: MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "0.1.0".to_string(),
+                    capabilities: vec![],
+                },
+            )
+            .unwrap();
+            let _req: GuestRequest = read_frame(&mut guest).unwrap();
+            write_frame(
+                &mut guest,
+                &GuestResponse::Error {
+                    message: "spawn failed".to_string(),
+                },
+            )
+            .unwrap();
+        });
+
+        let err = send_run_detached(&mut host, vec!["/bin/true".into()], vec![])
+            .expect_err("agent Error must surface as a helper error");
+        guest_thread.join().unwrap();
+        assert!(err.to_string().contains("spawn failed"), "err: {err}");
+    }
+
     #[test]
     fn test_run_entrypoint_request_env_defaults_empty_when_omitted() {
         // `env` is `#[serde(default)]`: a wire frame without it decodes to an
@@ -5793,6 +5997,10 @@ mod tests {
             GuestRequest::RunEntrypoint {
                 stdin: vec![],
                 timeout_secs: 1,
+                env: vec![],
+            },
+            GuestRequest::RunDetached {
+                argv: vec!["/bin/sh".into(), "-lc".into(), "true".into()],
                 env: vec![],
             },
             GuestRequest::PostRestore {
