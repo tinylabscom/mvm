@@ -200,7 +200,7 @@ aho-corasick = "1"
 # ASCII word/digit boundaries, and a few explicit `\u{...}` codepoint ranges
 # for steganographic Unicode. Keep `perf` + `unicode-perl` for `\b`/`\d`
 # semantics without carrying the full default Unicode table set.
-regex = { version = "1", default-features = false, features = ["perf", "std", "unicode-perl"] }
+regex = { version = "1", default-features = false, features = ["perf", "std", "unicode-case", "unicode-perl"] }
 
 # Crypto
 aes-gcm = "0.10"

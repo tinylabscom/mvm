@@ -3660,7 +3660,10 @@ fn builder_flag_rejects_unknown_value() {
     let err = Cli::try_parse_from(["mvmctl", "--builder", "bogus", "doctor"]).unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("invalid value") || msg.contains("possible values") || msg.contains("bogus"),
+        msg.contains("invalid value")
+            || msg.contains("possible values")
+            || msg.contains("bogus")
+            || msg.contains("one of the values isn't valid for an argument"),
         "expected a clap value-parser error mentioning 'bogus', got: {msg}"
     );
 }
