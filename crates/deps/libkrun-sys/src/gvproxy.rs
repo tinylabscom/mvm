@@ -470,6 +470,91 @@ pub fn reap_by_pid_file(scratch_dir: &Path) {
     let _ = std::fs::remove_file(scratch_dir.join("gvproxy.sock"));
 }
 
+/// Backstop reaper that kills a gvproxy still bound to
+/// `<scratch_dir>/gvproxy.sock` even when no `gvproxy.pid` sidecar exists —
+/// the case a supervisor binary predating the sidecar leaves behind (it spawns
+/// gvproxy without writing the pid file, so [`reap_by_pid_file`] finds nothing
+/// to reap and the daemon reparents to the init process). Scans the process
+/// table for whatever gateway is bound to this VM's socket (gvproxy, or the
+/// native gateway swapped in via `MVM_GATEWAY_BIN` — both carry the socket path
+/// in argv) and `SIGKILL`s it, then unlinks the socket. gvproxy ignores
+/// `SIGTERM`, so a graceful window buys nothing here.
+///
+/// Idempotent: a missing socket or no argv match is a clean no-op. Keyed on the
+/// per-VM socket path, which is unique to this VM's scratch dir, so it never
+/// touches another VM's gateway. The parent-aware sweep behind `mvmctl cache
+/// prune` supersedes this for cross-VM cleanup; this is the per-teardown
+/// guarantee the spawning host makes for the one VM it just waited on.
+pub fn reap_by_socket_path(scratch_dir: &Path) {
+    let socket_path = scratch_dir.join("gvproxy.sock");
+    if !socket_path.exists() {
+        return;
+    }
+    let self_pid = std::process::id() as i32;
+    for pid in pids_bound_to_socket(&socket_path) {
+        if pid == self_pid || pid <= 1 {
+            continue;
+        }
+        // SAFETY: kill on a since-exited pid races to ESRCH, which is benign.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+    }
+    let _ = std::fs::remove_file(&socket_path);
+}
+
+/// PIDs whose argv references `socket_path` — the gateway daemon(s) bound to
+/// this VM's gvproxy socket. Reads one process-table snapshot: `/proc` on
+/// Linux, a single `ps` on macOS/BSD (no `/proc`). The far richer, parent-aware
+/// process sweep behind `mvmctl cache prune` lives in the CLI layer; this crate
+/// can't reach up to it, so this stays a minimal self-contained probe scoped to
+/// a single known socket path.
+fn pids_bound_to_socket(socket_path: &Path) -> Vec<i32> {
+    let needle = socket_path.to_string_lossy();
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut pids = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return pids;
+        };
+        for entry in entries.flatten() {
+            let Some(pid) = entry
+                .file_name()
+                .to_str()
+                .and_then(|s| s.parse::<i32>().ok())
+            else {
+                continue;
+            };
+            // cmdline is NUL-separated argv; a lossy join preserves the path
+            // substring across argument boundaries.
+            if let Ok(bytes) = std::fs::read(entry.path().join("cmdline"))
+                && String::from_utf8_lossy(&bytes).contains(needle.as_ref())
+            {
+                pids.push(pid);
+            }
+        }
+        pids
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let Ok(output) = Command::new("ps").args(["-Ao", "pid=,command="]).output() else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            return Vec::new();
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (pid, cmd) = line.trim_start().split_once(char::is_whitespace)?;
+                cmd.contains(needle.as_ref())
+                    .then(|| pid.parse::<i32>().ok())
+                    .flatten()
+            })
+            .collect()
+    }
+}
+
 /// True if `pid` names a live process we can signal (`kill(pid, 0)`).
 fn pid_alive(pid: i32) -> bool {
     pid > 0 && unsafe { libc::kill(pid, 0) == 0 }
@@ -719,5 +804,62 @@ mod tests {
         std::fs::write(tmp.path().join(PID_FILE_NAME), dead.to_string()).unwrap();
         reap_by_pid_file(tmp.path());
         assert!(!tmp.path().join(PID_FILE_NAME).exists());
+    }
+
+    /// `reap_by_socket_path` SIGKILLs a gateway bound to `<dir>/gvproxy.sock`
+    /// found by its argv alone — the pid-file-less case a supervisor predating
+    /// the sidecar leaves behind. Stand-in is a `sh` sleeper carrying the socket
+    /// path in argv, exactly as gvproxy's `-listen-vfkit unixgram://<path>` does.
+    #[test]
+    fn reap_by_socket_path_kills_gateway_found_by_argv() {
+        use std::os::unix::process::ExitStatusExt;
+        let _env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let socket = tmp.path().join("gvproxy.sock");
+        std::fs::write(&socket, b"").unwrap();
+
+        // Stand-in gateway: `sh` blocking on the `read` builtin, so it stays in
+        // one process (no forked child to leak) with the socket path in its argv
+        // — exactly where gvproxy's `-listen-vfkit unixgram://<path>` carries it.
+        // The held-open stdin pipe keeps `read` blocking until we SIGKILL it.
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("read _")
+            .arg(socket.display().to_string())
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sh stand-in carrying the socket path in argv");
+        let pid = child.id() as i32;
+
+        // The process table can lag the spawn; poll until the scan sees it.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !pids_bound_to_socket(&socket).contains(&pid) {
+            assert!(
+                Instant::now() < deadline,
+                "argv scan never saw the stand-in gateway pid {pid}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+
+        reap_by_socket_path(tmp.path());
+
+        // We're the stand-in's parent, so a SIGKILL'd child lingers as a zombie
+        // until we wait() — prove the kill via the wait status, mirroring the
+        // pid-file reap test.
+        let status = child.wait().expect("wait stand-in");
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGKILL),
+            "stand-in gateway was not SIGKILL'd by the socket reap (status: {status:?})"
+        );
+        assert!(!socket.exists(), "socket not removed by the socket reap");
+    }
+
+    /// No socket file → nothing bound → clean no-op (no scan, no panic).
+    #[test]
+    fn reap_by_socket_path_is_noop_without_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        reap_by_socket_path(tmp.path());
+        assert!(!tmp.path().join("gvproxy.sock").exists());
     }
 }

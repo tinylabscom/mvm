@@ -1700,12 +1700,15 @@ pub(crate) fn unique_job_id() -> String {
 enum SupervisorSource {
     EnvOverride,
     NextToExe,
+    LocalBuild,
     Path,
 }
 
-/// Pure precedence over the three already-probed candidates: explicit env
-/// override > a binary next to the running exe (a fresh local build) > whatever
-/// is on `$PATH`. Each arg is `Some` only when that candidate exists. Returns
+/// Pure precedence over the four already-probed candidates: explicit env
+/// override > a binary next to the running exe (the version-matched local
+/// build) > a fresh build in a sibling cargo profile dir > whatever is on
+/// `$PATH`. Each arg is `Some` only when that candidate exists (and, for
+/// `local_build`, only when the caller judged it fresher than `$PATH`). Returns
 /// the chosen path and where it came from, or `None` when nothing resolved.
 /// Split out from [`resolve_supervisor_path`] so the precedence — and the
 /// "fell back to PATH" signal that drives the staleness warning — is unit
@@ -1713,6 +1716,7 @@ enum SupervisorSource {
 fn choose_supervisor(
     env_override: Option<PathBuf>,
     next_to_exe: Option<PathBuf>,
+    local_build: Option<PathBuf>,
     on_path: Option<PathBuf>,
 ) -> Option<(PathBuf, SupervisorSource)> {
     if let Some(p) = env_override {
@@ -1721,7 +1725,53 @@ fn choose_supervisor(
     if let Some(p) = next_to_exe {
         return Some((p, SupervisorSource::NextToExe));
     }
+    if let Some(p) = local_build {
+        return Some((p, SupervisorSource::LocalBuild));
+    }
     on_path.map(|p| (p, SupervisorSource::Path))
+}
+
+/// A freshly-built `mvm-libkrun-supervisor` in a sibling cargo profile dir —
+/// e.g. running `target/release/mvmctl` while the supervisor was last built
+/// into `target/debug/`. Source checkouts routinely split the driver and this
+/// per-VM binary across profiles because the supervisor is a separate bin that
+/// mvmctl's own build never refreshes; without this probe the resolver skips
+/// the fresh local build and falls through to a stale `$PATH` copy.
+///
+/// Only activates for a cargo `target/<profile>/` layout — an installed mvmctl
+/// (`~/.cargo/bin/mvmctl`, a release download) has no sibling profiles, so
+/// `$PATH` stays the right source there. Returns the newest match by mtime.
+fn sibling_profile_supervisor(exe_dir: &Path) -> Option<PathBuf> {
+    let target_dir = exe_dir.parent()?;
+    if target_dir.file_name()?.to_str()? != "target" {
+        return None;
+    }
+    let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(target_dir)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|profile_dir| profile_dir.is_dir() && profile_dir != exe_dir)
+        .map(|profile_dir| profile_dir.join("mvm-libkrun-supervisor"))
+        .filter(|bin| bin.is_file())
+        .filter_map(|bin| Some((std::fs::metadata(&bin).ok()?.modified().ok()?, bin)))
+        .collect();
+    candidates.sort_by_key(|(mtime, _)| *mtime);
+    candidates.pop().map(|(_, bin)| bin)
+}
+
+/// Whether a sibling-profile `candidate` should win over the `$PATH` copy: no
+/// `$PATH` copy, an unreadable mtime on either side (source-checkout intent —
+/// prefer the fresh local build), or `candidate` at least as new. Guards against
+/// a stale leftover build shadowing a freshly *installed* supervisor.
+fn supervisor_build_outranks_path(candidate: &Path, on_path: Option<&Path>) -> bool {
+    let Some(on_path) = on_path else {
+        return true;
+    };
+    let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    match (mtime(candidate), mtime(on_path)) {
+        (Some(cand), Some(path)) => cand >= path,
+        _ => true,
+    }
 }
 
 fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
@@ -1740,13 +1790,20 @@ fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
         }
         None => None,
     };
-    let next_to_exe = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("mvm-libkrun-supervisor")))
+    let exe = std::env::current_exe().ok();
+    let exe_dir = exe.as_deref().and_then(Path::parent);
+    let next_to_exe = exe_dir
+        .map(|dir| dir.join("mvm-libkrun-supervisor"))
         .filter(|candidate| candidate.is_file());
     let on_path = which::which("mvm-libkrun-supervisor").ok();
+    // A sibling-profile build (fresh local `cargo build`) closes the stale-PATH
+    // trap — but only when it's at least as fresh as the `$PATH` copy, so a
+    // stale leftover build can't shadow a freshly installed supervisor.
+    let local_build = exe_dir
+        .and_then(sibling_profile_supervisor)
+        .filter(|candidate| supervisor_build_outranks_path(candidate, on_path.as_deref()));
 
-    match choose_supervisor(env_override, next_to_exe, on_path) {
+    match choose_supervisor(env_override, next_to_exe, local_build, on_path) {
         Some((path, SupervisorSource::Path)) => {
             // The stale-install trap: a `cargo install`ed copy on $PATH is used
             // because no fresh binary sits next to the exe. Source checkouts
@@ -1876,11 +1933,17 @@ fn spawn_supervisor_and_wait(
     // SIGKILL'd it above. None of those run `GvproxyHandle::Drop` (no
     // unwind) or the supervisor's SIGTERM handler (SIGKILL is uncatchable,
     // exit() skips it), so the per-VM gvproxy is left "waiting for clients"
-    // and reparented to launchd. Reap it here: we (the spawning host) have
-    // observed the supervisor exit, so this is the one place teardown is
-    // guaranteed regardless of how libkrun terminated. See
-    // `gvproxy::reap_by_pid_file` (idempotent; no-op if already gone).
+    // and reparented to the init process. Reap it here: we (the spawning
+    // host) have observed the supervisor exit, so this is the one place
+    // teardown is guaranteed regardless of how libkrun terminated.
+    //
+    // Two-stage so the guarantee holds across supervisor versions: the pid
+    // sidecar is the cheap path, and the socket-argv scan backstops a
+    // supervisor binary that predates the sidecar (it spawns gvproxy without
+    // writing `gvproxy.pid`, so the pid reap finds nothing). Both idempotent —
+    // whichever runs first, the second is a no-op.
     libkrun_sys::gvproxy::reap_by_pid_file(vm_state_dir);
+    libkrun_sys::gvproxy::reap_by_socket_path(vm_state_dir);
 
     match outcome {
         Ok(WaitOutcome::Clean(code)) => Ok(code),
@@ -3943,27 +4006,101 @@ mod tests {
     }
 
     #[test]
-    fn choose_supervisor_prefers_env_then_next_to_exe_then_path() {
+    fn choose_supervisor_prefers_env_then_next_to_exe_then_local_build_then_path() {
         let env = PathBuf::from("/env/mvm-libkrun-supervisor");
         let exe = PathBuf::from("/exe/mvm-libkrun-supervisor");
+        let build = PathBuf::from("/ws/target/debug/mvm-libkrun-supervisor");
         let path = PathBuf::from("/usr/bin/mvm-libkrun-supervisor");
 
         // Env override wins over everything.
         assert_eq!(
-            choose_supervisor(Some(env.clone()), Some(exe.clone()), Some(path.clone())),
-            Some((env.clone(), SupervisorSource::EnvOverride))
+            choose_supervisor(
+                Some(env.clone()),
+                Some(exe.clone()),
+                Some(build.clone()),
+                Some(path.clone())
+            ),
+            Some((env, SupervisorSource::EnvOverride))
         );
-        // Next-to-exe wins over PATH when no env override.
+        // Next-to-exe (version-matched) wins over a sibling build and PATH.
         assert_eq!(
-            choose_supervisor(None, Some(exe.clone()), Some(path.clone())),
+            choose_supervisor(
+                None,
+                Some(exe.clone()),
+                Some(build.clone()),
+                Some(path.clone())
+            ),
             Some((exe, SupervisorSource::NextToExe))
+        );
+        // A fresh sibling-profile build beats a (stale) PATH copy — the trap fix.
+        assert_eq!(
+            choose_supervisor(None, None, Some(build.clone()), Some(path.clone())),
+            Some((build, SupervisorSource::LocalBuild))
         );
         // PATH is the last resort — and is flagged as such so the caller can warn.
         assert_eq!(
-            choose_supervisor(None, None, Some(path.clone())),
+            choose_supervisor(None, None, None, Some(path.clone())),
             Some((path, SupervisorSource::Path))
         );
         // Nothing found.
-        assert_eq!(choose_supervisor(None, None, None), None);
+        assert_eq!(choose_supervisor(None, None, None, None), None);
+    }
+
+    /// A supervisor in a sibling cargo profile dir is discovered (newest wins),
+    /// but only under a `target/<profile>/` layout — an installed-exe layout
+    /// returns `None` so `$PATH` stays authoritative there.
+    #[test]
+    fn sibling_profile_supervisor_finds_newest_under_target_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target");
+        let release = target.join("release");
+        let debug = target.join("debug");
+        std::fs::create_dir_all(&release).unwrap();
+        std::fs::create_dir_all(&debug).unwrap();
+        // The co-located (release) build is excluded; the sibling (debug) is found.
+        std::fs::write(release.join("mvm-libkrun-supervisor"), b"co-located").unwrap();
+        std::fs::write(debug.join("mvm-libkrun-supervisor"), b"sibling").unwrap();
+
+        assert_eq!(
+            sibling_profile_supervisor(&release),
+            Some(debug.join("mvm-libkrun-supervisor")),
+            "must find the sibling-profile build, not the co-located one"
+        );
+
+        // Not a `target/<profile>/` layout → no sibling probing.
+        let installed = tmp.path().join("home/.cargo/bin");
+        std::fs::create_dir_all(&installed).unwrap();
+        assert_eq!(sibling_profile_supervisor(&installed), None);
+    }
+
+    /// A sibling build outranks `$PATH` when it is missing/newer/equal, but a
+    /// stale build must not shadow a freshly installed `$PATH` copy.
+    #[test]
+    fn supervisor_build_outranks_path_respects_freshness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build-supervisor");
+        let path = tmp.path().join("path-supervisor");
+        std::fs::write(&build, b"b").unwrap();
+
+        // No `$PATH` copy → the local build always wins.
+        assert!(supervisor_build_outranks_path(&build, None));
+
+        // `$PATH` copy present but older than the build → build wins.
+        std::fs::write(&path, b"p").unwrap();
+        let older = std::time::SystemTime::UNIX_EPOCH;
+        let newer = older + std::time::Duration::from_secs(100);
+        set_mtime(&path, older);
+        set_mtime(&build, newer);
+        assert!(supervisor_build_outranks_path(&build, Some(&path)));
+
+        // `$PATH` copy newer (fresh install) → build must not shadow it.
+        set_mtime(&path, newer);
+        set_mtime(&build, older);
+        assert!(!supervisor_build_outranks_path(&build, Some(&path)));
+    }
+
+    fn set_mtime(path: &Path, when: std::time::SystemTime) {
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
     }
 }
