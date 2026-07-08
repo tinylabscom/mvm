@@ -562,13 +562,17 @@ fn machine_run_spec(
     } else if let Some(img) = &args.image {
         // Image-backed: store the OCI ref.
         (Some(img.clone()), None)
+    } else if args.runtime_pack {
+        // The verified runtime pack is its own source; recorded via
+        // `runtime_pack: true` below, not `image`/`manifest`.
+        (None, None)
     } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
         // Test escape: kernel + rootfs from env vars; no persistent source.
         (None, None)
     } else {
         bail!(
-            "machine run needs `--image <ref>`, `--manifest <path>`, or `--flake <path>` \
-             to create machine {name:?}"
+            "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, or \
+             `--runtime-pack` to create machine {name:?}"
         );
     };
     super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
@@ -580,6 +584,7 @@ fn machine_run_spec(
         image,
         manifest,
         resolved_digest: None,
+        runtime_pack: args.runtime_pack,
         net: args.net,
         allow_host: args.allow_host.clone(),
         cpus: args.cpus,
@@ -950,6 +955,7 @@ impl MachineCreateArgs {
             image: Some(image),
             manifest: None,
             resolved_digest: None,
+            runtime_pack: false,
             net,
             allow_host,
             cpus,

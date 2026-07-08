@@ -41,6 +41,10 @@ pub struct MachineSpec {
     pub manifest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resolved_digest: Option<String>,
+    /// Boot from the verified downloadable runtime pack instead of an OCI
+    /// image or a manifest slot. Mutually exclusive with `image`/`manifest`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub runtime_pack: bool,
     pub net: bool,
     pub allow_host: Vec<String>,
     pub cpus: u32,
@@ -161,6 +165,7 @@ pub fn list_machine_specs() -> Result<Vec<MachineSpec>> {
 pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
     a.image == b.image
         && a.manifest == b.manifest
+        && a.runtime_pack == b.runtime_pack
         && a.net == b.net
         && a.allow_host == b.allow_host
         && a.cpus == b.cpus
@@ -180,7 +185,10 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     // `image` and `manifest` are mutually-exclusive sources; report either as a
     // single "source" change. `machine_config_matches` already compares both, so
     // without this a manifest-only swap recreates with an empty `changed` list.
-    if current.image != desired.image || current.manifest != desired.manifest {
+    if current.image != desired.image
+        || current.manifest != desired.manifest
+        || current.runtime_pack != desired.runtime_pack
+    {
         changed.push("source");
     }
     if current.net != desired.net {
@@ -337,6 +345,7 @@ mod tests {
             image: Some("alpine:latest".to_string()),
             manifest: None,
             resolved_digest: None,
+            runtime_pack: false,
             net: false,
             allow_host: vec![],
             cpus: 2,
@@ -512,6 +521,7 @@ mod tests {
             image: Some("img:1".into()),
             manifest: None,
             resolved_digest: None,
+            runtime_pack: false,
             net: false,
             allow_host: vec![],
             cpus: 2,
@@ -587,6 +597,41 @@ mod tests {
         desired.manifest = Some("slot-bbbb".to_string());
         let changed = machine_config_diff(&current, &desired);
         assert!(changed.contains("source"), "changed: {changed}");
+    }
+
+    #[test]
+    fn config_match_false_when_only_runtime_pack_differs() {
+        let a = spec_fixture("web");
+        let mut b = spec_fixture("web");
+        b.runtime_pack = true;
+        assert!(!machine_config_matches(&a, &b));
+    }
+
+    #[test]
+    fn config_diff_reports_source_for_runtime_pack_flip() {
+        let current = spec_fixture("web");
+        let mut desired = spec_fixture("web");
+        desired.runtime_pack = true;
+        let changed = machine_config_diff(&current, &desired);
+        assert!(changed.contains("source"), "changed: {changed}");
+    }
+
+    #[test]
+    fn spec_serde_roundtrip_with_runtime_pack_true() {
+        let mut spec = spec_fixture("web");
+        spec.runtime_pack = true;
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(json.contains("\"runtime_pack\":true"), "json: {json}");
+        assert_eq!(spec, serde_json::from_str::<MachineSpec>(&json).unwrap());
+
+        // Default `false` skip-serializes (old spec files stay readable, and
+        // a no-op field doesn't bloat every persisted spec).
+        let bare = spec_fixture("bare");
+        assert!(
+            !serde_json::to_string(&bare)
+                .unwrap()
+                .contains("runtime_pack")
+        );
     }
 
     #[test]

@@ -533,6 +533,7 @@ fn spec_fixture(name: &str) -> MachineSpec {
         image: Some("alpine:latest".to_string()),
         manifest: None,
         resolved_digest: None,
+        runtime_pack: false,
         net: false,
         allow_host: vec![],
         cpus: 2,
@@ -582,6 +583,15 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
     assert!(!spec.ssh_agent);
     // No --agent-verb: spec stores an empty list (computed default applies at start).
     assert!(spec.agent_verb.is_empty());
+}
+
+#[test]
+fn run_spec_records_runtime_pack_source_with_no_image_or_manifest() {
+    let args = parse_run(&["run", "--runtime-pack", "--name", "web", "-d"]).expect("parse");
+    let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
+    assert!(spec.runtime_pack);
+    assert!(spec.image.is_none());
+    assert!(spec.manifest.is_none());
 }
 
 #[test]
@@ -713,6 +723,19 @@ fn persistent_spec_reconnects_without_image_and_errors_when_absent() {
     let err = resolve_persistent_spec(&reconnect, "web", None, None)
         .expect_err("reconnect to a missing machine errors");
     assert!(err.to_string().contains("does not exist"), "msg: {err}");
+}
+
+#[test]
+fn persistent_spec_creates_fresh_from_runtime_pack_with_no_existing_machine() {
+    // `--runtime-pack` alone is a source: it must not fall into the
+    // reconnect-only path that errors when no machine exists yet.
+    let args = parse_run(&["run", "--runtime-pack", "--name", "web", "-d"]).expect("parse");
+    let (spec, action) =
+        resolve_persistent_spec(&args, "web", None, None).expect("fresh runtime-pack create");
+    assert_eq!(action, SpecReconcile::Create);
+    assert!(spec.runtime_pack);
+    assert!(spec.image.is_none());
+    assert!(spec.manifest.is_none());
 }
 
 #[test]
@@ -1326,6 +1349,7 @@ fn mark_machine_started_sets_digest_and_timestamp() {
         image: Some("alpine:latest".to_string()),
         manifest: None,
         resolved_digest: None,
+        runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
         cpus: 2,
@@ -1545,6 +1569,7 @@ fn machine_start_preflight_redacts_host_paths_and_surfaces_policy() {
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
         resolved_digest: Some("sha256:abc".to_string()),
+        runtime_pack: false,
         net: false,
         allow_host: vec!["api.example.com".to_string()],
         cpus: 4,
@@ -1591,6 +1616,7 @@ fn machine_start_preflight_surfaces_ssh_agent_auth_mode() {
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
         resolved_digest: Some("sha256:abc".to_string()),
+        runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
         cpus: 2,
@@ -1620,6 +1646,7 @@ fn machine_start_backend_selection_refuses_firecracker_for_oci_egress() {
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
         resolved_digest: Some("sha256:abc".to_string()),
+        runtime_pack: false,
         net: false,
         allow_host: vec!["api.example.com".to_string()],
         cpus: 2,
@@ -1694,6 +1721,7 @@ fn machine_start_receipt_input_records_ssh_agent_socket_for_dev_profiles() {
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
         resolved_digest: None,
+        runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
         cpus: 2,
@@ -1854,6 +1882,7 @@ fn machine_start_receipt_input_refuses_ssh_agent_on_standard_profile() {
         image: Some("ghcr.io/acme/web:latest".to_string()),
         manifest: None,
         resolved_digest: None,
+        runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
         cpus: 2,
@@ -1909,6 +1938,7 @@ fn create_refuses_overwrite_without_force() {
         image: Some("alpine:latest".to_string()),
         manifest: None,
         resolved_digest: None,
+        runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
         cpus: 2,
@@ -1953,6 +1983,7 @@ fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
         image: Some("alpine:latest".to_string()),
         manifest: None,
         resolved_digest: None,
+        runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
         cpus: 2,
@@ -1984,6 +2015,7 @@ fn seed_machine_spec(name: &str) {
         image: Some(format!("example/{name}:latest")),
         manifest: None,
         resolved_digest: None,
+        runtime_pack: false,
         net: false,
         allow_host: Vec::new(),
         cpus: 2,
@@ -2373,6 +2405,7 @@ fn reconfigure_spec_fixture() -> MachineSpec {
         image: Some("img:1".into()),
         manifest: None,
         resolved_digest: None,
+        runtime_pack: false,
         net: false,
         allow_host: vec![],
         cpus: 2,

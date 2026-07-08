@@ -1122,6 +1122,12 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub no_supervisor: bool,
     /// Pre-built kernel path: skips `ensure_workload_kernel` when set.
     pub kernel_path: Option<String>,
+    /// Base-rootfs dm-verity sidecar path (`rootfs.verity`). `None` for OCI /
+    /// manifest sources whose ext4 is not verity-sealed; `Some` for a runtime
+    /// pack, which ships a sealed base rootfs.
+    pub verity_path: Option<String>,
+    /// 64-hex base-rootfs root hash paired with `verity_path`.
+    pub roothash: Option<String>,
     /// Raw `--agent-verb` strings from the CLI. Empty ⇒ use the computed
     /// sealed-prod default.
     pub agent_verb: Vec<String>,
@@ -1169,6 +1175,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         backend_name,
         no_supervisor,
         kernel_path,
+        verity_path,
+        roothash,
         agent_verb,
         has_ad_hoc_argv,
     } = params;
@@ -1227,8 +1235,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         rootfs_path: rootfs_path.display().to_string(),
         vmlinux_path: kernel_path,
         initrd_path: None,
-        verity_path: None,
-        roothash: None,
+        verity_path,
+        roothash,
         revision_hash: resolved_digest.to_string(),
         flake_ref: format!("oci:{image_label}"),
         profile: Some(profile.to_string()),

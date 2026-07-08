@@ -510,6 +510,7 @@ mod tests {
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
             manifest: None,
+            runtime_pack: false,
             resolved_digest: None,
             net: false,
             allow_host: vec![],
