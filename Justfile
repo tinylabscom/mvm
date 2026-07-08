@@ -20,6 +20,20 @@ install-hooks:
     git config core.hooksPath .githooks
     @echo "core.hooksPath -> .githooks/"
 
+# Provision the pinned cross-compile toolchain the embed step (mvm-cli/build.rs)
+# needs: the exact zig from the `ziglang` PyPI package + the musl rust targets.
+# Homebrew's `zig` drifts to newer, incompatible releases (fails downstream with
+# `CacheCheckFailed`); build.rs auto-detects the `ziglang`-installed zig instead.
+# Run once per machine (or after a toolchain pin bump).
+toolchain-embed:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    ZIG=$(python3 -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['metadata']['mvm']['toolchain']['zig'])")
+    echo "installing pinned zig ${ZIG} (ziglang) + musl rust targets"
+    python3 -m pip install --quiet "ziglang==${ZIG}"
+    rustup target add aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+    echo "embed toolchain ready: zig ${ZIG} + aarch64/x86_64 musl targets"
+
 # Build all crates (debug)
 build:
     cargo build --workspace

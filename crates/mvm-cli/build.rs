@@ -34,6 +34,7 @@ fn main() {
     println!("cargo:rustc-env=MVM_PINNED_TARGET={}", pin.target);
     println!("cargo:rerun-if-env-changed=MVM_EMBED_CARGO");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_RUSTC");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_ZIG");
 
     // HOST_BINARIES (installed into the builder/dev VM rootfs) + SEED_BINARIES
     // (host-side only, e.g. the Stage 0 nix-seed's /init). Both are
@@ -85,6 +86,7 @@ fn main() {
                 &host_target_dir,
                 name,
                 &pin.target,
+                &pin.zig,
                 &out_file,
             );
         }
@@ -103,7 +105,13 @@ fn main() {
     // and are looked up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte
     // stubs) — a stub build can't materialize an OCI run, same as the host bins.
     if !skip_embed {
-        run_guest_zigbuild(&workspace_root, &host_target_dir, &pin.target, &bins_out);
+        run_guest_zigbuild(
+            &workspace_root,
+            &host_target_dir,
+            &pin.target,
+            &pin.zig,
+            &bins_out,
+        );
     }
     for name in ["mvm-guest-agent", "mvm-guest-netinit"] {
         let out_file = bins_out.join(name);
@@ -245,37 +253,47 @@ fn strip_glibc(t: &str) -> &str {
     t.split('.').next().unwrap()
 }
 
-fn run_cargo_zigbuild(root: &Path, target_dir: &Path, pkg: &str, target: &str, out: &Path) {
+fn run_cargo_zigbuild(
+    root: &Path,
+    target_dir: &Path,
+    pkg: &str,
+    target: &str,
+    zig_pin: &str,
+    out: &Path,
+) {
     eprintln!("[build.rs] cargo zigbuild --release --target {target} -p mvm-build --bin {pkg}");
     // We need the rustup-managed cargo, not the Homebrew one. The Homebrew
     // cargo sets RUSTC=rustc which doesn't have the cross targets, and that
     // value propagates into the nested `cargo build` that cargo-zigbuild
     // spawns. Using the rustup cargo avoids that.
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
-    let status = Command::new(&cargo)
-        .args([
-            "zigbuild",
-            "--release",
-            "--target",
-            target,
-            "-p",
-            "mvm-build",
-            "--bin",
-            pkg,
-        ])
-        .env("RUSTC", &rustc)
-        // Dedicated target dir — see the deadlock note in main().
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .current_dir(root)
-        .status()
-        .expect(
-            "spawn `cargo zigbuild` — \
-             install with: `cargo install cargo-zigbuild --version 0.20.0` \
-             and `brew install zig` (or equivalent)",
-        );
+    let mut cmd = Command::new(&cargo);
+    cmd.args([
+        "zigbuild",
+        "--release",
+        "--target",
+        target,
+        "-p",
+        "mvm-build",
+        "--bin",
+        pkg,
+    ])
+    .env("RUSTC", &rustc)
+    // Dedicated target dir — see the deadlock note in main().
+    .env("CARGO_TARGET_DIR", target_dir)
+    .env_remove("RUSTUP_TOOLCHAIN")
+    .env_remove("RUSTC_WRAPPER")
+    .env_remove("RUSTC_WORKSPACE_WRAPPER")
+    .current_dir(root);
+    // Pin the zig binary cargo-zigbuild uses. Left to PATH, a Homebrew-upgraded
+    // zig (newer than the pin) fails downstream with a cryptic `CacheCheckFailed`.
+    if let Some(zig) = pinned_zig_path_or_fail(zig_pin) {
+        cmd.env("CARGO_ZIGBUILD_ZIG_PATH", zig);
+    }
+    let status = cmd.status().expect(
+        "spawn `cargo zigbuild` — \
+         install with: `cargo install cargo-zigbuild --version 0.20.0`",
+    );
     assert!(status.success(), "cargo zigbuild failed for {pkg}");
     let built = target_dir
         .join(strip_glibc(target))
@@ -289,33 +307,37 @@ fn run_cargo_zigbuild(root: &Path, target_dir: &Path, pkg: &str, target: &str, o
 /// to the static musl `target`, copying both into `out_dir`. Same zig/rustup
 /// handling as `run_cargo_zigbuild`; the guest binaries are a single `mvm-guest`
 /// package build with two `--bin`s, not one bin per call.
-fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, out_dir: &Path) {
+fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
     eprintln!(
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-guest \
          --bin mvm-guest-agent --bin mvm-guest-netinit --features mvm-guest/dev-shell"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
-    let status = Command::new(&cargo)
-        .args([
-            "zigbuild",
-            "--release",
-            "--target",
-            target,
-            "-p",
-            "mvm-guest",
-            "--bin",
-            "mvm-guest-agent",
-            "--bin",
-            "mvm-guest-netinit",
-            "--features",
-            "mvm-guest/dev-shell",
-        ])
-        .env("RUSTC", &rustc)
-        .env("CARGO_TARGET_DIR", target_dir)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTC_WRAPPER")
-        .env_remove("RUSTC_WORKSPACE_WRAPPER")
-        .current_dir(root)
+    let mut cmd = Command::new(&cargo);
+    cmd.args([
+        "zigbuild",
+        "--release",
+        "--target",
+        target,
+        "-p",
+        "mvm-guest",
+        "--bin",
+        "mvm-guest-agent",
+        "--bin",
+        "mvm-guest-netinit",
+        "--features",
+        "mvm-guest/dev-shell",
+    ])
+    .env("RUSTC", &rustc)
+    .env("CARGO_TARGET_DIR", target_dir)
+    .env_remove("RUSTUP_TOOLCHAIN")
+    .env_remove("RUSTC_WRAPPER")
+    .env_remove("RUSTC_WORKSPACE_WRAPPER")
+    .current_dir(root);
+    if let Some(zig) = pinned_zig_path_or_fail(zig_pin) {
+        cmd.env("CARGO_ZIGBUILD_ZIG_PATH", zig);
+    }
+    let status = cmd
         .status()
         .expect("spawn `cargo zigbuild` for the guest agent");
     assert!(
@@ -329,6 +351,68 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, out_dir: &Pa
         std::fs::copy(&built, &dest)
             .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), dest.display()));
     }
+}
+
+/// Resolve the zig binary cargo-zigbuild must use, pinned to `zig_pin`.
+///
+/// Order: explicit `MVM_EMBED_ZIG` → the `ziglang` PyPI package (version-exact,
+/// Homebrew-independent) → a PATH `zig` that already matches the pin (returns
+/// `None`, letting cargo-zigbuild find it). Panics with an actionable message
+/// when nothing matches — the alternative is cargo-zigbuild picking a
+/// Homebrew-upgraded zig and failing far downstream with `CacheCheckFailed`.
+fn pinned_zig_path_or_fail(zig_pin: &str) -> Option<String> {
+    if let Ok(p) = std::env::var("MVM_EMBED_ZIG")
+        && !p.is_empty()
+    {
+        return Some(p);
+    }
+    if let Some(path) = ziglang_zig_path(zig_pin) {
+        return Some(path);
+    }
+    if zig_on_path_matches(zig_pin) {
+        return None;
+    }
+    panic!(
+        "zig {zig_pin} is required to cross-compile the embedded host binaries but was not \
+         found. Install it with `pip install ziglang=={zig_pin}` (recommended — the build \
+         auto-detects it), put zig {zig_pin} on PATH, or set MVM_EMBED_ZIG=/path/to/zig. \
+         Homebrew's `zig` is usually a newer, incompatible release that fails downstream with \
+         `CacheCheckFailed`."
+    );
+}
+
+/// Absolute path to the `ziglang` PyPI package's bundled zig, iff its version is
+/// exactly `zig_pin`. `python3 -m ziglang version` prints the version; the binary
+/// sits next to the package's `__init__`.
+fn ziglang_zig_path(zig_pin: &str) -> Option<String> {
+    let ver = Command::new("python3")
+        .args(["-m", "ziglang", "version"])
+        .output()
+        .ok()?;
+    if !ver.status.success() || String::from_utf8_lossy(&ver.stdout).trim() != zig_pin {
+        return None;
+    }
+    let path = Command::new("python3")
+        .args([
+            "-c",
+            "import ziglang, os; print(os.path.join(os.path.dirname(ziglang.__file__), 'zig'))",
+        ])
+        .output()
+        .ok()?;
+    if !path.status.success() {
+        return None;
+    }
+    let p = String::from_utf8_lossy(&path.stdout).trim().to_string();
+    (!p.is_empty()).then_some(p)
+}
+
+/// True when a PATH `zig` reports exactly the pinned version.
+fn zig_on_path_matches(zig_pin: &str) -> bool {
+    Command::new("zig")
+        .arg("version")
+        .output()
+        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == zig_pin)
+        .unwrap_or(false)
 }
 
 /// Find a `(cargo, rustc)` pair that has `target` installed in its sysroot.
