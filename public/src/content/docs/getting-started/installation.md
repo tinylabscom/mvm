@@ -131,7 +131,7 @@ After installation, run the setup wizard:
 mvmctl init
 ```
 
-This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for Apple Virtualization.framework on macOS 26+), default network setup, and XDG directory creation. Use `--non-interactive` for scripted environments.
+This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for the HVF backend on macOS 26+), default network setup, and XDG directory creation. Use `--non-interactive` for scripted environments.
 
 Running `mvmctl dev` or `mvmctl bootstrap` also handles setup automatically -- they detect your platform, select the backend, and stage the builder microVM image on first use.
 

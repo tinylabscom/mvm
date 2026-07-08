@@ -39,7 +39,7 @@ Use Firecracker as the primary production backend. Support multiple backends: Ap
 3. **Docker running** -- Docker as container-based fallback
 4. **Other** (macOS Intel, Linux without KVM, native Windows, WSL2) -- unsupported for local microVM isolation today; Docker remains a Tier 3 convenience fallback only
 
-Override with `--hypervisor firecracker`, `--hypervisor vz`, `--hypervisor qemu`, or `--hypervisor docker`.
+Override with `--hypervisor firecracker`, `--hypervisor hvf`, `--hypervisor qemu`, or `--hypervisor docker`. (The Apple Virtualization.framework backend has since been removed; HVF is the macOS 26+ default.)
 
 ## Consequences
 

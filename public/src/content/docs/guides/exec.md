@@ -108,7 +108,7 @@ The snapshot path activates only when:
   the snapshot's recorded layout), AND
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (HVF, Vz, libkrun), vsock snapshots return `os error 95` (EOPNOTSUPP);
+On macOS backends without Firecracker (HVF, libkrun), vsock snapshots return `os error 95` (EOPNOTSUPP);
 restore failures fall back to cold boot with a warning rather than
 aborting. The harder branch -- parameterized snapshots that allow
 `--volume` -- is tracked in [issue #7](https://github.com/tinylabscom/mvm/issues/7).

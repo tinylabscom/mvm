@@ -34,7 +34,6 @@ genuinely backend-specific:
 | Firecracker | Auto on Linux with native KVM | Production Tier 1 backend |
 | HVF | Auto on supported macOS 26+ hosts | Preferred macOS local backend (Hypervisor.framework, vsock-only) |
 | libkrun | Auto fallback on supported hosts | Fast local Tier 2 backend |
-| Vz | Explicit opt-in (`--hypervisor vz`) | Supported, but not auto-selected |
 | QEMU | Explicit opt-in (`--hypervisor qemu`) | Linux dev/test backend |
 | Mock | Explicit opt-in (`--hypervisor mock`) | Test-only in-memory backend |
 
@@ -205,5 +204,5 @@ operations. It is not the same thing as the selected workload runtime backend.
 | Supported macOS 26+ host | HVF |
 | Supported host with libkrun available | libkrun |
 
-Other backends such as Vz and QEMU exist, but they are selected explicitly rather than by
+Other backends such as QEMU exist, but they are selected explicitly rather than by
 default policy.

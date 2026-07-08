@@ -38,13 +38,12 @@ git clone https://github.com/tinylabscom/mvm.git
 cd mvm
 cargo build --release --bin mvmctl
 cargo build --release -p mvm-vm-host \
-  --bin mvm-bridge --bin mvm-vz-supervisor --bin mvm-hvf-supervisor \
+  --bin mvm-bridge --bin mvm-hvf-supervisor \
   --bin mvm-libkrun-supervisor --features libkrun-sys
 cargo build --release -p mvm-hostd --bin mvm-substitution-endpoint
 install -m 0755 \
   target/release/mvmctl \
   target/release/mvm-bridge \
-  target/release/mvm-vz-supervisor \
   target/release/mvm-hvf-supervisor \
   target/release/mvm-libkrun-supervisor \
   target/release/mvm-substitution-endpoint \
@@ -118,4 +117,4 @@ brew install libkrun
 - **Apple Silicon (M1/M2/M3/M4 and newer)** — supported local path. HVF covers the dev VM, and libkrun backs builder/runtime components that need Hypervisor.framework directly.
 - **Intel Macs** — unsupported for the local microVM path. Run mvm on a Linux KVM host, or use future remote/Windows-style builder work when it lands.
 
-The HVF backend is the macOS 26+ Apple Silicon default (Hypervisor.framework, vsock-only egress); Vz is an opt-in, sunsetting alternative (`--hypervisor vz`). libkrun is also treated as an Apple Silicon macOS path for mvm support purposes.
+The HVF backend is the macOS 26+ Apple Silicon default and sole workload backend (Hypervisor.framework, vsock-only egress). libkrun is the macOS 13–25 default and is also treated as an Apple Silicon macOS path for mvm support purposes.

@@ -22,7 +22,7 @@ mvmctl pause agent-sandbox
 mvmctl resume agent-sandbox
 ```
 
-The exact backend mechanics differ. See [Snapshots](/working/snapshots/) for Firecracker sealed snapshots and Vz machine-state files.
+The exact backend mechanics differ. See [Snapshots](/working/snapshots/) for Firecracker sealed snapshots and full-VM machine-state files.
 
 ## Cold mode
 

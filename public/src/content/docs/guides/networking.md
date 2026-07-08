@@ -11,7 +11,6 @@ Networking differs by backend:
 |---------|-------------|----------|-------------|
 | Firecracker (Linux native) | TAP device | 172.16.0.2/30 | Direct via TAP |
 | HVF (macOS 26+, default) | vsock-only | — | Guest I/O over vsock; no guest NIC |
-| Vz (macOS 26+, opt-in) | vmnet by default; vsock-only for OCI egress | DHCP-assigned when vmnet is present | Via vmnet bridge, or host-vsock proxy on the NIC-less OCI path |
 | libkrun (macOS) | TSI (transparent socket impl) | host-loopback | Via per-port vsock listeners |
 | microvm.nix | TAP device | 172.16.0.2/30 | Direct via TAP |
 
@@ -23,7 +22,7 @@ Firecracker microVM (172.16.0.2/30, eth0)
 Linux host (172.16.0.1/30, tap0)  --  iptables NAT  --  internet
 ```
 
-On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. The TAP device connects the microVM to the host network namespace and gets NAT'd to the internet. On macOS hosts, networking is backend-specific: the default HVF backend is vsock-only (guest I/O crosses vsock, no guest NIC); Vz (opt-in) uses vmnet bridge mode; libkrun uses TSI (transparent socket impl) where outbound TCP/UDP appears as host-side socket calls.
+On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. The TAP device connects the microVM to the host network namespace and gets NAT'd to the internet. On macOS hosts, networking is backend-specific: the default HVF backend is vsock-only (guest I/O crosses vsock, no guest NIC); libkrun uses TSI (transparent socket impl) where outbound TCP/UDP appears as host-side socket calls.
 
 ## Port Forwarding
 
@@ -44,7 +43,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
 
-The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, Vz, and microvm.nix backends.
+The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
 
 For Firecracker, the host-side vsock UDS is scoped to the running VM directory:
 `<vm-dir>/runtime/v.sock`. It is not a global or master socket. `mvmctl machine run`
@@ -88,7 +87,7 @@ image-backed machine — `mvmctl` now selects only backends that can keep the
 guest **NIC-less** and proxy outbound traffic over the host-vsock egress
 endpoint. The injected guest runtime starts `mvm-egress-client` and the runtime
 sets standard proxy env vars to its loopback SOCKS listener automatically.
-Today that contract is provided by `hvf` and `vz`; if no available backend can
+Today that contract is provided by `hvf`; if no available backend can
 provide it, the start is refused up front instead of silently degrading to a
 guest NIC. This enables tools such as `curl` and `wget`; it does **not** add
 raw ICMP, so `ping google.com` is still expected to fail. Use an HTTP/TCP probe
@@ -118,7 +117,7 @@ The resolved profile is copied into the signed `ExecutionPlan` admission record 
 
 ## DNS
 
-The guest's `/etc/resolv.conf` is configured at build time to use the host's DNS resolver. Internet access works out of the box through the NAT chain (Firecracker), vmnet (Vz).
+The guest's `/etc/resolv.conf` is configured at build time to use the host's DNS resolver. Internet access works out of the box through the NAT chain (Firecracker) or the host-vsock egress endpoint (HVF).
 
 ### Local addon DNS (opt-in)
 

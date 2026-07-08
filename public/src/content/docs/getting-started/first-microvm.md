@@ -24,7 +24,7 @@ macOS 13-25 (AS):  mvmctl machine run  -->  libkrun microVM
 MicroVMs are **headless workloads** with no SSH access -- they communicate via vsock only.
 
 :::note
-On Linux with `/dev/kvm`, the dev-VM layer is skipped entirely -- Firecracker runs directly. On macOS Apple Silicon, microVMs run on Apple Virtualization.framework (macOS 26+) or libkrun (macOS 13–25). There is no Docker or container runtime path.
+On Linux with `/dev/kvm`, the dev-VM layer is skipped entirely -- Firecracker runs directly. On macOS Apple Silicon, microVMs run on the HVF backend (macOS 26+) or libkrun (macOS 13–25). There is no Docker or container runtime path.
 :::
 
 ## Scaffold a project

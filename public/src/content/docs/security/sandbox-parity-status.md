@@ -139,7 +139,7 @@ Tracking work:
 
 ### `cold-start` — Planned
 
-`runtime_boot_bench` covers Vz serial and parallel
+`runtime_boot_bench` covers HVF serial and parallel
 boots today, but mvm has no published end-to-end latency number
 covering Firecracker, libkrun, checkpoint restore, and warm-pool
 claim under a single methodology.
