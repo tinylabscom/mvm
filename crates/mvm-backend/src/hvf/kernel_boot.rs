@@ -162,6 +162,15 @@ fn default_virtiofs_bootargs() -> String {
     )
 }
 
+/// Default workload kernel cmdline for the chosen root strategy.
+pub fn workload_bootargs(virtiofs_root: bool, has_disk: bool) -> String {
+    if virtiofs_root {
+        default_virtiofs_bootargs()
+    } else {
+        default_bootargs(has_disk)
+    }
+}
+
 /// Host-supplied boot inputs the supervisor threads into a guest: the vsock
 /// channels (per-VM host→guest agent RPC socket, substitution-endpoint socket,
 /// egress relay UDS) plus the kernel cmdline. Bundled so the boot entry stays

@@ -258,7 +258,7 @@ pub(in crate::commands) struct MachineRunArgs {
     #[arg(long)]
     pub force: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -676,7 +676,7 @@ pub(in crate::commands) struct MachineStartArgs {
     #[arg(skip)]
     pub quiet: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -717,7 +717,7 @@ pub(in crate::commands) struct MachineStartCmd {
     #[arg(long)]
     pub dry_run: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -1285,6 +1285,58 @@ fn machine_start_receipt_input(
     })
 }
 
+fn requested_machine_start_backend_name(hypervisor_override: Option<&str>) -> String {
+    hypervisor_override
+        .map(str::to_string)
+        .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"))
+}
+
+fn validate_machine_start_oci_egress_backend(backend_name: &str) -> Result<()> {
+    let required = mvm_core::vm_backend::RequiredCapabilities {
+        vsock: true,
+        no_guest_nic: true,
+        host_vsock_proxy: true,
+        ..Default::default()
+    };
+    let missing = AnyBackend::from_hypervisor(backend_name)
+        .capabilities()
+        .shortfall(&required);
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "OCI-backed machine starts with outbound egress enabled require a NIC-less host-vsock-proxy backend; backend {backend_name} lacks [{}]",
+        missing.join(", ")
+    );
+}
+
+fn select_machine_start_backend(
+    spec: &MachineSpec,
+    hypervisor_override: Option<&str>,
+) -> Result<String> {
+    let network_policy = super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    let requested_backend = requested_machine_start_backend_name(hypervisor_override);
+    if spec.image.is_some() && network_policy.allows_egress() {
+        if hypervisor_override.is_some() {
+            validate_machine_start_oci_egress_backend(&requested_backend)?;
+            return Ok(requested_backend);
+        }
+        return AnyBackend::select_capable_available(&mvm_core::vm_backend::RequiredCapabilities {
+            vsock: true,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
+            ..Default::default()
+        })
+        .map(|backend| backend.name().to_string())
+        .map_err(|err| {
+            anyhow!(
+                "OCI-backed machine starts with outbound egress enabled require a NIC-less host-vsock-proxy backend: {err}"
+            )
+        });
+    }
+    Ok(requested_backend)
+}
+
 fn machine_start_volume_summary(volumes: &[MachineStartVolumePolicy]) -> &'static str {
     if volumes.is_empty() {
         "none"
@@ -1298,8 +1350,9 @@ fn machine_start_volume_summary(volumes: &[MachineStartVolumePolicy]) -> &'stati
 fn machine_start_preflight_summary(
     spec: &MachineSpec,
     receipt: Option<&Path>,
+    hypervisor_override: Option<&str>,
 ) -> Result<MachineStartPreflightSummary> {
-    let backend = super::shared::resolve_effective_hypervisor("firecracker");
+    let backend = select_machine_start_backend(spec, hypervisor_override)?;
     let invocation = machine_start_receipt_input(spec, &backend)?;
     let (memory_mib, mem_initial_mib) =
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
@@ -1900,7 +1953,11 @@ fn already_running_notice(name: &str, json: bool) -> String {
 fn start_machine(args: MachineStartArgs) -> Result<()> {
     let mut spec = ensure_machine_spec_exists(&args.name)?;
     if args.dry_run {
-        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        let summary = machine_start_preflight_summary(
+            &spec,
+            args.receipt.as_deref(),
+            args.hypervisor.as_deref(),
+        )?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
@@ -1915,11 +1972,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         return Ok(());
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
-    let effective_hypervisor = args
-        .hypervisor
-        .as_deref()
-        .map(String::from)
-        .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
+    let effective_hypervisor = select_machine_start_backend(&spec, args.hypervisor.as_deref())?;
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let ssh_auth_sock = if spec.ssh_agent {
         Some(ssh_auth_sock_from_env()?)
@@ -2012,7 +2065,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         volumes: &volume_cfg,
         network_policy,
         auth: machine_start_plan_auth_policy(&spec),
-        hypervisor_override: args.hypervisor.as_deref(),
+        backend_name: &effective_hypervisor,
         no_supervisor: args.no_supervisor,
         kernel_path,
         agent_verb: spec.agent_verb.clone(),
@@ -2022,13 +2075,13 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         && let Err(err) =
             configure_machine_ssh_agent_forwarding(&spec.name, &effective_hypervisor, host_sock)
     {
-        stop_failed_machine_start(&spec.name);
+        stop_failed_machine_start(&spec.name, &effective_hypervisor);
         return Err(err);
     }
     if !spec.init.is_empty()
         && let Err(err) = run_machine_init_commands(&spec.name, &spec.init, spec.ssh_agent)
     {
-        stop_failed_machine_start(&spec.name);
+        stop_failed_machine_start(&spec.name, &effective_hypervisor);
         return Err(err);
     }
     mark_machine_started(&mut spec, boot_digest);
@@ -2204,10 +2257,9 @@ fn run_machine_init_commands(name: &str, commands: &[String], ssh_agent: bool) -
     Ok(())
 }
 
-fn stop_failed_machine_start(name: &str) {
+fn stop_failed_machine_start(name: &str, backend_name: &str) {
     reap_proxy(name);
-    let backend =
-        AnyBackend::from_hypervisor(&super::shared::resolve_effective_hypervisor("firecracker"));
+    let backend = AnyBackend::from_hypervisor(backend_name);
     if let Err(err) = backend.stop(&VmId(name.to_string())) {
         tracing::warn!(error = %err, machine = name, "stopping machine after failed init failed");
     }
@@ -2387,7 +2439,11 @@ fn run_persistent(
 
     // Dry-run: explain the effective start without persisting or booting.
     if args.dry_run {
-        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        let summary = machine_start_preflight_summary(
+            &spec,
+            args.receipt.as_deref(),
+            args.hypervisor.as_deref(),
+        )?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
@@ -4413,7 +4469,7 @@ ssh_agent = true
         };
 
         let summary =
-            machine_start_preflight_summary(&spec, Some(Path::new("/tmp/web.receipt.json")))
+            machine_start_preflight_summary(&spec, Some(Path::new("/tmp/web.receipt.json")), None)
                 .expect("preflight summary");
         assert_eq!(
             summary.invocation.network_posture,
@@ -4454,10 +4510,42 @@ ssh_agent = true
             health_check: None,
         };
 
-        let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
+        let summary =
+            machine_start_preflight_summary(&spec, None, None).expect("preflight summary");
         assert_eq!(summary.invocation.auth.mode, "ssh-agent-socket");
         let json = serde_json::to_string(&summary).expect("summary json");
         assert!(json.contains("ssh-agent-socket"));
+    }
+
+    #[test]
+    fn machine_start_preflight_refuses_firecracker_for_oci_egress() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec!["api.example.com".to_string()],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+
+        let err = machine_start_preflight_summary(&spec, None, Some("firecracker"))
+            .expect_err("firecracker should be refused for OCI egress");
+        let msg = err.to_string();
+        assert!(msg.contains("NIC-less host-vsock-proxy backend"));
+        assert!(msg.contains("firecracker"));
+        assert!(msg.contains("host_vsock_proxy"));
     }
 
     #[test]

@@ -337,7 +337,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
-    let admit_backend = mvm_backend::backend::AnyBackend::auto_select()
+    let admit_backend = crate::exec::select_exec_backend(args.image.is_some(), &network_policy)?
         .name()
         .to_string();
     // The closure below moves `admit_backend`; keep a copy for the receipt's
@@ -638,6 +638,10 @@ fn build_exec_request(
     for kv in &args.env {
         env_pairs.push(parse_env_pair(kv)?);
     }
+    let selected_backend = crate::exec::select_exec_backend(image_ref.is_some(), &network_policy)?;
+    let mut effective_env =
+        oci_vsock_proxy_env_for_backend(&selected_backend, image_ref.is_some(), &network_policy);
+    effective_env.extend(env_pairs);
     // --manifest <PATH> accepts a manifest path / dir in addition to
     // legacy names. Resolve up front so the downstream
     // ImageSource::Template carries either a name (legacy) or a slot
@@ -729,7 +733,7 @@ fn build_exec_request(
         // mem_initial gets sourced for long-running workloads.
         mem_initial_mib: None,
         add_dirs,
-        env: env_pairs,
+        env: effective_env,
         target,
         timeout_secs: args.timeout,
         pty: args.pty,
@@ -980,7 +984,8 @@ impl RunPreflightSummary {
 
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
-        let backend = mvm_backend::backend::AnyBackend::auto_select()
+        let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+        let backend = crate::exec::select_exec_backend(args.image.is_some(), &policy)?
             .name()
             .to_string();
         let receipt_input = ReceiptInput::from_run_args(args, &backend)?;
@@ -1086,7 +1091,13 @@ impl ReceiptInput {
             }
         };
 
-        let mut env_keys = Vec::with_capacity(args.env.len());
+        let selected_backend = mvm_backend::backend::AnyBackend::from_hypervisor(backend);
+        let mut env_keys =
+            oci_vsock_proxy_env_for_backend(&selected_backend, args.image.is_some(), &policy)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>();
+        env_keys.reserve(args.env.len());
         for kv in &args.env {
             let (key, _) = kv
                 .split_once('=')
@@ -1094,6 +1105,7 @@ impl ReceiptInput {
             env_keys.push(key.to_string());
         }
         env_keys.sort();
+        env_keys.dedup();
 
         let mut add_dirs = Vec::with_capacity(args.add_dir.len());
         for spec in &args.add_dir {
@@ -1166,6 +1178,36 @@ fn parse_env_pair(kv: &str) -> Result<(String, String)> {
         anyhow::bail!("--env '{kv}': KEY must match [A-Za-z_][A-Za-z0-9_]* (got '{k}')");
     }
     Ok((k.to_string(), v.to_string()))
+}
+
+fn oci_vsock_proxy_env_for_backend(
+    backend: &mvm_backend::backend::AnyBackend,
+    image_requested: bool,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Vec<(String, String)> {
+    if !image_requested || !network_policy.allows_egress() {
+        return Vec::new();
+    }
+    let caps = backend.capabilities();
+    if !(caps.vsock && caps.no_guest_nic && caps.host_vsock_proxy) {
+        return Vec::new();
+    }
+    let proxy = "socks5h://127.0.0.1:1080".to_string();
+    vec![
+        ("ALL_PROXY".to_string(), proxy.clone()),
+        ("HTTP_PROXY".to_string(), proxy.clone()),
+        ("HTTPS_PROXY".to_string(), proxy.clone()),
+        ("http_proxy".to_string(), proxy.clone()),
+        ("https_proxy".to_string(), proxy),
+        (
+            "NO_PROXY".to_string(),
+            "localhost,127.0.0.1,::1".to_string(),
+        ),
+        (
+            "no_proxy".to_string(),
+            "localhost,127.0.0.1,::1".to_string(),
+        ),
+    ]
 }
 
 fn write_run_receipt(
@@ -1400,6 +1442,82 @@ mod tests {
         let r = ReceiptInput::from_run_args(&deny, "vz").expect("receipt input");
         assert_eq!(r.network_posture, "deny-all");
         assert_eq!(r.egress_enforcement, "flow-drop");
+    }
+
+    #[test]
+    fn oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend() {
+        let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
+        assert!(
+            oci_vsock_proxy_env_for_backend(
+                &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
+                true,
+                &deny_all,
+            )
+            .is_empty()
+        );
+
+        assert!(
+            oci_vsock_proxy_env_for_backend(
+                &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
+                false,
+                &mvm_core::network_policy::NetworkPolicy::preset(
+                    mvm_core::network_policy::NetworkPreset::Dev,
+                ),
+            )
+            .is_empty()
+        );
+        assert!(
+            oci_vsock_proxy_env_for_backend(
+                &mvm_backend::backend::AnyBackend::from_hypervisor("firecracker"),
+                true,
+                &mvm_core::network_policy::NetworkPolicy::preset(
+                    mvm_core::network_policy::NetworkPreset::Dev,
+                ),
+            )
+            .is_empty()
+        );
+
+        let vars = oci_vsock_proxy_env_for_backend(
+            &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
+            true,
+            &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+                mvm_core::network_policy::HostPort::new("example.com", 443),
+            ]),
+        );
+        assert!(
+            vars.iter()
+                .any(|(k, v)| k == "ALL_PROXY" && v == "socks5h://127.0.0.1:1080")
+        );
+        assert!(
+            vars.iter()
+                .any(|(k, v)| k == "HTTP_PROXY" && v == "socks5h://127.0.0.1:1080")
+        );
+        assert!(
+            vars.iter()
+                .any(|(k, v)| k == "NO_PROXY" && v == "localhost,127.0.0.1,::1")
+        );
+    }
+
+    #[test]
+    fn receipt_env_keys_include_injected_oci_proxy_vars() {
+        let mut args = run_args(RunProfile::Standard);
+        args.image = Some("docker.io/library/alpine:latest".to_string());
+        args.allow_host = vec!["example.com".to_string()];
+        args.env.push("HTTP_PROXY=override".to_string());
+        args.env.push("APP_MODE=dev".to_string());
+
+        let receipt = ReceiptInput::from_run_args(&args, "hvf").expect("receipt input");
+        assert!(receipt.env_keys.contains(&"ALL_PROXY".to_string()));
+        assert!(receipt.env_keys.contains(&"HTTP_PROXY".to_string()));
+        assert!(receipt.env_keys.contains(&"APP_MODE".to_string()));
+        assert_eq!(
+            receipt
+                .env_keys
+                .iter()
+                .filter(|k| k.as_str() == "HTTP_PROXY")
+                .count(),
+            1
+        );
     }
 
     fn run_args(profile: RunProfile) -> RunArgs {

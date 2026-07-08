@@ -1116,8 +1116,8 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub volumes: &'a [image::RuntimeVolume],
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
     pub auth: mvm_core::plan::AuthPolicy,
-    /// Override the backend (test escape; `None` = auto-detect).
-    pub hypervisor_override: Option<&'a str>,
+    /// Concrete backend selected by the caller.
+    pub backend_name: &'a str,
     /// Skip plan-admission signing (test escape).
     pub no_supervisor: bool,
     /// Pre-built kernel path: skips `ensure_workload_kernel` when set.
@@ -1166,16 +1166,13 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         volumes,
         network_policy,
         auth,
-        hypervisor_override,
+        backend_name,
         no_supervisor,
         kernel_path,
         agent_verb,
         has_ad_hoc_argv,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let effective_hypervisor = hypervisor_override
-        .map(String::from)
-        .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
     let kernel_path = if let Some(k) = kernel_path {
         k
     } else {
@@ -1190,12 +1187,12 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     };
     register_vm_name(name, "default");
 
-    let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
+    let backend = AnyBackend::from_hypervisor(backend_name);
     let admission_ledger = InMemoryNonceLedger::new();
     let admission = admit_plan_for_boot(AdmitPlanForBootParams {
         tenant: "local",
         vm_name: name,
-        backend_name: &effective_hypervisor,
+        backend_name,
         rootfs_path,
         precomputed_image_sha256: None,
         cpus,
@@ -1256,11 +1253,11 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     // guest at the agent + `enforce_accessible_gate`, leaving the listeners
     // inert there.
     start_config.dev_console = true;
-    attach_runtime_overlay_if_cached(&mut start_config, &effective_hypervisor);
+    attach_runtime_overlay_if_cached(&mut start_config, backend_name);
     if let Some(ctx) = admission.as_ref() {
         thread_tenant_id(&mut start_config, &ctx.admitted);
         populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
-        if persists_plan_before_start(&effective_hypervisor) {
+        if persists_plan_before_start(backend_name) {
             stash_plan_for_bridge(&start_config)?;
         }
     }
@@ -1273,7 +1270,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         emit_failed_if(&admission, "backend-start", &err);
         return Err(err);
     }
-    emit_launched_if(&admission, &effective_hypervisor);
+    emit_launched_if(&admission, backend_name);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);
     Ok(())

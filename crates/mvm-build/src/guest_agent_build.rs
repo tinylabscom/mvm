@@ -1,4 +1,4 @@
-//! Host-side source of the guest agent + netinit binaries baked into an
+//! Host-side source of the guest agent, netinit, and egress-client binaries baked into an
 //! OCI rootfs ([`crate::oci_runtime_inject`]).
 //!
 //! An mkGuest rootfs gets the agent from a nix build inside the builder
@@ -13,7 +13,7 @@
 //! `ring` (C), so a static musl build needs a musl C cross-compiler, and
 //! zig supplies it without a system `<arch>-linux-musl-gcc`. The
 //! source-checkout build ([`resolve_or_build_guest_binaries`]) is only
-//! reachable with the workspace + zig; a **shipped mvmctl** embeds these two
+//! reachable with the workspace + zig; a **shipped mvmctl** embeds these
 //! binaries at build time (`crates/mvm-cli/build.rs`) and installs the embedded
 //! bytes via [`install_prebuilt_guest_binaries`]. The resolution order —
 //! cache → source checkout → embedded — lives in `run_image::inject_and_materialize`.
@@ -43,6 +43,7 @@ pub struct GuestAgentLayout {
     pub dir: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
+    pub egress_client: PathBuf,
 }
 
 /// Cache segment keying the agent build variant. The `run --image` path needs
@@ -63,18 +64,20 @@ impl GuestAgentLayout {
         Self {
             agent: dir.join("mvm-guest-agent"),
             netinit: dir.join("mvm-guest-netinit"),
+            egress_client: dir.join("mvm-egress-client"),
             dir,
         }
     }
 
     fn is_complete(&self) -> bool {
-        self.agent.is_file() && self.netinit.is_file()
+        self.agent.is_file() && self.netinit.is_file() && self.egress_client.is_file()
     }
 
     fn binaries(&self) -> MvmRuntimeBinaries {
         MvmRuntimeBinaries {
             agent: self.agent.clone(),
             netinit: self.netinit.clone(),
+            egress_client: self.egress_client.clone(),
         }
     }
 }
@@ -133,6 +136,10 @@ impl GuestAgentBuildSpec {
             "mvm-guest-agent".to_string(),
             "--bin".to_string(),
             "mvm-guest-netinit".to_string(),
+            "-p".to_string(),
+            "mvm-guest-helpers".to_string(),
+            "--bin".to_string(),
+            "mvm-egress-client".to_string(),
             "--features".to_string(),
             "mvm-guest/dev-shell".to_string(),
         ]
@@ -161,8 +168,8 @@ pub fn resolve_or_build_guest_binaries(
         return Ok(layout.binaries());
     }
     let spec = GuestAgentBuildSpec::new(workspace_root.to_path_buf(), arch);
-    let (agent, netinit) = build_guest_binaries(&spec)?;
-    install_into_cache(&agent, &netinit, cache_root, version, arch)
+    let (agent, netinit, egress_client) = build_guest_binaries(&spec)?;
+    install_into_cache(&agent, &netinit, &egress_client, cache_root, version, arch)
 }
 
 /// Copy already-built guest binaries into the cache and return the
@@ -171,6 +178,7 @@ pub fn resolve_or_build_guest_binaries(
 pub fn install_into_cache(
     agent_src: &Path,
     netinit_src: &Path,
+    egress_client_src: &Path,
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
@@ -179,6 +187,7 @@ pub fn install_into_cache(
     std::fs::create_dir_all(&layout.dir)?;
     install_one(agent_src, &layout.agent)?;
     install_one(netinit_src, &layout.netinit)?;
+    install_one(egress_client_src, &layout.egress_client)?;
     Ok(layout.binaries())
 }
 
@@ -199,6 +208,7 @@ pub fn cached_guest_binaries(
 pub fn install_prebuilt_guest_binaries(
     agent_bytes: &[u8],
     netinit_bytes: &[u8],
+    egress_client_bytes: &[u8],
     cache_root: &Path,
     version: &str,
     arch: GuestArch,
@@ -207,6 +217,7 @@ pub fn install_prebuilt_guest_binaries(
     std::fs::create_dir_all(&layout.dir)?;
     write_exec(&layout.agent, agent_bytes)?;
     write_exec(&layout.netinit, netinit_bytes)?;
+    write_exec(&layout.egress_client, egress_client_bytes)?;
     Ok(layout.binaries())
 }
 
@@ -229,7 +240,7 @@ fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
 /// Run `cargo zigbuild` for the spec, returning the built binary paths.
 pub fn build_guest_binaries(
     spec: &GuestAgentBuildSpec,
-) -> Result<(PathBuf, PathBuf), GuestAgentBuildError> {
+) -> Result<(PathBuf, PathBuf, PathBuf), GuestAgentBuildError> {
     let argv = spec.argv();
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
@@ -256,12 +267,13 @@ pub fn build_guest_binaries(
     let dir = spec.output_dir();
     let agent = dir.join("mvm-guest-agent");
     let netinit = dir.join("mvm-guest-netinit");
-    for p in [&agent, &netinit] {
+    let egress_client = dir.join("mvm-egress-client");
+    for p in [&agent, &netinit, &egress_client] {
         if !p.is_file() {
             return Err(GuestAgentBuildError::OutputMissing(p.clone()));
         }
     }
-    Ok((agent, netinit))
+    Ok((agent, netinit, egress_client))
 }
 
 /// `rustup which rustc` path, or `None` if rustup isn't installed.
@@ -309,6 +321,7 @@ mod tests {
         let bins = install_prebuilt_guest_binaries(
             b"fake-agent-elf",
             b"fake-netinit-elf",
+            b"fake-egress-client-elf",
             cache.path(),
             "9.9.9",
             arch,
@@ -316,7 +329,12 @@ mod tests {
         .expect("install prebuilt");
         assert!(bins.agent.is_file());
         assert!(bins.netinit.is_file());
+        assert!(bins.egress_client.is_file());
         assert_eq!(std::fs::read(&bins.agent).unwrap(), b"fake-agent-elf");
+        assert_eq!(
+            std::fs::read(&bins.egress_client).unwrap(),
+            b"fake-egress-client-elf"
+        );
 
         let cached = cached_guest_binaries(cache.path(), "9.9.9", arch).expect("now cached");
         assert_eq!(cached.agent, bins.agent);
@@ -361,6 +379,10 @@ mod tests {
             l.netinit,
             PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell/mvm-guest-netinit")
         );
+        assert_eq!(
+            l.egress_client,
+            PathBuf::from("/c/guest-agent/0.16.1/aarch64/dev-shell/mvm-egress-client")
+        );
     }
 
     #[test]
@@ -372,6 +394,8 @@ mod tests {
         assert!(argv.contains(&"aarch64-unknown-linux-musl".to_string()));
         assert!(argv.contains(&"mvm-guest-agent".to_string()));
         assert!(argv.contains(&"mvm-guest-netinit".to_string()));
+        assert!(argv.contains(&"mvm-egress-client".to_string()));
+        assert!(argv.contains(&"mvm-guest-helpers".to_string()));
         assert!(argv.contains(&"mvm-guest/dev-shell".to_string()));
         // output_dir is under the target triple's release dir.
         assert_eq!(
@@ -385,19 +409,23 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let agent_src = tmp.path().join("a");
         let netinit_src = tmp.path().join("n");
+        let egress_client_src = tmp.path().join("e");
         std::fs::write(&agent_src, b"AGENT").unwrap();
         std::fs::write(&netinit_src, b"NETINIT").unwrap();
+        std::fs::write(&egress_client_src, b"EGRESS").unwrap();
         let cache = tmp.path().join("cache");
 
         let installed = install_into_cache(
             &agent_src,
             &netinit_src,
+            &egress_client_src,
             &cache,
             "0.16.1",
             GuestArch::Aarch64,
         )
         .expect("install");
         assert_eq!(std::fs::read(&installed.agent).unwrap(), b"AGENT");
+        assert_eq!(std::fs::read(&installed.egress_client).unwrap(), b"EGRESS");
 
         // A subsequent resolve hits the cache and never builds (the
         // workspace path is bogus; if it built it would fail).
@@ -417,6 +445,7 @@ mod tests {
         let err = install_into_cache(
             &tmp.path().join("missing-agent"),
             &tmp.path().join("missing-netinit"),
+            &tmp.path().join("missing-egress-client"),
             &tmp.path().join("cache"),
             "0.16.1",
             GuestArch::Aarch64,

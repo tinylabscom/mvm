@@ -11,10 +11,10 @@
 //! without `dev-shell`, so the handler is not present and `exec` returns
 //! "exec not available" regardless of any runtime configuration.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use mvm::vsock_transport;
 use mvm_backend::backend::AnyBackend;
-use mvm_core::vm_backend::{VmId, VmStartConfig, VmVolume};
+use mvm_core::vm_backend::{RequiredCapabilities, VmId, VmStartConfig, VmVolume};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -240,6 +240,36 @@ pub struct ExecRequest {
     /// Recorded liveness declaration (phase A: presence only). Persisted with a
     /// persistent machine so it survives + is inspectable; not yet probed.
     pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
+}
+
+pub(crate) fn select_exec_backend(
+    image_requested: bool,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Result<AnyBackend> {
+    if image_requested && network_policy.allows_egress() {
+        return AnyBackend::select_capable_available(&RequiredCapabilities {
+            vsock: true,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
+            ..Default::default()
+        })
+        .map_err(|e| {
+            anyhow!(
+                "OCI --image runs with outbound egress enabled require a NIC-less host-vsock-proxy backend: {e}"
+            )
+        });
+    }
+    Ok(AnyBackend::auto_select())
+}
+
+fn request_uses_vsock_proxy_backend(req: &ExecRequest) -> bool {
+    matches!(
+        &req.image,
+        ImageSource::Prebuilt {
+            virtiofs_oci_root: Some(_),
+            ..
+        }
+    ) && req.network_policy.allows_egress()
 }
 
 /// Build the IR healthcheck from the CLI flags. A shell command string becomes
@@ -616,7 +646,7 @@ fn run_inner(
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
 ) -> Result<Either<i32, ExecOutput>> {
-    let backend = AnyBackend::auto_select();
+    let backend = select_exec_backend(request_uses_vsock_proxy_backend(&req), &req.network_policy)?;
 
     // Phase timing (off unless `MVM_PHASE_TIMING` is set): capture a
     // host-monotonic mark at each run seam, then emit a one-line breakdown
@@ -862,9 +892,10 @@ fn run_inner(
     {
         let interrupted = interrupted.clone();
         let vm_name = vm_name.clone();
+        let backend_name = backend.name().to_string();
         let _ = crate::signal::set_ctrlc_handler(move || {
             interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
-            let backend = AnyBackend::auto_select();
+            let backend = AnyBackend::from_hypervisor(&backend_name);
             let _ = backend.stop_transient(&VmId(vm_name.clone()));
         });
     }
