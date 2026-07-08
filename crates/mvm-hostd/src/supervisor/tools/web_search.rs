@@ -726,7 +726,6 @@ impl SearchProvider for GoogleSearchProvider {
         let response = self
             .client
             .get(request_url)
-            .get(request_url)
             .send()
             .await
             .map_err(|e| SearchError::Upstream(self.redact_credentials(e.to_string())))?;
