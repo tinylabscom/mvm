@@ -53,6 +53,17 @@ stdin: number[]
 timeout_secs: number
 }
 } | {
+RunDetached: {
+/**
+ * The program and its arguments. `argv[0]` is the program; resolved via PATH when not absolute.
+ */
+argv: string[]
+/**
+ * Env vars injected after `env_clear()` (plus a minimal safe base). Empty when omitted on the wire.
+ */
+env?: [string, string][]
+}
+} | {
 PostRestore: {
 /**
  * Host-minted verb-grant envelope to re-pin after restore. When the plan changes across a snapshot boundary the host delivers a fresh envelope here so the guest updates its pinned grant without a reboot. Absent on callers that do not rotate grants.
@@ -308,6 +319,10 @@ ExecEvent: ExecEvent
 } | {
 ExecBatchResult: {
 outcomes: ExecOutcomeWire[]
+}
+} | {
+DetachedStarted: {
+pid: number
 }
 } | {
 PostRestoreAck: {

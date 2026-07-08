@@ -1163,6 +1163,50 @@
           "additionalProperties": false
         },
         {
+          "description": "Run an arbitrary argv as a detached workload (dev-only).\n\nMirrors how the image's `/init` runs its baked entrypoint, but driven from the agent and non-blocking: the agent spawns the program in its own session (`setsid`), with stdin from `/dev/null` and stdout/stderr on the guest console (which the host backend captures to `console.log`), returns an immediate `DetachedStarted { pid }` ack, and a reaper reports the workload's exit code to the host's workload-exit port when it finishes — so the VM powers off once the workload exits (docker `-d` semantics). Unlike `Exec`, the workload's lifetime is not bound to this request's connection.",
+          "type": "object",
+          "required": [
+            "RunDetached"
+          ],
+          "properties": {
+            "RunDetached": {
+              "type": "object",
+              "required": [
+                "argv"
+              ],
+              "properties": {
+                "argv": {
+                  "description": "The program and its arguments. `argv[0]` is the program; resolved via PATH when not absolute.",
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "env": {
+                  "description": "Env vars injected after `env_clear()` (plus a minimal safe base). Empty when omitted on the wire.",
+                  "default": [],
+                  "type": "array",
+                  "items": {
+                    "type": "array",
+                    "items": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "string"
+                      }
+                    ],
+                    "maxItems": 2,
+                    "minItems": 2
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
           "description": "Signal post-restore: rotate the VMGenID, then remount drives and restart services. `token` is the host-minted generation token for this resume; the guest feeds it to its `GenIdReseeder` so two clones of one snapshot reseed their CSPRNG to distinct state. An all-zero token (the `serde` default, used by no-rotation callers like template restore) means \"no rotation\" — the remount/restart still runs.",
           "type": "object",
           "required": [
@@ -2331,6 +2375,29 @@
                   "items": {
                     "$ref": "#/definitions/ExecOutcomeWire"
                   }
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "description": "Ack for a `RunDetached` call: the detached workload was spawned with the given guest PID. The workload runs independently of this request's connection; its exit is later reported to the host's workload-exit port by the agent's reaper.",
+          "type": "object",
+          "required": [
+            "DetachedStarted"
+          ],
+          "properties": {
+            "DetachedStarted": {
+              "type": "object",
+              "required": [
+                "pid"
+              ],
+              "properties": {
+                "pid": {
+                  "type": "integer",
+                  "format": "int32"
                 }
               },
               "additionalProperties": false

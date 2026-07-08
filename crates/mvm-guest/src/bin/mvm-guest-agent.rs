@@ -1010,6 +1010,113 @@ fn do_exec_streaming(
     GuestResponse::ExecEvent(terminal)
 }
 
+/// Spawn `argv` as a detached workload and return its ack (dev-shell only).
+///
+/// Models the image `/init` entrypoint launch, but agent-driven and
+/// non-blocking: the child gets its own session (`setsid`), stdin from
+/// `/dev/null`, and stdout/stderr on `/dev/console` (which the host
+/// backend captures to `console.log`). The call returns immediately with
+/// `DetachedStarted { pid }`; a detached reaper thread waits on the child
+/// and reports its exit code to the host's workload-exit port via
+/// `mvm-exit-report`, so the VM powers off when the workload finishes
+/// (docker `-d` semantics). The reaper never blocks the agent request loop.
+#[cfg(feature = "dev-shell")]
+fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    let Some((program, args)) = argv.split_first() else {
+        return GuestResponse::Error {
+            message: "run-detached refused: empty argv".to_string(),
+        };
+    };
+
+    let devnull = match std::fs::File::open("/dev/null") {
+        Ok(f) => f,
+        Err(e) => {
+            return GuestResponse::Error {
+                message: format!("run-detached: open /dev/null: {e}"),
+            };
+        }
+    };
+    // Two independent write handles to the console so stdout and stderr
+    // each own their fd (no shared-offset surprises).
+    let console_out = match std::fs::OpenOptions::new().write(true).open("/dev/console") {
+        Ok(f) => f,
+        Err(e) => {
+            return GuestResponse::Error {
+                message: format!("run-detached: open /dev/console: {e}"),
+            };
+        }
+    };
+    let console_err = match std::fs::OpenOptions::new().write(true).open("/dev/console") {
+        Ok(f) => f,
+        Err(e) => {
+            return GuestResponse::Error {
+                message: format!("run-detached: open /dev/console: {e}"),
+            };
+        }
+    };
+
+    // env_clear(), then a minimal safe base plus the caller's vars.
+    // Drop malformed entries rather than let `Command::env` panic
+    // (empty key, key containing '=' or NUL, value containing NUL).
+    let safe_env = env.into_iter().filter(|(k, v)| {
+        !k.is_empty() && !k.contains('=') && !k.contains('\0') && !v.contains('\0')
+    });
+
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .env_clear()
+        .env(
+            "PATH",
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        )
+        .envs(safe_env)
+        .stdin(Stdio::from(devnull))
+        .stdout(Stdio::from(console_out))
+        .stderr(Stdio::from(console_err));
+
+    // SAFETY: runs in the post-fork pre-exec child. `setsid(2)` is
+    // async-signal-safe and is the only work done here — it detaches the
+    // workload into its own session so it outlives this request's
+    // connection and isn't tied to the agent's controlling terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+
+    let child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            return GuestResponse::Error {
+                message: format!("run-detached: spawn {program}: {e}"),
+            };
+        }
+    };
+    let pid = child.id() as i32;
+
+    // Reaper: wait for the detached workload, then report its exit code
+    // to the host so the VM powers off (best-effort). Never touches the
+    // agent request loop.
+    std::thread::spawn(move || {
+        let mut child = child;
+        let code = match child.wait() {
+            Ok(status) => status.code().unwrap_or(-1),
+            Err(_) => -1,
+        };
+        let _ = std::process::Command::new("/usr/local/bin/mvm-exit-report")
+            .arg(code.to_string())
+            .status();
+    });
+
+    GuestResponse::DetachedStarted { pid }
+}
+
 /// Write one staged file to disk (creating parents, applying mode) before an
 /// `ExecBatch` runs its commands. (dev-shell only)
 #[cfg(feature = "dev-shell")]
@@ -2361,6 +2468,20 @@ fn handle_client(
                 handle_run_entrypoint(&mut file, stdin, timeout_secs, env)
             }
         }
+
+        #[cfg(feature = "dev-shell")]
+        GuestRequest::RunDetached { argv, env } => {
+            // Argv is NOT logged: it can carry user-typed secrets, mirroring
+            // the run-code audit posture.
+            eprintln!("[audit] run-detached request: {} args", argv.len());
+            do_run_detached(argv, env)
+        }
+
+        #[cfg(not(feature = "dev-shell"))]
+        GuestRequest::RunDetached { .. } => GuestResponse::Error {
+            message: "run-detached not available: guest agent built without dev-shell feature"
+                .to_string(),
+        },
 
         GuestRequest::FsDiff => {
             // Walk the overlay upper dir to find changes since boot.

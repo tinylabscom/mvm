@@ -2467,6 +2467,29 @@ fn run_persistent_post_start(
         if !super::shared::wait_for_guest_agent(name, 30) {
             bail!("guest agent for {name:?} not reachable to run the command");
         }
+        // `-d` with a command detaches: the guest agent spawns the argv as
+        // an independent workload (its own session, output to the captured
+        // console) and acks immediately, so we return instead of
+        // foreground-streaming a connection-scoped exec that the output cap
+        // would eventually kill.
+        if args.detach {
+            let env = machine_console_env(spec.ssh_agent);
+            let transport = mvm::vsock_transport::for_vm(name)?;
+            let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+            super::shared::emit_vsock_rpc_audit(
+                name,
+                &mvm_guest::vsock::GuestRequest::RunDetached {
+                    argv: args.argv.clone(),
+                    env: env.clone(),
+                },
+            );
+            let pid = mvm_guest::vsock::send_run_detached(&mut stream, args.argv.clone(), env)?;
+            if !args.json {
+                eprintln!("detached workload started (guest pid {pid})");
+                println!("{name}");
+            }
+            return Ok(());
+        }
         return console::run(
             cli,
             console::Args {

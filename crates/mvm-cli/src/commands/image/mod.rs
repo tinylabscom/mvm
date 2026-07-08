@@ -315,8 +315,10 @@ pub(in crate::commands) fn oci_cache_root() -> PathBuf {
 /// script) changes such that already-materialized rootfs images must be
 /// re-sealed. Folded with the crate version into [`oci_runtime_tag`]; a
 /// stale rootfs then re-materializes instead of booting an outdated agent.
-/// Epoch 1 introduces the dev-shell exec handler in the OCI agent.
-const OCI_RUNTIME_EPOCH: u32 = 1;
+/// Epoch 1 introduces the dev-shell exec handler in the OCI agent. Epoch 2 adds
+/// the detached-workload handler — a rootfs sealed with an older agent would
+/// reject the run-detached request, so it must re-materialize.
+const OCI_RUNTIME_EPOCH: u32 = 2;
 
 /// Identity of the guest runtime the running mvmctl bakes into an OCI rootfs.
 /// Cheap and build-free (no agent cross-compile) so it can gate the cache-hit
