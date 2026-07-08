@@ -13,6 +13,7 @@ authors.workspace = true
 default = ["proto"]
 guest = ["proto"]
 guest-linux = ["guest", "dep:libc"]
+guest-linux-runner = ["guest-linux", "wire-json"]
 proto = []
 serde = ["dep:serde"]
 wire-json = ["proto", "serde", "dep:serde_json"]

@@ -9,10 +9,26 @@
 use std::fmt;
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::Ipv4Addr;
+#[cfg(all(target_os = "linux", feature = "wire-json"))]
+use std::os::fd::{AsRawFd, RawFd};
 use std::path::Path;
 
 use crate::guest::{GuestBridgeConfig, GuestBridgeOperation, InterfaceName, Ipv4Cidr};
+#[cfg(all(target_os = "linux", feature = "wire-json"))]
+use crate::guest_packet::GuestPacketTranslator;
+#[cfg(all(target_os = "linux", feature = "wire-json"))]
+use crate::guest_pump::{
+    GuestAuthority, GuestBridgePump, GuestPumpLoop, GuestPumpWait, run_guest_pump_loop,
+};
 use crate::guest_pump::{GuestPacketRead, GuestPacketSink, GuestPacketSource};
+#[cfg(feature = "wire-json")]
+use crate::guest_pump::{GuestPumpError, GuestPumpLoopConfig, GuestPumpRunStats};
+#[cfg(all(target_os = "linux", feature = "wire-json"))]
+use crate::proto::{Capability, EndpointRole, Hello, NetMessage};
+#[cfg(feature = "wire-json")]
+use crate::wire_json::JsonWireConfig;
+#[cfg(all(target_os = "linux", feature = "wire-json"))]
+use crate::wire_json::LengthPrefixedJsonAuthority;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestBridgeExecError {
@@ -185,6 +201,408 @@ where
 
     fn write_packet(&mut self, packet: &[u8]) -> Result<(), Self::Error> {
         self.inner.write_all(packet)
+    }
+}
+
+#[cfg(feature = "wire-json")]
+pub const DEFAULT_GUEST_RUNNER_POLL_TIMEOUT_MILLIS: i32 = 1_000;
+
+#[cfg(feature = "wire-json")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinuxGuestBridgeRunnerConfig {
+    pump_loop_config: GuestPumpLoopConfig,
+    json_wire_config: JsonWireConfig,
+    idle_poll_timeout_millis: i32,
+    write_poll_timeout_millis: i32,
+}
+
+#[cfg(feature = "wire-json")]
+impl LinuxGuestBridgeRunnerConfig {
+    pub fn builder() -> LinuxGuestBridgeRunnerConfigBuilder {
+        LinuxGuestBridgeRunnerConfigBuilder::default()
+    }
+
+    pub fn pump_loop_config(&self) -> &GuestPumpLoopConfig {
+        &self.pump_loop_config
+    }
+
+    pub fn json_wire_config(&self) -> &JsonWireConfig {
+        &self.json_wire_config
+    }
+
+    pub const fn idle_poll_timeout_millis(&self) -> i32 {
+        self.idle_poll_timeout_millis
+    }
+
+    pub const fn write_poll_timeout_millis(&self) -> i32 {
+        self.write_poll_timeout_millis
+    }
+}
+
+#[cfg(feature = "wire-json")]
+impl Default for LinuxGuestBridgeRunnerConfig {
+    fn default() -> Self {
+        Self {
+            pump_loop_config: GuestPumpLoopConfig::default(),
+            json_wire_config: JsonWireConfig::default(),
+            idle_poll_timeout_millis: DEFAULT_GUEST_RUNNER_POLL_TIMEOUT_MILLIS,
+            write_poll_timeout_millis: DEFAULT_GUEST_RUNNER_POLL_TIMEOUT_MILLIS,
+        }
+    }
+}
+
+#[cfg(feature = "wire-json")]
+#[derive(Debug, Clone)]
+pub struct LinuxGuestBridgeRunnerConfigBuilder {
+    pump_loop_config: GuestPumpLoopConfig,
+    json_wire_config: JsonWireConfig,
+    idle_poll_timeout_millis: i32,
+    write_poll_timeout_millis: i32,
+}
+
+#[cfg(feature = "wire-json")]
+impl Default for LinuxGuestBridgeRunnerConfigBuilder {
+    fn default() -> Self {
+        let config = LinuxGuestBridgeRunnerConfig::default();
+        Self {
+            pump_loop_config: config.pump_loop_config,
+            json_wire_config: config.json_wire_config,
+            idle_poll_timeout_millis: config.idle_poll_timeout_millis,
+            write_poll_timeout_millis: config.write_poll_timeout_millis,
+        }
+    }
+}
+
+#[cfg(feature = "wire-json")]
+impl LinuxGuestBridgeRunnerConfigBuilder {
+    pub fn pump_loop_config(mut self, pump_loop_config: GuestPumpLoopConfig) -> Self {
+        self.pump_loop_config = pump_loop_config;
+        self
+    }
+
+    pub fn json_wire_config(mut self, json_wire_config: JsonWireConfig) -> Self {
+        self.json_wire_config = json_wire_config;
+        self
+    }
+
+    pub fn idle_poll_timeout_millis(mut self, idle_poll_timeout_millis: i32) -> Self {
+        self.idle_poll_timeout_millis = idle_poll_timeout_millis;
+        self
+    }
+
+    pub fn write_poll_timeout_millis(mut self, write_poll_timeout_millis: i32) -> Self {
+        self.write_poll_timeout_millis = write_poll_timeout_millis;
+        self
+    }
+
+    pub fn build(self) -> Result<LinuxGuestBridgeRunnerConfig, LinuxGuestBridgeRunError> {
+        if self.idle_poll_timeout_millis <= 0 {
+            return Err(LinuxGuestBridgeRunError::InvalidConfig(
+                "idle_poll_timeout_millis must be positive",
+            ));
+        }
+        if self.write_poll_timeout_millis <= 0 {
+            return Err(LinuxGuestBridgeRunError::InvalidConfig(
+                "write_poll_timeout_millis must be positive",
+            ));
+        }
+        Ok(LinuxGuestBridgeRunnerConfig {
+            pump_loop_config: self.pump_loop_config,
+            json_wire_config: self.json_wire_config,
+            idle_poll_timeout_millis: self.idle_poll_timeout_millis,
+            write_poll_timeout_millis: self.write_poll_timeout_millis,
+        })
+    }
+}
+
+#[cfg(feature = "wire-json")]
+#[derive(Debug)]
+pub enum LinuxGuestBridgeRunError {
+    Bridge(GuestBridgeExecError),
+    Pump(GuestPumpError),
+    Io {
+        operation: &'static str,
+        reason: String,
+    },
+    InvalidConfig(&'static str),
+}
+
+#[cfg(feature = "wire-json")]
+impl fmt::Display for LinuxGuestBridgeRunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bridge(err) => write!(f, "{err}"),
+            Self::Pump(err) => write!(f, "{err}"),
+            Self::Io { operation, reason } => write!(f, "{operation} failed: {reason}"),
+            Self::InvalidConfig(reason) => {
+                write!(f, "invalid guest bridge runner config: {reason}")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "wire-json")]
+impl std::error::Error for LinuxGuestBridgeRunError {}
+
+#[cfg(feature = "wire-json")]
+impl From<GuestBridgeExecError> for LinuxGuestBridgeRunError {
+    fn from(value: GuestBridgeExecError) -> Self {
+        Self::Bridge(value)
+    }
+}
+
+#[cfg(feature = "wire-json")]
+impl From<GuestPumpError> for LinuxGuestBridgeRunError {
+    fn from(value: GuestPumpError) -> Self {
+        Self::Pump(value)
+    }
+}
+
+#[cfg(all(feature = "wire-json", not(target_os = "linux")))]
+pub fn run_linux_guest_bridge(
+    _config: &GuestBridgeConfig,
+    _runner_config: LinuxGuestBridgeRunnerConfig,
+) -> Result<GuestPumpRunStats, LinuxGuestBridgeRunError> {
+    Err(LinuxGuestBridgeRunError::Bridge(
+        GuestBridgeExecError::UnsupportedPlatform,
+    ))
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+pub fn run_linux_guest_bridge(
+    config: &GuestBridgeConfig,
+    runner_config: LinuxGuestBridgeRunnerConfig,
+) -> Result<GuestPumpRunStats, LinuxGuestBridgeRunError> {
+    let runtime = start_linux_guest_bridge(config)?;
+    run_started_linux_guest_bridge(runtime, runner_config)
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+pub fn run_started_linux_guest_bridge(
+    runtime: GuestBridgeRuntime<std::fs::File, std::fs::File>,
+    runner_config: LinuxGuestBridgeRunnerConfig,
+) -> Result<GuestPumpRunStats, LinuxGuestBridgeRunError> {
+    let GuestBridgeRuntime { tun, authority } = runtime;
+    let tun_sink = tun
+        .try_clone()
+        .map_err(|err| run_io_failed("clone_tun", err))?;
+
+    set_nonblocking(tun.as_raw_fd(), "set_tun_nonblocking")?;
+    set_nonblocking(authority.as_raw_fd(), "set_authority_nonblocking")?;
+
+    let tun_fd = tun.as_raw_fd();
+    let authority_fd = authority.as_raw_fd();
+    let write_poll_timeout_millis = runner_config.write_poll_timeout_millis;
+    let mut source = TunPacketIo::new(LinuxPolledIo::new(tun, write_poll_timeout_millis));
+    let mut sink = TunPacketIo::new(LinuxPolledIo::new(tun_sink, write_poll_timeout_millis));
+    let authority = LengthPrefixedJsonAuthority::with_config(
+        LinuxPolledIo::new(authority, write_poll_timeout_millis),
+        runner_config.json_wire_config,
+    );
+    let mut pump = GuestBridgePump::new(GuestPacketTranslator::default(), authority);
+    send_guest_hello(pump.authority_mut())?;
+
+    let mut pump_loop = GuestPumpLoop::new(runner_config.pump_loop_config);
+    let mut wait =
+        LinuxGuestPumpWait::new(tun_fd, authority_fd, runner_config.idle_poll_timeout_millis);
+    run_guest_pump_loop(&mut pump_loop, &mut pump, &mut source, &mut sink, &mut wait)
+        .map_err(Into::into)
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+fn send_guest_hello<A>(authority: &mut A) -> Result<(), LinuxGuestBridgeRunError>
+where
+    A: GuestAuthority,
+{
+    let capabilities = vec![
+        Capability::Dns,
+        Capability::Tcp,
+        Capability::Udp,
+        Capability::IcmpEcho,
+    ];
+    authority
+        .send_message(NetMessage::Hello(Hello::new(
+            EndpointRole::Guest,
+            capabilities,
+        )))
+        .map_err(|err| LinuxGuestBridgeRunError::Pump(GuestPumpError::Authority(err.to_string())))
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+#[derive(Debug)]
+struct LinuxPolledIo<T> {
+    inner: T,
+    write_poll_timeout_millis: i32,
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+impl<T> LinuxPolledIo<T> {
+    fn new(inner: T, write_poll_timeout_millis: i32) -> Self {
+        Self {
+            inner,
+            write_poll_timeout_millis,
+        }
+    }
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+impl<T> Read for LinuxPolledIo<T>
+where
+    T: Read,
+{
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buffer)
+    }
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+impl<T> Write for LinuxPolledIo<T>
+where
+    T: Write + AsRawFd,
+{
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        loop {
+            match self.inner.write(buffer) {
+                Err(err) if err.kind() == ErrorKind::Interrupted => {}
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    poll_writable(self.inner.as_raw_fd(), self.write_poll_timeout_millis)?;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+#[derive(Debug)]
+struct LinuxGuestPumpWait {
+    tun_fd: RawFd,
+    authority_fd: RawFd,
+    idle_poll_timeout_millis: i32,
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+impl LinuxGuestPumpWait {
+    fn new(tun_fd: RawFd, authority_fd: RawFd, idle_poll_timeout_millis: i32) -> Self {
+        Self {
+            tun_fd,
+            authority_fd,
+            idle_poll_timeout_millis,
+        }
+    }
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+impl GuestPumpWait for LinuxGuestPumpWait {
+    type Error = io::Error;
+
+    fn wait_for_activity(&mut self) -> Result<(), Self::Error> {
+        poll_readable_pair(
+            self.tun_fd,
+            self.authority_fd,
+            self.idle_poll_timeout_millis,
+        )
+    }
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+fn set_nonblocking(fd: RawFd, operation: &'static str) -> Result<(), LinuxGuestBridgeRunError> {
+    // SAFETY: `fd` is an open Linux fd owned by the bridge runtime.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(run_io_failed(operation, io::Error::last_os_error()));
+    }
+    // SAFETY: `fd` is valid and flags preserve the existing file status bits.
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if rc < 0 {
+        return Err(run_io_failed(operation, io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+fn poll_writable(fd: RawFd, timeout_millis: i32) -> io::Result<()> {
+    let mut pollfd = libc::pollfd {
+        fd,
+        events: libc::POLLOUT,
+        revents: 0,
+    };
+    poll_one(&mut pollfd, timeout_millis)?;
+    if pollfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+        return Err(io::Error::from(ErrorKind::BrokenPipe));
+    }
+    Ok(())
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+fn poll_readable_pair(tun_fd: RawFd, authority_fd: RawFd, timeout_millis: i32) -> io::Result<()> {
+    let mut pollfds = [
+        libc::pollfd {
+            fd: tun_fd,
+            events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+            revents: 0,
+        },
+        libc::pollfd {
+            fd: authority_fd,
+            events: libc::POLLIN | libc::POLLERR | libc::POLLHUP,
+            revents: 0,
+        },
+    ];
+    loop {
+        // SAFETY: `pollfds` points to two initialized pollfd entries.
+        let rc = unsafe {
+            libc::poll(
+                pollfds.as_mut_ptr(),
+                pollfds.len() as libc::nfds_t,
+                timeout_millis,
+            )
+        };
+        if rc == 0 {
+            return Ok(());
+        }
+        if rc > 0 {
+            if pollfds
+                .iter()
+                .any(|pollfd| pollfd.revents & libc::POLLNVAL != 0)
+            {
+                return Err(io::Error::from(ErrorKind::BrokenPipe));
+            }
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+fn poll_one(pollfd: &mut libc::pollfd, timeout_millis: i32) -> io::Result<()> {
+    loop {
+        // SAFETY: `pollfd` points to one initialized pollfd entry.
+        let rc = unsafe { libc::poll(pollfd, 1, timeout_millis) };
+        if rc == 0 {
+            return Err(io::Error::from(ErrorKind::TimedOut));
+        }
+        if rc > 0 {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        if err.kind() != ErrorKind::Interrupted {
+            return Err(err);
+        }
+    }
+}
+
+#[cfg(all(feature = "wire-json", target_os = "linux"))]
+fn run_io_failed(operation: &'static str, err: io::Error) -> LinuxGuestBridgeRunError {
+    LinuxGuestBridgeRunError::Io {
+        operation,
+        reason: err.to_string(),
     }
 }
 
@@ -797,6 +1215,37 @@ mod tests {
         tun.write_packet(&[5, 6, 7, 8]).unwrap();
 
         assert_eq!(tun.into_inner().into_inner(), vec![5, 6, 7, 8]);
+    }
+
+    #[cfg(feature = "wire-json")]
+    #[test]
+    fn runner_config_rejects_non_positive_poll_timeouts() {
+        assert!(matches!(
+            LinuxGuestBridgeRunnerConfig::builder()
+                .idle_poll_timeout_millis(0)
+                .build(),
+            Err(LinuxGuestBridgeRunError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            LinuxGuestBridgeRunnerConfig::builder()
+                .write_poll_timeout_millis(0)
+                .build(),
+            Err(LinuxGuestBridgeRunError::InvalidConfig(_))
+        ));
+    }
+
+    #[cfg(all(feature = "wire-json", not(target_os = "linux")))]
+    #[test]
+    fn runner_reports_unsupported_platform_on_non_linux() {
+        assert!(matches!(
+            run_linux_guest_bridge(
+                &GuestBridgeConfig::default(),
+                LinuxGuestBridgeRunnerConfig::default()
+            ),
+            Err(LinuxGuestBridgeRunError::Bridge(
+                GuestBridgeExecError::UnsupportedPlatform
+            ))
+        ));
     }
 
     struct WouldBlockIo;

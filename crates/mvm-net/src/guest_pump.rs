@@ -19,6 +19,7 @@ pub enum GuestPumpError {
     PacketSource(String),
     Authority(String),
     PacketSink(String),
+    Wait(String),
     InvalidLoopConfig(&'static str),
     InvalidPacketRead { bytes: usize, capacity: usize },
     UnsupportedAuthorityMessage(&'static str),
@@ -31,6 +32,7 @@ impl fmt::Display for GuestPumpError {
             Self::PacketSource(err) => write!(f, "guest packet source failed: {err}"),
             Self::Authority(err) => write!(f, "authority transport failed: {err}"),
             Self::PacketSink(err) => write!(f, "guest packet sink failed: {err}"),
+            Self::Wait(err) => write!(f, "guest pump wait failed: {err}"),
             Self::InvalidLoopConfig(reason) => {
                 write!(f, "invalid guest pump loop config: {reason}")
             }
@@ -76,6 +78,12 @@ pub trait GuestPacketSource {
     type Error: fmt::Display;
 
     fn read_packet(&mut self, buffer: &mut [u8]) -> Result<GuestPacketRead, Self::Error>;
+}
+
+pub trait GuestPumpWait {
+    type Error: fmt::Display;
+
+    fn wait_for_activity(&mut self) -> Result<(), Self::Error>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +212,26 @@ impl GuestPumpTick {
     }
 }
 
+#[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]
+pub struct GuestPumpRunStats {
+    pub ticks: usize,
+    pub idle_waits: usize,
+    pub guest_packets_read: usize,
+    pub outbound_messages_sent: usize,
+    pub authority_messages_read: usize,
+    pub guest_packets_written: usize,
+}
+
+impl GuestPumpRunStats {
+    fn record_tick(&mut self, tick: GuestPumpTick) {
+        self.ticks += 1;
+        self.guest_packets_read += tick.guest_packets_read;
+        self.outbound_messages_sent += tick.outbound_messages_sent;
+        self.authority_messages_read += tick.authority_messages_read;
+        self.guest_packets_written += tick.guest_packets_written;
+    }
+}
+
 #[derive(Debug)]
 pub struct GuestPumpLoop {
     config: GuestPumpLoopConfig,
@@ -286,6 +314,37 @@ impl GuestPumpLoop {
 impl Default for GuestPumpLoop {
     fn default() -> Self {
         Self::new(GuestPumpLoopConfig::default())
+    }
+}
+
+pub fn run_guest_pump_loop<A, Source, Sink, Wait>(
+    pump_loop: &mut GuestPumpLoop,
+    pump: &mut GuestBridgePump<A>,
+    source: &mut Source,
+    sink: &mut Sink,
+    wait: &mut Wait,
+) -> Result<GuestPumpRunStats, GuestPumpError>
+where
+    A: GuestAuthorityReceiver,
+    Source: GuestPacketSource,
+    Sink: GuestPacketSink,
+    Wait: GuestPumpWait,
+{
+    let mut stats = GuestPumpRunStats::default();
+    loop {
+        let tick = pump_loop.tick(pump, source, sink)?;
+        let should_stop = tick.should_stop();
+        let is_idle = tick.is_idle();
+        stats.record_tick(tick);
+
+        if should_stop {
+            return Ok(stats);
+        }
+        if is_idle {
+            wait.wait_for_activity()
+                .map_err(|err| GuestPumpError::Wait(err.to_string()))?;
+            stats.idle_waits += 1;
+        }
     }
 }
 
@@ -517,6 +576,24 @@ mod tests {
                 MockSourceRead::Closed => Ok(GuestPacketRead::Closed),
                 MockSourceRead::Fail(err) => Err(err),
             }
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MockWait {
+        waits: usize,
+        fail: Option<&'static str>,
+    }
+
+    impl GuestPumpWait for MockWait {
+        type Error = &'static str;
+
+        fn wait_for_activity(&mut self) -> Result<(), Self::Error> {
+            if let Some(err) = self.fail {
+                return Err(err);
+            }
+            self.waits += 1;
+            Ok(())
         }
     }
 
@@ -785,6 +862,43 @@ mod tests {
         assert!(tick.guest_closed);
         assert!(tick.authority_closed);
         assert!(tick.should_stop());
+    }
+
+    #[test]
+    fn run_loop_waits_on_idle_and_stops_on_closed_source() {
+        let mut pump = pump();
+        let mut source =
+            MockSource::with_reads([MockSourceRead::WouldBlock, MockSourceRead::Closed]);
+        let mut sink = MockSink::default();
+        let mut wait = MockWait::default();
+        let mut pump_loop = GuestPumpLoop::default();
+
+        let stats =
+            run_guest_pump_loop(&mut pump_loop, &mut pump, &mut source, &mut sink, &mut wait)
+                .unwrap();
+
+        assert_eq!(stats.ticks, 2);
+        assert_eq!(stats.idle_waits, 1);
+        assert_eq!(wait.waits, 1);
+        assert_eq!(stats.guest_packets_read, 0);
+        assert_eq!(stats.authority_messages_read, 0);
+    }
+
+    #[test]
+    fn run_loop_fails_closed_on_wait_error() {
+        let mut pump = pump();
+        let mut source = MockSource::with_reads([MockSourceRead::WouldBlock]);
+        let mut sink = MockSink::default();
+        let mut wait = MockWait {
+            waits: 0,
+            fail: Some("poll failed"),
+        };
+        let mut pump_loop = GuestPumpLoop::default();
+
+        assert_eq!(
+            run_guest_pump_loop(&mut pump_loop, &mut pump, &mut source, &mut sink, &mut wait),
+            Err(GuestPumpError::Wait("poll failed".to_string()))
+        );
     }
 
     #[test]
