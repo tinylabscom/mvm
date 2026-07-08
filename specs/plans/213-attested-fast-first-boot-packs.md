@@ -127,14 +127,31 @@ The target user-visible shape is:
       contents.
 - [ ] Reverify manifest, hashes, signatures, expiry, revocation, and policy
       compatibility before every use.
-- [ ] Add cache indexes for pack hash, kind, architecture, backend, channel,
+- [x] Add cache indexes for pack hash, kind, architecture, backend, channel,
       expiry, size, and last-used time.
-- [ ] Implement `mvm cache status` showing local packs, readiness, size, expiry,
+      `mvm_core::pack_cache::list_cached_packs` — an on-demand directory scan
+      (no persisted index file; the cache is small).
+- [x] Implement `mvm cache status` showing local packs, readiness, size, expiry,
       revocation state, and instant-launch eligibility.
+      Per-pack rows show identity, size, expiry, and the manifest's declared
+      revocation channel (a cheap listing — it does not perform a live
+      revocation lookup); a single summary line reports the host runtime
+      pack's instant-launch readiness via `runtime_pack_diagnosis` +
+      `not_instant_reason`.
 - [ ] Implement `mvm cache prune` with policy-aware deletion that refuses to
       remove packs needed by active snapshots or warm standbys.
+      Partial: `mvm cache prune` now sweeps already-expired packs
+      (`prune_expired_packs`) — always safe, since an expired pack is never
+      instant-launch-eligible. Valid-but-unused (LRU/size-budget) reclamation
+      with active-standby/snapshot safety is deferred; it needs runtime-state
+      correlation this task doesn't have.
 - [ ] Add tests for interrupted downloads, partial extraction, atomic promotion,
       permission hardening, cache poisoning attempts, and policy-aware pruning.
+      Added: `list_cached_packs` (empty cache, multi-pack listing) and
+      `prune_expired_packs` (dry-run vs real, expired-only removal) coverage
+      in `mvm-core`'s `pack_cache` test module. Interrupted-download,
+      partial-extraction, and policy-aware (active-standby-safe) pruning
+      tests remain open, tracked with the LRU deferral above.
 
 ### D. Install and prepare UX
 

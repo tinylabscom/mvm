@@ -63,6 +63,13 @@ pub(in crate::commands) enum CacheAction {
         #[arg(long)]
         json: bool,
     },
+    /// Show cached attested packs: identity, size, expiry, and whether the
+    /// host runtime pack is ready for an instant launch.
+    Status {
+        /// Emit machine-readable JSON to stdout
+        #[arg(long)]
+        json: bool,
+    },
     /// Repair a degraded builder VM store. Clears
     /// `~/.cache/mvm/builder-vm/` so the next `dev up`/`build` cold-rebuilds it.
     /// Use this when `dev up` keeps failing with a dangling-store error
@@ -105,6 +112,32 @@ struct CacheDirEntry {
     bytes: u64,
     /// `false` for an entry no current subsystem owns (orphan cruft).
     recognized: bool,
+}
+
+/// Structured output for `cache status --json`: one row per cached pack plus
+/// the host runtime pack's instant-launch verdict.
+#[derive(serde::Serialize)]
+struct CacheStatusReport {
+    packs: Vec<CacheStatusEntry>,
+    instant_launch_ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    instant_launch_reason: Option<String>,
+}
+
+/// One row of the `cache status` table.
+#[derive(serde::Serialize)]
+struct CacheStatusEntry {
+    pack_hash: String,
+    kind: mvm_core::packs::PackKind,
+    arch: mvm_core::arch::GuestArch,
+    backends: Vec<mvm_core::packs::PackBackend>,
+    channel: String,
+    size_bytes: u64,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    expired: bool,
+    signing_key_id: mvm_core::plan::bundle::KeyId,
+    revocation_channel: String,
+    last_used_unix: Option<i64>,
 }
 
 fn collect_cache_info() -> Result<CacheInfo> {
@@ -192,6 +225,67 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     "If `dev up`/`build` fails with a dangling-store or mount error, \
                      run `mvmctl cache repair`."
                 );
+            }
+            Ok(())
+        }
+        CacheAction::Status { json } => {
+            let packs = mvm_core::pack_cache::list_cached_packs()?;
+            let now = chrono::Utc::now();
+            let diagnosis = crate::commands::vm::runtime_pack::runtime_pack_diagnosis()?;
+            let reason = crate::commands::vm::runtime_pack::not_instant_reason(&diagnosis);
+
+            if json {
+                let report = CacheStatusReport {
+                    packs: packs
+                        .iter()
+                        .map(|p| CacheStatusEntry {
+                            pack_hash: p.pack_hash.as_str().to_string(),
+                            kind: p.kind.clone(),
+                            arch: p.arch,
+                            backends: p.backends.clone(),
+                            channel: p.channel.clone(),
+                            size_bytes: p.size_bytes,
+                            expires_at: p.expires_at,
+                            expired: p.expires_at < now,
+                            signing_key_id: p.signing_key_id.clone(),
+                            revocation_channel: p.revocation_channel.clone(),
+                            last_used_unix: p.last_used_unix,
+                        })
+                        .collect(),
+                    instant_launch_ready: reason.is_none(),
+                    instant_launch_reason: reason,
+                };
+                crate::json_out::emit_json(&report)?;
+                return Ok(());
+            }
+
+            if packs.is_empty() {
+                ui::info("No packs cached.");
+                return Ok(());
+            }
+
+            for p in &packs {
+                let expired = p.expires_at < now;
+                let backends = p
+                    .backends
+                    .iter()
+                    .map(|b| b.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let short_hash = &p.pack_hash.as_str()[..p.pack_hash.as_str().len().min(12)];
+                println!(
+                    "{short_hash:<12}  {:<10?}  {:<8?}  {backends:<18}  {:<10}  {:>10}  {}  {}",
+                    p.kind,
+                    p.arch,
+                    p.channel,
+                    human_bytes(p.size_bytes),
+                    p.expires_at.format("%Y-%m-%d"),
+                    if expired { "EXPIRED" } else { "ok" },
+                );
+            }
+            match &reason {
+                Some(r) => ui::info(&format!("Instant launch: unavailable — {r}")),
+                None => ui::info("Instant launch: ready"),
             }
             Ok(())
         }
@@ -419,6 +513,32 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     Ok(n) => removed += n as u64,
                     Err(e) => ui::warn(&format!("checkpoint sweep failed: {e}")),
                 }
+            }
+
+            // Expired-pack sweep: an attested pack whose trust metadata expired
+            // is never instant-launch-eligible, so reclaiming it is always safe.
+            // Valid-but-unused (LRU) pack reclamation is a separate concern and
+            // is not swept here.
+            match mvm_core::pack_cache::prune_expired_packs(chrono::Utc::now(), dry_run) {
+                Ok(expired) => {
+                    if !expired.is_empty() {
+                        if dry_run {
+                            ui::info(&format!(
+                                "(dry-run) Would remove {} expired pack(s).",
+                                expired.len()
+                            ));
+                        } else {
+                            ui::info(&format!("Removed {} expired pack(s).", expired.len()));
+                            mvm_core::audit_emit!(
+                                CachePrune,
+                                "source=pack_cache_prune count={}",
+                                expired.len()
+                            );
+                        }
+                        removed += expired.len() as u64;
+                    }
+                }
+                Err(e) => ui::warn(&format!("expired-pack sweep failed: {e}")),
             }
 
             for entry in walkdir(path)? {

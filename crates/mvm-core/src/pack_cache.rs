@@ -11,6 +11,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use crate::arch::GuestArch;
@@ -20,6 +21,7 @@ use crate::packs::{
     PackManifestError, PackRevocationChecker, PackTrustStore, PackVerifyError, Sha256Hex,
     VerifiedPack, verify_pack_at, verify_pack_keyless_at,
 };
+use crate::plan::bundle::KeyId;
 
 /// Serialized manifest written alongside the verified file set so a promoted
 /// pack is self-describing and `resolve_pack` can re-verify it without external
@@ -373,6 +375,115 @@ fn read_manifest(dir: &Path) -> Option<PackManifest> {
     serde_json::from_slice(&bytes).ok()
 }
 
+/// One promoted pack, as surfaced by [`list_cached_packs`]. The on-demand
+/// index over the pack cache — the cache is small, so this is computed by a
+/// directory scan rather than a persisted index file.
+#[derive(Debug, Clone)]
+pub struct PackCacheEntry {
+    pub pack_hash: Sha256Hex,
+    pub kind: PackKind,
+    pub arch: GuestArch,
+    pub backends: Vec<PackBackend>,
+    pub channel: String,
+    pub expires_at: DateTime<Utc>,
+    pub signing_key_id: KeyId,
+    pub revocation_channel: String,
+    /// Sum of the on-disk sizes of the pack's promoted files.
+    pub size_bytes: u64,
+    /// Directory mtime as a unix timestamp (best-effort; None if unavailable).
+    pub last_used_unix: Option<i64>,
+}
+
+/// Scan the promoted pack cache and return one entry per valid pack. Skips the
+/// quarantine dir, dirs whose name does not equal the manifest's pack hash, and
+/// dirs with no readable manifest (foreign content) — same discipline as
+/// [`resolve_pack`]. A missing cache dir yields an empty vec, not an error.
+/// This does NOT verify signatures (it is a cheap listing); callers that need
+/// trust/eligibility use [`diagnose_pack`].
+pub fn list_cached_packs() -> Result<Vec<PackCacheEntry>, PackCacheError> {
+    let root = pack_cache_dir();
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        // No cache dir yet means no packs — not an error.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(io_at(&root)(error)),
+    };
+
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(io_at(&root))?;
+        let dir = entry.path();
+        let name = entry.file_name();
+        if !dir.is_dir() || name.to_str() == Some(QUARANTINE_DIR_NAME) {
+            continue;
+        }
+        // A dir with no sidecar, or an unreadable/undecodable one, is foreign
+        // content — skip it and keep scanning, same as `resolve_pack`.
+        let Some(manifest) = read_manifest(&dir) else {
+            continue;
+        };
+        // Defense in depth: a content-addressed dir must be named for the pack
+        // hash it holds.
+        if name.to_str() != Some(manifest.outputs.pack_hash.as_str()) {
+            continue;
+        }
+
+        let size_bytes: u64 = manifest
+            .outputs
+            .files
+            .iter()
+            .map(|file| {
+                std::fs::metadata(dir.join(&file.path))
+                    .map(|m| m.len())
+                    .unwrap_or(0)
+            })
+            .sum();
+        let last_used_unix = std::fs::metadata(&dir)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64);
+
+        out.push(PackCacheEntry {
+            pack_hash: manifest.outputs.pack_hash.clone(),
+            kind: manifest.kind.clone(),
+            arch: manifest.target_arch,
+            backends: manifest.backend_compatibility.clone(),
+            channel: manifest.trust.channel_identity.clone(),
+            expires_at: manifest.trust.expires_at,
+            signing_key_id: manifest.trust.signing_key_id.clone(),
+            revocation_channel: manifest.trust.revocation_channel.clone(),
+            size_bytes,
+            last_used_unix,
+        });
+    }
+    out.sort_by(|a, b| a.pack_hash.as_str().cmp(b.pack_hash.as_str()));
+    Ok(out)
+}
+
+/// Remove every promoted pack whose trust metadata expired before `now`.
+/// Expired packs are never instant-launch-eligible, so removing them is always
+/// safe — it never reclaims a pack backing a valid instant launch. Returns the
+/// pack hashes removed. With `dry_run`, reports what would be removed without
+/// deleting. Valid-but-unused (LRU) pack reclamation with active-standby
+/// safety is a separate concern and is not done here.
+pub fn prune_expired_packs(
+    now: DateTime<Utc>,
+    dry_run: bool,
+) -> Result<Vec<Sha256Hex>, PackCacheError> {
+    let mut removed = Vec::new();
+    for entry in list_cached_packs()? {
+        if entry.expires_at < now {
+            if !dry_run {
+                let dir = pack_dir(entry.pack_hash.as_str());
+                std::fs::remove_dir_all(&dir).map_err(io_at(&dir))?;
+            }
+            removed.push(entry.pack_hash);
+        }
+    }
+    Ok(removed)
+}
+
 fn new_quarantine_dir() -> Result<PathBuf, PackCacheError> {
     let incoming = pack_cache_dir().join(QUARANTINE_DIR_NAME);
     harden_dir(&incoming)?;
@@ -500,6 +611,33 @@ mod tests {
     /// Stage a `Builder` pack under a fresh dir and return `(staged_dir, manifest)`.
     fn staged_builder_pack() -> (TempDir, PackManifest) {
         staged_builder_pack_bytes(b"builder-kernel", b"builder-image")
+    }
+
+    /// Stage a `Builder` pack whose two files carry the given bytes and whose
+    /// trust metadata expires at `expires_at`, for exercising
+    /// `prune_expired_packs`.
+    fn staged_builder_pack_expiring(
+        kernel: &[u8],
+        image: &[u8],
+        expires_at: DateTime<Utc>,
+    ) -> (TempDir, PackManifest) {
+        let dir = TempDir::new().expect("tempdir");
+        fs::create_dir_all(dir.path().join("boot")).expect("mkdir boot");
+        fs::write(dir.path().join("boot/kernel"), kernel).expect("write kernel");
+        fs::write(dir.path().join("builder.img"), image).expect("write image");
+        let key = signing_key();
+        let mut meta = metadata(PackKind::Builder);
+        meta.trust.expires_at = expires_at;
+        let manifest = PackBuilder::new(dir.path(), meta, &key)
+            .files(["boot/kernel", "builder.img"])
+            .output_hashes(PackOutputHashes {
+                kernel_hash: Some(Sha256Hex::from_bytes(kernel)),
+                builder_image_hash: Some(Sha256Hex::from_bytes(image)),
+                ..Default::default()
+            })
+            .build()
+            .expect("build pack");
+        (dir, manifest)
     }
 
     /// Stage a `Builder` pack whose two files carry the given bytes. Distinct
@@ -974,5 +1112,92 @@ mod tests {
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn list_cached_packs_empty_on_missing_cache() {
+        let (_cache, _env) = isolated_cache();
+        let packs = list_cached_packs().expect("list ok");
+        assert!(packs.is_empty());
+    }
+
+    #[test]
+    fn list_cached_packs_returns_promoted_entries() {
+        let (_cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let (staged_a, manifest_a) = staged_builder_pack_bytes(b"kernel-a", b"image-a");
+        let (staged_b, manifest_b) = staged_builder_pack_bytes(b"kernel-b", b"image-b");
+        promote(staged_a.path(), &manifest_a, &ctx).expect("promote a");
+        promote(staged_b.path(), &manifest_b, &ctx).expect("promote b");
+
+        let packs = list_cached_packs().expect("list ok");
+        assert_eq!(packs.len(), 2);
+        let hashes: Vec<&str> = packs.iter().map(|p| p.pack_hash.as_str()).collect();
+        assert!(hashes.contains(&manifest_a.outputs.pack_hash.as_str()));
+        assert!(hashes.contains(&manifest_b.outputs.pack_hash.as_str()));
+        for p in &packs {
+            assert_eq!(p.kind, PackKind::Builder);
+            assert_eq!(p.arch, GuestArch::host());
+            assert!(p.size_bytes > 0, "size_bytes must reflect on-disk files");
+        }
+        // Sorted by pack_hash for stable output.
+        assert!(packs[0].pack_hash.as_str() <= packs[1].pack_hash.as_str());
+    }
+
+    #[test]
+    fn prune_expired_packs_dry_run_reports_without_removing() {
+        let (_cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        // `promote` itself refuses an already-expired pack (it verifies against
+        // `policy.now`, 2026-06-24), so the "expired" fixture must still be
+        // valid at promote time and only expire before the later `now` this
+        // test passes to `prune_expired_packs`.
+        let (staged_expired, manifest_expired) =
+            staged_builder_pack_expiring(b"kernel-expired", b"image-expired", utc(2026, 6, 25));
+        let (staged_future, manifest_future) =
+            staged_builder_pack_expiring(b"kernel-future", b"image-future", utc(2099, 1, 1));
+        promote(staged_expired.path(), &manifest_expired, &ctx).expect("promote expired");
+        promote(staged_future.path(), &manifest_future, &ctx).expect("promote future");
+
+        let now = utc(2026, 7, 1);
+        let removed = prune_expired_packs(now, true).expect("dry-run prune ok");
+        assert_eq!(removed, vec![manifest_expired.outputs.pack_hash.clone()]);
+
+        // Dry-run removes nothing; both packs remain listable.
+        let packs = list_cached_packs().expect("list ok");
+        assert_eq!(packs.len(), 2);
+    }
+
+    #[test]
+    fn prune_expired_packs_removes_only_expired() {
+        let (_cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        // Same promote-time-vs-prune-time distinction as the dry-run test above.
+        let (staged_expired, manifest_expired) =
+            staged_builder_pack_expiring(b"kernel-expired", b"image-expired", utc(2026, 6, 25));
+        let (staged_future, manifest_future) =
+            staged_builder_pack_expiring(b"kernel-future", b"image-future", utc(2099, 1, 1));
+        promote(staged_expired.path(), &manifest_expired, &ctx).expect("promote expired");
+        promote(staged_future.path(), &manifest_future, &ctx).expect("promote future");
+
+        let now = utc(2026, 7, 1);
+        let removed = prune_expired_packs(now, false).expect("prune ok");
+        assert_eq!(removed, vec![manifest_expired.outputs.pack_hash.clone()]);
+
+        let packs = list_cached_packs().expect("list ok");
+        assert_eq!(packs.len(), 1);
+        assert_eq!(packs[0].pack_hash, manifest_future.outputs.pack_hash);
     }
 }
