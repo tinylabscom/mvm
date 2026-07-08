@@ -9,8 +9,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use super::embedded::EMBEDDED;
+use super::source_build::{has_source_checkout, resolve_or_build_host_binaries};
 
 pub fn ensure_extracted(cache_root: &Path) -> std::io::Result<PathBuf> {
+    if EMBEDDED.iter().any(|bin| bin.bytes.is_empty()) && has_source_checkout() {
+        return resolve_or_build_host_binaries(cache_root)
+            .map_err(|e| std::io::Error::other(e.to_string()));
+    }
     let combined_hash = combined_hash_hex();
     let target = cache_root.join(&combined_hash);
     std::fs::create_dir_all(&target)?;
@@ -44,12 +49,15 @@ pub fn ensure_extracted_for_boot(cache_root: &Path) -> std::io::Result<PathBuf> 
     let dir = ensure_extracted(cache_root)?;
     for bin in EMBEDDED.iter() {
         if bin.bytes.is_empty() {
+            if has_source_checkout() {
+                return Ok(dir);
+            }
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!(
                     "embedded host-vm binary `{}` is a zero-byte stub — this mvmctl was \
-                     built without real embedded host binaries and cannot boot a builder VM; \
-                     rebuild with MVM_EMBED_BINARIES=1 or use a release build",
+                     built without real embedded host binaries and has no source checkout to \
+                     build them from",
                     bin.name
                 ),
             ));

@@ -17,12 +17,27 @@ pub(crate) fn ensure_default_microvm_image(
 pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     let cache = mvm_core::config::mvm_cache_dir();
     let arch = builder_vm_host_arch();
-    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, prod);
+    let source_checkout = find_builder_vm_flake_is_source_checkout();
+    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, prod, source_checkout);
     match resolved {
         WorkloadKernelBootstrap::Cached(path) => Ok(path),
         WorkloadKernelBootstrap::ReusableBuilder(path) => {
             ui::info("Reusing builder-image kernel as workload kernel (dev mode).");
             Ok(path)
+        }
+        WorkloadKernelBootstrap::Build(path) => {
+            ui::info("Building workload kernel locally from the source checkout...");
+            #[cfg(feature = "builder-vm")]
+            {
+                build_kernel_via_stage0(KernelVariant::Workload, false)?;
+                Ok(path)
+            }
+            #[cfg(not(feature = "builder-vm"))]
+            {
+                anyhow::bail!(
+                    "source checkout detected but this mvmctl was built without the `builder-vm` feature"
+                );
+            }
         }
         WorkloadKernelBootstrap::Download(dest) => {
             download_workload_kernel(arch, &dest)?;
@@ -35,6 +50,7 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
 pub(super) enum WorkloadKernelBootstrap {
     Cached(String),
     ReusableBuilder(String),
+    Build(String),
     Download(String),
 }
 
@@ -42,12 +58,18 @@ pub(super) fn resolve_workload_kernel_bootstrap(
     cache_dir: &str,
     arch: &str,
     prod: bool,
+    source_checkout: bool,
 ) -> WorkloadKernelBootstrap {
     if let Some(cached) = find_cached_workload_kernel(cache_dir, arch) {
         return WorkloadKernelBootstrap::Cached(cached);
     }
     if !prod && let Some(builder) = find_reusable_builder_kernel(cache_dir, arch) {
         return WorkloadKernelBootstrap::ReusableBuilder(builder);
+    }
+    if source_checkout {
+        return WorkloadKernelBootstrap::Build(format!(
+            "{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"
+        ));
     }
     WorkloadKernelBootstrap::Download(format!(
         "{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"

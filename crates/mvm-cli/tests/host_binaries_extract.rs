@@ -40,8 +40,19 @@ fn ensure_extracted_for_boot_matches_build_mode() {
     let tmp = tempfile::TempDir::new().unwrap();
     let res = ensure_extracted_for_boot(tmp.path());
     let is_stub_build = EMBEDDED.iter().any(|b| b.bytes.is_empty());
+    let source_checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .is_some_and(|workspace_root| workspace_root.join("crates/mvm-build").is_dir());
     if is_stub_build {
-        assert!(res.is_err(), "stub build must be refused for VM boot");
+        if source_checkout {
+            assert!(
+                res.is_ok(),
+                "source checkout stub build should source-build host binaries"
+            );
+        } else {
+            assert!(res.is_err(), "installed stub build must be refused for VM boot");
+        }
     } else {
         assert!(res.is_ok(), "real build must extract for VM boot");
     }
