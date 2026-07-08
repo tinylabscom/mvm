@@ -590,8 +590,14 @@ jobs:
             exit 0
           fi
           for manifest in "${manifests[@]}"; do
+            # --new-bundle-format emits the Sigstore bundle (with
+            # verificationMaterial) that the in-binary Rust verifier
+            # (image_verify::verify_manifest) parses; the legacy --bundle
+            # format is rejected by that stack, which would hard-fail the
+            # dev-image download's signature check.
             cosign sign-blob \
               --yes \
+              --new-bundle-format \
               --bundle "${manifest}.bundle" \
               "${manifest}"
             echo "Signed: ${manifest}"
