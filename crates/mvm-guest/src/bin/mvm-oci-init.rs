@@ -300,10 +300,8 @@ mod linux {
             );
             return;
         }
-        let get_flags = libc::c_int::try_from(libc::SIOCGIFFLAGS)
-            .expect("SIOCGIFFLAGS fits libc ioctl request type");
-        let set_flags = libc::c_int::try_from(libc::SIOCSIFFLAGS)
-            .expect("SIOCSIFFLAGS fits libc ioctl request type");
+        let get_flags = libc::SIOCGIFFLAGS as libc::c_ulong;
+        let set_flags = libc::SIOCSIFFLAGS as libc::c_ulong;
         let mut ifr = IfReq::for_name("lo");
         let get_rc = unsafe { libc::ioctl(sock, get_flags, &mut ifr) };
         if get_rc == 0 {
