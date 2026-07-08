@@ -4468,9 +4468,12 @@ ssh_agent = true
             health_check: None,
         };
 
-        let summary =
-            machine_start_preflight_summary(&spec, Some(Path::new("/tmp/web.receipt.json")), None)
-                .expect("preflight summary");
+        let summary = machine_start_preflight_summary(
+            &spec,
+            Some(Path::new("/tmp/web.receipt.json")),
+            Some("hvf"),
+        )
+        .expect("preflight summary");
         assert_eq!(
             summary.invocation.network_posture,
             "allow-list:api.example.com:443"
