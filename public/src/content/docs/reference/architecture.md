@@ -101,7 +101,7 @@ The workspace is organized by responsibility rather than by platform:
 | Build pipeline | `mvm-build` | Builder VM flow, artifact production, builder backend seams |
 | Host policy / supervision | `mvm-hostd` | Admission, audit, policy enforcement, launch preparation |
 | Guest / protocol surfaces | `mvm-guest`, `mvm-guest-helpers`, `mvm-mcp` | Guest agent and protocol-facing tooling |
-| Domain-specific subsystems | `mvm-storage`, `mvm-network`, `mvm-oci`, `mvm-verify` | Storage, networking, OCI, audit verification |
+| Domain-specific subsystems | `mvm-storage`, `mvm-network`, `mvm-net`, `mvm-oci`, `mvm-verify` | Storage, network provisioning, transparent vsock networking, OCI, audit verification |
 | CLI / SDK surface | `mvm-cli`, `mvm-sdk`, `mvm-sdk-macros` | User interface and workload authoring APIs |
 
 The root crate (`mvm`) is the facade/runtime integration crate. `mvm-cli` is the binary-facing

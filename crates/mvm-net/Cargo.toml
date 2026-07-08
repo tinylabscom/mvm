@@ -1,0 +1,27 @@
+[package]
+name = "mvm-net"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Transparent vsock networking protocol and shared networking primitives for mvm."
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+
+[features]
+default = ["proto"]
+guest = ["proto"]
+guest-linux = ["guest", "dep:libc"]
+proto = []
+serde = ["dep:serde"]
+
+[dependencies]
+libc = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

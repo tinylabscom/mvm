@@ -1,0 +1,22 @@
+//! Transparent vsock networking primitives for mvm.
+//!
+//! The crate starts with the shared wire protocol. Guest TUN bridging, host
+//! flow handling, TLS transformation, and plugin execution will live here as
+//! concrete modules as those layers land.
+
+#![deny(unsafe_code)]
+
+#[cfg(feature = "guest")]
+pub mod guest;
+
+#[cfg(feature = "guest")]
+pub mod guest_packet;
+
+#[cfg(feature = "guest")]
+pub mod guest_pump;
+
+#[cfg(feature = "guest-linux")]
+pub mod guest_linux;
+
+#[cfg(feature = "proto")]
+pub mod proto;
