@@ -106,6 +106,12 @@ fallback + macOS-13-25 backend; `passt` remains untouched (Linux only).
         (`machine run -d --image ...` and `machine start` on an image-backed
         machine), closing the remaining stored-lifecycle fallback onto the
         legacy NIC path.
+  - [x] 2026-07-08 gvproxy-specific test retirement landed: the remaining
+        gvproxy-only bridge witnesses are removed from
+        `crates/mvm-hostd/src/supervisor/gateway_bridge.rs`, and the dedicated
+        `gvproxy::tests` module is removed from
+        `crates/deps/libkrun-sys/src/gvproxy.rs`. Passt/native-rvproxy
+        coverage stays in place while WS-N continues toward code deletion.
         Remaining WS-N scope: builder egress, libkrun default-on cutover, and
         global gvproxy deletion.
 
