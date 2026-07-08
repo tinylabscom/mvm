@@ -538,6 +538,11 @@ libkrun-live = ["mvm-cli/libkrun-live"]
 # (default-features = false), without dragging in the rest of `host`.
 hostd-transport = ["mvm-core/hostd-transport"]
 
+# Optional CLI-only MCP server surface. Kept off the default path so the lean
+# dependency trim stays intact; this just forwards the existing gated mvm-cli
+# feature through the root package for integration tests and opt-in builds.
+mcp = ["mvm-cli/mcp"]
+
 # Release-only: let an installed binary download mvm-published prebuilt builder
 # VM images on a cache miss. Off for source checkouts (they build locally); the
 # release workflow turns it on.

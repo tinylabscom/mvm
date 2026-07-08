@@ -102,6 +102,7 @@ const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
     ("bench", AuditPosture::DelegatesToSub(BENCH_SUB)),
     ("config", AuditPosture::Emits("ConfigChange")),
+    #[cfg(feature = "mcp")]
     ("mcp", AuditPosture::InteractiveOrControl),
 ];
 
