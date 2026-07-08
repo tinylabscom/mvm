@@ -1,6 +1,6 @@
 # Plan 234 — Transparent networking over vsock
 
-**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, and Linux guest runner landed.
+**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, and packaged guest bridge binary landed.
 
 **Owner directive:** workload networking remains a vsock-mediated capability. The guest gets normal application-visible networking behavior, but the host remains the only authority that opens real network sockets, performs DNS, terminates TLS for secret-bearing flows, applies egress policy, records audit, and emits attestable evidence.
 
@@ -20,7 +20,7 @@
       Add the workspace member, keep the first implementation to tested shared protocol primitives, keep serde opt-in, document the crate in the architecture reference, and verify the default normal dependency tree stays empty beyond `mvm-net`.
 - [x] **A2 — Define the complete protocol contract.**
       Extend `mvm-net::proto` with version negotiation, flow correlation, DNS, TCP, UDP, ICMP echo, TLS-transform routing, denial reasons, and audit correlation fields. Add serde roundtrip and malformed-message tests for every message family.
-- [ ] **B1 — Build the guest network bridge.**
+- [x] **B1 — Build the guest network bridge.**
       Add the guest-side module and binary that creates `tun0`, installs the synthetic default route, points resolver configuration at the synthetic gateway, and translates guest traffic into `mvm-net` protocol frames over vsock.
 - [x] **B1a — Add dependency-light guest bridge planning.**
       Add `mvm-net::guest` behind an opt-in `guest` feature with validated synthetic IPv4 defaults, interface-name validation, resolver paths, transparent-network vsock port, and an ordered operation plan for TUN, default route, resolver, and vsock-authority connection. Keep normal dependencies empty for default, no-default-features, and `guest` builds.
@@ -40,7 +40,7 @@
       Add `TunPacketIo` for the Linux TUN packet source/sink boundary and an opt-in `wire-json` feature with bounded length-prefixed `NetMessage` framing, partial-read preservation, guest authority trait impls, closed-stream handling, and oversized-frame refusal.
 - [x] **B1c2e — Add the concrete Linux TUN/vsock runner.**
       Add the real runner that reads from the Linux TUN fd, writes protocol frames to the vsock authority stream, consumes host responses, synthesizes TCP replies to the guest, and enforces bounded readiness/backpressure across both directions.
-- [ ] **B1d — Package the guest bridge binary.**
+- [x] **B1d — Package the guest bridge binary.**
       Add the lean guest entrypoint that loads its bridge config, runs the Linux executor plus guest runner, reports startup/runtime failures clearly, and can be embedded into guest images without pulling host-side networking code.
 - [ ] **B2 — Build the host network authority.**
       Add the host-side module and binary that accepts the per-VM vsock stream, owns synthetic DNS/IP mapping, reuses the canonical network policy projection, opens real host sockets only after admission, and records flow-open/flow-close audit events.

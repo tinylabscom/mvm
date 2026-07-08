@@ -9,6 +9,11 @@ repository.workspace = true
 homepage.workspace = true
 authors.workspace = true
 
+[[bin]]
+name = "mvm-guest-netd"
+path = "src/bin/mvm-guest-netd.rs"
+required-features = ["guest-linux-runner"]
+
 [features]
 default = ["proto"]
 guest = ["proto"]

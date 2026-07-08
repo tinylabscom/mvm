@@ -42,6 +42,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
+| 5254 | `mvm-net` frames | Transparent networking authority stream (guest side packaged; host authority wiring pending) |
 
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
 
@@ -105,6 +106,18 @@ and a second admit/deny relay proof that demonstrates allowed traffic is
 reachable while a non-admitted destination is refused, all without a guest NIC.
 
 Network policies are enforced via iptables FORWARD rules on the bridge interface (Firecracker backend on Linux). DNS (port 53) is always allowed so domain resolution works. Rules are automatically cleaned up when the VM stops. On macOS backends, policies are enforced at the host-side layer rather than via iptables.
+
+## Transparent vsock networking status
+
+The guest-side `mvm-net` bridge is packaged as the internal
+`mvm-guest-netd` binary behind the `mvm-net` crate's `guest-linux-runner`
+feature. It configures a Linux TUN interface, installs the synthetic default
+route and resolver, connects to host vsock port `5254`, and pumps bounded
+`mvm-net` protocol frames over that single authority stream.
+
+This is not yet wired into `mvmctl machine run`. Until the host authority and
+runner integration land, the default HVF path remains vsock-only without
+ordinary guest-visible DNS/TCP/UDP/ICMP networking for tools inside the VM.
 
 ## Security Profiles
 

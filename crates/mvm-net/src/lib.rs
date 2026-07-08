@@ -9,6 +9,9 @@
 #[cfg(feature = "guest")]
 pub mod guest;
 
+#[cfg(feature = "guest-linux-runner")]
+pub mod guest_netd;
+
 #[cfg(feature = "guest")]
 pub mod guest_packet;
 
