@@ -15,10 +15,12 @@ guest = ["proto"]
 guest-linux = ["guest", "dep:libc"]
 proto = []
 serde = ["dep:serde"]
+wire-json = ["proto", "serde", "dep:serde_json"]
 
 [dependencies]
 libc = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
 serde_json.workspace = true

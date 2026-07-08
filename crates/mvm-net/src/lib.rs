@@ -20,3 +20,6 @@ pub mod guest_linux;
 
 #[cfg(feature = "proto")]
 pub mod proto;
+
+#[cfg(feature = "wire-json")]
+pub mod wire_json;

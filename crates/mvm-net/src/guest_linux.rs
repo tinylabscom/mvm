@@ -7,10 +7,12 @@
 #![cfg_attr(target_os = "linux", allow(unsafe_code))]
 
 use std::fmt;
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::Ipv4Addr;
 use std::path::Path;
 
 use crate::guest::{GuestBridgeConfig, GuestBridgeOperation, InterfaceName, Ipv4Cidr};
+use crate::guest_pump::{GuestPacketRead, GuestPacketSink, GuestPacketSource};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestBridgeExecError {
@@ -133,6 +135,57 @@ where
 
 pub fn resolver_contents(nameserver: Ipv4Addr) -> String {
     format!("nameserver {nameserver}\n")
+}
+
+#[derive(Debug)]
+pub struct TunPacketIo<T> {
+    inner: T,
+}
+
+impl<T> TunPacketIo<T> {
+    pub fn new(inner: T) -> Self {
+        Self { inner }
+    }
+
+    pub fn inner_mut(&mut self) -> &mut T {
+        &mut self.inner
+    }
+
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+}
+
+impl<T> GuestPacketSource for TunPacketIo<T>
+where
+    T: Read,
+{
+    type Error = io::Error;
+
+    fn read_packet(&mut self, buffer: &mut [u8]) -> Result<GuestPacketRead, Self::Error> {
+        loop {
+            match self.inner.read(buffer) {
+                Ok(0) => return Ok(GuestPacketRead::Closed),
+                Ok(bytes) => return Ok(GuestPacketRead::Packet { bytes }),
+                Err(err) if err.kind() == ErrorKind::Interrupted => {}
+                Err(err) if err.kind() == ErrorKind::WouldBlock => {
+                    return Ok(GuestPacketRead::WouldBlock);
+                }
+                Err(err) => return Err(err),
+            }
+        }
+    }
+}
+
+impl<T> GuestPacketSink for TunPacketIo<T>
+where
+    T: Write,
+{
+    type Error = io::Error;
+
+    fn write_packet(&mut self, packet: &[u8]) -> Result<(), Self::Error> {
+        self.inner.write_all(packet)
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -565,6 +618,8 @@ pub fn start_linux_guest_bridge(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{self, Cursor, Read, Write};
+
     use super::*;
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -699,5 +754,66 @@ mod tests {
             resolver_contents(Ipv4Addr::new(198, 18, 0, 1)),
             "nameserver 198.18.0.1\n"
         );
+    }
+
+    #[test]
+    fn tun_packet_io_reads_one_packet_from_stream() {
+        let mut tun = TunPacketIo::new(Cursor::new(vec![1, 2, 3, 4]));
+        let mut buffer = [0u8; 8];
+
+        assert_eq!(
+            tun.read_packet(&mut buffer).unwrap(),
+            GuestPacketRead::Packet { bytes: 4 }
+        );
+        assert_eq!(&buffer[..4], &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn tun_packet_io_reports_would_block_without_error() {
+        let mut tun = TunPacketIo::new(WouldBlockIo);
+        let mut buffer = [0u8; 8];
+
+        assert_eq!(
+            tun.read_packet(&mut buffer).unwrap(),
+            GuestPacketRead::WouldBlock
+        );
+    }
+
+    #[test]
+    fn tun_packet_io_reports_closed_stream() {
+        let mut tun = TunPacketIo::new(Cursor::new(Vec::new()));
+        let mut buffer = [0u8; 8];
+
+        assert_eq!(
+            tun.read_packet(&mut buffer).unwrap(),
+            GuestPacketRead::Closed
+        );
+    }
+
+    #[test]
+    fn tun_packet_io_writes_complete_packet() {
+        let mut tun = TunPacketIo::new(Cursor::new(Vec::new()));
+
+        tun.write_packet(&[5, 6, 7, 8]).unwrap();
+
+        assert_eq!(tun.into_inner().into_inner(), vec![5, 6, 7, 8]);
+    }
+
+    struct WouldBlockIo;
+
+    impl Read for WouldBlockIo {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+    }
+
+    impl Write for WouldBlockIo {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::WouldBlock))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }
