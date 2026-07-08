@@ -6,9 +6,16 @@
 //! guarantee the previous `alloc_zeroed` path provided is preserved without
 //! touching (and thus resident-ing) every page up front.
 
+use std::fs::File;
+use std::os::fd::AsRawFd;
+use std::path::Path;
 use std::ptr::NonNull;
 
 use super::HvfError;
+
+/// Apple-silicon hypervisor page size; `hv_vm_map` and `MAP_FIXED` sub-maps
+/// must stay aligned to this boundary.
+pub(crate) const HVF_PAGE_SIZE: usize = 16 * 1024;
 
 /// An owned demand-zero region sized for guest RAM. `munmap`s on drop, so the
 /// three hand-rolled free paths in the boot flow collapse into RAII.
@@ -53,6 +60,71 @@ impl GuestRam {
     pub(crate) fn len(&self) -> usize {
         self.len
     }
+
+    /// Copy bytes into the owned guest RAM mapping after checking bounds.
+    pub(crate) fn copy_at(&mut self, offset: usize, bytes: &[u8]) -> Result<(), HvfError> {
+        if offset
+            .checked_add(bytes.len())
+            .is_none_or(|end| end > self.len)
+        {
+            return Err(HvfError::BadKernel);
+        }
+        // SAFETY: destination bounds are checked above, and a borrowed slice
+        // cannot overlap this owned mmap reservation.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                self.ptr.as_ptr().add(offset),
+                bytes.len(),
+            );
+        }
+        Ok(())
+    }
+
+    /// Replace a page-aligned subrange with a private COW file mapping.
+    pub(crate) fn map_private_file_at(
+        &mut self,
+        offset: usize,
+        path: &Path,
+        len: usize,
+    ) -> Result<(), HvfError> {
+        let mapped_len = page_rounded_len(len)?;
+        if !offset.is_multiple_of(HVF_PAGE_SIZE)
+            || offset
+                .checked_add(mapped_len)
+                .is_none_or(|end| end > self.len)
+        {
+            return Err(HvfError::BadKernel);
+        }
+        let file = File::open(path).map_err(|_| HvfError::BadKernel)?;
+        let dst = unsafe { self.ptr.as_ptr().add(offset) };
+        // SAFETY: dst is page-aligned inside this owned reservation, and
+        // mapped_len is page-rounded. MAP_FIXED intentionally replaces only the
+        // kernel subrange; untouched guest RAM remains anonymous demand-zero.
+        let mapped = unsafe {
+            libc::mmap(
+                dst.cast(),
+                mapped_len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_PRIVATE | libc::MAP_FIXED,
+                file.as_raw_fd(),
+                0,
+            )
+        };
+        if mapped == libc::MAP_FAILED || mapped != dst.cast() {
+            return Err(HvfError::Alloc);
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn page_rounded_len(len: usize) -> Result<usize, HvfError> {
+    if len == 0 {
+        return Err(HvfError::BadKernel);
+    }
+    len.checked_add(HVF_PAGE_SIZE - 1)
+        .map(|n| n / HVF_PAGE_SIZE * HVF_PAGE_SIZE)
+        .ok_or(HvfError::BadKernel)
 }
 
 impl Drop for GuestRam {
@@ -69,8 +141,6 @@ impl Drop for GuestRam {
 mod tests {
     use super::*;
 
-    const PAGE: usize = 16 * 1024; // Apple-silicon hypervisor page size
-
     #[test]
     fn rejects_zero_length() {
         assert!(GuestRam::new(0).is_err());
@@ -78,11 +148,11 @@ mod tests {
 
     #[test]
     fn allocates_requested_size_page_aligned() {
-        let ram = GuestRam::new(PAGE * 4).expect("mmap");
-        assert_eq!(ram.len(), PAGE * 4);
+        let ram = GuestRam::new(HVF_PAGE_SIZE * 4).expect("mmap");
+        assert_eq!(ram.len(), HVF_PAGE_SIZE * 4);
         assert!(!ram.as_ptr().is_null());
         assert_eq!(
-            ram.as_ptr() as usize % PAGE,
+            ram.as_ptr() as usize % HVF_PAGE_SIZE,
             0,
             "region must be page-aligned"
         );
@@ -90,9 +160,9 @@ mod tests {
 
     #[test]
     fn fresh_region_reads_as_zero() {
-        let ram = GuestRam::new(PAGE * 2).expect("mmap");
+        let ram = GuestRam::new(HVF_PAGE_SIZE * 2).expect("mmap");
         // Sample a few offsets across the region; demand-zero guarantees 0.
-        for off in [0usize, PAGE, PAGE * 2 - 1] {
+        for off in [0usize, HVF_PAGE_SIZE, HVF_PAGE_SIZE * 2 - 1] {
             // SAFETY: off is within the mapped [0, len) range.
             let byte = unsafe { *ram.as_ptr().add(off) };
             assert_eq!(byte, 0, "offset {off} not zero-initialized");
@@ -107,5 +177,44 @@ mod tests {
             // SAFETY: base of a live mapping of at least one page.
             unsafe { *ram.as_ptr() = 1 }; // touch one page
         }
+    }
+
+    #[test]
+    fn copy_at_checks_bounds() {
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE).expect("mmap");
+        ram.copy_at(HVF_PAGE_SIZE - 4, b"tail").unwrap();
+        assert!(ram.copy_at(HVF_PAGE_SIZE - 3, b"tail").is_err());
+    }
+
+    #[test]
+    fn file_mapping_is_private_cow() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("Image");
+        std::fs::write(&kernel, b"abcdefgh").unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).unwrap();
+
+        ram.copy_at(0, b"anon").unwrap();
+        ram.map_private_file_at(HVF_PAGE_SIZE, &kernel, 8).unwrap();
+
+        let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
+        assert_eq!(mapped, b"abcdefgh");
+
+        unsafe {
+            *ram.as_ptr().add(HVF_PAGE_SIZE) = b'Z';
+        }
+        assert_eq!(std::fs::read(&kernel).unwrap(), b"abcdefgh");
+        let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
+        assert_eq!(mapped, b"Zbcdefgh");
+    }
+
+    #[test]
+    fn file_mapping_rejects_unaligned_or_out_of_bounds_range() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("Image");
+        std::fs::write(&kernel, b"abcdefgh").unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE).unwrap();
+
+        assert!(ram.map_private_file_at(1, &kernel, 8).is_err());
+        assert!(ram.map_private_file_at(HVF_PAGE_SIZE, &kernel, 8).is_err());
     }
 }
