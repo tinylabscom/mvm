@@ -71,13 +71,13 @@ use stage0_cache::{
     sweep_orphaned_stage0_staging_dirs_at, write_builder_vm_artifact_digest_manifest,
     write_builder_vm_source_cache_provenance, write_builder_vm_source_fingerprint,
 };
+use status::resolve_dev_cache_inspect_summary;
 pub(in crate::commands) use status::{
     build_dev_down_json, build_dev_status_json, build_dev_status_json_linux_native,
     build_dev_status_json_vmless, build_dev_up_json,
 };
 #[cfg(test)]
 use status::{builder_vm_cache_status_summary, dev_image_cache_summary};
-use status::resolve_dev_cache_inspect_summary;
 pub(in crate::commands) use vm_helpers::sweep_orphaned_vm_helpers_on_startup;
 #[cfg(test)]
 use vm_helpers::{

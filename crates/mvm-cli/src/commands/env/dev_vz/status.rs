@@ -225,7 +225,6 @@ pub(in crate::commands) fn build_dev_down_json(
     }
 }
 
-
 pub(super) fn resolve_builder_vm_cache_status_summary() -> BuilderVmCacheStatusSummary {
     builder_vm_cache_status_summary(
         find_builder_vm_flake(),

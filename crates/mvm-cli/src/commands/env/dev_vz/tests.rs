@@ -581,7 +581,6 @@ mod dev_status_image_tests {
         let already = build_dev_up_json("libkrun", "already-running");
         assert_eq!(already.outcome, "already-running");
     }
-
 }
 
 #[cfg(test)]
