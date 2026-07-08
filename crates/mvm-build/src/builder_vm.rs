@@ -1186,7 +1186,10 @@ mod tests {
             BuilderVmError::VmmUnavailable { requested, reason } => {
                 assert_eq!(requested, "stage0-bootstrap");
                 assert!(reason.contains("libkrun"), "names the supported backend");
-                assert!(reason.contains("ADR-068"), "points at the tracking ADR");
+                assert!(
+                    reason.contains("not") && reason.contains("wired"),
+                    "names the not-wired-yet gap"
+                );
             }
             other => panic!("unexpected error variant: {other}"),
         }
