@@ -2355,8 +2355,7 @@ fn secret_get_rejects_force_flag() {
         .expect_err("secret get must not accept --force");
     let msg = err.to_string();
     assert!(
-        msg.contains("unexpected argument '--force'")
-            || msg.contains("unexpected argument found"),
+        msg.contains("unexpected argument '--force'") || msg.contains("unexpected argument found"),
         "got: {msg}"
     );
 }
