@@ -11,6 +11,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/verify-release-assets.sh"
 TARGETS="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
 BUILDER_ARCHES="aarch64 x86_64"
+RUNTIME_ARCHES="aarch64 x86_64"
 
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
@@ -47,6 +48,15 @@ build_valid_fixture() {
     : > "$dir/builder-vm-$arch-checksums-sha256.txt"
     for f in "builder-vm-$arch.pack-manifest.json" "builder-vm-$arch.pack-manifest.json.bundle" "builder-vm-$arch.sbom.txt"; do
       echo "$(sha256_of "$dir/$f")  $f" >> "$dir/builder-vm-$arch-checksums-sha256.txt"
+    done
+  done
+  for arch in $RUNTIME_ARCHES; do
+    printf '{"pack":"runtime-%s"}\n' "$arch" > "$dir/default-microvm-$arch.pack-manifest.json"
+    printf 'sigstore-bundle\n'              > "$dir/default-microvm-$arch.pack-manifest.json.bundle"
+    printf 'store-path-a\nstore-path-b\n'   > "$dir/default-microvm-$arch.sbom.txt"
+    : > "$dir/default-microvm-$arch-checksums-sha256.txt"
+    for f in "default-microvm-$arch.pack-manifest.json" "default-microvm-$arch.pack-manifest.json.bundle" "default-microvm-$arch.sbom.txt"; do
+      echo "$(sha256_of "$dir/$f")  $f" >> "$dir/default-microvm-$arch-checksums-sha256.txt"
     done
   done
   echo "$dir"
@@ -86,6 +96,25 @@ rm -rf "$d"
 d="$(build_valid_fixture)"
 : > "$d/builder-vm-aarch64-checksums-sha256.txt"   # empty: nothing listed
 if run "$d"; then bad "unlisted pack files must fail"; else ok "unlisted pack files fail closed"; fi
+rm -rf "$d"
+
+# 6. Partial runtime pack (bundle missing) → fail closed.
+d="$(build_valid_fixture)"
+rm -f "$d/default-microvm-aarch64.pack-manifest.json.bundle"
+if run "$d"; then bad "partial runtime pack (missing bundle) must fail"; else ok "partial runtime pack (missing bundle) fails closed"; fi
+rm -rf "$d"
+
+# 7. Absent runtime pack (all three gone) → pass (accelerator absent).
+d="$(build_valid_fixture)"
+rm -f "$d/default-microvm-x86_64.pack-manifest.json" "$d/default-microvm-x86_64.pack-manifest.json.bundle" \
+      "$d/default-microvm-x86_64.sbom.txt" "$d/default-microvm-x86_64-checksums-sha256.txt"
+if run "$d"; then ok "absent runtime pack is accepted"; else bad "absent runtime pack should be accepted"; fi
+rm -rf "$d"
+
+# 8. Complete runtime pack but checksum tampered → fail closed.
+d="$(build_valid_fixture)"
+printf 'tampered\n' > "$d/default-microvm-aarch64.pack-manifest.json"
+if run "$d"; then bad "checksum-mismatched runtime pack must fail"; else ok "checksum-mismatched runtime pack fails closed"; fi
 rm -rf "$d"
 
 echo "verify-release-assets pack-gate: $PASS passed, $FAILN failed"
