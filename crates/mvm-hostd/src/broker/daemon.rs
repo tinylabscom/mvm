@@ -28,7 +28,8 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::VerifyingKey;
 use mvm_core::protocol::audit_signer::{
-    SignerHelperDeregisterVm, SignerHelperRegisterVm, SignerHelperRequest, SignerHelperResponse,
+    SignerHelperAppendEntry, SignerHelperDeregisterVm, SignerHelperRegisterVm, SignerHelperRequest,
+    SignerHelperResponse,
 };
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
@@ -41,6 +42,13 @@ use super::control::{ControlRequest, ControlResponse, RegisterVm, SignedControl}
 use super::handlers::host_audit_v1::HostAuditV1Handler;
 use super::registry::Registry;
 use super::server::{read_frame, serve_on_listener, write_frame};
+
+/// Audit category for daemon-emitted health entries. Health probing is
+/// mvm-hostd lifecycle activity, so it files under the host-asserted `host`
+/// category — distinct from a workload's own `workload_audit` emissions — with
+/// the event name carried in the entry's fields. Must stay in the
+/// audit-signer allow-list.
+const HEALTH_AUDIT_CATEGORY: &str = "host";
 
 /// Default control-frame cap — Register/Deregister are tiny; this bounds a
 /// hostile/garbled control message.
@@ -245,6 +253,29 @@ impl HostAgentDaemon {
     /// health watcher reads this each pass to decide which guests to probe.
     pub fn registered_vm_ids(&self) -> Vec<String> {
         self.vms.keys().cloned().collect()
+    }
+
+    /// Snapshot the state a [`HealthAuditSink`] needs to append chain-signed
+    /// health entries for the currently-registered VMs, without holding the
+    /// daemon lock across the (blocking) helper round-trip. The health watcher
+    /// takes this alongside [`registered_vm_ids`](Self::registered_vm_ids) while
+    /// briefly locked, then moves it into its blocking probe pass — so a health
+    /// append never serialises against broker request handling.
+    pub fn health_audit_sink(&self) -> HealthAuditSink {
+        let workload_ids = self
+            .registrations
+            .iter()
+            .map(|(vm, reg)| {
+                let wl = reg.workload_id.clone().unwrap_or_else(|| reg.vm_id.clone());
+                (vm.clone(), wl)
+            })
+            .collect();
+        HealthAuditSink {
+            helper_uds: self.signer_helper_uds_path.clone(),
+            tenant_id: self.tenant_id.clone(),
+            max_frame_bytes: self.max_frame_bytes,
+            workload_ids,
+        }
     }
 
     /// Apply a verified control request. Must run inside a tokio runtime (it
@@ -497,6 +528,80 @@ fn validate_vm_id(vm_id: &str) -> Result<()> {
         bail!("vm_id {:?} has characters outside [A-Za-z0-9_-]", vm_id);
     }
     Ok(())
+}
+
+/// A self-contained snapshot that appends chain-signed health entries to
+/// registered VMs' per-VM workload chains via the resident signer helper.
+///
+/// Built by [`HostAgentDaemon::health_audit_sink`] while the daemon is briefly
+/// locked, then moved into the health watcher's blocking probe pass — so the
+/// blocking helper round-trip never runs under the daemon lock. Health entries
+/// land on the same tamper-evident chain that `mvmctl trust audit` verifies and
+/// that the guest-facing `host.audit.v1` path appends to; the helper serialises
+/// per-chain, so host-asserted health entries interleave safely with a
+/// workload's own emissions.
+#[derive(Clone)]
+pub struct HealthAuditSink {
+    helper_uds: Option<PathBuf>,
+    tenant_id: String,
+    max_frame_bytes: usize,
+    /// Server-derived workload id per VM, snapshotted from the registration set.
+    /// The helper rejects an append whose `workload_id` doesn't match the VM's
+    /// registration, so this must mirror what `register_helper_vm` sent.
+    workload_ids: HashMap<String, String>,
+}
+
+impl HealthAuditSink {
+    /// Append one chain-signed health entry for `vm_id`.
+    ///
+    /// The entry carries the host-asserted `host` category (distinct from a
+    /// workload's own `workload_audit` emissions); the event name and state ride
+    /// in `fields`. Best-effort: a VM absent from the snapshot — or a sink with
+    /// no helper — is a silent no-op, and a helper refusal is returned for the
+    /// caller to log rather than propagated into the probe loop.
+    pub fn append(&self, vm_id: &str, fields: serde_json::Value) -> Result<()> {
+        let Some(path) = &self.helper_uds else {
+            return Ok(());
+        };
+        let Some(workload_id) = self.workload_ids.get(vm_id) else {
+            return Ok(());
+        };
+        // The timestamp doubles as the per-event disambiguator: successive
+        // health events for one VM would otherwise share a request/correlation
+        // id, so stamp it into both to keep diagnostics addressable.
+        let ts = chrono::Utc::now().to_rfc3339();
+        let req = SignerHelperRequest::AppendEntry(SignerHelperAppendEntry {
+            request_id: format!("health-{vm_id}-{ts}"),
+            vm_id: vm_id.to_string(),
+            category: HEALTH_AUDIT_CATEGORY.to_string(),
+            ts: ts.clone(),
+            workload_id: workload_id.clone(),
+            tenant_id: self.tenant_id.clone(),
+            // The health chain has no per-session identity of its own; a stable
+            // per-VM marker keeps entries attributable without inventing one.
+            session_id: format!("health-{vm_id}"),
+            correlation_id: format!("health-{vm_id}-{ts}"),
+            fields,
+        });
+        match SignerHelperClient::new(path.clone())
+            .with_max_frame_bytes(self.max_frame_bytes)
+            .send(&req)?
+        {
+            SignerHelperResponse::Ok { .. } => Ok(()),
+            SignerHelperResponse::Err { message, .. } => {
+                bail!("signer-helper health append refused: {message}")
+            }
+            other => bail!("signer-helper returned unexpected append response: {other:?}"),
+        }
+    }
+}
+
+impl crate::health_probe::HealthAudit for HealthAuditSink {
+    fn record(&self, vm_id: &str, fields: serde_json::Value) {
+        if let Err(e) = self.append(vm_id, fields) {
+            warn!(vm_id = %vm_id, error = %e, "health-audit append failed");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -836,5 +941,80 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&chain).unwrap().lines().count(), 2);
 
         restarted.abort();
+    }
+
+    #[test]
+    fn health_audit_sink_is_noop_without_helper() {
+        // A daemon with no signer helper yields a sink whose append is a silent
+        // success — health observability degrades cleanly rather than erroring.
+        let d = daemon("local");
+        let sink = d.health_audit_sink();
+        sink.append("vm-a", serde_json::json!({"event": "health.transition"}))
+            .unwrap();
+    }
+
+    #[test]
+    fn health_audit_sink_is_noop_for_unregistered_vm() {
+        // With nothing registered, the snapshot carries no workload id for the
+        // VM, so append no-ops before it ever connects to the helper (which
+        // isn't running here).
+        let dir = tempfile::tempdir().unwrap();
+        let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
+        let d = HostAgentDaemon::new_with_signer_helper(
+            "local",
+            vk,
+            dir.path().join("helper.sock"),
+            64 * 1024,
+        );
+        let sink = d.health_audit_sink();
+        sink.append("ghost", serde_json::json!({"event": "x"}))
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn health_audit_sink_appends_host_category_entry_to_the_chain() {
+        let dir = tempfile::tempdir().unwrap();
+        let helper_sock = dir.path().join("signer-helper.sock");
+        let key_path = dir.path().join("tenant-key.ed25519");
+        std::fs::write(&key_path, [12u8; 32]).unwrap();
+        let helper_task = start_helper(helper_sock.clone(), "local", key_path).await;
+
+        let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
+        let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
+        let reg = register(dir.path(), "vm-a", "local", None);
+        let chain = reg.workload_chain_path.clone();
+        d.apply(&ControlRequest::Register(reg)).unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // The append does blocking helper I/O, so run it off the reactor.
+        let sink = d.health_audit_sink();
+        let fields = serde_json::json!({"event": "health.transition", "state": "unhealthy"});
+        tokio::task::spawn_blocking(move || sink.append("vm-a", fields))
+            .await
+            .unwrap()
+            .unwrap();
+
+        // The health entry landed on vm-a's per-VM chain, chain-signed under the
+        // helper's tenant key, recording the host category (not workload_audit).
+        let verifying_key = SigningKey::from_bytes(&[12u8; 32]).verifying_key();
+        assert_eq!(verify_workload_chain(&chain, &verifying_key).unwrap(), 1);
+
+        // The entry's fields are stored as base64-encoded JCS bytes in the
+        // on-disk `canonical` field; decode it to inspect the recorded category.
+        let raw = std::fs::read_to_string(&chain).unwrap();
+        let line: serde_json::Value = serde_json::from_str(raw.lines().next().unwrap()).unwrap();
+        let canonical = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(line["canonical"].as_str().unwrap())
+                .unwrap()
+        };
+        let entry: serde_json::Value = serde_json::from_slice(&canonical).unwrap();
+        assert_eq!(entry["category"], "host");
+        assert_eq!(entry["fields"]["event"], "health.transition");
+        assert_eq!(entry["fields"]["state"], "unhealthy");
+        assert_ne!(entry["category"], "workload_audit");
+
+        helper_task.abort();
     }
 }

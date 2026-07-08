@@ -123,7 +123,14 @@ pub async fn run_health_watcher(daemon: Arc<Mutex<HostAgentDaemon>>) {
     let mut prober = HealthProber::new();
     loop {
         ticker.tick().await;
-        let vm_ids = daemon.lock().await.registered_vm_ids();
+        // Snapshot the live set and the health-audit sink together under one
+        // brief lock, then release it before the blocking pass — the sink is
+        // self-contained (it does its own blocking helper round-trip inside the
+        // pass), so a health append never runs under the daemon lock.
+        let (vm_ids, audit) = {
+            let d = daemon.lock().await;
+            (d.registered_vm_ids(), d.health_audit_sink())
+        };
         if vm_ids.is_empty() {
             continue;
         }
@@ -138,7 +145,7 @@ pub async fn run_health_watcher(daemon: Arc<Mutex<HostAgentDaemon>>) {
             // (every tick, inside `act`): `tick` schedules a restart into the
             // future, and `act` fires any gate that has since elapsed. A restart
             // scheduled this pass therefore fires on a later pass, not this one.
-            prober.tick(&vm_ids, now, &AgentExec);
+            prober.tick(&vm_ids, now, &AgentExec, &audit);
             prober.act(&vm_ids, now, &MachineRestarter);
             prober
         })
