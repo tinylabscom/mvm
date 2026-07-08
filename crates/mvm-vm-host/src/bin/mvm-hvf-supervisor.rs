@@ -17,7 +17,7 @@ fn main() {
 }
 
 /// Ad-hoc entitlement applied at first launch — `Hypervisor.framework` rejects an
-/// unsigned process. Hypervisor-only (vs the vz supervisor's virtualization key).
+/// unsigned process. Hypervisor-only — no virtualization entitlement.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const HVF_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
     <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \

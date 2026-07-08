@@ -6,9 +6,8 @@
 //! and builds the matching
 //! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant, applying
 //! `mvm-jailer-lite` confinement through one cfg-gated codepath wherever the OS
-//! supports it (the Linux `Passt` endpoint). The macOS arms (`VzIngest`,
-//! libkrun-gvproxy on macOS) run unconfined — `confine_self` is Linux-only
-//! (Landlock+seccomp), unchanged from the vz drainer.
+//! supports it (the Linux `Passt` endpoint). The macOS libkrun-gvproxy arm runs
+//! unconfined — `confine_self` is Linux-only (Landlock+seccomp).
 //!
 //! ## Fail-closed parsing
 //!
@@ -36,7 +35,7 @@ use serde::{Deserialize, Serialize};
 pub use crate::firecracker_bridge::parse::{PasstHashesFile, decode_plan_json, verify_passt_hash};
 
 /// Stdin JSON contract for the shared `mvm-bridge` sidecar. Producer is the
-/// active backend (`mvm-backend::libkrun` / `::microvm` (Firecracker) / `::vz`).
+/// active backend (`mvm-backend::libkrun` / `::microvm` (Firecracker)).
 /// All paths are absolute and already-canonicalised by the parent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -94,8 +93,8 @@ pub struct BridgeConfigJson {
 /// Backend-specific transport for the bridge, selecting which
 /// `BridgeEndpoints` variant the sidecar builds.
 ///
-/// Externally tagged (`{"passt": {…}}` / `{"vz_ingest": {…}}` /
-/// `{"libkrun_gvproxy": {…}}`) with per-variant `deny_unknown_fields`.
+/// Externally tagged (`{"passt": {…}}` / `{"libkrun_gvproxy": {…}}`) with
+/// per-variant `deny_unknown_fields`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BridgeEndpointKind {
@@ -112,14 +111,6 @@ pub enum BridgeEndpointKind {
         gateway_fd_raw: i32,
         /// Raw fd of the supervisor half of the inner virtio-net socketpair.
         supervisor_fd_raw: i32,
-    },
-    /// Legacy per-VM supervisor + gvproxy NDJSON flow-event ingest. Inert
-    /// dead config since the Vz backend was removed; kept as a bridge endpoint
-    /// shape pending a full removal (no live producer emits it).
-    VzIngest {
-        /// Socket the supervisor writes its NDJSON `FlowEventWire` stream to;
-        /// the bridge binds (mode 0700) and reads.
-        events_socket_path: PathBuf,
     },
     /// macOS libkrun + gvproxy: gvproxy owns its listener at
     /// `gvproxy_socket_path`; the bridge binds `supervisor_listen_path` and
@@ -198,23 +189,6 @@ mod tests {
     }
 
     #[test]
-    fn vz_ingest_endpoint_roundtrips() {
-        let json = with_endpoint(serde_json::json!({
-            "vz_ingest": { "events_socket_path": "/home/u/.mvm/vms/vm-1/events.sock" }
-        }));
-        let cfg: BridgeConfigJson = serde_json::from_str(&json).expect("vz_ingest parses");
-        match &cfg.endpoint {
-            BridgeEndpointKind::VzIngest { events_socket_path } => {
-                assert_eq!(
-                    events_socket_path,
-                    &PathBuf::from("/home/u/.mvm/vms/vm-1/events.sock")
-                );
-            }
-            other => panic!("expected VzIngest, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn libkrun_gvproxy_endpoint_roundtrips() {
         let json = with_endpoint(serde_json::json!({
             "libkrun_gvproxy": {
@@ -236,7 +210,7 @@ mod tests {
         obj.insert("bundle_json".into(), serde_json::json!("{\"x\":1}"));
         obj.insert(
             "endpoint".into(),
-            serde_json::json!({ "vz_ingest": { "events_socket_path": "/x.sock" } }),
+            serde_json::json!({ "libkrun_gvproxy": { "gvproxy_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
         );
         let cfg: BridgeConfigJson = serde_json::from_str(&serde_json::to_string(&v).unwrap())
             .expect("parses with bundle_json");
@@ -250,7 +224,7 @@ mod tests {
         obj.insert("attacker_injected".into(), serde_json::json!("evil"));
         obj.insert(
             "endpoint".into(),
-            serde_json::json!({ "vz_ingest": { "events_socket_path": "/x.sock" } }),
+            serde_json::json!({ "libkrun_gvproxy": { "gvproxy_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
         );
         let err = serde_json::from_str::<BridgeConfigJson>(&serde_json::to_string(&v).unwrap())
             .expect_err("deny_unknown_fields must reject");
@@ -260,8 +234,9 @@ mod tests {
     #[test]
     fn unknown_field_within_a_variant_is_rejected() {
         let json = with_endpoint(serde_json::json!({
-            "vz_ingest": {
-                "events_socket_path": "/x.sock",
+            "libkrun_gvproxy": {
+                "gvproxy_socket_path": "/gv.sock",
+                "supervisor_listen_path": "/sup.sock",
                 "sneaky": true,
             }
         }));
@@ -298,7 +273,7 @@ mod tests {
     #[test]
     fn network_policy_json_defaults_to_none_and_decodes_none() {
         let json = with_endpoint(serde_json::json!({
-            "vz_ingest": { "events_socket_path": "/x.sock" }
+            "libkrun_gvproxy": { "gvproxy_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" }
         }));
         let cfg: BridgeConfigJson = serde_json::from_str(&json).unwrap();
         assert!(cfg.network_policy_json.is_none());
@@ -314,7 +289,7 @@ mod tests {
         obj.insert("network_policy_json".into(), serde_json::json!(policy_json));
         obj.insert(
             "endpoint".into(),
-            serde_json::json!({ "vz_ingest": { "events_socket_path": "/x.sock" } }),
+            serde_json::json!({ "libkrun_gvproxy": { "gvproxy_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
         );
         let cfg: BridgeConfigJson =
             serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();
@@ -326,13 +301,12 @@ mod tests {
 
     // ── Producer byte-equivalence (golden) ──────────────────────────────
     //
-    // The FC + vz backends build this config as raw JSON (they cannot depend on
-    // the leaf bin crate). These two tests mirror those producer `json!` blocks
-    // EXACTLY so a key/nesting drift between producer and consumer is caught in
-    // CI without a live VM — the main guard for the Firecracker leg, whose
-    // producer (`mvm-backend::microvm::spawn_fc_bridge`) is Linux-only and not
-    // compiled on a macOS dev host. Keep these in sync with the producers; the
-    // live runs (Hetzner KVM for FC, macOS-26 for vz) are the end-to-end proof.
+    // The FC backend builds this config as raw JSON (it cannot depend on the
+    // leaf bin crate). This test mirrors that producer `json!` block EXACTLY so
+    // a key/nesting drift between producer and consumer is caught in CI without
+    // a live VM. The producer (`mvm-backend::microvm::spawn_fc_bridge`) is
+    // Linux-only and not compiled on a macOS dev host; the live KVM run is the
+    // end-to-end proof.
 
     #[test]
     fn fc_producer_passt_config_deserializes() {
@@ -375,25 +349,5 @@ mod tests {
             }
             other => panic!("expected Passt, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn vz_producer_vz_ingest_config_deserializes() {
-        // Mirror of `mvm-backend::vz::spawn_vz_drainer`'s drainer_cfg.
-        let json = serde_json::json!({
-            "vm_name": "vz-vm",
-            "audit_dir": "/h/.mvm/audit",
-            "audit_socket": "/h/.mvm/audit/gateway-vz-vm.sock",
-            "keys_dir": "/h/.mvm/keys",
-            "signing_key_path": "/h/.mvm/keys/host-signer.ed25519",
-            "plan_json": "{}",
-            "bundle_json": serde_json::Value::Null,
-            "endpoint": { "vz_ingest": { "events_socket_path": "/h/.mvm/vms/vz-vm/events.sock" } },
-        });
-        let cfg: BridgeConfigJson =
-            serde_json::from_value(json).expect("vz producer JSON must deserialize");
-        // vz omits network_policy_json → None (no-bundle arm fails closed).
-        assert!(decode_network_policy(&cfg).unwrap().is_none());
-        assert!(matches!(cfg.endpoint, BridgeEndpointKind::VzIngest { .. }));
     }
 }

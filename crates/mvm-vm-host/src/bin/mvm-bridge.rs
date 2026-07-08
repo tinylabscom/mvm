@@ -6,14 +6,12 @@
 //! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant, then hands
 //! the packet/flow loop to the unchanged
 //! `mvm_hostd::supervisor::gateway_bridge::spawn_bridge_thread`. Folds the
-//! former `mvm-firecracker-bridge` (Passt) and `mvm-vz-drainer` (VzIngest) into
-//! one — the contract the source already described as "identical across all
-//! three".
+//! former `mvm-firecracker-bridge` (Passt) into the shared sidecar — the
+//! contract the source already described as "identical across backends".
 //!
 //! Spawned by the active backend (`mvm-backend::microvm` Firecracker /
-//! `::vz` / `::libkrun` once the libkrun supervisor is split) with an RAII
-//! teardown guard (`AttachedBridgeGuard` / `AttachedDrainerGuard`) that kills
-//! this process on
+//! `::libkrun` once the libkrun supervisor is split) with an RAII teardown
+//! guard (`AttachedBridgeGuard`) that kills this process on
 //! early return / panic / VM teardown; the bridge's own `catch_unwind →
 //! exit(1)` is the fail-closed signal for the claim-10 substrate.
 //!
@@ -21,11 +19,11 @@
 //!
 //! Unlike the old `mvm-firecracker-bridge` (whole-binary Linux gate), this
 //! binary is cross-platform: the `Passt` endpoint is Linux-only (socketpair +
-//! passt + `mvm-jailer-lite` confinement), while `VzIngest` is macOS (the
-//! Swift Vz supervisor's NDJSON stream). `confine_self` (Landlock + seccomp) is
+//! passt + `mvm-jailer-lite` confinement), while the libkrun-gvproxy endpoint
+//! runs on macOS. `confine_self` (Landlock + seccomp) is
 //! **Linux-only** — on macOS it is a hard-erroring stub because the OS has no
 //! kernel LSM — so confinement is applied per-arm where the OS supports it; the
-//! macOS paths run unconfined, exactly as the vz drainer did.
+//! macOS paths run unconfined.
 //!
 //! ## Trust model
 //!
@@ -105,9 +103,9 @@ fn run() -> Result<()> {
     // ── Step 4: apply mvm-jailer-lite confinement where supported ───
     //
     // Linux-only: `confine_self` is Landlock+seccomp. On macOS it is a
-    // hard-erroring stub (no kernel LSM), so the macOS arms (VzIngest, and
-    // libkrun-gvproxy on macOS) run unconfined exactly as the vz drainer did.
-    // Per the partial-confinement contract, any error here is a hard exit.
+    // hard-erroring stub (no kernel LSM), so the macOS libkrun-gvproxy arm runs
+    // unconfined. Per the partial-confinement contract, any error here is a hard
+    // exit.
     #[cfg(target_os = "linux")]
     confine_for_endpoint(&cfg)?;
 
@@ -177,7 +175,7 @@ fn run() -> Result<()> {
         observers,
         network_policy,
         // The native rvproxy flow-audit follower is the libkrun-native-gateway
-        // path; it is wired when libkrun moves onto this sidecar. FC + vz do not
+        // path; it is wired when libkrun moves onto this sidecar. FC does not
         // run a native rvproxy gateway.
         native_flow_audit_path: None,
     };
@@ -201,9 +199,8 @@ fn run() -> Result<()> {
 }
 
 /// Observer leaf capabilities by endpoint. Passt and the in-process gvproxy
-/// shuffle sit directly on the byte stream (`payload_tap: true`); the Vz Swift
-/// ingest path sees only flow-open/close events (`payload_tap: false`), so
-/// payload-tap observers refuse at the capability gate. Pure — unit-tested.
+/// shuffle sit directly on the byte stream (`payload_tap: true`). Pure —
+/// unit-tested.
 fn leaf_caps_for(kind: &BridgeEndpointKind) -> ProviderCapabilities {
     match kind {
         BridgeEndpointKind::Passt { .. } | BridgeEndpointKind::LibkrunGvproxy { .. } => {
@@ -212,10 +209,6 @@ fn leaf_caps_for(kind: &BridgeEndpointKind) -> ProviderCapabilities {
                 payload_tap: true,
             }
         }
-        BridgeEndpointKind::VzIngest { .. } => ProviderCapabilities {
-            flow_events: true,
-            payload_tap: false,
-        },
     }
 }
 
@@ -223,13 +216,12 @@ fn leaf_caps_for(kind: &BridgeEndpointKind) -> ProviderCapabilities {
 fn endpoint_label(kind: &BridgeEndpointKind) -> &'static str {
     match kind {
         BridgeEndpointKind::Passt { .. } => "passt",
-        BridgeEndpointKind::VzIngest { .. } => "vz_ingest",
         BridgeEndpointKind::LibkrunGvproxy { .. } => "libkrun_gvproxy",
     }
 }
 
 /// Refuse an endpoint the running OS cannot serve. `Passt` requires Linux
-/// (socketpair + passt + jailer-lite); the gvproxy/Vz paths run on macOS.
+/// (socketpair + passt + jailer-lite); the gvproxy path runs on macOS.
 /// Pure (cfg-dependent) — unit-tested against the host it compiles on.
 fn check_endpoint_platform(kind: &BridgeEndpointKind) -> Result<()> {
     match kind {
@@ -246,7 +238,7 @@ fn check_endpoint_platform(kind: &BridgeEndpointKind) -> Result<()> {
                 Ok(())
             }
         }
-        BridgeEndpointKind::VzIngest { .. } | BridgeEndpointKind::LibkrunGvproxy { .. } => Ok(()),
+        BridgeEndpointKind::LibkrunGvproxy { .. } => Ok(()),
     }
 }
 
@@ -265,14 +257,12 @@ fn confine_for_endpoint(cfg: &BridgeConfigJson) -> Result<()> {
         }
         // libkrun-gvproxy on Linux needs a dedicated (passt-free) confinement
         // spec; that arm has no producer until libkrun moves onto this sidecar,
-        // so refuse rather than ship an unconfined Linux path. VzIngest never
-        // reaches here (vz is macOS).
+        // so refuse rather than ship an unconfined Linux path.
         BridgeEndpointKind::LibkrunGvproxy { .. } => anyhow::bail!(
             "libkrun-gvproxy confinement on Linux is not yet wired (no producer emits \
              this endpoint until the libkrun supervisor is split); refusing to run an \
              unconfined Linux bridge"
         ),
-        BridgeEndpointKind::VzIngest { .. } => Ok(()),
     }
 }
 
@@ -310,9 +300,6 @@ fn build_endpoints(cfg: &BridgeConfigJson) -> Result<BridgeEndpoints> {
                 anyhow::bail!("Passt endpoint is Linux-only")
             }
         }
-        BridgeEndpointKind::VzIngest { events_socket_path } => Ok(BridgeEndpoints::VzIngest {
-            events_socket_path: events_socket_path.clone(),
-        }),
         BridgeEndpointKind::LibkrunGvproxy {
             gvproxy_socket_path,
             supervisor_listen_path,
@@ -336,11 +323,6 @@ mod tests {
             supervisor_fd_raw: 8,
         }
     }
-    fn vz() -> BridgeEndpointKind {
-        BridgeEndpointKind::VzIngest {
-            events_socket_path: PathBuf::from("/h/.mvm/vms/x/events.sock"),
-        }
-    }
     fn gvproxy() -> BridgeEndpointKind {
         BridgeEndpointKind::LibkrunGvproxy {
             gvproxy_socket_path: PathBuf::from("/tmp/gv.sock"),
@@ -352,36 +334,31 @@ mod tests {
     fn leaf_caps_track_endpoint_payload_visibility() {
         assert!(leaf_caps_for(&passt()).payload_tap);
         assert!(leaf_caps_for(&gvproxy()).payload_tap);
-        // Swift Vz emits flow events only — no payload tap.
-        assert!(!leaf_caps_for(&vz()).payload_tap);
-        assert!(leaf_caps_for(&vz()).flow_events);
+        assert!(leaf_caps_for(&gvproxy()).flow_events);
     }
 
     #[test]
     fn endpoint_labels_are_stable() {
         assert_eq!(endpoint_label(&passt()), "passt");
-        assert_eq!(endpoint_label(&vz()), "vz_ingest");
         assert_eq!(endpoint_label(&gvproxy()), "libkrun_gvproxy");
     }
 
     #[test]
     fn passt_platform_gate_matches_host() {
-        // Passt is admitted only on Linux; the gvproxy/Vz paths always pass.
+        // Passt is admitted only on Linux; the gvproxy path always passes.
         assert_eq!(
             check_endpoint_platform(&passt()).is_ok(),
             cfg!(target_os = "linux"),
             "Passt must be admitted iff on Linux"
         );
-        assert!(check_endpoint_platform(&vz()).is_ok());
         assert!(check_endpoint_platform(&gvproxy()).is_ok());
     }
 
     #[test]
     fn build_endpoints_maps_path_based_variants() {
-        // The path-only variants build without any live fds, so they are
-        // testable here. (Passt requires real inherited fds → exercised on-host
-        // in Task 6.)
-        let mut cfg = BridgeConfigJson {
+        // The path-only variant builds without any live fds, so it is testable
+        // here. (Passt requires real inherited fds → exercised on-host.)
+        let cfg = BridgeConfigJson {
             vm_name: "x".into(),
             audit_dir: PathBuf::from("/a"),
             audit_socket: PathBuf::from("/a/s.sock"),
@@ -390,13 +367,8 @@ mod tests {
             plan_json: "{}".into(),
             bundle_json: None,
             network_policy_json: None,
-            endpoint: vz(),
+            endpoint: gvproxy(),
         };
-        assert!(matches!(
-            build_endpoints(&cfg).unwrap(),
-            BridgeEndpoints::VzIngest { .. }
-        ));
-        cfg.endpoint = gvproxy();
         assert!(matches!(
             build_endpoints(&cfg).unwrap(),
             BridgeEndpoints::LibkrunGvproxy { .. }
