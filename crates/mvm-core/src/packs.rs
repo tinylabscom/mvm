@@ -424,26 +424,44 @@ pub fn verify_pack_keyless_at(
     revocations: &dyn PackRevocationChecker,
 ) -> Result<VerifiedPack, PackVerifyError> {
     validate_signature_bundle_keyless(manifest)?;
+    // Bind the pack's stamped signer id to the identity that actually verifies
+    // it: only consider accepted identities whose derived key id equals
+    // `signing_key_id`, so the signature and the id revocation keys on cannot
+    // name different signers. A pack whose stamped id matches no accepted
+    // identity is refused before any signature bytes are examined.
+    let stamped = &manifest.trust.signing_key_id;
+    let candidates: Vec<&str> = keyless
+        .accepted_identities
+        .iter()
+        .filter(|identity| KeyId::from_identity(identity) == *stamped)
+        .map(String::as_str)
+        .collect();
+    if candidates.is_empty() {
+        return Err(PackVerifyError::SignerIdentityMismatch {
+            signing_key_id: stamped.clone(),
+        });
+    }
     let payload = manifest.signature_payload_bytes()?;
     let mut failure: Option<String> = None;
-    let verified = keyless.accepted_identities.iter().any(|identity| {
-        match crate::crypto::image_verify::verify_signed_payload(
-            &payload,
-            cosign_bundle,
-            identity,
-            &keyless.issuer,
-        ) {
-            Ok(()) => true,
-            Err(error) => {
-                failure = Some(error.to_string());
-                false
-            }
-        }
-    });
+    let verified =
+        candidates.iter().any(
+            |identity| match crate::crypto::image_verify::verify_signed_payload(
+                &payload,
+                cosign_bundle,
+                identity,
+                &keyless.issuer,
+            ) {
+                Ok(()) => true,
+                Err(error) => {
+                    failure = Some(error.to_string());
+                    false
+                }
+            },
+        );
     if !verified {
         return Err(PackVerifyError::KeylessSignatureInvalid(
             failure.unwrap_or_else(|| {
-                "no accepted identities configured for keyless verification".to_string()
+                "keyless signature did not verify under any candidate identity".to_string()
             }),
         ));
     }
@@ -885,6 +903,8 @@ pub enum PackVerifyError {
     },
     #[error("keyless signature verification failed: {0}")]
     KeylessSignatureInvalid(String),
+    #[error("pack signer id {signing_key_id:?} matches no accepted release identity")]
+    SignerIdentityMismatch { signing_key_id: KeyId },
     #[error(transparent)]
     Manifest(#[from] PackManifestError),
 }
@@ -1912,6 +1932,39 @@ mod tests {
             )
             .expect_err("bad bundle");
             assert!(matches!(err, PackVerifyError::KeylessSignatureInvalid(_)));
+        }
+
+        #[test]
+        fn signer_id_not_matching_accepted_identity_is_rejected() {
+            let dir = TempDir::new().expect("tempdir");
+            // sigstore_manifest stamps signing_key_id = from_identity(IDENTITY).
+            let m = sigstore_manifest(&dir);
+            // A trust root that accepts only a different release identity: its
+            // derived id can't equal the stamped one, so the pack is refused
+            // before any signature bytes are examined — the stamped signer id
+            // must correspond to the identity that would verify it.
+            let other = KeylessTrust {
+                accepted_identities: vec![
+                    "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v9.9.9"
+                        .to_string(),
+                ],
+                issuer: ISSUER.to_string(),
+            };
+            let err = verify_pack_keyless_at(
+                &m,
+                dir.path(),
+                &hvf_policy(),
+                b"bundle",
+                &other,
+                &StaticRevocation {
+                    status: RevocationStatus::Good,
+                },
+            )
+            .expect_err("signer id mismatch");
+            assert!(matches!(
+                err,
+                PackVerifyError::SignerIdentityMismatch { .. }
+            ));
         }
 
         #[test]

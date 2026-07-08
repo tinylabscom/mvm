@@ -672,11 +672,12 @@ embedded root stays inert.
 
 ### Review follow-ups (Minor, deferred with a home)
 
-- **Cross-bind `signing_key_id` to the matched keyless identity** — the keyless
-  verifier trusts the producer-stamped `signing_key_id` (it is inside the signed
-  payload, so unforgeable, but not checked to equal `from_identity(matched)`).
-  No practical impact until keyless revocation has teeth; fold into the
-  live-revocation work (§I) so revocation-keying can't drift.
+- ✅ **Cross-bind `signing_key_id` to the verifying keyless identity** — the
+  keyless verifier now only considers accepted identities whose
+  `from_identity` equals the stamped `signing_key_id`, and refuses a pack whose
+  id matches none (`SignerIdentityMismatch`) before any signature is examined.
+  The signature and the id revocation keys on can no longer name different
+  signers — the prerequisite for trustworthy keyless revocation (§I).
 - **Keyless materialization error short-circuits the ed25519 fallback** — a
   placement (not resolution) error in the keyless attempt propagates and skips
   the ed25519 attempt before falling through to the plain download. Fail-safe
