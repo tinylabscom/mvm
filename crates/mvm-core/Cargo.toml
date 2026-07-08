@@ -150,6 +150,12 @@ required-features = ["manifest-verify"]
 name = "verify-signed-manifest"
 required-features = ["manifest-verify"]
 
+# Same purpose for the pack revocation list, calling
+# `pack_revocation::verify_pack_revocation_list` directly.
+[[example]]
+name = "verify-pack-revocation-list"
+required-features = ["manifest-verify"]
+
 [dev-dependencies]
 # `OsRng` for generating fresh ed25519 keys in signed_config tests
 # without committing static fixtures. (Also a non-dev dep above for the
