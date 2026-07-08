@@ -215,6 +215,14 @@ _release-prep VERSION:
         -e "s/(path = \"[^\"]*\", version = )\"[^\"]*\"/\1\"$V\"/" Cargo.toml
     rm Cargo.toml.bak
     cargo update -w
+    # The runtime-overlay flake pins its version to the workspace version
+    # (check-runtime-overlay-version fails closed on a mismatch, ADR-051); the
+    # nix package versions should track too. Bump them alongside Cargo.toml.
+    sed -i.bak -E "s/(overlayVersion[[:space:]]*=[[:space:]]*\")[^\"]*(\")/\1$V\2/" nix/images/runtime-overlay/flake.nix
+    rm nix/images/runtime-overlay/flake.nix.bak
+    sed -i.bak -E "s/(^[[:space:]]*version = \")[0-9][^\"]*(\")/\1$V\2/" nix/packages/mvmctl.nix nix/packages/mvm-host-services-ffi.nix
+    rm nix/packages/*.bak
+    git add nix/images/runtime-overlay/flake.nix nix/packages/mvmctl.nix nix/packages/mvm-host-services-ffi.nix
     git-cliff --tag "v$V" --unreleased --prepend CHANGELOG.md
     # Fail closed if git-cliff did not add the new section (silently shipped
     # v0.15.2/v0.16.0/v0.16.1 with no changelog entry — never again).
