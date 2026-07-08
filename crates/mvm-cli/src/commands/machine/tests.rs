@@ -1,4 +1,6 @@
-use super::receipt::{MachineStartAuthPolicy, MachineStartInitPolicy};
+use super::receipt::{
+    MachineStartAuthPolicy, MachineStartInitPolicy, select_machine_start_backend,
+};
 use super::runtime::resolve_persistent_spec;
 use super::*;
 use crate::commands::{Cli, Commands};
@@ -1558,12 +1560,17 @@ fn machine_start_preflight_redacts_host_paths_and_surfaces_policy() {
         health_check: None,
     };
 
-    let summary = machine_start_preflight_summary(&spec, Some(Path::new("/tmp/web.receipt.json")))
-        .expect("preflight summary");
+    let summary = machine_start_preflight_summary(
+        &spec,
+        Some(Path::new("/tmp/web.receipt.json")),
+        Some("hvf"),
+    )
+    .expect("preflight summary");
     assert_eq!(
         summary.invocation.network_posture,
         "allow-list:api.example.com:443"
     );
+    assert_eq!(summary.invocation.egress_enforcement, "hvf:l4-host-port");
     assert_eq!(summary.invocation.auth.mode, "none");
     assert_eq!(summary.invocation.volumes.len(), 1);
     assert_eq!(summary.invocation.volumes[0].kind, "dir_share");
@@ -1599,10 +1606,40 @@ fn machine_start_preflight_surfaces_ssh_agent_auth_mode() {
         health_check: None,
     };
 
-    let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
+    let summary = machine_start_preflight_summary(&spec, None, None).expect("preflight summary");
     assert_eq!(summary.invocation.auth.mode, "ssh-agent-socket");
     let json = serde_json::to_string(&summary).expect("summary json");
     assert!(json.contains("ssh-agent-socket"));
+}
+
+#[test]
+fn machine_start_backend_selection_refuses_firecracker_for_oci_egress() {
+    let spec = MachineSpec {
+        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+        name: "web".to_string(),
+        image: Some("ghcr.io/acme/web:latest".to_string()),
+        manifest: None,
+        resolved_digest: Some("sha256:abc".to_string()),
+        net: false,
+        allow_host: vec!["api.example.com".to_string()],
+        cpus: 2,
+        memory: "512M".to_string(),
+        mem_initial: None,
+        profile: "dev".to_string(),
+        volumes: Vec::new(),
+        init: Vec::new(),
+        ssh_agent: false,
+        agent_verb: Vec::new(),
+        created_at: Some("2026-06-18T00:00:00Z".to_string()),
+        last_started_at: None,
+        health_check: None,
+    };
+
+    let err = select_machine_start_backend(&spec, Some("firecracker"))
+        .expect_err("firecracker must be refused for OCI egress-backed machine starts");
+    let msg = err.to_string();
+    assert!(msg.contains("NIC-less host-vsock-proxy backend"));
+    assert!(msg.contains("firecracker"));
 }
 
 #[test]
