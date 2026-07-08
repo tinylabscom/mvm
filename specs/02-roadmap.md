@@ -27,9 +27,9 @@ non-persistence claim.
 - **Core security claims:** claims 1-15 are shipped in
   `specs/claims/catalog.md`; claim 16, egress substitution keeping raw secrets
   off the guest, is tracked as `Preview`.
-- **Backend matrix:** the runtime matrix is now Firecracker, libkrun, Vz, QEMU
-  as dev/test, plus mock. Apple Container and cloud-hypervisor were removed by
-  Plan 177; Vz is at parity with the macOS libkrun baseline.
+- **Backend matrix:** the live workload matrix is now HVF, Firecracker, and
+  libkrun, with QEMU as dev/test plus mock. Apple Container,
+  cloud-hypervisor, and Vz are not current workload backends.
 - **Signed execution and audit:** every workload launch is admitted through a
   signed `ExecutionPlan` and chain-signed audit path.
 - **Verified boot and sealed production:** dm-verity rootfs integrity and the
@@ -41,9 +41,9 @@ non-persistence claim.
 - **Encryption substrate:** AEAD, KEK rotation policy, per-rebuild DEK binding,
   signed snapshots, and VMGenID reseed substrate are implemented. The encrypted
   storage-provider selection and VMGenID delivery follow-ups remain open.
-- **Vz warm/start primitives:** Vz snapshot, pause/resume, vm_full
-  save/restore, fork, and warm pool work are live-proven, with Firecracker
-  live-memory warm-start still tracked separately.
+- **Firecracker warm/start primitives:** Firecracker pause/resume, `vm_full`
+  save/restore, fork, and warm `resume` are live-proven. HVF snapshot/restore
+  remains separate open work.
 
 ## Partially shipped gaps
 
@@ -102,7 +102,7 @@ implemented features, and roadmap language for unchecked plans. In particular:
 - Do not claim witnessed non-persistence until Plan 167 adds catalog witnesses.
 - Do not claim prompt-injection protection as detection accuracy; claim only the
   deterministic signed-binding gate once Plan 135 lands.
-- Do not list Apple Container or cloud-hypervisor as active runtime backends;
-  they were removed in favor of the consolidated matrix.
+- Do not list Apple Container, cloud-hypervisor, or Vz as active runtime
+  backends; they were removed in favor of the consolidated matrix.
 - Do not claim WASM production isolation until ADR-081's artifact admission and
   in-guest runner exist.
