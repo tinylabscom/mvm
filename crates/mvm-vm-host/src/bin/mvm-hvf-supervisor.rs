@@ -171,8 +171,9 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(&cfg.pid_file, std::process::id().to_string())
         .with_context(|| format!("write pid file {}", cfg.pid_file.display()))?;
 
-    let image = std::fs::read(&cfg.kernel)
-        .with_context(|| format!("read kernel {}", cfg.kernel.display()))?;
+    if !cfg.kernel.is_file() {
+        anyhow::bail!("kernel {} is not a readable file", cfg.kernel.display());
+    }
     let initramfs = cfg
         .initramfs
         .as_ref()
@@ -211,7 +212,7 @@ fn main() -> anyhow::Result<()> {
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
     let result = mvm_backend::hvf::boot_kernel_until(
-        mvm_backend::hvf::KernelBootUntilParams::builder(&image, timeout)
+        mvm_backend::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
             .initramfs(initramfs.as_deref())
             .disks(disks)
             .vsock(cfg.vsock)

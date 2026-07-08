@@ -15,13 +15,17 @@
 //! It then panics mounting the root fs because none is supplied — providing a
 //! root filesystem (initramfs / virtio-blk) is the next slice.
 
-use std::path::PathBuf;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use super::HvfError;
-use super::guest_ram::GuestRam;
+#[cfg(test)]
+use super::guest_ram::HVF_PAGE_SIZE;
+use super::guest_ram::{GuestRam, page_rounded_len};
 use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::sys::*;
 use super::vcpu::esr_ec;
@@ -198,7 +202,7 @@ static NEVER_PAUSE: AtomicBool = AtomicBool::new(false);
 /// Inputs for a persistent HVF kernel boot. Grouped so pause/stop/channel
 /// control stays explicit without growing a positional argument list.
 pub struct KernelBootUntilParams<'a> {
-    image: &'a [u8],
+    kernel: KernelImageSource<'a>,
     initramfs: Option<&'a [u8]>,
     disks: Vec<DiskImage>,
     vsock: bool,
@@ -211,7 +215,20 @@ pub struct KernelBootUntilParams<'a> {
 impl<'a> KernelBootUntilParams<'a> {
     pub fn builder(image: &'a [u8], timeout: Duration) -> KernelBootUntilParamsBuilder<'a> {
         KernelBootUntilParamsBuilder {
-            image,
+            kernel: KernelImageSource::Bytes(image),
+            initramfs: None,
+            disks: Vec::new(),
+            vsock: false,
+            timeout,
+            stop: &NEVER_STOP,
+            paused: &NEVER_PAUSE,
+            channels: HostChannels::default(),
+        }
+    }
+
+    pub fn builder_file(kernel: &'a Path, timeout: Duration) -> KernelBootUntilParamsBuilder<'a> {
+        KernelBootUntilParamsBuilder {
+            kernel: KernelImageSource::File(kernel),
             initramfs: None,
             disks: Vec::new(),
             vsock: false,
@@ -224,7 +241,7 @@ impl<'a> KernelBootUntilParams<'a> {
 }
 
 pub struct KernelBootUntilParamsBuilder<'a> {
-    image: &'a [u8],
+    kernel: KernelImageSource<'a>,
     initramfs: Option<&'a [u8]>,
     disks: Vec<DiskImage>,
     vsock: bool,
@@ -272,7 +289,7 @@ impl<'a> KernelBootUntilParamsBuilder<'a> {
 
     pub fn build(self) -> KernelBootUntilParams<'a> {
         KernelBootUntilParams {
-            image: self.image,
+            kernel: self.kernel,
             initramfs: self.initramfs,
             disks: self.disks,
             vsock: self.vsock,
@@ -315,9 +332,71 @@ pub fn boot_kernel_until(params: KernelBootUntilParams<'_>) -> Result<KernelBoot
     boot_kernel_impl(params)
 }
 
+#[derive(Clone, Copy)]
+enum KernelImageSource<'a> {
+    Bytes(&'a [u8]),
+    File(&'a Path),
+}
+
+#[derive(Clone, Copy)]
+struct KernelImageMeta {
+    file_len: usize,
+    reserved_len: usize,
+}
+
+impl KernelImageMeta {
+    fn new(file_len: usize, image_size: u64, file_backed: bool) -> Result<Self, HvfError> {
+        let image_size = usize::try_from(image_size).map_err(|_| HvfError::BadKernel)?;
+        let mapped_len = if file_backed {
+            page_rounded_len(file_len)?
+        } else {
+            file_len
+        };
+        Ok(Self {
+            file_len,
+            reserved_len: mapped_len.max(image_size),
+        })
+    }
+}
+
+impl KernelImageSource<'_> {
+    fn metadata(self) -> Result<KernelImageMeta, HvfError> {
+        match self {
+            Self::Bytes(image) => {
+                let hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
+                KernelImageMeta::new(image.len(), hdr.image_size, false)
+            }
+            Self::File(path) => {
+                let mut file = File::open(path).map_err(|_| HvfError::BadKernel)?;
+                let mut header = [0_u8; 64];
+                file.read_exact(&mut header)
+                    .map_err(|_| HvfError::BadKernel)?;
+                let hdr = kernel_image::parse(&header).map_err(|_| HvfError::BadKernel)?;
+                let len = file
+                    .metadata()
+                    .map_err(|_| HvfError::BadKernel)?
+                    .len()
+                    .try_into()
+                    .map_err(|_| HvfError::BadKernel)?;
+                KernelImageMeta::new(len, hdr.image_size, true)
+            }
+        }
+    }
+
+    fn load_into(self, ram: &mut GuestRam, offset: usize) -> Result<(), HvfError> {
+        match self {
+            Self::Bytes(image) => ram.copy_at(offset, image),
+            Self::File(path) => {
+                let meta = self.metadata()?;
+                ram.map_private_file_at(offset, path, meta.file_len)
+            }
+        }
+    }
+}
+
 fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResult, HvfError> {
     let KernelBootUntilParams {
-        image,
+        kernel,
         initramfs,
         disks,
         vsock,
@@ -330,17 +409,25 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         return Err(HvfError::BadKernel);
     }
     // Validate it's an arm64 Image; we load at the fixed boot-protocol offset.
-    let _hdr = kernel_image::parse(image).map_err(|_| HvfError::BadKernel)?;
+    let kernel_meta = kernel.metadata()?;
     let ram_size = ram_size_bytes(channels.mem_mib);
     let load_off = KERNEL_LOAD_OFFSET as usize;
-    let dtb_off = ram_size - FDT_MAX_SIZE as usize; // DTB window at top of RAM
-    if load_off + image.len() > dtb_off {
+    let dtb_off = ram_size
+        .checked_sub(FDT_MAX_SIZE as usize)
+        .ok_or(HvfError::BadKernel)?; // DTB window at top of RAM
+    let kernel_end = load_off
+        .checked_add(kernel_meta.reserved_len)
+        .ok_or(HvfError::BadKernel)?;
+    if kernel_end > dtb_off {
         return Err(HvfError::BadKernel);
     }
     // Place initramfs at INITRD_OFFSET; must clear the kernel and the DTB window.
     let initrd_off = INITRD_OFFSET as usize;
     if let Some(rd) = initramfs
-        && (initrd_off < load_off + image.len() || initrd_off + rd.len() > dtb_off)
+        && (initrd_off < kernel_end
+            || initrd_off
+                .checked_add(rd.len())
+                .is_none_or(|end| end > dtb_off))
     {
         return Err(HvfError::BadKernel);
     }
@@ -348,7 +435,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     // Demand-zero anonymous mapping: host pages fault in as the guest touches
     // them, so idle residency tracks the working set instead of `ram_size`.
     // `guest_ram` owns the region and unmaps it on drop, after `hv_vm_destroy`.
-    let guest_ram = GuestRam::new(ram_size)?;
+    let mut guest_ram = GuestRam::new(ram_size)?;
     let ram = guest_ram.as_ptr();
 
     // Base cmdline, plus optional appended args. Precedence: the `MVM_HVF_BOOTARGS`
@@ -404,14 +491,10 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
         let _ = std::fs::write(path, &dtb);
     }
 
-    // SAFETY: `ram` owns RAM_SIZE writable bytes; every region is bounds-checked
-    // above to fit and not overlap.
-    unsafe {
-        core::ptr::copy_nonoverlapping(image.as_ptr(), ram.add(load_off), image.len());
-        core::ptr::copy_nonoverlapping(dtb.as_ptr(), ram.add(dtb_off), dtb.len());
-        if let Some(rd) = initramfs {
-            core::ptr::copy_nonoverlapping(rd.as_ptr(), ram.add(initrd_off), rd.len());
-        }
+    kernel.load_into(&mut guest_ram, load_off)?;
+    guest_ram.copy_at(dtb_off, &dtb)?;
+    if let Some(rd) = initramfs {
+        guest_ram.copy_at(initrd_off, rd)?;
     }
 
     let entry = RAM_BASE + KERNEL_LOAD_OFFSET;
@@ -786,6 +869,14 @@ unsafe fn run(
 mod tests {
     use super::*;
 
+    fn arm64_image(size: usize, image_size: u64) -> Vec<u8> {
+        let mut image = vec![0_u8; size];
+        image[8..16].copy_from_slice(&KERNEL_LOAD_OFFSET.to_le_bytes());
+        image[16..24].copy_from_slice(&image_size.to_le_bytes());
+        image[56..60].copy_from_slice(&0x644d_5241_u32.to_le_bytes());
+        image
+    }
+
     #[test]
     fn default_bootargs_mounts_rootfs_when_disk_present() {
         // A virtio-blk disk is a real mkGuest workload rootfs: mount it and run
@@ -812,5 +903,64 @@ mod tests {
             without.contains("console=ttyAMA0"),
             "console wired: {without}"
         );
+    }
+
+    #[test]
+    fn kernel_metadata_reserves_effective_image_size_tail() {
+        let image = arm64_image(128, 4096);
+        let meta = KernelImageSource::Bytes(&image).metadata().unwrap();
+        assert_eq!(meta.file_len, 128);
+        assert_eq!(meta.reserved_len, 4096);
+    }
+
+    #[test]
+    fn kernel_metadata_uses_file_length_when_larger_than_header_size() {
+        let image = arm64_image(4096, 128);
+        let meta = KernelImageSource::Bytes(&image).metadata().unwrap();
+        assert_eq!(meta.file_len, 4096);
+        assert_eq!(meta.reserved_len, 4096);
+    }
+
+    #[test]
+    fn file_kernel_metadata_reads_header_without_loading_whole_image() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("Image");
+        std::fs::write(&kernel, arm64_image(128, (HVF_PAGE_SIZE * 2) as u64)).unwrap();
+
+        let meta = KernelImageSource::File(&kernel).metadata().unwrap();
+        assert_eq!(meta.file_len, 128);
+        assert_eq!(meta.reserved_len, HVF_PAGE_SIZE * 2);
+    }
+
+    #[test]
+    fn file_kernel_metadata_reserves_page_rounded_mapping() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("Image");
+        std::fs::write(&kernel, arm64_image(128, 0)).unwrap();
+
+        let meta = KernelImageSource::File(&kernel).metadata().unwrap();
+        assert_eq!(meta.file_len, 128);
+        assert_eq!(meta.reserved_len, HVF_PAGE_SIZE);
+    }
+
+    #[test]
+    fn guest_ram_file_mapping_is_private_cow() {
+        let dir = tempfile::tempdir().unwrap();
+        let kernel = dir.path().join("Image");
+        std::fs::write(&kernel, b"abcdefgh").unwrap();
+        let mut ram = GuestRam::new(HVF_PAGE_SIZE * 2).unwrap();
+
+        ram.copy_at(0, b"anon").unwrap();
+        ram.map_private_file_at(HVF_PAGE_SIZE, &kernel, 8).unwrap();
+
+        let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
+        assert_eq!(mapped, b"abcdefgh");
+
+        unsafe {
+            *ram.as_ptr().add(HVF_PAGE_SIZE) = b'Z';
+        }
+        assert_eq!(std::fs::read(&kernel).unwrap(), b"abcdefgh");
+        let mapped = unsafe { std::slice::from_raw_parts(ram.as_ptr().add(HVF_PAGE_SIZE), 8) };
+        assert_eq!(mapped, b"Zbcdefgh");
     }
 }
