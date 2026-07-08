@@ -147,7 +147,6 @@ pub(crate) fn resolve_or_build_host_binaries(
     Ok(layout.dir)
 }
 
-#[cfg(target_os = "macos")]
 pub(crate) fn load_stage0_init_bytes(cache_root: &Path) -> Result<Vec<u8>, HostBinaryBuildError> {
     let stage0_init = EMBEDDED
         .iter()
