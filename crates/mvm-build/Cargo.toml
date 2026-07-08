@@ -111,7 +111,6 @@ ed25519-dalek.workspace = true
 # dev-dep so lib code (not just tests) can reach it.
 tempfile.workspace = true
 thiserror = "1"
-tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
 # `builder_protocol::{HostVmRequest,HostVmResponse}`

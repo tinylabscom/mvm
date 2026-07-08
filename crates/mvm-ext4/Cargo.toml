@@ -17,7 +17,6 @@ sha2 = { workspace = true }
 # a real, independent ext4 reader. Dev-only — never a runtime dependency (it
 # carries ~105 unsafe blocks + a journaling/casefold surface we do not ship).
 am-fs-ext4 = "0.4"
-tempfile = { workspace = true }
 
 [lints]
 workspace = true
