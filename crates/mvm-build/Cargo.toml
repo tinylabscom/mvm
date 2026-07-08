@@ -118,7 +118,7 @@ uuid.workspace = true
 # routing a build through the supervisor. Unix-only; gated with
 # `#[cfg(unix)]` at the call site.
 libc.workspace = true
-which = "6"
+which.workspace = true
 
 # Linux mount/reboot/signal/ioctl syscalls for the mvm-host-vm-init bin
 # (the builder VM's PID 1) — folded in with mvm-host-vm-init.

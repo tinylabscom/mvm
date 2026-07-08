@@ -132,6 +132,60 @@ validate or right-size the whole effort before the riskier phases).
   posture is the backstop, and a reimplementation is only worth it when it is
   *simpler and auditable*, never a subtle re-bug. Ratchet: a **dependency-count
   budget** in CI so the total can't silently grow, plus `cargo deny` on every PR.
+  - [x] **Slice 1 (2026-07-08):** removed `inquire` workspace-wide. Evidence:
+    only three prompt call-sites remained (`mvm::ui::confirm`, the destructive
+    `DELETE-EVERYTHING` prompt, and secret entry). Replaced them with tiny
+    in-house prompt helpers over `std::io` + `libc` termios echo suppression
+    for hidden secret input, preserving the no-echo secret posture. Result:
+    `inquire` and its transitive terminal stack (`crossterm`,
+    `crossterm_winapi`, `signal-hook`, `signal-hook-mio`, `fuzzy-matcher`,
+    `derive_more`, `document-features`, `convert_case`, `litrs`,
+    `unicode-segmentation`) drop out of `Cargo.lock`. Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend`, targeted
+    `mvm-backend` UI tests, `cargo test -p mvm-cli --lib`, and
+    `cargo clippy -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`.
+  - [ ] **Slice 2 (2026-07-08):** removed `colored` and stale direct manifest
+    edges from `mvm`. Evidence: `colored` had one real consumer
+    (`mvm-backend::base::ui`) and `mvm` still declared `colored` /
+    `indicatif` directly even though `mvm::ui` is only a re-export of
+    `mvm-backend::base::ui`. Replaced the `colored` calls with a tiny
+    terminal-aware ANSI helper inside `mvm-backend::base::ui`, keeping
+    color off for non-TTY output and preserving the existing spinner path
+    (`indicatif`). Result: `colored` drops out of `Cargo.lock`, the direct
+    `mvm` manifest no longer carries dead `colored` / `indicatif` edges,
+    and `mvm-hostd`'s `web_search` path no longer relies on reqwest's
+    optional `.query()` method (it now builds query URLs explicitly, which
+    keeps the lean reqwest feature set intact). Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend -p mvm-hostd`,
+    targeted `mvm-backend` UI tests, targeted `mvm-hostd` web-search tests,
+    and `cargo clippy -p mvm-cli -p mvm-backend -p mvm-hostd --lib --tests -- -D warnings`.
+    Final closeout is pending a less-restricted host run of
+    `cargo test -p mvm-cli --lib`; in this sandbox the remaining failures are
+    permission-denied test fixtures that bind local sockets / write under
+    `/var/tmp`, not compile or logic regressions from this slice.
+  - [x] **Slice 3 (2026-07-08):** unified `which` to the workspace's single
+    `which 7` version. Evidence: `cargo tree -p mvmctl -i which@6.0.3` showed
+    `mvm-build` as the lone remaining `which 6` root, and its call-sites only
+    use the stable `which::which(...)` API already used elsewhere in the
+    workspace. Swapped `crates/mvm-build/Cargo.toml` from `which = "6"` to
+    `which.workspace = true`, which drops `which 6` from `Cargo.lock` and
+    reduces the `mvmctl` normal-dependency closure count from 859 to 853.
+    Verified with `cargo fmt --check`, `cargo check -p mvm-build -p mvm-cli -p mvm-backend`,
+    `cargo clippy -p mvm-build -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`,
+    and closure remeasurement via `cargo tree`.
+  - [x] **Slice 4 (2026-07-08):** removed `indicatif` from the shared CLI/UI
+    path. Evidence: `cargo tree -p mvmctl -i indicatif` showed a single UI-only
+    root through `mvm-backend::base::ui` and the thin CLI wrapper; call-sites
+    only use a cloneable spinner with `set_message` and `finish_and_clear`.
+    Replaced it with a tiny in-house spinner handle in
+    `mvm-backend::base::ui`, updated the CLI wrapper to re-export that handle,
+    and swapped the dev-builder heartbeat type plumbing accordingly. Result:
+    `indicatif` drops out of `Cargo.lock`, along with its exclusive closure
+    pieces such as `console` and `unit-prefix`, and the `mvmctl`
+    normal-dependency closure count falls from 853 to 845. Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend`,
+    targeted `mvm-backend` UI tests, `cargo clippy -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`,
+    and closure remeasurement via `cargo tree`.
 
 Likely order: **P1 → P7 → P2 → P4 → P3 → P5 → P6** — P1 and P7 are the
 dependency/attack-surface pair and run first (P1 removes what's unused, P7
