@@ -51,7 +51,10 @@ fn ensure_extracted_for_boot_matches_build_mode() {
                 "source checkout stub build should source-build host binaries"
             );
         } else {
-            assert!(res.is_err(), "installed stub build must be refused for VM boot");
+            assert!(
+                res.is_err(),
+                "installed stub build must be refused for VM boot"
+            );
         }
     } else {
         assert!(res.is_ok(), "real build must extract for VM boot");
