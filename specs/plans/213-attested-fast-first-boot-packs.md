@@ -232,6 +232,16 @@ The target user-visible shape is:
 - [ ] Document channel pinning, mirror setup, offline operation, and revocation
       behavior.
 
+#### §I progress — builder-pack revocation consumer (2026-07-08)
+
+- [x] Installed builder-pack resolution now refreshes a project-signed
+      `pack-revocations.json` from the `revocations` release, caches it under
+      `~/.cache/mvm/pack-revocations/` with a 24-hour refresh / 7-day offline
+      tolerance / `404` bootstrap state, and unions fetched entries with the
+      operator's `pack-trust.json` revocations.
+- [x] Tests: absent cache pair and a garbage cosign bundle both fail open on
+      availability while refusing to apply an unverifiable fetched list.
+
 ### J. Metrics, proof gates, and regression tests
 
 - [ ] Instrument launch phases: artifact resolution, verification, CoW sandbox
