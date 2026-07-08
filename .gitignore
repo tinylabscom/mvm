@@ -3,6 +3,7 @@
 **/.build/
 .playwright-mcp/
 .superpowers/
+.codex/
 .claude/*
 !.claude/settings.json
 **/node_modules
