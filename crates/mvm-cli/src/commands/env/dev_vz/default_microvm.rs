@@ -34,6 +34,7 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
             }
             #[cfg(not(feature = "builder-vm"))]
             {
+                let _ = &path;
                 anyhow::bail!(
                     "source checkout detected but this mvmctl was built without the `builder-vm` feature"
                 );
