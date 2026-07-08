@@ -223,18 +223,41 @@ The target user-visible shape is:
 
 ### H. Launch attestation and explainability
 
-- [ ] Define the launch attestation record linking source input, builder
+- [~] Define the launch attestation record linking source input, builder
       identity, pack identity, local verification, snapshot/warm derivation,
-      policy admission, command, and result.
-- [ ] Store launch records in a tamper-evident local audit log.
-- [ ] Include command, plan hash, network policy hash, artifact hashes,
+      policy admission, command, and result. Partial: the existing
+      `AuditEntry` (plan id, image hash, backend, network policy, timestamps,
+      exit status) already carries the admission/launch/exit spine that
+      `mvm explain` renders; snapshot/warm derivation and builder-identity
+      linkage are not yet distinct fields on the record (see item 3).
+- [x] Store launch records in a tamper-evident local audit log. Already
+      satisfied by the chain-signed `~/.mvm/audit/<tenant>.jsonl` stream
+      (`mvm_hostd::supervisor::{FileAuditSigner, verify_audit_chain}`).
+- [~] Include command, plan hash, network policy hash, artifact hashes,
       snapshot/warm identity, backend identity, launcher version, timestamps,
-      exit status, and output digest metadata.
-- [ ] Implement `mvm explain <run-id>` for successful launches, builder-prepare
-      launches, cache misses, and refusals.
+      exit status, and output digest metadata. Partial: plan id, image hash,
+      backend, network policy label, timestamps, and exit status are recorded
+      and rendered today. Snapshot/warm-source identity, output digest, and
+      launcher version are NOT yet emitted — they need new `AuditEmitter`
+      calls on the run path (touched by other in-flight work), deferred to
+      avoid a churn conflict.
+- [x] Implement `mvm explain <run-id>` for successful launches. Renders the
+      full event lifecycle, outcome, backend, and OCI source provenance (when
+      present) for a run selected by plan id, plan-id prefix, or workload
+      image name, with a loud footer when the chain fails verification
+      (`crates/mvm-cli/src/commands/vm/explain.rs`). Builder-prepare launches,
+      cache misses, and refusals are deferred remainder — those event kinds
+      aren't emitted on the run path yet, so `explain` has nothing to render
+      for them until item 3's emit work lands.
 - [ ] Add tests proving audit records are emitted on success, refusal, builder
-      fallback, verification failure, and interrupted launch.
-- [ ] Add tamper tests proving modified audit records are detected.
+      fallback, verification failure, and interrupted launch. Deferred
+      remainder alongside item 3 — these are run-path emit tests, not
+      `explain`-render tests; `explain.rs`'s own unit tests cover reading and
+      rendering whatever the chain already contains.
+- [x] Add tamper tests proving modified audit records are detected. Reuses
+      `verify_audit_chain`; `explain.rs::collect_run` surfaces a failed
+      verification loudly instead of hiding it
+      (`collect_run_reports_tampered_chain_loudly_but_still_returns_the_run`).
 
 ### I. Revocation, mirrors, and enterprise policy
 

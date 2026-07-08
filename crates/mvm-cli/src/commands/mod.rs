@@ -90,6 +90,9 @@ pub(in crate::commands) enum Commands {
     Doctor(env::doctor::Args),
     /// List running VMs
     Ls(vm::ps::Args),
+    /// Explain a run after the fact from the chain-signed audit log
+    #[command(display_order = 7)]
+    Explain(vm::explain::Args),
     /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing
     /// transient-run role folded into `machine run`; `run` survives only as the
     /// SDK Sandbox launcher the Python/TS SDKs shell to, so it stays hidden

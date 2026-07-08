@@ -17,6 +17,7 @@ impl TopLevelCommand for Commands {
             Commands::Bootstrap(a) => bootstrap::run(cli, a, cfg),
             Commands::Dev(a) => env::dev::run(cli, a, cfg),
             Commands::Ls(a) => vm::ps::run(cli, a, cfg),
+            Commands::Explain(a) => vm::explain::run(a),
             Commands::Run(a) => vm::exec::run_secure(cli, a, cfg),
             Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),

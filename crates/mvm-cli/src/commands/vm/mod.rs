@@ -9,6 +9,7 @@ pub(super) mod cp;
 pub(super) mod diff;
 pub(super) mod down;
 pub(super) mod exec;
+pub(in crate::commands) mod explain;
 pub(super) mod forward;
 pub(super) mod fs;
 pub(super) mod group;

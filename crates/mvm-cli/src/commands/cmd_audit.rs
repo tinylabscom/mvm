@@ -208,6 +208,7 @@ impl Commands {
             Commands::Bootstrap(_) => "bootstrap",
             Commands::Dev(_) => "dev",
             Commands::Ls(_) => "ls",
+            Commands::Explain(_) => "explain",
             Commands::Run(_) => "run",
             Commands::SdkNoVm(_) => "__sdk-no-vm",
             Commands::Doctor(_) => "doctor",
