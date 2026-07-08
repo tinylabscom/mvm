@@ -337,6 +337,13 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     reference: &str,
     prod: bool,
 ) -> Result<ResolvedOciRunImage> {
+    // Rootfs materialization can fall back to a builder VM (a flat dir the
+    // in-process ext4 writer can't emit), and an abnormally-exited builder can
+    // orphan its gvproxy sidecar to the init process. `up` / `dev up` reap the
+    // previous run's corpses at startup; the run-image path is the other place
+    // a builder VM spawns, so give it the same sweep before we might add one.
+    crate::commands::env::dev_vz::sweep_orphaned_vm_helpers_on_startup();
+
     // Local sources route to their own ingest; a registry reference falls
     // through to the cache-or-pull path below.
     match source::ImageSource::classify(reference)? {
