@@ -947,6 +947,13 @@ impl RunJsonSummary {
 
 impl RunPreflightSummary {
     fn from_args(args: &RunArgs) -> Result<Self> {
+        Self::from_args_with_backend_override(args, None)
+    }
+
+    fn from_args_with_backend_override(
+        args: &RunArgs,
+        backend_override: Option<&str>,
+    ) -> Result<Self> {
         let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
         for kv in &args.env {
             parse_env_pair(kv)?;
@@ -985,9 +992,12 @@ impl RunPreflightSummary {
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
         let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
-        let backend = crate::exec::select_exec_backend(args.image.is_some(), &policy)?
-            .name()
-            .to_string();
+        let backend = match backend_override {
+            Some(backend) => backend.to_string(),
+            None => crate::exec::select_exec_backend(args.image.is_some(), &policy)?
+                .name()
+                .to_string(),
+        };
         let receipt_input = ReceiptInput::from_run_args(args, &backend)?;
 
         Ok(Self {
@@ -1357,6 +1367,26 @@ pub(in crate::commands) fn test_run_security_summary(
 ) -> Result<RunSecuritySummary> {
     let preflight = RunPreflightSummary::from_args(args)?;
     let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
+    test_run_security_summary_from_parts(preflight, receipt)
+}
+
+#[cfg(test)]
+pub(in crate::commands) fn test_run_security_summary_with_preflight_backend(
+    args: &RunArgs,
+    preflight_backend: &str,
+    receipt_backend: &str,
+) -> Result<RunSecuritySummary> {
+    let preflight =
+        RunPreflightSummary::from_args_with_backend_override(args, Some(preflight_backend))?;
+    let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
+    test_run_security_summary_from_parts(preflight, receipt)
+}
+
+#[cfg(test)]
+fn test_run_security_summary_from_parts(
+    preflight: RunPreflightSummary,
+    receipt: ReceiptInput,
+) -> Result<RunSecuritySummary> {
     let image_kind = match preflight.image {
         RunPreflightImage::DefaultMicrovm => "default-microvm",
         RunPreflightImage::Manifest { .. } => "manifest",
