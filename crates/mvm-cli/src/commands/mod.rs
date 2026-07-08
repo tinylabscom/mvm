@@ -267,7 +267,7 @@ fn configure_runtime_logging(cli: &Cli) {
 
 fn install_signal_handler() {
     let pids = Arc::clone(&CHILD_PIDS);
-    if let Err(e) = ctrlc::set_handler(move || {
+    if let Err(e) = crate::signal::set_ctrlc_handler(move || {
         if IN_CONSOLE_MODE.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }

@@ -13,6 +13,7 @@ pub mod logging;
 pub mod metrics_server;
 pub mod security_cmd;
 pub mod shell_init;
+pub mod signal;
 pub mod template_cmd;
 pub mod ts_runner;
 pub mod ui;
