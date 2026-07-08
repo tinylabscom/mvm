@@ -1,5 +1,6 @@
 use mvm_net::host_netd::{
-    HostNetdError, launch_config_from_args_and_env, load_config_file, run_host_netd_stdio, usage,
+    HostNetdError, launch_config_from_args_and_env, load_config_file, run_host_netd_listen_uds,
+    run_host_netd_stdio, usage,
 };
 
 fn main() {
@@ -23,7 +24,12 @@ fn main() {
         }
     };
 
-    match run_host_netd_stdio(&config) {
+    let result = match launch.listen_uds() {
+        Some(path) => run_host_netd_listen_uds(&config, path),
+        None => run_host_netd_stdio(&config),
+    };
+
+    match result {
         Ok(stats) => {
             eprintln!(
                 "mvm-host-netd: stopped after {} messages read, {} messages written",

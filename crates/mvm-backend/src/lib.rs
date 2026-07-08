@@ -84,6 +84,7 @@ pub mod libkrun;
 pub mod microvm;
 pub mod mock;
 pub mod mock_guest_agent;
+pub(crate) mod mvm_net_spawn;
 pub mod netinit_audit;
 pub mod network;
 /// `NetworkProvider` impl over the bridge+TAP path.

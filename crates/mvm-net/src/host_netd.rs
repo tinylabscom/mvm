@@ -6,6 +6,7 @@
 
 use std::fmt;
 use std::io::{self, Read, Write};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
 use crate::host::{HostAuditEvent, HostAuditSink, HostAuthority, HostTcpConnector};
@@ -14,23 +15,27 @@ use crate::host_runner::{
     HostAuthorityWire, HostRunnerConfig, HostRunnerError, HostRunnerStats, SplitJsonHostWire,
     run_host_authority_until_blocked,
 };
-use crate::wire_json::{JsonWireConfig, JsonWireError};
+use crate::wire_json::{JsonWireConfig, JsonWireError, LengthPrefixedJsonAuthority};
 
 pub const ENV_CONFIG: &str = "MVM_NET_HOST_CONFIG";
+pub const ENV_LISTEN_UDS: &str = "MVM_NET_HOST_LISTEN_UDS";
 
 const USAGE: &str = "\
 mvm-host-netd [OPTIONS]
 
-Host transparent networking authority. It reads length-prefixed JSON
-mvm-net frames from stdin, writes length-prefixed responses to stdout, and
-emits structured JSON audit events to stderr.
+Host transparent networking authority. It either accepts one Unix-domain
+socket connection or reads length-prefixed JSON mvm-net frames from stdin,
+writes length-prefixed responses to the peer/stdout, and emits structured
+JSON audit events to stderr.
 
 Options:
-  --config PATH     JSON host-netd config file
+  --config PATH       JSON host-netd config file
+  --listen-uds PATH   Bind PATH and accept one authority stream
   -h, --help
 
 Environment:
   MVM_NET_HOST_CONFIG
+  MVM_NET_HOST_LISTEN_UDS
 
 Command-line options override environment values.
 ";
@@ -98,17 +103,28 @@ impl From<HostRunnerError> for HostNetdError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostNetdLaunchConfig {
     config_path: PathBuf,
+    listen_uds: Option<PathBuf>,
 }
 
 impl HostNetdLaunchConfig {
     pub fn new(config_path: impl Into<PathBuf>) -> Self {
         Self {
             config_path: config_path.into(),
+            listen_uds: None,
         }
     }
 
     pub fn config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    pub fn listen_uds(&self) -> Option<&Path> {
+        self.listen_uds.as_deref()
+    }
+
+    fn with_listen_uds(mut self, listen_uds: impl Into<PathBuf>) -> Self {
+        self.listen_uds = Some(listen_uds.into());
+        self
     }
 }
 
@@ -265,9 +281,12 @@ where
     Value: Into<String>,
 {
     let mut config_path = None;
+    let mut listen_uds = None;
     for (key, value) in env {
-        if key.as_ref() == ENV_CONFIG {
-            config_path = Some(PathBuf::from(value.into()));
+        match key.as_ref() {
+            ENV_CONFIG => config_path = Some(PathBuf::from(value.into())),
+            ENV_LISTEN_UDS => listen_uds = Some(PathBuf::from(value.into())),
+            _ => {}
         }
     }
 
@@ -277,22 +296,31 @@ where
             return Err(HostNetdError::HelpRequested);
         }
         let value = if let Some((flag, value)) = arg.split_once('=') {
-            if flag != "--config" {
-                return Err(HostNetdError::UnknownArgument(flag.to_string()));
+            match flag {
+                "--config" | "--listen-uds" => value.to_string(),
+                _ => return Err(HostNetdError::UnknownArgument(flag.to_string())),
             }
-            value.to_string()
-        } else if arg == "--config" {
+        } else if arg == "--config" || arg == "--listen-uds" {
             args.next()
                 .ok_or_else(|| HostNetdError::MissingValue(arg.clone()))?
         } else {
             return Err(HostNetdError::UnknownArgument(arg));
         };
-        config_path = Some(PathBuf::from(value));
+        if arg.starts_with("--listen-uds") {
+            listen_uds = Some(PathBuf::from(value));
+        } else {
+            config_path = Some(PathBuf::from(value));
+        }
     }
 
-    match config_path {
+    let config = match config_path {
         Some(path) if !path.as_os_str().is_empty() => Ok(HostNetdLaunchConfig::new(path)),
         Some(_) | None => Err(HostNetdError::MissingConfigPath),
+    }?;
+    match listen_uds {
+        Some(path) if !path.as_os_str().is_empty() => Ok(config.with_listen_uds(path)),
+        Some(_) => Err(HostNetdError::Config("listen-uds path must not be empty")),
+        None => Ok(config),
     }
 }
 
@@ -323,6 +351,74 @@ pub fn run_host_netd_stdio(config: &HostNetdConfig) -> Result<HostRunnerStats, H
         stdout.lock(),
         JsonLineAuditSink::new(stderr.lock()),
     )
+}
+
+pub fn run_host_netd_listen_uds(
+    config: &HostNetdConfig,
+    path: &Path,
+) -> Result<HostRunnerStats, HostNetdError> {
+    let stderr = io::stderr();
+    run_host_netd_listen_uds_with_audit(config, path, JsonLineAuditSink::new(stderr.lock()))
+}
+
+pub fn run_host_netd_listen_uds_with_audit<A>(
+    config: &HostNetdConfig,
+    path: &Path,
+    audit: A,
+) -> Result<HostRunnerStats, HostNetdError>
+where
+    A: HostAuditSink,
+{
+    if path.as_os_str().is_empty() {
+        return Err(HostNetdError::Config("listen-uds path must not be empty"));
+    }
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|source| HostNetdError::Io {
+            context: "failed to create host netd socket directory",
+            source,
+        })?;
+    }
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(HostNetdError::Io {
+                context: "failed to remove stale host netd socket",
+                source,
+            });
+        }
+    }
+    let listener = UnixListener::bind(path).map_err(|source| HostNetdError::Io {
+        context: "failed to bind host netd socket",
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |source| HostNetdError::Io {
+                context: "failed to chmod host netd socket",
+                source,
+            },
+        )?;
+    }
+    let (stream, _) = listener.accept().map_err(|source| HostNetdError::Io {
+        context: "failed to accept host netd socket",
+        source,
+    })?;
+    run_host_netd_on_stream(config, stream, audit)
+}
+
+pub fn run_host_netd_on_stream<A>(
+    config: &HostNetdConfig,
+    stream: UnixStream,
+    audit: A,
+) -> Result<HostRunnerStats, HostNetdError>
+where
+    A: HostAuditSink,
+{
+    let mut wire = LengthPrefixedJsonAuthority::with_config(stream, config.wire_config().clone());
+    run_host_netd_with_wire(config, audit, StdTcpConnector::new(), &mut wire)
 }
 
 pub fn run_host_netd_on_stdio_parts<R, W, A>(
@@ -450,11 +546,26 @@ mod tests {
     fn launch_config_prefers_cli_path_over_env_path() {
         let config = launch_config_from_args_and_env(
             ["--config", "/tmp/cli.json"],
-            [(ENV_CONFIG, "/tmp/env.json")],
+            [
+                (ENV_CONFIG, "/tmp/env.json"),
+                (ENV_LISTEN_UDS, "/tmp/env.sock"),
+            ],
         )
         .unwrap();
 
         assert_eq!(config.config_path(), Path::new("/tmp/cli.json"));
+        assert_eq!(config.listen_uds(), Some(Path::new("/tmp/env.sock")));
+    }
+
+    #[test]
+    fn launch_config_prefers_cli_listen_socket_over_env_socket() {
+        let config = launch_config_from_args_and_env(
+            ["--config=/tmp/cfg.json", "--listen-uds", "/tmp/cli.sock"],
+            [(ENV_LISTEN_UDS, "/tmp/env.sock")],
+        )
+        .unwrap();
+
+        assert_eq!(config.listen_uds(), Some(Path::new("/tmp/cli.sock")));
     }
 
     #[test]
@@ -532,6 +643,61 @@ mod tests {
     }
 
     #[test]
+    fn host_netd_listen_uds_accepts_one_authority_stream() {
+        let dir = std::env::temp_dir().join(format!(
+            "mvm-netd-listen-{}-{}",
+            std::process::id(),
+            unique_test_suffix()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let socket = dir.join("netd.sock");
+        let config = deny_all_config();
+        let server_socket = socket.clone();
+        let server = std::thread::spawn(move || {
+            let mut audit = Vec::new();
+            let stats = run_host_netd_listen_uds_with_audit(
+                &config,
+                &server_socket,
+                JsonLineAuditSink::new(&mut audit),
+            )
+            .unwrap();
+            (stats, audit)
+        });
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !socket.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "host netd socket was not bound"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+
+        let mut client = LengthPrefixedJsonAuthority::new(
+            UnixStream::connect(&socket).expect("connect to host netd socket"),
+        );
+        client
+            .write_message(NetMessage::Hello(Hello::new(
+                EndpointRole::Guest,
+                vec![Capability::Dns],
+            )))
+            .unwrap();
+        assert!(matches!(
+            client.read_message().unwrap(),
+            JsonWireRead::Message(NetMessage::HelloAck(_))
+        ));
+        drop(client);
+
+        let (stats, audit) = server.join().unwrap();
+        assert_eq!(stats.messages_read, 1);
+        assert_eq!(stats.messages_written, 1);
+        let audit_line = std::str::from_utf8(&audit).unwrap();
+        let audit_json: serde_json::Value = serde_json::from_str(audit_line.trim()).unwrap();
+        assert_eq!(audit_json["event"], "handshake_accepted");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn host_netd_wire_runner_uses_configured_policy_adapter() {
         let mut encoded = LengthPrefixedJsonAuthority::new(Cursor::new(Vec::new()));
         encoded
@@ -554,5 +720,11 @@ mod tests {
 
         assert_eq!(stats.messages_read, 1);
         assert_eq!(stats.messages_written, 1);
+    }
+
+    fn unique_test_suffix() -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        NEXT.fetch_add(1, Ordering::Relaxed).to_string()
     }
 }

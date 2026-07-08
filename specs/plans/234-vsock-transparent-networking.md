@@ -56,6 +56,10 @@
       Add feature-gated `mvm-host-netd` behind `host-netd`; load explicit JSON config with network policy, DNS pins, timestamp, and bounded runner/wire limits; run the host authority over split stdin/stdout length-prefixed JSON streams; emit structured JSON audit events; and keep the binary plus `mvm-core` policy adapter out of default, `host`, and `host-runner` builds.
 - [ ] **B2b2b — Wire backend per-VM listener supervision.**
       Spawn or attach `mvm-host-netd` from the VM backend/supervisor path, bind it to the actual per-VM vsock authority stream, generate the admitted policy/pin config, collect its structured audit output, and fail closed if the process, transport, policy projection, or audit path is unavailable.
+- [x] **B2b2b1 — Add host authority UDS listener and backend spawn/reap seam.**
+      Add `mvm-host-netd --listen-uds` for a per-VM authority stream, generate the host daemon JSON config with admitted network policy and DNS pins, spawn the process through the existing aux-bin resolver, collect structured audit output to a per-VM JSONL file, record/reap its pid and socket, wire the workload runner's production endpoint spawner to the new authority socket, and keep `mvm-backend` from linking `mvm-net`.
+- [ ] **B2b2b2 — Connect the guest bridge to the backend authority stream.**
+      Launch/package the guest `mvm-guest-netd` sidecar in VM startup, connect guest vsock port `5254` to the spawned host authority stream, supervise both ends across boot failure and stop, and add the first end-to-end guest DNS/TCP acceptance path.
 - [ ] **C1 — Add DNS plus TCP MVP.**
       Support A/AAAA DNS answers, synthetic IP mapping, TCP connect/data/close, allow-host default port handling, denied-host failure behavior, and bounded backpressure.
 - [ ] **C2 — Add mandatory TLS transform for secret-bearing flows.**

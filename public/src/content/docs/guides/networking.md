@@ -122,14 +122,17 @@ stream. `host-std` provides a standard-library TCP connector that can connect to
 a policy-supplied pinned upstream IP. `host-mvm-core` adapts canonical
 `mvm-core` network policy projection plus DNS pins into host admission. The
 `host-netd` feature packages the internal `mvm-host-netd` process contract: it
-loads explicit JSON policy/pin config, reads length-prefixed `mvm-net` frames
-from stdin, writes responses to stdout, and emits structured JSON audit lines
-to stderr.
+loads explicit JSON policy/pin config, runs length-prefixed `mvm-net` frames over
+stdio or a private per-VM Unix socket (`--listen-uds`), and emits structured JSON
+audit lines.
 
-This is not yet wired into `mvmctl machine run`. Until backend integration
-spawns/connects `mvm-host-netd` to each VM's actual vsock authority stream, the
-default HVF path remains vsock-only without ordinary guest-visible
-DNS/TCP/UDP/ICMP networking for tools inside the VM.
+Backend integration has started: the workload-runner path can spawn and reap
+`mvm-host-netd`, write its admitted policy/DNS-pin config, and capture its audit
+JSONL under the VM state directory. This is not end-to-end `mvmctl machine run`
+networking yet. Until VM startup launches the guest bridge and connects guest
+vsock port `5254` to that host authority stream, the default HVF path remains
+vsock-only without ordinary guest-visible DNS/TCP/UDP/ICMP networking for tools
+inside the VM.
 
 ## Security Profiles
 

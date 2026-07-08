@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use mvm_core::config::{mvm_data_dir, vm_state_dir, vm_substitution_endpoint_socket};
+use mvm_core::config::{mvm_data_dir, vm_state_dir};
 use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
@@ -19,6 +19,7 @@ use mvm_core::vm_backend::{
 
 use crate::driver::{RunningVm, VmmDriver};
 use crate::egress_shared::decode_plan_secrets_from_state;
+<<<<<<< HEAD
 use crate::network_tunnel_spawn::{
     NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
     spawn_network_tunnel_worker_if_configured,
@@ -27,6 +28,10 @@ use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
     spawn_substitution_endpoint,
 };
+=======
+use crate::mvm_net_spawn::{MvmNetSpawnParams, reap_mvm_net_authority, spawn_mvm_net_authority};
+use crate::substitution_spawn::reap_substitution_endpoint;
+>>>>>>> 411a20937 (Wire host netd backend spawn seam)
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::spec_map::{
     WorkloadSockets, WorkloadSpecInputs, console_data_sockets, network_tunnel_socket, workload_spec,
@@ -51,26 +56,17 @@ pub trait EndpointSpawner: Send + Sync {
     fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf>;
 }
 
-/// The production `EndpointSpawner`: spawns the real `mvm-substitution-endpoint`
-/// over the in-process-VMM UDS transport.
+/// The production `EndpointSpawner`: spawns the real `mvm-host-netd`
+/// authority over a per-VM UDS listener.
 pub struct RealEndpointSpawner;
 
 impl EndpointSpawner for RealEndpointSpawner {
     fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
-        let uds = vm_substitution_endpoint_socket(req.vm_name);
-        spawn_substitution_endpoint(SubstitutionSpawnParams {
+        spawn_mvm_net_authority(MvmNetSpawnParams {
             vm_name: req.vm_name,
             state_dir: req.state_dir,
-            tenant: req.tenant,
-            secrets: req.secrets,
-            redaction: req.redaction,
-            transport: EndpointTransport::Uds { path: uds.clone() },
-            terminator_listen: None,
-            tls_intermediate: None,
-            network_policy: Some(req.network_policy),
-            raw_egress: req.raw_egress,
-        })?;
-        Ok(uds)
+            network_policy: req.network_policy,
+        })
     }
 }
 
@@ -171,9 +167,20 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
             console_log: socks.console_log,
         });
 
+<<<<<<< HEAD
         let vm = self.driver.boot(&spec)?;
         tunnel_guard.defuse();
         Ok(vm)
+=======
+        match self.driver.boot(&spec) {
+            Ok(vm) => Ok(vm),
+            Err(err) => {
+                reap_mvm_net_authority(&state_dir);
+                reap_substitution_endpoint(&state_dir, &inputs.config.name);
+                Err(err)
+            }
+        }
+>>>>>>> 411a20937 (Wire host netd backend spawn seam)
     }
 }
 
@@ -235,6 +242,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
         // Reap the per-VM secrets endpoint first, so a crashed VM's
         // decrypted-secret process can't outlive the guest. Idempotent + a no-op
         // when the VM spawned none.
+        reap_mvm_net_authority(&vm_state_dir(&id.0));
         reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
         reap_network_tunnel_worker(&vm_state_dir(&id.0));
         self.driver.attach(id)?.kill()
