@@ -3565,6 +3565,76 @@ that stops a third surface reappearing. Everything below hangs off that spine.
   surfaces + the library API; every public item carries a doc example (kept
   green by `just test-doc`); `just` recipes for the common flows. Best-in-class
   "use it as a library" story.
+- [ ] **P7 — Dependency surface reduction (security-driven).** The workspace
+  carries ~734 crates — every one is attack surface and a potential supply-chain
+  CVE, which is a direct, stated security concern (not just tidiness). Beyond
+  P1's *unused*-dep removal, audit the *used* deps: for each direct dependency,
+  measure how much of it we actually consume. Categorize:
+  **(a) unused** → remove (P1); **(b) barely-used** (a single function or a
+  handful) → reimplement in-house behind a small, focused, tested module **or**
+  swap for a lighter-weight / `std` alternative; **(c) heavy-but-justified** →
+  keep, with a one-line rationale recorded. Prioritize by risk: unmaintained
+  crates, large transitive footprints, duplicate crates at multiple versions, and
+  categories that pull broad native/parsing surface. Every removal/replacement is
+  evidence-driven (`cargo tree -i`, actual call-site count) and tested, and must
+  **not** weaken any security claim — claim 7's `cargo-audit` + `deny.toml`
+  posture is the backstop, and a reimplementation is only worth it when it is
+  *simpler and auditable*, never a subtle re-bug. Ratchet: a **dependency-count
+  budget** in CI so the total can't silently grow, plus `cargo deny` on every PR.
+  - [x] **Slice 1 (2026-07-08):** removed `inquire` workspace-wide. Evidence:
+    only three prompt call-sites remained (`mvm::ui::confirm`, the destructive
+    `DELETE-EVERYTHING` prompt, and secret entry). Replaced them with tiny
+    in-house prompt helpers over `std::io` + `libc` termios echo suppression
+    for hidden secret input, preserving the no-echo secret posture. Result:
+    `inquire` and its transitive terminal stack (`crossterm`,
+    `crossterm_winapi`, `signal-hook`, `signal-hook-mio`, `fuzzy-matcher`,
+    `derive_more`, `document-features`, `convert_case`, `litrs`,
+    `unicode-segmentation`) drop out of `Cargo.lock`. Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend`, targeted
+    `mvm-backend` UI tests, `cargo test -p mvm-cli --lib`, and
+    `cargo clippy -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`.
+  - [ ] **Slice 2 (2026-07-08):** removed `colored` and stale direct manifest
+    edges from `mvm`. Evidence: `colored` had one real consumer
+    (`mvm-backend::base::ui`) and `mvm` still declared `colored` /
+    `indicatif` directly even though `mvm::ui` is only a re-export of
+    `mvm-backend::base::ui`. Replaced the `colored` calls with a tiny
+    terminal-aware ANSI helper inside `mvm-backend::base::ui`, keeping
+    color off for non-TTY output and preserving the existing spinner path
+    (`indicatif`). Result: `colored` drops out of `Cargo.lock`, the direct
+    `mvm` manifest no longer carries dead `colored` / `indicatif` edges,
+    and `mvm-hostd`'s `web_search` path no longer relies on reqwest's
+    optional `.query()` method (it now builds query URLs explicitly, which
+    keeps the lean reqwest feature set intact). Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend -p mvm-hostd`,
+    targeted `mvm-backend` UI tests, targeted `mvm-hostd` web-search tests,
+    and `cargo clippy -p mvm-cli -p mvm-backend -p mvm-hostd --lib --tests -- -D warnings`.
+    Final closeout is pending a less-restricted host run of
+    `cargo test -p mvm-cli --lib`; in this sandbox the remaining failures are
+    permission-denied test fixtures that bind local sockets / write under
+    `/var/tmp`, not compile or logic regressions from this slice.
+  - [x] **Slice 3 (2026-07-08):** unified `which` to the workspace's single
+    `which 7` version. Evidence: `cargo tree -p mvmctl -i which@6.0.3` showed
+    `mvm-build` as the lone remaining `which 6` root, and its call-sites only
+    use the stable `which::which(...)` API already used elsewhere in the
+    workspace. Swapped `crates/mvm-build/Cargo.toml` from `which = "6"` to
+    `which.workspace = true`, which drops `which 6` from `Cargo.lock` and
+    reduces the `mvmctl` normal-dependency closure count from 859 to 853.
+    Verified with `cargo fmt --check`, `cargo check -p mvm-build -p mvm-cli -p mvm-backend`,
+    `cargo clippy -p mvm-build -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`,
+    and closure remeasurement via `cargo tree`.
+  - [x] **Slice 4 (2026-07-08):** removed `indicatif` from the shared CLI/UI
+    path. Evidence: `cargo tree -p mvmctl -i indicatif` showed a single UI-only
+    root through `mvm-backend::base::ui` and the thin CLI wrapper; call-sites
+    only use a cloneable spinner with `set_message` and `finish_and_clear`.
+    Replaced it with a tiny in-house spinner handle in
+    `mvm-backend::base::ui`, updated the CLI wrapper to re-export that handle,
+    and swapped the dev-builder heartbeat type plumbing accordingly. Result:
+    `indicatif` drops out of `Cargo.lock`, along with its exclusive closure
+    pieces such as `console` and `unit-prefix`, and the `mvmctl`
+    normal-dependency closure count falls from 853 to 845. Verified with
+    `cargo fmt --check`, `cargo check -p mvm-cli -p mvm-backend`,
+    targeted `mvm-backend` UI tests, `cargo clippy -p mvm-cli -p mvm-backend --lib --tests -- -D warnings`,
+    and closure remeasurement via `cargo tree`.
 
 ### Scoping decisions to confirm before execution (front-loaded)
 
@@ -3580,7 +3650,7 @@ here so execution doesn't guess:
    (no back-compat obligation), so hard deletion is on the table; confirm the
    keep-list.
 4. **One sprint vs several** — P1/P2 are safe and fast; P3/P4 are larger. Likely
-   sequence P1 → P2 → P4 → P3 → P5 → P6.
+   sequence P1 → P7 → P2 → P4 → P3 → P5 → P6.
 
 ### Exit criteria
 
@@ -3590,8 +3660,10 @@ here so execution doesn't guess:
   `cargo clippy --workspace -- -D warnings` clean.
 - CLI verb count reduced with a snapshot test guarding it.
 - `mvmd` orchestrates a network of ≥2 mvm hosts via the facade (smoke test).
-- New CI ratchets live: crate-count budget, `cargo public-api` snapshots,
-  `cargo machete`.
+- Dependency count materially reduced from ~734 (target set in the scoping call);
+  barely-used deps reimplemented or replaced with a recorded rationale.
+- New CI ratchets live: crate-count budget, **dependency-count budget**,
+  `cargo public-api` snapshots, `cargo machete`, `cargo deny`.
 
 > **Does Plan 230 (this session's work) make this sprint harder? No — it is
 > Phase 0.** It supplies the decision rule (host/user/scaffolding), the

@@ -726,6 +726,7 @@ impl SearchProvider for GoogleSearchProvider {
         let response = self
             .client
             .get(request_url)
+            .get(request_url)
             .send()
             .await
             .map_err(|e| SearchError::Upstream(self.redact_credentials(e.to_string())))?;
@@ -1097,6 +1098,19 @@ mod tests {
     fn noop_provider_is_named_noop() {
         let p = NoopSearchProvider;
         assert_eq!(p.name(), "noop");
+    }
+
+    #[test]
+    fn endpoint_with_query_appends_and_encodes_params() {
+        let url = endpoint_with_query(
+            "https://example.test/search",
+            &[("q", "rust async"), ("count", "20")],
+        )
+        .expect("url");
+        assert_eq!(
+            url.as_str(),
+            "https://example.test/search?q=rust+async&count=20"
+        );
     }
 
     // ──────────────────────────────────────────────────────────────

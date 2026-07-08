@@ -116,7 +116,7 @@ pub(super) struct BuildHeartbeat {
     // `Some` on a TTY: an animated spinner whose message is refreshed with the
     // elapsed time. `None` when piped/redirected — there the text path emits a
     // periodic line instead (a spinner draws nothing off a terminal).
-    spinner: Option<indicatif::ProgressBar>,
+    spinner: Option<ui::Spinner>,
 }
 
 #[cfg(feature = "builder-vm")]
