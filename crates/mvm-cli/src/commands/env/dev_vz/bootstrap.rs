@@ -7,8 +7,8 @@ use super::kernel::{
 use super::stage0_cache::write_builder_vm_cache_sidecars;
 #[cfg(feature = "builder-vm")]
 use super::stage0_cache::{
-    STAGE0_FLAVOR_CURRENT, acquire_stage0_lock, promote_builder_vm_stage0_cache,
-    stage0_failure_reason_summary, stage0_fingerprint_prefix, unique_builder_vm_stage0_staging_dir,
+    acquire_stage0_lock, promote_builder_vm_stage0_cache, stage0_failure_reason_summary,
+    stage0_fingerprint_prefix, unique_builder_vm_stage0_staging_dir,
 };
 use super::stage0_cache::{
     builder_vm_source_cache_status, builder_vm_source_fingerprint,

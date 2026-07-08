@@ -95,7 +95,6 @@ pub(in crate::commands) use stage0_cache::{
 use stage0_cache::{
     acquire_stage0_lock, build_image_via_libkrun, builder_vm_source_cache_status,
     builder_vm_source_fingerprint, stage0_fingerprint_prefix, unique_builder_vm_stage0_staging_dir,
-    validate_builder_vm_stage0_artifacts,
 };
 #[cfg(test)]
 use stage0_cache::{
