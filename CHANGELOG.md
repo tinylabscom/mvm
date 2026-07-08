@@ -4,6 +4,16 @@ All notable changes to mvm are documented in this file.
 
 ## [0.17.0] — 2026-07-08
 
+### Removed
+- **backend**: Removed the Vz (Apple Virtualization.framework) backend — its
+  supervisor bin, builder, `vz_objc`/`vz_control`, `mvm_build::vz` +
+  Vz-only `host_gvproxy`, and the objc2/Virtualization dependency cluster.
+  HVF is the sole macOS workload backend, with libkrun as the fallback;
+  libkrun (+ gvproxy) and passt are untouched (Plan 226 R1P1). `--hypervisor vz`
+  / `--builder vz` are gone (fall through to auto-detect). `machine
+  checkpoint/fork` is temporarily unsupported on macOS pending HVF save/restore
+  (Plan 226 WS-E); the macOS-26 dev VM temporarily falls back to libkrun.
+
 ### ADR-082
 - Rust-native egress gateway replaces the vendored Go gateway (Proposed)
 

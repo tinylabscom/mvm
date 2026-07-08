@@ -11,7 +11,7 @@ macOS Host (this CLI) -> libkrun Linux VM -> Firecracker microVM (/dev/kvm)
 Linux Host (this CLI) -> Firecracker microVM (/dev/kvm)
 ```
 
-Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS 13-25 backend; HVF (the in-house Hypervisor.framework VMM, vsock-only) is the macOS 26+ Apple Silicon default, with Vz (Apple Virtualization.framework) as an opt-in, sunsetting alternative; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. Plan 177 Phase 2 folded the former in-process `apple_container` backend into the supervisor-model `vz` backend — there is one AVF code path now, and `--hypervisor apple-container` is gone (use `vz`).
+Lima was the historical macOS host abstraction. It was removed on 2026-05-14 (Plan 72 W0–W6 + Plan 75 W0). libkrun is the default macOS 13-25 backend; HVF (the in-house Hypervisor.framework VMM, vsock-only) is the macOS 26+ Apple Silicon default; Firecracker is the Linux KVM path. There is no `--lima` flag and no Lima fallback. The Apple Virtualization.framework (`vz`) backend was **removed** (Plan 226 R1P1) — HVF is the sole macOS workload backend, with libkrun as the fallback; there is no `--hypervisor vz` and no `apple-container` backend.
 
 ## Host dependencies (macOS)
 
@@ -61,21 +61,23 @@ The builder VM (the Linux guest that runs `nix build` inside `mvmctl build image
 
 - **hvf** — the HVF builder (Hypervisor.framework, no Homebrew deps). Default on macOS 26+ Apple Silicon. macOS-only.
 - **libkrun** — third-party in-process VMM via the `slp/krun/*` Homebrew trio. Default on Linux and macOS 13-25. Works everywhere mvm runs.
-- **Vz** — Apple Virtualization.framework. Deprecated; opt-in only via `--builder vz`. macOS-only.
+- **qemu** — QEMU/microvm_nix builder (Linux dev/test substrate). Opt-in only.
+
+(The Vz builder was removed in Plan 226 R1P1.)
 
 Selection priority (highest first):
 
-1. `--builder <libkrun|vz|qemu|hvf>` global CLI flag.
-2. `MVM_BUILDER_BACKEND=libkrun|vz|qemu|hvf` env var (case-insensitive, whitespace-trimmed; unrecognised values log a warning and fall through to auto-detect).
+1. `--builder <libkrun|qemu|hvf>` global CLI flag.
+2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf` env var (case-insensitive, whitespace-trimmed; unrecognised values — including the removed `vz` — log a warning and fall through to auto-detect).
 3. Auto-detect: macOS 26+ Apple Silicon → hvf; everywhere else → libkrun.
 
 `mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.
 
 **Auto-fallback (ADR-093).** When the *auto-detected* builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error — mvm transparently retries the next backend: hvf → libkrun on macOS 26+, libkrun → the QEMU/microvm_nix builder (Plan 166) on Linux. One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point. A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. The Linux auto-detect default is unchanged (libkrun-first).
 
-Vz is opt-in only via the flag/env override — auto-detect will not pick it. The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
+The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
 
-Persistent builder state dirs live under `~/.cache/mvm/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-vz-*` for Vz, `mvm-persistent-builder-hvf-*` for hvf). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
+Persistent builder state dirs live under `~/.cache/mvm/builder-vm/vms/`, distinguished by name prefix (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-hvf-*` for hvf). The Stage 0 reaper (Plan 99 PR-1) is prefix-agnostic so all backends participate in `mvmctl cache prune` without code changes.
 
 ## Architecture
 
@@ -86,15 +88,15 @@ Persistent builder state dirs live under `~/.cache/mvm/builder-vm/vms/`, disting
 - `mvm-core` -- types, IDs, config, protocol, signing, routing, crypto. Absorbs `plan` (typed signed `ExecutionPlan`), `policy` (incl. `policy::security` session-policy), and `crypto` (the former `mvm-security`: attestation/keystore/secret_store/snapshot crypto + opt-in cosign behind `manifest-verify`). **The default build has no async/runtime deps** (plan 126 B5): `tokio` is optional, pulled only by the off-by-default `hostd-transport` feature (the `protocol` hostd IPC transport that mvmd consumes via `mvmctl::core::protocol`) or `manifest-verify` (sigstore). `core::framing` moved to `mvm_hostd::framing` (plan 126 B5). The `xtask check-core-runtime-free` gate asserts `cargo tree -p mvm-core -e no-dev` carries no `tokio`.
 - `mvm-sdk` -- build-time SDK (decorator + runtime authoring) **and the `ir` module** (the canonical `Workload` IR, was `mvm-ir`). `mvm-sdk-macros` is the separate proc-macro crate.
 - `mvm-guest` -- vsock protocol, console, integrations, agent; `runner` module + `mvm-runner` `[[bin]]` (in-guest function entrypoint).
-- `mvm-build` -- Nix builder pipeline; also hosts `vz` (Swift-supervisor interface, was `mvm-vz`), `egress_proxy` (lib), and the builder-VM-only `[[bin]]`s `mvm-host-vm-init` + `mvm-egress-proxy` (cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
+- `mvm-build` -- Nix builder pipeline; also hosts `egress_proxy` (lib) and the builder-VM-only `[[bin]]`s `mvm-host-vm-init` + `mvm-egress-proxy` (cfg-gated Linux, cross-compiled + embedded by `mvm-cli/build.rs`).
 - `mvm` -- runtime: shell, VM lifecycle, UI, templates. Re-exports `shell`/`ui`/`shell_mock`/`cow`/`runtime_meta` from `mvm-backend::base` to preserve the mvmd `mvmctl::runtime::*` contract.
-- `mvm-backend` -- `VmBackend` trait + every backend impl + selection/dispatch; `base` (host substrate, was `mvm-base`), the Apple VZ objc2 interface (folded into `vz`, was the `mvm-providers` crate), `libkrun`/`vz`/`vz_control`/`firecracker`/`qemu`/`mock` dispatch.
+- `mvm-backend` -- `VmBackend` trait + every backend impl + selection/dispatch; `base` (host substrate, was `mvm-base`), `libkrun`/`hvf_backend`/`firecracker`/`qemu`/`mock` dispatch.
 - `crates/deps/libkrun-sys` -- the one true C FFI (bindgen + `-lkrun`, gated by the `libkrun-sys` feature) **plus the safe wrapper** (`KrunContext`/`SupervisorConfig`/gvproxy/passt); was `mvm-libkrun`. Lives low so `mvm-build` can consume the wrapper.
 - `mvm-hostd` -- host-side daemon roles: `supervisor` + `jailer` (libs) + `broker`/`host_signer`/`audit_signer` (libs + three subprocess `[[bin]]`s — the process moat). Was `mvm-supervisor`/`mvm-broker`/`mvm-host-signer`/`mvm-audit-signer`/`mvm-jailer-lite`.
-- `mvm-vm-host` -- per-VM supervisor host processes (one per guest): cfg-gated `[[bin]]`s `mvm-libkrun-supervisor` / `mvm-vz-supervisor` / `mvm-bridge` (the shared external-VMM gateway/audit sidecar for Firecracker + vz, folded from the former `mvm-firecracker-bridge` + `mvm-vz-drainer`); the lib carries the unified bridge config/passt-hash parsers.
+- `mvm-vm-host` -- per-VM supervisor host processes (one per guest): cfg-gated `[[bin]]`s `mvm-libkrun-supervisor` / `mvm-hvf-supervisor` / `mvm-bridge` (the shared external-VMM gateway/audit sidecar for Firecracker); the lib carries the unified bridge config/passt-hash parsers.
 - `mvm-guest-helpers` -- in-guest helper `[[bin]]`s `mvm-addon-dns` + `mvm-addon-vsock-bridge`, baked into the rootfs by mkGuest.
 - `mvm-cli` -- Clap CLI, bootstrap, update, doctor, template commands; `build.rs` embeds the host binaries.
-- `mvm-mcp`, `mvm-oci`, `mvm-storage` -- unchanged. `mvm-verify` -- wasm-clean audit-log verifier (ADR-069, zero `mvm-*` deps). `mvm-vz-supervisor` -- Swift (outside the cargo workspace). `xtask` -- tooling + claim-gate lints.
+- `mvm-mcp`, `mvm-oci`, `mvm-storage` -- unchanged. `mvm-verify` -- wasm-clean audit-log verifier (ADR-069, zero `mvm-*` deps). `xtask` -- tooling + claim-gate lints.
 
 Root package: `src/lib.rs` (facade re-exports `mvmctl::core`=mvm-core, `mvmctl::runtime`=mvm, `mvmctl::build`=mvm-build, `mvmctl::guest`=mvm-guest, `mvmctl::backend`=mvm-backend, `mvmctl::security`=`mvm_core::crypto`) + `src/main.rs` (thin CLI entry -> `mvm_cli::run()`)
 
@@ -106,9 +108,9 @@ Binary: `mvmctl` (from root, delegates to mvm-cli)
 
 mvm-core: `plan/` (ExecutionPlan, bundle, signing, validity), `policy/` (security, audit, network_policy, bundle/resolver/policies), `crypto/` (attestation, keystore, secret_store, snapshot_*), `protocol.rs`, `agent.rs`, `catalog.rs`, `dev_network.rs`, `config.rs` (XDG)
 
-mvm-backend: `base/` (shell, ui, linux_env, cow, runtime_meta, config — was mvm-base), `libkrun.rs`/`vz.rs`/`vz_control.rs`/`firecracker.rs`/`qemu.rs`/`mock.rs` (dispatch), `codesign.rs`, `artifacts/`
+mvm-backend: `base/` (shell, ui, linux_env, cow, runtime_meta, config — was mvm-base), `libkrun.rs`/`hvf_backend.rs`/`hvf/`/`firecracker.rs`/`qemu.rs`/`mock.rs` (dispatch), `codesign.rs`, `artifacts/`
 
-mvm-build: `pipeline/` (`build.rs` = `pool_build`, `dev_build.rs`), `vz/` (Swift-supervisor config), `egress_proxy/`, `src/bin/mvm-host-vm-init*` + `src/bin/mvm-egress-proxy.rs`, `nix/`
+mvm-build: `pipeline/` (`build.rs` = `pool_build`, `dev_build.rs`), `egress_proxy/`, `src/bin/mvm-host-vm-init*` + `src/bin/mvm-egress-proxy.rs`, `nix/`
 
 mvm-guest: `vsock.rs`, `console.rs`, `integrations.rs`, `builder_agent.rs`, `runner/`
 
@@ -143,7 +145,7 @@ The `RuntimeBuildEnv` in mvm implements only `ShellEnvironment`. The full `Build
 - **Dev mode**: `mvmctl dev` (or `mvmctl dev up`) auto-bootstraps then drops into a dev shell. On macOS 26+ Apple Silicon: boots a long-lived HVF builder VM with Nix + build tools via PTY-over-vsock console. On other macOS: libkrun builder VM. On Linux with KVM: Firecracker directly. `mvmctl dev down` stops it. `mvmctl dev shell` opens a shell. `mvmctl dev status` shows environment info. It does NOT start or SSH into a Firecracker microVM.
 - **Headless microVMs**: `mvmctl start` and `mvmctl run` boot Firecracker as a daemon. Interactive access via `mvmctl console` (PTY-over-vsock, dev-mode only).
 - **Dev mode isolation**: `mvmctl start/stop/dev` use a completely separate code path from orchestration.
-- **Shell scripts inside run_in_vm**: complex ops are bash scripts handed to the active `LinuxEnv` backend (libkrun / vz / Firecracker). Deliberate — they run inside the Linux VM, not on the macOS/Linux host.
+- **Shell scripts inside run_in_vm**: complex ops are bash scripts handed to the active `LinuxEnv` backend (libkrun / HVF / Firecracker). Deliberate — they run inside the Linux VM, not on the macOS/Linux host.
 - **Idempotent setup**: every step checks if already done before acting.
 - **Templates use dev_build path**: `mvmctl template build` runs `nix build` locally inside the builder VM (no ephemeral FC builder VMs).
 - **mvm-core stays whole**: orchestration types (tenant, pool, instance, agent, protocol) remain in mvm-core even though they're only used by mvmd. This avoids a third shared-types crate and keeps the facade dependency simple.
@@ -374,7 +376,7 @@ the source gap analysis is at
     in `.github/workflows/security.yml` (`scripts/check-prod-agent-no-console.sh`)
     asserts the console symbol is absent from a production agent build,
     sibling to `prod-agent-runentry-contract`. Serial-console passthrough
-    was considered and rejected (fatal on Vz's input-less console); there
+    was considered and rejected (fatal on an input-less console); there
     is exactly one interactive transport and it is dev-only.
 
 The guest agent itself runs as uid 901 under setpriv (W4.5); the

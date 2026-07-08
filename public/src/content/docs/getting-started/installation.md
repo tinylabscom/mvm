@@ -115,7 +115,7 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 | Platform | Backend | What happens |
 |----------|---------|-------------|
 | **Linux with `/dev/kvm`** | Firecracker | Runs directly on KVM. Smallest attack surface, fastest cold boot. |
-| **macOS 26+ Apple Silicon** | HVF | Hypervisor.framework, bundled with the OS; vsock-only. Vz is opt-in (`--hypervisor vz`, sunsetting). |
+| **macOS 26+ Apple Silicon** | HVF | Hypervisor.framework, bundled with the OS; vsock-only. libkrun is the fallback. |
 | **macOS 13–25 Apple Silicon** | libkrun | In-process VMM via the Homebrew `slp/krun` trio. |
 
 There is no Docker or container backend on the runtime path. A `qemu`
@@ -140,7 +140,6 @@ You can force a specific backend with `--hypervisor`:
 ```bash
 mvmctl machine run --flake . --hypervisor firecracker  # Linux KVM
 mvmctl machine run --flake . --hypervisor hvf          # macOS 26+ Apple Silicon (default)
-mvmctl machine run --flake . --hypervisor vz           # macOS 26+ opt-in (sunsetting)
 mvmctl machine run --flake . --hypervisor libkrun      # macOS 13–25 Apple Silicon
 mvmctl machine run --flake . --hypervisor qemu         # microvm.nix — dev/test only
 ```
