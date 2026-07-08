@@ -9,9 +9,9 @@
 //!
 //! ## Selection priority
 //!
-//! 1. **CLI flag** (`--builder <libkrun|vz|hvf|qemu>`, plumbed in by
+//! 1. **CLI flag** (`--builder <libkrun|hvf|qemu>`, plumbed in by
 //!    callers as a typed `Option<BuilderBackendChoice>`) — highest priority.
-//! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `vz` / `hvf` /
+//! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `hvf` /
 //!    `qemu`, case-insensitive, surrounding whitespace trimmed.
 //! 3. **Auto-detect** by host platform when neither override is set:
 //!    macOS 26+ Apple Silicon → HVF builder; everywhere else →
@@ -28,7 +28,6 @@ use crate::builder_health;
 use crate::builder_vm::{BuilderVm, BuilderVmError};
 use crate::libkrun_builder::LibkrunBuilderVm;
 use crate::qemu_builder::QemuBuilderVm;
-use crate::vz_builder::VzBuilderVm;
 use mvm_core::platform::{Platform, current};
 
 /// Constructor for the hvf builder, registered by the CLI (which can name
@@ -68,8 +67,6 @@ pub enum BuilderBackendChoice {
     /// libkrun-backed builder VM. Default when the env var is unset
     /// or holds a value we don't recognise.
     Libkrun,
-    /// Vz-backed builder VM. Opt-in via `MVM_BUILDER_BACKEND=vz`.
-    Vz,
     /// QEMU-backed builder VM (Linux dev/builder substrate). Opt-in via
     /// `MVM_BUILDER_BACKEND=qemu` / `--builder qemu`;
     /// auto-detect never picks it (the default-flip is evidence-gated).
@@ -85,7 +82,6 @@ impl BuilderBackendChoice {
     pub fn name(self) -> &'static str {
         match self {
             BuilderBackendChoice::Libkrun => "libkrun",
-            BuilderBackendChoice::Vz => "vz",
             BuilderBackendChoice::Qemu => "qemu",
             BuilderBackendChoice::Hvf => "hvf",
         }
@@ -130,7 +126,6 @@ pub fn resolve_env_override() -> Option<BuilderBackendChoice> {
     match trimmed.to_ascii_lowercase().as_str() {
         "" => None,
         "libkrun" => Some(BuilderBackendChoice::Libkrun),
-        "vz" => Some(BuilderBackendChoice::Vz),
         "qemu" => Some(BuilderBackendChoice::Qemu),
         "hvf" => Some(BuilderBackendChoice::Hvf),
         other => {
@@ -185,7 +180,6 @@ pub fn resolve_builder_backend_with_override(
 ) -> Box<dyn BuilderVm> {
     match resolve_choice_with_override(flag) {
         BuilderBackendChoice::Libkrun => Box::new(LibkrunBuilderVm::default()),
-        BuilderBackendChoice::Vz => Box::new(VzBuilderVm::new()),
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
         BuilderBackendChoice::Hvf => {
             // Delegate to the registered constructor; panic if not registered
@@ -208,7 +202,6 @@ pub fn try_resolve_builder_backend_with_override(
 ) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
     match resolve_choice_with_override(flag) {
         BuilderBackendChoice::Libkrun => Ok(Box::new(LibkrunBuilderVm::default())),
-        BuilderBackendChoice::Vz => Ok(Box::new(VzBuilderVm::new())),
         BuilderBackendChoice::Qemu => Ok(Box::new(QemuBuilderVm::new())),
         BuilderBackendChoice::Hvf => match HVF_CTOR.get() {
             Some(ctor) => ctor(),
@@ -222,7 +215,7 @@ pub fn try_resolve_builder_backend_with_override(
 
 /// Builder driver for the Stage 0 bootstrap.
 ///
-/// Stage 0 is implemented for libkrun and QEMU; hvf, Vz, and Firecracker
+/// Stage 0 is implemented for libkrun and QEMU; hvf and Firecracker
 /// Stage 0 are still fail-closed gaps. So this dispatch deliberately differs
 /// from [`resolve_builder_backend`]: an explicit `qemu` choice uses QEMU, but
 /// everything else — including the hvf auto-detect default on macOS-26+ —
@@ -236,9 +229,9 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
 
 /// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
 /// construct the next backend to try. QEMU when chosen; libkrun for everything
-/// else (hvf and Vz Stage 0 are gaps, and the "Stage 0 is libkrun even on
+/// else (hvf Stage 0 is a gap, and the "Stage 0 is libkrun even on
 /// hvf-default hosts" invariant holds — the Linux fallback order only ever
-/// yields libkrun→qemu, never hvf or Vz).
+/// yields libkrun→qemu, never hvf).
 pub fn resolve_stage0_backend_for_choice(
     choice: BuilderBackendChoice,
     verbose: bool,
@@ -280,15 +273,14 @@ fn is_linux_native_host() -> bool {
 ///
 /// - An **explicit** choice (CLI flag / `MVM_BUILDER_BACKEND`) is honoured with
 ///   no fallback — the operator asked for that backend specifically.
-/// - Auto-detected **Vz** falls back to **libkrun** (the long-standing macOS
-///   behaviour: Vz probe passes but the backend trips a runtime issue).
+/// - Auto-detected **hvf** falls back to **libkrun** on macOS.
 /// - Auto-detected **libkrun on Linux** falls back to **qemu** — libkrun-on-KVM
 ///   can fail at VM creation on hosts the qemu/microvm_nix builder handles fine.
 ///   When `libkrun_unhealthy` (a fresh per-host marker from a prior failed
 ///   attempt — see [`crate::builder_health`]) the doomed libkrun attempt is
 ///   skipped entirely and qemu is tried first, so a reliably-broken host
 ///   doesn't re-pay the failure on every build. The marker only reorders the
-///   Linux-libkrun auto path; explicit choices and the macOS Vz→libkrun path
+///   Linux-libkrun auto path; explicit choices and the macOS hvf→libkrun path
 ///   ignore it.
 pub fn builder_attempt_order(
     selected: BuilderBackendChoice,
@@ -300,7 +292,6 @@ pub fn builder_attempt_order(
         return vec![selected];
     }
     match selected {
-        BuilderBackendChoice::Vz => vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun],
         BuilderBackendChoice::Hvf => {
             vec![BuilderBackendChoice::Hvf, BuilderBackendChoice::Libkrun]
         }
@@ -570,27 +561,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_env_override_vz_lowercase() {
-        with_env(Some("vz"), || {
-            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::Vz));
-        });
-    }
-
-    #[test]
-    fn resolve_env_override_vz_uppercase() {
-        // Case-insensitive matters because operators set this in
-        // shell rc files and the convention varies. `Vz` is the
-        // crate name; `VZ` is the entitlement string. Both should
-        // work.
-        with_env(Some("VZ"), || {
-            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::Vz));
-        });
-    }
-
-    #[test]
     fn resolve_env_override_strips_whitespace() {
-        with_env(Some("  vz  "), || {
-            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::Vz));
+        with_env(Some("  libkrun  "), || {
+            assert_eq!(resolve_env_override(), Some(BuilderBackendChoice::Libkrun));
         });
     }
 
@@ -603,12 +576,21 @@ mod tests {
         });
     }
 
+    #[test]
+    fn resolve_env_override_vz_is_unrecognised() {
+        // The Vz builder was removed; `vz` is no longer a valid choice and
+        // falls through to auto-detect like any unrecognised value.
+        with_env(Some("vz"), || {
+            assert_eq!(resolve_env_override(), None);
+        });
+    }
+
     // ── Priority: flag > env > auto-detect ──
 
     #[test]
     fn override_flag_beats_env_var() {
-        // Flag says libkrun, env says vz → flag wins.
-        with_env(Some("vz"), || {
+        // Flag says libkrun, env says qemu → flag wins.
+        with_env(Some("qemu"), || {
             assert_eq!(
                 resolve_choice_with_override(Some(BuilderBackendChoice::Libkrun)),
                 BuilderBackendChoice::Libkrun,
@@ -621,8 +603,8 @@ mod tests {
         // No env, flag explicit → flag wins regardless of host.
         with_env(None, || {
             assert_eq!(
-                resolve_choice_with_override(Some(BuilderBackendChoice::Vz)),
-                BuilderBackendChoice::Vz,
+                resolve_choice_with_override(Some(BuilderBackendChoice::Qemu)),
+                BuilderBackendChoice::Qemu,
             );
             assert_eq!(
                 resolve_choice_with_override(Some(BuilderBackendChoice::Libkrun)),
@@ -633,8 +615,11 @@ mod tests {
 
     #[test]
     fn env_var_beats_auto_detect_when_no_flag() {
-        with_env(Some("vz"), || {
-            assert_eq!(resolve_choice_with_override(None), BuilderBackendChoice::Vz,);
+        with_env(Some("qemu"), || {
+            assert_eq!(
+                resolve_choice_with_override(None),
+                BuilderBackendChoice::Qemu,
+            );
         });
         with_env(Some("libkrun"), || {
             assert_eq!(
@@ -660,7 +645,20 @@ mod tests {
     #[test]
     fn backend_choice_name_round_trips() {
         assert_eq!(BuilderBackendChoice::Libkrun.name(), "libkrun");
-        assert_eq!(BuilderBackendChoice::Vz.name(), "vz");
+        assert_eq!(BuilderBackendChoice::Qemu.name(), "qemu");
+    }
+
+    /// Compile-time + behaviour guard: the Vz builder choice is gone; every
+    /// remaining choice round-trips through `name()` without yielding "vz".
+    #[test]
+    fn builder_backend_choice_has_no_vz_variant() {
+        for c in [
+            BuilderBackendChoice::Libkrun,
+            BuilderBackendChoice::Qemu,
+            BuilderBackendChoice::Hvf,
+        ] {
+            assert_ne!(c.name(), "vz");
+        }
     }
 
     #[test]
@@ -671,7 +669,7 @@ mod tests {
         with_env(Some("libkrun"), || {
             let _backend = resolve_builder_backend();
         });
-        with_env(Some("vz"), || {
+        with_env(Some("qemu"), || {
             let _backend = resolve_builder_backend();
         });
     }
@@ -756,19 +754,19 @@ mod tests {
     }
 
     #[test]
-    fn attempt_order_preserves_vz_to_libkrun_and_explicit_qemu() {
+    fn attempt_order_preserves_hvf_to_libkrun_and_explicit_qemu() {
         use BuilderBackendChoice::*;
-        // Existing macOS behaviour unchanged (and the libkrun marker never
-        // reorders the Vz→libkrun auto path).
+        // macOS auto-detect: hvf → libkrun (the libkrun marker never reorders
+        // this macOS path).
         assert_eq!(
-            builder_attempt_order(Vz, false, false, false),
-            vec![Vz, Libkrun]
+            builder_attempt_order(Hvf, false, false, false),
+            vec![Hvf, Libkrun]
         );
         assert_eq!(
-            builder_attempt_order(Vz, false, false, true),
-            vec![Vz, Libkrun]
+            builder_attempt_order(Hvf, false, false, true),
+            vec![Hvf, Libkrun]
         );
-        assert_eq!(builder_attempt_order(Vz, true, false, false), vec![Vz]);
+        assert_eq!(builder_attempt_order(Hvf, true, false, false), vec![Hvf]);
         // Explicit qemu is a single attempt.
         assert_eq!(builder_attempt_order(Qemu, false, true, false), vec![Qemu]);
     }

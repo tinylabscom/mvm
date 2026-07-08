@@ -343,13 +343,12 @@ fn builder_egress_check_from_outcome(outcome: mvm_build::guest_net::BuilderNetBo
 /// (DHCP lease / static fallback / failure) so the failure class is
 /// diagnosable without reading the guest console by hand.
 ///
-/// Reads the persistent dev builder VM's host-side `console.log`. Only the
-/// Vz dev VM (the macOS-26 default) has a stable, predictable console-log
-/// path under a fixed session id; the libkrun persistent path keys off an
-/// opaque per-run job id, so there is no analogous fixed helper to probe.
+/// Reads the libkrun dev VM's host-side `console.log` at the fixed
+/// `mvm-dev` state dir. When the VM hasn't booted yet the file is absent and
+/// the check reports that cleanly.
 #[cfg(feature = "builder-vm")]
 fn builder_egress_check() -> Check {
-    let log_path = mvm_build::vz_builder::dev_builder_vz_console_log();
+    let log_path = mvm_core::config::vm_state_dir("mvm-dev").join("console.log");
     let Ok(contents) = std::fs::read_to_string(&log_path) else {
         return Check {
             name: "builder egress",
@@ -362,9 +361,8 @@ fn builder_egress_check() -> Check {
     builder_egress_check_from_outcome(outcome)
 }
 
-/// Stub when the `builder-vm` feature is off — the Vz console-log helper
-/// is feature-gated, and a CLI built without builder support never boots
-/// a builder VM.
+/// Stub when the `builder-vm` feature is off — a CLI built without builder
+/// support never boots a builder VM.
 #[cfg(not(feature = "builder-vm"))]
 fn builder_egress_check() -> Check {
     Check {
@@ -1625,13 +1623,6 @@ fn builder_backend_check(plat: Platform) -> Check {
                 format!("libkrun NOT available ({})", libkrun_sys::install_hint())
             }
         }
-        BuilderBackendChoice::Vz => {
-            if plat.has_vz() {
-                "Vz available".to_string()
-            } else {
-                "Vz NOT available (requires macOS 13+)".to_string()
-            }
-        }
         BuilderBackendChoice::Qemu => {
             // Linux dev/builder backend. KVM-accelerated
             // where /dev/kvm is present, TCG fallback otherwise.
@@ -1731,15 +1722,12 @@ fn builder_residency_check() -> Check {
     }
 }
 
+/// The persistent-builder snapshot/park mechanism belonged to the removed Vz
+/// builder; the libkrun builder has no memory snapshot, so no builder VM
+/// carries a resumable snapshot today.
 #[cfg(feature = "builder-vm")]
-fn builder_vz_snapshot_present(vms_root: &std::path::Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(vms_root) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let dir = entry.path();
-        dir.is_dir() && mvm_build::vz_builder::builder_snapshot_path(&dir).is_file()
-    })
+fn builder_vz_snapshot_present(_vms_root: &std::path::Path) -> bool {
+    false
 }
 
 #[cfg(feature = "builder-vm")]
@@ -2851,10 +2839,10 @@ mod tests {
         use mvm_core::util::test_env::TestEnv;
         let scratch = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path());
+        env.set("MVM_DATA_DIR", scratch.path());
         // Materialize a fixture console.log at the exact path the helper
         // resolves, then assert the lease is read end-to-end.
-        let log = mvm_build::vz_builder::dev_builder_vz_console_log();
+        let log = mvm_core::config::vm_state_dir("mvm-dev").join("console.log");
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(
             &log,
@@ -3930,7 +3918,7 @@ mod tests {
     fn builder_backend_check_linux_honors_env_override() {
         let prev = std::env::var_os("MVM_BUILDER_BACKEND");
         unsafe {
-            std::env::set_var("MVM_BUILDER_BACKEND", "vz");
+            std::env::set_var("MVM_BUILDER_BACKEND", "qemu");
         }
 
         let c = builder_backend_check(Platform::LinuxNative);
@@ -3946,8 +3934,8 @@ mod tests {
         // Env override flips the resolved backend even when
         // `auto_detect_default()` would have picked libkrun.
         assert!(
-            c.info.starts_with("vz — "),
-            "expected vz-resolved line under env override; got: {}",
+            c.info.starts_with("qemu — "),
+            "expected qemu-resolved line under env override; got: {}",
             c.info
         );
         assert!(
@@ -3955,10 +3943,9 @@ mod tests {
             "expected `override via` source label; got: {}",
             c.info
         );
-        // On Linux Vz is never available; line must communicate that.
         assert!(
-            c.info.contains("Vz NOT available"),
-            "expected `Vz NOT available` segment on Linux; got: {}",
+            c.info.contains("QEMU available") || c.info.contains("QEMU NOT available"),
+            "expected per-VMM availability segment; got: {}",
             c.info
         );
     }
@@ -4209,22 +4196,6 @@ mod tests {
             "info was {:?}",
             c.info
         );
-    }
-
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn builder_vz_snapshot_present_detects_state_vzsave_under_vms_root() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(!builder_vz_snapshot_present(root.path()));
-        let vm_dir = root.path().join("mvm-persistent-builder-vz-dev");
-        std::fs::create_dir_all(&vm_dir).unwrap();
-        assert!(!builder_vz_snapshot_present(root.path()));
-        std::fs::write(
-            mvm_build::vz_builder::builder_snapshot_path(&vm_dir),
-            b"snapshot",
-        )
-        .unwrap();
-        assert!(builder_vz_snapshot_present(root.path()));
     }
 
     #[cfg(feature = "builder-vm")]

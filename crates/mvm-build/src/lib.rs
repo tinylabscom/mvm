@@ -103,14 +103,6 @@ pub mod guest_net;
 
 pub mod qemu_builder;
 
-/// Vz-backed builder VM (gated by `builder-vm` for symmetry with
-/// `libkrun_builder`). Implements the second
-/// [`builder_vm::VmBackendForBuilder`] impl alongside
-/// `LibkrunBuilderBackend`; both feed the same hypervisor-agnostic
-/// `BuilderVmRuntime` orchestration on top.
-#[cfg(feature = "builder-vm")]
-pub mod vz_builder;
-
 /// Builder-runtime selection. `MVM_BUILDER_BACKEND` picks between
 /// `libkrun` (default) and `vz`; the caller receives a
 /// `Box<dyn BuilderVm>` so the dispatch site doesn't depend on which

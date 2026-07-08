@@ -5329,18 +5329,18 @@ mod builder_backend_attempt_order_tests {
     use mvm_build::builder_backend_select::BuilderBackendChoice;
 
     #[test]
-    fn auto_selected_vz_retries_with_libkrun() {
+    fn auto_selected_hvf_retries_with_libkrun() {
         assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Vz, false),
-            vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun]
+            builder_backend_attempt_order(BuilderBackendChoice::Hvf, false),
+            vec![BuilderBackendChoice::Hvf, BuilderBackendChoice::Libkrun]
         );
     }
 
     #[test]
-    fn explicit_vz_override_does_not_fallback() {
+    fn explicit_hvf_override_does_not_fallback() {
         assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Vz, true),
-            vec![BuilderBackendChoice::Vz]
+            builder_backend_attempt_order(BuilderBackendChoice::Hvf, true),
+            vec![BuilderBackendChoice::Hvf]
         );
     }
 
