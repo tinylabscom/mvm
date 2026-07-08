@@ -1,6 +1,6 @@
 # Plan 234 — Transparent networking over vsock
 
-**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, packaged guest bridge binary, dependency-light host authority core, host runner/connector/policy-adapter substrate, host authority process contract, backend host authority spawn, and backend port-5254 relay landed.
+**Status:** In progress — `mvm-net` protocol contract, guest bridge planning, Linux guest executor, packet translation foundation, dependency-light guest pump seam, TCP response synthesis, bounded pump loop substrate, concrete TUN/wire adapters, Linux guest runner, packaged guest bridge binary, dependency-light host authority core, host runner/connector/policy-adapter substrate, host authority process contract, backend host authority spawn, backend port-5254 relay, and the gated live CLI smoke harness landed.
 
 **Owner directive:** workload networking remains a vsock-mediated capability. The guest gets normal application-visible networking behavior, but the host remains the only authority that opens real network sockets, performs DNS, terminates TLS for secret-bearing flows, applies egress policy, records audit, and emits attestable evidence.
 
@@ -68,8 +68,10 @@
       Add a `guest,host` feature test that drives raw guest DNS and TCP packets through `GuestBridgePump`, a real `HostAuthority`, and a recording TCP connector, proving synthetic DNS allocation, guest TCP open mapping back to the DNS name, SYN-ACK synthesis, and guest-to-host TCP data forwarding without booting a VM.
 - [x] **B2b2b2e — Bound host authority stop/reap behavior.**
       Make `reap_mvm_net_authority` terminate the recorded `mvm-host-netd` pid with SIGTERM, wait for exit, escalate to SIGKILL on timeout, reap child zombies when possible, and remove pid/socket state; cover a SIGTERM-ignoring stub process in unit tests.
+- [x] **B2b2b2f — Add the gated live CLI DNS/TCP smoke harness.**
+      Add `crates/mvm-cli/tests/transparent_net_e2e.rs` plus `just e2e-transparent-net` so an operator can build the current `mvmctl`, HVF supervisor, and `mvm-host-netd`, then boot `machine run --image ... --allow-host ...` and prove ordinary in-guest DNS plus TCP reaches `example.com:80` through `mvm-guest-netd` and `mvm-host-netd`. The test is skipped unless `MVM_TRANSPARENT_NET_SMOKE=1`; it uses a hard watchdog, per-step process-group kill, stable scratch logs under `/tmp`, target-dir helper pinning, and a best-effort bounded `machine stop` cleanup. Validation: `cargo fmt --all`; `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli --test transparent_net_e2e -- --test-threads=1` (3 tests). The live smoke itself remains unrun in this host turn because it boots a microVM and the non-bypass embed build requires Zig 0.13.0.
 - [ ] **B2b2b2 — Connect the guest bridge to the backend authority stream.**
-      Add a live microVM DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd`.
+      Run the gated live microVM DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd` in the approved microVM environment and fix any failures it exposes.
 - [ ] **C1 — Add DNS plus TCP MVP.**
       Support A/AAAA DNS answers, synthetic IP mapping, TCP connect/data/close, allow-host default port handling, denied-host failure behavior, and bounded backpressure.
 - [ ] **C2 — Add mandatory TLS transform for secret-bearing flows.**

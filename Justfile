@@ -149,6 +149,14 @@ test-ci:
 test-cargo:
     cargo test --workspace
 
+# Run the transparent vsock-networking live smoke. Gated because it boots a
+# workload microVM and reaches the public internet through the host authority.
+e2e-transparent-net:
+    cargo build --bin mvmctl
+    cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
+    cargo build -p mvm-net --bin mvm-host-netd --features host-netd
+    MVM_TRANSPARENT_NET_SMOKE=1 cargo test -p mvm-cli --test transparent_net_e2e -- --nocapture
+
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
 # a targeted rebuild or CI.

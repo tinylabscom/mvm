@@ -42,7 +42,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 | Port | Protocol | Purpose |
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
-| 5254 | `mvm-net` frames | Transparent networking authority stream (backend relay wired; guest auto-launch pending) |
+| 5254 | `mvm-net` frames | Transparent networking authority stream between `mvm-guest-netd` and `mvm-host-netd` |
 
 The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, and microvm.nix backends.
 
@@ -126,26 +126,27 @@ loads explicit JSON policy/pin config, runs length-prefixed `mvm-net` frames ove
 stdio or a private per-VM Unix socket (`--listen-uds`), and emits structured JSON
 audit lines.
 
-Backend integration has started: the workload-runner path can spawn and reap
-`mvm-host-netd`, write its admitted policy/DNS-pin config, and capture its audit
-JSONL under the VM state directory. The in-house HVF path now also threads a
-dedicated `transparent_net_socket` into the supervisor and relays guest vsock
-port `5254` byte-for-byte to that authority, failing closed when the authority
-is absent. OCI image injection now includes `mvm-guest-netd` with the guest
-agent and netinit, and the injected PID 1 starts it only when the HVF boot path
-adds `mvm.netd=1` because a transparent-network authority socket is present. If
-that token is present but netd is missing or exits during startup, PID 1 refuses
-to start the guest agent instead of silently running the workload without the
-requested network path. The first in-process acceptance harness now drives raw
-guest DNS and TCP packets through `GuestBridgePump`, a real `HostAuthority`, and
-a recording TCP connector. Host-side stop now reaps the recorded
-`mvm-host-netd` process with bounded SIGTERM-to-SIGKILL cleanup and removes the
-authority pid/socket state.
+Backend integration is wired for the HVF workload path: the workload runner
+spawns and reaps `mvm-host-netd`, writes its admitted policy/DNS-pin config, and
+captures its audit JSONL under the VM state directory. The supervisor receives a
+dedicated `transparent_net_socket` and relays guest vsock port `5254`
+byte-for-byte to that authority, failing closed when the authority is absent.
+OCI image injection includes `mvm-guest-netd` with the guest agent and netinit,
+and the injected PID 1 starts it only when the boot path adds `mvm.netd=1`
+because a transparent-network authority socket is present. If that token is
+present but netd is missing or exits during startup, PID 1 refuses to start the
+guest agent instead of silently running the workload without the requested
+network path. The first in-process acceptance harness now drives raw guest DNS
+and TCP packets through `GuestBridgePump`, a real `HostAuthority`, and a
+recording TCP connector. Host-side stop now reaps the recorded `mvm-host-netd`
+process with bounded SIGTERM-to-SIGKILL cleanup and removes the authority
+pid/socket state.
 
-This is not end-to-end supported `mvmctl machine run` networking yet. The
-remaining work is live microVM DNS/TCP proof through `mvm-guest-netd` and
-`mvm-host-netd`; until that lands, ordinary tools in the VM still must not rely
-on transparent networking on the default HVF path.
+This is not end-to-end supported `mvmctl machine run` networking yet. A gated
+operator smoke exists as `just e2e-transparent-net`; it boots a live VM and
+probes ordinary DNS plus HTTP over `--allow-host example.com:80`. Until that
+live proof is green in the approved microVM environment, ordinary tools in the
+VM still must not rely on transparent networking on the default HVF path.
 
 ## Security Profiles
 
