@@ -1,3 +1,4 @@
+#[cfg(any(feature = "builder-vm", test))]
 use super::*;
 
 /// Which custom kernel `mvmctl kernel build` realizes. Each maps to a

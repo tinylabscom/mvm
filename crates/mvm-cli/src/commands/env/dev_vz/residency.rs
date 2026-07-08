@@ -1,3 +1,4 @@
+#[cfg(any(feature = "builder-vm", test))]
 use super::*;
 
 #[cfg(feature = "builder-vm")]

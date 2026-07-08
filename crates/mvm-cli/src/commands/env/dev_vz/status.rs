@@ -1,3 +1,7 @@
+use super::stage0_cache::{
+    builder_vm_source_cache_status, builder_vm_source_fingerprint,
+    validate_builder_vm_stage0_artifacts,
+};
 use super::*;
 
 #[derive(Debug, Serialize, PartialEq, Eq)]

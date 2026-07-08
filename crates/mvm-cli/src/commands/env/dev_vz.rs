@@ -34,16 +34,15 @@ use super::artifact_verify::{
     bump_verify_outcome, download_file, fetch_expected_hashes, url_exists, verify_artifact_hash,
 };
 use crate::ui;
+use base::read_dev_base_provenance;
 #[cfg(test)]
 use base::{
     DevBaseProvenance, ResolvedDevBaseImage, dev_base_artifacts_from_revision_dir,
     dev_base_provenance_path,
 };
 pub(super) use base::{DevBaseRef, DevBaseStatusJson};
-use base::{
-    read_dev_base_provenance, remove_dev_base_provenance, resolve_dev_base_image,
-    write_dev_base_provenance,
-};
+#[cfg(any(feature = "builder-vm", test))]
+use base::{remove_dev_base_provenance, resolve_dev_base_image, write_dev_base_provenance};
 #[cfg(all(test, feature = "builder-vm"))]
 use bootstrap::BuildHeartbeat;
 pub(in crate::commands) use bootstrap::bootstrap_builder_vm_image;
@@ -77,11 +76,14 @@ use kernel::format_compile_elapsed;
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 #[cfg(feature = "builder-vm")]
 use residency::VzDevResidencyDecision;
+use residency::dev_vz_snapshot_exists;
+#[cfg(feature = "builder-vm")]
 pub(in crate::commands) use residency::touch_dev_vz_activity_now;
 #[cfg(all(test, feature = "builder-vm"))]
 use residency::{decide_vz_dev_residency, read_dev_vz_last_activity, touch_dev_vz_activity_at};
+#[cfg(feature = "builder-vm")]
 use residency::{
-    dev_vz_snapshot_exists, enforce_dev_vz_cold_policy_on_entry, enforce_dev_vz_residency_policy,
+    enforce_dev_vz_cold_policy_on_entry, enforce_dev_vz_residency_policy,
     remove_dev_vz_snapshot_markers, should_park, should_resume, wait_for_dev_vm_ready,
 };
 #[cfg(feature = "builder-vm")]
@@ -109,14 +111,22 @@ pub(in crate::commands) use status::{
 #[cfg(test)]
 use status::{builder_vm_cache_status_summary, dev_image_cache_summary};
 use status::{resolve_builder_vm_cache_status_summary, resolve_dev_cache_inspect_summary};
-#[cfg(feature = "builder-vm")]
-pub(in crate::commands) use vm_helpers::reap_orphaned_vm_helpers;
 pub(in crate::commands) use vm_helpers::sweep_orphaned_vm_helpers_on_startup;
 #[cfg(test)]
 use vm_helpers::{
     BUILDER_SIDECARS, ProcSnapshot, WORKLOAD_SIDECARS, pid_is_alive, reap_orphaned_vm_helpers_at,
     reap_orphaned_vm_helpers_at_with_snapshot,
 };
+
+#[cfg(feature = "builder-vm")]
+pub(in crate::commands) use vm_helpers::reap_orphaned_vm_helpers;
+
+#[cfg(not(feature = "builder-vm"))]
+pub(in crate::commands) fn reap_orphaned_vm_helpers(
+    _dry_run: bool,
+) -> Result<vm_helpers::ReapOutcome> {
+    anyhow::bail!("builder helper reaping requires the `builder-vm` cargo feature")
+}
 
 // ============================================================================
 // Dev environment (Vz supervisor)

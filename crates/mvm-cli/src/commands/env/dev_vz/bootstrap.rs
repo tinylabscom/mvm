@@ -5,8 +5,15 @@ use super::kernel::{
 };
 #[cfg(feature = "builder-vm")]
 use super::stage0_cache::write_builder_vm_cache_sidecars;
-#[cfg(any(feature = "builder-vm", test))]
-use super::stage0_cache::{promote_builder_vm_stage0_cache, stage0_failure_reason_summary};
+#[cfg(feature = "builder-vm")]
+use super::stage0_cache::{
+    STAGE0_FLAVOR_CURRENT, acquire_stage0_lock, promote_builder_vm_stage0_cache,
+    stage0_failure_reason_summary, stage0_fingerprint_prefix, unique_builder_vm_stage0_staging_dir,
+};
+use super::stage0_cache::{
+    builder_vm_source_cache_status, builder_vm_source_fingerprint,
+    validate_builder_vm_stage0_artifacts,
+};
 use super::*;
 
 pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
@@ -689,6 +696,7 @@ pub(in crate::commands) mod attested_builder_pack {
         Ok(())
     }
 }
+#[cfg(feature = "builder-vm")]
 fn bootstrap_builder_vm_image_via_root_dir_stage0(
     builder_flake_dir: &str,
     out_dir: &str,
@@ -852,6 +860,7 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
 /// clean exit, write the cache-validation sidecars next to the
 /// emitted artifacts so the outer caller can promote them into the
 /// per-arch builder VM cache.
+#[cfg(feature = "builder-vm")]
 #[cfg(feature = "builder-vm")]
 fn run_stage0_root_dir(
     staging_dir: &std::path::Path,
