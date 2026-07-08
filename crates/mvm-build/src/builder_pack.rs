@@ -153,7 +153,7 @@ pub struct KeylessBuilderPack {
 }
 
 /// Keyless counterpart to [`build_builder_pack`]: same artifact layout and typed
-/// output hashes, but the manifest is assembled via `PackBuilder::build_sigstore`
+/// output hashes, but the manifest is assembled via `PackBuilder::new_keyless`
 /// (no ed25519 key, no in-manifest signature) and the file written to
 /// `out_dir/manifest.json` is `manifest.canonical_bytes()` verbatim — the exact
 /// bytes a release pipeline signs out of band and a keyless verifier re-derives
@@ -173,14 +173,14 @@ pub fn build_keyless_builder_pack(
     let kernel_hash = sha256_file(&kernel_dest)?;
     let builder_image_hash = sha256_file(&rootfs_dest)?;
 
-    let manifest = PackBuilder::new_keyless(out_dir, builder_metadata(params))
+    let manifest = PackBuilder::new_keyless(out_dir, builder_metadata(params), identity)
         .files([KERNEL_FILE, ROOTFS_FILE])
         .output_hashes(PackOutputHashes {
             kernel_hash: Some(kernel_hash),
             builder_image_hash: Some(builder_image_hash),
             ..Default::default()
         })
-        .build_sigstore(identity)?;
+        .build()?;
 
     // Not pretty-printed: this file's bytes are exactly what gets signed, so it
     // must match `manifest.canonical_bytes()` byte-for-byte rather than a

@@ -256,6 +256,16 @@ jobs:
     # Skipped on a dry-run dispatch — Nix image builds are slow and unchanged by
     # the binary-packaging path a dry-run validates. Runs on tag push / dry_run=false.
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    # This job mints a keyless (OIDC/Fulcio) signature over the attested
+    # builder pack manifest, and the resulting certificate's SAN is derived
+    # from the workflow ref that ran it. Gating the job on a protected
+    # environment means the ref that can produce a valid signing identity is
+    # constrained by the environment's deployment branch/tag rule (restricted
+    # to version tags in repo settings), with an optional required-reviewer
+    # gate on top of the tag-push trigger already enforced above — so the
+    # identity a released binary trusts can't be minted from an arbitrary
+    # branch or workflow_dispatch run.
+    environment: release-signing
     strategy:
       matrix:
         include:
@@ -339,12 +349,17 @@ jobs:
           fi
           IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${REF}"
           REVOCATION_CHANNEL="https://github.com/${REPOSITORY}/releases/download/revocations/builder-vm-revocations.json"
+          # The published location of the SBOM this release ships, so the
+          # manifest's SBOM reference points at a real download instead of a
+          # path that only exists on the runner that built it.
+          SBOM_URI="https://github.com/${REPOSITORY}/releases/download/${REF#refs/tags/}/builder-vm-${ARCH}.sbom.txt"
           cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
             --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
             --arch "$ARCH" --channel stable --keyless \
             --identity "$IDENTITY" \
             --out-dir staging \
             --sbom "staging/builder-vm-${ARCH}.sbom.txt" \
+            --sbom-uri "$SBOM_URI" \
             --revocation-channel "$REVOCATION_CHANNEL"
           mv staging/manifest.json "staging/builder-vm-${ARCH}.pack-manifest.json"
 

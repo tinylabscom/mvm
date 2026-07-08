@@ -16,7 +16,7 @@
 //!   --channel <name> --signing-key <hex-file> --out-dir <dir> \
 //!   --sbom <path> --revocation-channel <url> \
 //!   [--builder-identity <s>] [--build-env <s>] \
-//!   [--valid-days <n>] [--mirror-identity <s>]
+//!   [--valid-days <n>] [--mirror-identity <s>] [--sbom-uri <url>]
 //!
 //! # keyless: writes an unsigned Sigstore-authority manifest; a release
 //! # pipeline signs it out of band with `cosign sign-blob`.
@@ -25,7 +25,7 @@
 //!   --channel <name> --keyless --identity <SAN> --out-dir <dir> \
 //!   --sbom <path> --revocation-channel <url> \
 //!   [--builder-identity <s>] [--build-env <s>] \
-//!   [--valid-days <n>] [--mirror-identity <s>]
+//!   [--valid-days <n>] [--mirror-identity <s>] [--sbom-uri <url>]
 //! ```
 //!
 //! `--signing-key` names a file holding the 32-byte Ed25519 secret key as 64
@@ -34,7 +34,11 @@
 //! manifest's `trust.signing_key_id` is derived from; required with
 //! `--keyless`, otherwise ignored. `--sbom` names the SBOM file enumerating
 //! the pack's contents; its bytes are hashed into the manifest's SBOM
-//! reference.
+//! reference. `--sbom-uri` optionally overrides the SBOM reference's `uri`
+//! field with a real published location (e.g. a release download URL); the
+//! sha256 is always computed from the local `--sbom` file regardless. Without
+//! it, the `uri` falls back to a `file://` path of the local SBOM file, which
+//! is only meaningful on the machine that produced the pack.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -77,13 +81,18 @@ fn usage() {
          \x20 --sbom <path> --revocation-channel <url> \\\n\
          \x20 (--signing-key <hex-file> | --keyless --identity <SAN>) \\\n\
          \x20 [--builder-identity <s>] [--build-env <s>] \\\n\
-         \x20 [--valid-days <n>] [--mirror-identity <s>]"
+         \x20 [--valid-days <n>] [--mirror-identity <s>] [--sbom-uri <url>]\n\
+         \n\
+         --sbom-uri overrides the manifest's SBOM reference uri with a \
+         published location (e.g. a release download URL) instead of the \
+         default file:// path of the local --sbom file; the sha256 is \
+         always computed from the local file."
     );
 }
 
 fn run(rest: &[String]) -> Result<(), String> {
     let parsed = parse_args(rest)?;
-    let sbom = sbom_reference(&parsed.sbom)?;
+    let sbom = sbom_reference(&parsed.sbom, parsed.sbom_uri.as_deref())?;
 
     // The producers are pure; this wrapper owns the single wall-clock read.
     let now = Utc::now();
@@ -150,6 +159,7 @@ struct ParsedArgs {
     identity: Option<String>,
     out_dir: PathBuf,
     sbom: PathBuf,
+    sbom_uri: Option<String>,
     revocation_channel: String,
     builder_identity: String,
     build_environment_identity: String,
@@ -181,6 +191,7 @@ fn parse_args(rest: &[String]) -> Result<ParsedArgs, String> {
         identity,
         out_dir: PathBuf::from(required(rest, "out-dir")?),
         sbom: PathBuf::from(required(rest, "sbom")?),
+        sbom_uri: optional(rest, "sbom-uri").map(str::to_string),
         revocation_channel: required(rest, "revocation-channel")?.to_string(),
         builder_identity: optional(rest, "builder-identity")
             .unwrap_or("mvm-builder-pack-tool")
@@ -234,13 +245,18 @@ fn load_signing_key(path: &Path) -> Result<SigningKey, String> {
 }
 
 /// Build the manifest's SBOM reference from the SBOM file: hash its bytes and
-/// point the uri at the file.
-fn sbom_reference(path: &Path) -> Result<SbomReference, String> {
+/// point the uri at `uri_override` when given, or at the local file otherwise.
+/// The sha256 always comes from hashing `path`, regardless of `uri_override`.
+fn sbom_reference(path: &Path, uri_override: Option<&str>) -> Result<SbomReference, String> {
     use sha2::{Digest, Sha256};
     let bytes = fs::read(path).map_err(|e| format!("read sbom {}: {e}", path.display()))?;
     let hex = format!("{:x}", Sha256::digest(&bytes));
+    let uri = match uri_override {
+        Some(uri) => uri.to_string(),
+        None => format!("file://{}", path.display()),
+    };
     Ok(SbomReference {
-        uri: format!("file://{}", path.display()),
+        uri,
         sha256: Sha256Hex::new(hex).map_err(|e| e.to_string())?,
     })
 }
@@ -366,5 +382,46 @@ mod tests {
         a.extend(args(&[("valid-days", "soon")]));
         let err = parse_args(&a).expect_err("bad valid-days");
         assert!(err.contains("valid-days"), "got: {err}");
+    }
+
+    #[test]
+    fn sbom_uri_flag_is_absent_by_default() {
+        let parsed = parse_args(&full_args()).expect("parse");
+        assert_eq!(parsed.sbom_uri, None);
+    }
+
+    #[test]
+    fn sbom_uri_flag_is_parsed_when_given() {
+        let mut a = full_args();
+        a.extend(args(&[("sbom-uri", "https://example.test/s.txt")]));
+        let parsed = parse_args(&a).expect("parse");
+        assert_eq!(
+            parsed.sbom_uri,
+            Some("https://example.test/s.txt".to_string())
+        );
+    }
+
+    #[test]
+    fn sbom_reference_uses_override_uri_when_given() {
+        use sha2::Digest as _;
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("sbom.json");
+        fs::write(&path, b"sbom bytes").expect("write sbom");
+        let reference =
+            sbom_reference(&path, Some("https://example.test/s.txt")).expect("sbom reference");
+        assert_eq!(reference.uri, "https://example.test/s.txt");
+        assert_eq!(
+            reference.sha256.as_str(),
+            format!("{:x}", sha2::Sha256::digest(b"sbom bytes"))
+        );
+    }
+
+    #[test]
+    fn sbom_reference_defaults_to_file_uri_when_no_override() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("sbom.json");
+        fs::write(&path, b"sbom bytes").expect("write sbom");
+        let reference = sbom_reference(&path, None).expect("sbom reference");
+        assert_eq!(reference.uri, format!("file://{}", path.display()));
     }
 }
