@@ -1057,8 +1057,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e0e367e4e7da84520dedcac1901e4da967309406d1e51017ae1abfb97adbd38"
 dependencies = [
  "bitflags 2.11.0",
- "block2",
- "libc",
  "objc2",
 ]
 
@@ -2512,9 +2510,7 @@ name = "mvm-backend"
 version = "0.17.0"
 dependencies = [
  "anyhow",
- "block2",
  "colored",
- "dispatch2",
  "ext4-view",
  "indicatif",
  "inquire",
@@ -2528,9 +2524,6 @@ dependencies = [
  "mvm-guest",
  "mvm-network",
  "mvm-storage",
- "objc2",
- "objc2-foundation",
- "objc2-virtualization",
  "secrecy",
  "serde",
  "serde_json",
@@ -2884,9 +2877,7 @@ name = "mvm-vm-host"
 version = "0.17.0"
 dependencies = [
  "anyhow",
- "block2",
  "chrono",
- "dispatch2",
  "ed25519-dalek",
  "libc",
  "libkrun-sys",
@@ -2895,9 +2886,6 @@ dependencies = [
  "mvm-core",
  "mvm-guest",
  "mvm-hostd",
- "objc2",
- "objc2-foundation",
- "objc2-virtualization",
  "serde",
  "serde_json",
  "sha2",
@@ -3086,17 +3074,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "objc2-app-kit"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d49e936b501e5c5bf01fda3a9452ff86dc3ea98ad5f283e1455153142d97518c"
-dependencies = [
- "bitflags 2.11.0",
- "objc2",
- "objc2-foundation",
-]
-
-[[package]]
 name = "objc2-core-foundation"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3124,21 +3101,6 @@ dependencies = [
  "libc",
  "objc2",
  "objc2-core-foundation",
-]
-
-[[package]]
-name = "objc2-virtualization"
-version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8edb98625ad1f7dea2e82ab54d5bdf3f477e6645b550f4a7cced1818be9ff59d"
-dependencies = [
- "bitflags 2.11.0",
- "block2",
- "dispatch2",
- "objc2",
- "objc2-app-kit",
- "objc2-core-foundation",
- "objc2-foundation",
 ]
 
 [[package]]

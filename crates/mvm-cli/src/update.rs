@@ -9,7 +9,6 @@ use mvm::shell::run_host;
 const GITHUB_REPO: &str = "tinylabscom/mvm";
 const RELEASE_HOST_BINS: &[&str] = &[
     "mvm-bridge",
-    "mvm-vz-supervisor",
     "mvm-hvf-supervisor",
     "mvm-libkrun-supervisor",
     "mvm-substitution-endpoint",

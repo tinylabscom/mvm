@@ -248,7 +248,6 @@ fn materialize_ext4_in_builder_vm(
     use crate::builder_backend_select::BuilderBackendChoice;
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob, LibkrunBuilderVm};
     use crate::qemu_builder::QemuBuilderVm;
-    use crate::vz_builder::VzBuilderVm;
 
     let artifact_out = input
         .output
@@ -283,7 +282,6 @@ fn materialize_ext4_in_builder_vm(
             BuilderBackendChoice::Qemu => QemuBuilderVm::new()
                 .run_shell_script(&shell_job)
                 .map(|_| ()),
-            BuilderBackendChoice::Vz => VzBuilderVm::new().run_shell_script(&shell_job).map(|_| ()),
         }
     })?;
     Ok(())
@@ -828,15 +826,6 @@ mod tests {
         env.set(MVM_BUILDER_BACKEND_ENV, "qemu");
 
         assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Qemu);
-    }
-
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn materializer_honors_explicit_vz_backend() {
-        let mut env = TestEnv::new();
-        env.set(MVM_BUILDER_BACKEND_ENV, "vz");
-
-        assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Vz);
     }
 
     #[cfg(not(feature = "builder-vm"))]

@@ -1,5 +1,10 @@
 # Release 1 Phase 1 — Vz Deletion — Implementation Plan
 
+**Status: COMPLETE (2026-07-08, branch `feat/plan-229-vz-deletion`).** All tasks
+landed with per-task commits; see the Deferred follow-ups and Self-Review below for
+the adaptations from the plan (macOS-26 dev VM → libkrun; `checkpoint/fork`
+tracked-unsupported; `BuilderBackendChoice::Hvf` instead of `InHouse`).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. Execute in an isolated git worktree (the user enforces worktree isolation).
 
 **Goal:** Delete the entire Apple-Virtualization (`vz`) backend from mvm and re-home the one runtime capability that depended on it (`machine checkpoint/fork`) onto a backend-agnostic, tracked-unsupported gate — while keeping libkrun (and its gvproxy path) untouched.
@@ -486,7 +491,31 @@ git commit -m "release: v0.17.0 — Vz backend removed (Plan 226 R1P1)"
 
 - **Spec coverage (against Plan 226 §4 workstreams):** WS-D → Task 1; WS-B → Task 2; WS-C → Task 3; WS-A → Tasks 4-6; WS-F → Task 7; WS-G → Task 8; WS-H → Tasks 8-9. **WS-N (gvproxy delete) and WS-E (HVF SaveRestore) are intentionally NOT in this plan** — they are separate follow-on plans (226-R1P2, 226-R1E); this plan keeps libkrun's gvproxy path intact and leaves `machine checkpoint/fork` descoped with a tracked error.
 - **Placeholder scan:** the two "read/decide first" steps (Task 2 Step 1, Task 6 Step 1) resolve a concrete unknown with a named deliverable, not deferred implementation. No TBD/TODO.
-- **Type consistency:** `ensure_save_restore_supported(backend, action)` defined in Task 1 and used consistently; `DevBackend::InHouse` and `capability_candidates() -> [AnyBackend; 3]` are used consistently after their introducing tasks.
+- **Type consistency:** `ensure_save_restore_supported(action)` was already backend-agnostic on `main` (kept as-is); `capability_candidates() -> [AnyBackend; 3]` after dropping Vz. **Adapted from the plan:** there is no `DevBackend::InHouse` on `main` — the macOS-26 dev VM falls back to `DevBackend::Libkrun` (see Deferred follow-ups), and the builder choice enum uses the existing `BuilderBackendChoice::Hvf` (renamed from `InHouse`).
+
+## Deferred follow-ups
+
+Landed as part of executing this plan; tracked here per repo convention:
+
+- **Dev-shell VM on macOS-26 temporarily falls back to libkrun.** The plan assumed a
+  `DevBackend::InHouse` dev-VM boot existed; it does not on `main` (the HVF dev-VM
+  boot rides the unmerged virtio-fs `/work`-share stack, Plan 222). So `mvmctl dev up`
+  on macOS 26+ Apple Silicon now selects the **libkrun** dev VM (the documented
+  fallback), and the macOS-26 build `ShellEnvironment` (`create_linux_env`) routes
+  through the libkrun dev VM's per-port vsock. Flip the dev default to the in-house
+  HVF VMM once the HVF dev-VM boot (virtio-fs `/work` share) lands on `main` — a
+  one-line change in `select_dev_backend`.
+- **`mvm machine checkpoint/fork` and `restore` are tracked-unsupported on macOS.**
+  The Vz save/restore path was deleted; the backend-agnostic restore seam
+  (`VmFullRestore` / `restore_checkpoint`) is kept and mock-tested, but no macOS
+  backend implements `SnapshotCapability::SaveRestore` yet. Returns a clear tracked
+  error until Plan 226 WS-E (HVF SaveRestore) lands. Firecracker `vm_full`
+  capture/fork on Linux is retained.
+- **Inert `mvm-bridge` `VzIngest` endpoint + broader doc Vz mentions.** The
+  `BridgeEndpointKind::VzIngest` bridge variant is now dead config (no Vz supervisor
+  emits its NDJSON) but references no deleted Rust symbol; and several
+  `public/src/content/docs/**` pages still mention Vz as an opt-in backend. Both are
+  a docs/dead-config cleanup follow-up; neither is CI-gated or affects runtime.
 
 ## Follow-on plans (write after this lands)
 

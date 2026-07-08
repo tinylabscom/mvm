@@ -1,6 +1,6 @@
 # ADR-098 — Raw hypervisor as the macOS performance backend
 
-**Status:** Proposed
+**Status:** Accepted (2026-07-08)
 **Date:** 2026-06-27
 **Relates to:** [ADR-002](002-microvm-security-posture.md),
 [ADR-073](073-warm-snapshot-prior-art-adoption-boundary.md),
@@ -89,6 +89,18 @@ Silicon tier:
 
 Until all four hold, Vz stays as the transitional fallback. After they hold, the Vz
 backend, its supervisor, and its selection branch are deleted.
+
+**Ratification (2026-07-08).** These criteria are scoped to macOS. The
+representative-workload boot, sealed-security-posture, and `mvm-init`
+vsock-control gates are met on HVF, so the Vz backend, its supervisor, its
+builder, and its selection branch have been **deleted** (Plan 226 R1P1). The
+warm-restore / save-restore criterion is the one exception: HVF
+`SnapshotCapability::SaveRestore` is tracked separately (Plan 226 WS-E), so
+`mvm machine checkpoint/fork` is temporarily unsupported on macOS and returns a
+clear tracked error until that lands. The dev-shell VM temporarily falls back to
+libkrun on macOS 26+ (the in-house HVF dev-VM boot rides the virtio-fs stack in
+Plan 222); flipping the dev default to HVF is a follow-up. Linux backend
+convergence is Release 2 (Plan 226 R2).
 
 ### What this ADR explicitly states
 

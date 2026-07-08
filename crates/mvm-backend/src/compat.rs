@@ -10,7 +10,7 @@
 //! - **Libkrun**: `crates/mvm-libkrun/src/sys.rs` FFI mapping;
 //!   `crates/mvm-backend/src/libkrun.rs` `DEFAULT_CMDLINE`; macOS-only so
 //!   `console=hvc0`; no jailer or snapshots (host process == supervisor).
-//! - **Vz**: `crates/mvm-backend/src/vz.rs` `DEFAULT_CMDLINE` + capabilities;
+//! - (Vz removed)
 //!   macOS-only, aarch64-only in practice (Apple Silicon + HVF),
 //!   gvproxy networking, snapshot-capable on macOS 14+
 //!   (capabilities() is host-probed; compat reports the nominal capability).
@@ -29,7 +29,6 @@ use serde::{Deserialize, Serialize};
 pub enum MicrovmBackend {
     Firecracker,
     Libkrun,
-    Vz,
     Qemu,
 }
 
@@ -136,32 +135,6 @@ static LIBKRUN: BackendCompat = BackendCompat {
     networking: NetworkingModel::Gvproxy,
 };
 
-// Vz (Apple Virtualization.framework): source — crates/mvm-backend/src/vz.rs.
-// macOS 13+ only; Apple Silicon = aarch64 only (HVF is ARM-only on Apple hardware).
-// DEFAULT_CMDLINE uses console=hvc0 (virtio-console, matching libkrun shape).
-// Accepts uncompressed arm64 Image — the Vz kernel API takes a raw Image or ELF;
-// libkrun's bundled compressed variants are NOT needed here because Vz has its
-// own VMM. Snapshot capable on macOS 14+ (capabilities() is host-probed;
-// the static model reports true = backend supports it when OS meets requirement).
-// gvproxy for networking.
-static VZ: BackendCompat = BackendCompat {
-    backend: MicrovmBackend::Vz,
-    guest_arches: &[Aarch64], // macOS on Apple Silicon only
-    kernel_formats: &[
-        // Vz loads an uncompressed ELF vmlinux or uncompressed arm64 Image.
-        // Source: Apple VZ API `VZLinuxBootLoader.kernelURL` accepts both;
-        // mvm's vz.rs KernelConfig accepts any path (no format validation
-        // in the supervisor today). Elf is listed conservatively alongside
-        // Image since Apple VZ can boot either on aarch64.
-        (Aarch64, &[K::Elf, K::Image]),
-    ],
-    rootfs_formats: &[R::Ext4],
-    required_boot_args: &["console=hvc0"],
-    supports_snapshots: true, // macOS 14+; host-checked at runtime in VzBackend::capabilities()
-    supports_jailer: false,
-    networking: NetworkingModel::Gvproxy,
-};
-
 // Qemu: no implementation yet. Capabilities are conventional QEMU defaults
 // for the mvm workload shape. All fields are marked // assumption below.
 // x86_64: ELF vmlinux or bzImage (Raw accepted as generic blob);  // assumption
@@ -187,7 +160,6 @@ pub fn compat(b: MicrovmBackend) -> &'static BackendCompat {
     match b {
         MicrovmBackend::Firecracker => &FIRECRACKER,
         MicrovmBackend::Libkrun => &LIBKRUN,
-        MicrovmBackend::Vz => &VZ,
         MicrovmBackend::Qemu => &QEMU,
     }
 }
@@ -220,7 +192,6 @@ mod tests {
         for b in [
             MicrovmBackend::Firecracker,
             MicrovmBackend::Libkrun,
-            MicrovmBackend::Vz,
             MicrovmBackend::Qemu,
         ] {
             assert_eq!(compat(b).backend, b);
@@ -241,20 +212,9 @@ mod tests {
     }
 
     #[test]
-    fn vz_is_aarch64_only() {
-        let c = compat(MicrovmBackend::Vz);
-        assert!(c.guest_arches.contains(&Aarch64));
-        assert!(!c.guest_arches.contains(&X86_64));
-    }
-
-    #[test]
     fn firecracker_supports_jailer_others_do_not() {
         assert!(compat(MicrovmBackend::Firecracker).supports_jailer);
-        for b in [
-            MicrovmBackend::Libkrun,
-            MicrovmBackend::Vz,
-            MicrovmBackend::Qemu,
-        ] {
+        for b in [MicrovmBackend::Libkrun, MicrovmBackend::Qemu] {
             assert!(!compat(b).supports_jailer, "{b:?} should not have jailer");
         }
     }
@@ -262,9 +222,9 @@ mod tests {
     #[test]
     fn serde_roundtrips() {
         // Spot-check that the enums round-trip through JSON as snake_case.
-        let b = MicrovmBackend::Vz;
+        let b = MicrovmBackend::Qemu;
         let j = serde_json::to_string(&b).unwrap();
-        assert_eq!(j, "\"vz\"");
+        assert_eq!(j, "\"qemu\"");
         assert_eq!(serde_json::from_str::<MicrovmBackend>(&j).unwrap(), b);
 
         let r = RootfsFormat::InitramfsCpioGz;

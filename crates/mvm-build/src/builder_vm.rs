@@ -375,9 +375,8 @@ pub trait BuilderVm {
         Err(BuilderVmError::VmmUnavailable {
             requested: "stage0-bootstrap".to_string(),
             reason: "Stage 0 builder-VM bootstrap is implemented for the libkrun \
-                     backend only; Vz and Firecracker Stage 0 are tracked in \
-                     ADR-068 §\"Backend gaps\". Bootstrap with the libkrun builder \
-                     backend."
+                     backend only; the hvf and Firecracker Stage 0 paths are not \
+                     wired yet. Bootstrap with the libkrun builder backend."
                 .to_string(),
         })
     }
@@ -606,16 +605,12 @@ impl BuilderVm for StubBuilderVm {
 // substrate orchestration (cmd.sh emission, /job/result parsing, panic
 // detection, NixStoreImageLock, stderr-tail capture) and the
 // hypervisor-specific spawn/wait. Lifting the substrate out behind this
-// trait lets a future `VzBuilderVm` reuse ~850 lines of orchestration
-// code with only a Vz-side mount glue (~600 lines).
-//
-// Today the trait + supporting types exist with no impls yet;
-// subsequent slices wire it for libkrun (port LibkrunBuilderVm) and
-// Vz (new VzBuilderVm).
+// trait lets an additional backend reuse ~850 lines of orchestration
+// code with only backend-side mount glue.
 // ============================================================================
 
 /// Per-run configuration the builder helper passes to the underlying
-/// hypervisor. Hypervisor-agnostic — both libkrun and Vz consume it
+/// hypervisor. Hypervisor-agnostic — every builder backend consumes it
 /// identically.
 ///
 /// Resources (`vcpus`, `memory_mib`) are caller-supplied; the
@@ -696,9 +691,9 @@ pub struct BuilderVmExitInfo {
 /// Hypervisor-agnostic primitive that a `BuilderVmRuntime` helper
 /// builds on top of.
 ///
-/// Both `LibkrunBuilderVm` (today, via the libkrun supervisor) and
-/// the future `VzBuilderVm` (via the `mvm-vz-supervisor`) implement
-/// this trait. The shared orchestration logic — cmd.sh emission,
+/// `LibkrunBuilderVm` (via the libkrun supervisor) implements this
+/// trait; the shape stays hypervisor-agnostic so a future backend can
+/// reuse it. The shared orchestration logic — cmd.sh emission,
 /// `/job/result` JSON parsing, `NixStoreImageLock`, kernel-panic
 /// detection on the console log, stderr-tail capture — lives in the
 /// helper and works against `&dyn VmBackendForBuilder` so it doesn't
@@ -714,12 +709,10 @@ pub struct BuilderVmExitInfo {
 /// builder semantics into ill-fitting methods. A dedicated trait
 /// keeps both clean.
 ///
-/// ## Implementations (planned)
+/// ## Implementations
 ///
 /// - `LibkrunBuilderBackend` — `mvm-build/src/libkrun_builder.rs`,
 ///   wraps `spawn_supervisor_and_wait` + `wait_with_panic_detector`.
-/// - `VzBuilderBackend` — wraps `VzBackend::run_attached` with
-///   builder-side virtio-fs share configuration.
 pub trait VmBackendForBuilder: Send + Sync {
     /// Spawn the supervisor for a builder run, attach the given
     /// virtio-fs shares + extra virtio-blk disks, and block until
@@ -1175,8 +1168,8 @@ mod tests {
 
     #[test]
     fn run_stage0_default_is_a_documented_backend_gap() {
-        // Backends without a Stage 0 impl (Stub, and Vz until a future
-        // slice) inherit the trait default — a fail-closed error that
+        // Backends without a Stage 0 impl (e.g. Stub) inherit the trait
+        // default — a fail-closed error that
         // names the gap and the recovery path, never a silent no-op or
         // a todo!() panic.
         let stub = StubBuilderVm;
@@ -1193,7 +1186,10 @@ mod tests {
             BuilderVmError::VmmUnavailable { requested, reason } => {
                 assert_eq!(requested, "stage0-bootstrap");
                 assert!(reason.contains("libkrun"), "names the supported backend");
-                assert!(reason.contains("ADR-068"), "points at the tracking ADR");
+                assert!(
+                    reason.contains("not") && reason.contains("wired"),
+                    "names the not-wired-yet gap"
+                );
             }
             other => panic!("unexpected error variant: {other}"),
         }

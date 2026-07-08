@@ -66,21 +66,6 @@ pub mod rootfs_inject;
 pub mod run_image;
 pub mod stage0;
 pub mod template_reuse;
-/// Type-safe interface to the `mvm-vz-supervisor` binary —
-/// `SupervisorConfig` + on-disk path helpers. It lives in mvm-build
-/// (not mvm-backend) because mvm-build's `vz_builder` consumes it and
-/// sits below mvm-backend, which would cycle. mvm-backend's `VzBackend`
-/// reaches it via `mvm_build::vz`.
-pub mod vz;
-
-/// Host-side gvproxy lifecycle (detached spawn + PID-sidecar
-/// tear-down). Lives here (not mvm-backend) so the Vz *builder*
-/// (`vz_builder`) can reach it for cold-`nix build` egress;
-/// mvm-backend's `VzBackend` consumes it via `mvm_build::host_gvproxy`.
-/// Gated by `builder-vm` because it links `libkrun_sys::gvproxy` for
-/// the binary locator + free-port reservation.
-#[cfg(feature = "builder-vm")]
-pub mod host_gvproxy;
 
 /// libkrun-backed builder VM (gated by `builder-vm`). See module-level
 /// docs.
@@ -102,14 +87,6 @@ pub mod libkrun_network_provider;
 pub mod guest_net;
 
 pub mod qemu_builder;
-
-/// Vz-backed builder VM (gated by `builder-vm` for symmetry with
-/// `libkrun_builder`). Implements the second
-/// [`builder_vm::VmBackendForBuilder`] impl alongside
-/// `LibkrunBuilderBackend`; both feed the same hypervisor-agnostic
-/// `BuilderVmRuntime` orchestration on top.
-#[cfg(feature = "builder-vm")]
-pub mod vz_builder;
 
 /// Builder-runtime selection. `MVM_BUILDER_BACKEND` picks between
 /// `libkrun` (default) and `vz`; the caller receives a

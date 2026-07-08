@@ -18,7 +18,6 @@ use crate::libkrun::LibkrunBackend;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
-use crate::vz::VzBackend;
 use crate::workload_runner::{RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
 
@@ -468,11 +467,6 @@ pub enum AnyBackend {
     Firecracker(FirecrackerBackend),
     /// libkrun — Linux KVM / macOS Apple Silicon HVF.
     Libkrun(LibkrunBackend),
-    /// Vz — the one Apple Virtualization.framework backend (per-VM Rust
-    /// objc2 supervisor: snapshot/restore, pause/resume, flow-audited
-    /// networking). The macOS-26 auto-default; opt-in elsewhere via
-    /// `--hypervisor vz` / `MVM_BACKEND=vz`.
-    Vz(VzBackend),
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
     /// `MVM_BACKEND=qemu`; `auto_select` never picks it (Firecracker
@@ -522,7 +516,7 @@ impl AnyBackend {
     /// Select backend by hypervisor name.
     ///
     /// Supported: `"firecracker"` (default), `"qemu"` (Linux dev/test),
-    /// `"vz"` (Apple Virtualization.framework, macOS), `"libkrun"`
+    /// `"hvf"` (in-house Hypervisor.framework VMM, macOS), `"libkrun"`
     /// (Linux KVM / macOS HVF). Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
         // The runner isn't const-constructible, so it can't live in the catalog
@@ -582,7 +576,7 @@ impl AnyBackend {
     /// state-dir marker file, so `down` / `status` dispatch to the VMM that
     /// actually launched it rather than a platform default. The pid-file
     /// backends each drop a distinct marker under `vm_state_dir(name)`:
-    /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`, Vz `vz.pid`.
+    /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`.
     ///
     /// Returns `None` when no marker is present — the VM isn't one of the
     /// pid-file backends (e.g. Apple Container, which tracks state
@@ -614,13 +608,12 @@ impl AnyBackend {
     }
 
     /// The typed discriminant for this backend. Lets callers branch on
-    /// `BackendKind::Vz` etc. instead of string-matching `name()`. The runner-role
+    /// `BackendKind::Hvf` etc. instead of string-matching `name()`. The runner-role
     /// variant reports the same hvf VMM kind as the raw `Hvf` variant.
     pub fn kind(&self) -> catalog::BackendKind {
         match self {
             Self::Firecracker(_) => catalog::BackendKind::Firecracker,
             Self::Libkrun(_) => catalog::BackendKind::Libkrun,
-            Self::Vz(_) => catalog::BackendKind::Vz,
             Self::Qemu(_) => catalog::BackendKind::Qemu,
             Self::Mock(_) => catalog::BackendKind::Mock,
             Self::Hvf(_) | Self::HvfRunner(_) => catalog::BackendKind::Hvf,
@@ -631,7 +624,6 @@ impl AnyBackend {
         match self {
             Self::Firecracker(backend) => backend,
             Self::Libkrun(backend) => backend,
-            Self::Vz(backend) => backend,
             Self::Qemu(backend) => backend,
             Self::Mock(backend) => backend,
             Self::Hvf(backend) => backend,
@@ -647,7 +639,6 @@ impl AnyBackend {
                 std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
             }
             Self::Libkrun(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
-            Self::Vz(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Qemu(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Mock(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
@@ -700,7 +691,6 @@ impl AnyBackend {
         match self {
             AnyBackend::Firecracker(b) => Some(b),
             AnyBackend::Libkrun(b) => Some(b),
-            AnyBackend::Vz(b) => Some(b),
             AnyBackend::Mock(b) => Some(b),
             AnyBackend::Qemu(_) => None,
             // HVF carries untrusted workloads: claim-10 default-deny egress, a real
@@ -981,16 +971,13 @@ mod tests {
     }
 
     #[test]
-    fn test_any_backend_from_hypervisor_vz() {
-        // `--backend vz` and the longer `--backend virtualization`
-        // both still route to the Vz backend — Vz stays selectable as an
-        // opt-in. `auto_select()` no longer picks it on macOS 26+; the
-        // hvf VMM is the workload default there.
+    fn from_hypervisor_vz_falls_back_to_default_not_vz() {
+        // The Vz backend is deleted: the `vz` / `virtualization` selectors no
+        // longer resolve to a distinct Vz backend and fall through to the
+        // default like any unrecognised hypervisor value.
         for alias in ["vz", "virtualization"] {
             let backend = AnyBackend::from_hypervisor(alias);
-            assert!(matches!(backend, AnyBackend::Vz(_)), "alias {alias}");
-            assert_eq!(backend.name(), "vz");
-            assert_eq!(backend.tier(), BackendTier::Tier2);
+            assert_ne!(backend.name(), "vz", "alias {alias} must not resolve to Vz");
         }
     }
 
@@ -1143,22 +1130,6 @@ mod tests {
     }
 
     #[test]
-    fn for_started_vm_resolves_vz_by_marker() {
-        let _legacy_guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let temp = tempfile::tempdir().expect("create temp HOME");
-        let vms = temp.path().join(".mvm/vms");
-        std::fs::create_dir_all(vms.join("vzvm")).expect("mkdir vm dir");
-        std::fs::write(vms.join("vzvm").join("vz.pid"), "12345").expect("write marker");
-        env.set("HOME", temp.path());
-        env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
-        let result = AnyBackend::for_started_vm("vzvm");
-        assert!(matches!(result, Some(AnyBackend::Vz(_))), "vz.pid → Vz");
-    }
-
-    #[test]
     fn test_auto_select_returns_valid_backend() {
         let backend = AnyBackend::auto_select();
         let name = backend.name();
@@ -1211,16 +1182,6 @@ mod tests {
                     Some(2),
                     true,
                     true,
-                    true,
-                ),
-                (
-                    "vz",
-                    vec!["virtualization"],
-                    BackendTier::Tier2,
-                    Some("vz.pid"),
-                    Some(4),
-                    false,
-                    false,
                     true,
                 ),
                 (
@@ -1361,24 +1322,10 @@ mod tests {
             }) => {
                 assert_eq!(requested, SnapshotCapability::LiveMemory);
                 assert_eq!(available, SnapshotCapability::DiskOnly);
-                assert!(
-                    hint.contains("Firecracker") || hint.contains("Vz"),
-                    "{hint}"
-                );
+                assert!(hint.contains("Firecracker"), "{hint}");
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn snapshot_capability_vz_tracks_macos_support() {
-        // SaveRestore on macOS 26+, Unsupported elsewhere — never silently
-        // LiveMemory/DiskOnly. (Runs on Linux CI, where it's Unsupported.)
-        let cap = AnyBackend::from_hypervisor("vz").snapshot_capability();
-        assert!(matches!(
-            cap,
-            SnapshotCapability::SaveRestore | SnapshotCapability::Unsupported
-        ));
     }
 
     #[test]
@@ -1404,11 +1351,6 @@ mod tests {
             fc.capabilities().pause_resume,
             "firecracker: capability flag must say pause_resume=true (matches the real impl)"
         );
-        let vz = AnyBackend::from_hypervisor("vz");
-        assert!(
-            vz.capabilities().pause_resume,
-            "vz: capability flag must say pause_resume=true (matches the real impl)"
-        );
     }
 
     // BackendTier coverage.
@@ -1418,7 +1360,6 @@ mod tests {
         let cases: &[(&str, BackendTier)] = &[
             ("firecracker", BackendTier::Tier1),
             ("libkrun", BackendTier::Tier2),
-            ("vz", BackendTier::Tier2),
             ("qemu", BackendTier::Tier2),
             ("mock", BackendTier::Tier3),
         ];
@@ -1435,7 +1376,7 @@ mod tests {
         // long-standing per-backend tier declaration. `AnyBackend::tier()`
         // is the closed-enum view of the same fact. Bumping one without
         // the other is a regression — keep them wired.
-        let names = ["firecracker", "libkrun", "vz", "qemu", "mock"];
+        let names = ["firecracker", "libkrun", "qemu", "mock"];
         for name in names {
             let b = AnyBackend::from_hypervisor(name);
             let enum_tier = b.tier();
@@ -1463,7 +1404,7 @@ mod tests {
     fn as_workload_backend_some_for_workload_variants() {
         // mock is included: it is the hermetic lifecycle test double that
         // stands in for a workload backend on the admitted path.
-        for name in ["firecracker", "libkrun", "vz", "hvf", "mock"] {
+        for name in ["firecracker", "libkrun", "hvf", "mock"] {
             let backend = AnyBackend::from_hypervisor(name);
             assert!(
                 backend.as_workload_backend().is_some(),
@@ -1540,10 +1481,9 @@ mod tests {
     fn no_backend_advertises_production_ssh() {
         // The capability layer encodes the SSH ban: no backend may advertise an
         // in-guest SSH server. A future backend that flips this trips here.
-        let backends: [(&str, AnyBackend); 5] = [
+        let backends: [(&str, AnyBackend); 4] = [
             ("firecracker", AnyBackend::Firecracker(FirecrackerBackend)),
             ("libkrun", AnyBackend::Libkrun(LibkrunBackend)),
-            ("vz", AnyBackend::Vz(VzBackend)),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
             ("mock", AnyBackend::Mock(MockBackend::new())),
         ];

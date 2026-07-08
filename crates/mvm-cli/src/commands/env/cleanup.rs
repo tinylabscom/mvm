@@ -277,14 +277,11 @@ fn confirm_tier(tier: Tier, yes_flag: bool) -> Result<bool> {
 }
 
 /// Returns the name of the first VM that appears to be running, or
-/// None if none are. Probes both the Apple Container dev VM and any
-/// libkrun-managed VM whose `~/.mvm/vms/<id>/libkrun.pid` points at
-/// a live process. Errors during the probe are conservative: a failed
-/// readdir returns None (the check is a guardrail, not a guarantee).
+/// None if none are. Probes any libkrun-managed VM whose
+/// `~/.mvm/vms/<id>/libkrun.pid` points at a live process. Errors during
+/// the probe are conservative: a failed readdir returns None (the check
+/// is a guardrail, not a guarantee).
 fn first_running_vm() -> Option<String> {
-    if super::dev_vz::is_vz_dev_running() {
-        return Some("mvm-dev (Apple Container)".to_string());
-    }
     let vms_root = PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");
     let entries = std::fs::read_dir(&vms_root).ok()?;
     for entry in entries.flatten() {

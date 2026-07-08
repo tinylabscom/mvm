@@ -101,12 +101,9 @@ impl Platform {
     /// regression). Both architectures are supported (Apple Silicon
     /// arm64 + Intel x86_64); Vz works on both since macOS 11.
     ///
-    /// This probe does **not** assert the `mvm-vz-supervisor` binary
-    /// is installed — that lives under `~/.mvm/bin/` for release
-    /// layouts and at `the cargo target dir (target/<profile>/)` for
-    /// source-checkout builds. `mvmctl doctor` surfaces the binary
-    /// presence separately; `VzBackend::start` returns the precise
-    /// "supervisor binary missing" error when needed.
+    /// This probe reports only the OS-version tier; it does not assert any
+    /// per-VM supervisor binary is installed (`mvmctl doctor` surfaces binary
+    /// presence separately).
     pub fn has_vz(self) -> bool {
         if !matches!(self, Platform::MacOS) {
             return false;

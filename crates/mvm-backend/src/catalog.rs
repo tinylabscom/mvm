@@ -16,7 +16,6 @@ use crate::backend::{AnyBackend, BackendTier, FirecrackerBackend};
 use crate::libkrun::LibkrunBackend;
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
-use crate::vz::VzBackend;
 use mvm_core::vm_backend::VmBackend;
 
 /// A first-class, declarative description of one backend: its discovery
@@ -124,18 +123,6 @@ backend_catalog![
         started_vm_probe_order: Some(2),
         list_all: true,
         balloon_support: true,
-        warm_start_support: true
-    },
-    {
-        kind: Vz,
-        selector: "vz",
-        aliases: ["virtualization"],
-        constructor: AnyBackend::Vz(VzBackend),
-        tier: Tier2,
-        marker_file: Some("vz.pid"),
-        started_vm_probe_order: Some(4),
-        list_all: false,
-        balloon_support: false,
         warm_start_support: true
     },
     {
@@ -292,7 +279,7 @@ mod tests {
         );
         assert_eq!(
             selectors(warm_start_support_descriptors()),
-            ["firecracker", "libkrun", "vz", "qemu"]
+            ["firecracker", "libkrun", "qemu"]
         );
         assert_eq!(
             selectors(list_all_descriptors()),
@@ -301,7 +288,7 @@ mod tests {
         // Started-VM probe is sorted by probe order, not declaration order.
         assert_eq!(
             selectors(started_vm_probe_descriptors().into_iter()),
-            ["qemu", "libkrun", "firecracker", "vz", "hvf"]
+            ["qemu", "libkrun", "firecracker", "hvf"]
         );
     }
 }

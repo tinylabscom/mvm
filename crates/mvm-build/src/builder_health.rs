@@ -126,9 +126,9 @@ mod tests {
         // the fallback worked, libkrun is still broken here.
         note_attempt_outcome(BuilderBackendChoice::Qemu, true);
         assert!(libkrun_marked_unavailable());
-        // A Vz failure (macOS) is unrelated and must not set the libkrun marker.
+        // An hvf failure (macOS) is unrelated and must not set the libkrun marker.
         note_attempt_outcome(BuilderBackendChoice::Libkrun, true); // reset
-        note_attempt_outcome(BuilderBackendChoice::Vz, false);
+        note_attempt_outcome(BuilderBackendChoice::Hvf, false);
         assert!(!libkrun_marked_unavailable());
     }
 

@@ -458,19 +458,18 @@ mod dev_status_image_tests {
             &tmp.path().join("cache"),
         );
 
-        let report = build_dev_status_json("vz", "running", Some("6.1.0-mvm".to_string()));
+        let report = build_dev_status_json("libkrun", "running", Some("6.1.0-mvm".to_string()));
         assert_eq!(report.schema_version, 1);
-        assert_eq!(report.backend, "vz");
+        assert_eq!(report.backend, "libkrun");
         assert_eq!(report.vm_name, Some(DEV_VM_NAME));
         assert_eq!(report.state, "running");
         assert_eq!(report.guest_kernel.as_deref(), Some("6.1.0-mvm"));
         assert!(report.dev_image.is_some());
         assert!(report.builder_cache.is_some());
-        assert!(report.base.is_none());
         assert!(report.linux_native.is_none());
 
         let json = crate::json_out::to_json_string(&report).expect("serialize");
-        assert!(json.contains("\"backend\": \"vz\""));
+        assert!(json.contains("\"backend\": \"libkrun\""));
         assert!(json.contains("\"state\": \"running\""));
         assert!(json.contains("\"guest_kernel\": \"6.1.0-mvm\""));
         assert!(!json.contains("/Users"));
@@ -479,78 +478,9 @@ mod dev_status_image_tests {
         assert!(!json.contains("vmlinux"));
     }
 
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn dev_base_provenance_roundtrips_without_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        let kernel = tmp.path().join("vmlinux");
-        std::fs::write(&rootfs, b"deterministic-rootfs").unwrap();
-        std::fs::write(&kernel, b"kernel").unwrap();
-        let base = ResolvedDevBaseImage {
-            id: "base-a".to_string(),
-            revision: "rev-1".to_string(),
-            kernel_path: kernel,
-            rootfs_path: rootfs.clone(),
-        };
-
-        let provenance = write_dev_base_provenance(tmp.path(), &base).expect("write provenance");
-        assert_eq!(provenance.schema_version, 1);
-        assert_eq!(provenance.id, "base-a");
-        assert_eq!(provenance.revision, "rev-1");
-        assert_eq!(
-            provenance.rootfs_fingerprint,
-            mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap()
-        );
-
-        let roundtrip = read_dev_base_provenance(tmp.path()).expect("read provenance");
-        assert_eq!(roundtrip, provenance);
-        let json = std::fs::read_to_string(dev_base_provenance_path(tmp.path())).unwrap();
-        assert!(json.contains("\"rootfs_fingerprint\""));
-        assert!(!json.contains(rootfs.to_string_lossy().as_ref()));
-        assert!(!json.contains("rootfs.ext4"));
-        assert!(!json.contains("vmlinux"));
-
-        remove_dev_base_provenance(tmp.path());
-        assert!(read_dev_base_provenance(tmp.path()).is_none());
-    }
-
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn dev_status_json_reports_active_base_fingerprint() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", tmp.path().join("cache"));
-        env.set("MVM_DATA_DIR", tmp.path().join("data"));
-
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-        std::fs::create_dir_all(&state_dir).unwrap();
-        let provenance = DevBaseProvenance {
-            schema_version: 1,
-            id: "template-a".to_string(),
-            revision: "rev-abc".to_string(),
-            rootfs_fingerprint: "0123456789abcdef".repeat(4),
-        };
-        let json = serde_json::to_vec_pretty(&provenance).unwrap();
-        std::fs::write(dev_base_provenance_path(&state_dir), json).unwrap();
-
-        let report = build_dev_status_json("vz", "running", None);
-        let base = report.base.as_ref().expect("base status");
-        assert_eq!(base.id, "template-a");
-        assert_eq!(base.revision, "rev-abc");
-        assert_eq!(base.rootfs_fingerprint, "0123456789abcdef".repeat(4));
-
-        let serialized = crate::json_out::to_json_string(&report).expect("serialize");
-        assert!(serialized.contains("\"base\""));
-        assert!(serialized.contains("\"rootfs_fingerprint\""));
-        assert!(!serialized.contains(state_dir.to_string_lossy().as_ref()));
-        assert!(!serialized.contains("rootfs.ext4"));
-        assert!(!serialized.contains("vmlinux"));
-    }
-
     #[test]
     fn dev_status_json_stopped_omits_kernel() {
-        let report = build_dev_status_json("vz", "stopped", None);
+        let report = build_dev_status_json("libkrun", "stopped", None);
         assert_eq!(report.state, "stopped");
         assert!(report.guest_kernel.is_none());
         let json = crate::json_out::to_json_string(&report).expect("serialize");
@@ -616,9 +546,9 @@ mod dev_status_image_tests {
 
     #[test]
     fn dev_down_json_reports_stopped_and_omits_reset_when_false() {
-        let report = build_dev_down_json("vz", true, false);
+        let report = build_dev_down_json("libkrun", true, false);
         assert_eq!(report.schema_version, 1);
-        assert_eq!(report.backend, "vz");
+        assert_eq!(report.backend, "libkrun");
         assert_eq!(report.action, "down");
         assert_eq!(report.outcome, "stopped");
         let json = crate::json_out::to_json_string(&report).expect("serialize");
@@ -639,10 +569,10 @@ mod dev_status_image_tests {
 
     #[test]
     fn dev_up_json_reports_outcome_and_omits_reset() {
-        let started = build_dev_up_json("vz", "started");
+        let started = build_dev_up_json("libkrun", "started");
         assert_eq!(started.action, "up");
         assert_eq!(started.outcome, "started");
-        assert_eq!(started.backend, "vz");
+        assert_eq!(started.backend, "libkrun");
         let json = crate::json_out::to_json_string(&started).expect("serialize");
         assert!(json.contains("\"action\": \"up\""));
         assert!(json.contains("\"outcome\": \"started\""));
@@ -650,62 +580,6 @@ mod dev_status_image_tests {
 
         let already = build_dev_up_json("libkrun", "already-running");
         assert_eq!(already.outcome, "already-running");
-    }
-
-    #[test]
-    fn dev_park_json_reports_parked_and_not_running() {
-        let parked = build_dev_park_json("vz", true);
-        assert_eq!(parked.schema_version, 1);
-        assert_eq!(parked.backend, "vz");
-        assert_eq!(parked.action, "park");
-        assert_eq!(parked.outcome, "parked");
-        let json = crate::json_out::to_json_string(&parked).expect("serialize");
-        assert!(json.contains("\"action\": \"park\""));
-        assert!(json.contains("\"outcome\": \"parked\""));
-        assert!(!json.contains("\"reset\""));
-
-        let missing = build_dev_park_json("vz", false);
-        assert_eq!(missing.outcome, "not-running");
-    }
-
-    #[test]
-    fn dev_base_ref_parses_template_and_revision() {
-        let base = DevBaseRef::parse("dev-base@rev-2026.06").expect("parse");
-        assert_eq!(base.id, "dev-base");
-        assert_eq!(base.revision.as_deref(), Some("rev-2026.06"));
-
-        let slot = "a".repeat(64);
-        let base = DevBaseRef::parse(&slot).expect("slot hash parse");
-        assert_eq!(base.id, slot);
-        assert!(base.revision.is_none());
-    }
-
-    #[test]
-    fn dev_base_ref_rejects_empty_or_traversal_components() {
-        assert!(DevBaseRef::parse("").is_err());
-        assert!(DevBaseRef::parse("dev-base@").is_err());
-        assert!(DevBaseRef::parse("dev-base@../rev").is_err());
-        assert!(DevBaseRef::parse("../dev-base").is_err());
-    }
-
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn dev_base_artifact_resolution_requires_kernel_and_rootfs() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let rev_dir = tmp.path().join("rev-a");
-        std::fs::create_dir_all(&rev_dir).expect("mkdir");
-        std::fs::write(rev_dir.join("vmlinux"), b"kernel").expect("kernel");
-        let err = dev_base_artifacts_from_revision_dir("dev-base", "rev-a", &rev_dir)
-            .expect_err("missing rootfs must fail");
-        assert!(format!("{err}").contains("rootfs"));
-
-        std::fs::write(rev_dir.join("rootfs.ext4"), b"rootfs").expect("rootfs");
-        let resolved =
-            dev_base_artifacts_from_revision_dir("dev-base", "rev-a", &rev_dir).expect("resolve");
-        assert_eq!(resolved.id, "dev-base");
-        assert_eq!(resolved.revision, "rev-a");
-        assert_eq!(resolved.kernel_path, rev_dir.join("vmlinux"));
-        assert_eq!(resolved.rootfs_path, rev_dir.join("rootfs.ext4"));
     }
 }
 
@@ -1043,112 +917,5 @@ mod heartbeat_tests {
             format_compile_elapsed(Duration::from_secs(130)),
             "still compiling… (2m10s elapsed)"
         );
-    }
-}
-
-#[cfg(all(test, feature = "builder-vm"))]
-mod autopark_gating_tests {
-    use super::{should_park, should_resume};
-
-    #[test]
-    fn cold_residency_never_parks_or_resumes() {
-        assert!(!should_park(false, true, false));
-        assert!(!should_park(false, false, false));
-        assert!(!should_resume(false, true));
-        assert!(!should_resume(false, false));
-    }
-
-    #[test]
-    fn warm_alive_no_reset_parks() {
-        assert!(should_park(true, true, false));
-    }
-
-    #[test]
-    fn park_requires_a_live_vm() {
-        assert!(!should_park(true, false, false));
-    }
-
-    #[test]
-    fn reset_suppresses_park() {
-        assert!(!should_park(true, true, true));
-        assert!(!should_park(true, false, true));
-    }
-
-    #[test]
-    fn resume_requires_a_present_snapshot() {
-        assert!(should_resume(true, true));
-        assert!(!should_resume(true, false));
-    }
-}
-
-#[cfg(all(test, feature = "builder-vm"))]
-mod vz_residency_keeper_tests {
-    use super::{
-        VzDevResidencyDecision, decide_vz_dev_residency, read_dev_vz_last_activity,
-        touch_dev_vz_activity_at,
-    };
-    use mvm_core::residency::ResidencyPolicy;
-
-    #[test]
-    fn not_running_keeps_for_every_residency() {
-        for policy in [
-            ResidencyPolicy::cold(),
-            ResidencyPolicy::parked(),
-            ResidencyPolicy::always_warm(),
-        ] {
-            assert_eq!(
-                decide_vz_dev_residency(&policy, false, Some(0), 10_000),
-                VzDevResidencyDecision::Keep
-            );
-        }
-    }
-
-    #[test]
-    fn cold_running_tears_down() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::cold(), true, Some(100), 200),
-            VzDevResidencyDecision::Teardown
-        );
-    }
-
-    #[test]
-    fn parked_running_parks() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::parked(), true, Some(100), 200),
-            VzDevResidencyDecision::Park
-        );
-    }
-
-    #[test]
-    fn warm_without_activity_keeps() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, None, 2_000),
-            VzDevResidencyDecision::Keep
-        );
-    }
-
-    #[test]
-    fn warm_at_idle_threshold_keeps() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_200),
-            VzDevResidencyDecision::Keep
-        );
-    }
-
-    #[test]
-    fn warm_past_idle_threshold_parks() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_201),
-            VzDevResidencyDecision::Park
-        );
-    }
-
-    #[test]
-    fn activity_timestamp_round_trips_through_state_dir() {
-        let tmp = tempfile::tempdir().expect("create temporary dev vz state dir");
-
-        touch_dev_vz_activity_at(tmp.path(), 55).expect("write dev vz activity timestamp");
-
-        assert_eq!(read_dev_vz_last_activity(tmp.path()), Some(55));
     }
 }

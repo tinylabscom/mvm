@@ -215,17 +215,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 );
             }
 
-            // Guard 2 — a clear requires the persistent dev builder down (it
-            // holds the store's flock for its lifetime). Stop it first; the next
-            // `dev up` restarts it. Skipped under --dry-run (which mutates
-            // nothing). The stop is the reversible half of repair, so we do it
-            // automatically rather than refuse.
-            if !dry_run && dev_vz::is_vz_dev_running() {
-                ui::warn("A dev builder VM is running; stopping it before clearing the store.");
-                // Clearing the store invalidates any snapshot, so don't park.
-                let _ = dev_vz::cmd_dev_vz_down(/* json = */ false, /* reset = */ true);
-            }
-
             let repair = mvm_build::builder_vm::clear_builder_store(dry_run)
                 .map_err(|e| anyhow::anyhow!("clearing builder store: {e}"))?;
             if json {

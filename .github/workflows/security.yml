@@ -262,8 +262,8 @@ jobs:
 
   # ── Lane 4: Parser fuzzing (best-effort, time-boxed) ───────────────
   # ADR-002 §W4.2 + Plan 85 §R1 — cargo-fuzz harnesses for
-  # GuestRequest, the authenticated-frame envelope, the libkrun/Vz
-  # SupervisorConfig parsers, and the OCI layer-unpack ingress.
+  # GuestRequest, the authenticated-frame envelope, the libkrun
+  # SupervisorConfig parser, and the OCI layer-unpack ingress.
   # Run for 5 minutes per tag-push / dispatch; the nightly cron
   # extends to 30 minutes.
   fuzz:
@@ -351,18 +351,6 @@ jobs:
         # hard process death before the plan re-verify can fail closed.
         # Same "never panic on any input" contract as fuzz_supervisor_config.
         run: cargo fuzz run fuzz_attach_message -- -max_total_time="$DURATION"
-
-      - name: Fuzz Vz SupervisorConfig (host-side)
-        working-directory: crates/mvm-build
-        env:
-          DURATION: ${{ steps.duration.outputs.secs }}
-          RUSTUP_TOOLCHAIN: nightly-2026-06-11
-        # Plan 97 / ADR-002 claim 5 / ADR-056 — the Rust-native
-        # mvm-vz-supervisor reads this SupervisorConfig JSON on stdin
-        # with deny-unknown-fields semantics. A panic-free decoder on
-        # arbitrary input is the strict-keys trust boundary (ADR-002
-        # claim 5 foundation).
-        run: cargo fuzz run fuzz_supervisor_config -- -max_total_time="$DURATION"
 
       - name: Fuzz OCI unpack_layer
         working-directory: crates/mvm-oci
@@ -478,8 +466,6 @@ jobs:
             crates/mvm-guest/fuzz/artifacts/
             crates/deps/libkrun-sys/fuzz/corpus/
             crates/deps/libkrun-sys/fuzz/artifacts/
-            crates/mvm-build/fuzz/corpus/
-            crates/mvm-build/fuzz/artifacts/
             crates/mvm-oci/fuzz/corpus/
             crates/mvm-oci/fuzz/artifacts/
             crates/mvm-vm-host/fuzz/corpus/

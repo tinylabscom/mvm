@@ -343,13 +343,12 @@ fn builder_egress_check_from_outcome(outcome: mvm_build::guest_net::BuilderNetBo
 /// (DHCP lease / static fallback / failure) so the failure class is
 /// diagnosable without reading the guest console by hand.
 ///
-/// Reads the persistent dev builder VM's host-side `console.log`. Only the
-/// Vz dev VM (the macOS-26 default) has a stable, predictable console-log
-/// path under a fixed session id; the libkrun persistent path keys off an
-/// opaque per-run job id, so there is no analogous fixed helper to probe.
+/// Reads the libkrun dev VM's host-side `console.log` at the fixed
+/// `mvm-dev` state dir. When the VM hasn't booted yet the file is absent and
+/// the check reports that cleanly.
 #[cfg(feature = "builder-vm")]
 fn builder_egress_check() -> Check {
-    let log_path = mvm_build::vz_builder::dev_builder_vz_console_log();
+    let log_path = mvm_core::config::vm_state_dir("mvm-dev").join("console.log");
     let Ok(contents) = std::fs::read_to_string(&log_path) else {
         return Check {
             name: "builder egress",
@@ -362,9 +361,8 @@ fn builder_egress_check() -> Check {
     builder_egress_check_from_outcome(outcome)
 }
 
-/// Stub when the `builder-vm` feature is off — the Vz console-log helper
-/// is feature-gated, and a CLI built without builder support never boots
-/// a builder VM.
+/// Stub when the `builder-vm` feature is off — a CLI built without builder
+/// support never boots a builder VM.
 #[cfg(not(feature = "builder-vm"))]
 fn builder_egress_check() -> Check {
     Check {
@@ -566,7 +564,6 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
 
     checks.push(kvm_check(plat, false));
     checks.push(nested_kvm_check(plat));
-    checks.push(vz_check(plat));
     checks.push(libkrun_check(plat));
     checks.push(builder_backend_check(plat));
     checks.push(runtime_backend_check(plat));
@@ -1221,227 +1218,6 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
     }
 }
 
-/// Apple Virtualization.framework probe.
-///
-/// Vz is built into macOS 13+; nothing to install at the framework
-/// layer. The supervisor *binary* (`mvm-vz-supervisor`) is a separate
-/// concern — we probe its presence so operators don't hit a
-/// mid-`mvmctl up --backend vz` failure. Both paths the
-/// `VzBackend::resolve_supervisor_path` resolver consults are
-/// reported when relevant.
-fn vz_check(plat: Platform) -> Check {
-    if plat != Platform::MacOS {
-        return Check {
-            name: "Apple Virtualization.framework",
-            category: "platform",
-            ok: true,
-            info: "n/a (not macOS)".to_string(),
-        };
-    }
-    if !plat.has_vz() {
-        return Check {
-            name: "Apple Virtualization.framework",
-            category: "platform",
-            ok: true, // Not a failure — Vz is optional.
-            info: "not available (requires macOS 13+; macOS 11–12 fall back to libkrun)"
-                .to_string(),
-        };
-    }
-    // Vz framework available. Probe for the supervisor binary in the
-    // two locations the backend's resolver checks (source-checkout
-    // build output, release-installed `~/.mvm/bin/`). Surface either
-    // a found path or the build hint so the operator can act.
-    let (supervisor_path, supervisor_info) = locate_vz_supervisor();
-
-    let Some(path) = supervisor_path else {
-        return Check {
-            name: "Apple Virtualization.framework",
-            category: "platform",
-            ok: true,
-            info: format!("available (macOS 13+); {supervisor_info}"),
-        };
-    };
-
-    // Sub-probes: entitlement check + MDM-policy probe.
-    // Each surfaces a brief tag in the info string; `ok` drops to false
-    // if either probe affirmatively reports the supervisor cannot run.
-    let entitlement = vz_entitlement_probe(&path);
-    let runtime = vz_runtime_probe(&path);
-
-    let entitlement_tag = match entitlement {
-        Some(true) => "entitlement ✓",
-        Some(false) => "entitlement MISSING",
-        None => "entitlement ?",
-    };
-    let runtime_tag = match &runtime {
-        Some(r) if r.is_supported => "probe ✓",
-        Some(_) => "probe: VZ NOT SUPPORTED (MDM lockdown? unsupported hardware?)",
-        None => "probe ?",
-    };
-    let macos_tag = runtime
-        .as_ref()
-        .map(|r| format!(" on macOS {}", r.macos_version))
-        .unwrap_or_default();
-
-    // An entitlement that's verifiably MISSING or a probe that
-    // affirmatively says NOT SUPPORTED means the operator will hit a
-    // real failure on `mvmctl up --backend vz`. Surface as not-ok so
-    // doctor flags it. `?` (probe failed to run, codesign missing,
-    // etc.) leaves ok=true — we don't want a broken probe to mask the
-    // real "supervisor present, framework available" signal.
-    let probes_ok =
-        !matches!(entitlement, Some(false)) && !matches!(&runtime, Some(r) if !r.is_supported);
-
-    Check {
-        name: "Apple Virtualization.framework",
-        category: "platform",
-        ok: probes_ok,
-        info: format!(
-            "available (macOS 13+); {supervisor_info}; {entitlement_tag}; {runtime_tag}{macos_tag}"
-        ),
-    }
-}
-
-/// Locate the `mvm-vz-supervisor` binary using the same chain the
-/// `VzBackend` resolver applies. Returns `(path, label)`: `path` is
-/// `Some` when the binary was found (so sub-probes have something to
-/// inspect); `label` is the doctor-friendly description either way.
-/// Order:
-///
-/// 1. `MVM_VZ_SUPERVISOR_PATH` (explicit override)
-/// 2. Adjacent to `mvmctl` (source-checkout `target/<profile>/` or installed layout)
-/// 3. Release-installed `~/.mvm/bin/mvm-vz-supervisor-<mvmctl-version>`
-fn locate_vz_supervisor() -> (Option<std::path::PathBuf>, String) {
-    if let Some(p) = std::env::var_os("MVM_VZ_SUPERVISOR_PATH") {
-        let path = std::path::PathBuf::from(p);
-        if path.is_file() {
-            let info = format!(
-                "supervisor at {} (via MVM_VZ_SUPERVISOR_PATH)",
-                path.display()
-            );
-            return (Some(path), info);
-        }
-        let info = format!(
-            "MVM_VZ_SUPERVISOR_PATH set to {} but the path is not a file",
-            path.display()
-        );
-        return (None, info);
-    }
-    // Source-checkout path — workspace root is wherever `mvmctl`'s
-    // build manifest sits; we can't introspect that from a doctor
-    // function compiled into the binary, but we can probe the path
-    // adjacent to `mvmctl` — the cargo-built Rust `[[bin]]` lands next to
-    // the `mvmctl` exe in source-checkout (`target/<profile>/`) and in
-    // installed layouts, mirroring the VzBackend resolver.
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("mvm-vz-supervisor");
-        if candidate.is_file() {
-            let info = format!(
-                "supervisor at {} (adjacent / source-checkout build)",
-                candidate.display()
-            );
-            return (Some(candidate), info);
-        }
-    }
-    // Release-installed path under `~/.mvm/bin/`.
-    if let Some(home) = std::env::var_os("HOME") {
-        let candidate = std::path::PathBuf::from(home)
-            .join(".mvm/bin")
-            .join(format!("mvm-vz-supervisor-{}", env!("CARGO_PKG_VERSION")));
-        if candidate.is_file() {
-            let info = format!("supervisor at {} (installed)", candidate.display());
-            return (Some(candidate), info);
-        }
-    }
-    (
-        None,
-        "supervisor binary NOT FOUND — build via \
-         `cargo build -p mvm-vm-host --bin mvm-vz-supervisor` before \
-         `mvmctl up --backend vz`"
-            .to_string(),
-    )
-}
-
-/// Probe whether the supervisor binary carries the
-/// `com.apple.security.virtualization` entitlement.
-///
-/// Returns:
-/// - `Some(true)`  — the entitlement is present (binary will be
-///   permitted to use Virtualization.framework).
-/// - `Some(false)` — codesign ran successfully but the entitlement is
-///   absent from the binary. `mvmctl up --backend vz` will fail with
-///   an opaque framework error; the supervisor self-signs the
-///   entitlement on first launch, so a fresh run fixes it.
-/// - `None` — codesign couldn't be invoked (not on PATH, or the
-///   binary path is wrong). Surfaced as `entitlement ?` in doctor; not
-///   a hard failure because we can't distinguish "tooling unavailable"
-///   from "binary actually unsigned" without the tool itself.
-fn vz_entitlement_probe(supervisor_path: &std::path::Path) -> Option<bool> {
-    // `codesign --display --entitlements :- <path>` writes the
-    // entitlement plist to stdout. The LEADING colon selects the XML
-    // plist format and the `-` means stdout. The colon must be first:
-    // `-:-` does not start with `:`, so codesign treats it as a literal
-    // output-file path and silently writes a file named `-:-` into the
-    // CWD instead of streaming to stdout. We grep for the entitlement
-    // key rather than parse the plist — the key is a long well-known
-    // identifier, false positives are vanishingly unlikely.
-    let output = std::process::Command::new("codesign")
-        .args(["--display", "--entitlements", ":-", "--"])
-        .arg(supervisor_path)
-        .output()
-        .ok()?;
-    Some(entitlement_present_in_codesign_output(&output.stdout))
-}
-
-/// Pure helper for parsing `codesign --display --entitlements`
-/// output. Split out so unit tests can drive it with fixture bytes
-/// without invoking codesign.
-fn entitlement_present_in_codesign_output(stdout: &[u8]) -> bool {
-    // The entitlement key always appears as `<key>...</key>` in plist
-    // output; matching the raw key text avoids depending on a plist
-    // parser and works against both XML and (older) hybrid formats.
-    let needle = b"com.apple.security.virtualization";
-    stdout.windows(needle.len()).any(|w| w == needle)
-}
-
-/// Result of running the supervisor in `--probe` mode. Mirrors the
-/// JSON the Swift side emits.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
-struct VzProbeResult {
-    is_supported: bool,
-    macos_version: String,
-}
-
-/// Run the supervisor with `--probe` to learn whether VZ is actually
-/// usable on this host (MDM-policy detection). The Swift
-/// side calls `VZVirtualMachine.isSupported`, which returns false
-/// under MDM virtualization lockdown, on unsupported hardware, and on
-/// macOS <11.
-///
-/// Returns `None` when the supervisor itself failed to run (codesign
-/// rejection, arch mismatch, file-not-executable). Returns `Some(_)`
-/// when the probe ran to completion and emitted parseable JSON. A
-/// `None` here surfaces as `probe ?` — same posture as the
-/// entitlement probe: we don't infer worst-case from a broken tool.
-fn vz_runtime_probe(supervisor_path: &std::path::Path) -> Option<VzProbeResult> {
-    let output = std::process::Command::new(supervisor_path)
-        .arg("--probe")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_vz_probe_output(&output.stdout)
-}
-
-/// Pure parser for the `--probe` JSON payload. Separate so tests can
-/// drive it without invoking the supervisor.
-fn parse_vz_probe_output(stdout: &[u8]) -> Option<VzProbeResult> {
-    serde_json::from_slice::<VzProbeResult>(stdout).ok()
-}
-
 /// Userspace network-gateway host-side availability. Probes `$PATH`
 /// for the gateway binary the host's libkrun build defaults to:
 /// `passt` on Linux, `gvproxy` on macOS (passt does not build on
@@ -1580,14 +1356,13 @@ fn libkrun_check(plat: Platform) -> Check {
 ///
 /// `mvm_build::builder_backend_select` enforces priority
 /// `--builder` flag > `MVM_BUILDER_BACKEND` env > platform default
-/// (macOS 26+ Apple Silicon → vz; everywhere else → libkrun). The
+/// (macOS 26+ Apple Silicon → hvf; everywhere else → libkrun). The
 /// flag is folded into the env at startup (`commands::run`), so by
 /// the time doctor runs every override is observable via env.
 ///
 /// The check is informational — it never fails. A missing libkrun
-/// or Vz prereq is reported by the platform-level `libkrun_check`
-/// / `vz_check` already in the report; this check is about the
-/// *selection*, not the availability.
+/// prereq is reported by the platform-level `libkrun_check` already in
+/// the report; this check is about the *selection*, not the availability.
 #[cfg(feature = "builder-vm")]
 fn builder_backend_check(plat: Platform) -> Check {
     use mvm_build::builder_backend_select::{
@@ -1623,13 +1398,6 @@ fn builder_backend_check(plat: Platform) -> Check {
                 "libkrun available".to_string()
             } else {
                 format!("libkrun NOT available ({})", libkrun_sys::install_hint())
-            }
-        }
-        BuilderBackendChoice::Vz => {
-            if plat.has_vz() {
-                "Vz available".to_string()
-            } else {
-                "Vz NOT available (requires macOS 13+)".to_string()
             }
         }
         BuilderBackendChoice::Qemu => {
@@ -1731,15 +1499,12 @@ fn builder_residency_check() -> Check {
     }
 }
 
+/// The persistent-builder snapshot/park mechanism belonged to the removed Vz
+/// builder; the libkrun builder has no memory snapshot, so no builder VM
+/// carries a resumable snapshot today.
 #[cfg(feature = "builder-vm")]
-fn builder_vz_snapshot_present(vms_root: &std::path::Path) -> bool {
-    let Ok(entries) = std::fs::read_dir(vms_root) else {
-        return false;
-    };
-    entries.flatten().any(|entry| {
-        let dir = entry.path();
-        dir.is_dir() && mvm_build::vz_builder::builder_snapshot_path(&dir).is_file()
-    })
+fn builder_vz_snapshot_present(_vms_root: &std::path::Path) -> bool {
+    false
 }
 
 #[cfg(feature = "builder-vm")]
@@ -2851,10 +2616,10 @@ mod tests {
         use mvm_core::util::test_env::TestEnv;
         let scratch = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path());
+        env.set("MVM_DATA_DIR", scratch.path());
         // Materialize a fixture console.log at the exact path the helper
         // resolves, then assert the lease is read end-to-end.
-        let log = mvm_build::vz_builder::dev_builder_vz_console_log();
+        let log = mvm_core::config::vm_state_dir("mvm-dev").join("console.log");
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(
             &log,
@@ -2916,85 +2681,6 @@ mod tests {
         assert!(platform_description(Platform::LinuxNoKvm).contains("without KVM"));
     }
 
-    #[test]
-    fn vz_check_is_na_on_non_macos() {
-        for plat in [
-            Platform::LinuxNative,
-            Platform::LinuxNoKvm,
-            Platform::Wsl2,
-            Platform::Windows,
-        ] {
-            let c = vz_check(plat);
-            assert!(c.ok, "non-macOS vz check must not fail: {c:?}");
-            assert!(
-                c.info.contains("n/a"),
-                "non-macOS vz check info should say n/a: {}",
-                c.info
-            );
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn vz_check_macos_reports_availability() {
-        let c = vz_check(Platform::MacOS);
-        // Either "available" (macOS 13+) or "not available" (macOS 11–12)
-        // — the variant depends on the contributor host's version.
-        // We deliberately do NOT assert `c.ok` here: under the
-        // sub-probes, `ok` flips to false when codesign reports a missing
-        // entitlement or the supervisor probe affirmatively says VZ is not
-        // supported. Both are legitimate signals for a real CI host where
-        // the supervisor binary was built without the entitlement step or
-        // where MDM blocks Vz. The new probe-specific tests below pin the
-        // per-probe behaviour against fixture input.
-        assert!(
-            c.info.contains("available") || c.info.contains("not available"),
-            "macOS vz check should mention availability: {}",
-            c.info
-        );
-    }
-
-    #[test]
-    fn entitlement_probe_parses_xml_plist_with_entitlement() {
-        // Real `codesign --display --entitlements :-` XML plist output
-        // shape captured from a build.sh-signed mvm-vz-supervisor.
-        let stdout = br#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.virtualization</key>
-    <true/>
-</dict>
-</plist>
-"#;
-        assert!(entitlement_present_in_codesign_output(stdout));
-    }
-
-    #[test]
-    fn entitlement_probe_parses_plist_without_entitlement() {
-        // A binary that codesign succeeds against but carries no entitlements
-        // (or carries a different set) — operator needs to rebuild via
-        // `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.
-        let stdout = br#"<?xml version="1.0" encoding="UTF-8"?>
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.app-sandbox</key>
-    <true/>
-</dict>
-</plist>
-"#;
-        assert!(!entitlement_present_in_codesign_output(stdout));
-    }
-
-    #[test]
-    fn entitlement_probe_handles_empty_output() {
-        // codesign on an unsigned binary may emit empty output (varies by
-        // macOS version). Treat as "no entitlement" rather than "tooling
-        // broken" — the doctor's None-path is reserved for "couldn't run
-        // codesign at all".
-        assert!(!entitlement_present_in_codesign_output(b""));
-    }
-
     // ── signing_check_from_probes unit tests ────────────────────────
 
     #[test]
@@ -3014,7 +2700,7 @@ mod tests {
                 Some(true),
             ),
             (
-                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                std::path::PathBuf::from("/usr/local/bin/mvm-hvf-supervisor"),
                 Some(true),
             ),
         ];
@@ -3036,14 +2722,14 @@ mod tests {
                 Some(true),
             ),
             (
-                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                std::path::PathBuf::from("/usr/local/bin/mvm-hvf-supervisor"),
                 Some(false),
             ),
         ];
         let c = signing_check_from_probes(&probes);
         assert!(!c.ok, "unsigned supervisor must fail; got: {}", c.info);
         assert!(
-            c.info.contains("mvm-vz-supervisor"),
+            c.info.contains("mvm-hvf-supervisor"),
             "info must name the unsigned target; got: {}",
             c.info
         );
@@ -3070,14 +2756,14 @@ mod tests {
                 None,
             ),
             (
-                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                std::path::PathBuf::from("/usr/local/bin/mvm-hvf-supervisor"),
                 Some(false),
             ),
         ];
         let c = signing_check_from_probes(&probes);
         assert!(!c.ok, "at least one Some(false) → not ok; got: {}", c.info);
         assert!(
-            c.info.contains("mvm-vz-supervisor"),
+            c.info.contains("mvm-hvf-supervisor"),
             "must name the unsigned binary; got: {}",
             c.info
         );
@@ -3096,41 +2782,12 @@ mod tests {
         let probes = vec![
             (std::path::PathBuf::from("/usr/local/bin/mvmctl"), None),
             (
-                std::path::PathBuf::from("/usr/local/bin/mvm-vz-supervisor"),
+                std::path::PathBuf::from("/usr/local/bin/mvm-hvf-supervisor"),
                 None,
             ),
         ];
         let c = signing_check_from_probes(&probes);
         assert!(c.ok, "all None → n/a, ok; got: {}", c.info);
-    }
-
-    #[test]
-    fn vz_runtime_probe_parses_supported_payload() {
-        let stdout = br#"{"is_supported":true,"macos_version":"26.3.1"}
-"#;
-        let parsed = parse_vz_probe_output(stdout).expect("valid probe output");
-        assert!(parsed.is_supported);
-        assert_eq!(parsed.macos_version, "26.3.1");
-    }
-
-    #[test]
-    fn vz_runtime_probe_parses_unsupported_payload() {
-        // Coarse "MDM lockdown or unsupported hardware" signal — the doctor
-        // surfaces this as the "VZ NOT SUPPORTED" tag and flips ok to false.
-        let stdout = br#"{"is_supported":false,"macos_version":"13.0.0"}"#;
-        let parsed = parse_vz_probe_output(stdout).expect("valid probe output");
-        assert!(!parsed.is_supported);
-        assert_eq!(parsed.macos_version, "13.0.0");
-    }
-
-    #[test]
-    fn vz_runtime_probe_rejects_malformed_json() {
-        assert!(parse_vz_probe_output(b"{not json").is_none());
-        assert!(parse_vz_probe_output(b"").is_none());
-        // Missing required field — serde_json must reject rather than fill
-        // a default, otherwise a partially-broken probe would silently
-        // claim is_supported=false.
-        assert!(parse_vz_probe_output(br#"{"macos_version":"13.0.0"}"#).is_none());
     }
 
     #[test]
@@ -3225,14 +2882,6 @@ mod tests {
         assert_eq!(r.backends.get("firecracker"), Some(&"live-memory"));
         assert_eq!(r.backends.get("libkrun"), Some(&"disk-only"));
         assert_eq!(r.backends.get("qemu"), Some(&"disk-only"));
-        // Vz carries the macOS save/restore warm-start tier; it must be
-        // surfaced. The exact tier is host-gated (save-restore on a Vz
-        // host, unsupported elsewhere), so assert presence + honesty
-        // rather than a fixed value.
-        assert!(matches!(
-            r.backends.get("vz"),
-            Some(&"save-restore") | Some(&"unsupported")
-        ));
     }
 
     #[test]
@@ -3240,9 +2889,6 @@ mod tests {
         let r = collect_warm_start_support();
         let ordered_backends: Vec<_> = r.backends.into_iter().collect();
         let ordered_standby_pool: Vec<_> = r.standby_pool.into_iter().collect();
-        let vz_warm_start = AnyBackend::from_hypervisor("vz")
-            .snapshot_capability()
-            .label();
 
         assert_eq!(
             ordered_backends,
@@ -3250,17 +2896,14 @@ mod tests {
                 ("firecracker".to_string(), "live-memory"),
                 ("libkrun".to_string(), "disk-only"),
                 ("qemu".to_string(), "disk-only"),
-                ("vz".to_string(), vz_warm_start),
             ]
         );
-        let vz_standby = AnyBackend::from_hypervisor("vz").supports_standby_pool();
         assert_eq!(
             ordered_standby_pool,
             vec![
                 ("firecracker".to_string(), true),
                 ("libkrun".to_string(), true),
                 ("qemu".to_string(), false),
-                ("vz".to_string(), vz_standby),
             ]
         );
     }
@@ -3268,12 +2911,10 @@ mod tests {
     #[test]
     fn collect_warm_start_support_reports_standby_pool_per_backend() {
         let r = collect_warm_start_support();
-        // Firecracker, libkrun, and Vz (on macOS 14+) implement the standby pool;
-        // QEMU does not. Report honest values for every backend; none may be silently dropped.
+        // Firecracker and libkrun implement the standby pool; QEMU does not.
+        // Report honest values for every backend; none may be silently dropped.
         assert_eq!(r.standby_pool.get("firecracker"), Some(&true));
         assert_eq!(r.standby_pool.get("libkrun"), Some(&true));
-        let vz_standby = AnyBackend::from_hypervisor("vz").supports_standby_pool();
-        assert_eq!(r.standby_pool.get("vz"), Some(&vz_standby));
         assert_eq!(r.standby_pool.get("qemu"), Some(&false));
     }
 
@@ -3282,10 +2923,10 @@ mod tests {
         let rows = collect_capability_table();
         let by = |name: &str| rows.iter().find(|r| r.backend == name).cloned();
 
-        // The Tier 3 `mock` test double is excluded; the four real
+        // The Tier 3 `mock` test double is excluded; the three real
         // backends are present, in stable name order.
         let names: Vec<_> = rows.iter().map(|r| r.backend.as_str()).collect();
-        assert_eq!(names, vec!["firecracker", "libkrun", "qemu", "vz"]);
+        assert_eq!(names, vec!["firecracker", "libkrun", "qemu"]);
 
         let fc = by("firecracker").unwrap();
         assert_eq!(fc.snapshot_tier, "live-memory");
@@ -3316,11 +2957,6 @@ mod tests {
             "qemu uses user-mode slirp, not a host TAP"
         );
         assert!(qemu.vsock);
-
-        // Vz dispositions are host-gated (macOS version); assert only the
-        // platform-stable invariant — the vsock control channel is always present.
-        let vz = by("vz").unwrap();
-        assert!(vz.vsock);
     }
 
     #[test]
@@ -3930,7 +3566,7 @@ mod tests {
     fn builder_backend_check_linux_honors_env_override() {
         let prev = std::env::var_os("MVM_BUILDER_BACKEND");
         unsafe {
-            std::env::set_var("MVM_BUILDER_BACKEND", "vz");
+            std::env::set_var("MVM_BUILDER_BACKEND", "qemu");
         }
 
         let c = builder_backend_check(Platform::LinuxNative);
@@ -3946,8 +3582,8 @@ mod tests {
         // Env override flips the resolved backend even when
         // `auto_detect_default()` would have picked libkrun.
         assert!(
-            c.info.starts_with("vz — "),
-            "expected vz-resolved line under env override; got: {}",
+            c.info.starts_with("qemu — "),
+            "expected qemu-resolved line under env override; got: {}",
             c.info
         );
         assert!(
@@ -3955,10 +3591,9 @@ mod tests {
             "expected `override via` source label; got: {}",
             c.info
         );
-        // On Linux Vz is never available; line must communicate that.
         assert!(
-            c.info.contains("Vz NOT available"),
-            "expected `Vz NOT available` segment on Linux; got: {}",
+            c.info.contains("QEMU available") || c.info.contains("QEMU NOT available"),
+            "expected per-VMM availability segment; got: {}",
             c.info
         );
     }
@@ -4209,22 +3844,6 @@ mod tests {
             "info was {:?}",
             c.info
         );
-    }
-
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn builder_vz_snapshot_present_detects_state_vzsave_under_vms_root() {
-        let root = tempfile::tempdir().unwrap();
-        assert!(!builder_vz_snapshot_present(root.path()));
-        let vm_dir = root.path().join("mvm-persistent-builder-vz-dev");
-        std::fs::create_dir_all(&vm_dir).unwrap();
-        assert!(!builder_vz_snapshot_present(root.path()));
-        std::fs::write(
-            mvm_build::vz_builder::builder_snapshot_path(&vm_dir),
-            b"snapshot",
-        )
-        .unwrap();
-        assert!(builder_vz_snapshot_present(root.path()));
     }
 
     #[cfg(feature = "builder-vm")]

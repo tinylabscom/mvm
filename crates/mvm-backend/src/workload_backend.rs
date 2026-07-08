@@ -6,7 +6,6 @@ use crate::backend::{AnyBackend, FirecrackerBackend};
 use crate::hvf_backend::HvfBackend;
 use crate::libkrun::LibkrunBackend;
 use crate::mock::MockBackend;
-use crate::vz::VzBackend;
 use anyhow::{Result, anyhow};
 use mvm_core::vm_backend::VmBackend;
 
@@ -63,11 +62,6 @@ impl WorkloadBackend for LibkrunBackend {
         EgressSubstitutionTransport::RvproxyTransparentTerminator
     }
 }
-impl WorkloadBackend for VzBackend {
-    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        EgressSubstitutionTransport::VsockUdsChannel
-    }
-}
 impl WorkloadBackend for HvfBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         // Proxy-aware substitution over the vsock gateway: the guest dials the
@@ -89,7 +83,7 @@ impl WorkloadBackend for MockBackend {
 /// The single boundary the admitted launch path goes through. Returns the
 /// backend as `&dyn WorkloadBackend`, or a typed refusal for backends not
 /// permitted to carry an untrusted workload (the dev/test backends). The
-/// bar is permission, not tier — libkrun and vz are Tier-2 yet workload-capable.
+/// bar is permission, not tier — libkrun is Tier-2 yet workload-capable.
 pub fn require_workload_backend(backend: &AnyBackend) -> Result<&dyn WorkloadBackend> {
     backend.as_workload_backend().ok_or_else(|| {
         anyhow!(
@@ -129,7 +123,6 @@ mod tests {
     fn workload_backends_implement_marker() {
         assert_is_workload_backend::<FirecrackerBackend>();
         assert_is_workload_backend::<LibkrunBackend>();
-        assert_is_workload_backend::<VzBackend>();
         assert_is_workload_backend::<HvfBackend>();
         assert_is_workload_backend::<MockBackend>();
     }
@@ -159,14 +152,6 @@ mod tests {
         );
         assert!(transport.supports_proxy_aware_substitution());
         assert!(transport.supports_transparent_terminator());
-    }
-
-    #[test]
-    fn vz_declares_vsock_uds_channel() {
-        let transport = VzBackend.egress_substitution_transport();
-        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
-        assert!(transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
@@ -217,7 +202,7 @@ mod tests {
     fn transparent_egress_terminator_requirement_refuses_proxy_only_backends() {
         let mock = MockBackend::new();
         for backend in [
-            &VzBackend as &dyn WorkloadBackend,
+            &HvfBackend as &dyn WorkloadBackend,
             &mock as &dyn WorkloadBackend,
         ] {
             let err = match require_transparent_egress_terminator(backend) {

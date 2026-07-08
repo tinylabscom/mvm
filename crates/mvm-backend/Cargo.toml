@@ -50,16 +50,9 @@ mvm-guest.workspace = true
 # (`builder_vm::admit_overlay_aware`) called from every backend's
 # `start` impl. The base substrate's sidecar reader already pulls
 # `mvm-build`, so this doesn't widen the dependency graph.
-#
-# `builder-vm` is enabled because `vz.rs` reaches
-# `mvm_build::host_gvproxy` (moved down from this crate so the Vz
-# *builder* can also spawn gvproxy). That feature pulls `libkrun-sys`,
-# which this crate already depends on non-optionally — so no new dep.
 mvm-build = { workspace = true, features = ["builder-vm"] }
 libkrun-sys.workspace = true
 mio.workspace = true
-# Vz backend foundation crate (SupervisorConfig types, supervisor-binary
-# path resolution). Pure data + helpers; no Swift dep.
 # Folded in with the former mvm-base crate: the base substrate's ui
 # (colored/indicatif/inquire spinners + prompts) and secret handling
 # (secrecy). Crypto helpers come from mvm_core::crypto, already available
@@ -92,43 +85,6 @@ tracing.workspace = true
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
 # `base64` builds WireRequest body fixtures in the substitution-bridge tests.
-
-# Apple Virtualization.framework bindings (objc2) for the providers
-# interface — folded in with the former mvm-providers crate. macOS-only;
-# the workspace lock already carries these (no new third-party dep).
-[target.'cfg(target_os = "macos")'.dependencies]
-block2 = "0.6"
-dispatch2 = "0.3"
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSURL", "NSArray", "NSError"] }
-objc2-virtualization = { version = "0.3", features = [
-    "VZBootLoader",
-    "VZLinuxBootLoader",
-    "VZVirtualMachine",
-    "VZVirtualMachineConfiguration",
-    "VZGenericPlatformConfiguration",
-    "VZPlatformConfiguration",
-    "VZVirtioBlockDeviceConfiguration",
-    "VZStorageDeviceConfiguration",
-    "VZDiskImageStorageDeviceAttachment",
-    "VZNetworkDeviceConfiguration",
-    "VZVirtioNetworkDeviceConfiguration",
-    "VZNATNetworkDeviceAttachment",
-    "VZNetworkDeviceAttachment",
-    "VZVirtioEntropyDeviceConfiguration",
-    "VZEntropyDeviceConfiguration",
-    "VZSerialPortConfiguration",
-    "VZVirtioConsoleDeviceSerialPortConfiguration",
-    "VZSerialPortAttachment",
-    "VZFileHandleSerialPortAttachment",
-    "VZMemoryBalloonDeviceConfiguration",
-    "VZVirtioTraditionalMemoryBalloonDeviceConfiguration",
-    "VZSocketDevice",
-    "VZSocketDeviceConfiguration",
-    "VZVirtioSocketDevice",
-    "VZVirtioSocketDeviceConfiguration",
-    "VZVirtioSocketConnection",
-] }
 
 # KVM backend. Pre-generated bindings + safe ioctl wrappers;
 # the in-repo kvm::x86_boot logic is pure and platform-independent.

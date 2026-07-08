@@ -26,7 +26,6 @@ use mvm_backend::backend::AnyBackend;
 use mvm_core::config::vm_state_dir;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::VmId;
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -69,12 +68,6 @@ pub(in crate::commands) struct ResumeArgs {
     /// warm-start at the live-memory tier (e.g. libkrun is disk-only).
     #[arg(long)]
     pub warm: bool,
-}
-
-/// A running VM whose state dir carries a `vz.pid` marker is a Vz VM — it gets
-/// native vCPU pause/resume rather than the Firecracker snapshot-seal path.
-fn is_vz_vm(name: &str) -> bool {
-    matches!(AnyBackend::for_started_vm(name), Some(AnyBackend::Vz(_)))
 }
 
 /// Pick the `SnapshotIO` impl matching the hypervisor selector.
@@ -132,36 +125,6 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
         };
         await_primed_barrier(&source, timeout)
             .with_context(|| format!("primed barrier for VM {:?}", args.name))?;
-    }
-    if is_vz_vm(&args.name) {
-        AnyBackend::Vz(mvm_backend::vz::VzBackend)
-            .pause(&VmId::from(args.name.as_str()))
-            .with_context(|| format!("pausing Vz VM {:?}", args.name))?;
-        // Stamp the live supervisor pid into a marker so the fs_quick gate
-        // can confirm the VM is quiesced without depending on the name
-        // registry (which `up`-created VMs may never have populated).
-        // The marker is only valid while the same pid is alive; a re-launched
-        // or crashed VM will have a different or absent pid, so the marker
-        // self-invalidates without any explicit cleanup on those paths.
-        let state_dir = vm_state_dir(&args.name);
-        match std::fs::read_to_string(state_dir.join("vz.pid")) {
-            Ok(pid) => {
-                if let Err(e) = std::fs::write(state_dir.join("vz.paused"), pid.trim()) {
-                    tracing::warn!(error = %e, vm = %args.name, "could not write vz.paused marker (pause succeeded)");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, vm = %args.name, "vz.pid unreadable; vz.paused marker not written (pause succeeded)");
-            }
-        }
-        let registry_path = mvm::vm::name_registry::registry_path();
-        if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
-            let _ = registry.set_paused(&args.name, true);
-            let _ = registry.save(&registry_path);
-        }
-        println!("{}: paused (vz, vCPUs quiesced)", args.name);
-        mvm_core::audit_emit!(WorkloadSleep, vm: &args.name, "backend=vz");
-        return Ok(());
     }
     let io = snapshot_io_for(&args.hypervisor, &args.name)?;
 
@@ -247,25 +210,6 @@ pub(in crate::commands) fn run_resume(
     _cfg: &MvmConfig,
 ) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    if is_vz_vm(&args.name) {
-        AnyBackend::Vz(mvm_backend::vz::VzBackend)
-            .resume(&VmId::from(args.name.as_str()))
-            .with_context(|| format!("resuming Vz VM {:?}", args.name))?;
-        // Remove the pause marker now that vCPUs are running again.
-        // Tolerate a missing file — it may have already been cleaned up or
-        // was never written (best-effort on the pause side).
-        let marker = vm_state_dir(&args.name).join("vz.paused");
-        let _ = std::fs::remove_file(&marker);
-        let registry_path = mvm::vm::name_registry::registry_path();
-        if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
-            let _ = registry.set_paused(&args.name, false);
-            let _ = registry.touch_last_active(&args.name, mvm_core::time::utc_now());
-            let _ = registry.save(&registry_path);
-        }
-        println!("{}: resumed (vz, vCPUs running)", args.name);
-        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "backend=vz");
-        return Ok(());
-    }
     // `--warm` routes the resume through the backend's live-memory
     // warm-start path (`VmBackend::warm_start`). It mints a fresh VMGenID
     // token, loads + resumes the sealed snapshot, and delivers the token so
@@ -512,17 +456,5 @@ mod tests {
         // The disk-only / no-rotation backend reads honestly too.
         let na = warm_start_success_line("vm1", ReseedStatus::NotApplicable);
         assert!(!na.contains("VMGenID rotated"), "{na}");
-    }
-
-    #[test]
-    fn is_vz_vm_true_for_vz_marker() {
-        let tmp = tempfile::tempdir().unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", tmp.path());
-        let dir = mvm_core::config::vm_state_dir("vzvm");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("vz.pid"), "1").unwrap();
-        assert!(is_vz_vm("vzvm"));
-        assert!(!is_vz_vm("nope"));
     }
 }

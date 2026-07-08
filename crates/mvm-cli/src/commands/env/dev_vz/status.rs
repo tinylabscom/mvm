@@ -90,8 +90,6 @@ pub(in crate::commands) struct DevStatusJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builder_cache: Option<BuilderVmCacheJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub base: Option<DevBaseStatusJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub linux_native: Option<LinuxNativeDevStatusJson>,
 }
 
@@ -124,7 +122,6 @@ pub(in crate::commands) fn build_dev_status_json(
         builder_cache: Some(builder_vm_cache_json(
             &resolve_builder_vm_cache_status_summary(),
         )),
-        base: resolve_dev_base_status_json(),
         linux_native: None,
     }
 }
@@ -141,7 +138,6 @@ pub(in crate::commands) fn build_dev_status_json_vmless(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
-        base: None,
         linux_native: None,
     }
 }
@@ -166,7 +162,6 @@ pub(in crate::commands) fn build_dev_status_json_linux_native(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
-        base: None,
         linux_native: Some(LinuxNativeDevStatusJson {
             kvm: LinuxNativeComponentJson {
                 state: if has_kvm { "present" } else { "missing" },
@@ -187,24 +182,6 @@ pub(in crate::commands) fn build_dev_status_json_linux_native(
             },
         }),
     }
-}
-
-fn resolve_dev_base_status_json() -> Option<DevBaseStatusJson> {
-    let state_dir = {
-        #[cfg(feature = "builder-vm")]
-        {
-            mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID)
-        }
-        #[cfg(not(feature = "builder-vm"))]
-        {
-            std::path::PathBuf::new()
-        }
-    };
-    read_dev_base_provenance(&state_dir).map(|provenance| DevBaseStatusJson {
-        id: provenance.id,
-        revision: provenance.revision,
-        rootfs_fingerprint: provenance.rootfs_fingerprint,
-    })
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -245,19 +222,6 @@ pub(in crate::commands) fn build_dev_down_json(
             "not-running"
         },
         reset,
-    }
-}
-
-pub(in crate::commands) fn build_dev_park_json(
-    backend: &'static str,
-    parked: bool,
-) -> DevLifecycleJson {
-    DevLifecycleJson {
-        schema_version: 1,
-        backend,
-        action: "park",
-        outcome: if parked { "parked" } else { "not-running" },
-        reset: false,
     }
 }
 
