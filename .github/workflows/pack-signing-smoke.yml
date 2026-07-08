@@ -80,6 +80,34 @@ jobs:
             --manifest smoke/pack-manifest.json --bundle smoke/pack-manifest.json.bundle \
             --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
 
+      - name: Round-trip a runtime pack manifest through the Rust verifier
+        # The runtime pack the release pipeline publishes uses a distinct
+        # keyless producer (kernel + verity-sealed rootfs + verity/roothash
+        # sidecars) from the builder pack above. Produce one over dummy
+        # artifacts, sign its manifest with the same real `cosign sign-blob
+        # --new-bundle-format`, and verify through the same production
+        # primitive — so this smoke guards the runtime-pack signing path too.
+        run: |
+          set -euo pipefail
+          printf 'dummy-verity'   > smoke/rootfs.verity
+          printf '%064d' 0        > smoke/rootfs.roothash
+          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+            --kind runtime \
+            --vmlinux smoke/vmlinux --rootfs smoke/rootfs.ext4 \
+            --verity smoke/rootfs.verity --roothash smoke/rootfs.roothash \
+            --arch x86_64 --channel stable --keyless \
+            --identity "${IDENTITY}" --out-dir smoke --sbom smoke/sbom.txt \
+            --revocation-channel "https://example.test/rev.json"
+          mv smoke/manifest.json smoke/runtime-pack-manifest.json
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle smoke/runtime-pack-manifest.json.bundle \
+            smoke/runtime-pack-manifest.json
+          cargo run --release -p mvm-core --example verify-pack-signature --features manifest-verify -- \
+            --manifest smoke/runtime-pack-manifest.json --bundle smoke/runtime-pack-manifest.json.bundle \
+            --identity "${IDENTITY}" --issuer "https://token.actions.githubusercontent.com"
+
       - name: Round-trip an image manifest through the dev-image verifier
         # The same Rust stack backs the dev-image download signature check
         # (image_verify::verify_manifest), which hard-fails on a bundle it

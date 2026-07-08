@@ -89,6 +89,8 @@ endpoint. The injected guest runtime starts `mvm-egress-client` and the runtime
 sets standard proxy env vars to its loopback SOCKS listener automatically.
 Today that contract is provided by `hvf`; if no available backend can
 provide it, the start is refused up front instead of silently degrading to a
+Today that contract is provided by `hvf`; if no available backend can provide
+it, the start is refused up front instead of silently degrading to a
 guest NIC. This enables tools such as `curl` and `wget`; it does **not** add
 raw ICMP, so `ping google.com` is still expected to fail. Use an HTTP/TCP probe
 as the smoke test instead.

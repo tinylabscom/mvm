@@ -9,7 +9,7 @@ Shell execution, VM lifecycle management, and platform-aware operations. Impleme
 | `shell` | `run_in_vm()`, `run_in_vm_visible()`, `run_in_vm_stdout()` — platform-aware shell execution |
 | `build_env` | `RuntimeBuildEnv` implementing `ShellEnvironment` (delegates to `shell`) |
 | `config` | VM constants, `VmSlot`, `MvmState`, `RunInfo`, Lima template discovery |
-| `ui` | CLI UI helpers (colored output, spinners, prompts) |
+| `ui` | CLI UI helpers (terminal-aware ANSI output, spinners, prompts) |
 | `shell_mock` | Test mocking for shell commands |
 
 ### VM Subsystem (`vm/`)

@@ -1099,6 +1099,19 @@ mod tests {
         assert_eq!(p.name(), "noop");
     }
 
+    #[test]
+    fn build_query_url_appends_and_encodes_params() {
+        let url = build_query_url(
+            "https://example.test/search",
+            &[("q", "rust async"), ("count", "20")],
+        )
+        .expect("url");
+        assert_eq!(
+            url.as_str(),
+            "https://example.test/search?q=rust+async&count=20"
+        );
+    }
+
     // ──────────────────────────────────────────────────────────────
     // BraveSearchProvider
     // ──────────────────────────────────────────────────────────────
