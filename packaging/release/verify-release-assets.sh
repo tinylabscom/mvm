@@ -20,6 +20,7 @@ ASSETS_DIR=""
 TARGETS="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
 # Keep in lockstep with the release.yml `builder-vm-image` matrix.
 BUILDER_ARCHES="aarch64 x86_64"
+RUNTIME_ARCHES="aarch64 x86_64"
 DO_COSIGN=0
 EXPECT_VERSION=""
 
@@ -28,6 +29,7 @@ while [ $# -gt 0 ]; do
     --assets-dir)     ASSETS_DIR="$2"; shift 2 ;;
     --targets)        TARGETS="$2"; shift 2 ;;
     --builder-arches) BUILDER_ARCHES="$2"; shift 2 ;;
+    --runtime-arches) RUNTIME_ARCHES="$2"; shift 2 ;;
     --cosign)         DO_COSIGN=1; shift ;;
     # Assert the packaged binary reports this version. Only the target that
     # matches the host can be executed; cross-arch targets are skipped (their
@@ -174,6 +176,44 @@ for arch in $BUILDER_ARCHES; do
     [ "$want" = "$got" ] || fail "[$arch] $f sha256 mismatch: recorded=$want actual=$got"
   done
   [ "$FAILED" = 0 ] && echo "ok: [$arch] attested builder pack complete (manifest + bundle + SBOM, checksummed)."
+done
+
+# Attested runtime packs follow the identical accelerator contract as builder
+# packs: COMPLETE (manifest + cosign bundle + SBOM, each listed in and matching
+# the per-arch default-microvm checksums manifest) or entirely ABSENT. A partial
+# runtime pack fails closed for the same reason — an installed binary would
+# fetch it, fail to verify, and silently fall back to the plain download.
+for arch in $RUNTIME_ARCHES; do
+  rp_manifest="default-microvm-${arch}.pack-manifest.json"
+  rp_bundle="default-microvm-${arch}.pack-manifest.json.bundle"
+  rp_sbom="default-microvm-${arch}.sbom.txt"
+  rp_checks="$ASSETS_DIR/default-microvm-${arch}-checksums-sha256.txt"
+
+  present=0
+  for f in "$rp_manifest" "$rp_bundle" "$rp_sbom"; do
+    [ -f "$ASSETS_DIR/$f" ] && present=$((present + 1))
+  done
+
+  if [ "$present" -eq 0 ]; then
+    echo "note: [$arch] no attested runtime pack published (accelerator absent) — ok"
+    continue
+  fi
+  if [ "$present" -ne 3 ]; then
+    fail "[$arch] partial attested runtime pack: manifest=$([ -f "$ASSETS_DIR/$rp_manifest" ] && echo y || echo n) bundle=$([ -f "$ASSETS_DIR/$rp_bundle" ] && echo y || echo n) sbom=$([ -f "$ASSETS_DIR/$rp_sbom" ] && echo y || echo n)"
+    continue
+  fi
+
+  [ -f "$rp_checks" ] || { fail "[$arch] default-microvm checksums manifest missing: default-microvm-${arch}-checksums-sha256.txt"; continue; }
+  for f in "$rp_manifest" "$rp_bundle" "$rp_sbom"; do
+    want=$(awk -v n="$f" '$2 == n { print $1 }' "$rp_checks" | head -1)
+    if [ -z "$want" ]; then
+      fail "[$arch] $f not listed in default-microvm-${arch}-checksums-sha256.txt"
+      continue
+    fi
+    got=$(sha256_of "$ASSETS_DIR/$f")
+    [ "$want" = "$got" ] || fail "[$arch] $f sha256 mismatch: recorded=$want actual=$got"
+  done
+  [ "$FAILED" = 0 ] && echo "ok: [$arch] attested runtime pack complete (manifest + bundle + SBOM, checksummed)."
 done
 
 if [ "$FAILED" = 0 ]; then

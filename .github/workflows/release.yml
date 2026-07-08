@@ -492,6 +492,12 @@ jobs:
       - name: Install Nix
         uses: DeterminateSystems/nix-installer-action@main
 
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
       - name: Build default microVM image (prod variant)
         env:
           ARCH: ${{ matrix.arch }}
@@ -500,19 +506,93 @@ jobs:
           nix build "./nix/images/default-tenant#packages.${SYSTEM}.default" \
             --impure --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
+          echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
           mkdir -p staging
           cp -L "$STORE_PATH/vmlinux"         "staging/default-microvm-vmlinux-${ARCH}"
           cp -L "$STORE_PATH/rootfs.ext4"     "staging/default-microvm-rootfs-${ARCH}.ext4"
           cp -L "$STORE_PATH/rootfs.verity"   "staging/default-microvm-rootfs-${ARCH}.verity"
           cp -L "$STORE_PATH/rootfs.roothash" "staging/default-microvm-rootfs-${ARCH}.roothash"
           cp -L "$STORE_PATH/mvm-meta.json"   "staging/default-microvm-meta-${ARCH}.json"
+
+      - name: Generate default microVM SBOM
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          # Real store-path bill of materials for the default microVM closure —
+          # the attested runtime pack manifest's SBOM reference hashes this
+          # file's bytes.
+          nix-store --query --requisites "$STORE_PATH" > "staging/default-microvm-${ARCH}.sbom.txt"
+
+      - name: Produce and keyless-sign attested runtime pack manifest
+        # The runtime pack is an instant-launch accelerator, never a hard
+        # dependency. A Fulcio/Rekor/OIDC hiccup must not block the plain
+        # vmlinux/rootfs/verity publish above, so a signing failure here is
+        # tolerated: the job continues, no pack ships, and installed binaries
+        # fall back to the plain hash-verified download + verity-sealed boot.
+        continue-on-error: true
+        env:
+          ARCH: ${{ matrix.arch }}
+          REPOSITORY: ${{ github.repository }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          # A runtime pack's keyless identity is the version tag ref cosign
+          # embeds in the certificate SAN and a released mvmctl reconstructs
+          # when verifying. Skip production unless the ref is a version tag
+          # whose version equals the crate version; anything else yields an
+          # identity no installed binary can reconstruct, so it would fail-open
+          # to the plain download. Skipping keeps that explicit.
+          if [[ "${REF}" != refs/tags/v* ]]; then
+            echo "::notice::${REF} is not a version tag; skipping attested runtime pack."
+            exit 0
+          fi
+          TAG_VERSION="${REF#refs/tags/v}"
+          CRATE_VERSION="$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name=="mvm-cli") | .version')"
+          if [[ "${TAG_VERSION}" != "${CRATE_VERSION}" ]]; then
+            echo "::warning::tag ${REF} does not match crate version v${CRATE_VERSION}; installed binaries could not verify this pack — skipping attested runtime pack."
+            exit 0
+          fi
+          IDENTITY="https://github.com/${REPOSITORY}/.github/workflows/release.yml@${REF}"
+          REVOCATION_CHANNEL="https://github.com/${REPOSITORY}/releases/download/revocations/runtime-pack-revocations.json"
+          SBOM_URI="https://github.com/${REPOSITORY}/releases/download/${REF#refs/tags/}/default-microvm-${ARCH}.sbom.txt"
+          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+            --kind runtime \
+            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
+            --verity "$STORE_PATH/rootfs.verity" --roothash "$STORE_PATH/rootfs.roothash" \
+            --arch "$ARCH" --channel stable --keyless \
+            --identity "$IDENTITY" \
+            --out-dir staging \
+            --sbom "staging/default-microvm-${ARCH}.sbom.txt" \
+            --sbom-uri "$SBOM_URI" \
+            --revocation-channel "$REVOCATION_CHANNEL"
+          mv staging/manifest.json "staging/default-microvm-${ARCH}.pack-manifest.json"
+
+          # Keyless OIDC sign — --new-bundle-format emits the Sigstore bundle
+          # (with verificationMaterial) the installed binary's Rust verifier
+          # parses; the legacy --bundle format is not accepted by that stack.
+          cosign sign-blob \
+            --yes \
+            --new-bundle-format \
+            --bundle "staging/default-microvm-${ARCH}.pack-manifest.json.bundle" \
+            "staging/default-microvm-${ARCH}.pack-manifest.json"
+
+      - name: Generate default microVM checksums
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
           cd staging
-          sha256sum "default-microvm-vmlinux-${ARCH}" \
-                    "default-microvm-rootfs-${ARCH}.ext4" \
-                    "default-microvm-rootfs-${ARCH}.verity" \
-                    "default-microvm-rootfs-${ARCH}.roothash" \
-                    "default-microvm-meta-${ARCH}.json" \
-            > "default-microvm-${ARCH}-checksums-sha256.txt"
+          FILES="default-microvm-vmlinux-${ARCH} \
+                 default-microvm-rootfs-${ARCH}.ext4 \
+                 default-microvm-rootfs-${ARCH}.verity \
+                 default-microvm-rootfs-${ARCH}.roothash \
+                 default-microvm-meta-${ARCH}.json"
+          # The attested pack is optional (signing may be skipped or fail); only
+          # checksum its files when they are actually present.
+          if [ -f "default-microvm-${ARCH}.pack-manifest.json.bundle" ]; then
+            FILES="$FILES default-microvm-${ARCH}.pack-manifest.json default-microvm-${ARCH}.pack-manifest.json.bundle default-microvm-${ARCH}.sbom.txt"
+          fi
+          sha256sum $FILES > "default-microvm-${ARCH}-checksums-sha256.txt"
 
       - name: Upload default microVM image artifacts
         uses: actions/upload-artifact@v7
@@ -524,6 +604,9 @@ jobs:
             staging/default-microvm-rootfs-${{ matrix.arch }}.verity
             staging/default-microvm-rootfs-${{ matrix.arch }}.roothash
             staging/default-microvm-meta-${{ matrix.arch }}.json
+            staging/default-microvm-${{ matrix.arch }}.pack-manifest.json
+            staging/default-microvm-${{ matrix.arch }}.pack-manifest.json.bundle
+            staging/default-microvm-${{ matrix.arch }}.sbom.txt
             staging/default-microvm-${{ matrix.arch }}-checksums-sha256.txt
 
   release:
@@ -653,6 +736,9 @@ jobs:
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*
+            artifacts/default-microvm-*.pack-manifest.json
+            artifacts/default-microvm-*.pack-manifest.json.bundle
+            artifacts/default-microvm-*.sbom.txt
             artifacts/default-microvm-*-checksums-sha256.txt
             sbom.cdx.json
             sbom.cdx.json.bundle

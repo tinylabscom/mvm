@@ -93,17 +93,25 @@ The target user-visible shape is:
 
 ### B. Release production and artifact publishing
 
-- [ ] Extend the release pipeline to produce runtime packs for each supported
+- [x] Extend the release pipeline to produce runtime packs for each supported
       host architecture/backend pair.
+      (`default-microvm` job in `.github/workflows/release.yml` produces +
+      keyless-signs + publishes a runtime pack — kernel + verity-sealed rootfs +
+      sidecars — per arch, on a version-tag push whose version matches the crate.)
 - [ ] Extend the release pipeline to produce builder packs for each supported
       builder architecture.
 - [ ] Include seeded Nix closures for common mvm build and materialization paths
       in builder packs.
-- [ ] Emit SBOMs, checksums, signatures, provenance, and pack manifests for every
+- [x] Emit SBOMs, checksums, signatures, provenance, and pack manifests for every
       release pack.
+      (Both the builder-pack and runtime-pack producers emit a store-path SBOM,
+      a per-arch checksums manifest listing the pack files, a cosign
+      `--new-bundle-format` signature bundle, and the pack manifest.)
 - [x] Add release verification checks that fail closed when any pack lacks a
       manifest, signature bundle, checksum, SBOM, or expected version metadata.
-      (builder-pack gate in `packaging/release/verify-release-assets.sh`)
+      (builder-pack **and** runtime-pack completeness gates in
+      `packaging/release/verify-release-assets.sh` — each pack must be COMPLETE
+      or entirely ABSENT; a partial or checksum-mismatched pack fails closed.)
 - [ ] Add a reproducibility verification job that rebuilds at least one published
       runtime pack and one published builder pack from source pins and compares
       output hashes.
