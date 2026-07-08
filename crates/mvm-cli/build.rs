@@ -1,3 +1,6 @@
+#[path = "build_embed_mode.rs"]
+mod build_embed_mode;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -55,23 +58,22 @@ fn main() {
     // plain-`cargo build` fast-path was once tried on the false premise that
     // the bins are C-free; it broke CI, which has no musl-gcc.)
 
-    // Fast path for local test/dev iteration: skip the nested
-    // `cargo zigbuild --release` cross-compile of the host-vm binaries and
-    // bake zero-byte stubs instead. Cuts the dominant cold-build tax on
-    // macOS (and any fresh worktree) for everyone who isn't exercising a
-    // builder-VM boot. The only consumers that read the *bytes* are the
-    // env-gated boot/E2E tests (`MVM_E2E_SMOKE`, libkrun lifecycle), which
-    // are skipped in a default `cargo test`/`nextest` run — and the
-    // `e2e-core-demo` recipe never sets this var, so a stub build can't
-    // masquerade as a passing E2E. NEVER set this in CI release builds:
-    // the shipped mvmctl must embed the real reproducible binaries
-    // (claim 11).
-    let skip_embed = std::env::var("MVM_SKIP_EMBED_BINARIES").as_deref() == Ok("1");
+    // Build policy:
+    // - `MVM_SKIP_EMBED_BINARIES=1` always skips the nested cross-compile.
+    // - `MVM_EMBED_BINARIES=1` always performs the real embed, even in dev/test.
+    // - Otherwise, release builds embed the real binaries and non-release
+    //   builds bake zero-byte stubs.
+    //
+    // This keeps production artifacts reproducible by default while removing
+    // the dominant cold-build tax from ordinary `cargo check`/`cargo test`
+    // contributor workflows.
+    let skip_embed = should_skip_embed_binaries();
     println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
+    println!("cargo:rerun-if-env-changed=MVM_EMBED_BINARIES");
     if skip_embed {
         println!(
-            "cargo:warning=MVM_SKIP_EMBED_BINARIES=1: embedding zero-byte host-vm \
-             stubs; builder-VM boot is unavailable in this build"
+            "cargo:warning=embedding zero-byte host-vm stubs for this non-release build; \
+             set MVM_EMBED_BINARIES=1 to force real embedded binaries"
         );
     }
 
@@ -98,12 +100,12 @@ fn main() {
         );
     }
 
-    // Guest-agent binaries (`mvm-guest-agent` + `mvm-guest-netinit`, dev-shell,
-    // guest arch = host arch). Embedded alongside the host bins so an end-user
-    // mvmctl with no source checkout can inject them into an OCI `run --image`
-    // rootfs. Built in one cargo invocation; they ride the same `EMBEDDED` array
-    // and are looked up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte
-    // stubs) — a stub build can't materialize an OCI run, same as the host bins.
+    // Guest runtime binaries (agent + netinit + egress-client, guest arch =
+    // host arch). Embedded alongside the host bins so an end-user mvmctl with no
+    // source checkout can inject them into an OCI `run --image` rootfs. Built in
+    // one cargo invocation; they ride the same `EMBEDDED` array and are looked
+    // up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte stubs) — a stub
+    // build can't materialize an OCI run, same as the host bins.
     if !skip_embed {
         run_guest_zigbuild(
             &workspace_root,
@@ -113,7 +115,7 @@ fn main() {
             &bins_out,
         );
     }
-    for name in ["mvm-guest-agent", "mvm-guest-netinit"] {
+    for name in ["mvm-guest-agent", "mvm-guest-netinit", "mvm-egress-client"] {
         let out_file = bins_out.join(name);
         if skip_embed {
             std::fs::write(&out_file, b"")
@@ -122,10 +124,15 @@ fn main() {
         let sha = sha256_hex(&out_file);
         entries.push((name.to_string(), out_file, sha));
     }
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("crates/mvm-guest/src").display()
-    );
+    // Watch the guest source trees file-by-file, not as a directory. Cargo's
+    // directory-level `rerun-if-changed` does not reliably fire on a content
+    // edit to an existing file (only on add/remove), so a change to e.g. the
+    // guest agent's request handler would otherwise leave the *embedded* agent
+    // stale on an incremental build — `machine run --image` would then inject an
+    // out-of-date agent. Emitting one `rerun-if-changed` per file guarantees the
+    // cross-compile re-runs on any edit.
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-guest/src"));
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-guest-helpers/src"));
 
     let embedded_rs = render_embedded_rs(&entries);
     std::fs::write(out_dir.join("embedded.rs"), embedded_rs).unwrap();
@@ -147,16 +154,43 @@ fn main() {
         "cargo:rerun-if-changed={}",
         workspace_root.join("Cargo.lock").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("crates/mvm-build/src").display()
-    );
+    // Same file-by-file watch for the `mvm-build` lib the host bins link (a
+    // content edit there must re-cross-compile the embedded host bins).
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-build/src"));
+}
+
+/// Emit one `cargo:rerun-if-changed` per file under `root`, recursively. Unlike
+/// a single directory-level `rerun-if-changed` (which cargo does not reliably
+/// re-trigger on a content edit to an existing file), this forces the build
+/// script — and therefore the embedded-binary cross-compile — to re-run whenever
+/// any watched source file changes. Missing trees are silently skipped (the
+/// dir-level watch already fails soft the same way).
+fn emit_rerun_for_tree(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            emit_rerun_for_tree(&path);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }
 
 struct Pin {
     zig: String,
     cargo_zigbuild: String,
     target: String,
+}
+
+fn should_skip_embed_binaries() -> bool {
+    build_embed_mode::should_skip_embed_binaries(
+        std::env::var("PROFILE").ok().as_deref(),
+        std::env::var("MVM_SKIP_EMBED_BINARIES").ok().as_deref(),
+        std::env::var("MVM_EMBED_BINARIES").ok().as_deref(),
+    )
 }
 
 fn read_pinned_toolchain(root: &Path) -> Pin {
@@ -303,14 +337,14 @@ fn run_cargo_zigbuild(
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
 }
 
-/// Cross-compile the guest agent + netinit (one invocation, dev-shell feature)
-/// to the static musl `target`, copying both into `out_dir`. Same zig/rustup
-/// handling as `run_cargo_zigbuild`; the guest binaries are a single `mvm-guest`
-/// package build with two `--bin`s, not one bin per call.
+/// Cross-compile the guest runtime binaries (one invocation, dev-shell feature)
+/// to the static musl `target`, copying them into `out_dir`. Same zig/rustup
+/// handling as `run_cargo_zigbuild`.
 fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
     eprintln!(
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-guest \
-         --bin mvm-guest-agent --bin mvm-guest-netinit --features mvm-guest/dev-shell"
+         --bin mvm-guest-agent --bin mvm-guest-netinit -p mvm-guest-helpers \
+         --bin mvm-egress-client --features mvm-guest/dev-shell"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
     let mut cmd = Command::new(&cargo);
@@ -325,6 +359,10 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "mvm-guest-agent",
         "--bin",
         "mvm-guest-netinit",
+        "-p",
+        "mvm-guest-helpers",
+        "--bin",
+        "mvm-egress-client",
         "--features",
         "mvm-guest/dev-shell",
     ])
@@ -345,7 +383,7 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "cargo zigbuild failed for the guest agent"
     );
     let rel = target_dir.join(strip_glibc(target)).join("release");
-    for name in ["mvm-guest-agent", "mvm-guest-netinit"] {
+    for name in ["mvm-guest-agent", "mvm-guest-netinit", "mvm-egress-client"] {
         let built = rel.join(name);
         let dest = out_dir.join(name);
         std::fs::copy(&built, &dest)

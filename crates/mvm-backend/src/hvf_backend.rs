@@ -184,6 +184,26 @@ fn spawn_hvf_gating_endpoint(
     Ok((EndpointGuard::new(vm_name), socket))
 }
 
+/// Kernel cmdline token that turns on the in-guest vsock egress client.
+/// Emitted only when the run actually allows outbound egress and the workload
+/// carries no bound secrets, so the raw SOCKS path never contends with the
+/// substitution endpoint for the shared egress port.
+fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
+    (config.network_policy.allows_egress()
+        && !crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
+    .then(|| "mvm.vsock_egress=1".to_string())
+}
+
+fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
+    let token = vsock_egress_cmdline_token(config, state_dir)?;
+    let virtiofs_root = config.virtiofs_root.is_some();
+    let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
+    let mut cmdline = crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk);
+    cmdline.push(' ');
+    cmdline.push_str(&token);
+    Some(cmdline)
+}
+
 impl VmBackend for HvfBackend {
     fn name(&self) -> &str {
         "hvf"
@@ -325,9 +345,9 @@ impl VmBackend for HvfBackend {
 
         let cfg = HvfSupervisorConfig {
             kernel: PathBuf::from(kernel),
-            // Workload path: the supervisor's default cmdline (`init=/init`) is the
-            // mkGuest contract, so leave it unset.
-            cmdline: None,
+            // Thread a full cmdline only when we need extra workload tokens;
+            // otherwise keep the supervisor default (`init=/init`).
+            cmdline: hvf_workload_cmdline(config, &state_dir),
             memory_mib: config.memory_mib,
             initramfs: config.initrd_path.clone().map(PathBuf::from),
             disks,
@@ -613,6 +633,41 @@ mod tests {
             first.host_socket,
             PathBuf::from("/state/hvf/vsock/vsock-20001.sock")
         );
+    }
+
+    #[test]
+    fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {
+        let dir = tempfile::tempdir().unwrap();
+        let deny_all = VmStartConfig::default();
+        assert_eq!(vsock_egress_cmdline_token(&deny_all, dir.path()), None);
+
+        let allow_egress = VmStartConfig {
+            network_policy: mvm_core::network_policy::NetworkPolicy::preset(
+                mvm_core::network_policy::NetworkPreset::Dev,
+            ),
+            ..Default::default()
+        };
+        assert_eq!(
+            vsock_egress_cmdline_token(&allow_egress, dir.path()).as_deref(),
+            Some("mvm.vsock_egress=1")
+        );
+    }
+
+    #[test]
+    fn hvf_workload_cmdline_appends_vsock_egress_token_for_virtiofs_root() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let config = VmStartConfig {
+            virtiofs_root: Some("/tmp/root".to_string()),
+            network_policy: mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+                mvm_core::network_policy::HostPort::new("example.com", 443),
+            ]),
+            ..Default::default()
+        };
+        let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
+        assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
+        assert!(cmdline.contains("init=/init"));
+        assert!(cmdline.contains("mvm.vsock_egress=1"));
     }
 
     #[test]

@@ -306,6 +306,15 @@ impl NetworkPolicy {
         }
     }
 
+    /// Whether this policy grants any outbound egress at all.
+    ///
+    /// `unrestricted` obviously does; allow-lists and named presets do iff
+    /// they expand to at least one host:port rule. Both the explicit
+    /// deny-all preset and an empty allow-list return `false`.
+    pub fn allows_egress(&self) -> bool {
+        self.is_unrestricted() || self.resolve_rules().is_some_and(|rules| !rules.is_empty())
+    }
+
     /// Short, non-sensitive, human-readable summary of the effective
     /// egress posture for admission/audit/dry-run/receipt surfaces.
     ///
@@ -683,6 +692,15 @@ mod tests {
             .posture_label(),
             "allow-list:a.com:443,b.com:8443"
         );
+    }
+
+    #[test]
+    fn allows_egress_covers_every_shape() {
+        assert!(!NetworkPolicy::deny_all().allows_egress());
+        assert!(!NetworkPolicy::allow_list(vec![]).allows_egress());
+        assert!(NetworkPolicy::unrestricted().allows_egress());
+        assert!(NetworkPolicy::preset(NetworkPreset::Dev).allows_egress());
+        assert!(NetworkPolicy::allow_list(vec![HostPort::new("a.com", 443)]).allows_egress());
     }
 
     #[test]

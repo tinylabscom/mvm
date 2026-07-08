@@ -71,6 +71,24 @@ The hvf guest agent must answer host RPC. Root-cause the guest-no-reply (host de
 Adopt Plan 214 S4/S6/S7 into execution, with the **builder as a policy profile, not a networking exception**:
 
 - [ ] **B1 (libkrun workloads):** flip the built-but-inert guest vsock egress on by default (`MVM_VSOCK_EGRESS` becomes opt-out during bake-in, then removed); retire the workload NIC + gvproxy/passt spawn on the workload path.
+  - [x] 2026-07-08 activation plumbing landed for OCI `--image` workloads: the
+        injected guest `/init` now launches `mvm-egress-client`, exports proxy
+        envs, and the host-side OCI exec path injects the same proxy envs when
+        the selected backend is a vsock-only proxy backend with
+        `MVM_VSOCK_EGRESS` enabled. HVF now emits the `mvm.vsock_egress=1`
+        kernel token on eligible boots.
+  - [x] 2026-07-08 activation follow-through landed for the OCI path: the
+        trigger is now the requested outbound policy (`--net` /
+        `--allow-host`), not a hidden env toggle; OCI exec/preflight/receipt
+        selection now requires a backend that honestly advertises
+        `{ vsock, no_guest_nic, host_vsock_proxy }`, refusing incapable
+        backends instead of silently attaching a NIC. Vz now omits the guest
+        NIC/gvproxy on this raw OCI path and brings the host egress endpoint up
+        before boot so the shim fails closed if the endpoint is absent. The
+        same selector now gates persistent OCI-backed machine boots
+        (`machine run -d --image ...` and `machine start` on an image-backed
+        machine), so stored machine lifecycles cannot regress onto the legacy
+        NIC/gateway path.
 - [ ] **B2 (firecracker workloads):** egress via vhost-vsock → gating endpoint; retire workload TAP + nftables enforcement (endpoint enforces `PlanFlowPolicy` uniformly). nftables remains only as belt-and-braces during transition, then removed.
 - [ ] **B3 (builders):** builder VMs boot with **no NIC**. Nix egress rides `HTTP(S)_PROXY` → in-guest forward proxy (existing `127.0.0.1:18080` machinery + the already-embedded `mvm-egress-proxy` builder binary) → AF_VSOCK → host gating endpoint running a **builder profile**: fetch-host allowlist + **chain-signed audit entry per fetch (URL + content hash)**. Remove `host_gvproxy` spawn sites on the builder path.
 - [ ] **B4 (supply-chain manifest):** the per-build fetch log + flake.lock forms a reviewable manifest; `mvmctl trust audit verify` covers it. Optional host-side content-addressed fetch cache at the endpoint (faster warm builds, offline replay).

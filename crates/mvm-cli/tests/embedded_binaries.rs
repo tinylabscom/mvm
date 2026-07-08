@@ -4,15 +4,18 @@ use sha2::{Digest, Sha256};
 #[test]
 fn each_embedded_binary_starts_with_elf_magic() {
     for bin in EMBEDDED.iter() {
+        if bin.bytes.is_empty() {
+            continue;
+        }
         assert!(
             bin.bytes.len() > 1024,
-            "{}: implausibly small payload",
+            "{}: non-stub payload is implausibly small",
             bin.name
         );
         assert_eq!(
             &bin.bytes[..4],
             &[0x7F, b'E', b'L', b'F'],
-            "{}: payload is not an ELF binary",
+            "{}: non-stub payload is not an ELF binary",
             bin.name
         );
     }

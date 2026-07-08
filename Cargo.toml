@@ -224,12 +224,14 @@ colored = "3"
 indicatif = "0.18"
 inquire = "0.9"
 
-# HTTP client (for CLI upgrade)
-reqwest = { version = "0.12", features = ["blocking", "json", "rustls-tls"], default-features = false }
+# HTTP client. Keep the workspace on a single reqwest line so the direct
+# callers and `oci-client` share one HTTP/TLS stack instead of compiling both
+# 0.12 and 0.13 in the same workspace build.
+reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false }
 
 # Plan 129 Stage 2 — the egress terminator's server-side TLS (terminate the
 # guest's https to bound hosts under the per-VM name-constrained intermediate).
-# `ring` backend (matches reqwest's rustls-tls + rcgen), no aws-lc-rs/cmake.
+# `ring` backend (matches reqwest's rustls surface + rcgen), no aws-lc-rs/cmake.
 # Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 

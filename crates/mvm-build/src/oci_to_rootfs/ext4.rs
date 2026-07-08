@@ -15,8 +15,9 @@
 //! - `-U <uuid>` — filesystem UUID.
 //! - `-E hash_seed=<uuid>` — htree directory-hash seed (controls
 //!   dirent ordering inside a directory).
-//! - `SOURCE_DATE_EPOCH=0` env — every file's mtime is pinned to
-//!   the Unix epoch.
+//! - `SOURCE_DATE_EPOCH=0` and `E2FSPROGS_FAKE_TIME=0` env —
+//!   filesystem creation/check times and e2fsprogs current-time
+//!   fallbacks are pinned to the Unix epoch across versions.
 //! - `-E no_copy_xattrs` — xattrs are skipped uniformly (we don't
 //!   forward OCI xattrs through unpack today anyway).
 //! - `-b 4096` — fixed block size.
@@ -40,6 +41,12 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "linux", test))]
 const DISABLED_EXT4_FEATURES: &str = "^has_journal,^orphan_file";
+
+#[cfg(any(target_os = "linux", test))]
+const SOURCE_DATE_EPOCH_ENV: &str = "SOURCE_DATE_EPOCH";
+
+#[cfg(any(target_os = "linux", test))]
+const E2FSPROGS_FAKE_TIME_ENV: &str = "E2FSPROGS_FAKE_TIME";
 
 /// Knobs for [`materialize_to_ext4`]. Defaults produce a
 /// byte-deterministic image suitable for verity
@@ -70,10 +77,11 @@ pub struct Mke2fsOptions {
     /// than truncated content, so the padding is for ergonomics,
     /// not correctness.
     pub size_padding_bytes: u64,
-    /// `SOURCE_DATE_EPOCH` env value passed to `mke2fs`. Default
-    /// 0 — every file timestamp becomes the Unix epoch. The verity
-    /// story needs this so two runs of the same source tree
-    /// produce byte-identical ext4.
+    /// Deterministic timestamp value passed to `mke2fs`. Default
+    /// 0 — filesystem creation/check times and e2fsprogs
+    /// current-time fallbacks are pinned to the Unix epoch. The
+    /// verity story needs this so two runs of the same source
+    /// tree produce byte-identical ext4.
     pub source_date_epoch: u64,
     /// Override the `mke2fs` binary location. Default `None` —
     /// the binary is resolved via `$PATH`. Tests use this to
@@ -193,10 +201,39 @@ fn run_mke2fs(
     output: &Path,
     options: &Mke2fsOptions,
 ) -> Result<(), OciUnpackError> {
-    let binary: &Path = options
+    let binary = selected_mke2fs_binary(options);
+    let mut cmd = build_mke2fs_command(binary, staged_root, output, options);
+    let exec = cmd.output().map_err(|e| OciUnpackError::Mke2fsFailed {
+        reason: format!("spawn `{}`: {e}", binary.display()),
+    })?;
+    if !exec.status.success() {
+        let stderr = String::from_utf8_lossy(&exec.stderr).into_owned();
+        let stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
+        return Err(OciUnpackError::Mke2fsFailed {
+            reason: format!(
+                "exit {:?}; stderr={stderr}; stdout={stdout}",
+                exec.status.code()
+            ),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn selected_mke2fs_binary(options: &Mke2fsOptions) -> &Path {
+    options
         .mke2fs_binary
         .as_deref()
-        .unwrap_or_else(|| Path::new("mke2fs"));
+        .unwrap_or_else(|| Path::new("mke2fs"))
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn build_mke2fs_command(
+    binary: &Path,
+    staged_root: &Path,
+    output: &Path,
+    options: &Mke2fsOptions,
+) -> std::process::Command {
     // mke2fs's `-E` is last-wins, not accumulating — passing it twice
     // silently drops the earlier value. Combine extended options into a
     // single comma-separated `-E` so `hash_seed` actually takes effect
@@ -204,7 +241,9 @@ fn run_mke2fs(
     // shifting the htree layout and breaking the byte-determinism the
     // verity cache depends on).
     let mut cmd = std::process::Command::new(binary);
-    cmd.env("SOURCE_DATE_EPOCH", options.source_date_epoch.to_string())
+    let deterministic_time = options.source_date_epoch.to_string();
+    cmd.env(SOURCE_DATE_EPOCH_ENV, &deterministic_time)
+        .env(E2FSPROGS_FAKE_TIME_ENV, deterministic_time)
         .args(["-F"]) // overwrite the preallocated output file
         .args(["-t", "ext4"])
         // Disable features that can carry run-specific bytes. The journal and
@@ -222,20 +261,7 @@ fn run_mke2fs(
         .arg("-d")
         .arg(staged_root)
         .arg(output);
-    let exec = cmd.output().map_err(|e| OciUnpackError::Mke2fsFailed {
-        reason: format!("spawn `{}`: {e}", binary.display()),
-    })?;
-    if !exec.status.success() {
-        let stderr = String::from_utf8_lossy(&exec.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
-        return Err(OciUnpackError::Mke2fsFailed {
-            reason: format!(
-                "exit {:?}; stderr={stderr}; stdout={stdout}",
-                exec.status.code()
-            ),
-        });
-    }
-    Ok(())
+    cmd
 }
 
 /// Recursive directory walk that returns
@@ -293,6 +319,38 @@ mod tests {
         // Padding is large enough to absorb mke2fs overhead but
         // not so large that small images pay an outsized cost.
         assert_eq!(o.size_padding_bytes, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn mke2fs_command_pins_all_time_sources() {
+        let tmp = TempDir::new().unwrap();
+        let output = tmp.path().join("rootfs.ext4");
+        let options = Mke2fsOptions {
+            source_date_epoch: 123,
+            mke2fs_binary: Some(PathBuf::from("/usr/sbin/mke2fs")),
+            ..defaults()
+        };
+        let cmd = build_mke2fs_command(
+            selected_mke2fs_binary(&options),
+            tmp.path(),
+            &output,
+            &options,
+        );
+
+        assert_eq!(
+            command_env_value(&cmd, SOURCE_DATE_EPOCH_ENV).as_deref(),
+            Some("123")
+        );
+        assert_eq!(
+            command_env_value(&cmd, E2FSPROGS_FAKE_TIME_ENV).as_deref(),
+            Some("123")
+        );
+    }
+
+    fn command_env_value(cmd: &std::process::Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(name, _)| *name == std::ffi::OsStr::new(key))
+            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
     }
 
     #[test]

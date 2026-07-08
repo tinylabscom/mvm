@@ -29,6 +29,7 @@ use super::guest_ram::{GuestRam, page_rounded_len};
 use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::sys::*;
 use super::vcpu::esr_ec;
+use crate::hvf_bootargs::{default_bootargs, default_virtiofs_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
@@ -136,30 +137,6 @@ pub struct KernelBootResult {
     /// port (the transient run-to-exit signal). `None` for a run that ended by
     /// timeout/stop without a workload-exit report.
     pub workload_exit_code: Option<i32>,
-}
-
-/// Kernel cmdline used when `MVM_HVF_BOOTARGS` is unset. Always wires the PL011
-/// console (earlycon + `ttyAMA0`). When a virtio-blk disk is attached it is a
-/// real mkGuest workload rootfs, so mount it and run the baked init —
-/// `root=/dev/vda rw init=/init`, the same contract the Vz/firecracker backends
-/// boot mkGuest images with. Disk-less boots (initramfs / freestanding payloads)
-/// keep the bare console args.
-fn default_bootargs(has_disk: bool) -> String {
-    let mut args =
-        format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8");
-    if has_disk {
-        args.push_str(" root=/dev/vda rw init=/init");
-    }
-    args
-}
-
-/// Cmdline for a virtiofs-root dev boot: mount the virtio-fs device tagged
-/// `mvmroot` as root and run the baked init. No block rootfs is attached.
-fn default_virtiofs_bootargs() -> String {
-    format!(
-        "earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8 \
-         rootfstype=virtiofs root=mvmroot rw init=/init"
-    )
 }
 
 /// Host-supplied boot inputs the supervisor threads into a guest: the vsock

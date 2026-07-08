@@ -424,7 +424,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 |---------|-------------|
 | `mvmctl machine run --image <ref> -- <cmd>...` | Boot an OCI image, run `<cmd>` with no network, tear down |
 | `mvmctl machine run --net --image <ref> -- <cmd>...` | Boot with dev-tier outbound networking enabled |
-| `mvmctl machine run --image <ref> --allow-host <host[:port]> -- <cmd>...` | Boot with egress narrowed to the listed host/port entries |
+| `mvmctl machine run --image <ref> --allow-host <host[:port]> -- <cmd>...` | Boot with egress narrowed to the listed TCP host/port entries (`<host>` alone defaults to `:443`) |
 | `mvmctl machine run --image <ref> --profile dev --volume .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
 | `mvmctl machine run --image <ref> --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
 | `mvmctl machine run --image <ref> --dry-run -- <cmd>` | Validate and explain the run plan without booting a VM |
@@ -489,6 +489,15 @@ mvmctl machine run -it --image <dev-image> -- /bin/sh   # exits with /bin/sh, VM
 mvmctl machine run -it --image <dev-image> -- htop      # exits with htop, VM gone
 ```
 
+For OCI `--image` runs that request outbound egress (`--net` or `--allow-host`),
+`mvmctl` selects only backends that can keep the guest NIC-less and proxy
+traffic over the host-vsock egress endpoint. On that path the injected guest
+`/init` starts `mvm-egress-client` and the runtime injects proxy env vars
+pointing at its loopback SOCKS listener automatically. Today that means `hvf`
+and `vz`; incapable backends are refused rather than silently falling back to a
+guest NIC. That makes TCP/HTTP clients work, but it does **not** add ICMP
+support: `ping` is not a valid smoke test for `--allow-host`.
+
 Naming a foreground run does not make it persistent; it only gives the transient
 VM a stable identity while it is running:
 
@@ -530,7 +539,14 @@ named `MachineSpec` to exist first. `machine start` resolves the stored OCI
 image through the normal cache/materialization path, emits the same admission
 and OCI provenance audit substrate as the transient image runner, then boots
 the named VM with any persisted `mem_initial` and volume settings. When the
-named spec came from an image-backed manifest, `machine create --manifest`
+stored machine requests outbound egress and is OCI-backed (`machine create
+--image`, `machine create --manifest` with an image-backed manifest, or
+`machine run -d --image`), `machine start` applies the same NIC-less
+host-vsock-proxy backend gate as transient `run --image`: only backends that
+honestly advertise `{ vsock, no_guest_nic, host_vsock_proxy }` are allowed,
+and incapable backends are refused instead of silently falling back to a guest
+NIC or `gvproxy`/`passt`. When the named spec came from an image-backed
+manifest, `machine create --manifest`
 persists the manifest's `net`, `[network].allow_hosts`, `cpus`, `mem`,
 `mem_initial`, `[dev].volumes`, and `[dev].init` fields into the durable
 machine spec; relative manifest volume paths are resolved against the manifest

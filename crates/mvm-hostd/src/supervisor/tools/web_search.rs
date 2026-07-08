@@ -41,6 +41,7 @@ use async_trait::async_trait;
 use secrecy::{ExposeSecret, SecretBox};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use url::Url;
 
 use super::http_hardening::{DEFAULT_RESPONSE_BODY_CAP, hardened_client_builder, read_capped};
 use super::{HostMediatedTool, ToolInvokeError};
@@ -60,6 +61,18 @@ pub const MAX_ALLOWED_RESULTS: u32 = 50;
 /// queries longer than ~512 chars anyway, but pre-rejecting here
 /// keeps the audit chain from logging giant strings.
 pub const MAX_QUERY_LEN: usize = 1024;
+
+fn build_query_url(endpoint: &str, params: &[(&str, &str)]) -> Result<Url, SearchError> {
+    let mut url = Url::parse(endpoint)
+        .map_err(|e| SearchError::Upstream(format!("invalid provider endpoint {endpoint}: {e}")))?;
+    {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in params {
+            pairs.append_pair(key, value);
+        }
+    }
+    Ok(url)
+}
 
 /// Pluggable upstream search adapter. Production impls (`BraveProvider`,
 /// `GoogleProvider`, …) wrap their respective HTTP clients;
@@ -207,14 +220,18 @@ impl SearchProvider for BraveSearchProvider {
         // before forwarding so a caller-supplied 50 doesn't trip a
         // 422 from upstream.
         let count = max_results.min(20);
+        let count_string = count.to_string();
+        let request_url = build_query_url(
+            &self.endpoint,
+            &[("q", query), ("count", count_string.as_str())],
+        )?;
         let response = self
             .client
-            .get(&self.endpoint)
+            .get(request_url)
             .header(
                 "X-Subscription-Token",
                 self.api_key.expose_secret().as_str(),
             )
-            .query(&[("q", query), ("count", &count.to_string())])
             .send()
             .await
             .map_err(|e| SearchError::Upstream(e.to_string()))?;
@@ -696,15 +713,19 @@ impl SearchProvider for GoogleSearchProvider {
         // Google CSE caps `num` at 10 per call. Clamp before
         // forwarding so a caller-supplied 50 doesn't trip a 400.
         let num = max_results.min(10);
-        let response = self
-            .client
-            .get(&self.endpoint)
-            .query(&[
+        let num_string = num.to_string();
+        let request_url = build_query_url(
+            &self.endpoint,
+            &[
                 ("key", self.api_key.expose_secret().as_str()),
                 ("cx", self.cse_id.expose_secret().as_str()),
                 ("q", query),
-                ("num", &num.to_string()),
-            ])
+                ("num", num_string.as_str()),
+            ],
+        )?;
+        let response = self
+            .client
+            .get(request_url)
             .send()
             .await
             .map_err(|e| SearchError::Upstream(self.redact_credentials(e.to_string())))?;
@@ -842,6 +863,26 @@ mod tests {
                 snippet: "package registry".into(),
             },
         ]
+    }
+
+    #[test]
+    fn build_query_url_encodes_pairs() {
+        let url = build_query_url(
+            "https://example.com/search",
+            &[("q", "rust async"), ("count", "10")],
+        )
+        .unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://example.com/search?q=rust+async&count=10"
+        );
+    }
+
+    #[test]
+    fn build_query_url_rejects_invalid_endpoint() {
+        let err = build_query_url("not a url", &[("q", "rust")]).unwrap_err();
+        assert!(matches!(err, SearchError::Upstream(_)));
+        assert!(err.to_string().contains("invalid provider endpoint"));
     }
 
     fn tool_with_stub(

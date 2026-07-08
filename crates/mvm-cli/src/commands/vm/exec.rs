@@ -122,6 +122,11 @@ pub(in crate::commands) struct RunArgs {
     /// Internal (not a CLI flag): optional foreground transient VM identity.
     #[arg(skip)]
     pub vm_name: Option<String>,
+    /// Internal (not a CLI flag): boot from a verified attested runtime pack
+    /// instead of `--manifest`/`--image`/the bundled default. Set by
+    /// `machine run --runtime-pack`.
+    #[arg(skip)]
+    pub runtime_pack: bool,
     /// Enable dev-tier outbound networking (broad egress + DNS). Off by
     /// default (deny-all). Narrow it with `--allow-host`.
     #[arg(long)]
@@ -337,7 +342,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
-    let admit_backend = mvm_backend::backend::AnyBackend::auto_select()
+    let admit_backend = crate::exec::select_exec_backend(args.image.is_some(), &network_policy)?
         .name()
         .to_string();
     // The closure below moves `admit_backend`; keep a copy for the receipt's
@@ -422,13 +427,15 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     if args.json || receipt_path.is_some() {
         let receipt_input = ReceiptInput::from_run_args(&args, &receipt_backend)?;
         let json_requested = args.json;
-        let image = args.image.clone();
-        let prod = args.prod;
+        let selection = ImageSelection {
+            image_ref: args.image.clone(),
+            prod: args.prod,
+            runtime_pack: args.runtime_pack,
+        };
         let req = build_exec_request(
             args.into_exec_args(),
             "`mvmctl run`",
-            image,
-            prod,
+            selection,
             network_policy,
         )?;
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
@@ -466,14 +473,16 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         }
         return Ok(());
     }
-    let image = args.image.clone();
-    let prod = args.prod;
+    let selection = ImageSelection {
+        image_ref: args.image.clone(),
+        prod: args.prod,
+        runtime_pack: args.runtime_pack,
+    };
     run_run_args(
         cli,
         args.into_exec_args(),
         cfg,
-        image,
-        prod,
+        selection,
         network_policy,
         RunAudit {
             admit: Some(&admit),
@@ -575,16 +584,26 @@ struct RunAudit<'a> {
     backend: &'a str,
 }
 
+/// The inputs that decide which `ImageSource` a run boots from: the OCI
+/// reference (`--image`), the prod/dev posture that gates it, and whether to
+/// boot from a verified attested runtime pack instead. Grouped so
+/// `build_exec_request` and its callers don't grow a loose bool/Option
+/// parameter apiece.
+struct ImageSelection {
+    image_ref: Option<String>,
+    prod: bool,
+    runtime_pack: bool,
+}
+
 fn run_run_args(
     _cli: &Cli,
     args: Args,
     _cfg: &MvmConfig,
-    image: Option<String>,
-    prod: bool,
+    selection: ImageSelection,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     audit: RunAudit<'_>,
 ) -> Result<()> {
-    let req = build_exec_request(args, "`mvmctl run`", image, prod, network_policy)?;
+    let req = build_exec_request(args, "`mvmctl run`", selection, network_policy)?;
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
     let exit_code = match crate::exec::run_with_posture(req, audit.admit, &posture) {
         Ok(code) => {
@@ -610,10 +629,14 @@ fn run_run_args(
 fn build_exec_request(
     args: Args,
     command_name: &str,
-    image_ref: Option<String>,
-    prod: bool,
+    selection: ImageSelection,
     network_policy: mvm_core::network_policy::NetworkPolicy,
 ) -> Result<crate::exec::ExecRequest> {
+    let ImageSelection {
+        image_ref,
+        prod,
+        runtime_pack,
+    } = selection;
     let target = match (args.launch_plan.as_ref(), args.argv.is_empty()) {
         (Some(_), false) => {
             anyhow::bail!("--launch-plan and a trailing argv are mutually exclusive");
@@ -638,84 +661,97 @@ fn build_exec_request(
     for kv in &args.env {
         env_pairs.push(parse_env_pair(kv)?);
     }
+    let selected_backend = crate::exec::select_exec_backend(image_ref.is_some(), &network_policy)?;
+    let mut effective_env =
+        oci_vsock_proxy_env_for_backend(&selected_backend, image_ref.is_some(), &network_policy);
+    effective_env.extend(env_pairs);
     // --manifest <PATH> accepts a manifest path / dir in addition to
     // legacy names. Resolve up front so the downstream
     // ImageSource::Template carries either a name (legacy) or a slot
     // hash (manifest), and the dispatched lifecycle helpers handle
     // both keys transparently.
-    let image = match (args.manifest, image_ref) {
-        (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
-        (Some(arg), None) => {
-            let resolved = match super::shared::resolve_manifest_arg(&arg)? {
-                super::shared::ManifestArgRef::Name(n) => n,
-                super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
-            };
-            crate::exec::ImageSource::Template(resolved)
-        }
-        (None, Some(reference)) => {
-            let cached = super::super::image::resolve_or_pull_run_image(
-                &super::super::image::oci_cache_root(),
-                &reference,
-                prod,
-            )?;
-            ui::info(&format!(
-                "Using OCI image {} ({})",
-                cached.reference, cached.resolved_digest
-            ));
-            emit_oci_run_admission(
-                &cached,
-                args.cpus,
-                u64::from(memory_mib),
-                args.timeout.unwrap_or(60),
-            )
-            .context("admitting OCI image provenance for mvmctl run --image")?;
-            if cached.pulled {
-                let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
-                mvm_core::audit_emit!(
-                    ImageFetch,
-                    "source=run_image reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
-                    cached.reference,
-                    cached.resolved_digest,
+    //
+    // --runtime-pack is its own image source, mutually exclusive with
+    // --manifest/--image at the clap layer, so it short-circuits the match
+    // below entirely rather than adding a third leg to it.
+    let image = if runtime_pack {
+        super::runtime_pack::resolve_runtime_pack_image_source(prod)
+            .context("resolving --runtime-pack image source")?
+    } else {
+        match (args.manifest, image_ref) {
+            (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
+            (Some(arg), None) => {
+                let resolved = match super::shared::resolve_manifest_arg(&arg)? {
+                    super::shared::ManifestArgRef::Name(n) => n,
+                    super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
+                };
+                crate::exec::ImageSource::Template(resolved)
+            }
+            (None, Some(reference)) => {
+                let cached = super::super::image::resolve_or_pull_run_image(
+                    &super::super::image::oci_cache_root(),
+                    &reference,
                     prod,
-                    cached.provenance.layer_digests.len(),
-                    cached.provenance.trust_policy,
-                    cached.provenance.verification_status,
-                    auth_source
-                );
-            }
-            // An `--image` run boots the materialized OCI rootfs (with its
-            // injected agent), so we need only a workload kernel. Resolve just
-            // the kernel — a cached workload/default-image kernel, the cold-cache
-            // published workload-kernel download, or (for non-prod) an existing
-            // builder kernel already on disk — rather than building/downloading a
-            // whole default image whose rootfs we'd discard. This runtime path
-            // never builds Stage 0 or compiles a workload kernel.
-            let kernel_path = ensure_workload_kernel(prod)?;
-            crate::exec::ImageSource::Prebuilt {
-                kernel_path,
-                rootfs_path: cached.rootfs_path.display().to_string(),
-                initrd_path: None,
-                label: format!("oci:{}", cached.resolved_digest),
-                // Offer the unpacked+injected tree as a virtiofs-root candidate;
-                // the run-path tier gate (backend cap × prod × sealed) decides.
-                virtiofs_oci_root: cached.unpacked_root.as_ref().map(|tree| {
-                    crate::exec::VirtiofsOciRoot {
-                        tree_dir: tree.display().to_string(),
+                )?;
+                ui::info(&format!(
+                    "Using OCI image {} ({})",
+                    cached.reference, cached.resolved_digest
+                ));
+                emit_oci_run_admission(
+                    &cached,
+                    args.cpus,
+                    u64::from(memory_mib),
+                    args.timeout.unwrap_or(60),
+                )
+                .context("admitting OCI image provenance for mvmctl run --image")?;
+                if cached.pulled {
+                    let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
+                    mvm_core::audit_emit!(
+                        ImageFetch,
+                        "source=run_image reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
+                        cached.reference,
+                        cached.resolved_digest,
                         prod,
-                    }
-                }),
+                        cached.provenance.layer_digests.len(),
+                        cached.provenance.trust_policy,
+                        cached.provenance.verification_status,
+                        auth_source
+                    );
+                }
+                // An `--image` run boots the materialized OCI rootfs (with its
+                // injected agent), so we need only a workload kernel. Resolve just
+                // the kernel — a cached workload/default-image kernel, the cold-cache
+                // published workload-kernel download, or (for non-prod) an existing
+                // builder kernel already on disk — rather than building/downloading a
+                // whole default image whose rootfs we'd discard. This runtime path
+                // never builds Stage 0 or compiles a workload kernel.
+                let kernel_path = ensure_workload_kernel(prod)?;
+                crate::exec::ImageSource::Prebuilt {
+                    kernel_path,
+                    rootfs_path: cached.rootfs_path.display().to_string(),
+                    initrd_path: None,
+                    label: format!("oci:{}", cached.resolved_digest),
+                    // Offer the unpacked+injected tree as a virtiofs-root candidate;
+                    // the run-path tier gate (backend cap × prod × sealed) decides.
+                    virtiofs_oci_root: cached.unpacked_root.as_ref().map(|tree| {
+                        crate::exec::VirtiofsOciRoot {
+                            tree_dir: tree.display().to_string(),
+                            prod,
+                        }
+                    }),
+                }
             }
-        }
-        (None, None) => {
-            ui::info("No --manifest specified; using bundled default microVM image.");
-            let (kernel_path, rootfs_path) =
-                ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
-            crate::exec::ImageSource::Prebuilt {
-                kernel_path,
-                rootfs_path,
-                initrd_path: None,
-                label: "default-microvm".to_string(),
-                virtiofs_oci_root: None,
+            (None, None) => {
+                ui::info("No --manifest specified; using bundled default microVM image.");
+                let (kernel_path, rootfs_path) =
+                    ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+                crate::exec::ImageSource::Prebuilt {
+                    kernel_path,
+                    rootfs_path,
+                    initrd_path: None,
+                    label: "default-microvm".to_string(),
+                    virtiofs_oci_root: None,
+                }
             }
         }
     };
@@ -729,7 +765,7 @@ fn build_exec_request(
         // mem_initial gets sourced for long-running workloads.
         mem_initial_mib: None,
         add_dirs,
-        env: env_pairs,
+        env: effective_env,
         target,
         timeout_secs: args.timeout,
         pty: args.pty,
@@ -924,6 +960,7 @@ enum RunPreflightImage {
     DefaultMicrovm,
     Manifest { argument_sha256: String },
     Oci { reference_sha256: String },
+    RuntimePack,
 }
 
 impl RunJsonSummary {
@@ -943,6 +980,13 @@ impl RunJsonSummary {
 
 impl RunPreflightSummary {
     fn from_args(args: &RunArgs) -> Result<Self> {
+        Self::from_args_with_backend_override(args, None)
+    }
+
+    fn from_args_with_backend_override(
+        args: &RunArgs,
+        backend_override: Option<&str>,
+    ) -> Result<Self> {
         let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
         for kv in &args.env {
             parse_env_pair(kv)?;
@@ -954,6 +998,7 @@ impl RunPreflightSummary {
             crate::exec::AddDir::parse(spec)?;
         }
         let image = match args.manifest.as_ref() {
+            _ if args.runtime_pack => RunPreflightImage::RuntimePack,
             Some(manifest) if args.image.is_none() => RunPreflightImage::Manifest {
                 argument_sha256: sha256_hex(manifest.as_bytes()),
             },
@@ -980,9 +1025,13 @@ impl RunPreflightSummary {
 
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
-        let backend = mvm_backend::backend::AnyBackend::auto_select()
-            .name()
-            .to_string();
+        let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+        let backend = match backend_override {
+            Some(backend) => backend.to_string(),
+            None => crate::exec::select_exec_backend(args.image.is_some(), &policy)?
+                .name()
+                .to_string(),
+        };
         let receipt_input = ReceiptInput::from_run_args(args, &backend)?;
 
         Ok(Self {
@@ -1028,6 +1077,9 @@ fn print_run_preflight_human(summary: &RunPreflightSummary) {
         }
         RunPreflightImage::Oci { reference_sha256 } => {
             println!("image: OCI reference sha256={reference_sha256} (not resolved)");
+        }
+        RunPreflightImage::RuntimePack => {
+            println!("image: verified attested runtime pack (not resolved)");
         }
     }
     println!(
@@ -1086,7 +1138,13 @@ impl ReceiptInput {
             }
         };
 
-        let mut env_keys = Vec::with_capacity(args.env.len());
+        let selected_backend = mvm_backend::backend::AnyBackend::from_hypervisor(backend);
+        let mut env_keys =
+            oci_vsock_proxy_env_for_backend(&selected_backend, args.image.is_some(), &policy)
+                .into_iter()
+                .map(|(key, _)| key)
+                .collect::<Vec<_>>();
+        env_keys.reserve(args.env.len());
         for kv in &args.env {
             let (key, _) = kv
                 .split_once('=')
@@ -1094,6 +1152,7 @@ impl ReceiptInput {
             env_keys.push(key.to_string());
         }
         env_keys.sort();
+        env_keys.dedup();
 
         let mut add_dirs = Vec::with_capacity(args.add_dir.len());
         for spec in &args.add_dir {
@@ -1166,6 +1225,36 @@ fn parse_env_pair(kv: &str) -> Result<(String, String)> {
         anyhow::bail!("--env '{kv}': KEY must match [A-Za-z_][A-Za-z0-9_]* (got '{k}')");
     }
     Ok((k.to_string(), v.to_string()))
+}
+
+fn oci_vsock_proxy_env_for_backend(
+    backend: &mvm_backend::backend::AnyBackend,
+    image_requested: bool,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Vec<(String, String)> {
+    if !image_requested || !network_policy.allows_egress() {
+        return Vec::new();
+    }
+    let caps = backend.capabilities();
+    if !(caps.vsock && caps.no_guest_nic && caps.host_vsock_proxy) {
+        return Vec::new();
+    }
+    let proxy = "socks5h://127.0.0.1:1080".to_string();
+    vec![
+        ("ALL_PROXY".to_string(), proxy.clone()),
+        ("HTTP_PROXY".to_string(), proxy.clone()),
+        ("HTTPS_PROXY".to_string(), proxy.clone()),
+        ("http_proxy".to_string(), proxy.clone()),
+        ("https_proxy".to_string(), proxy),
+        (
+            "NO_PROXY".to_string(),
+            "localhost,127.0.0.1,::1".to_string(),
+        ),
+        (
+            "no_proxy".to_string(),
+            "localhost,127.0.0.1,::1".to_string(),
+        ),
+    ]
 }
 
 fn write_run_receipt(
@@ -1315,10 +1404,31 @@ pub(in crate::commands) fn test_run_security_summary(
 ) -> Result<RunSecuritySummary> {
     let preflight = RunPreflightSummary::from_args(args)?;
     let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
+    test_run_security_summary_from_parts(preflight, receipt)
+}
+
+#[cfg(test)]
+pub(in crate::commands) fn test_run_security_summary_with_preflight_backend(
+    args: &RunArgs,
+    preflight_backend: &str,
+    receipt_backend: &str,
+) -> Result<RunSecuritySummary> {
+    let preflight =
+        RunPreflightSummary::from_args_with_backend_override(args, Some(preflight_backend))?;
+    let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
+    test_run_security_summary_from_parts(preflight, receipt)
+}
+
+#[cfg(test)]
+fn test_run_security_summary_from_parts(
+    preflight: RunPreflightSummary,
+    receipt: ReceiptInput,
+) -> Result<RunSecuritySummary> {
     let image_kind = match preflight.image {
         RunPreflightImage::DefaultMicrovm => "default-microvm",
         RunPreflightImage::Manifest { .. } => "manifest",
         RunPreflightImage::Oci { .. } => "oci",
+        RunPreflightImage::RuntimePack => "runtime-pack",
     };
     Ok(RunSecuritySummary {
         dry_run: preflight.dry_run,
@@ -1402,6 +1512,82 @@ mod tests {
         assert_eq!(r.egress_enforcement, "flow-drop");
     }
 
+    #[test]
+    fn oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend() {
+        let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
+        assert!(
+            oci_vsock_proxy_env_for_backend(
+                &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
+                true,
+                &deny_all,
+            )
+            .is_empty()
+        );
+
+        assert!(
+            oci_vsock_proxy_env_for_backend(
+                &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
+                false,
+                &mvm_core::network_policy::NetworkPolicy::preset(
+                    mvm_core::network_policy::NetworkPreset::Dev,
+                ),
+            )
+            .is_empty()
+        );
+        assert!(
+            oci_vsock_proxy_env_for_backend(
+                &mvm_backend::backend::AnyBackend::from_hypervisor("firecracker"),
+                true,
+                &mvm_core::network_policy::NetworkPolicy::preset(
+                    mvm_core::network_policy::NetworkPreset::Dev,
+                ),
+            )
+            .is_empty()
+        );
+
+        let vars = oci_vsock_proxy_env_for_backend(
+            &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
+            true,
+            &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+                mvm_core::network_policy::HostPort::new("example.com", 443),
+            ]),
+        );
+        assert!(
+            vars.iter()
+                .any(|(k, v)| k == "ALL_PROXY" && v == "socks5h://127.0.0.1:1080")
+        );
+        assert!(
+            vars.iter()
+                .any(|(k, v)| k == "HTTP_PROXY" && v == "socks5h://127.0.0.1:1080")
+        );
+        assert!(
+            vars.iter()
+                .any(|(k, v)| k == "NO_PROXY" && v == "localhost,127.0.0.1,::1")
+        );
+    }
+
+    #[test]
+    fn receipt_env_keys_include_injected_oci_proxy_vars() {
+        let mut args = run_args(RunProfile::Standard);
+        args.image = Some("docker.io/library/alpine:latest".to_string());
+        args.allow_host = vec!["example.com".to_string()];
+        args.env.push("HTTP_PROXY=override".to_string());
+        args.env.push("APP_MODE=dev".to_string());
+
+        let receipt = ReceiptInput::from_run_args(&args, "hvf").expect("receipt input");
+        assert!(receipt.env_keys.contains(&"ALL_PROXY".to_string()));
+        assert!(receipt.env_keys.contains(&"HTTP_PROXY".to_string()));
+        assert!(receipt.env_keys.contains(&"APP_MODE".to_string()));
+        assert_eq!(
+            receipt
+                .env_keys
+                .iter()
+                .filter(|k| k.as_str() == "HTTP_PROXY")
+                .count(),
+            1
+        );
+    }
+
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
             warm_pool_size: 0,
@@ -1409,6 +1595,7 @@ mod tests {
             vm_name: None,
             manifest: None,
             image: None,
+            runtime_pack: false,
             net: false,
             allow_host: Vec::new(),
             cpus: 2,

@@ -29,9 +29,9 @@ fn ensure_extracted_is_idempotent() {
     assert_eq!(dir1, dir2);
 }
 
-// The boot guard must reject a stub build (MVM_SKIP_EMBED_BINARIES=1) and
-// admit a real one. The expected verdict is whatever this binary was
-// compiled with, so the test is valid in both modes.
+// The boot guard must reject a stub build and admit a real one. The expected
+// verdict is whatever this binary was compiled with, so the test is valid in
+// both modes.
 #[test]
 fn ensure_extracted_for_boot_matches_build_mode() {
     use mvm_cli::host_binaries::embedded::EMBEDDED;
