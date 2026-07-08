@@ -1,38 +1,17 @@
-//! Vz dev environment + bundled image fetching.
-//!
-//! The dev VM is a long-lived Vz builder guest (`/dev/vdb` nix-store
-//! overlay + `/work` share wired internally) that runs `nix build`.
-//! Both the auto-detect macOS tier and an explicit `--builder vz`
-//! route here.
+//! Dev environment lifecycle helpers + bundled image fetching, builder-VM
+//! image bootstrap, Stage 0, and dev-cache inspection.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-#[cfg(feature = "builder-vm")]
-use mvm::vsock_transport::{VsockTransport, VzTransport};
-
-#[cfg(feature = "builder-vm")]
-use super::super::vm::console::console_interactive;
 use super::artifact_verify::{
     bump_verify_outcome, download_file, fetch_expected_hashes, url_exists, verify_artifact_hash,
 };
 use crate::ui;
 
-// ============================================================================
-// Dev environment (Vz supervisor)
-// ============================================================================
-
 pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
 
-/// Stable session id for the long-lived dev builder VM. Fixed (not the
-/// random per-build id the warm pool uses) so a separate `dev down`
-/// process can locate the supervisor PID file under
-/// `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-dev/` and reap it.
-#[cfg(feature = "builder-vm")]
-const DEV_VM_SESSION_ID: &str = mvm_build::vz_builder::DEV_SESSION_ID;
-#[cfg(feature = "builder-vm")]
-const DEV_VZ_ACTIVITY_FILE: &str = "last-activity-unix-secs";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
@@ -46,819 +25,12 @@ const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
     test
 ))]
 const MVM_BUILDER_PACK_ENV: &str = "MVM_BUILDER_PACK";
-#[cfg(feature = "builder-vm")]
-const DEV_BASE_PROVENANCE_FILE: &str = "dev-base.json";
 /// Absolute path the builder-VM rootfs must carry for the steady-state
 /// VM to boot (`init=/sbin/mvm-host-vm-init` on the kernel cmdline).
 /// `verify_stage0_rootfs_has_init` looks this inode up directly via a
 /// read-only ext4 walk after Stage 0 builds the image.
 #[cfg(feature = "builder-vm")]
 const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
-
-/// Host directory the dev VM binds at `/work` (the guest-side
-/// workspace mount). This is the user's CWD at `dev up` time — the
-/// same value the old daemon captured to choose the virtio-fs share —
-/// so `dev_build` paths resolve identically on both sides of the VM
-/// boundary.
-#[cfg(feature = "builder-vm")]
-fn dev_workspace_root() -> std::path::PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-}
-
-/// Cmdline for the dev rootfs override. Reuses the builder image's
-/// canonical cmdline (same flake / mkGuest shape) when the builder
-/// cache is populated, falling back to the Vz builder default. Both
-/// carry `root=/dev/vda`, `console=hvc0`, and `init=/init`; the guest
-/// init then mounts `/dev/vdb` as the persistent nix store.
-#[cfg(feature = "builder-vm")]
-fn dev_image_cmdline() -> String {
-    use mvm_build::libkrun_builder::BuilderVmImage;
-    match mvm_build::libkrun_builder::ensure_builder_vm_image() {
-        Ok(BuilderVmImage::Rootfs { cmdline, .. }) if !cmdline.trim().is_empty() => cmdline,
-        _ => mvm_build::vz_builder::DEFAULT_VZ_BUILDER_CMDLINE.to_string(),
-    }
-}
-
-/// User-facing base-image reference accepted by `mvmctl dev up --base`.
-///
-/// The `id` is resolved by the existing template dispatcher, so it may be a
-/// legacy template name, manifest slot hash, or installed bundle sha. A
-/// revision pin (`name@revision`) is supported for template/slot bases only;
-/// bundles are already content-addressed by their sha.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct DevBaseRef {
-    id: String,
-    revision: Option<String>,
-}
-
-impl DevBaseRef {
-    pub(super) fn parse(raw: &str) -> Result<Self> {
-        let (id, revision) = match raw.split_once('@') {
-            Some((id, revision)) => {
-                if revision.is_empty() {
-                    anyhow::bail!("dev base revision cannot be empty");
-                }
-                (id, Some(revision.to_string()))
-            }
-            None => (raw, None),
-        };
-        if id.is_empty() {
-            anyhow::bail!("dev base id cannot be empty");
-        }
-        if !mvm_core::manifest::is_slot_hash_dirname(id) {
-            mvm_core::naming::validate_template_name(id)
-                .with_context(|| format!("invalid dev base template name: {id:?}"))?;
-        }
-        if let Some(rev) = revision.as_deref()
-            && !is_safe_base_component(rev)
-        {
-            anyhow::bail!("invalid dev base revision: {rev:?}");
-        }
-        Ok(Self {
-            id: id.to_string(),
-            revision,
-        })
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ResolvedDevBaseImage {
-    id: String,
-    revision: String,
-    kernel_path: std::path::PathBuf,
-    rootfs_path: std::path::PathBuf,
-}
-
-#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
-struct DevBaseProvenance {
-    schema_version: u8,
-    id: String,
-    revision: String,
-    rootfs_fingerprint: String,
-}
-
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
-pub(super) struct DevBaseStatusJson {
-    pub id: String,
-    pub revision: String,
-    pub rootfs_fingerprint: String,
-}
-
-fn is_safe_base_component(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
-}
-
-#[cfg(feature = "builder-vm")]
-fn resolve_dev_base_image(base: &DevBaseRef) -> Result<ResolvedDevBaseImage> {
-    match base.revision.as_deref() {
-        Some(revision) => resolve_dev_base_pinned_revision(&base.id, revision),
-        None => {
-            let (_spec, kernel, _initrd, rootfs, revision) =
-                mvm::vm::template::lifecycle::template_artifacts_dispatched(&base.id)
-                    .with_context(|| format!("resolving dev base {:?}", base.id))?;
-            Ok(ResolvedDevBaseImage {
-                id: base.id.clone(),
-                revision,
-                kernel_path: std::path::PathBuf::from(kernel),
-                rootfs_path: std::path::PathBuf::from(rootfs),
-            })
-        }
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-fn resolve_dev_base_pinned_revision(id: &str, revision: &str) -> Result<ResolvedDevBaseImage> {
-    let rev_dir = if mvm_core::manifest::is_slot_hash_dirname(id) {
-        let slot_dir = std::path::PathBuf::from(mvm_core::manifest::slot_dir(id));
-        if !slot_dir.exists() {
-            anyhow::bail!(
-                "dev base {id}@{revision} is not a built template slot; bundle bases are \
-                 content-addressed, so omit @revision for installed bundle shas"
-            );
-        }
-        mvm::vm::template::lifecycle::template_load_slot(id)
-            .with_context(|| format!("loading dev base slot {id}"))?;
-        std::path::PathBuf::from(mvm_core::manifest::slot_revision_dir(id, revision))
-    } else {
-        mvm::vm::template::lifecycle::template_load(id)
-            .with_context(|| format!("loading dev base template {id:?}"))?;
-        std::path::PathBuf::from(mvm_core::template::template_revision_dir(id, revision))
-    };
-    dev_base_artifacts_from_revision_dir(id, revision, &rev_dir)
-}
-
-#[cfg(feature = "builder-vm")]
-fn dev_base_artifacts_from_revision_dir(
-    id: &str,
-    revision: &str,
-    rev_dir: &std::path::Path,
-) -> Result<ResolvedDevBaseImage> {
-    let kernel_path = rev_dir.join("vmlinux");
-    if !kernel_path.is_file() {
-        anyhow::bail!("dev base {id}@{revision} has no vmlinux artifact");
-    }
-    let rootfs_path = rev_dir.join("rootfs.ext4");
-    if !rootfs_path.is_file() {
-        anyhow::bail!("dev base {id}@{revision} has no rootfs artifact");
-    }
-    Ok(ResolvedDevBaseImage {
-        id: id.to_string(),
-        revision: revision.to_string(),
-        kernel_path,
-        rootfs_path,
-    })
-}
-
-#[cfg(feature = "builder-vm")]
-fn dev_base_provenance_path(state_dir: &std::path::Path) -> std::path::PathBuf {
-    state_dir.join(DEV_BASE_PROVENANCE_FILE)
-}
-
-#[cfg(feature = "builder-vm")]
-fn write_dev_base_provenance(
-    state_dir: &std::path::Path,
-    base: &ResolvedDevBaseImage,
-) -> Result<DevBaseProvenance> {
-    let rootfs_fingerprint = mvm_core::crypto::image_verify::sha256_file_cached(&base.rootfs_path)
-        .with_context(|| {
-            format!(
-                "fingerprinting pinned dev base rootfs {}",
-                base.rootfs_path.display()
-            )
-        })?;
-    let provenance = DevBaseProvenance {
-        schema_version: 1,
-        id: base.id.clone(),
-        revision: base.revision.clone(),
-        rootfs_fingerprint,
-    };
-    std::fs::create_dir_all(state_dir)
-        .with_context(|| format!("creating dev VM state dir {}", state_dir.display()))?;
-    let json = serde_json::to_vec_pretty(&provenance).context("serializing dev base provenance")?;
-    std::fs::write(dev_base_provenance_path(state_dir), json)
-        .with_context(|| format!("writing {}", dev_base_provenance_path(state_dir).display()))?;
-    Ok(provenance)
-}
-
-#[cfg(feature = "builder-vm")]
-fn read_dev_base_provenance(state_dir: &std::path::Path) -> Option<DevBaseProvenance> {
-    let path = dev_base_provenance_path(state_dir);
-    let bytes = match std::fs::read(&path) {
-        Ok(bytes) => bytes,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
-        Err(e) => {
-            tracing::warn!(error = %e, path = %path.display(), "could not read dev base provenance");
-            return None;
-        }
-    };
-    match serde_json::from_slice::<DevBaseProvenance>(&bytes) {
-        Ok(provenance) if provenance.schema_version == 1 => Some(provenance),
-        Ok(provenance) => {
-            tracing::warn!(
-                schema_version = provenance.schema_version,
-                path = %path.display(),
-                "ignoring unsupported dev base provenance schema"
-            );
-            None
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, path = %path.display(), "could not parse dev base provenance");
-            None
-        }
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-fn remove_dev_base_provenance(state_dir: &std::path::Path) {
-    let path = dev_base_provenance_path(state_dir);
-    match std::fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            tracing::warn!(error = %e, path = %path.display(), "could not remove dev base provenance")
-        }
-    }
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn read_dev_base_provenance(_state_dir: &std::path::Path) -> Option<DevBaseProvenance> {
-    None
-}
-
-/// Connect to the dev VM's guest agent over its Vz per-port vsock
-/// socket. The dev VM is a persistent Vz builder; its socket lives in
-/// the builder cache (not the data-dir path `VzTransport::for_vm`
-/// resolves), so the transport is built directly from the session's
-/// vsock dir.
-#[cfg(feature = "builder-vm")]
-fn dev_vm_guest_agent_connect() -> Result<std::os::unix::net::UnixStream> {
-    let vsock_dir = mvm_build::vz_builder::persistent_vz_vsock_dir(DEV_VM_SESSION_ID);
-    VzTransport::new(vsock_dir).connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-}
-
-/// Check if the dev VM is running *and* reachable cross-process.
-///
-/// A live supervisor PID alone isn't enough — the guest may still be
-/// booting, in which case other-process RPCs fail. Requiring the
-/// guest-agent socket to connect keeps `dev status` honest with what
-/// `dev shell` actually sees.
-pub(in crate::commands) fn is_vz_dev_running() -> bool {
-    #[cfg(feature = "builder-vm")]
-    {
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-        if !mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir) {
-            return false;
-        }
-        dev_vm_guest_agent_connect().is_ok()
-    }
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        false
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-fn dev_vz_snapshot_exists() -> bool {
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-    mvm_build::vz_builder::builder_snapshot_path(&state_dir).is_file()
-}
-
-/// Whether `dev down` should park (snapshot-save) the resident builder before
-/// stopping: residency keeps a persistent builder, the VM is live, and this is
-/// not a `--reset` stop (reset wants a clean cold boot next time).
-#[cfg(feature = "builder-vm")]
-fn should_park(allows_persistent: bool, alive: bool, reset: bool) -> bool {
-    allows_persistent && alive && !reset
-}
-
-/// Whether `dev up` should resume from a parked snapshot rather than cold-boot:
-/// residency keeps a persistent builder and a parked snapshot is present.
-#[cfg(feature = "builder-vm")]
-fn should_resume(allows_persistent: bool, snapshot_present: bool) -> bool {
-    allows_persistent && snapshot_present
-}
-
-/// Discard a parked snapshot (+ its machine-id sidecar) so a later `dev up`
-/// cold-boots instead of resuming a builder we no longer want resident.
-#[cfg(feature = "builder-vm")]
-fn remove_dev_vz_snapshot_markers(state_dir: &std::path::Path) {
-    let snap = mvm_build::vz_builder::builder_snapshot_path(state_dir);
-    let mid = mvm_build::vz_builder::builder_snapshot_machine_id_path(&snap);
-    let _ = std::fs::remove_file(&snap);
-    let _ = std::fs::remove_file(&mid);
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn dev_vz_snapshot_exists() -> bool {
-    false
-}
-
-#[cfg(feature = "builder-vm")]
-fn wait_for_dev_vm_ready(console_log: &std::path::Path) -> Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
-    loop {
-        if std::time::Instant::now() > deadline {
-            anyhow::bail!(
-                "Dev VM did not become ready within 60 seconds.\n\
-                 Check the console log: {}",
-                console_log.display()
-            );
-        }
-        if dev_vm_guest_agent_connect().is_ok() {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(500));
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VzDevResidencyDecision {
-    Keep,
-    Park,
-    Teardown,
-}
-
-#[cfg(feature = "builder-vm")]
-fn decide_vz_dev_residency(
-    policy: &mvm_core::residency::ResidencyPolicy,
-    running: bool,
-    last_activity_unix_secs: Option<u64>,
-    now_unix_secs: u64,
-) -> VzDevResidencyDecision {
-    if !running {
-        return VzDevResidencyDecision::Keep;
-    }
-    match policy.kind() {
-        mvm_core::residency::ResidencyKind::Cold => VzDevResidencyDecision::Teardown,
-        mvm_core::residency::ResidencyKind::Parked => VzDevResidencyDecision::Park,
-        mvm_core::residency::ResidencyKind::Warm => {
-            let Some(threshold) = policy.idle_timeout() else {
-                return VzDevResidencyDecision::Keep;
-            };
-            let Some(last) = last_activity_unix_secs else {
-                return VzDevResidencyDecision::Keep;
-            };
-            let idle = std::time::Duration::from_secs(now_unix_secs.saturating_sub(last));
-            match mvm_core::residency::decide_builder_residency_action(
-                policy.kind(),
-                idle,
-                threshold,
-            ) {
-                mvm_core::residency::BuilderResidencyAction::Keep => VzDevResidencyDecision::Keep,
-                mvm_core::residency::BuilderResidencyAction::Park => VzDevResidencyDecision::Park,
-                mvm_core::residency::BuilderResidencyAction::Teardown => {
-                    VzDevResidencyDecision::Teardown
-                }
-            }
-        }
-    }
-}
-
-#[cfg(feature = "builder-vm")]
-fn dev_vz_activity_path(state_dir: &std::path::Path) -> std::path::PathBuf {
-    state_dir.join(DEV_VZ_ACTIVITY_FILE)
-}
-
-#[cfg(feature = "builder-vm")]
-fn current_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
-#[cfg(feature = "builder-vm")]
-fn read_dev_vz_last_activity(state_dir: &std::path::Path) -> Option<u64> {
-    let body = std::fs::read_to_string(dev_vz_activity_path(state_dir)).ok()?;
-    body.trim().parse().ok()
-}
-
-#[cfg(feature = "builder-vm")]
-fn touch_dev_vz_activity_at(
-    state_dir: &std::path::Path,
-    now_unix_secs: u64,
-) -> std::io::Result<()> {
-    std::fs::create_dir_all(state_dir)?;
-    std::fs::write(dev_vz_activity_path(state_dir), now_unix_secs.to_string())
-}
-
-#[cfg(feature = "builder-vm")]
-pub(in crate::commands) fn touch_dev_vz_activity_now() {
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-    let _ = touch_dev_vz_activity_at(&state_dir, current_unix_secs());
-}
-
-#[cfg(feature = "builder-vm")]
-fn enforce_dev_vz_cold_policy_on_entry(state_dir: &std::path::Path) -> bool {
-    let (policy, _source) = mvm_core::residency::resolve_residency();
-    if !matches!(policy.kind(), mvm_core::residency::ResidencyKind::Cold) {
-        return false;
-    }
-    remove_dev_vz_snapshot_markers(state_dir);
-    if !mvm_build::vz_builder::persistent_vz_supervisor_alive(state_dir) {
-        return false;
-    }
-    mvm_build::vz_builder::stop_persistent_vz_by_pid_file(state_dir);
-    let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
-    true
-}
-
-#[cfg(feature = "builder-vm")]
-fn enforce_dev_vz_residency_policy() -> Result<Option<VzDevResidencyDecision>> {
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-    let running = mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir);
-    let (policy, _source) = mvm_core::residency::resolve_residency();
-    let decision = decide_vz_dev_residency(
-        &policy,
-        running,
-        read_dev_vz_last_activity(&state_dir),
-        current_unix_secs(),
-    );
-    match decision {
-        VzDevResidencyDecision::Keep => Ok(None),
-        VzDevResidencyDecision::Park => {
-            mvm_build::vz_builder::park_persistent_vz_builder(&state_dir)
-                .map_err(|e| anyhow::anyhow!("Failed to park dev VM by residency policy: {e}"))?;
-            let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
-            Ok(Some(decision))
-        }
-        VzDevResidencyDecision::Teardown => {
-            mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
-            let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
-            remove_dev_vz_snapshot_markers(&state_dir);
-            Ok(Some(decision))
-        }
-    }
-}
-
-/// Boot the dev VM via the Vz supervisor, optionally opening an
-/// interactive console.
-#[cfg(feature = "builder-vm")]
-pub(super) fn cmd_dev_vz(
-    cpus: u32,
-    memory_gib: u32,
-    open_shell: bool,
-    base_ref: Option<&DevBaseRef>,
-) -> Result<&'static str> {
-    ui::progress("Starting dev environment via Vz (Virtualization.framework)...");
-
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-    if enforce_dev_vz_cold_policy_on_entry(&state_dir) {
-        ui::info("Stopped existing dev VM because MVM_RESIDENCY=cold; cold-booting.");
-    }
-
-    if is_vz_dev_running() {
-        if base_ref.is_some() {
-            anyhow::bail!(
-                "`mvmctl dev up --base` cannot change the base of an already-running dev VM; \
-                 run `mvmctl dev down` first"
-            );
-        }
-        touch_dev_vz_activity_now();
-        if open_shell {
-            ui::progress("Dev VM already running. Opening shell...");
-            console_interactive(DEV_VM_NAME)?;
-        } else {
-            ui::progress("Dev VM already running.");
-        }
-        return Ok("already-running");
-    }
-
-    // Reap a dead-but-not-reaped supervisor from a prior session so the
-    // fresh start binds a clean state dir.
-    mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
-    let console_log = state_dir.join("console.log");
-    let allows_persistent = mvm_core::residency::resolve_residency()
-        .0
-        .allows_persistent_builder();
-    let snapshot_present = dev_vz_snapshot_exists();
-    if snapshot_present && base_ref.is_some() {
-        anyhow::bail!(
-            "`mvmctl dev up --base` cannot change the base of a parked dev VM; \
-             run `mvmctl dev down` first"
-        );
-    }
-    if should_resume(allows_persistent, snapshot_present) {
-        match mvm_build::vz_builder::restore_persistent_vz_builder_from_snapshot(&state_dir) {
-            Ok(_) => {
-                wait_for_dev_vm_ready(&console_log)?;
-                touch_dev_vz_activity_now();
-                ui::success("Dev VM restored from parked snapshot.");
-                if open_shell {
-                    ui::info("");
-                    let _ = console_interactive(DEV_VM_NAME);
-                }
-                return Ok("restored");
-            }
-            Err(e) => {
-                // The snapshot is unusable; discard it so the next `dev up`
-                // cold-boots cleanly instead of retrying the same failed restore.
-                remove_dev_vz_snapshot_markers(&state_dir);
-                ui::warn(&format!(
-                    "parked dev VM restore failed; discarded snapshot, cold-booting: {e}"
-                ));
-            }
-        }
-    } else if dev_vz_snapshot_exists() {
-        // Residency no longer keeps a resident builder (cold): drop the stale
-        // snapshot so we cold-boot cleanly rather than waking an unwanted VM.
-        remove_dev_vz_snapshot_markers(&state_dir);
-    }
-
-    // Ensure the boot image exists before launching. `--base` resolves
-    // through the same template/slot/bundle artifact registry as `mvmctl up`;
-    // the default path keeps the source-checkout dev-image fast path.
-    let image = match base_ref {
-        Some(base) => {
-            let resolved = resolve_dev_base_image(base)?;
-            write_dev_base_provenance(&state_dir, &resolved)?;
-            ui::info(&format!(
-                "Using pinned dev base {}@{}",
-                resolved.id, resolved.revision
-            ));
-            mvm_build::libkrun_builder::BuilderVmImage::Rootfs {
-                kernel_path: resolved.kernel_path,
-                rootfs_path: resolved.rootfs_path,
-                cmdline: dev_image_cmdline(),
-            }
-        }
-        None => {
-            remove_dev_base_provenance(&state_dir);
-            let (kernel, rootfs) = ensure_dev_image()?;
-            mvm_build::libkrun_builder::BuilderVmImage::Rootfs {
-                kernel_path: std::path::PathBuf::from(&kernel),
-                rootfs_path: std::path::PathBuf::from(&rootfs),
-                cmdline: dev_image_cmdline(),
-            }
-        }
-    };
-
-    // Lock ~/.mvm and ~/.cache/mvm to 0700 on every `dev up`. Idempotent.
-    mvm_core::config::ensure_data_dir().with_context(|| "locking down data dir to mode 0700")?;
-    mvm_core::config::ensure_cache_dir().with_context(|| "locking down cache dir to mode 0700")?;
-
-    ui::info(&format!(
-        "Booting dev VM ({cpus} vCPUs, {memory_gib} GiB memory)..."
-    ));
-
-    let memory_mib = memory_gib.saturating_mul(1024);
-
-    // The Vz supervisor detaches: `start()` spawns it as a background
-    // child that writes `builder.pid` under the stable state dir and
-    // outlives this CLI process. A later `dev down` reaps it via that
-    // PID file. The persistent builder wires the `/dev/vdb` nix store
-    // and the `/work` share internally and holds the nix-store flock
-    // for the VM's lifetime.
-    let handle = mvm_build::vz_builder::VzPersistentBuilderVm::new(dev_workspace_root())
-        .with_session_id(DEV_VM_SESSION_ID)
-        .with_guest_agent_port(true)
-        .with_vcpus(cpus.clamp(1, u32::from(u8::MAX)) as u8)
-        .with_memory_mib(memory_mib)
-        .with_image_override(image)
-        .start()
-        .map_err(|e| anyhow::anyhow!("Failed to start dev VM: {e}"))?;
-    let console_log = handle.vm_state_dir().join("console.log");
-    // Drop the handle WITHOUT killing the supervisor — the dev VM must
-    // survive this process exit. `VzPersistentVmHandle::Drop` leaves the
-    // detached supervisor running (it only owns the `Child` for an
-    // optional explicit kill, which we don't call).
-    drop(handle);
-
-    wait_for_dev_vm_ready(&console_log)?;
-    touch_dev_vz_activity_now();
-
-    ui::success("Dev VM ready.");
-    ui::info("  Shell:      mvmctl dev shell");
-    ui::info("  Stop VM:    mvmctl dev down");
-
-    if open_shell {
-        ui::info("");
-        let _ = console_interactive(DEV_VM_NAME);
-    }
-
-    Ok("started")
-}
-
-#[cfg(not(feature = "builder-vm"))]
-pub(super) fn cmd_dev_vz(
-    _cpus: u32,
-    _memory_gib: u32,
-    _open_shell: bool,
-    _base_ref: Option<&DevBaseRef>,
-) -> Result<&'static str> {
-    anyhow::bail!(
-        "the dev VM is built locally via the builder VM, but this mvmctl was \
-         compiled without the `builder-vm` feature."
-    )
-}
-
-pub(in crate::commands) fn cmd_dev_vz_park(json: bool) -> Result<bool> {
-    #[cfg(feature = "builder-vm")]
-    {
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-        if !mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir) {
-            if !json {
-                ui::info("Dev VM is not running.");
-            }
-            return Ok(false);
-        }
-        let parked = mvm_build::vz_builder::park_persistent_vz_builder(&state_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to park dev VM: {e}"))?;
-        let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
-        if !json {
-            ui::success("Dev VM parked.");
-            ui::info(&format!("  Snapshot: {}", parked.snapshot_path.display()));
-        }
-        Ok(true)
-    }
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        if !json {
-            ui::info("Dev VM is not running.");
-        }
-        Ok(false)
-    }
-}
-
-/// Host-side path of the dev VM's guest-agent vsock socket. The console
-/// picker checks this for existence before falling through to the other
-/// backend probes; a present socket means the dev VM is the target.
-pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
-    #[cfg(feature = "builder-vm")]
-    {
-        mvm_build::vz_builder::persistent_vz_vsock_dir(DEV_VM_SESSION_ID)
-            .join(mvm_core::config::vsock_socket_filename(
-                mvm_guest::vsock::GUEST_AGENT_PORT,
-            ))
-            .to_string_lossy()
-            .into_owned()
-    }
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        // No builder-vm feature → no dev VM; return a path that never
-        // exists so the console picker skips the dev branch.
-        String::new()
-    }
-}
-
-/// Stop the dev VM by reaping its detached Vz supervisor via the PID
-/// file under the stable state dir.
-/// Stop the Vz dev VM. Returns whether a live VM was reaped. Prints the
-/// human result line only when `!json` (the dispatch emits the JSON form).
-pub(in crate::commands) fn cmd_dev_vz_down(json: bool, reset: bool) -> Result<bool> {
-    #[cfg(feature = "builder-vm")]
-    {
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-        let allows_persistent = mvm_core::residency::resolve_residency()
-            .0
-            .allows_persistent_builder();
-        let alive = mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir);
-
-        if should_park(allows_persistent, alive, reset) {
-            match mvm_build::vz_builder::park_persistent_vz_builder(&state_dir) {
-                Ok(_) => {
-                    // park_persistent_vz_builder already stopped the supervisor.
-                    let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
-                    if !json {
-                        ui::success("Parked dev VM — next `dev up` resumes from snapshot.");
-                    }
-                    return Ok(true);
-                }
-                Err(e) => {
-                    // Park failed: fall through to a normal stop so we never
-                    // leave a half-parked, still-running VM.
-                    if !json {
-                        ui::warn(&format!("Park failed ({e}); stopping normally."));
-                    }
-                }
-            }
-        }
-
-        let was_running = mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
-        // Drop the per-VM vsock dir so a stale socket can't fool the
-        // liveness probe on the next `dev status`.
-        let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
-        // Not parking (cold residency or `--reset`): discard any stale snapshot
-        // so a later `dev up` cold-boots instead of resuming an old builder.
-        remove_dev_vz_snapshot_markers(&state_dir);
-        remove_dev_base_provenance(&state_dir);
-        if !json {
-            if was_running {
-                ui::success("Dev VM stopped.");
-            } else {
-                ui::info("Dev VM is not running.");
-            }
-        }
-        Ok(was_running)
-    }
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        let _ = reset;
-        if !json {
-            ui::info("Dev VM is not running.");
-        }
-        Ok(false)
-    }
-}
-
-/// Show dev VM status.
-pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
-    #[cfg(feature = "builder-vm")]
-    {
-        match enforce_dev_vz_residency_policy() {
-            Ok(Some(decision)) if !json => match decision {
-                VzDevResidencyDecision::Park => {
-                    ui::info("Dev VM parked by residency policy.");
-                }
-                VzDevResidencyDecision::Teardown => {
-                    ui::info("Dev VM stopped by cold residency policy.");
-                }
-                VzDevResidencyDecision::Keep => {}
-            },
-            Ok(_) => {}
-            Err(e) if !json => {
-                ui::warn(&format!("Dev VM residency policy enforcement failed: {e}"));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    let running = is_vz_dev_running();
-    let state = if running {
-        "running"
-    } else if cfg!(feature = "builder-vm") && dev_vz_snapshot_exists() {
-        "parked"
-    } else {
-        "stopped"
-    };
-    let kernel = if running { probe_dev_vm_kernel() } else { None };
-
-    if json {
-        return crate::json_out::emit_json(&build_dev_status_json("vz", state, kernel));
-    }
-
-    ui::info("Backend:  Vz (Apple Virtualization.framework)");
-    ui::info(&format!("Dev VM:   {DEV_VM_NAME}"));
-    ui::info(&format!("Status:   {state}"));
-    if let Some(kernel) = &kernel {
-        ui::info(&format!("  Kernel:  {kernel}"));
-    }
-
-    if let Some(image) = resolve_dev_status_image() {
-        ui::info("  Image:   cached");
-        if let Some(kernel_path) = image.kernel_path {
-            ui::info(&format!("  Image kernel: {kernel_path}"));
-        }
-        ui::info(&format!("  Rootfs:  {}", image.rootfs_path));
-    } else {
-        ui::info("  Image:   not built");
-    }
-
-    let builder_cache = resolve_builder_vm_cache_status_summary();
-    ui::info(&format!(
-        "  Builder: {} cache {} (reason: {})",
-        builder_cache.cache_kind,
-        builder_cache.state.label(),
-        builder_cache.reason_code
-    ));
-
-    Ok(())
-}
-
-/// Best-effort `uname -r` over the dev VM's guest agent. `None` when the
-/// agent isn't reachable (VM down/booting) or the `builder-vm` feature
-/// (which carries the guest-agent transport) is off.
-#[cfg(feature = "builder-vm")]
-fn probe_dev_vm_kernel() -> Option<String> {
-    let mut stream = dev_vm_guest_agent_connect().ok()?;
-    // Inbound vsock RPC audit.
-    super::super::shared::emit_vsock_rpc_audit(
-        DEV_VM_NAME,
-        &mvm_guest::vsock::GuestRequest::Exec {
-            command: "uname -r".to_string(),
-            stdin: None,
-            timeout_secs: Some(5),
-        },
-    );
-    let mut out_buf: Vec<u8> = Vec::new();
-    mvm_guest::vsock::send_exec_streaming(&mut stream, "uname -r", None, Some(5), |event| {
-        if let mvm_guest::vsock::ExecEvent::Stdout { chunk } = event {
-            out_buf.extend_from_slice(chunk);
-        }
-    })
-    .ok()?;
-    let kernel = String::from_utf8_lossy(&out_buf).trim().to_string();
-    (!kernel.is_empty()).then_some(kernel)
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn probe_dev_vm_kernel() -> Option<String> {
-    None
-}
 
 /// Inspect dev caches without booting, rebuilding, or exposing local
 /// artifact paths/digests.
@@ -1042,8 +214,6 @@ pub(super) struct DevStatusJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builder_cache: Option<BuilderVmCacheJson>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub base: Option<DevBaseStatusJson>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub linux_native: Option<LinuxNativeDevStatusJson>,
 }
 
@@ -1059,9 +229,9 @@ pub(super) struct LinuxNativeComponentJson {
     pub state: &'static str,
 }
 
-/// Build the status report for a VM-backed dev backend (vz / libkrun):
-/// resolves the backend-agnostic dev-image + builder-VM cache state and
-/// attaches the caller-probed `kernel` (vz only; `None` elsewhere).
+/// Build the status report for the libkrun dev backend: resolves the
+/// backend-agnostic dev-image + builder-VM cache state and attaches the
+/// caller-probed `guest_kernel` (`None` when the VM isn't answering).
 pub(super) fn build_dev_status_json(
     backend: &'static str,
     state: &'static str,
@@ -1079,7 +249,6 @@ pub(super) fn build_dev_status_json(
         builder_cache: Some(builder_vm_cache_json(
             &resolve_builder_vm_cache_status_summary(),
         )),
-        base: resolve_dev_base_status_json(),
         linux_native: None,
     }
 }
@@ -1098,7 +267,6 @@ pub(super) fn build_dev_status_json_vmless(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
-        base: None,
         linux_native: None,
     }
 }
@@ -1123,7 +291,6 @@ pub(super) fn build_dev_status_json_linux_native(
         guest_kernel: None,
         dev_image: None,
         builder_cache: None,
-        base: None,
         linux_native: Some(LinuxNativeDevStatusJson {
             kvm: LinuxNativeComponentJson {
                 state: if has_kvm { "present" } else { "missing" },
@@ -1144,24 +311,6 @@ pub(super) fn build_dev_status_json_linux_native(
             },
         }),
     }
-}
-
-fn resolve_dev_base_status_json() -> Option<DevBaseStatusJson> {
-    let state_dir = {
-        #[cfg(feature = "builder-vm")]
-        {
-            mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID)
-        }
-        #[cfg(not(feature = "builder-vm"))]
-        {
-            std::path::PathBuf::new()
-        }
-    };
-    read_dev_base_provenance(&state_dir).map(|provenance| DevBaseStatusJson {
-        id: provenance.id,
-        revision: provenance.revision,
-        rootfs_fingerprint: provenance.rootfs_fingerprint,
-    })
 }
 
 /// Machine-readable result of a `dev down` (and, later, `dev up`)
@@ -1205,16 +354,6 @@ pub(super) fn build_dev_down_json(
             "not-running"
         },
         reset,
-    }
-}
-
-pub(super) fn build_dev_park_json(backend: &'static str, parked: bool) -> DevLifecycleJson {
-    DevLifecycleJson {
-        schema_version: 1,
-        backend,
-        action: "park",
-        outcome: if parked { "parked" } else { "not-running" },
-        reset: false,
     }
 }
 
@@ -7095,21 +6234,19 @@ mod dev_status_image_tests {
 
         // A VM-backed report carries the backend, the fixed dev VM name,
         // the state, and a guest-probed kernel version — but never a local
-        // artifact path. Digest-bearing base provenance is reported only
-        // under the explicit `base.rootfs_fingerprint` acceptance field.
-        let report = build_dev_status_json("vz", "running", Some("6.1.0-mvm".to_string()));
+        // artifact path.
+        let report = build_dev_status_json("libkrun", "running", Some("6.1.0-mvm".to_string()));
         assert_eq!(report.schema_version, 1);
-        assert_eq!(report.backend, "vz");
+        assert_eq!(report.backend, "libkrun");
         assert_eq!(report.vm_name, Some(DEV_VM_NAME));
         assert_eq!(report.state, "running");
         assert_eq!(report.guest_kernel.as_deref(), Some("6.1.0-mvm"));
         assert!(report.dev_image.is_some());
         assert!(report.builder_cache.is_some());
-        assert!(report.base.is_none());
         assert!(report.linux_native.is_none());
 
         let json = crate::json_out::to_json_string(&report).expect("serialize");
-        assert!(json.contains("\"backend\": \"vz\""));
+        assert!(json.contains("\"backend\": \"libkrun\""));
         assert!(json.contains("\"state\": \"running\""));
         assert!(json.contains("\"guest_kernel\": \"6.1.0-mvm\""));
         // No absolute paths / image filenames / digests leak.
@@ -7119,79 +6256,10 @@ mod dev_status_image_tests {
         assert!(!json.contains("vmlinux"));
     }
 
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn dev_base_provenance_roundtrips_without_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        let kernel = tmp.path().join("vmlinux");
-        std::fs::write(&rootfs, b"deterministic-rootfs").unwrap();
-        std::fs::write(&kernel, b"kernel").unwrap();
-        let base = ResolvedDevBaseImage {
-            id: "base-a".to_string(),
-            revision: "rev-1".to_string(),
-            kernel_path: kernel,
-            rootfs_path: rootfs.clone(),
-        };
-
-        let provenance = write_dev_base_provenance(tmp.path(), &base).expect("write provenance");
-        assert_eq!(provenance.schema_version, 1);
-        assert_eq!(provenance.id, "base-a");
-        assert_eq!(provenance.revision, "rev-1");
-        assert_eq!(
-            provenance.rootfs_fingerprint,
-            mvm_core::crypto::image_verify::sha256_file(&rootfs).unwrap()
-        );
-
-        let roundtrip = read_dev_base_provenance(tmp.path()).expect("read provenance");
-        assert_eq!(roundtrip, provenance);
-        let json = std::fs::read_to_string(dev_base_provenance_path(tmp.path())).unwrap();
-        assert!(json.contains("\"rootfs_fingerprint\""));
-        assert!(!json.contains(rootfs.to_string_lossy().as_ref()));
-        assert!(!json.contains("rootfs.ext4"));
-        assert!(!json.contains("vmlinux"));
-
-        remove_dev_base_provenance(tmp.path());
-        assert!(read_dev_base_provenance(tmp.path()).is_none());
-    }
-
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn dev_status_json_reports_active_base_fingerprint() {
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", tmp.path().join("cache"));
-        env.set("MVM_DATA_DIR", tmp.path().join("data"));
-
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-        std::fs::create_dir_all(&state_dir).unwrap();
-        let provenance = DevBaseProvenance {
-            schema_version: 1,
-            id: "template-a".to_string(),
-            revision: "rev-abc".to_string(),
-            rootfs_fingerprint: "0123456789abcdef".repeat(4),
-        };
-        let json = serde_json::to_vec_pretty(&provenance).unwrap();
-        std::fs::write(dev_base_provenance_path(&state_dir), json).unwrap();
-
-        let report = build_dev_status_json("vz", "running", None);
-        let base = report.base.as_ref().expect("base status");
-        assert_eq!(base.id, "template-a");
-        assert_eq!(base.revision, "rev-abc");
-        assert_eq!(base.rootfs_fingerprint, "0123456789abcdef".repeat(4));
-
-        let serialized = crate::json_out::to_json_string(&report).expect("serialize");
-        assert!(serialized.contains("\"base\""));
-        assert!(serialized.contains("\"rootfs_fingerprint\""));
-        assert!(!serialized.contains(state_dir.to_string_lossy().as_ref()));
-        assert!(!serialized.contains("rootfs.ext4"));
-        assert!(!serialized.contains("vmlinux"));
-    }
-
     #[test]
     fn dev_status_json_stopped_omits_kernel() {
         // A stopped VM has no guest to probe; `guest_kernel` is skipped, not null.
-        let report = build_dev_status_json("vz", "stopped", None);
+        let report = build_dev_status_json("libkrun", "stopped", None);
         assert_eq!(report.state, "stopped");
         assert!(report.guest_kernel.is_none());
         let json = crate::json_out::to_json_string(&report).expect("serialize");
@@ -7295,62 +6363,6 @@ mod dev_status_image_tests {
 
         let already = build_dev_up_json("libkrun", "already-running");
         assert_eq!(already.outcome, "already-running");
-    }
-
-    #[test]
-    fn dev_park_json_reports_parked_and_not_running() {
-        let parked = build_dev_park_json("vz", true);
-        assert_eq!(parked.schema_version, 1);
-        assert_eq!(parked.backend, "vz");
-        assert_eq!(parked.action, "park");
-        assert_eq!(parked.outcome, "parked");
-        let json = crate::json_out::to_json_string(&parked).expect("serialize");
-        assert!(json.contains("\"action\": \"park\""));
-        assert!(json.contains("\"outcome\": \"parked\""));
-        assert!(!json.contains("\"reset\""));
-
-        let missing = build_dev_park_json("vz", false);
-        assert_eq!(missing.outcome, "not-running");
-    }
-
-    #[test]
-    fn dev_base_ref_parses_template_and_revision() {
-        let base = DevBaseRef::parse("dev-base@rev-2026.06").expect("parse");
-        assert_eq!(base.id, "dev-base");
-        assert_eq!(base.revision.as_deref(), Some("rev-2026.06"));
-
-        let slot = "a".repeat(64);
-        let base = DevBaseRef::parse(&slot).expect("slot hash parse");
-        assert_eq!(base.id, slot);
-        assert!(base.revision.is_none());
-    }
-
-    #[test]
-    fn dev_base_ref_rejects_empty_or_traversal_components() {
-        assert!(DevBaseRef::parse("").is_err());
-        assert!(DevBaseRef::parse("dev-base@").is_err());
-        assert!(DevBaseRef::parse("dev-base@../rev").is_err());
-        assert!(DevBaseRef::parse("../dev-base").is_err());
-    }
-
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn dev_base_artifact_resolution_requires_kernel_and_rootfs() {
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let rev_dir = tmp.path().join("rev-a");
-        std::fs::create_dir_all(&rev_dir).expect("mkdir");
-        std::fs::write(rev_dir.join("vmlinux"), b"kernel").expect("kernel");
-        let err = dev_base_artifacts_from_revision_dir("dev-base", "rev-a", &rev_dir)
-            .expect_err("missing rootfs must fail");
-        assert!(format!("{err}").contains("rootfs"));
-
-        std::fs::write(rev_dir.join("rootfs.ext4"), b"rootfs").expect("rootfs");
-        let resolved =
-            dev_base_artifacts_from_revision_dir("dev-base", "rev-a", &rev_dir).expect("resolve");
-        assert_eq!(resolved.id, "dev-base");
-        assert_eq!(resolved.revision, "rev-a");
-        assert_eq!(resolved.kernel_path, rev_dir.join("vmlinux"));
-        assert_eq!(resolved.rootfs_path, rev_dir.join("rootfs.ext4"));
     }
 }
 
@@ -8293,11 +7305,11 @@ mod builder_vm_bootstrap_tests {
         }
     }
 
-    /// Pin that the orphan reaper covers `mvm-builder-vz-<job_id>`
-    /// dirs the same way it covers
+    /// Pin that the orphan reaper covers legacy `mvm-builder-vz-<job_id>`
+    /// dirs (left over from the removed Vz builder) the same way it covers
     /// `mvm-builder-vm-<job_id>`. The traversal in
-    /// `reap_orphaned_vm_helpers_at` is prefix-agnostic and
-    /// `VzBuilderVm` writes a `builder.pid` sidecar under the shared
+    /// `reap_orphaned_vm_helpers_at` is prefix-agnostic and a builder VM
+    /// writes a `builder.pid` sidecar under the shared
     /// `~/.cache/mvm/builder-vm/vms/` tree; this test guards against
     /// a future refactor narrowing either invariant.
     #[test]
@@ -8948,112 +7960,5 @@ mod heartbeat_tests {
             format_compile_elapsed(Duration::from_secs(130)),
             "still compiling… (2m10s elapsed)"
         );
-    }
-}
-
-#[cfg(all(test, feature = "builder-vm"))]
-mod autopark_gating_tests {
-    use super::{should_park, should_resume};
-
-    #[test]
-    fn cold_residency_never_parks_or_resumes() {
-        assert!(!should_park(false, true, false));
-        assert!(!should_park(false, false, false));
-        assert!(!should_resume(false, true));
-        assert!(!should_resume(false, false));
-    }
-
-    #[test]
-    fn warm_alive_no_reset_parks() {
-        assert!(should_park(true, true, false));
-    }
-
-    #[test]
-    fn park_requires_a_live_vm() {
-        assert!(!should_park(true, false, false));
-    }
-
-    #[test]
-    fn reset_suppresses_park() {
-        assert!(!should_park(true, true, true));
-        assert!(!should_park(true, false, true));
-    }
-
-    #[test]
-    fn resume_requires_a_present_snapshot() {
-        assert!(should_resume(true, true));
-        assert!(!should_resume(true, false));
-    }
-}
-
-#[cfg(all(test, feature = "builder-vm"))]
-mod vz_residency_keeper_tests {
-    use super::{
-        VzDevResidencyDecision, decide_vz_dev_residency, read_dev_vz_last_activity,
-        touch_dev_vz_activity_at,
-    };
-    use mvm_core::residency::ResidencyPolicy;
-
-    #[test]
-    fn not_running_keeps_for_every_residency() {
-        for policy in [
-            ResidencyPolicy::cold(),
-            ResidencyPolicy::parked(),
-            ResidencyPolicy::always_warm(),
-        ] {
-            assert_eq!(
-                decide_vz_dev_residency(&policy, false, Some(0), 10_000),
-                VzDevResidencyDecision::Keep
-            );
-        }
-    }
-
-    #[test]
-    fn cold_running_tears_down() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::cold(), true, Some(100), 200),
-            VzDevResidencyDecision::Teardown
-        );
-    }
-
-    #[test]
-    fn parked_running_parks() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::parked(), true, Some(100), 200),
-            VzDevResidencyDecision::Park
-        );
-    }
-
-    #[test]
-    fn warm_without_activity_keeps() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, None, 2_000),
-            VzDevResidencyDecision::Keep
-        );
-    }
-
-    #[test]
-    fn warm_at_idle_threshold_keeps() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_200),
-            VzDevResidencyDecision::Keep
-        );
-    }
-
-    #[test]
-    fn warm_past_idle_threshold_parks() {
-        assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_201),
-            VzDevResidencyDecision::Park
-        );
-    }
-
-    #[test]
-    fn activity_timestamp_round_trips_through_state_dir() {
-        let tmp = tempfile::tempdir().expect("create temporary dev vz state dir");
-
-        touch_dev_vz_activity_at(tmp.path(), 55).expect("write dev vz activity timestamp");
-
-        assert_eq!(read_dev_vz_last_activity(tmp.path()), Some(55));
     }
 }

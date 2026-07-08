@@ -3440,45 +3440,12 @@ fn test_dev_down_json_and_reset_flags_parse() {
 }
 
 #[test]
-fn test_dev_park_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "park"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Park { json }),
-        }) => assert!(!json, "bare `dev park` defaults to text output"),
-        _ => panic!("Expected Dev Park command"),
-    }
-}
-
-#[test]
-fn test_dev_park_json_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "park", "--json"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Park { json }),
-        }) => assert!(json, "`--json` requests machine-readable output"),
-        _ => panic!("Expected Dev Park command"),
-    }
-}
-
-#[test]
 fn test_dev_up_json_flag_parses() {
     let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "--json"]).unwrap();
     match cli.command {
         Commands::Dev(dev::Args {
             action: Some(DevAction::Up { json, .. }),
         }) => assert!(json),
-        _ => panic!("Expected Dev Up command"),
-    }
-}
-
-#[test]
-fn test_dev_up_base_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "--base", "dev-base@rev-a"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Up { base, .. }),
-        }) => assert_eq!(base.as_deref(), Some("dev-base@rev-a")),
         _ => panic!("Expected Dev Up command"),
     }
 }
@@ -3516,12 +3483,6 @@ fn test_dev_status_json_flag_parses() {
         }) => assert!(json, "`--json` requests machine-readable output"),
         _ => panic!("Expected Dev Status command"),
     }
-}
-
-#[test]
-fn test_is_vz_dev_running_returns_bool() {
-    // Just verify it doesn't panic — actual result depends on platform
-    let _ = super::env::dev_vz::is_vz_dev_running();
 }
 
 // ---- admission flags (up retired; pin removal) ----

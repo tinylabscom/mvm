@@ -7,29 +7,23 @@ use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
 use mvm::vsock_transport::{
-    DevConsoleTransport, FirecrackerTransport, LibkrunTransport, VsockTransport, VzTransport,
+    DevConsoleTransport, FirecrackerTransport, LibkrunTransport, VsockTransport,
     firecracker_transport_supported,
 };
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 
-use super::super::env::dev_vz::{DEV_VM_NAME, dev_vsock_proxy_path};
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
 use crate::ui;
 
 /// Pick the right vsock transport for `name`. Priority:
-/// 1. The dev VM's Vz guest-agent socket, when this is the dev VM and
-///    its socket is present (the dev VM lives in the builder cache, a
-///    different path than `VzTransport::for_vm` resolves).
-/// 2. libkrun per-port Unix socket.
-/// 3. HVF runner (`WorkloadRunner` / HVF) agent socket at
+/// 1. libkrun per-port Unix socket (also serves the libkrun dev VM).
+/// 2. HVF runner (`WorkloadRunner` / HVF) agent socket at
 ///    `<vm_state_dir>/hvf-agent.sock`. This is workload-local; the
 ///    pre-opened console sockets exist only when the VM was booted with
 ///    `dev_console=true`.
-/// 4. Vz per-port Unix socket (`<vm_state_dir>/vsock/vsock-<port>.sock`) —
-///    the macOS AVF path.
-/// 5. Firecracker UDS multiplexer (fleet/production path), only on native
+/// 3. Firecracker UDS multiplexer (fleet/production path), only on native
 ///    Linux where resolving the Firecracker runtime dir is side-effect-free.
 ///
 /// Each probe consumes one stream and drops it; the returned
@@ -37,25 +31,6 @@ use crate::ui;
 /// (control + data + resize). Cloning the Arc lets the SIGWINCH handler
 /// thread reuse the same dispatch.
 fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
-    // The dev VM's guest-agent socket sits in the builder cache, not the
-    // data-dir path `VzTransport::for_vm` resolves. The Vz supervisor
-    // exposes it as a direct per-port socket (no proxy port prefix), so
-    // dial it through `VzTransport` rooted at the socket's parent dir.
-    //
-    // Gate this on the requested name being the dev VM. The dev socket is
-    // present whenever the persistent dev/builder VM is up (e.g. after an
-    // image-ensure step), so an unconditional check would route every
-    // workload's console onto the builder — which must stay free to build
-    // other microVMs, and whose per-port data socket the workload's session
-    // never created anyway. A workload falls through to its own transport.
-    if name == DEV_VM_NAME {
-        let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
-        if dev_sock.exists()
-            && let Some(dir) = dev_sock.parent()
-        {
-            return Ok(Arc::new(VzTransport::new(dir)));
-        }
-    }
     let libkrun = LibkrunTransport::for_vm(name);
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Arc::new(libkrun));
@@ -72,13 +47,6 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
         if hvf.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
             return Ok(Arc::new(hvf));
         }
-    }
-    // Vz workloads expose the agent at `<vm_state_dir>/vsock/vsock-<port>.sock`
-    // (one subdir deeper than libkrun); without this probe `console` fell
-    // through to the firecracker fallback and mis-resolved to `mvm-dev`.
-    let vz = VzTransport::for_vm(name);
-    if vz.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
-        return Ok(Arc::new(vz));
     }
     if firecracker_transport_supported(mvm_core::platform::current()) {
         return Ok(Arc::new(FirecrackerTransport::for_vm(name)?));
@@ -570,98 +538,6 @@ mod accessible_gate_tests {
     }
 
     #[test]
-    fn pick_console_transport_selects_vz_when_only_vz_socket_present() {
-        use std::os::unix::net::UnixListener;
-        // Regression for the "console can't reach a Vz workload" gap: with a
-        // Vz workload's vsock socket present (and no dev-proxy / libkrun /
-        // firecracker surface), the picker must select the Vz
-        // transport instead of erroring out on the firecracker fallback.
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
-
-        let name = "vz-console-probe";
-        let sock =
-            mvm_core::config::vm_vz_vsock_port_socket(name, mvm_guest::vsock::GUEST_AGENT_PORT);
-        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
-        let _listener = UnixListener::bind(&sock).unwrap();
-
-        let transport = pick_console_transport(name).expect("picker should find the vz transport");
-        transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect("selected transport should connect to the vz socket");
-    }
-
-    // The dev VM's vsock socket is present whenever the persistent
-    // dev/builder VM is up. A workload's console request must NOT be
-    // routed onto it (the builder must stay free to build other microVMs,
-    // and its session never created the workload's per-port data socket).
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn pick_console_transport_does_not_route_workload_to_dev_socket() {
-        use mvm_backend::base::shell_mock;
-        use std::os::unix::net::UnixListener;
-
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        // Root under /tmp: the dev socket path includes a long
-        // `mvm-persistent-builder-vz-dev` component that overruns the
-        // ~104-char AF_UNIX SUN_LEN limit when rooted in the default $TMPDIR.
-        let cache = tempfile::tempdir_in("/tmp").expect("cache tempdir");
-        let data = tempfile::tempdir_in("/tmp").expect("data tempdir");
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
-
-        // Intercept any shell commands (e.g. the `echo $VMS_DIR` in the
-        // Firecracker fallback) so the test completes fast whether or not
-        // the dev VM happens to be running.
-        let fake_vms = data.path().join("vms");
-        let fake_vms_str = fake_vms.display().to_string();
-        let _mock = shell_mock::install_handler(move |_script: &str| shell_mock::MockResponse {
-            exit_code: 0,
-            stdout: fake_vms_str.clone(),
-        });
-
-        // Dev VM socket present and live, but the requested name is a workload.
-        let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
-        std::fs::create_dir_all(dev_sock.parent().unwrap()).unwrap();
-        let _dev_listener = UnixListener::bind(&dev_sock).unwrap();
-
-        // No socket for the workload, so the only way to "succeed" is the
-        // buggy short-circuit onto the dev socket. An Err (no transport
-        // resolved) is fine too — just not the dev VM.
-        if let Ok(transport) = pick_console_transport("workload-1") {
-            assert!(
-                transport
-                    .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-                    .is_err(),
-                "a workload console must not be routed onto the dev/builder VM socket"
-            );
-        }
-    }
-
-    // The dev shell path (`console_interactive(DEV_VM_NAME)`) must still
-    // resolve to the dev VM's builder-cache socket.
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn pick_console_transport_selects_dev_socket_for_dev_vm() {
-        use std::os::unix::net::UnixListener;
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        // /tmp root — see SUN_LEN note in the sibling test above.
-        let cache = tempfile::tempdir_in("/tmp").expect("cache tempdir");
-        env.set("MVM_CACHE_DIR", cache.path());
-
-        let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
-        std::fs::create_dir_all(dev_sock.parent().unwrap()).unwrap();
-        let _dev_listener = UnixListener::bind(&dev_sock).unwrap();
-
-        let transport =
-            pick_console_transport(DEV_VM_NAME).expect("picker should find the dev VM transport");
-        transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect("dev VM console must connect to the builder-cache socket");
-    }
-
-    #[test]
     fn gate_allows_when_meta_missing() {
         with_home(|_| {
             assert!(enforce_accessible_gate("never-started", false).is_ok());
@@ -873,64 +749,5 @@ mod picker_hvf_tests {
         transport
             .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport must connect to the workload agent socket");
-    }
-
-    // Extend the boundary test: even with MVM_ENV=dev (which enables the
-    // hvf arm), the picker selects the workload's OWN hvf socket — not
-    // the dev/builder VM socket — when both are present. The hvf arm probes
-    // `hvf-agent.sock` under the workload's own state dir, which is disjoint
-    // from the builder cache, so it can never cross-route.
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn pick_console_transport_hvf_uses_workload_not_dev_socket() {
-        // /tmp root — see SUN_LEN note in the original boundary test.
-        let cache = tempfile::tempdir_in("/tmp").expect("cache tempdir");
-        let data = tempfile::tempdir_in("/tmp").expect("data tempdir");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
-        env.set("MVM_ENV", "dev");
-
-        // Dev VM socket present and live.
-        let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
-        std::fs::create_dir_all(dev_sock.parent().unwrap()).unwrap();
-        let _dev_listener = UnixListener::bind(&dev_sock).unwrap();
-
-        // Workload's hvf agent.sock also present.
-        let name = "hvf-with-dev-present";
-        let state = mvm_core::config::vm_state_dir(name);
-        std::fs::create_dir_all(&state).unwrap();
-        let workload_agent = mvm_core::config::vm_hvf_agent_socket(name);
-        let _workload_listener = UnixListener::bind(&workload_agent).unwrap();
-
-        // The picker must select the workload's own hvf socket, not the
-        // dev/builder socket. Connection to agent.sock must succeed.
-        let transport = pick_console_transport(name)
-            .expect("picker must find the hvf transport for the workload");
-        transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect("selected transport must connect to the workload's agent.sock");
-    }
-
-    // Extend the boundary test: the dev VM path must still work even when
-    // MVM_ENV=dev is set (which enables the hvf arm for workloads).
-    #[cfg(feature = "builder-vm")]
-    #[test]
-    fn pick_console_transport_selects_dev_socket_for_dev_vm_with_dev_mode() {
-        // /tmp root — see SUN_LEN note in the original boundary test.
-        let cache = tempfile::tempdir_in("/tmp").expect("cache tempdir");
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_ENV", "dev");
-
-        let dev_sock = std::path::PathBuf::from(dev_vsock_proxy_path());
-        std::fs::create_dir_all(dev_sock.parent().unwrap()).unwrap();
-        let _dev_listener = UnixListener::bind(&dev_sock).unwrap();
-
-        let transport =
-            pick_console_transport(DEV_VM_NAME).expect("picker must find the dev VM transport");
-        transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect("dev VM console must connect to the builder-cache socket");
     }
 }
