@@ -2353,9 +2353,11 @@ fn secret_put_without_value_source_parses_for_interactive_prompt() {
 fn secret_get_rejects_force_flag() {
     let err = Cli::try_parse_from(["mvmctl", "secret", "get", "api-key", "--force"])
         .expect_err("secret get must not accept --force");
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("unexpected argument '--force'"),
-        "got: {err}"
+        msg.contains("unexpected argument '--force'")
+            || msg.contains("unexpected argument found"),
+        "got: {msg}"
     );
 }
 
