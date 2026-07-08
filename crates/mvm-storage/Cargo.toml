@@ -9,7 +9,6 @@ homepage.workspace = true
 authors.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 async-trait = "0.1"
 bytes = "1"
 chrono.workspace = true
@@ -17,11 +16,9 @@ mvm-core.workspace = true
 # IR `MountSource` that MountProvider resolves. Acyclic: mvm-sdk does
 # not depend on mvm-storage, and its only mvm-* normal dep is mvm-core.
 mvm-sdk.workspace = true
-serde.workspace = true
 # Content-addressed volume digests (B3).
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "macros"] }
-tracing.workspace = true
 # DEK held in the EncryptedStorage struct is zeroized on drop.
 zeroize.workspace = true
 # S3 MountProvider — OFF by default. The lean object_store, not
