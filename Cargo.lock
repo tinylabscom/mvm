@@ -2356,8 +2356,6 @@ name = "mvm-backend"
 version = "0.17.0"
 dependencies = [
  "anyhow",
- "block2",
- "dispatch2",
  "ext4-view",
  "kvm-bindings",
  "kvm-ioctls",
