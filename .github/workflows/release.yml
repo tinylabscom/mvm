@@ -346,12 +346,14 @@ jobs:
             --revocation-channel "$REVOCATION_CHANNEL"
           mv staging/manifest.json "staging/builder-vm-${ARCH}.pack-manifest.json"
 
-          # Keyless OIDC sign — no secret key needed. The bundle carries the
-          # signature, the short-lived cert, and the transparency-log
-          # inclusion proof; the installed-binary fetch path verifies exactly
-          # this format.
+          # Keyless OIDC sign — no secret key needed. --new-bundle-format emits
+          # the Sigstore bundle (with verificationMaterial) that the installed
+          # binary's Rust verifier parses; the legacy --bundle format is not
+          # accepted by that stack. The bundle carries the signature, the
+          # short-lived cert, and the transparency-log inclusion proof.
           cosign sign-blob \
             --yes \
+            --new-bundle-format \
             --bundle "staging/builder-vm-${ARCH}.pack-manifest.json.bundle" \
             "staging/builder-vm-${ARCH}.pack-manifest.json"
 

@@ -56,8 +56,12 @@ jobs:
       - name: Keyless-sign the manifest with cosign
         run: |
           set -euo pipefail
+          # --new-bundle-format emits the Sigstore bundle (with
+          # verificationMaterial) the Rust verifier parses; legacy --bundle is
+          # rejected by that stack.
           cosign sign-blob \
             --yes \
+            --new-bundle-format \
             --bundle smoke/pack-manifest.json.bundle \
             smoke/pack-manifest.json
 
