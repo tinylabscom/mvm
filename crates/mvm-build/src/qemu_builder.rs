@@ -3,7 +3,7 @@
 //! QEMU is the portable, apt-installable Linux builder substrate: it uses
 //! `/dev/kvm` when present (fast) and TCG software emulation otherwise (slow,
 //! but works anywhere — CI runners, nested VMs, containers). On macOS the
-//! built-in equivalent is Vz; QEMU is Linux-only. Firecracker remains the
+//! built-in equivalent is LegacyMacos; QEMU is Linux-only. Firecracker remains the
 //! production runtime.
 //!
 //! Stage 0 reuses the same nix-tarball seed + `stage0-init` as the libkrun
@@ -422,7 +422,7 @@ fn io_err(ctx: &str, path: &Path, e: std::io::Error) -> BuilderVmError {
 // the ext4 rootfs directly with no initramfs and no ext4-disk-share
 // workaround, and `mvm-host-vm-init` (PID 1, UNCHANGED) mounts the same
 // virtio-fs tags + persistent `/dev/vdb` nix store it does under
-// libkrun/Vz, runs `/job/cmd.sh`, writes `/job/result`, and powers off.
+// libkrun/LegacyMacos, runs `/job/cmd.sh`, writes `/job/result`, and powers off.
 //
 // Devices, matched to what the unchanged guest expects:
 //   - vda  virtio-blk  the builder `rootfs.ext4` (mounted `ro`)
@@ -675,7 +675,7 @@ fn run_build_qemu(
     };
 
     // 4. Allocate / lock the persistent `/nix-store` virtio-blk image
-    //    (vdb). Shared with the libkrun/Vz builders via the same flock so
+    //    (vdb). Shared with the libkrun/LegacyMacos builders via the same flock so
     //    a warm store carries across backends; the lock serialises writers.
     let nix_store_lock = acquire_nix_store_image_lock(
         &builder_vm_cache_dir(),
@@ -797,7 +797,7 @@ fn run_build_qemu(
     }
 
     // 12. Per-variant finalize via the shared job protocol — identical to
-    //     the libkrun/Vz paths, so the BuilderArtifacts is byte-identical
+    //     the libkrun/LegacyMacos paths, so the BuilderArtifacts is byte-identical
     //     regardless of VMM. Flake reads /job/result + validates
     //     /out/rootfs.ext4; Install reads /out/result.json.
     let artifacts = match job {

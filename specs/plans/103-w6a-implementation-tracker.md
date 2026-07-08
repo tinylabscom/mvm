@@ -89,7 +89,7 @@ observable, mediable substrate across all three backends
             to commit 8 amendments — historical plan, low impact)
       - [ ] `specs/plans/76-secure-fast-boot-and-dx.md` (commit 8)
       - [ ] `specs/plans/88-gvproxy-macos-backend.md` (commit 8)
-      - [ ] `specs/plans/97-vz-backend.md` (commit 8)
+      - [ ] `removed legacy macOS archival spec` (commit 8)
 - [x] Delete tests touching `MVM_NETWORKING=tsi` (two assertions
       in `resolve_networking_mode_parses_env`)
 - [x] New test: `tsi_no_longer_resolvable` (five case variants of

@@ -5,7 +5,7 @@
 //! [`parse::BridgeEndpointKind`] discriminant to build the matching
 //! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant. This folds
 //! the previously per-backend stdin contracts (`mvm-firecracker-bridge`'s
-//! `BridgeConfigJson` and `mvm-vz-drainer`'s `DrainerConfig`) into one — the
+//! `BridgeConfigJson` and `mvm-legacy-macos-drainer`'s `DrainerConfig`) into one — the
 //! contract the source already described as "identical across all three".
 //!
 //! The plan-decode (`parse::decode_plan_json`) and passt-hash verify

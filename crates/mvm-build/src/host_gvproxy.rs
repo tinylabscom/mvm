@@ -1,17 +1,17 @@
-//! Host-side gvproxy lifecycle for the Vz backend.
+//! Host-side gvproxy lifecycle for the LegacyMacos backend.
 //!
-//! VzBackend is stateless (no per-VM in-memory ownership), so
-//! `gvproxy` must outlive `VzBackend::start`'s
+//! LegacyMacosBackend is stateless (no per-VM in-memory ownership), so
+//! `gvproxy` must outlive `LegacyMacosBackend::start`'s
 //! return. We can't use [`libkrun_sys::gvproxy::spawn`] directly:
 //! it returns a `GvproxyHandle` whose Drop SIGTERMs the child the
 //! moment the handle goes out of scope — perfect for the in-libkrun-
 //! supervisor model (which holds the handle on the supervisor
 //! process's stack until `krun_start_enter` exit()s), wrong for the
-//! Vz parent-spawn model.
+//! LegacyMacos parent-spawn model.
 //!
 //! This module spawns gvproxy without owning its `Child`, records
 //! the PID in a sidecar file under the per-VM scratch dir, and
-//! exposes a tear-down helper for `VzBackend::stop` to call.
+//! exposes a tear-down helper for `LegacyMacosBackend::stop` to call.
 //! `std::process::Child::drop` does NOT kill the child — it just
 //! closes stdio handles — so dropping the Child immediately is
 //! safe and leaves gvproxy running as a normal child of the
@@ -33,7 +33,7 @@ use sha2::{Digest, Sha256};
 
 /// File name used for the host-gvproxy PID sidecar under the per-VM
 /// state dir. Picked to not collide with the existing `libkrun.pid`
-/// or `mvm-vz-supervisor.pid` markers in the same directory.
+/// or `mvm-legacy-macos-supervisor.pid` markers in the same directory.
 pub const PID_FILE_NAME: &str = "host-gvproxy.pid";
 
 /// File name of the host-gvproxy listener socket. Lives under the
@@ -53,7 +53,7 @@ pub(crate) const SUN_PATH_MAX: usize = 108;
 
 /// Short, deterministic, filesystem-safe hex token derived from `input`
 /// (first `bytes` bytes of its SHA-256). Used to keep `AF_UNIX` socket paths
-/// short: as a relocated-socket filename here, and as the Vz persistent
+/// short: as a relocated-socket filename here, and as the LegacyMacos persistent
 /// builder's session id (so its `<state_dir>/vsock/*` paths stay under
 /// [`SUN_PATH_MAX`]). Collision-resistant across a host's per-VM dirs.
 pub(crate) fn short_token(input: &str, bytes: usize) -> String {
@@ -71,7 +71,7 @@ pub(crate) fn short_token(input: &str, bytes: usize) -> String {
 /// `scratch_dir`.
 ///
 /// Normally `<scratch_dir>/gvproxy.sock`. But the per-VM state-dir name can be
-/// long (e.g. `mvm-persistent-builder-vz-<session>`), and under a long
+/// long (e.g. `mvm-persistent-builder-legacy-macos-<session>`), and under a long
 /// `MVM_CACHE_DIR`/`MVM_DATA_DIR` or a long `$HOME` the natural path can exceed
 /// the `AF_UNIX` `sun_path` limit — gvproxy then fails to `bind()` and exits
 /// before listening. When the natural path wouldn't fit, relocate the socket to
@@ -112,10 +112,10 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Debug, Clone)]
 pub struct HostGvproxyInfo {
     /// Absolute path to gvproxy's `-listen-vfkit` SOCK_DGRAM
-    /// listener. Vz supervisor connects here.
+    /// listener. LegacyMacos supervisor connects here.
     pub socket_path: PathBuf,
     /// gvproxy's PID. Also written to `<scratch_dir>/host-gvproxy.pid`
-    /// so [`stop_by_pid_file`] can rediscover it after VzBackend::start
+    /// so [`stop_by_pid_file`] can rediscover it after LegacyMacosBackend::start
     /// has returned.
     pub pid: u32,
 }
@@ -170,7 +170,7 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
     let _ = std::fs::remove_file(&pid_path);
 
     // gvproxy args (mirror mvm-libkrun::gvproxy::spawn):
-    //   -listen-vfkit unixgram://<path>  — Vz connects here
+    //   -listen-vfkit unixgram://<path>  — LegacyMacos connects here
     //   -log-file <path>                 — diagnostic log
     //   -ssh-port <port>                 — fresh OS-assigned free port
     //                                      so concurrent gvproxies (and
@@ -218,8 +218,8 @@ pub fn spawn_detached(scratch_dir: &Path) -> Result<HostGvproxyInfo> {
         .map_err(|e| anyhow!("spawn gvproxy {}: {e}", gvproxy_bin.display()))?;
     let pid = child.id();
 
-    // Persist the PID so VzBackend::stop can find this child later.
-    // VzBackend::start returns shortly after this, dropping `child`
+    // Persist the PID so LegacyMacosBackend::stop can find this child later.
+    // LegacyMacosBackend::start returns shortly after this, dropping `child`
     // (which doesn't kill the process — std::process::Child::drop
     // is a no-op WRT process lifetime). The kernel reparents
     // gvproxy to init when mvmctl eventually exits.
@@ -305,7 +305,7 @@ fn stop_by_pid_file_with_grace(scratch_dir: &Path, grace: Option<Duration>) -> R
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             // No PID file = nothing to stop. Mirror the libkrun /
-            // Vz supervisor stop semantics.
+            // LegacyMacos supervisor stop semantics.
             return Ok(());
         }
         Err(e) => return Err(anyhow!("read {}: {e}", pid_path.display())),
@@ -351,7 +351,7 @@ fn pid_alive(pid: i32) -> bool {
 /// Derive a MAC address from a VM name. Stable across runs (same
 /// name → same MAC), collision-resistant via SHA-256 truncation,
 /// and locally-administered (first octet has `0x02` set) per the
-/// MacAddress invariant in `mvm-vz`. Renders as
+/// MacAddress invariant in `mvm-legacy_macos`. Renders as
 /// `"aa:bb:cc:dd:ee:ff"` (lowercase) suitable for the
 /// `NetworkConfig::Gvproxy.mac` field.
 pub fn derive_mac(vm_name: &str) -> String {
@@ -403,7 +403,7 @@ mod tests {
 
     #[test]
     fn socket_path_keeps_natural_path_when_it_fits() {
-        let scratch = Path::new("/Users/u/.cache/mvm/builder-vm/vms/mvm-builder-vz-123");
+        let scratch = Path::new("/Users/u/.cache/mvm/builder-vm/vms/mvm-builder-legacy-macos-123");
         let cache = Path::new("/Users/u/.cache/mvm");
         let got = gvproxy_socket_path_in(scratch, cache);
         // Fits → unchanged behaviour: socket sits in the scratch dir.
@@ -418,7 +418,7 @@ mod tests {
         let cache = Path::new("/Users/somebody/some-long-isolated-cache-dir/mvm");
         let scratch = cache
             .join("builder-vm/vms")
-            .join("mvm-persistent-builder-vz-1782091841495-85253");
+            .join("mvm-persistent-builder-legacy-macos-1782091841495-85253");
         let natural = scratch.join(SOCKET_FILE_NAME);
         assert!(
             natural.as_os_str().len() >= SUN_PATH_MAX,
@@ -441,8 +441,10 @@ mod tests {
     #[test]
     fn socket_path_is_deterministic_and_collision_free() {
         let cache = Path::new("/Users/somebody/some-long-isolated-cache-dir/mvm");
-        let a = cache.join("builder-vm/vms/mvm-persistent-builder-vz-1111111111111-11111");
-        let b = cache.join("builder-vm/vms/mvm-persistent-builder-vz-2222222222222-22222");
+        let a =
+            cache.join("builder-vm/vms/mvm-persistent-builder-legacy-macos-1111111111111-11111");
+        let b =
+            cache.join("builder-vm/vms/mvm-persistent-builder-legacy-macos-2222222222222-22222");
         // Same input → same path (so spawn_detached and stop_by_pid_file agree).
         assert_eq!(
             gvproxy_socket_path_in(&a, cache),
@@ -467,7 +469,7 @@ mod tests {
 
     #[test]
     fn ssh_port_uses_a_free_os_assigned_port() {
-        // The Vz lane reserves its gvproxy ssh-forward port the same
+        // The LegacyMacos lane reserves its gvproxy ssh-forward port the same
         // way the libkrun lane does — a fresh OS-assigned free port,
         // never a deterministic scratch-dir hash that could collide
         // with a leaked daemon.

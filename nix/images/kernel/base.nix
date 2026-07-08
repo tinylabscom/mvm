@@ -50,12 +50,12 @@ let
     # virtio bus + BOTH transports (sans virtio-fs — that's builder-only; a
     # sealed workload mounts no host shares). Both transports are required
     # because the backends differ: libkrun/Firecracker present virtio over
-    # MMIO, but **vz (Apple Virtualization.framework) presents virtio over
-    # PCI**. A kernel without PCI/VIRTIO_PCI boots blind under vz — no
+    # MMIO, but **legacy-macos (Apple Virtualization.framework) presents virtio over
+    # PCI**. A kernel without PCI/VIRTIO_PCI boots blind under legacy-macos — no
     # virtio-console (zero bytes on hvc0), no virtio-net, no virtio-block — so
-    # the vz builder + workload VMs hang at boot. PCI + PCI_MSI + VIRTIO_PCI
+    # the legacy-macos builder + workload VMs hang at boot. PCI + PCI_MSI + VIRTIO_PCI
     # therefore stay enabled; do not drop them as "MMIO-only dead weight" (that
-    # regression broke every vz boot on macOS). The generic ECAM PCI host
+    # regression broke every legacy-macos boot on macOS). The generic ECAM PCI host
     # controller AVF's bus needs comes from `make defconfig` once PCI is on.
     "VIRTIO" "VIRTIO_MENU" "VIRTIO_MMIO" "VIRTIO_PCI"
     "PCI" "PCI_MSI"
@@ -178,10 +178,10 @@ let
     "PINCTRL"              # SoC pin-mux
     "MFD_CORE"             # multi-function (PMIC) device core
 
-    # NOTE: PCI is intentionally NOT disabled — vz (Apple
+    # NOTE: PCI is intentionally NOT disabled — legacy-macos (Apple
     # Virtualization.framework) presents virtio over PCI, so PCI + VIRTIO_PCI
     # are in the enable list above. libkrun/Firecracker (MMIO) simply don't
-    # probe it. Dropping PCI here is what broke every vz boot on macOS.
+    # probe it. Dropping PCI here is what broke every legacy-macos boot on macOS.
 
     # Shrink batch 4 — more whole subsystems a sealed virtio microVM never
     # uses. Each cascades its family (drivers + helpers) via olddefconfig.
@@ -207,7 +207,7 @@ let
 
     # Shrink batch 6 — block-device *clients* defconfig builds in that no mvm
     # backend can ever drive. Every guest boots one virtio-blk disk (`vda`,
-    # kept via VIRTIO_BLK above); libkrun / vz / Firecracker present no NBD
+    # kept via VIRTIO_BLK above); libkrun / legacy-macos / Firecracker present no NBD
     # server and no NVMe controller, so these drivers register phantom devices
     # (nbd0–15) and idle rescuer workqueue threads (16× kworker/R-nbd*, 3×
     # kworker/R-nvme) with nothing behind them. A workload *cannot* reach them —

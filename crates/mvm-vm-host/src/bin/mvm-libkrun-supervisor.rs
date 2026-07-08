@@ -187,63 +187,6 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
         }
     }
 
-    // Phase A: transparent-TCP vsock egress. When the host opted in and the
-    // workload carries no bound secrets (so the substitution endpoint is NOT
-    // binding EGRESS_PORT), bind the EGRESS_PORT UDS and run the claim-10 egress
-    // server. The NIC is still attached (Phase A retains it); this is the opt-in
-    // vsock path used to live-prove egress before the NIC is removed in Phase B.
-    {
-        let opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
-        // Short-circuit on the opt-in flag so the default (flag-off) path does no
-        // extra plan.json read. `should_serve_vsock_egress` also requires `opt_in`,
-        // so passing `has_secrets = false` when opted out changes nothing.
-        let has_secrets = opt_in
-            && mvm_backend::egress_shared::state_has_bound_secrets(std::path::Path::new(
-                &cfg.vm_state_dir,
-            ))
-            .unwrap_or(false);
-        if mvm_vm_host::egress_server::should_serve_vsock_egress(
-            &cfg.krun.host_listen_ports,
-            opt_in,
-            has_secrets,
-        ) {
-            let policy: mvm_core::network_policy::NetworkPolicy = cfg
-                .network_policy
-                .clone()
-                .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or_else(mvm_core::network_policy::NetworkPolicy::deny_all);
-            let gate = mvm_hostd::supervisor::substitution_endpoint::build_egress_gate(&policy);
-            let egress_sock = cfg.krun.vsock_socket_path(mvm_guest::vsock::EGRESS_PORT);
-            // Bind INSIDE the runtime context: `tokio::net::UnixListener::bind`
-            // registers the fd with the reactor via `Handle::current()` and panics if
-            // no runtime is entered. `dispatch_config` runs on a plain (non-tokio)
-            // thread, so create + enter the runtime first, then remove_file + bind,
-            // then serve — mirroring the runtime-first pattern in
-            // `mvm_hostd::supervisor::gateway_bridge`.
-            std::thread::spawn(move || {
-                let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        eprintln!("mvm-libkrun-supervisor: egress runtime: {e}");
-                        return;
-                    }
-                };
-                let _guard = rt.enter();
-                let _ = std::fs::remove_file(&egress_sock);
-                let listener = match tokio::net::UnixListener::bind(&egress_sock) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        eprintln!("mvm-libkrun-supervisor: bind egress socket: {e}");
-                        return;
-                    }
-                };
-                if let Err(e) = rt.block_on(mvm_vm_host::egress_server::run(listener, gate)) {
-                    eprintln!("mvm-libkrun-supervisor: egress server: {e}");
-                }
-            });
-        }
-    }
-
     // Route to the bridge path when the producer
     // populated the audit substrate, otherwise fall back to the
     // legacy direct-libkrun path (Stage 0 builder VMs, smoke tests,
@@ -533,7 +476,7 @@ fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible
     // reaching this code).
     //
     // Leaf capabilities are fixed per backend: libkrun reports
-    // `payload_tap: true`. The Vz drainer will
+    // `payload_tap: true`. The LegacyMacos drainer will
     // set `payload_tap: false` from its own bin.
     let leaf_caps = mvm_hostd::supervisor::network::ProviderCapabilities {
         flow_events: true,

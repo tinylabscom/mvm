@@ -47,7 +47,7 @@ pub mod firewall;
 // mpsc.
 pub mod gateway_audit;
 // Per-VM gateway audit bridge. Splices guest virtio-net <-> host
-// gateway (passt / gvproxy / Vz ingest), emits FlowOpened/FlowClosed
+// gateway (passt / gvproxy / LegacyMacos ingest), emits FlowOpened/FlowClosed
 // through a per-VM signer_task into the claim-8 chain, broadcasts
 // NDJSON to gateway_audit subscribers, and exposes a `FlowPolicy` hook
 // for SNI / L7 inspectors.

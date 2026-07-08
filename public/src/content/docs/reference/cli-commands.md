@@ -56,9 +56,9 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run -e KEY=VALUE` | Inject an environment variable (repeatable; gated by `--profile`) |
 | `mvmctl machine run --volume host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`) |
 | `mvmctl machine run --profile <p>` | Security posture: `restrictive`, `standard` (default), `dev`, `permissive` |
-| `mvmctl machine run --net` | Enable broad dev-tier outbound egress (default is deny-all) |
-| `mvmctl machine run --allow-host HOST[:PORT]` | Allow egress only to these hosts (repeatable; PORT defaults to 443; wins over `--net`) |
-| `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `vz` (macOS 26+ opt-in, sunsetting), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
+| `mvmctl machine run --net` | Select the broad dev-tier outbound egress policy (default is deny-all). Policy only: never enables guest-NIC networking on an unsupported backend |
+| `mvmctl machine run --allow-host HOST[:PORT]` | Narrow egress to these hosts (repeatable; PORT defaults to 443; wins over `--net`). Policy only: never enables guest-NIC networking on an unsupported backend |
+| `mvmctl machine run --hypervisor <backend>` | Backend override: `hvf` (macOS 26+ default), `firecracker` and `libkrun` (both satisfy the vsock-only workload-egress contract), `qemu` (dev/test) |
 | `mvmctl machine run --flake <ref> --flake-profile <variant>` | Flake package variant (e.g. worker, gateway) |
 | `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
 | `mvmctl machine stop [name...]` | Stop one or more VMs by name, or `--all` |
@@ -89,14 +89,14 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
 | `mvmctl dev up --shell` (or `-s`) | Force opening an interactive shell after starting (the default behavior) |
 | `mvmctl dev up --no-shell` | Start the dev VM without attaching an interactive shell |
-| `mvmctl dev up --base <template[@revision]\|slot[@revision]\|bundle-sha>` | On the Vz backend, boot the dev VM from a built template/manifest-slot revision or installed bundle instead of the default dev image. Unknown or unbuilt bases fail before launch; changing the base of an already-running or parked dev VM requires `mvmctl dev down` first. |
+| `mvmctl dev up --base <template[@revision]\|slot[@revision]\|bundle-sha>` | Boot the dev VM from a built template/manifest-slot revision or installed bundle instead of the default dev image. Unknown or unbuilt bases fail before launch; changing the base of an already-running or parked dev VM requires `mvmctl dev down` first. |
 | `mvmctl dev down` | Stop the dev VM |
 | `mvmctl dev down --reset` | Also delete the cached dev image so the next `dev up` rebuilds from local source |
-| `mvmctl dev park` | Vz only: snapshot and stop the running dev VM so the next `dev up` restores from the parked state |
+| `mvmctl dev park` | Snapshot and stop the running dev VM on a save/restore-capable legacy builder backend so the next `dev up` restores from the parked state |
 | `mvmctl dev shell` | Open a shell in the running dev VM |
 | `mvmctl dev shell --project ~/dir` | Open shell and cd into a project directory |
 | `mvmctl dev status` | Show dev environment backend, running state, cached image paths, and safe builder-cache readiness reason |
-| `mvmctl dev status --json` | Emit schema-versioned dev status JSON; Vz pinned-base dev VMs include a `base` object with `id`, `revision`, and `rootfs_fingerprint`, while Linux-native hosts include typed KVM, Firecracker, and base-asset readiness labels |
+| `mvmctl dev status --json` | Emit schema-versioned dev status JSON; Linux-native hosts include typed KVM, Firecracker, and base-asset readiness labels |
 | `mvmctl dev cache inspect` | Inspect dev image and builder-cache readiness without rebuilding, booting, or printing local artifact paths |
 | `mvmctl dev cache inspect --json` | Emit the sanitized dev-cache inspection as structured JSON |
 | `mvmctl dev rebuild` | Stop, clear cache, and rebuild + restart the dev VM |
@@ -359,8 +359,8 @@ flag:
 - **Transient** (default): boot a fresh microVM from an OCI image, run the
   command, tear the VM down. Routes into the same code path as
   `mvmctl run --image`, inheriting **deny-all networking by default**, opt-in
-  egress via `--net` / `--allow-host`, and the same `--profile`, `--volume`,
-  `--receipt`, `--json`, and `--dry-run` semantics.
+  egress policy via `--net` / `--allow-host`, and the same `--profile`,
+  `--volume`, `--receipt`, `--json`, and `--dry-run` semantics.
 - **Foreground interactive** (`-t`/`--tty`, with `-i` accepted so `-it`
   parses): boot a fresh transient VM, run the requested argv attached to a PTY,
   return that command's exit code, then tear the VM down. **Dev-only** —
@@ -420,11 +420,18 @@ the runtime also denies TCP/22 even under broad egress. Dev-tier `ssh_agent`
 means only Unix-socket forwarding of the host `SSH_AUTH_SOCK`; it never copies
 or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 
+Every workload boot carries an admitted network policy, even when that policy is
+the default `deny-all`. That policy requires the backend capability contract
+`vsock + no_guest_nic + host_vsock_proxy`. `--net` and `--allow-host` therefore
+select policy only; they never enable guest NIC, TAP, gvproxy, passt, or other
+backend-specific workload networking. Backends that cannot satisfy the contract
+are refused with a clear error instead of silently falling back.
+
 | Command | Description |
 |---------|-------------|
 | `mvmctl machine run --image <ref> -- <cmd>...` | Boot an OCI image, run `<cmd>` with no network, tear down |
-| `mvmctl machine run --net --image <ref> -- <cmd>...` | Boot with dev-tier outbound networking enabled |
-| `mvmctl machine run --image <ref> --allow-host <host[:port]> -- <cmd>...` | Boot with egress narrowed to the listed host/port entries |
+| `mvmctl machine run --net --image <ref> -- <cmd>...` | Boot with the dev-tier outbound egress policy selected. The boot still requires a backend that satisfies the vsock-only workload-egress contract |
+| `mvmctl machine run --image <ref> --allow-host <host[:port]> -- <cmd>...` | Boot with egress narrowed to the listed host/port entries. The boot still requires a backend that satisfies the vsock-only workload-egress contract |
 | `mvmctl machine run --image <ref> --profile dev --volume .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
 | `mvmctl machine run --image <ref> --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
 | `mvmctl machine run --image <ref> --dry-run -- <cmd>` | Validate and explain the run plan without booting a VM |
@@ -439,7 +446,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run -it --name <name> --image <ref> -- <cmd>` | Same, with a stable transient VM name while it runs |
 | `mvmctl machine create --name <name> --image <ref>` | Persist a named OCI-backed machine spec without booting it |
 | `mvmctl machine create --name <name> --manifest <path>` | Persist a named machine spec from an image-backed `mvm.toml` / `Mvmfile.toml` |
-| `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress settings for future lifecycle starts |
+| `mvmctl machine create --name <name> --image <ref> --net --allow-host <host[:port]>` | Persist a named spec with opt-in egress policy for future lifecycle starts; the same vsock-only backend contract is enforced at boot |
 | `mvmctl machine create --name <name> --manifest <path>` | Persist an image-backed `mvm.toml` / `Mvmfile.toml` as a named machine spec |
 | `mvmctl machine create --name <name> --image <ref> --force` | Overwrite an existing named machine spec |
 | `mvmctl machine start <name>...` | Boot one or more persisted named machines through the admitted OCI-backed start path (`--receipt`/`--json`/`--dry-run` are single-machine) |
@@ -568,13 +575,13 @@ host registry records.
 
 ## Checkpoint
 
-`mvmctl machine save` / `mvmctl machine restore` are the first-class Vz machine-state verbs. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk through Vz `saveMachineStateToURL`, restore verifies the sealed checkpoint content and resumes the same VM identity. `mvmctl machine checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl machine snapshot ls` / `mvmctl machine snapshot rm` remain for Firecracker sealed snapshots.
+`mvmctl machine save` / `mvmctl machine restore` are the first-class machine-state verbs for the save/restore snapshot tier. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk through the active backend's save/restore mechanism, restore verifies the sealed checkpoint content and resumes the same VM identity. `mvmctl machine checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl machine snapshot ls` / `mvmctl machine snapshot rm` remain for Firecracker sealed snapshots.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl machine save <name> [--tag <tag>] [--json]` | Save a running Vz VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
+| `mvmctl machine save <name> [--tag <tag>] [--json]` | Save a running VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
 | `mvmctl machine restore <checkpoint> [--json]` | Restore a previously saved `vm_full` checkpoint into the original VM identity after content verification. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
-| `mvmctl machine checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via Vz's `saveMachineStateToURL`. Records content hash in the audit chain. |
+| `mvmctl machine checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) through the active backend's save/restore path. Records content hash in the audit chain. |
 | `mvmctl machine checkpoint restore <checkpoint> [--json]` | Restore a previously created `vm_full` checkpoint into the original VM identity. Re-hashes content against the recorded metadata before loading. |
 | `mvmctl machine checkpoint fork <checkpoint> [--new-id <name>] [--boot] [--json]` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). `vm_full` forks auto-boot; `fs_quick` forks boot only with `--boot`. |
 | `mvmctl machine checkpoint ls [--json]` | List checkpoints. |
@@ -675,7 +682,7 @@ The snapshot path activates only when *all* of the following hold:
   snapshot's recorded drive layout);
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (HVF, Vz, libkrun), vsock
+On macOS backends without Firecracker (HVF, libkrun), vsock
 snapshots return `os error 95` (EOPNOTSUPP); restore failures fall back
 to cold boot with a warning rather than aborting the exec. See the
 [Sandboxed Exec](/guides/exec/) guide for the full background.

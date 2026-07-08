@@ -1,33 +1,33 @@
-//! Rust-native Vz supervisor — one process per Vz guest.
+//! Rust-native LegacyMacos supervisor — one process per LegacyMacos guest.
 //!
-//! Reads a [`mvm_build::vz::SupervisorConfig`] JSON document on stdin (the same
-//! contract the Swift `mvm-vz-supervisor` consumed), builds the
+//! Reads a [`mvm_build::legacy_supervisor_config::SupervisorConfig`] JSON document on stdin (the same
+//! contract the Swift `mvm-legacy-macos-supervisor` consumed), builds the
 //! `VZVirtualMachineConfiguration`, cold-boots the guest on its private serial
 //! dispatch queue, forwards SIGTERM/SIGINT as a graceful ACPI shutdown, and
 //! blocks until the guest stops. The process exit code mirrors the guest:
 //! `0` on a clean power-off, `1` on a framework error stop.
 //!
 //! macOS-only — the objc2 Virtualization.framework stack lives behind a
-//! `cfg(target_os = "macos")` gate (mirrored by the lib's `vz_objc` module).
+//! `cfg(target_os = "macos")` gate (mirrored by the lib's `legacy_macos_objc` module).
 //! On other targets this is a stub that fails closed, so a non-macOS workspace
 //! build still links the bin without pulling the Apple frameworks.
 //!
-//! Spawned by `mvm_backend::vz` via `resolve_supervisor_path()`. This is the
+//! Spawned by `mvm_backend::legacy_macos` via `resolve_supervisor_path()`. This is the
 //! production VZ path — the Swift supervisor is deleted. A
 //! boot/vsock/control/save-restore correctness gate lives at
-//! `crates/mvm-build/tests/vz_supervisor_parity.rs`.
+//! `crates/mvm-build/tests/legacy_macos_supervisor_parity.rs`.
 
 #[cfg(not(target_os = "macos"))]
 fn main() {
     eprintln!(
-        "mvm-vz-supervisor runs only on macOS (Apple Virtualization.framework); \
+        "mvm-legacy-macos-supervisor runs only on macOS (Apple Virtualization.framework); \
          this is a non-macOS stub build"
     );
     std::process::exit(1);
 }
 
 /// Ad-hoc entitlements plist applied at first launch. Virtualization-only — the
-/// `hypervisor` entitlement is libkrun's; the Vz supervisor only instantiates a
+/// `hypervisor` entitlement is libkrun's; the LegacyMacos supervisor only instantiates a
 /// `VZVirtualMachine`, which `Hypervisor.framework` rejects from an unsigned
 /// process. Mirrors the virtualization entitlement self-signed at launch.
 #[cfg(target_os = "macos")]
@@ -55,9 +55,9 @@ fn exe_has_virtualization_entitlement(exe: &std::path::Path) -> bool {
 
 /// Self-sign ad-hoc with the virtualization entitlement, then re-exec — we ship
 /// the bin unsigned, and VZ start is rejected without it. Mirrors
-/// `mvm_backend::codesign::ensure_signed` (virtualization-only). The `MVM_VZ_SIGNED`
+/// `mvm_backend::codesign::ensure_signed` (virtualization-only). The `MVM_LEGACY_MACOS_SIGNED`
 /// guard prevents an exec loop; `exec()` preserves the pid and the stdin pipe
-/// the spawner writes the config to, so this is transparent to `mvm_backend::vz`.
+/// the spawner writes the config to, so this is transparent to `mvm_backend::legacy_macos`.
 /// Best-effort: a signing failure logs and proceeds so the real entitlement
 /// error from `start()` is what surfaces.
 ///
@@ -72,7 +72,7 @@ fn ensure_self_signed() {
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
-    if std::env::var("MVM_VZ_SIGNED").as_deref() == Ok("1") {
+    if std::env::var("MVM_LEGACY_MACOS_SIGNED").as_deref() == Ok("1") {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -89,7 +89,7 @@ fn ensure_self_signed() {
         .create(true)
         .write(true)
         .truncate(false) // a lock file — never clobber its (empty) contents
-        .open(std::env::temp_dir().join("mvm-vz-supervisor.codesign.lock"))
+        .open(std::env::temp_dir().join("mvm-legacy-macos-supervisor.codesign.lock"))
         .ok();
     if let Some(f) = &lock {
         // SAFETY: flock on a valid fd; LOCK_EX blocks until exclusive.
@@ -99,7 +99,7 @@ fn ensure_self_signed() {
     // Re-check under the lock — another launcher may have signed it while we
     // waited, in which case we skip straight to the re-exec.
     if !exe_has_virtualization_entitlement(&exe) {
-        let ent = std::env::temp_dir().join("mvm-vz-supervisor-entitlements.plist");
+        let ent = std::env::temp_dir().join("mvm-legacy-macos-supervisor-entitlements.plist");
         if std::fs::write(&ent, VZ_ENTITLEMENTS_PLIST).is_err() {
             return;
         }
@@ -110,7 +110,7 @@ fn ensure_self_signed() {
             .output();
         let signed = output.as_ref().map(|o| o.status.success()).unwrap_or(false);
         if !signed {
-            eprintln!("mvm-vz-supervisor: ad-hoc codesign failed; VM start may be rejected");
+            eprintln!("mvm-legacy-macos-supervisor: ad-hoc codesign failed; VM start may be rejected");
             // On success codesign's "replacing existing signature" line is
             // discarded; on failure its stderr is the actionable detail.
             if let Ok(o) = &output {
@@ -129,9 +129,9 @@ fn ensure_self_signed() {
 
     let err = Command::new(&exe)
         .args(std::env::args_os().skip(1))
-        .env("MVM_VZ_SIGNED", "1")
+        .env("MVM_LEGACY_MACOS_SIGNED", "1")
         .exec();
-    eprintln!("mvm-vz-supervisor: re-exec after signing failed: {err}");
+    eprintln!("mvm-legacy-macos-supervisor: re-exec after signing failed: {err}");
     std::process::exit(1);
 }
 
@@ -143,8 +143,8 @@ fn main() -> anyhow::Result<()> {
     use anyhow::Context;
     use tokio::signal::unix::{SignalKind, signal};
 
-    use mvm_build::vz::SupervisorConfig;
-    use mvm_vm_host::vz_objc::{VzSupervisor, remove_pid_file, write_pid_file};
+    use mvm_build::legacy_supervisor_config::SupervisorConfig;
+    use mvm_vm_host::legacy_macos_objc::{LegacyMacosSupervisor, remove_pid_file, write_pid_file};
 
     // Sign + re-exec before anything else (preserves the stdin pipe).
     ensure_self_signed();
@@ -174,7 +174,7 @@ fn main() -> anyhow::Result<()> {
         .context("build tokio runtime")?;
 
     let code = rt.block_on(async move {
-        let supervisor = Arc::new(VzSupervisor::boot(&config).await.context("boot vz guest")?);
+        let supervisor = Arc::new(LegacyMacosSupervisor::boot(&config).await.context("boot legacy_macos guest")?);
         write_pid_file(&config).context("write supervisor pid file")?;
 
         let mut sigterm = signal(SignalKind::terminate()).context("install SIGTERM handler")?;

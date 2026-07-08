@@ -1,9 +1,9 @@
-//! Rust-native Vz supervisor objc2 bridge.
+//! Rust-native LegacyMacos supervisor objc2 bridge.
 //!
 //! Drives Apple's `Virtualization.framework` directly from Rust via the
 //! `objc2` stack — the replacement for the (removed) Swift supervisor.
 //! One guest per process; nothing depends on this as a library beyond the
-//! sibling `mvm-vz-supervisor` `[[bin]]`.
+//! sibling `mvm-legacy-macos-supervisor` `[[bin]]`.
 //!
 //! **Threading.** Every `VZVirtualMachine` call runs
 //! on a private serial dispatch queue — the model the Swift supervisor already
@@ -57,7 +57,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use mvm_build::vz::{NetworkConfig, StartupMode, SupervisorConfig};
+use mvm_build::legacy_supervisor_config::{NetworkConfig, StartupMode, SupervisorConfig};
 use mvm_core::exit_capture::exit_file_path;
 use mvm_guest::vsock::WORKLOAD_EXIT_PORT;
 
@@ -325,7 +325,7 @@ fn attach_disk_image(
             disk = disk_id,
             attempt,
             code = error.code(),
-            "vz disk attach failed ({domain}); retrying in {backoff}ms"
+            "legacy_macos disk attach failed ({domain}); retrying in {backoff}ms"
         );
         std::thread::sleep(std::time::Duration::from_millis(backoff));
     }
@@ -855,10 +855,10 @@ fn status_word(s: VZVirtualMachineState) -> &'static str {
     }
 }
 
-/// One Vz guest, driven from Rust. Created with [`VzSupervisor::boot`], which
+/// One LegacyMacos guest, driven from Rust. Created with [`LegacyMacosSupervisor::boot`], which
 /// builds the config, instantiates the VM on its queue, installs the delegate,
 /// binds the vsock host proxy, and cold-boots it.
-pub struct VzSupervisor {
+pub struct LegacyMacosSupervisor {
     handle: Arc<VmHandle>,
     queue: SerialQueue,
     state_tx: watch::Sender<RunState>,
@@ -894,13 +894,13 @@ pub struct VzSupervisor {
     _bridge: Option<std::thread::JoinHandle<()>>,
 }
 
-impl VzSupervisor {
+impl LegacyMacosSupervisor {
     /// Build the configuration, create the VM on a fresh serial queue, install
     /// the delegate, and cold-boot. Returns once `start()` has completed (the
     /// guest is running) — call [`wait`](Self::wait) to block until it stops.
     pub async fn boot(config: &SupervisorConfig) -> Result<Self> {
         let label = format!(
-            "com.mvm.vz-supervisor.{}",
+            "com.mvm.legacy-macos-supervisor.{}",
             VM_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
         let queue = SerialQueue::new(&label);
@@ -937,13 +937,13 @@ impl VzSupervisor {
         // flow-audited) — all produced on the queue.
         let (handle, machine_id, pending_bridge) = queue
             .dispatch(move || -> Result<CreatedVm> {
-                let (vz_config, machine_id, pending_bridge) = build_vz_config(&config)?;
+                let (legacy_macos_config, machine_id, pending_bridge) = build_legacy_macos_config(&config)?;
                 // SAFETY: initWithConfiguration_queue binds the VM to this
                 // queue; we are executing on it.
                 let vm = unsafe {
                     VZVirtualMachine::initWithConfiguration_queue(
                         VZVirtualMachine::alloc(),
-                        &vz_config,
+                        &legacy_macos_config,
                         &queue_inner,
                     )
                 };
@@ -1082,7 +1082,7 @@ impl VzSupervisor {
 
     /// Bind the per-VM control socket (`control.sock`, mode 0700) and spawn its
     /// accept loop. Speaks the newline-framed `VERB args\n` → `OK …`/`ERR …`
-    /// protocol the host-side `mvm_backend::vz_control` client drives.
+    /// protocol the host-side `mvm_backend::legacy_supervisor_control` client drives.
     fn start_control_socket(&mut self, path: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         let path = Path::new(path);
@@ -1312,7 +1312,7 @@ impl VzSupervisor {
                 RunState::Stopped => return Ok(self.captured_exit_code().unwrap_or(0)),
                 RunState::Errored(msg) => {
                     if !msg.is_empty() {
-                        eprintln!("mvm-vz-supervisor: guest stopped with error: {msg}");
+                        eprintln!("mvm-legacy-macos-supervisor: guest stopped with error: {msg}");
                     }
                     return Ok(self.captured_exit_code().unwrap_or(1));
                 }
@@ -1528,17 +1528,17 @@ fn validate_requested_resources(cpu_count: u32, memory_mib: u64) -> Result<()> {
     Ok(())
 }
 
-fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
+fn build_legacy_macos_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
     validate_requested_resources(config.resources.cpu_count, config.resources.memory_mib)?;
     // Set when the flow-audited gvproxy bridge is wired (audit substrate present):
     // the supervisor's half of the guest-NIC socketpair, handed to the bridge.
     let mut pending_bridge: Option<PendingBridge> = None;
     // SAFETY: new() returns a default-initialized configuration.
-    let vz_config = unsafe { VZVirtualMachineConfiguration::new() };
+    let legacy_macos_config = unsafe { VZVirtualMachineConfiguration::new() };
     // SAFETY: plain setters; values were range-checked above.
     unsafe {
-        vz_config.setCPUCount(config.resources.cpu_count as usize);
-        vz_config.setMemorySize(mib_to_bytes(config.resources.memory_mib));
+        legacy_macos_config.setCPUCount(config.resources.cpu_count as usize);
+        legacy_macos_config.setMemorySize(mib_to_bytes(config.resources.memory_mib));
     }
 
     // Direct kernel boot (VZLinuxBootLoader) — no EFI, smaller surface.
@@ -1555,7 +1555,7 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
         unsafe { boot_loader.setInitialRamdiskURL(Some(&initrd_url)) };
     }
     // SAFETY: setBootLoader accepts any VZBootLoader subclass.
-    unsafe { vz_config.setBootLoader(Some(&boot_loader)) };
+    unsafe { legacy_macos_config.setBootLoader(Some(&boot_loader)) };
 
     // Linux guests require a generic platform. Pin an explicit machine
     // identifier: Boot mints a fresh one; Restore reloads the `.machine-id`
@@ -1582,7 +1582,7 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
     // SAFETY: setMachineIdentifier applies a validated identifier.
     unsafe { platform.setMachineIdentifier(&identifier) };
     // SAFETY: setPlatform accepts any VZPlatformConfiguration subclass.
-    unsafe { vz_config.setPlatform(&platform) };
+    unsafe { legacy_macos_config.setPlatform(&platform) };
 
     // Disks → virtio-blk in declared order (rootfs /dev/vda, overlay, verity
     // sidecar, app-deps volume …). Raw image format.
@@ -1601,12 +1601,12 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
         }
         let array = NSArray::from_retained_slice(&devices);
         // SAFETY: setStorageDevices installs the block devices.
-        unsafe { vz_config.setStorageDevices(&array) };
+        unsafe { legacy_macos_config.setStorageDevices(&array) };
     }
 
     // virtio-fs shares. Workload microVMs get none by default; the builder VM
     // mounts /work + /job read-only and /out read-write. `read_only` is
-    // enforced by Vz itself — the guest can't remount rw.
+    // enforced by LegacyMacos itself — the guest can't remount rw.
     if !config.virtio_fs.is_empty() {
         let mut devices = Vec::with_capacity(config.virtio_fs.len());
         for share in &config.virtio_fs {
@@ -1637,16 +1637,16 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
         }
         let array = NSArray::from_retained_slice(&devices);
         // SAFETY: setDirectorySharingDevices installs the shares.
-        unsafe { vz_config.setDirectorySharingDevices(&array) };
+        unsafe { legacy_macos_config.setDirectorySharingDevices(&array) };
     }
 
-    // virtio-vsock device. CID 3 is the Vz default for the first guest; the
+    // virtio-vsock device. CID 3 is the LegacyMacos default for the first guest; the
     // host dials per-port unix sockets via the vsock proxy.
     // SAFETY: new() returns a default vsock device configuration.
     let vsock = unsafe { VZVirtioSocketDeviceConfiguration::new() };
     let vsock_array = NSArray::from_retained_slice(&[Retained::into_super(vsock)]);
     // SAFETY: setSocketDevices installs the vsock device.
-    unsafe { vz_config.setSocketDevices(&vsock_array) };
+    unsafe { legacy_macos_config.setSocketDevices(&vsock_array) };
 
     // Console: always attach a serial port so `console=hvc0` has a sink. Writes
     // go to the requested capture file (created if absent), else /dev/null.
@@ -1680,14 +1680,14 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
     unsafe { serial.setAttachment(Some(&attachment)) };
     let serial_array = NSArray::from_retained_slice(&[Retained::into_super(serial)]);
     // SAFETY: setSerialPorts installs the console.
-    unsafe { vz_config.setSerialPorts(&serial_array) };
+    unsafe { legacy_macos_config.setSerialPorts(&serial_array) };
 
     // Entropy — minimal Linux guests block in early getrandom(2) without it.
     // SAFETY: new() returns a default entropy device configuration.
     let entropy = unsafe { VZVirtioEntropyDeviceConfiguration::new() };
     let entropy_array = NSArray::from_retained_slice(&[Retained::into_super(entropy)]);
     // SAFETY: setEntropyDevices installs the entropy device.
-    unsafe { vz_config.setEntropyDevices(&entropy_array) };
+    unsafe { legacy_macos_config.setEntropyDevices(&entropy_array) };
 
     // Memory balloon (host-driven reclaim). The floor is enforced host-side;
     // here we only wire the device when enabled.
@@ -1698,7 +1698,7 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
         let device = unsafe { VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new() };
         let array = NSArray::from_retained_slice(&[Retained::into_super(device)]);
         // SAFETY: setMemoryBalloonDevices installs the balloon (Apple caps at one).
-        unsafe { vz_config.setMemoryBalloonDevices(&array) };
+        unsafe { legacy_macos_config.setMemoryBalloonDevices(&array) };
     }
 
     // Network (optional). gvproxy-backed virtio-net (passt is Linux-only).
@@ -1716,40 +1716,40 @@ fn build_vz_config(config: &SupervisorConfig) -> Result<BuiltConfig> {
             // to gvproxy through the observer + chain-signing pipeline. Without a
             // substrate (dev / builder VMs) the NIC attaches straight to gvproxy.
             let device = if config.has_audit_substrate() {
-                let (vz_fd, supervisor_fd) = dgram_socketpair()?;
+                let (legacy_macos_fd, supervisor_fd) = dgram_socketpair()?;
                 pending_bridge = Some(PendingBridge {
                     supervisor_fd,
                     gvproxy_socket_path: socket_path.clone(),
                 });
-                net_device_from_fd(vz_fd, mac)?
+                net_device_from_fd(legacy_macos_fd, mac)?
             } else {
                 build_gvproxy_device(socket_path, mac)?
             };
             let array = NSArray::from_retained_slice(&[Retained::into_super(device)]);
             // SAFETY: setNetworkDevices installs the virtio-net device.
-            unsafe { vz_config.setNetworkDevices(&array) };
+            unsafe { legacy_macos_config.setNetworkDevices(&array) };
         }
     }
 
     // SAFETY: validateWithError checks the assembled configuration's invariants.
-    unsafe { vz_config.validateWithError() }
+    unsafe { legacy_macos_config.validateWithError() }
         .map_err(|e| anyhow!("VZ configuration invalid: {}", ns_error_to_string(&e)))?;
 
     // Save/restore is a separate, weaker guarantee than validity (VZ boots
     // configs it can't snapshot). A `Boot` that never snapshots is fine, so this
     // is a warning, not a gate — SAVE / `Restore` startup surface the real error
     // if they're used against an unsupported config.
-    // SAFETY: `vz_config` is a fully-assembled VZVirtualMachineConfiguration;
+    // SAFETY: `legacy_macos_config` is a fully-assembled VZVirtualMachineConfiguration;
     // validateSaveRestoreSupportWithError only reads it and returns an
     // autoreleased NSError on failure (surfaced as the warning below).
-    if let Err(e) = unsafe { vz_config.validateSaveRestoreSupportWithError() } {
+    if let Err(e) = unsafe { legacy_macos_config.validateSaveRestoreSupportWithError() } {
         tracing::warn!(
             error = %ns_error_to_string(&e),
             "VZ config does not support save/restore"
         );
     }
 
-    Ok((vz_config, Some(machine_id), pending_bridge))
+    Ok((legacy_macos_config, Some(machine_id), pending_bridge))
 }
 
 /// Load a `VZGenericMachineIdentifier` from a SAVE-written `.machine-id` sidecar.
@@ -1767,7 +1767,7 @@ fn load_machine_identifier(path: &str) -> Result<Retained<VZGenericMachineIdenti
 }
 
 /// The supervisor's half of the guest-NIC socketpair, handed to the in-process
-/// gvproxy bridge. Carried out of `build_vz_config`
+/// gvproxy bridge. Carried out of `build_legacy_macos_config`
 /// because the bridge is spawned after the VM is created.
 struct PendingBridge {
     supervisor_fd: OwnedFd,
@@ -1775,7 +1775,7 @@ struct PendingBridge {
 }
 
 /// Build a gvproxy-backed virtio-net device: a SOCK_DGRAM unix socket connected
-/// to gvproxy's `--listen-vfkit` listener (direct, no flow audit), handed to Vz
+/// to gvproxy's `--listen-vfkit` listener (direct, no flow audit), handed to LegacyMacos
 /// via a file-handle attachment with the per-VM MAC pinned.
 fn build_gvproxy_device(
     socket_path: &str,
@@ -1810,10 +1810,10 @@ fn net_device_from_fd(
 
     let mac_ns = NSString::from_str(mac);
     // SAFETY: initWithString validates the MAC string (nil on malformed).
-    let vz_mac = unsafe { VZMACAddress::initWithString(VZMACAddress::alloc(), &mac_ns) }
+    let legacy_macos_mac = unsafe { VZMACAddress::initWithString(VZMACAddress::alloc(), &mac_ns) }
         .ok_or_else(|| anyhow!("invalid MAC address {mac:?} for gvproxy network"))?;
     // SAFETY: setMACAddress pins the validated address.
-    unsafe { device.setMACAddress(&vz_mac) };
+    unsafe { device.setMACAddress(&legacy_macos_mac) };
 
     Ok(device)
 }
@@ -1854,7 +1854,7 @@ fn bump_socket_buffers(fd: std::os::fd::RawFd) {
 /// spawn the in-process flow-audited gvproxy bridge.
 /// Mirrors the libkrun supervisor's `run_with_bridge`: decode the signed plan +
 /// bundle, open the chain `FileAuditSigner`, resolve the observer chain, then
-/// `spawn_bridge_thread(VzGvproxy)`. Fail-closed: a malformed substrate refuses
+/// `spawn_bridge_thread(LegacyMacosGvproxy)`. Fail-closed: a malformed substrate refuses
 /// the boot rather than running unaudited. The returned bridge thread runs until
 /// the guest stops (or process exit reaps it).
 fn spawn_payload_tap(
@@ -1918,7 +1918,7 @@ fn spawn_payload_tap(
         .map_err(|e| anyhow!("open FileAuditSigner: {e}"))?;
     let signer: Arc<dyn AuditSigner> = Arc::new(signer);
 
-    // Leaf capabilities: the Rust Vz supervisor splices in-process, so it can
+    // Leaf capabilities: the Rust LegacyMacos supervisor splices in-process, so it can
     // observe + rewrite payloads (payload_tap), like the libkrun gvproxy path.
     let leaf_caps = ProviderCapabilities {
         flow_events: true,
@@ -1927,7 +1927,7 @@ fn spawn_payload_tap(
     // Resolve observers from the admitted policy *source*: a CLI-generated
     // egress bundle lives only in `config.bundle` (threaded as `bundle_json`),
     // never under `~/.mvm/policies`, so the plan-ref-only resolver would fail
-    // closed on it. Mirrors the vz drainer + libkrun supervisor.
+    // closed on it. Mirrors the legacy_macos drainer + libkrun supervisor.
     let observer_names = resolve_observer_chain_from_policy_source(&plan, bundle.as_ref())
         .map_err(|e| anyhow!("resolve observers: {e}"))?;
     let observers = if observer_names.is_empty() {
@@ -1957,11 +1957,11 @@ fn spawn_payload_tap(
         // Bare-policy enforcement seam (no-bundle path), decoded from
         // SupervisorConfig.network_policy (filled from VmStartConfig.network_policy).
         network_policy,
-        // Native rvproxy flow-audit follower is the libkrun path; the Vz objc
+        // Native rvproxy flow-audit follower is the libkrun path; the LegacyMacos objc
         // bridge doesn't run a native rvproxy gateway.
         native_flow_audit_path: None,
     };
-    let endpoints = BridgeEndpoints::VzGvproxy {
+    let endpoints = BridgeEndpoints::LegacyMacosGvproxy {
         supervisor_fd: pending.supervisor_fd,
         gvproxy_socket_path: PathBuf::from(pending.gvproxy_socket_path),
     };
@@ -1994,7 +1994,7 @@ fn sockaddr_un_from_path(path: &str) -> Result<libc::sockaddr_un> {
 ///
 /// An unbound unix-datagram socket has no return address, so gvproxy's
 /// `sendto()` replies are dropped by the kernel. We bind to a sibling path
-/// (`<dir>/vz-net-reply.sock`) so gvproxy has an address to reply to. The
+/// (`<dir>/legacy-macos-net-reply.sock`) so gvproxy has an address to reply to. The
 /// state-dir removal on VM teardown cleans up the bind socket alongside the
 /// rest of the per-VM files.
 fn connect_gvproxy_dgram(path: &str) -> Result<OwnedFd> {
@@ -2024,7 +2024,7 @@ fn connect_gvproxy_dgram(path: &str) -> Result<OwnedFd> {
         let parent = std::path::Path::new(path)
             .parent()
             .ok_or_else(|| anyhow!("gvproxy socket path has no parent dir: {path}"))?;
-        parent.join("vz-net-reply.sock")
+        parent.join("legacy-macos-net-reply.sock")
     };
     let reply_path_str = reply_path
         .to_str()
@@ -2073,7 +2073,7 @@ fn connect_gvproxy_dgram(path: &str) -> Result<OwnedFd> {
 // ---------------------------------------------------------------------------
 
 /// Write the supervisor PID into `vm_state_dir` (created mode 0700 if absent),
-/// the convention `mvmctl` reads to find a running Vz guest. Mirrors the Swift
+/// the convention `mvmctl` reads to find a running LegacyMacos guest. Mirrors the Swift
 /// supervisor's `writePidFile`.
 pub fn write_pid_file(config: &SupervisorConfig) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -2160,7 +2160,7 @@ mod tests {
 
         // Use a short /tmp dir to stay well within the 104-byte sun_path limit.
         let dir = tempfile::Builder::new()
-            .prefix("mvm-vz-t")
+            .prefix("mvm-legacy-macos-t")
             .tempdir_in("/tmp")
             .unwrap();
 

@@ -49,7 +49,7 @@ pub struct RegisterVm {
     pub tenant_id: String,
     /// The `BROKER_PORT` UDS the daemon binds for this VM — the backend-specific
     /// path the VMM splices the guest's `connect_host_vsock(BROKER_PORT)` to
-    /// (libkrun `<state>/vsock-<port>.sock`, vz `<state>/vsock/vsock-<port>.sock`).
+    /// (libkrun `<state>/vsock-<port>.sock`, legacy_macos `<state>/vsock/vsock-<port>.sock`).
     pub broker_listen_socket: PathBuf,
     /// Per-VM workload audit chain the daemon forwards `host.audit.v1` entries
     /// into (`<tenant>.<vm>.workload.jsonl`).

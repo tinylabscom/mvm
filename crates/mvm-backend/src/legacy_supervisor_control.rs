@@ -1,4 +1,4 @@
-//! Rust client for the `mvm-vz-supervisor` control socket.
+//! Rust client for the `mvm-legacy-macos-supervisor` control socket.
 //!
 //! The supervisor binds a `SOCK_STREAM` unix socket at
 //! `<vm_state_dir>/control.sock` mode 0700 and accepts newline-framed
@@ -6,14 +6,14 @@
 //! Rust-native supervisor's control socket in `mvm-vm-host`). This
 //! module wraps the dial +
 //! send + readline + parse cycle into a small synchronous client
-//! `VzBackend` uses for `pause` / `resume` / `balloon_set_target` and
+//! `LegacyMacosBackend` uses for `pause` / `resume` / `balloon_set_target` and
 //! the snapshot verbs.
 //!
 //! Single short-lived connection per command; no connection pool.
 //! Commands all run on the supervisor's main dispatch queue (the same
-//! one Vz requires), so multi-connection concurrency adds nothing
+//! one LegacyMacos requires), so multi-connection concurrency adds nothing
 //! while complicating cleanup. Set
-//! `MVM_VZ_CONTROL_TIMEOUT_MS` to override the default 2 s I/O
+//! `MVM_LEGACY_MACOS_CONTROL_TIMEOUT_MS` to override the default 2 s I/O
 //! timeout.
 
 use anyhow::{Result, anyhow, bail};
@@ -84,7 +84,7 @@ pub fn send_command(socket_path: &Path, command: &str) -> Result<String> {
 }
 
 fn timeout() -> Duration {
-    if let Ok(ms) = std::env::var("MVM_VZ_CONTROL_TIMEOUT_MS")
+    if let Ok(ms) = std::env::var("MVM_LEGACY_MACOS_CONTROL_TIMEOUT_MS")
         && let Ok(parsed) = ms.parse::<u64>()
     {
         return Duration::from_millis(parsed);

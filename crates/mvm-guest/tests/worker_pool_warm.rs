@@ -90,6 +90,17 @@ fn idle_call_count(pool: &Arc<WorkerPool>, pid: u32) -> u64 {
         .unwrap_or(0)
 }
 
+fn wait_until(description: &str, timeout: Duration, mut predicate: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while start.elapsed() < timeout {
+        if predicate() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("timed out waiting for {description}");
+}
+
 #[test]
 fn warm_process_round_trip_pid_stable() {
     // SAFETY: tests in this binary run sequentially? No — Cargo runs
@@ -198,13 +209,17 @@ fn idle_timeout_skips_busy_workers() {
     let pool_clone = Arc::clone(&pool);
     let dispatch_handle = std::thread::spawn(move || {
         pool_clone
-            .dispatch(b"x".to_vec(), 5, Vec::new())
+            .dispatch(b"x".to_vec(), 30, Vec::new())
             .expect("dispatch")
     });
 
-    // Give the worker time to enter Busy state (acquire flips the
-    // slot) and pass the 1s idle threshold from spawn.
-    std::thread::sleep(Duration::from_millis(1200));
+    // Wait for acquire to flip the slot; fixed sleeps are too brittle
+    // when the full workspace test suite is saturating the host.
+    wait_until("worker to enter Busy state", Duration::from_secs(5), || {
+        pool.snapshot()
+            .iter()
+            .any(|s| matches!(s, SlotSnapshot::Busy))
+    });
     pool.sweep_idle();
 
     // Slot should still be Busy (the call is in-flight). If the
@@ -466,19 +481,18 @@ fn wait_for_ready_succeeds_against_passing_probe() {
 
 #[test]
 fn wait_for_ready_succeeds_after_initial_failures() {
-    // Probe fails twice then exits 0 — after_start.sh exits 1 thrice
-    // then 0.
+    // Probe fails twice, then exits 0.
     let tmp = tempfile::tempdir().expect("tempdir");
     let counter = tmp.path().join("count");
     fs::write(&counter, "0").expect("seed counter");
     let body = format!(
-        "#!/bin/sh\nc=$(cat {ctr})\nc=$((c+1))\necho $c > {ctr}\n[ $c -ge 3 ] && exit 0\nexit 1\n",
+        "#!/bin/sh\nc=$(cat \"{ctr}\")\nc=$((c+1))\necho \"$c\" > \"{ctr}\"\n[ \"$c\" -ge 3 ] && exit 0\nexit 1\n",
         ctr = counter.display()
     );
     let probe = write_probe(tmp.path(), "after_start.sh", &body);
     let pool = start_pool_unready(cfg(1, 100, 1024));
     let cfg_probe = ReadinessConfig::new(probe)
-        .with_timeout(Duration::from_secs(3))
+        .with_timeout(Duration::from_secs(10))
         .with_interval(Duration::from_millis(50));
 
     // While warming, dispatch should fail-closed.

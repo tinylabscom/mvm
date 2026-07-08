@@ -13,7 +13,7 @@ For stateful agent and service workspaces, see [Persistent workspaces](/guides/p
 | Files inside a running VM | VM runtime disk | Lost when the VM is destroyed unless captured or copied out. |
 | Host-mounted files | Mount or copy workflow | Host exposure depends on mount mode and path selection. |
 | Managed local volume | `mvmctl volume` | Encrypted at rest when locked. |
-| Machine state | pause/resume or checkpoint create/restore | May contain memory, files, processes, and credentials present in the guest. |
+| Machine state | pause/resume or backend-specific restore flow | May contain memory, files, processes, and credentials present in the guest. |
 
 ## Pause and resume
 
@@ -22,7 +22,7 @@ mvmctl pause agent-sandbox
 mvmctl resume agent-sandbox
 ```
 
-The exact backend mechanics differ. See [Snapshots](/working/snapshots/) for Firecracker sealed snapshots and Vz machine-state files.
+The exact backend mechanics differ. See [Snapshots](/working/snapshots/) for the Firecracker sealed snapshot path and the current backend matrix.
 
 ## Cold mode
 

@@ -1,23 +1,23 @@
-//! Type-safe interface to `mvm-vz-supervisor`.
+//! Type-safe interface to `mvm-legacy-macos-supervisor`.
 //!
-//! The Vz backend (`mvm-backend::VzBackend`) constructs a
+//! The LegacyMacos backend (`mvm-backend::LegacyMacosBackend`) constructs a
 //! `SupervisorConfig`, serializes it to JSON, and pipes it to the
-//! Rust-native `mvm-vz-supervisor` binary on stdin, which decodes it
+//! Rust-native `mvm-legacy-macos-supervisor` binary on stdin, which decodes it
 //! with strict deny-unknown-fields semantics — claim 5 (vsock framing
 //! fuzzed) rests on that decoder rejecting malformed input.
 //!
-//! Pure data + path resolution. No FFI, no Vz framework binding. This
+//! Pure data + path resolution. No FFI, no LegacyMacos framework binding. This
 //! crate compiles on every host the workspace targets, including Linux
-//! contributors who never touch the Vz code path (`has_vz()` returns
+//! contributors who never touch the LegacyMacos code path (`has_legacy_macos()` returns
 //! `false` there). The supervisor binary itself is the objc2 `[[bin]]`
 //! in `mvm-vm-host`, built via
-//! `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.
+//! `cargo build -p mvm-vm-host --bin mvm-legacy-macos-supervisor`.
 
 use std::path::PathBuf;
 
 // MARK: - Config types
 
-/// JSON payload the host pipes to `mvm-vz-supervisor` on stdin.
+/// JSON payload the host pipes to `mvm-legacy-macos-supervisor` on stdin.
 ///
 /// The schema **must** stay in lockstep with the Rust `SupervisorConfig`
 /// decoder — both sides apply deny-unknown-fields. Adding a field
@@ -32,7 +32,7 @@ pub struct SupervisorConfig {
     /// and the supervisor binary creates if absent (mode 0700).
     /// Typically `~/.mvm/vms/<name>/`.
     pub vm_state_dir: String,
-    /// PID file name inside `vm_state_dir`. Defaults to `vz.pid`
+    /// PID file name inside `vm_state_dir`. Defaults to `legacy-macos.pid`
     /// supervisor-side when omitted; consumers should set it
     /// explicitly so multiple backends coexist in the same state dir.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -68,7 +68,7 @@ pub struct SupervisorConfig {
     /// binds (`SOCK_STREAM`, mode 0700) to accept PAUSE / RESUME /
     /// BALLOON / SAVE / STATUS commands from the host. `None` opts
     /// out — the supervisor runs without a control channel and
-    /// pause/resume/balloon/snapshot verbs on `VzBackend` short-circuit.
+    /// pause/resume/balloon/snapshot verbs on `LegacyMacosBackend` short-circuit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub control_socket_path: Option<String>,
     /// Supervisor startup mode.
@@ -83,7 +83,7 @@ pub struct SupervisorConfig {
     pub startup_mode: StartupMode,
 
     // ── Audit substrate (flow-audited networking) ──
-    // The Rust-native Vz supervisor runs the gateway bridge in-process
+    // The Rust-native LegacyMacos supervisor runs the gateway bridge in-process
     // (payload_tap), so it needs the same admitted-plan + signing inputs the
     // libkrun supervisor's config carries. All optional + omitted-when-absent so
     // configs without it (and the dev/builder VM, which has no audit substrate)
@@ -112,9 +112,9 @@ pub struct SupervisorConfig {
     /// Host Ed25519 signing key (mode 0600) the chain signer re-reads per start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub signing_key_path: Option<String>,
-    /// Reserved transparent-terminator destination for the Vz supervisor.
+    /// Reserved transparent-terminator destination for the LegacyMacos supervisor.
     /// This keeps the config schema aligned with the libkrun path while the
-    /// Vz runtime still uses the existing gvproxy bridge.
+    /// LegacyMacos runtime still uses the existing gvproxy bridge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transparent_terminator_port: Option<u16>,
 }
@@ -136,7 +136,7 @@ pub enum StartupMode {
     /// from `kernel.path` / `kernel.cmdline` and call `start()`.
     #[default]
     Boot,
-    /// Restore from a previously saved Vz machine-state file. The
+    /// Restore from a previously saved LegacyMacos machine-state file. The
     /// supervisor:
     ///
     /// 1. Constructs a `VZVirtualMachineConfiguration` from the
@@ -151,7 +151,7 @@ pub enum StartupMode {
     ///    success the VM is paused; the supervisor then calls
     ///    `resume()` so it begins executing from the saved state.
     ///
-    /// `snapshot_path` must be absolute (the Vz API does not honour
+    /// `snapshot_path` must be absolute (the LegacyMacos API does not honour
     /// cwd). `machine_id_path` is optional; on miss the supervisor
     /// falls back to a fresh `VZGenericMachineIdentifier()` which
     /// boots correctly but loses guest-side identity continuity.
@@ -181,7 +181,8 @@ impl SupervisorConfig {
     /// to read the PID after spawn without reaching into the Swift
     /// side's default-name logic.
     pub fn resolved_pid_file(&self) -> PathBuf {
-        PathBuf::from(&self.vm_state_dir).join(self.pid_file_name.as_deref().unwrap_or("vz.pid"))
+        PathBuf::from(&self.vm_state_dir)
+            .join(self.pid_file_name.as_deref().unwrap_or("legacy-macos.pid"))
     }
 
     /// Serialize to JSON with sorted keys for stable hashing /
@@ -207,7 +208,7 @@ impl SupervisorConfig {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KernelConfig {
-    /// Path to an uncompressed `vmlinux` (Vz `VZLinuxBootLoader` boots
+    /// Path to an uncompressed `vmlinux` (LegacyMacos `VZLinuxBootLoader` boots
     /// only uncompressed kernels).
     pub path: String,
     /// Kernel command line. Workload mode requires the host to
@@ -252,7 +253,7 @@ pub struct VirtioFsShare {
     /// Whether the share is mounted read-only inside the guest.
     /// The Swift supervisor threads this onto
     /// `VZSharedDirectory(readOnly:)`, so a `true` here is enforced
-    /// by Vz itself — the guest can't remount it rw.
+    /// by LegacyMacos itself — the guest can't remount it rw.
     ///
     /// Required (no default) so host-path-mount admission decisions
     /// are explicit rather than inheriting the per-language default.
@@ -294,13 +295,13 @@ pub enum NetworkConfig {
         /// against the locally-administered bit in [`MacAddress`].
         mac: String,
         /// Path to the Rust supervisor's gateway-audit ingest socket
-        /// (`~/.mvm/audit/gateway-events-<vm>.sock`). The Vz Swift
-        /// bridge connects here (sending `MVM_VZ_BRIDGE_V1\n`
+        /// (`~/.mvm/audit/gateway-events-<vm>.sock`). The LegacyMacos Swift
+        /// bridge connects here (sending `MVM_LEGACY_MACOS_BRIDGE_V1\n`
         /// handshake first) and writes NDJSON `FlowEventWire`
         /// entries for the Rust supervisor's signer task to drain
         /// into the claim-8 chain.
         ///
-        /// `None` keeps older configs parseable; the Vz bridge only
+        /// `None` keeps older configs parseable; the LegacyMacos bridge only
         /// emits when this is set.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         events_ingest_socket_path: Option<String>,
@@ -373,9 +374,9 @@ impl MacAddress {
 pub const INSTALLED_BIN_DIRNAME: &str = ".mvm/bin";
 
 /// Filename prefix of the version-pinned supervisor binary. The host
-/// launches `~/.mvm/bin/mvm-vz-supervisor-<mvmctl_version>` and refuses
+/// launches `~/.mvm/bin/mvm-legacy-macos-supervisor-<mvmctl_version>` and refuses
 /// to run against a mismatched version.
-pub const SUPERVISOR_BIN_PREFIX: &str = "mvm-vz-supervisor-";
+pub const SUPERVISOR_BIN_PREFIX: &str = "mvm-legacy-macos-supervisor-";
 
 /// Resolve the release-installed supervisor path for the given mvmctl
 /// version. The host then layers fallback / source-checkout selection
@@ -386,18 +387,18 @@ pub fn supervisor_binary_path(home: &std::path::Path, mvmctl_version: &str) -> P
         .join(format!("{SUPERVISOR_BIN_PREFIX}{mvmctl_version}"))
 }
 
-/// Source-checkout layout: the Rust-native `mvm-vz-supervisor` is a cargo
+/// Source-checkout layout: the Rust-native `mvm-legacy-macos-supervisor` is a cargo
 /// `[[bin]]` in `mvm-vm-host`, so a workspace build lands in the cargo target
 /// dir. CLAUDE.md "Source-checkout builds never depend on mvm-published
 /// artifacts" — a contributor who has `cargo build -p mvm-vm-host --bin
-/// mvm-vz-supervisor`'d the bin uses that, not the `~/.mvm/bin/` release path.
+/// mvm-legacy-macos-supervisor`'d the bin uses that, not the `~/.mvm/bin/` release path.
 /// (The resolver's adjacent-to-exe probe covers `cargo run`; this is the
 /// fallback when `mvmctl` is invoked from outside `target/`.)
 pub fn source_tree_binary_path(workspace_root: &std::path::Path) -> PathBuf {
     workspace_root
         .join("target")
         .join("debug")
-        .join("mvm-vz-supervisor")
+        .join("mvm-legacy-macos-supervisor")
 }
 
 // MARK: - Errors
@@ -431,8 +432,8 @@ mod tests {
     fn minimal_config() -> SupervisorConfig {
         SupervisorConfig {
             name: "smoke".into(),
-            vm_state_dir: "/tmp/vz-smoke".into(),
-            pid_file_name: Some("vz.pid".into()),
+            vm_state_dir: "/tmp/legacy_macos-smoke".into(),
+            pid_file_name: Some("legacy-macos.pid".into()),
             kernel: KernelConfig {
                 path: "/tmp/vmlinux".into(),
                 cmdline: "console=hvc0 root=/dev/vda rw init=/init".into(),
@@ -450,7 +451,7 @@ mod tests {
             virtio_fs: vec![],
             vsock: VsockConfig {
                 ports: vec![5252],
-                socket_dir: "/tmp/vz-smoke/vsock".into(),
+                socket_dir: "/tmp/legacy_macos-smoke/vsock".into(),
                 host_listen_ports: vec![],
             },
             console_output_path: None,
@@ -593,7 +594,7 @@ mod tests {
     fn resolved_pid_file_uses_default_when_missing() {
         let mut cfg = minimal_config();
         cfg.pid_file_name = None;
-        assert!(cfg.resolved_pid_file().ends_with("vz.pid"));
+        assert!(cfg.resolved_pid_file().ends_with("legacy-macos.pid"));
     }
 
     #[test]
@@ -671,11 +672,11 @@ mod tests {
         let path = supervisor_binary_path(home, "0.14.0");
         assert_eq!(
             path.to_str().unwrap(),
-            "/Users/x/.mvm/bin/mvm-vz-supervisor-0.14.0"
+            "/Users/x/.mvm/bin/mvm-legacy-macos-supervisor-0.14.0"
         );
     }
 
-    /// `events_ingest_socket_path` is the field the Vz bridge connects
+    /// `events_ingest_socket_path` is the field the LegacyMacos bridge connects
     /// to when emitting `FlowEventWire` NDJSON for the Rust supervisor's
     /// signer task. Skipped on serialize when `None` so older JSON stays
     /// clean; deserializes cleanly when present.

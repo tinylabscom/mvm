@@ -33,6 +33,6 @@ The runtime primitive is `mvm`: it knows how to talk to the backend, write or ve
 Use "cold mode" for the product state. Use backend-specific terms for implementation:
 
 - Firecracker sealed pause/resume.
-- Vz machine-state save/restore.
+- Backend-specific checkpoint/save/restore only when that backend's docs explicitly publish the flow.
 - Pool Sleeping/Running restore.
 Avoid implying that every backend supports every cold-mode operation.

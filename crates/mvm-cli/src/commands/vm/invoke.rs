@@ -203,7 +203,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                         // its secret bindings from `<state_dir>/plan.json` inside
                         // `backend.start()`; `boot_session_vm` only threads the
                         // plan in-memory, so without this on-disk copy the
-                        // endpoint silently no-ops on vz/libkrun (the in-memory
+                        // endpoint silently no-ops on disk-reading backends (the in-memory
                         // thread alone never reaches the disk-reading decode).
                         if super::up::persists_plan_before_start(&backend_name) {
                             super::plan_persist::write_plan(vm_name, &c.admitted.plan)
@@ -526,9 +526,40 @@ fn substitution_env(vm_name: &str) -> Vec<(String, String)> {
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     with_egress_ca_env(
-        build_substitution_env(placeholders),
+        if placeholders.is_empty() {
+            raw_vsock_proxy_env(vm_name)
+        } else {
+            build_substitution_env(placeholders)
+        },
         egress_ca_present(vm_name),
     )
+}
+
+fn raw_vsock_proxy_env(vm_name: &str) -> Vec<(String, String)> {
+    let backend = match mvm_backend::backend::AnyBackend::for_started_vm(vm_name) {
+        Some(backend) => backend,
+        None => return Vec::new(),
+    };
+    if !backend.capabilities().host_vsock_proxy {
+        return Vec::new();
+    }
+    let proxy = "socks5h://127.0.0.1:1080".to_string();
+    vec![
+        ("ALL_PROXY".to_string(), proxy.clone()),
+        ("all_proxy".to_string(), proxy.clone()),
+        ("HTTP_PROXY".to_string(), proxy.clone()),
+        ("HTTPS_PROXY".to_string(), proxy.clone()),
+        ("http_proxy".to_string(), proxy.clone()),
+        ("https_proxy".to_string(), proxy),
+        (
+            "NO_PROXY".to_string(),
+            "localhost,127.0.0.1,::1".to_string(),
+        ),
+        (
+            "no_proxy".to_string(),
+            "localhost,127.0.0.1,::1".to_string(),
+        ),
+    ]
 }
 
 /// Whether the per-VM egress CA sidecar exists — i.e. egress substitution
@@ -775,6 +806,30 @@ mod tests {
         assert!(
             env.iter()
                 .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret-abc123")
+        );
+    }
+
+    #[test]
+    fn raw_vsock_proxy_env_appears_for_host_vsock_proxy_backends() {
+        let _legacy_guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        let vms = tmp.path().join(".mvm").join("vms").join("fc-egress");
+        std::fs::create_dir_all(&vms).unwrap();
+        std::fs::write(vms.join("fc.pid"), "123").unwrap();
+        env.set("HOME", tmp.path());
+        env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+
+        let got = super::raw_vsock_proxy_env("fc-egress");
+        assert!(
+            got.iter()
+                .any(|(k, v)| k == "ALL_PROXY" && v == "socks5h://127.0.0.1:1080")
+        );
+        assert!(
+            got.iter()
+                .any(|(k, v)| k == "NO_PROXY" && v == "localhost,127.0.0.1,::1")
         );
     }
 

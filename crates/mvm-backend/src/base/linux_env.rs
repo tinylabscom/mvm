@@ -68,7 +68,7 @@ impl LinuxEnv for NativeEnv {
     }
 }
 
-/// Decide whether `VzDevEnv` may auto-start the dev daemon.
+/// Decide whether `LegacyDevEnv` may auto-start the dev daemon.
 ///
 /// `MVM_NO_AUTO_DEV=1`             — opt-out (always wins).
 /// `MVM_AUTO_DEV=1`                — opt-in even when stdin isn't a TTY.
@@ -94,31 +94,33 @@ fn is_stdin_tty() -> bool {
     unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 1 }
 }
 
-/// Name of the Vz dev VM. `mvmctl dev up` boots it as the persistent builder
-/// `mvm-persistent-builder-vz-dev` (session [`vz_builder::DEV_SESSION_ID`]) under
+/// Name of the legacy macOS dev VM. `mvmctl dev up` boots it as the persistent builder
+/// `mvm-persistent-builder-legacy-macos-dev` (session [`legacy_builder_vm::DEV_SESSION_ID`]) under
 /// the cache dir; this is the display name the dev env carries.
 const DEV_VM_NAME: &str = "mvm-dev";
 
 /// Host vsock dir the dev env connects through.
 ///
-/// The Vz dev VM is the persistent builder under the *cache* dir
-/// (`persistent_vz_vsock_dir`, session "dev") — the exact path `mvmctl dev
+/// The LegacyMacos dev VM is the persistent builder under the *cache* dir
+/// (`persistent_legacy_macos_vsock_dir`, session "dev") — the exact path `mvmctl dev
 /// shell` uses — NOT the legacy `~/.mvm/vms/<id>` *data*-dir path that
-/// `vm_vz_vsock_dir` yields. Routing the flake-build env to the data-dir path
+/// `vm_legacy_macos_vsock_dir` yields. Routing the flake-build env to the data-dir path
 /// was the bug that left `machine run --flake` unable to reach the dev VM that
 /// `dev up` (and the auto-start) actually boots. Any non-dev `vm_id` keeps the
 /// legacy per-VM path.
 fn dev_vsock_dir(vm_id: &str) -> std::path::PathBuf {
     if vm_id == DEV_VM_NAME {
-        mvm_build::vz_builder::persistent_vz_vsock_dir(mvm_build::vz_builder::DEV_SESSION_ID)
+        mvm_build::legacy_builder_vm::persistent_legacy_macos_vsock_dir(
+            mvm_build::legacy_builder_vm::DEV_SESSION_ID,
+        )
     } else {
-        mvm_core::config::vm_vz_vsock_dir(vm_id)
+        mvm_core::config::vm_legacy_macos_vsock_dir(vm_id)
     }
 }
 
-/// Connect to the AVF dev VM's guest-agent vsock through the vz supervisor's
+/// Connect to the AVF dev VM's guest-agent vsock through the legacy_macos supervisor's
 /// per-port Unix socket (`<vsock_dir>/vsock-<port>.sock`) — the same listener
-/// `VzTransport` uses. AVF dev VMs run under the per-VM vz supervisor; the
+/// `LegacySupervisorTransport` uses. AVF dev VMs run under the per-VM legacy_macos supervisor; the
 /// supervisor is the cross-process vsock server, so a plain connect to its
 /// listener is the whole transport.
 fn connect_dev_vsock(vm_id: &str, port: u32) -> std::io::Result<std::os::unix::net::UnixStream> {
@@ -156,7 +158,7 @@ fn start_dev_daemon(vm_id: &str) -> Result<()> {
 /// Shell prelude that defines a no-op `sudo` function when the script
 /// already runs as root and `sudo` isn't installed.
 ///
-/// The Vz dev VM uses a minimal Nix-built rootfs that runs scripts as
+/// The LegacyMacos dev VM uses a minimal Nix-built rootfs that runs scripts as
 /// PID 1 (uid 0) with no sudo binary, while the shared network /
 /// firecracker scripts in this crate assume a non-root +
 /// passwordless-sudo model. Prepending this shim lets the same scripts
@@ -164,15 +166,15 @@ fn start_dev_daemon(vm_id: &str) -> Result<()> {
 const SUDO_SHIM: &str =
     "if [ \"$(id -u)\" = 0 ] && ! command -v sudo >/dev/null 2>&1; then sudo() { \"$@\"; }; fi";
 
-/// Vz dev-VM-backed Linux execution environment.
+/// LegacyMacos dev-VM-backed Linux execution environment.
 ///
 /// Routes commands through the guest agent's vsock `Exec` protocol.
-/// Used on macOS 26+ when the Vz dev VM is running.
-pub struct VzDevEnv {
+/// Used on macOS 26+ when the LegacyMacos dev VM is running.
+pub struct LegacyDevEnv {
     pub vm_id: String,
 }
 
-impl VzDevEnv {
+impl LegacyDevEnv {
     pub fn new(vm_id: &str) -> Self {
         Self {
             vm_id: vm_id.to_string(),
@@ -252,7 +254,7 @@ impl VzDevEnv {
     }
 }
 
-impl LinuxEnv for VzDevEnv {
+impl LinuxEnv for LegacyDevEnv {
     fn run(&self, script: &str) -> Result<Output> {
         if let Some(output) = crate::base::shell_mock::intercept(script) {
             return Ok(output);
@@ -305,7 +307,7 @@ impl LinuxEnv for VzDevEnv {
 
 /// Create the appropriate `LinuxEnv` for the current platform.
 ///
-/// Vz dev hosts (macOS 26+ Apple Silicon) route through the dev VM's
+/// macOS 26+ Apple Silicon hosts route through the dev VM's
 /// guest-agent vsock channel; native Linux runs on the host. macOS
 /// Intel, Linux without KVM, WSL2, and native Windows are not supported
 /// local Linux execution boundaries today; WSL2 nested KVM and a
@@ -313,8 +315,8 @@ impl LinuxEnv for VzDevEnv {
 pub fn create_linux_env() -> Box<dyn LinuxEnv> {
     let plat = platform::current();
 
-    if plat.is_vz_default_tier() {
-        return Box::new(VzDevEnv::new(DEV_VM_NAME));
+    if plat.is_hvf_default_tier() {
+        return Box::new(LegacyDevEnv::new(DEV_VM_NAME));
     }
 
     Box::new(NativeEnv)
@@ -349,27 +351,29 @@ mod tests {
     }
 
     #[test]
-    fn test_vz_dev_env_name() {
-        let env = VzDevEnv::new("mvm-dev");
+    fn test_legacy_macos_dev_env_name() {
+        let env = LegacyDevEnv::new("mvm-dev");
         assert_eq!(env.vm_id, "mvm-dev");
     }
 
     #[test]
     fn dev_vm_connects_via_persistent_builder_path_not_legacy() {
-        // The Vz dev VM is the persistent builder under the cache dir (session
+        // The LegacyMacos dev VM is the persistent builder under the cache dir (session
         // "dev"), NOT the legacy ~/.mvm/vms/<id> path. Regression guard for the
         // vm_id/path mismatch that left `machine run --flake` unable to reach
         // the dev VM that `dev up` actually boots.
         let dev = dev_vsock_dir(DEV_VM_NAME);
         let expected =
-            mvm_build::vz_builder::persistent_vz_vsock_dir(mvm_build::vz_builder::DEV_SESSION_ID);
+            mvm_build::legacy_builder_vm::persistent_legacy_macos_vsock_dir(
+                mvm_build::legacy_builder_vm::DEV_SESSION_ID,
+            );
         assert_eq!(
             dev, expected,
             "dev VM must use the persistent-builder cache path"
         );
 
         let other = dev_vsock_dir("mvm-other");
-        assert_eq!(other, mvm_core::config::vm_vz_vsock_dir("mvm-other"));
+        assert_eq!(other, mvm_core::config::vm_legacy_macos_vsock_dir("mvm-other"));
         assert_ne!(
             dev, other,
             "dev VM path must not collapse to the legacy per-VM path"

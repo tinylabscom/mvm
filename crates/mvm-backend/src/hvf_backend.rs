@@ -1,6 +1,6 @@
 //! `HvfBackend` — the `VmBackend` impl for the raw-HVF macOS path.
 //!
-//! Lifecycle mirrors the other detached-supervisor backends (vz/libkrun): `start`
+//! Lifecycle mirrors the other detached-supervisor backends (legacy_macos/libkrun): `start`
 //! builds an [`HvfSupervisorConfig`] from the `VmStartConfig`, spawns
 //! `mvm-hvf-supervisor` with the JSON on stdin, and waits for it to write its PID
 //! file (boot confirmed). `stop` signals that PID; `status` probes it with
@@ -184,6 +184,40 @@ fn spawn_hvf_gating_endpoint(
     Ok((EndpointGuard::new(vm_name), socket))
 }
 
+fn configure_hvf_supervisor_command(cmd: &mut Command) {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    // Detach into its own session so a persistent HVF machine survives the
+    // short-lived `mvmctl machine run -d` process that launched it.
+    //
+    // SAFETY: `pre_exec` runs after fork and before exec. The closure only
+    // calls async-signal-safe `setsid` and returns an OS error if it fails.
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+fn hvf_cmdline_extra(config: &VmStartConfig) -> Option<String> {
+    let mut tokens = Vec::new();
+    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
+        tokens.push(uvols);
+    }
+    if let Some(token) = crate::microvm::verb_grant_cmdline_token(&config.name) {
+        tokens.push(token);
+    }
+    if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
+        tokens.push(token);
+    }
+    (!tokens.is_empty()).then(|| tokens.join(" "))
+}
+
 impl VmBackend for HvfBackend {
     fn name(&self) -> &str {
         "hvf"
@@ -208,7 +242,7 @@ impl VmBackend for HvfBackend {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // Same Hypervisor.framework microVM tier as Vz (Tier 2), but the in-house
+        // Same Hypervisor.framework microVM tier as LegacyMacos (Tier 2), but the in-house
         // VMM owns the surface and the data plane is vsock-only (no guest NIC;
         // egress rides the host gating endpoint). Claims 1-2/4-7 hold as on FC;
         // claim 3 (verified boot) does not hold on the default path — the
@@ -328,6 +362,7 @@ impl VmBackend for HvfBackend {
             // Workload path: the supervisor's default cmdline (`init=/init`) is the
             // mkGuest contract, so leave it unset.
             cmdline: None,
+            cmdline_extra: hvf_cmdline_extra(config),
             memory_mib: config.memory_mib,
             initramfs: config.initrd_path.clone().map(PathBuf::from),
             disks,
@@ -353,10 +388,9 @@ impl VmBackend for HvfBackend {
             supervisor.display()
         ));
 
-        let mut child = Command::new(&supervisor)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::inherit())
+        let mut cmd = Command::new(&supervisor);
+        configure_hvf_supervisor_command(&mut cmd);
+        let mut child = cmd
             .spawn()
             .map_err(|e| anyhow!("spawn {}: {e}", supervisor.display()))?;
         child
@@ -399,14 +433,14 @@ impl VmBackend for HvfBackend {
         endpoint_guard.defuse();
 
         // Register an admitted workload with the per-tenant host-agent daemon,
-        // same as libkrun/vz: the daemon starts tracking this VM and binds its
+        // same as libkrun/legacy_macos: the daemon starts tracking this VM and binds its
         // BROKER_PORT socket. The guest-side BROKER_PORT bridge is wired on this
         // backend too — the supervisor config carries `broker_socket`
         // (`broker_listen_socket` above) and the vsock dispatcher relays
         // BROKER_PORT to it — so a guest `host.audit.v1` call reaches the broker
-        // here just as it does on libkrun/vz (host->guest agent RPC over
+        // here just as it does on libkrun/legacy_macos (host->guest agent RPC over
         // GUEST_AGENT_PORT is a separate path). Registration keeps daemon-side
-        // tracking + lifecycle parity with the other backends. Unlike libkrun/vz
+        // tracking + lifecycle parity with the other backends. Unlike libkrun/legacy_macos
         // there is no per-VM broker-fork fallback here, so MVM_HOST_AGENT_DAEMON=0
         // selects nothing — this backend is daemon-only. Best-effort: a
         // registration failure is logged, never a launch rollback (the workload
@@ -630,12 +664,12 @@ mod tests {
     }
 
     /// `start()` registers an admitted VM with the per-tenant host-agent
-    /// daemon (mirrors libkrun/vz); `stop()` must reap that registration.
+    /// daemon (mirrors libkrun/legacy_macos); `stop()` must reap that registration.
     /// This exercises the `stop()` half of the wiring without spawning a real
     /// supervisor: it plants the tenant-ref marker `register_host_agent_
     /// services_if_admitted` would have written, then asserts `stop()`
     /// removes it via `reap_host_agent_services_from_state` — the same call
-    /// libkrun/vz make. The daemon connect itself is best-effort (no daemon
+    /// libkrun/legacy_macos make. The daemon connect itself is best-effort (no daemon
     /// is running for this fake tenant), so this only verifies the reap path
     /// is wired, not the network round-trip (covered by `host_agent_spawn`'s
     /// own tests).
@@ -667,6 +701,94 @@ mod tests {
         unsafe {
             std::env::remove_var("MVM_DATA_DIR");
         }
+    }
+
+    #[test]
+    fn hvf_cmdline_extra_threads_volume_and_verb_grant_tokens() {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::{VerbGrantEnvelope, VmVolume, VmVolumeKind};
+
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let vm_name = "hvf-verb-grant-token-test";
+        let state_dir = vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let nonce = Nonce::from_bytes([7u8; 16]);
+        let not_after = mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: "aa".repeat(32),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            grant: VerbGrant {
+                session_id: vm_name.to_string(),
+                plan_nonce: nonce,
+                not_after,
+                verbs: vec![VerbId::new("ping").unwrap()],
+                sig: vec![0u8; 64],
+            },
+        };
+        std::fs::write(
+            state_dir.join("verb-grant.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+
+        let config = VmStartConfig {
+            name: vm_name.to_string(),
+            volumes: vec![VmVolume {
+                host: "/host/share".to_string(),
+                guest: "/guest/share".to_string(),
+                size: String::new(),
+                read_only: true,
+                kind: VmVolumeKind::DirShare,
+                encrypted: false,
+            }],
+            ..Default::default()
+        };
+        let extra = hvf_cmdline_extra(&config).expect("cmdline extra");
+
+        assert!(extra.contains("mvm.uvols="));
+        assert!(extra.contains("mvm.verb_grant="));
+        assert!(extra.contains("mvm.require_grant=1"));
+    }
+
+    #[test]
+    fn hvf_supervisor_command_starts_a_new_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pid_file = tmp.path().join("pid");
+        let mut cmd = Command::new("/bin/sh");
+        cmd.arg("-c")
+            .arg("printf '%s\n' \"$$\" > \"$1\"; sleep 30")
+            .arg("sh")
+            .arg(&pid_file);
+        configure_hvf_supervisor_command(&mut cmd);
+
+        let mut child = cmd.spawn().expect("spawn test helper");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let pid = loop {
+            if let Some(pid) = read_pid(&pid_file) {
+                break pid;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "test helper did not write its pid"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let sid = unsafe { libc::getsid(pid) };
+        terminate_pid(pid);
+        let _ = child.wait();
+
+        assert_ne!(sid, -1, "getsid failed");
+        assert_eq!(
+            sid, pid,
+            "detached HVF supervisor helper must become its own session leader"
+        );
     }
 
     #[test]

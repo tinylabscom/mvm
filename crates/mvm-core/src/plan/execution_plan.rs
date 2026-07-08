@@ -190,7 +190,7 @@ pub struct ExecutionPlan {
     /// mount. Empty for the common no-volume case. The admit path
     /// asserts the launch config's volumes are a subset of this list
     /// (claim 1 / claim 8) and emits it to the chain-signed audit log;
-    /// the Vz supervisor's future per-attach gate reads it to refuse
+    /// the LegacyMacos supervisor's future per-attach gate reads it to refuse
     /// any share the plan didn't name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<HostShareGrant>,

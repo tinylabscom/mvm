@@ -4,7 +4,7 @@
 //! These are the generic "pull a file over curl and check it against the
 //! published checksum manifest" helpers that back hash-verified downloads;
 //! the dev-image and builder-VM download orchestration in
-//! `dev_vz.rs` calls them.
+//! `dev_vm_legacy.rs` calls them.
 
 use anyhow::{Context, Result};
 

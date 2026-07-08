@@ -37,7 +37,7 @@ pub trait VsockTransport: Send + Sync {
 
 /// Whether unresolved socket probes may fall back to Firecracker's in-Linux
 /// runtime directory lookup. On macOS that lookup shells through the dev Linux
-/// environment, so it must not run while probing a normal host-side HVF/Vz
+/// environment, so it must not run while probing a normal host-side HVF/LegacyMacos
 /// workload.
 pub fn firecracker_transport_supported(platform: Platform) -> bool {
     platform.supports_native_runner()
@@ -116,18 +116,18 @@ impl VsockTransport for LibkrunTransport {
     }
 }
 
-/// Connects through the Vz supervisor's per-port vsock listener.
+/// Connects through the LegacyMacos supervisor's per-port vsock listener.
 ///
-/// `VzBackend` starts the Swift supervisor with a `VsockProxy` that
+/// `LegacyMacosBackend` starts the Swift supervisor with a `VsockProxy` that
 /// listens under `<vm_state_dir>/vsock/` and forwards each connection to
 /// the guest's vsock port, so a host client connects directly with no
 /// port handshake — the libkrun shape, one subdir deeper. The path is the
-/// single-source-of-truth [`mvm_core::config::vm_vz_vsock_port_socket`].
-pub struct VzTransport {
+/// single-source-of-truth [`mvm_core::config::vm_legacy_macos_vsock_port_socket`].
+pub struct LegacySupervisorTransport {
     socket_dir: PathBuf,
 }
 
-impl VzTransport {
+impl LegacySupervisorTransport {
     pub fn new(socket_dir: impl Into<PathBuf>) -> Self {
         Self {
             socket_dir: socket_dir.into(),
@@ -135,7 +135,7 @@ impl VzTransport {
     }
 
     pub fn for_vm(vm_name: &str) -> Self {
-        Self::new(mvm_core::config::vm_vz_vsock_dir(vm_name))
+        Self::new(mvm_core::config::vm_legacy_macos_vsock_dir(vm_name))
     }
 
     fn socket_path(&self, port: u32) -> PathBuf {
@@ -144,11 +144,11 @@ impl VzTransport {
     }
 }
 
-impl VsockTransport for VzTransport {
+impl VsockTransport for LegacySupervisorTransport {
     fn connect(&self, port: u32) -> Result<UnixStream> {
         let path = self.socket_path(port);
         UnixStream::connect(&path)
-            .with_context(|| format!("Failed to connect to Vz vsock at {}", path.display()))
+            .with_context(|| format!("Failed to connect to LegacyMacos vsock at {}", path.display()))
     }
 }
 
@@ -160,7 +160,7 @@ impl VsockTransport for VzTransport {
 ///   standing agent bridge the device binds at boot (see
 ///   [`mvm_core::config::vm_hvf_agent_socket`]).
 /// - Console data (ports in `dev_console_data_ports()`): `<state_dir>/vsock/vsock-<port>.sock`
-///   — same `vsock/` subdir convention the Vz supervisor uses, populated
+///   — same `vsock/` subdir convention the LegacyMacos supervisor uses, populated
 ///   only when `VmStartConfig.dev_console` is true.
 ///
 /// The **agent-RPC** use (via [`for_vm`]) is not gated — every
@@ -186,7 +186,7 @@ impl DevConsoleTransport {
 
     pub fn for_vm(vm_name: &str) -> Self {
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
-        let vsock_dir = mvm_core::config::vm_vz_vsock_dir(vm_name);
+        let vsock_dir = mvm_core::config::vm_legacy_macos_vsock_dir(vm_name);
         Self {
             state_dir,
             vsock_dir,
@@ -199,7 +199,7 @@ impl DevConsoleTransport {
     ///   bridge the hvf device binds — see
     ///   [`mvm_core::config::vm_hvf_agent_socket`]).
     /// - Any other port → `<state_dir>/vsock/vsock-<port>.sock` (the
-    ///   pre-opened console data socket, same convention as Vz).
+    ///   pre-opened console data socket, same convention as LegacyMacos).
     pub(crate) fn socket_path(&self, port: u32) -> PathBuf {
         if port == mvm_guest::vsock::GUEST_AGENT_PORT {
             self.state_dir.join("hvf-agent.sock")
@@ -277,7 +277,7 @@ impl VsockTransport for NestingHopTransport {
 /// its runtime directory lookup is local and side-effect-free. macOS must not
 /// fall back to Firecracker here: that path shells through the dev Linux
 /// environment and can auto-start the builder/dev VM while waiting for a normal
-/// HVF/Vz workload socket to appear.
+/// HVF/LegacyMacos workload socket to appear.
 ///
 /// Note: the probe consumes one stream and immediately drops it;
 /// callers get a *fresh* stream from the returned transport's
@@ -286,7 +286,7 @@ impl VsockTransport for NestingHopTransport {
 pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
     // (HVF / WorkloadRunner) VMs bind the agent bridge at
     // `<state_dir>/hvf-agent.sock`. Probe it first — it's the macOS-26 default
-    // backend, and the socket name is distinct from the libkrun/vz layouts so a
+    // backend, and the socket name is distinct from the libkrun/legacy_macos layouts so a
     // hit here is unambiguous. Without this branch the agent-RPC path (every
     // non-interactive `machine run -- <cmd>`, `machine exec`, `invoke`) could
     // never reach an hvf guest and timed out after 30s.
@@ -298,9 +298,9 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
     if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(libkrun));
     }
-    let vz = VzTransport::for_vm(vm_name);
-    if vz.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
-        return Ok(Box::new(vz));
+    let legacy_macos = LegacySupervisorTransport::for_vm(vm_name);
+    if legacy_macos.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+        return Ok(Box::new(legacy_macos));
     }
     if firecracker_transport_supported(mvm_core::platform::current()) {
         let fc = FirecrackerTransport::for_vm(vm_name)
@@ -343,58 +343,57 @@ mod tests {
     }
 
     #[test]
-    fn vz_transport_connects_to_socket_in_its_dir() {
+    fn legacy_macos_transport_connects_to_socket_in_its_dir() {
         use std::os::unix::net::UnixListener;
-        // Vz's supervisor listens on `<vsock_dir>/vsock-<port>.sock`; a host
+        // LegacyMacos's supervisor listens on `<vsock_dir>/vsock-<port>.sock`; a host
         // client connects directly (no port handshake), same shape as libkrun.
         let dir = tempfile::tempdir().unwrap();
         let sock = dir
             .path()
             .join(mvm_core::config::vsock_socket_filename(5252));
         let _listener = UnixListener::bind(&sock).unwrap();
-        let t = VzTransport::new(dir.path());
-        t.connect(5252).expect("vz transport should connect");
+        let t = LegacySupervisorTransport::new(dir.path());
+        t.connect(5252).expect("legacy_macos transport should connect");
     }
 
     #[test]
-    fn vz_transport_for_vm_targets_vsock_subdir() {
-        // for_vm must point at `<vm_state_dir>/vsock/` (Vz nests one subdir
+    fn legacy_macos_transport_for_vm_targets_vsock_subdir() {
+        // for_vm must point at `<vm_state_dir>/vsock/` (LegacyMacos nests one subdir
         // deeper than libkrun's `<vm_state_dir>/`), and the error names the
         // backend so console failures are diagnosable.
-        let t = VzTransport::for_vm("no-such-vz-vm");
+        let t = LegacySupervisorTransport::for_vm("no-such-legacy_macos-vm");
         let err = t
             .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect_err("should fail to connect")
             .to_string();
         assert!(
-            err.contains("Vz vsock") && err.contains("/vsock/vsock-5252.sock"),
-            "error didn't show the vz vsock-subdir path: {err}"
+            err.contains("LegacyMacos vsock") && err.contains("/vsock/vsock-5252.sock"),
+            "error didn't show the legacy_macos vsock-subdir path: {err}"
         );
     }
 
     #[test]
-    fn for_vm_selects_vz_when_only_vz_socket_present() {
+    fn for_vm_selects_legacy_macos_when_only_legacy_macos_socket_present() {
         use std::os::unix::net::UnixListener;
-        // With a Vz workload's socket present (and no libkrun/firecracker
-        // surface), the picker must select the Vz transport rather
+        // With a LegacyMacos workload's socket present (and no libkrun/firecracker
+        // surface), the picker must select the LegacyMacos transport rather
         // than falling through to the firecracker error. Regression for the
-        // "console can't reach a Vz workload" gap.
+        // "console can't reach a LegacyMacos workload" gap.
         let _lock = crate::vm::DATA_DIR_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
-        let name = "vz-picker-probe";
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+        let name = "legacy_macos-picker-probe";
         let sock =
-            mvm_core::config::vm_vz_vsock_port_socket(name, mvm_guest::vsock::GUEST_AGENT_PORT);
+            mvm_core::config::vm_legacy_macos_vsock_port_socket(name, mvm_guest::vsock::GUEST_AGENT_PORT);
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
         let _listener = UnixListener::bind(&sock).unwrap();
 
-        let t = for_vm(name).expect("picker should find the vz transport");
+        let t = for_vm(name).expect("picker should find the legacy_macos transport");
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect("selected transport should connect to the vz socket");
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+            .expect("selected transport should connect to the legacy_macos socket");
     }
 
     #[test]
@@ -404,13 +403,14 @@ mod tests {
         // `<state_dir>/hvf-agent.sock`. With only that socket present the picker
         // must select the hvf transport — the regression for the
         // non-interactive `machine run` reachability gap (the picker previously
-        // knew only libkrun/vz/firecracker, so it fell through to the
+        // knew only libkrun/legacy_macos/firecracker, so it fell through to the
         // firecracker error and the agent-RPC path timed out after 30s).
         let _lock = crate::vm::DATA_DIR_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
         let name = "hvf-picker-probe";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
@@ -419,8 +419,6 @@ mod tests {
         let t = for_vm(name).expect("picker should find the hvf transport");
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the hvf-agent socket");
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]

@@ -287,7 +287,7 @@ fn dns_carve_out_rules() -> Vec<CanonicalRule> {
 /// Lower a bare [`crate::policy::network_policy::NetworkPolicy`] (the
 /// no-signed-bundle transient/dev path) + admission-time DNS pins into the
 /// canonical egress grant set — the transient analogue of
-/// [`canonicalize_effective`]. This is what makes the libkrun/Vz bare path gate
+/// [`canonicalize_effective`]. This is what makes the libkrun/LegacyMacos bare path gate
 /// `host:port` at L4 like Firecracker's nftables, closing the direct-IP-dial
 /// bypass that a name-only [`crate::policy`] sink-hole leaves open.
 ///

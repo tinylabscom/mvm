@@ -15,7 +15,7 @@ impl<T: std::io::Read + std::io::Write + Send> DuplexStream for T {}
 
 /// VMM mechanics, written once per VMM.
 pub trait VmmDriver: Send + Sync {
-    /// Stable backend token (`"libkrun"`, `"vz"`, `"firecracker"`, `"hvf"`, `"mock"`).
+    /// Stable backend token (`"libkrun"`, `"legacy-macos"`, `"firecracker"`, `"hvf"`, `"mock"`).
     fn name(&self) -> &str;
     /// Whether this VMM can run on the current host.
     fn is_available(&self) -> Result<bool>;

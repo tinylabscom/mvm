@@ -1,18 +1,18 @@
-//! Vz dev environment + bundled image fetching.
+//! Legacy dev-VM environment + bundled image fetching.
 //!
-//! The dev VM is a long-lived Vz builder guest (`/dev/vdb` nix-store
+//! The dev VM is a long-lived builder guest (`/dev/vdb` nix-store
 //! overlay + `/work` share wired internally) that runs `nix build`.
-//! Both the auto-detect macOS tier and an explicit `--builder vz`
-//! route here.
+//! The current command surface reaches this only through the neutral
+//! `dev_vm` facade.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "builder-vm")]
-use mvm::vsock_transport::{VsockTransport, VzTransport};
+use mvm::vsock_transport::{LegacySupervisorTransport, VsockTransport};
 
-#[cfg(feature = "builder-vm")]
+#[cfg(any())]
 use super::super::vm::console::console_interactive;
 use super::artifact_verify::{
     bump_verify_outcome, download_file, fetch_expected_hashes, url_exists, verify_artifact_hash,
@@ -20,7 +20,7 @@ use super::artifact_verify::{
 use crate::ui;
 
 // ============================================================================
-// Dev environment (Vz supervisor)
+// Dev environment (legacy detached supervisor)
 // ============================================================================
 
 pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
@@ -28,10 +28,10 @@ pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
 /// Stable session id for the long-lived dev builder VM. Fixed (not the
 /// random per-build id the warm pool uses) so a separate `dev down`
 /// process can locate the supervisor PID file under
-/// `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-dev/` and reap it.
+/// `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-legacy-macos-dev/` and reap it.
 #[cfg(feature = "builder-vm")]
-const DEV_VM_SESSION_ID: &str = mvm_build::vz_builder::DEV_SESSION_ID;
-#[cfg(feature = "builder-vm")]
+const DEV_VM_SESSION_ID: &str = mvm_build::legacy_builder_vm::DEV_SESSION_ID;
+#[cfg(all(test, feature = "builder-vm"))]
 const DEV_VZ_ACTIVITY_FILE: &str = "last-activity-unix-secs";
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
@@ -60,22 +60,22 @@ const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
 /// same value the old daemon captured to choose the virtio-fs share —
 /// so `dev_build` paths resolve identically on both sides of the VM
 /// boundary.
-#[cfg(feature = "builder-vm")]
+#[cfg(any())]
 fn dev_workspace_root() -> std::path::PathBuf {
     std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
 }
 
 /// Cmdline for the dev rootfs override. Reuses the builder image's
 /// canonical cmdline (same flake / mkGuest shape) when the builder
-/// cache is populated, falling back to the Vz builder default. Both
+/// cache is populated, falling back to the legacy builder default. Both
 /// carry `root=/dev/vda`, `console=hvc0`, and `init=/init`; the guest
 /// init then mounts `/dev/vdb` as the persistent nix store.
-#[cfg(feature = "builder-vm")]
+#[cfg(any())]
 fn dev_image_cmdline() -> String {
     use mvm_build::libkrun_builder::BuilderVmImage;
     match mvm_build::libkrun_builder::ensure_builder_vm_image() {
         Ok(BuilderVmImage::Rootfs { cmdline, .. }) if !cmdline.trim().is_empty() => cmdline,
-        _ => mvm_build::vz_builder::DEFAULT_VZ_BUILDER_CMDLINE.to_string(),
+        _ => mvm_build::legacy_builder_vm::DEFAULT_VZ_BUILDER_CMDLINE.to_string(),
     }
 }
 
@@ -86,13 +86,13 @@ fn dev_image_cmdline() -> String {
 /// revision pin (`name@revision`) is supported for template/slot bases only;
 /// bundles are already content-addressed by their sha.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct DevBaseRef {
+pub(in crate::commands) struct DevBaseRef {
     id: String,
     revision: Option<String>,
 }
 
 impl DevBaseRef {
-    pub(super) fn parse(raw: &str) -> Result<Self> {
+    pub(in crate::commands) fn parse(raw: &str) -> Result<Self> {
         let (id, revision) = match raw.split_once('@') {
             Some((id, revision)) => {
                 if revision.is_empty() {
@@ -121,7 +121,7 @@ impl DevBaseRef {
     }
 }
 
-#[cfg(feature = "builder-vm")]
+#[cfg(all(test, feature = "builder-vm"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ResolvedDevBaseImage {
     id: String,
@@ -139,7 +139,7 @@ struct DevBaseProvenance {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
-pub(super) struct DevBaseStatusJson {
+pub(in crate::commands) struct DevBaseStatusJson {
     pub id: String,
     pub revision: String,
     pub rootfs_fingerprint: String,
@@ -152,7 +152,7 @@ fn is_safe_base_component(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
 }
 
-#[cfg(feature = "builder-vm")]
+#[cfg(any())]
 fn resolve_dev_base_image(base: &DevBaseRef) -> Result<ResolvedDevBaseImage> {
     match base.revision.as_deref() {
         Some(revision) => resolve_dev_base_pinned_revision(&base.id, revision),
@@ -170,7 +170,7 @@ fn resolve_dev_base_image(base: &DevBaseRef) -> Result<ResolvedDevBaseImage> {
     }
 }
 
-#[cfg(feature = "builder-vm")]
+#[cfg(any())]
 fn resolve_dev_base_pinned_revision(id: &str, revision: &str) -> Result<ResolvedDevBaseImage> {
     let rev_dir = if mvm_core::manifest::is_slot_hash_dirname(id) {
         let slot_dir = std::path::PathBuf::from(mvm_core::manifest::slot_dir(id));
@@ -191,7 +191,7 @@ fn resolve_dev_base_pinned_revision(id: &str, revision: &str) -> Result<Resolved
     dev_base_artifacts_from_revision_dir(id, revision, &rev_dir)
 }
 
-#[cfg(feature = "builder-vm")]
+#[cfg(all(test, feature = "builder-vm"))]
 fn dev_base_artifacts_from_revision_dir(
     id: &str,
     revision: &str,
@@ -218,7 +218,7 @@ fn dev_base_provenance_path(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join(DEV_BASE_PROVENANCE_FILE)
 }
 
-#[cfg(feature = "builder-vm")]
+#[cfg(all(test, feature = "builder-vm"))]
 fn write_dev_base_provenance(
     state_dir: &std::path::Path,
     base: &ResolvedDevBaseImage,
@@ -289,15 +289,16 @@ fn read_dev_base_provenance(_state_dir: &std::path::Path) -> Option<DevBaseProve
     None
 }
 
-/// Connect to the dev VM's guest agent over its Vz per-port vsock
-/// socket. The dev VM is a persistent Vz builder; its socket lives in
-/// the builder cache (not the data-dir path `VzTransport::for_vm`
+/// Connect to the dev VM's guest agent over its per-port vsock
+/// socket. The dev VM is a persistent builder; its socket lives in
+/// the builder cache (not the data-dir path `LegacySupervisorTransport::for_vm`
 /// resolves), so the transport is built directly from the session's
 /// vsock dir.
 #[cfg(feature = "builder-vm")]
 fn dev_vm_guest_agent_connect() -> Result<std::os::unix::net::UnixStream> {
-    let vsock_dir = mvm_build::vz_builder::persistent_vz_vsock_dir(DEV_VM_SESSION_ID);
-    VzTransport::new(vsock_dir).connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+    let vsock_dir =
+        mvm_build::legacy_builder_vm::persistent_legacy_macos_vsock_dir(DEV_VM_SESSION_ID);
+    LegacySupervisorTransport::new(vsock_dir).connect(mvm_guest::vsock::GUEST_AGENT_PORT)
 }
 
 /// Check if the dev VM is running *and* reachable cross-process.
@@ -306,11 +307,12 @@ fn dev_vm_guest_agent_connect() -> Result<std::os::unix::net::UnixStream> {
 /// booting, in which case other-process RPCs fail. Requiring the
 /// guest-agent socket to connect keeps `dev status` honest with what
 /// `dev shell` actually sees.
-pub(in crate::commands) fn is_vz_dev_running() -> bool {
+pub(in crate::commands) fn is_dev_vm_running_legacy() -> bool {
     #[cfg(feature = "builder-vm")]
     {
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-        if !mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir) {
+        let state_dir =
+            mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID);
+        if !mvm_build::legacy_builder_vm::persistent_legacy_macos_supervisor_alive(&state_dir) {
             return false;
         }
         dev_vm_guest_agent_connect().is_ok()
@@ -321,10 +323,11 @@ pub(in crate::commands) fn is_vz_dev_running() -> bool {
     }
 }
 
-#[cfg(feature = "builder-vm")]
-fn dev_vz_snapshot_exists() -> bool {
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-    mvm_build::vz_builder::builder_snapshot_path(&state_dir).is_file()
+#[cfg(any())]
+fn dev_vm_snapshot_exists() -> bool {
+    let state_dir =
+        mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID);
+    mvm_build::legacy_builder_vm::builder_snapshot_path(&state_dir).is_file()
 }
 
 /// Whether `dev down` should park (snapshot-save) the resident builder before
@@ -337,7 +340,7 @@ fn should_park(allows_persistent: bool, alive: bool, reset: bool) -> bool {
 
 /// Whether `dev up` should resume from a parked snapshot rather than cold-boot:
 /// residency keeps a persistent builder and a parked snapshot is present.
-#[cfg(feature = "builder-vm")]
+#[cfg(all(test, feature = "builder-vm"))]
 fn should_resume(allows_persistent: bool, snapshot_present: bool) -> bool {
     allows_persistent && snapshot_present
 }
@@ -345,19 +348,19 @@ fn should_resume(allows_persistent: bool, snapshot_present: bool) -> bool {
 /// Discard a parked snapshot (+ its machine-id sidecar) so a later `dev up`
 /// cold-boots instead of resuming a builder we no longer want resident.
 #[cfg(feature = "builder-vm")]
-fn remove_dev_vz_snapshot_markers(state_dir: &std::path::Path) {
-    let snap = mvm_build::vz_builder::builder_snapshot_path(state_dir);
-    let mid = mvm_build::vz_builder::builder_snapshot_machine_id_path(&snap);
+fn remove_dev_vm_snapshot_markers(state_dir: &std::path::Path) {
+    let snap = mvm_build::legacy_builder_vm::builder_snapshot_path(state_dir);
+    let mid = mvm_build::legacy_builder_vm::builder_snapshot_machine_id_path(&snap);
     let _ = std::fs::remove_file(&snap);
     let _ = std::fs::remove_file(&mid);
 }
 
-#[cfg(not(feature = "builder-vm"))]
-fn dev_vz_snapshot_exists() -> bool {
+#[cfg(any())]
+fn dev_vm_snapshot_exists() -> bool {
     false
 }
 
-#[cfg(feature = "builder-vm")]
+#[cfg(any())]
 fn wait_for_dev_vm_ready(console_log: &std::path::Path) -> Result<()> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
@@ -375,33 +378,33 @@ fn wait_for_dev_vm_ready(console_log: &std::path::Path) -> Result<()> {
     }
 }
 
-#[cfg(feature = "builder-vm")]
+#[cfg(all(test, feature = "builder-vm"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum VzDevResidencyDecision {
+enum DevVmResidencyDecision {
     Keep,
     Park,
     Teardown,
 }
 
-#[cfg(feature = "builder-vm")]
-fn decide_vz_dev_residency(
+#[cfg(all(test, feature = "builder-vm"))]
+fn decide_dev_vm_residency(
     policy: &mvm_core::residency::ResidencyPolicy,
     running: bool,
     last_activity_unix_secs: Option<u64>,
     now_unix_secs: u64,
-) -> VzDevResidencyDecision {
+) -> DevVmResidencyDecision {
     if !running {
-        return VzDevResidencyDecision::Keep;
+        return DevVmResidencyDecision::Keep;
     }
     match policy.kind() {
-        mvm_core::residency::ResidencyKind::Cold => VzDevResidencyDecision::Teardown,
-        mvm_core::residency::ResidencyKind::Parked => VzDevResidencyDecision::Park,
+        mvm_core::residency::ResidencyKind::Cold => DevVmResidencyDecision::Teardown,
+        mvm_core::residency::ResidencyKind::Parked => DevVmResidencyDecision::Park,
         mvm_core::residency::ResidencyKind::Warm => {
             let Some(threshold) = policy.idle_timeout() else {
-                return VzDevResidencyDecision::Keep;
+                return DevVmResidencyDecision::Keep;
             };
             let Some(last) = last_activity_unix_secs else {
-                return VzDevResidencyDecision::Keep;
+                return DevVmResidencyDecision::Keep;
             };
             let idle = std::time::Duration::from_secs(now_unix_secs.saturating_sub(last));
             match mvm_core::residency::decide_builder_residency_action(
@@ -409,22 +412,22 @@ fn decide_vz_dev_residency(
                 idle,
                 threshold,
             ) {
-                mvm_core::residency::BuilderResidencyAction::Keep => VzDevResidencyDecision::Keep,
-                mvm_core::residency::BuilderResidencyAction::Park => VzDevResidencyDecision::Park,
+                mvm_core::residency::BuilderResidencyAction::Keep => DevVmResidencyDecision::Keep,
+                mvm_core::residency::BuilderResidencyAction::Park => DevVmResidencyDecision::Park,
                 mvm_core::residency::BuilderResidencyAction::Teardown => {
-                    VzDevResidencyDecision::Teardown
+                    DevVmResidencyDecision::Teardown
                 }
             }
         }
     }
 }
 
-#[cfg(feature = "builder-vm")]
-fn dev_vz_activity_path(state_dir: &std::path::Path) -> std::path::PathBuf {
+#[cfg(all(test, feature = "builder-vm"))]
+fn dev_vm_activity_path(state_dir: &std::path::Path) -> std::path::PathBuf {
     state_dir.join(DEV_VZ_ACTIVITY_FILE)
 }
 
-#[cfg(feature = "builder-vm")]
+#[cfg(any())]
 fn current_unix_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -432,94 +435,98 @@ fn current_unix_secs() -> u64 {
         .as_secs()
 }
 
-#[cfg(feature = "builder-vm")]
-fn read_dev_vz_last_activity(state_dir: &std::path::Path) -> Option<u64> {
-    let body = std::fs::read_to_string(dev_vz_activity_path(state_dir)).ok()?;
+#[cfg(all(test, feature = "builder-vm"))]
+fn read_dev_vm_last_activity(state_dir: &std::path::Path) -> Option<u64> {
+    let body = std::fs::read_to_string(dev_vm_activity_path(state_dir)).ok()?;
     body.trim().parse().ok()
 }
 
-#[cfg(feature = "builder-vm")]
-fn touch_dev_vz_activity_at(
+#[cfg(all(test, feature = "builder-vm"))]
+fn touch_dev_vm_activity_at(
     state_dir: &std::path::Path,
     now_unix_secs: u64,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(state_dir)?;
-    std::fs::write(dev_vz_activity_path(state_dir), now_unix_secs.to_string())
+    std::fs::write(dev_vm_activity_path(state_dir), now_unix_secs.to_string())
 }
 
-#[cfg(feature = "builder-vm")]
-pub(in crate::commands) fn touch_dev_vz_activity_now() {
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-    let _ = touch_dev_vz_activity_at(&state_dir, current_unix_secs());
+#[cfg(any())]
+pub(in crate::commands) fn touch_dev_vm_activity_now() {
+    let state_dir =
+        mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID);
+    let _ = touch_dev_vm_activity_at(&state_dir, current_unix_secs());
 }
 
-#[cfg(feature = "builder-vm")]
-fn enforce_dev_vz_cold_policy_on_entry(state_dir: &std::path::Path) -> bool {
+#[cfg(any())]
+fn enforce_dev_vm_cold_policy_on_entry(state_dir: &std::path::Path) -> bool {
     let (policy, _source) = mvm_core::residency::resolve_residency();
     if !matches!(policy.kind(), mvm_core::residency::ResidencyKind::Cold) {
         return false;
     }
-    remove_dev_vz_snapshot_markers(state_dir);
-    if !mvm_build::vz_builder::persistent_vz_supervisor_alive(state_dir) {
+    remove_dev_vm_snapshot_markers(state_dir);
+    if !mvm_build::legacy_builder_vm::persistent_legacy_macos_supervisor_alive(state_dir) {
         return false;
     }
-    mvm_build::vz_builder::stop_persistent_vz_by_pid_file(state_dir);
+    mvm_build::legacy_builder_vm::stop_persistent_legacy_macos_by_pid_file(state_dir);
     let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
     true
 }
 
-#[cfg(feature = "builder-vm")]
-fn enforce_dev_vz_residency_policy() -> Result<Option<VzDevResidencyDecision>> {
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-    let running = mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir);
+#[cfg(any())]
+fn enforce_dev_vm_residency_policy() -> Result<Option<DevVmResidencyDecision>> {
+    let state_dir =
+        mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID);
+    let running =
+        mvm_build::legacy_builder_vm::persistent_legacy_macos_supervisor_alive(&state_dir);
     let (policy, _source) = mvm_core::residency::resolve_residency();
-    let decision = decide_vz_dev_residency(
+    let decision = decide_dev_vm_residency(
         &policy,
         running,
-        read_dev_vz_last_activity(&state_dir),
+        read_dev_vm_last_activity(&state_dir),
         current_unix_secs(),
     );
     match decision {
-        VzDevResidencyDecision::Keep => Ok(None),
-        VzDevResidencyDecision::Park => {
-            mvm_build::vz_builder::park_persistent_vz_builder(&state_dir)
+        DevVmResidencyDecision::Keep => Ok(None),
+        DevVmResidencyDecision::Park => {
+            mvm_build::legacy_builder_vm::park_persistent_legacy_macos_builder(&state_dir)
                 .map_err(|e| anyhow::anyhow!("Failed to park dev VM by residency policy: {e}"))?;
             let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
             Ok(Some(decision))
         }
-        VzDevResidencyDecision::Teardown => {
-            mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
+        DevVmResidencyDecision::Teardown => {
+            mvm_build::legacy_builder_vm::stop_persistent_legacy_macos_by_pid_file(&state_dir);
             let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
-            remove_dev_vz_snapshot_markers(&state_dir);
+            remove_dev_vm_snapshot_markers(&state_dir);
             Ok(Some(decision))
         }
     }
 }
 
-/// Boot the dev VM via the Vz supervisor, optionally opening an
+/// Boot the dev VM via the legacy detached supervisor, optionally opening an
 /// interactive console.
-#[cfg(feature = "builder-vm")]
-pub(super) fn cmd_dev_vz(
+#[cfg(any())]
+pub(super) fn cmd_dev_vm_legacy(
     cpus: u32,
     memory_gib: u32,
     open_shell: bool,
     base_ref: Option<&DevBaseRef>,
 ) -> Result<&'static str> {
-    ui::progress("Starting dev environment via Vz (Virtualization.framework)...");
+    ui::progress("Starting dev environment...");
 
-    let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-    if enforce_dev_vz_cold_policy_on_entry(&state_dir) {
+    let state_dir =
+        mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID);
+    if enforce_dev_vm_cold_policy_on_entry(&state_dir) {
         ui::info("Stopped existing dev VM because MVM_RESIDENCY=cold; cold-booting.");
     }
 
-    if is_vz_dev_running() {
+    if is_dev_vm_running_legacy() {
         if base_ref.is_some() {
             anyhow::bail!(
                 "`mvmctl dev up --base` cannot change the base of an already-running dev VM; \
                  run `mvmctl dev down` first"
             );
         }
-        touch_dev_vz_activity_now();
+        touch_dev_vm_activity_now();
         if open_shell {
             ui::progress("Dev VM already running. Opening shell...");
             console_interactive(DEV_VM_NAME)?;
@@ -531,12 +538,12 @@ pub(super) fn cmd_dev_vz(
 
     // Reap a dead-but-not-reaped supervisor from a prior session so the
     // fresh start binds a clean state dir.
-    mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
+    mvm_build::legacy_builder_vm::stop_persistent_legacy_macos_by_pid_file(&state_dir);
     let console_log = state_dir.join("console.log");
     let allows_persistent = mvm_core::residency::resolve_residency()
         .0
         .allows_persistent_builder();
-    let snapshot_present = dev_vz_snapshot_exists();
+    let snapshot_present = dev_vm_snapshot_exists();
     if snapshot_present && base_ref.is_some() {
         anyhow::bail!(
             "`mvmctl dev up --base` cannot change the base of a parked dev VM; \
@@ -544,10 +551,12 @@ pub(super) fn cmd_dev_vz(
         );
     }
     if should_resume(allows_persistent, snapshot_present) {
-        match mvm_build::vz_builder::restore_persistent_vz_builder_from_snapshot(&state_dir) {
+        match mvm_build::legacy_builder_vm::restore_persistent_legacy_macos_builder_from_snapshot(
+            &state_dir,
+        ) {
             Ok(_) => {
                 wait_for_dev_vm_ready(&console_log)?;
-                touch_dev_vz_activity_now();
+                touch_dev_vm_activity_now();
                 ui::success("Dev VM restored from parked snapshot.");
                 if open_shell {
                     ui::info("");
@@ -558,16 +567,16 @@ pub(super) fn cmd_dev_vz(
             Err(e) => {
                 // The snapshot is unusable; discard it so the next `dev up`
                 // cold-boots cleanly instead of retrying the same failed restore.
-                remove_dev_vz_snapshot_markers(&state_dir);
+                remove_dev_vm_snapshot_markers(&state_dir);
                 ui::warn(&format!(
                     "parked dev VM restore failed; discarded snapshot, cold-booting: {e}"
                 ));
             }
         }
-    } else if dev_vz_snapshot_exists() {
+    } else if dev_vm_snapshot_exists() {
         // Residency no longer keeps a resident builder (cold): drop the stale
         // snapshot so we cold-boot cleanly rather than waking an unwanted VM.
-        remove_dev_vz_snapshot_markers(&state_dir);
+        remove_dev_vm_snapshot_markers(&state_dir);
     }
 
     // Ensure the boot image exists before launching. `--base` resolves
@@ -608,13 +617,12 @@ pub(super) fn cmd_dev_vz(
 
     let memory_mib = memory_gib.saturating_mul(1024);
 
-    // The Vz supervisor detaches: `start()` spawns it as a background
-    // child that writes `builder.pid` under the stable state dir and
+    // The detached supervisor writes `builder.pid` under the stable state dir and
     // outlives this CLI process. A later `dev down` reaps it via that
     // PID file. The persistent builder wires the `/dev/vdb` nix store
     // and the `/work` share internally and holds the nix-store flock
     // for the VM's lifetime.
-    let handle = mvm_build::vz_builder::VzPersistentBuilderVm::new(dev_workspace_root())
+    let handle = mvm_build::legacy_builder_vm::LegacyPersistentBuilderVm::new(dev_workspace_root())
         .with_session_id(DEV_VM_SESSION_ID)
         .with_guest_agent_port(true)
         .with_vcpus(cpus.clamp(1, u32::from(u8::MAX)) as u8)
@@ -624,13 +632,13 @@ pub(super) fn cmd_dev_vz(
         .map_err(|e| anyhow::anyhow!("Failed to start dev VM: {e}"))?;
     let console_log = handle.vm_state_dir().join("console.log");
     // Drop the handle WITHOUT killing the supervisor — the dev VM must
-    // survive this process exit. `VzPersistentVmHandle::Drop` leaves the
+    // survive this process exit. `LegacyPersistentVmHandle::Drop` leaves the
     // detached supervisor running (it only owns the `Child` for an
     // optional explicit kill, which we don't call).
     drop(handle);
 
     wait_for_dev_vm_ready(&console_log)?;
-    touch_dev_vz_activity_now();
+    touch_dev_vm_activity_now();
 
     ui::success("Dev VM ready.");
     ui::info("  Shell:      mvmctl dev shell");
@@ -644,8 +652,8 @@ pub(super) fn cmd_dev_vz(
     Ok("started")
 }
 
-#[cfg(not(feature = "builder-vm"))]
-pub(super) fn cmd_dev_vz(
+#[cfg(any())]
+pub(super) fn cmd_dev_vm_legacy(
     _cpus: u32,
     _memory_gib: u32,
     _open_shell: bool,
@@ -657,17 +665,19 @@ pub(super) fn cmd_dev_vz(
     )
 }
 
-pub(in crate::commands) fn cmd_dev_vz_park(json: bool) -> Result<bool> {
+#[cfg(any())]
+pub(in crate::commands) fn cmd_dev_vm_park_legacy(json: bool) -> Result<bool> {
     #[cfg(feature = "builder-vm")]
     {
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
-        if !mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir) {
+        let state_dir =
+            mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID);
+        if !mvm_build::legacy_builder_vm::persistent_legacy_macos_supervisor_alive(&state_dir) {
             if !json {
                 ui::info("Dev VM is not running.");
             }
             return Ok(false);
         }
-        let parked = mvm_build::vz_builder::park_persistent_vz_builder(&state_dir)
+        let parked = mvm_build::legacy_builder_vm::park_persistent_legacy_macos_builder(&state_dir)
             .map_err(|e| anyhow::anyhow!("Failed to park dev VM: {e}"))?;
         let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
         if !json {
@@ -691,7 +701,7 @@ pub(in crate::commands) fn cmd_dev_vz_park(json: bool) -> Result<bool> {
 pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
     #[cfg(feature = "builder-vm")]
     {
-        mvm_build::vz_builder::persistent_vz_vsock_dir(DEV_VM_SESSION_ID)
+        mvm_build::legacy_builder_vm::persistent_legacy_macos_vsock_dir(DEV_VM_SESSION_ID)
             .join(mvm_core::config::vsock_socket_filename(
                 mvm_guest::vsock::GUEST_AGENT_PORT,
             ))
@@ -706,23 +716,25 @@ pub(in crate::commands) fn dev_vsock_proxy_path() -> String {
     }
 }
 
-/// Stop the dev VM by reaping its detached Vz supervisor via the PID
+/// Stop the dev VM by reaping its detached supervisor via the PID
 /// file under the stable state dir.
-/// Stop the Vz dev VM. Returns whether a live VM was reaped. Prints the
+/// Stop the dev VM. Returns whether a live VM was reaped. Prints the
 /// human result line only when `!json` (the dispatch emits the JSON form).
-pub(in crate::commands) fn cmd_dev_vz_down(json: bool, reset: bool) -> Result<bool> {
+pub(in crate::commands) fn cmd_dev_vm_down_legacy(json: bool, reset: bool) -> Result<bool> {
     #[cfg(feature = "builder-vm")]
     {
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+        let state_dir =
+            mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID);
         let allows_persistent = mvm_core::residency::resolve_residency()
             .0
             .allows_persistent_builder();
-        let alive = mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir);
+        let alive =
+            mvm_build::legacy_builder_vm::persistent_legacy_macos_supervisor_alive(&state_dir);
 
         if should_park(allows_persistent, alive, reset) {
-            match mvm_build::vz_builder::park_persistent_vz_builder(&state_dir) {
+            match mvm_build::legacy_builder_vm::park_persistent_legacy_macos_builder(&state_dir) {
                 Ok(_) => {
-                    // park_persistent_vz_builder already stopped the supervisor.
+                    // park_persistent_legacy_macos_builder already stopped the supervisor.
                     let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
                     if !json {
                         ui::success("Parked dev VM — next `dev up` resumes from snapshot.");
@@ -739,13 +751,14 @@ pub(in crate::commands) fn cmd_dev_vz_down(json: bool, reset: bool) -> Result<bo
             }
         }
 
-        let was_running = mvm_build::vz_builder::stop_persistent_vz_by_pid_file(&state_dir);
+        let was_running =
+            mvm_build::legacy_builder_vm::stop_persistent_legacy_macos_by_pid_file(&state_dir);
         // Drop the per-VM vsock dir so a stale socket can't fool the
         // liveness probe on the next `dev status`.
         let _ = std::fs::remove_dir_all(state_dir.join("vsock"));
         // Not parking (cold residency or `--reset`): discard any stale snapshot
         // so a later `dev up` cold-boots instead of resuming an old builder.
-        remove_dev_vz_snapshot_markers(&state_dir);
+        remove_dev_vm_snapshot_markers(&state_dir);
         remove_dev_base_provenance(&state_dir);
         if !json {
             if was_running {
@@ -767,18 +780,19 @@ pub(in crate::commands) fn cmd_dev_vz_down(json: bool, reset: bool) -> Result<bo
 }
 
 /// Show dev VM status.
-pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
+#[cfg(any())]
+pub(super) fn cmd_dev_vm_status_legacy(json: bool) -> Result<()> {
     #[cfg(feature = "builder-vm")]
     {
-        match enforce_dev_vz_residency_policy() {
+        match enforce_dev_vm_residency_policy() {
             Ok(Some(decision)) if !json => match decision {
-                VzDevResidencyDecision::Park => {
+                DevVmResidencyDecision::Park => {
                     ui::info("Dev VM parked by residency policy.");
                 }
-                VzDevResidencyDecision::Teardown => {
+                DevVmResidencyDecision::Teardown => {
                     ui::info("Dev VM stopped by cold residency policy.");
                 }
-                VzDevResidencyDecision::Keep => {}
+                DevVmResidencyDecision::Keep => {}
             },
             Ok(_) => {}
             Err(e) if !json => {
@@ -787,10 +801,10 @@ pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
             Err(e) => return Err(e),
         }
     }
-    let running = is_vz_dev_running();
+    let running = is_dev_vm_running_legacy();
     let state = if running {
         "running"
-    } else if cfg!(feature = "builder-vm") && dev_vz_snapshot_exists() {
+    } else if cfg!(feature = "builder-vm") && dev_vm_snapshot_exists() {
         "parked"
     } else {
         "stopped"
@@ -798,10 +812,10 @@ pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
     let kernel = if running { probe_dev_vm_kernel() } else { None };
 
     if json {
-        return crate::json_out::emit_json(&build_dev_status_json("vz", state, kernel));
+        return crate::json_out::emit_json(&build_dev_status_json("legacy-macos", state, kernel));
     }
 
-    ui::info("Backend:  Vz (Apple Virtualization.framework)");
+    ui::info("Backend:  legacy macOS dev VM");
     ui::info(&format!("Dev VM:   {DEV_VM_NAME}"));
     ui::info(&format!("Status:   {state}"));
     if let Some(kernel) = &kernel {
@@ -832,7 +846,7 @@ pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
 /// Best-effort `uname -r` over the dev VM's guest agent. `None` when the
 /// agent isn't reachable (VM down/booting) or the `builder-vm` feature
 /// (which carries the guest-agent transport) is off.
-#[cfg(feature = "builder-vm")]
+#[cfg(any())]
 fn probe_dev_vm_kernel() -> Option<String> {
     let mut stream = dev_vm_guest_agent_connect().ok()?;
     // Inbound vsock RPC audit.
@@ -855,14 +869,14 @@ fn probe_dev_vm_kernel() -> Option<String> {
     (!kernel.is_empty()).then_some(kernel)
 }
 
-#[cfg(not(feature = "builder-vm"))]
+#[cfg(any())]
 fn probe_dev_vm_kernel() -> Option<String> {
     None
 }
 
 /// Inspect dev caches without booting, rebuilding, or exposing local
 /// artifact paths/digests.
-pub(super) fn cmd_dev_cache_inspect(json: bool) -> Result<()> {
+pub(in crate::commands) fn cmd_dev_cache_inspect(json: bool) -> Result<()> {
     let summary = resolve_dev_cache_inspect_summary();
     if json {
         println!("{}", dev_cache_inspect_json(&summary)?);
@@ -958,14 +972,14 @@ struct DevCacheInspectJson {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct DevImageCacheJson {
+pub(in crate::commands) struct DevImageCacheJson {
     state: &'static str,
     kernel: &'static str,
     rootfs: &'static str,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct BuilderVmCacheJson {
+pub(in crate::commands) struct BuilderVmCacheJson {
     kind: &'static str,
     state: &'static str,
     reason_code: &'static str,
@@ -1029,7 +1043,7 @@ fn builder_vm_cache_json(summary: &BuilderVmCacheStatusSummary) -> BuilderVmCach
 /// when the VM answers — distinct from `dev_image.kernel`, which reports
 /// whether the *cached image* ships a kernel artifact.
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct DevStatusJson {
+pub(in crate::commands) struct DevStatusJson {
     pub schema_version: u8,
     pub backend: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1048,21 +1062,21 @@ pub(super) struct DevStatusJson {
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct LinuxNativeDevStatusJson {
+pub(in crate::commands) struct LinuxNativeDevStatusJson {
     pub kvm: LinuxNativeComponentJson,
     pub firecracker: LinuxNativeComponentJson,
     pub base_assets: LinuxNativeComponentJson,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct LinuxNativeComponentJson {
+pub(in crate::commands) struct LinuxNativeComponentJson {
     pub state: &'static str,
 }
 
-/// Build the status report for a VM-backed dev backend (vz / libkrun):
+/// Build the status report for a VM-backed dev backend (legacy_macos / libkrun):
 /// resolves the backend-agnostic dev-image + builder-VM cache state and
-/// attaches the caller-probed `kernel` (vz only; `None` elsewhere).
-pub(super) fn build_dev_status_json(
+/// attaches the caller-probed `kernel` (legacy_macos only; `None` elsewhere).
+pub(in crate::commands) fn build_dev_status_json(
     backend: &'static str,
     state: &'static str,
     guest_kernel: Option<String>,
@@ -1086,7 +1100,7 @@ pub(super) fn build_dev_status_json(
 
 /// Report for a backend with no managed dev VM (linux-native host shell,
 /// or an unsupported host): no VM, no image/builder cache.
-pub(super) fn build_dev_status_json_vmless(
+pub(in crate::commands) fn build_dev_status_json_vmless(
     backend: &'static str,
     state: &'static str,
 ) -> DevStatusJson {
@@ -1103,7 +1117,7 @@ pub(super) fn build_dev_status_json_vmless(
     }
 }
 
-pub(super) fn build_dev_status_json_linux_native(
+pub(in crate::commands) fn build_dev_status_json_linux_native(
     has_kvm: bool,
     firecracker_installed: bool,
     base_assets_present: bool,
@@ -1150,7 +1164,7 @@ fn resolve_dev_base_status_json() -> Option<DevBaseStatusJson> {
     let state_dir = {
         #[cfg(feature = "builder-vm")]
         {
-            mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID)
+            mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID)
         }
         #[cfg(not(feature = "builder-vm"))]
         {
@@ -1167,7 +1181,7 @@ fn resolve_dev_base_status_json() -> Option<DevBaseStatusJson> {
 /// Machine-readable result of a `dev down` (and, later, `dev up`)
 /// lifecycle mutation, so scripts can branch on the outcome.
 #[derive(Debug, Serialize, PartialEq, Eq)]
-pub(super) struct DevLifecycleJson {
+pub(in crate::commands) struct DevLifecycleJson {
     pub schema_version: u8,
     pub backend: &'static str,
     pub action: &'static str,
@@ -1178,7 +1192,10 @@ pub(super) struct DevLifecycleJson {
     pub reset: bool,
 }
 
-pub(super) fn build_dev_up_json(backend: &'static str, outcome: &'static str) -> DevLifecycleJson {
+pub(in crate::commands) fn build_dev_up_json(
+    backend: &'static str,
+    outcome: &'static str,
+) -> DevLifecycleJson {
     DevLifecycleJson {
         schema_version: 1,
         backend,
@@ -1190,7 +1207,7 @@ pub(super) fn build_dev_up_json(backend: &'static str, outcome: &'static str) ->
     }
 }
 
-pub(super) fn build_dev_down_json(
+pub(in crate::commands) fn build_dev_down_json(
     backend: &'static str,
     was_running: bool,
     reset: bool,
@@ -1208,6 +1225,7 @@ pub(super) fn build_dev_down_json(
     }
 }
 
+#[cfg(test)]
 pub(super) fn build_dev_park_json(backend: &'static str, parked: bool) -> DevLifecycleJson {
     DevLifecycleJson {
         schema_version: 1,
@@ -1317,7 +1335,7 @@ fn prepare_dev_image_out_dir(out_dir: &str) -> Result<()> {
 /// Failures of the local build are surfaced loudly — never silently
 /// substituted with the prebuilt, since the prebuilt would mask local
 /// rootfs changes.
-pub(super) fn ensure_dev_image() -> Result<(String, String)> {
+pub(in crate::commands) fn ensure_dev_image() -> Result<(String, String)> {
     // Source-checkout dispatch.
     //
     // The dev-shell image now comes from `packages.<sys>.dev` in
@@ -4527,8 +4545,8 @@ fn run_stage0_root_dir(
 
     // Dispatch Stage 0 through the `BuilderVm` trait. QEMU when explicitly
     // chosen (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including
-    // the Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
-    // That preserves the "Stage 0 is libkrun even on Vz-default hosts"
+    // the LegacyMacos auto-detect default on macOS-26+, since LegacyMacos Stage 0 is still a gap.
+    // That preserves the "Stage 0 is libkrun even on LegacyMacos-default hosts"
     // invariant. `verbose` forwards the in-guest nix `--print-build-logs`
     // output to host stderr.
     //
@@ -4888,7 +4906,7 @@ pub(in crate::commands) struct ReapOutcome {
 
 /// Reap orphaned per-VM helpers left behind by killed
 /// `mvmctl dev up` runs. Covers both backends: libkrun (`mvm-libkrun-
-/// supervisor` + `gvproxy`) and Vz (`mvm-vz-supervisor`).
+/// supervisor` + `gvproxy`) and LegacyMacos (`mvm-legacy-macos-supervisor`).
 ///
 /// mvmctl spawns the active backend's supervisor binary, which in turn
 /// spawns its networking helper (gvproxy for libkrun). If mvmctl exits
@@ -4898,10 +4916,10 @@ pub(in crate::commands) struct ReapOutcome {
 ///
 /// The dir traversal below is **prefix-agnostic**: it iterates every
 /// subdirectory of `~/.cache/mvm/builder-vm/vms/`, so both
-/// `mvm-builder-vm-<job_id>` (libkrun) and `mvm-builder-vz-<job_id>`
-/// (Vz) state dirs are picked up by the same loop, and the sidecar PID
+/// `mvm-builder-vm-<job_id>` (libkrun) and `mvm-builder-legacy-macos-<job_id>`
+/// (LegacyMacos) state dirs are picked up by the same loop, and the sidecar PID
 /// names (`builder.pid` / `stage0.pid`) are shared across backends. The
-/// `reap_picks_up_orphaned_vz_builder_state_dir` test pins this — a
+/// `reap_picks_up_orphaned_legacy_macos_builder_state_dir` test pins this — a
 /// future refactor that narrows the traversal or renames the sidecar
 /// must update that test.
 ///
@@ -4911,7 +4929,7 @@ pub(in crate::commands) struct ReapOutcome {
 /// liveness signal, so the sweep runs in two phases per dir:
 ///
 /// 1. **Supervisor phase.** Read the supervisor sidecars (`builder.pid` /
-///    `stage0.pid` / `vz.pid` / `libkrun.pid` — see
+///    `stage0.pid` / `legacy-macos.pid` / `libkrun.pid` — see
 ///    [`is_supervisor_sidecar`]). On a *managed* dir (the persistent dev
 ///    builder `mvm-persistent-builder-*`, or any named workload under
 ///    `~/.mvm/vms/`) an alive supervisor is the running VM, spared:
@@ -4974,19 +4992,24 @@ pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
     }
 }
 
-/// Sidecar PID file names a *builder* VM dir carries (libkrun + Vz).
+/// Sidecar PID file names a *builder* VM dir carries (libkrun + LegacyMacos).
 const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 
 /// Sidecar PID file names a *workload* VM dir under `~/.mvm/vms/<name>/`
-/// carries: `libkrun.pid` (libkrun supervisor), `vz.pid` (Vz
+/// carries: `libkrun.pid` (libkrun supervisor), `legacy-macos.pid` (LegacyMacos
 /// supervisor), and the gvproxy sidecars (`gvproxy.pid` libkrun lane /
-/// `host-gvproxy.pid` Vz lane). The argv scan backstops these, but
-/// reading the sidecar directly is cheaper and catches a detached Vz
+/// `host-gvproxy.pid` LegacyMacos lane). The argv scan backstops these, but
+/// reading the sidecar directly is cheaper and catches a detached LegacyMacos
 /// supervisor that the argv scan might miss.
-const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid", "gvproxy.pid", "host-gvproxy.pid"];
+const WORKLOAD_SIDECARS: &[&str] = &[
+    "libkrun.pid",
+    "legacy-macos.pid",
+    "gvproxy.pid",
+    "host-gvproxy.pid",
+];
 
 /// Dir-name prefix of the **persistent** dev builder VM
-/// (`mvm-persistent-builder-vz-dev`, fixed session id "dev"). Unlike an
+/// (`mvm-persistent-builder-legacy-macos-dev`, fixed session id "dev"). Unlike an
 /// ephemeral per-job `mvm-builder-v{m,z}-<job_id>` scratch dir, this VM
 /// is long-lived: its supervisor is detached and reparented to launchd
 /// *by design* so it outlives the spawning CLI. So a live PID recorded
@@ -5121,7 +5144,7 @@ fn reap_orphaned_vm_helpers_at_with_snapshot(
         let mut seen_pids: std::collections::HashSet<i32> = std::collections::HashSet::new();
 
         // Phase 1 — supervisors. The supervisor (`builder.pid` /
-        // `stage0.pid` / `vz.pid` / `libkrun.pid`) is the authoritative
+        // `stage0.pid` / `legacy-macos.pid` / `libkrun.pid`) is the authoritative
         // per-VM liveness signal: while it lives the VM is up. On a
         // managed dir an alive supervisor is the running VM (spared); on
         // an ephemeral per-job dir an alive *launchd-parented* supervisor
@@ -5263,7 +5286,7 @@ fn reap_or_track(
 fn is_supervisor_sidecar(name: &str) -> bool {
     matches!(
         name,
-        "builder.pid" | "stage0.pid" | "vz.pid" | "libkrun.pid"
+        "builder.pid" | "stage0.pid" | "legacy-macos.pid" | "libkrun.pid"
     )
 }
 
@@ -6078,12 +6101,12 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
     };
 
     // Source-checkout dev-image builds route through the selected
-    // builder backend. When Vz was chosen only
+    // builder backend. When LegacyMacos was chosen only
     // by auto-detect (no explicit `--builder` / env override), allow
-    // a one-shot fallback to libkrun if Vz bring-up fails. This
+    // a one-shot fallback to libkrun if LegacyMacos bring-up fails. This
     // keeps `mvmctl dev up` usable on hosts where the platform-level
-    // Vz probe passes but the builder-VM path still trips a backend-
-    // specific runtime issue. Explicit `vz` overrides still fail
+    // LegacyMacos probe passes but the builder-VM path still trips a backend-
+    // specific runtime issue. Explicit `legacy_macos` overrides still fail
     // loudly so operators can debug the backend they asked for.
     let selected = resolve_choice();
     let explicit_override = resolve_env_override().is_some();
@@ -6164,7 +6187,7 @@ fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
 
 /// Backend attempt order for the dev-image / default-microvm builds. Delegates
 /// to the shared [`mvm_build::builder_backend_select::builder_attempt_order`]
-/// (one policy: auto Vz→libkrun, auto libkrun→qemu on Linux, explicit→single)
+/// (one policy: auto hvf→libkrun, auto libkrun→qemu on Linux, explicit→single)
 /// so this CLI loop and the `mvm-build` build paths can't drift. The live
 /// platform supplies `is_linux_native`, and the per-host builder-health cache
 /// supplies whether libkrun should be skipped (a prior failed attempt left a
@@ -6192,18 +6215,18 @@ mod builder_backend_attempt_order_tests {
     use mvm_build::builder_backend_select::BuilderBackendChoice;
 
     #[test]
-    fn auto_selected_vz_retries_with_libkrun() {
+    fn auto_selected_hvf_retries_with_libkrun() {
         assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Vz, false),
-            vec![BuilderBackendChoice::Vz, BuilderBackendChoice::Libkrun]
+            builder_backend_attempt_order(BuilderBackendChoice::Hvf, false),
+            vec![BuilderBackendChoice::Hvf, BuilderBackendChoice::Libkrun]
         );
     }
 
     #[test]
-    fn explicit_vz_override_does_not_fallback() {
+    fn explicit_hvf_override_does_not_fallback() {
         assert_eq!(
-            builder_backend_attempt_order(BuilderBackendChoice::Vz, true),
-            vec![BuilderBackendChoice::Vz]
+            builder_backend_attempt_order(BuilderBackendChoice::Hvf, true),
+            vec![BuilderBackendChoice::Hvf]
         );
     }
 
@@ -7099,9 +7122,10 @@ mod dev_status_image_tests {
         // the state, and a guest-probed kernel version — but never a local
         // artifact path. Digest-bearing base provenance is reported only
         // under the explicit `base.rootfs_fingerprint` acceptance field.
-        let report = build_dev_status_json("vz", "running", Some("6.1.0-mvm".to_string()));
+        let report =
+            build_dev_status_json("legacy-macos", "running", Some("6.1.0-mvm".to_string()));
         assert_eq!(report.schema_version, 1);
-        assert_eq!(report.backend, "vz");
+        assert_eq!(report.backend, "legacy-macos");
         assert_eq!(report.vm_name, Some(DEV_VM_NAME));
         assert_eq!(report.state, "running");
         assert_eq!(report.guest_kernel.as_deref(), Some("6.1.0-mvm"));
@@ -7111,7 +7135,7 @@ mod dev_status_image_tests {
         assert!(report.linux_native.is_none());
 
         let json = crate::json_out::to_json_string(&report).expect("serialize");
-        assert!(json.contains("\"backend\": \"vz\""));
+        assert!(json.contains("\"backend\": \"legacy_macos\""));
         assert!(json.contains("\"state\": \"running\""));
         assert!(json.contains("\"guest_kernel\": \"6.1.0-mvm\""));
         // No absolute paths / image filenames / digests leak.
@@ -7165,7 +7189,8 @@ mod dev_status_image_tests {
         env.set("MVM_CACHE_DIR", tmp.path().join("cache"));
         env.set("MVM_DATA_DIR", tmp.path().join("data"));
 
-        let state_dir = mvm_build::vz_builder::persistent_vz_state_dir(DEV_VM_SESSION_ID);
+        let state_dir =
+            mvm_build::legacy_builder_vm::persistent_legacy_macos_state_dir(DEV_VM_SESSION_ID);
         std::fs::create_dir_all(&state_dir).unwrap();
         let provenance = DevBaseProvenance {
             schema_version: 1,
@@ -7176,7 +7201,7 @@ mod dev_status_image_tests {
         let json = serde_json::to_vec_pretty(&provenance).unwrap();
         std::fs::write(dev_base_provenance_path(&state_dir), json).unwrap();
 
-        let report = build_dev_status_json("vz", "running", None);
+        let report = build_dev_status_json("legacy-macos", "running", None);
         let base = report.base.as_ref().expect("base status");
         assert_eq!(base.id, "template-a");
         assert_eq!(base.revision, "rev-abc");
@@ -7193,7 +7218,7 @@ mod dev_status_image_tests {
     #[test]
     fn dev_status_json_stopped_omits_kernel() {
         // A stopped VM has no guest to probe; `guest_kernel` is skipped, not null.
-        let report = build_dev_status_json("vz", "stopped", None);
+        let report = build_dev_status_json("legacy-macos", "stopped", None);
         assert_eq!(report.state, "stopped");
         assert!(report.guest_kernel.is_none());
         let json = crate::json_out::to_json_string(&report).expect("serialize");
@@ -7261,9 +7286,9 @@ mod dev_status_image_tests {
 
     #[test]
     fn dev_down_json_reports_stopped_and_omits_reset_when_false() {
-        let report = build_dev_down_json("vz", true, false);
+        let report = build_dev_down_json("legacy-macos", true, false);
         assert_eq!(report.schema_version, 1);
-        assert_eq!(report.backend, "vz");
+        assert_eq!(report.backend, "legacy-macos");
         assert_eq!(report.action, "down");
         assert_eq!(report.outcome, "stopped");
         let json = crate::json_out::to_json_string(&report).expect("serialize");
@@ -7285,10 +7310,10 @@ mod dev_status_image_tests {
 
     #[test]
     fn dev_up_json_reports_outcome_and_omits_reset() {
-        let started = build_dev_up_json("vz", "started");
+        let started = build_dev_up_json("legacy-macos", "started");
         assert_eq!(started.action, "up");
         assert_eq!(started.outcome, "started");
-        assert_eq!(started.backend, "vz");
+        assert_eq!(started.backend, "legacy-macos");
         let json = crate::json_out::to_json_string(&started).expect("serialize");
         assert!(json.contains("\"action\": \"up\""));
         assert!(json.contains("\"outcome\": \"started\""));
@@ -7301,9 +7326,9 @@ mod dev_status_image_tests {
 
     #[test]
     fn dev_park_json_reports_parked_and_not_running() {
-        let parked = build_dev_park_json("vz", true);
+        let parked = build_dev_park_json("legacy-macos", true);
         assert_eq!(parked.schema_version, 1);
-        assert_eq!(parked.backend, "vz");
+        assert_eq!(parked.backend, "legacy-macos");
         assert_eq!(parked.action, "park");
         assert_eq!(parked.outcome, "parked");
         let json = crate::json_out::to_json_string(&parked).expect("serialize");
@@ -7311,7 +7336,7 @@ mod dev_status_image_tests {
         assert!(json.contains("\"outcome\": \"parked\""));
         assert!(!json.contains("\"reset\""));
 
-        let missing = build_dev_park_json("vz", false);
+        let missing = build_dev_park_json("legacy-macos", false);
         assert_eq!(missing.outcome, "not-running");
     }
 
@@ -7487,7 +7512,7 @@ mod reap_orphans_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
         // The fixed persistent dev VM dir name (session id "dev").
-        let vm = vms_root.join("mvm-persistent-builder-vz-dev");
+        let vm = vms_root.join("mvm-persistent-builder-legacy-macos-dev");
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{pid}\n")).expect("write pid");
 
@@ -7526,7 +7551,7 @@ mod reap_orphans_tests {
         let vms_root = dir.path().join("vms");
         let vm = vms_root.join("mvm-workload-livetest-3b1f-running");
         std::fs::create_dir_all(&vm).expect("mkdir");
-        std::fs::write(vm.join("vz.pid"), format!("{pid}\n")).expect("write pid");
+        std::fs::write(vm.join("legacy-macos.pid"), format!("{pid}\n")).expect("write pid");
 
         let out = reap_orphaned_vm_helpers_at_with_snapshot(
             &vms_root,
@@ -7546,7 +7571,7 @@ mod reap_orphans_tests {
     }
 
     /// The guard is scoped to managed dirs only: an ephemeral per-job
-    /// builder scratch dir (`mvm-builder-vz-<job>`) with a live,
+    /// builder scratch dir (`mvm-builder-legacy-macos-<job>`) with a live,
     /// launchd-parented supervisor is a genuine leak from a crashed
     /// `mvmctl` and is still SIGTERM'd. Proves the fix didn't blunt the
     /// reaper's real job.
@@ -7556,7 +7581,7 @@ mod reap_orphans_tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-builder-vz-abc12345");
+        let vm = vms_root.join("mvm-builder-legacy-macos-abc12345");
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{pid}\n")).expect("write pid");
 
@@ -7577,7 +7602,7 @@ mod reap_orphans_tests {
     }
 
     /// A live named workload keeps *all* its PIDs: the supervisor
-    /// (`vz.pid`) is alive, so its gvproxy helper (`host-gvproxy.pid`,
+    /// (`legacy-macos.pid`) is alive, so its gvproxy helper (`host-gvproxy.pid`,
     /// also launchd-parented) is spared too. Pins that the helper phase
     /// follows the supervisor's liveness, not the helper's own parent.
     #[test]
@@ -7602,7 +7627,7 @@ mod reap_orphans_tests {
         let vms_root = dir.path().join("vms");
         let vm = vms_root.join("mvm-workload-livegv-9c2a-running");
         std::fs::create_dir_all(&vm).expect("mkdir");
-        std::fs::write(vm.join("vz.pid"), format!("{sup_pid}\n")).expect("write sup pid");
+        std::fs::write(vm.join("legacy-macos.pid"), format!("{sup_pid}\n")).expect("write sup pid");
         std::fs::write(vm.join("host-gvproxy.pid"), format!("{gv_pid}\n")).expect("write gv pid");
 
         let out = reap_orphaned_vm_helpers_at_with_snapshot(
@@ -7650,7 +7675,8 @@ mod reap_orphans_tests {
         let vms_root = dir.path().join("vms");
         let vm = vms_root.join("mvm-workload-deadgv-4e7b-stopped");
         std::fs::create_dir_all(&vm).expect("mkdir");
-        std::fs::write(vm.join("vz.pid"), format!("{dead_sup}\n")).expect("write dead sup pid");
+        std::fs::write(vm.join("legacy-macos.pid"), format!("{dead_sup}\n"))
+            .expect("write dead sup pid");
         std::fs::write(vm.join("host-gvproxy.pid"), format!("{gv_pid}\n")).expect("write gv pid");
 
         let out = reap_orphaned_vm_helpers_at_with_snapshot(
@@ -7682,7 +7708,7 @@ mod reap_orphans_tests {
     fn prune_spares_stopped_persistent_builder_store() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-persistent-builder-vz-dev");
+        let vm = vms_root.join("mvm-persistent-builder-legacy-macos-dev");
         std::fs::create_dir_all(&vm).expect("mkdir");
         // Dead supervisor → VM is stopped. i32::MAX is never alive.
         std::fs::write(vm.join("builder.pid"), format!("{}\n", i32::MAX)).expect("write pid");
@@ -7716,7 +7742,7 @@ mod reap_orphans_tests {
     fn prune_still_reclaims_dead_ephemeral_builder() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-builder-vz-deadjob1");
+        let vm = vms_root.join("mvm-builder-legacy-macos-deadjob1");
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), format!("{}\n", i32::MAX)).expect("write pid");
 
@@ -8069,10 +8095,7 @@ mod builder_vm_bootstrap_tests {
         );
 
         drop(guard);
-        assert!(
-            !stage0_bootstrap_in_flight_at(&builder_vm),
-            "releasing the lock must clear the in-flight signal"
-        );
+        assert_stage0_not_in_flight_uncontended(&builder_vm);
     }
 
     /// Name predicate must match both the current hidden
@@ -8146,6 +8169,20 @@ mod builder_vm_bootstrap_tests {
                 }
                 Err(e) => panic!("flock error: {e:#}"),
             }
+        }
+        unreachable!()
+    }
+
+    fn assert_stage0_not_in_flight_uncontended(builder_vm: &std::path::Path) {
+        for attempt in 0..200u32 {
+            if !stage0_bootstrap_in_flight_at(builder_vm) {
+                return;
+            }
+            assert!(
+                attempt < 199,
+                "releasing the lock must clear the in-flight signal"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(2));
         }
         unreachable!()
     }
@@ -8295,23 +8332,27 @@ mod builder_vm_bootstrap_tests {
         }
     }
 
-    /// Pin that the orphan reaper covers `mvm-builder-vz-<job_id>`
+    /// Pin that the orphan reaper covers `mvm-builder-legacy-macos-<job_id>`
     /// dirs the same way it covers
     /// `mvm-builder-vm-<job_id>`. The traversal in
     /// `reap_orphaned_vm_helpers_at` is prefix-agnostic and
-    /// `VzBuilderVm` writes a `builder.pid` sidecar under the shared
+    /// `LegacyBuilderVm` writes a `builder.pid` sidecar under the shared
     /// `~/.cache/mvm/builder-vm/vms/` tree; this test guards against
     /// a future refactor narrowing either invariant.
     #[test]
-    fn reap_picks_up_orphaned_vz_builder_state_dir() {
+    fn reap_picks_up_orphaned_legacy_macos_builder_state_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let vms = tmp.path();
-        let vz_dir = vms.join("mvm-builder-vz-abc12345");
-        std::fs::create_dir_all(&vz_dir).unwrap();
+        let legacy_macos_dir = vms.join("mvm-builder-legacy-macos-abc12345");
+        std::fs::create_dir_all(&legacy_macos_dir).unwrap();
         // `i32::MAX` is guaranteed not to be a live process on any
         // supported host — classify_pid → Dead, so the dir has no
         // live owner and is eligible for removal.
-        std::fs::write(vz_dir.join("builder.pid"), format!("{}\n", i32::MAX)).unwrap();
+        std::fs::write(
+            legacy_macos_dir.join("builder.pid"),
+            format!("{}\n", i32::MAX),
+        )
+        .unwrap();
 
         let outcome = reap_orphaned_vm_helpers_at(
             vms,
@@ -8324,11 +8365,11 @@ mod builder_vm_bootstrap_tests {
 
         assert_eq!(
             outcome.removed_dirs, 1,
-            "vz builder state dir should be reaped"
+            "legacy_macos builder state dir should be reaped"
         );
         assert!(
-            !vz_dir.exists(),
-            "vz builder state dir should be gone on disk"
+            !legacy_macos_dir.exists(),
+            "legacy_macos builder state dir should be gone on disk"
         );
     }
 
@@ -8989,10 +9030,10 @@ mod autopark_gating_tests {
 }
 
 #[cfg(all(test, feature = "builder-vm"))]
-mod vz_residency_keeper_tests {
+mod dev_vm_residency_keeper_tests {
     use super::{
-        VzDevResidencyDecision, decide_vz_dev_residency, read_dev_vz_last_activity,
-        touch_dev_vz_activity_at,
+        DevVmResidencyDecision, decide_dev_vm_residency, read_dev_vm_last_activity,
+        touch_dev_vm_activity_at,
     };
     use mvm_core::residency::ResidencyPolicy;
 
@@ -9004,8 +9045,8 @@ mod vz_residency_keeper_tests {
             ResidencyPolicy::always_warm(),
         ] {
             assert_eq!(
-                decide_vz_dev_residency(&policy, false, Some(0), 10_000),
-                VzDevResidencyDecision::Keep
+                decide_dev_vm_residency(&policy, false, Some(0), 10_000),
+                DevVmResidencyDecision::Keep
             );
         }
     }
@@ -9013,49 +9054,49 @@ mod vz_residency_keeper_tests {
     #[test]
     fn cold_running_tears_down() {
         assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::cold(), true, Some(100), 200),
-            VzDevResidencyDecision::Teardown
+            decide_dev_vm_residency(&ResidencyPolicy::cold(), true, Some(100), 200),
+            DevVmResidencyDecision::Teardown
         );
     }
 
     #[test]
     fn parked_running_parks() {
         assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::parked(), true, Some(100), 200),
-            VzDevResidencyDecision::Park
+            decide_dev_vm_residency(&ResidencyPolicy::parked(), true, Some(100), 200),
+            DevVmResidencyDecision::Park
         );
     }
 
     #[test]
     fn warm_without_activity_keeps() {
         assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, None, 2_000),
-            VzDevResidencyDecision::Keep
+            decide_dev_vm_residency(&ResidencyPolicy::always_warm(), true, None, 2_000),
+            DevVmResidencyDecision::Keep
         );
     }
 
     #[test]
     fn warm_at_idle_threshold_keeps() {
         assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_200),
-            VzDevResidencyDecision::Keep
+            decide_dev_vm_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_200),
+            DevVmResidencyDecision::Keep
         );
     }
 
     #[test]
     fn warm_past_idle_threshold_parks() {
         assert_eq!(
-            decide_vz_dev_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_201),
-            VzDevResidencyDecision::Park
+            decide_dev_vm_residency(&ResidencyPolicy::always_warm(), true, Some(0), 1_201),
+            DevVmResidencyDecision::Park
         );
     }
 
     #[test]
     fn activity_timestamp_round_trips_through_state_dir() {
-        let tmp = tempfile::tempdir().expect("create temporary dev vz state dir");
+        let tmp = tempfile::tempdir().expect("create temporary dev VM state dir");
 
-        touch_dev_vz_activity_at(tmp.path(), 55).expect("write dev vz activity timestamp");
+        touch_dev_vm_activity_at(tmp.path(), 55).expect("write dev VM activity timestamp");
 
-        assert_eq!(read_dev_vz_last_activity(tmp.path()), Some(55));
+        assert_eq!(read_dev_vm_last_activity(tmp.path()), Some(55));
     }
 }

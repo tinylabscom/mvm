@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Date:** 2026-06-22
 **Relates to:** [ADR-002](002-microvm-security-posture.md) §"Per-backend tier
-matrix", [Plan 98 — builder backend selection](../plans/98-vz-builder-vm.md),
+matrix", Plan 98 — builder backend selection,
 [Plan 166 — QEMU dev builder backend](../plans/166-qemu-dev-builder-backend.md)
 
 ## Context

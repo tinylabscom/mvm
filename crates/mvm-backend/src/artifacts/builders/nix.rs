@@ -57,7 +57,7 @@ use crate::compat::RootfsFormat;
 /// `timestamp_unix` is caller-supplied; pass `0` in tests to keep builds
 /// deterministic — do not call `SystemTime::now()` here.
 pub struct NixMicrovmBuilder<'a> {
-    /// Injected builder backend (libkrun / Vz / mock).
+    /// Injected builder backend (libkrun / LegacyMacos / mock).
     pub builder_vm: &'a dyn BuilderVm,
     /// Host path to the flake source (bind-mounted read-only at `/work`).
     pub flake_src: PathBuf,

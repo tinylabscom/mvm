@@ -199,7 +199,7 @@ impl FlowDirection {
 /// catch / I/O error / drop guard. `PolicyDropped` is the
 /// `FlowPolicy` hook returning `FlowAction::Drop` — the substrate
 /// enforcement plugs into. `Shutdown` covers graceful
-/// supervisor teardown (Vz Swift bridge cancellation, libkrun
+/// supervisor teardown (LegacyMacos Swift bridge cancellation, libkrun
 /// `exit()`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

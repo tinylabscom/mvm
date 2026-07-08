@@ -244,7 +244,7 @@ pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
 /// intact so its data survives. No-op for a directory share.
 ///
 /// The sidecar-lock guard from `ensure_persistent_volume_image` is
-/// released immediately: Apple Vz takes its own exclusive lock on a RW
+/// released immediately: the retired Apple virtualization backend took its own exclusive lock on a RW
 /// disk at start, and a daemon-launched workload can't hold a host-side
 /// guard for the VM's lifetime anyway. The guard's value is serializing
 /// concurrent *creation*, which this still does.

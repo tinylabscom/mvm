@@ -258,7 +258,7 @@ pub(in crate::commands) struct MachineRunArgs {
     #[arg(long)]
     pub force: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -676,7 +676,7 @@ pub(in crate::commands) struct MachineStartArgs {
     #[arg(skip)]
     pub quiet: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -717,7 +717,7 @@ pub(in crate::commands) struct MachineStartCmd {
     #[arg(long)]
     pub dry_run: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -1266,6 +1266,12 @@ fn machine_start_receipt_input(
 ) -> Result<MachineStartReceiptInput> {
     enforce_ssh_agent_profile(&spec.profile, spec.ssh_agent)?;
     let network_policy = super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    let selected_backend = AnyBackend::from_hypervisor(backend);
+    mvm_backend::workload_backend::require_vsock_only_workload_egress(
+        &selected_backend,
+        &network_policy,
+        "persistent workload boot",
+    )?;
     let _ = validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volumes = machine_start_volume_policy(spec)?;
     Ok(MachineStartReceiptInput {
@@ -1295,12 +1301,12 @@ fn machine_start_volume_summary(volumes: &[MachineStartVolumePolicy]) -> &'stati
     }
 }
 
-fn machine_start_preflight_summary(
+fn machine_start_preflight_summary_for_backend(
     spec: &MachineSpec,
     receipt: Option<&Path>,
+    backend: &str,
 ) -> Result<MachineStartPreflightSummary> {
-    let backend = super::shared::resolve_effective_hypervisor("firecracker");
-    let invocation = machine_start_receipt_input(spec, &backend)?;
+    let invocation = machine_start_receipt_input(spec, backend)?;
     let (memory_mib, mem_initial_mib) =
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let mut notes = vec![
@@ -1900,7 +1906,14 @@ fn already_running_notice(name: &str, json: bool) -> String {
 fn start_machine(args: MachineStartArgs) -> Result<()> {
     let mut spec = ensure_machine_spec_exists(&args.name)?;
     if args.dry_run {
-        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        let backend = args
+            .hypervisor
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
+        super::shared::reject_removed_hypervisor(&backend)?;
+        let summary =
+            machine_start_preflight_summary_for_backend(&spec, args.receipt.as_deref(), &backend)?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
@@ -1920,6 +1933,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         .as_deref()
         .map(String::from)
         .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
+    super::shared::reject_removed_hypervisor(&effective_hypervisor)?;
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let ssh_auth_sock = if spec.ssh_agent {
         Some(ssh_auth_sock_from_env()?)
@@ -1933,66 +1947,66 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
 
     // Direct-boot escape: kernel + rootfs supplied via env vars (test path only).
     // Skips OCI image resolution and the default-microvm build entirely.
-    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest) = if std::env::var(
-        "MVM_DIRECT_BOOT",
-    )
-    .as_deref()
-        == Ok("1")
-    {
-        let kernel = std::env::var("MVM_KERNEL_PATH")
-            .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_KERNEL_PATH"))?;
-        let rootfs = std::env::var("MVM_ROOTFS_PATH")
-            .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_ROOTFS_PATH"))?;
-        (
-            Some(kernel),
-            "direct-boot".to_string(),
-            std::path::PathBuf::from(rootfs),
-            "direct-boot".to_string(),
-        )
-    } else {
-        // Boot source: OCI image or pre-built manifest slot.
-        let (label, rootfs, digest) = if let Some(slot_hash) = &spec.manifest {
-            let (_, _vmlinux, _initrd, rootfs, rev) =
-                mvm::vm::template::lifecycle::template_artifacts_for_slot(slot_hash).with_context(
-                    || format!("loading manifest slot {slot_hash:?} for machine start"),
-                )?;
+    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest, boot_unpacked_root) =
+        if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
+            let kernel = std::env::var("MVM_KERNEL_PATH")
+                .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_KERNEL_PATH"))?;
+            let rootfs = std::env::var("MVM_ROOTFS_PATH")
+                .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_ROOTFS_PATH"))?;
             (
-                format!("manifest:{slot_hash}"),
+                Some(kernel),
+                "direct-boot".to_string(),
                 std::path::PathBuf::from(rootfs),
-                rev,
-            )
-        } else if let Some(image_ref) = &spec.image {
-            let cached = super::image::resolve_or_pull_run_image(
-                &super::image::oci_cache_root(),
-                image_ref,
-                false,
-            )?;
-            if cached.pulled {
-                let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
-                mvm_core::audit_emit!(
-                    ImageFetch,
-                    "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
-                    cached.reference,
-                    cached.resolved_digest,
-                    cached.provenance.layer_digests.len(),
-                    cached.provenance.trust_policy,
-                    cached.provenance.verification_status,
-                    auth_source
-                );
-            }
-            (
-                cached.reference.clone(),
-                cached.rootfs_path.clone(),
-                cached.resolved_digest.clone(),
+                "direct-boot".to_string(),
+                None,
             )
         } else {
-            bail!(
-                "machine {name:?} spec has neither image nor manifest — use `machine rm` to remove and recreate it",
-                name = spec.name
-            );
+            // Boot source: OCI image or pre-built manifest slot.
+            let (label, rootfs, digest, unpacked_root) = if let Some(slot_hash) = &spec.manifest {
+                let (_, _vmlinux, _initrd, rootfs, rev) =
+                    mvm::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
+                        .with_context(|| {
+                            format!("loading manifest slot {slot_hash:?} for machine start")
+                        })?;
+                (
+                    format!("manifest:{slot_hash}"),
+                    std::path::PathBuf::from(rootfs),
+                    rev,
+                    None,
+                )
+            } else if let Some(image_ref) = &spec.image {
+                let cached = super::image::resolve_or_pull_run_image(
+                    &super::image::oci_cache_root(),
+                    image_ref,
+                    false,
+                )?;
+                if cached.pulled {
+                    let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
+                    mvm_core::audit_emit!(
+                        ImageFetch,
+                        "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
+                        cached.reference,
+                        cached.resolved_digest,
+                        cached.provenance.layer_digests.len(),
+                        cached.provenance.trust_policy,
+                        cached.provenance.verification_status,
+                        auth_source
+                    );
+                }
+                (
+                    cached.reference.clone(),
+                    cached.rootfs_path.clone(),
+                    cached.resolved_digest.clone(),
+                    cached.unpacked_root.clone(),
+                )
+            } else {
+                bail!(
+                    "machine {name:?} spec has neither image nor manifest — use `machine rm` to remove and recreate it",
+                    name = spec.name
+                );
+            };
+            (None, label, rootfs, digest, unpacked_root)
         };
-        (None, label, rootfs, digest)
-    };
     // A `--kernel-pin` request overrides the image's own kernel with the
     // locally-built workload kernel (the canonical boot path for `vm rekernel`).
     // Direct-boot's explicit kernel always wins.
@@ -2005,6 +2019,7 @@ fn start_machine(args: MachineStartArgs) -> Result<()> {
         image_label: &boot_label,
         resolved_digest: &boot_digest,
         rootfs_path: &boot_rootfs,
+        unpacked_root: boot_unpacked_root.as_deref(),
         profile: &spec.profile,
         cpus: spec.cpus,
         memory_mib,
@@ -2074,10 +2089,6 @@ fn machine_start_audit_detail(input: &MachineStartReceiptInput) -> String {
 fn ssh_agent_proxy_listen_for_backend(vm_name: &str, backend: &str) -> SshAgentProxyListen {
     match backend {
         "firecracker" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
-            vm_name,
-            mvm_guest::vsock::SSH_AGENT_PORT,
-        )),
-        "vz" => SshAgentProxyListen::Uds(mvm_core::config::vm_vz_vsock_port_socket(
             vm_name,
             mvm_guest::vsock::SSH_AGENT_PORT,
         )),
@@ -2387,7 +2398,14 @@ fn run_persistent(
 
     // Dry-run: explain the effective start without persisting or booting.
     if args.dry_run {
-        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        let backend = args
+            .hypervisor
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
+        super::shared::reject_removed_hypervisor(&backend)?;
+        let summary =
+            machine_start_preflight_summary_for_backend(&spec, args.receipt.as_deref(), &backend)?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
@@ -3023,10 +3041,7 @@ mod tests {
             summary.receipt_network_posture,
             summary.preflight_network_posture
         );
-        assert_eq!(
-            summary.receipt_egress_enforcement,
-            "firecracker:l4-host-port"
-        );
+        assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
         assert_eq!(summary.preflight_command, summary.receipt_command);
         assert!(summary.preflight_command.contains("argv_len=3"));
         assert!(!summary.preflight_command.contains("echo ok"));
@@ -3687,7 +3702,7 @@ mod tests {
         let run = parse_owned_run(&sdk_args)
             .expect("sdk args parse as CLI machine run")
             .into_run_args();
-        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "hvf")
             .expect("CLI preflight accepts SDK args");
 
         assert!(summary.dry_run);
@@ -3714,7 +3729,7 @@ mod tests {
         let run = parse_owned_run(&sdk_args)
             .expect("sdk args parse as CLI machine run")
             .into_run_args();
-        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "hvf")
             .expect("CLI receipt input accepts SDK args");
 
         assert_eq!(
@@ -3726,10 +3741,7 @@ mod tests {
             summary.receipt_network_posture,
             summary.preflight_network_posture
         );
-        assert_eq!(
-            summary.receipt_egress_enforcement,
-            "firecracker:l4-host-port"
-        );
+        assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
     }
 
     #[test]
@@ -3755,7 +3767,7 @@ mod tests {
         let run = parse_owned_run(&sdk_args)
             .expect("sdk args parse as CLI machine run")
             .into_run_args();
-        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "hvf")
             .expect("CLI receipt input accepts SDK args");
 
         assert_sdk_run_admission_inputs(summary);
@@ -3767,7 +3779,7 @@ mod tests {
         let run = parse_owned_run(&sdk_args)
             .expect("Python/TypeScript SDK fixture parses as CLI machine run")
             .into_run_args();
-        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "hvf")
             .expect("CLI preflight accepts Python/TypeScript SDK fixture");
 
         assert!(summary.dry_run);
@@ -3785,7 +3797,7 @@ mod tests {
         let run = parse_owned_run(&sdk_args)
             .expect("Python/TypeScript SDK fixture parses as CLI machine run")
             .into_run_args();
-        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "hvf")
             .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 
         assert_eq!(
@@ -3797,10 +3809,7 @@ mod tests {
             summary.receipt_network_posture,
             summary.preflight_network_posture
         );
-        assert_eq!(
-            summary.receipt_egress_enforcement,
-            "firecracker:l4-host-port"
-        );
+        assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
     }
 
     #[test]
@@ -3809,7 +3818,7 @@ mod tests {
         let run = parse_owned_run(&sdk_args)
             .expect("Python/TypeScript SDK fixture parses as CLI machine run")
             .into_run_args();
-        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "hvf")
             .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 
         assert_sdk_run_admission_inputs(summary);
@@ -4412,9 +4421,12 @@ ssh_agent = true
             health_check: None,
         };
 
-        let summary =
-            machine_start_preflight_summary(&spec, Some(Path::new("/tmp/web.receipt.json")))
-                .expect("preflight summary");
+        let summary = machine_start_preflight_summary_for_backend(
+            &spec,
+            Some(Path::new("/tmp/web.receipt.json")),
+            "hvf",
+        )
+        .expect("preflight summary");
         assert_eq!(
             summary.invocation.network_posture,
             "allow-list:api.example.com:443"
@@ -4454,7 +4466,8 @@ ssh_agent = true
             health_check: None,
         };
 
-        let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
+        let summary = machine_start_preflight_summary_for_backend(&spec, None, "hvf")
+            .expect("preflight summary");
         assert_eq!(summary.invocation.auth.mode, "ssh-agent-socket");
         let json = serde_json::to_string(&summary).expect("summary json");
         assert!(json.contains("ssh-agent-socket"));
@@ -4526,7 +4539,7 @@ ssh_agent = true
             last_started_at: None,
             health_check: None,
         };
-        let input = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
+        let input = machine_start_receipt_input(&spec, "hvf").expect("receipt input");
         assert_eq!(input.auth.mode, "ssh-agent-socket");
         assert_eq!(
             machine_start_plan_auth_policy(&spec),
@@ -4635,13 +4648,6 @@ ssh_agent = true
             (
                 "libkrun",
                 mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
-            ),
-            (
-                "vz",
-                mvm_core::config::vm_vz_vsock_port_socket(
-                    "devbox",
-                    mvm_guest::vsock::SSH_AGENT_PORT,
-                ),
             ),
         ];
 

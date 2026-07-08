@@ -17,7 +17,7 @@ fn main() {
 }
 
 /// Ad-hoc entitlement applied at first launch — `Hypervisor.framework` rejects an
-/// unsigned process. Hypervisor-only (vs the vz supervisor's virtualization key).
+/// unsigned process. Hypervisor-only (vs the legacy_macos supervisor's virtualization key).
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const HVF_ENTITLEMENTS_PLIST: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
     <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \
@@ -43,7 +43,7 @@ fn exe_has_hypervisor_entitlement(exe: &std::path::Path) -> bool {
 /// bin unsigned and HVF rejects it otherwise. `MVM_HVF_SIGNED` breaks the exec
 /// loop; `exec()` preserves the pid + the stdin config pipe. A file lock
 /// serializes concurrent launches (codesign --force rewrites the shared binary
-/// in place). Mirrors `mvm-vz-supervisor`'s `ensure_self_signed`.
+/// in place). Mirrors `mvm-legacy-macos-supervisor`'s `ensure_self_signed`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn ensure_self_signed() {
     use std::os::fd::AsRawFd;
@@ -229,6 +229,7 @@ fn main() -> anyhow::Result<()> {
                     .map(|c| (c.guest_port, c.host_socket.clone()))
                     .collect(),
                 cmdline: cfg.cmdline.clone(),
+                cmdline_extra: cfg.cmdline_extra.clone(),
                 mem_mib: cfg.memory_mib,
                 // Dev hook: `MVM_HVF_VIRTIOFS_ROOT=<dir>` boots a virtiofs root without
                 // the full run-path gate wiring, for live-mount iteration on HVF.

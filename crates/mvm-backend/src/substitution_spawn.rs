@@ -158,7 +158,7 @@ pub struct SubstitutionSpawnParams<'a> {
     /// Per-destination redaction policy from the signed plan.
     pub redaction: &'a mvm_core::policy::RedactionPolicy,
     /// Backend-shaped guest→host channel: `Vsock` (FC/QEMU) or `Uds`
-    /// (libkrun/vz, the per-VM socket the VMM proxies).
+    /// (libkrun/legacy_macos, the per-VM socket the VMM proxies).
     pub transport: EndpointTransport,
     /// `Some(addr)` ⇒ also run the transparent HTTP terminator on that host TCP
     /// addr (FC nft REDIRECT feeds it). `None` on slirp / in-process VMMs.
@@ -187,7 +187,7 @@ fn build_endpoint_config_json(params: &SubstitutionSpawnParams<'_>) -> serde_jso
         "redaction": serde_json::to_value(params.redaction)
             .expect("RedactionPolicy serializes to JSON"),
         // Backend-shaped guest→host channel: FC/QEMU dial the per-port vsock
-        // (Vsock); libkrun/vz route through the per-VM UDS the VMM proxies (Uds).
+        // (Vsock); libkrun/legacy_macos route through the per-VM UDS the VMM proxies (Uds).
         "transport": serde_json::to_value(&params.transport)
             .expect("EndpointTransport serializes to JSON"),
         // Which egress protocol the relayed stream carries. Always emit: an
@@ -319,7 +319,7 @@ fn read_handshake_line(
 /// `start` is wiring the VM and dropped on any early-return so the
 /// decrypted-secret process can't outlive a failed launch. Defused once the VM
 /// is fully up (the normal `stop` path then owns teardown). Shared by the
-/// libkrun and vz backends — one definition so the spawn/reap moat can't drift.
+/// libkrun and legacy_macos backends — one definition so the spawn/reap moat can't drift.
 pub(crate) struct EndpointGuard {
     /// `Some(name)` while armed; `None` once defused. Read by backend tests to
     /// assert the no-secrets path yields a no-op guard.
@@ -397,7 +397,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    // The libkrun/vz transport: `spawn_substitution_endpoint` must serialize the
+    // The libkrun/legacy_macos transport: `spawn_substitution_endpoint` must serialize the
     // `Uds` variant into the config JSON the endpoint bin parses
     // (`{"kind":"uds","path":...}`). Drive it with a stub bin (via
     // `MVM_SUBSTITUTION_ENDPOINT_PATH`) that copies its stdin config to a file

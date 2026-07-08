@@ -126,8 +126,8 @@ fn parse_env_residency(raw: &str) -> Option<ResidencyPolicy> {
     }
 }
 
-fn host_default_for(is_vz_default_tier: bool) -> ResidencyPolicy {
-    if is_vz_default_tier {
+fn host_default_for(is_hvf_default_tier: bool) -> ResidencyPolicy {
+    if is_hvf_default_tier {
         ResidencyPolicy::always_warm()
     } else {
         ResidencyPolicy::parked()
@@ -156,7 +156,7 @@ pub fn resolve_residency() -> (ResidencyPolicy, ResidencySource) {
             "[mvm] warning: unrecognised {MVM_RESIDENCY_ENV}={raw:?} (expected warm|parked|cold); using auto-detect"
         );
     }
-    let is_tier = crate::platform::current().is_vz_default_tier();
+    let is_tier = crate::platform::current().is_hvf_default_tier();
     (host_default_for(is_tier), ResidencySource::AutoDetect)
 }
 
@@ -211,7 +211,7 @@ mod tests {
     }
 
     #[test]
-    fn host_default_is_warm_on_vz_tier_parked_otherwise() {
+    fn host_default_is_warm_on_hvf_default_tier_parked_otherwise() {
         assert_eq!(host_default_for(true), ResidencyPolicy::always_warm());
         assert_eq!(host_default_for(false), ResidencyPolicy::parked());
     }

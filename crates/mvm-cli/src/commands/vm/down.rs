@@ -20,9 +20,9 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     // Platform default for VMs with no pid-file marker. On macOS 26+ Apple
     // Silicon the workload default is the HVF VMM (matches
-    // `resolve_effective_hypervisor` / `auto_select`), not Vz.
+    // `resolve_effective_hypervisor` / `auto_select`), not LegacyMacos.
     let platform_default = || {
-        if mvm_core::platform::current().is_vz_default_tier() {
+        if mvm_core::platform::current().is_hvf_default_tier() {
             AnyBackend::from_hypervisor("hvf")
         } else {
             AnyBackend::default_backend()

@@ -1,4 +1,4 @@
-//! Rust-native `mvm-vz-supervisor` correctness.
+//! Rust-native `mvm-legacy-macos-supervisor` correctness.
 //!
 //! Originally a Swift-vs-Rust parity gate; the Swift supervisor was removed
 //! (it self-deadlocked on async VZ control ops — its
@@ -20,13 +20,13 @@
 //! bootable kernel+rootfs. Those come from the environment so the test is a
 //! no-op skip on a machine without them (a plain `cargo test` host, CI Linux,
 //! GitHub macOS runners that lack Hypervisor.framework) and runs for real on the
-//! self-hosted `vz-macos-26` runner or a dev Mac that exports them:
+//! self-hosted `legacy_macos-macos-26` runner or a dev Mac that exports them:
 //!
 //! ```text
-//! MVM_VZ_PARITY_RUST_BIN=/abs/path/to/mvm-vz-supervisor   # cargo --bin output, codesigned
-//! MVM_VZ_PARITY_KERNEL=/abs/path/to/vmlinux               # uncompressed
-//! MVM_VZ_PARITY_ROOTFS=/abs/path/to/rootfs.ext4
-//! MVM_VZ_PARITY_CMDLINE="console=hvc0 root=/dev/vda rw init=/bin/busybox sleep 1000000"  # long-lived guest
+//! MVM_LEGACY_MACOS_PARITY_RUST_BIN=/abs/path/to/mvm-legacy-macos-supervisor   # cargo --bin output, codesigned
+//! MVM_LEGACY_MACOS_PARITY_KERNEL=/abs/path/to/vmlinux               # uncompressed
+//! MVM_LEGACY_MACOS_PARITY_ROOTFS=/abs/path/to/rootfs.ext4
+//! MVM_LEGACY_MACOS_PARITY_CMDLINE="console=hvc0 root=/dev/vda rw init=/bin/busybox sleep 1000000"  # long-lived guest
 //! ```
 //!
 //! Slices: boot + graceful-stop; vsock proxy round-trip; control verbs
@@ -39,20 +39,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mvm_build::vz::{
+use mvm_build::legacy_supervisor_config::{
     DiskConfig, KernelConfig, ResourceConfig, StartupMode, SupervisorConfig, VsockConfig,
 };
 
-const RUST_BIN: &str = "MVM_VZ_PARITY_RUST_BIN";
-const KERNEL: &str = "MVM_VZ_PARITY_KERNEL";
-const ROOTFS: &str = "MVM_VZ_PARITY_ROOTFS";
+const RUST_BIN: &str = "MVM_LEGACY_MACOS_PARITY_RUST_BIN";
+const KERNEL: &str = "MVM_LEGACY_MACOS_PARITY_KERNEL";
+const ROOTFS: &str = "MVM_LEGACY_MACOS_PARITY_ROOTFS";
 /// Guest vsock port to round-trip through the proxy (default 5252, the agent).
-const VSOCK_PORT: &str = "MVM_VZ_PARITY_VSOCK_PORT";
+const VSOCK_PORT: &str = "MVM_LEGACY_MACOS_PARITY_VSOCK_PORT";
 /// Path to a file of request bytes the guest answers on that port (e.g. a
 /// captured agent ping). The gate stays protocol-agnostic — it asserts the two
 /// supervisors return *identical* replies to identical bytes, not what the bytes
 /// mean. Without it the vsock round-trip parity test skips.
-const VSOCK_REQUEST: &str = "MVM_VZ_PARITY_VSOCK_REQUEST";
+const VSOCK_REQUEST: &str = "MVM_LEGACY_MACOS_PARITY_VSOCK_REQUEST";
 
 /// Default workload kernel cmdline (kernel-cmdline lockdown). The backend
 /// constructs this; we mirror it so the gate boots the same shape the real
@@ -65,7 +65,7 @@ const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 /// this to a long-lived PID 1 (e.g.
 /// `console=hvc0 root=/dev/vda rw init=/bin/busybox sleep 1000000`) on the live
 /// runner so the guest stays up across the sequence.
-const CMDLINE_OVERRIDE: &str = "MVM_VZ_PARITY_CMDLINE";
+const CMDLINE_OVERRIDE: &str = "MVM_LEGACY_MACOS_PARITY_CMDLINE";
 
 /// Resolve the boot cmdline: [`CMDLINE_OVERRIDE`] if exported, else [`DEFAULT_CMDLINE`].
 fn cmdline() -> String {
@@ -81,7 +81,7 @@ fn build_boot_config(name: &str, kernel: &str, rootfs: &str, state_dir: &Path) -
     SupervisorConfig {
         name: name.to_string(),
         vm_state_dir: state_dir.to_string_lossy().into_owned(),
-        pid_file_name: Some("vz.pid".to_string()),
+        pid_file_name: Some("legacy-macos.pid".to_string()),
         kernel: KernelConfig {
             path: kernel.to_string(),
             cmdline: cmdline(),
@@ -127,7 +127,7 @@ fn build_boot_config(name: &str, kernel: &str, rootfs: &str, state_dir: &Path) -
 }
 
 /// One control-socket round-trip: write `verb\n`, read one line back. A
-/// std-only reimplementation of `mvm_backend::vz_control::send_command` so this
+/// std-only reimplementation of `mvm_backend::legacy_supervisor_control::send_command` so this
 /// VZ-free crate doesn't pull in `mvm-backend` (and its VZ link) just to talk to
 /// a unix socket. Rejects an embedded newline before connecting — a verb with a
 /// `\n` would be read as two commands.
@@ -232,7 +232,10 @@ fn stop_and_reap(child: &mut Child, grace: Duration) -> Option<i32> {
 
 /// Unique per-run scratch state dir for a supervisor under test.
 fn make_state_dir(label: &str) -> std::io::Result<PathBuf> {
-    let dir = std::env::temp_dir().join(format!("mvm-vz-parity-{label}-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!(
+        "mvm-legacy_macos-parity-{label}-{}",
+        std::process::id()
+    ));
     std::fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -256,7 +259,7 @@ fn spawn_with_config(bin: &Path, config: &SupervisorConfig) -> std::io::Result<C
 }
 
 /// Copy the source rootfs into `state_dir` as a writable image and return its
-/// path. Vz refuses a read-write disk attachment backed by a read-only file (the
+/// path. LegacyMacos refuses a read-write disk attachment backed by a read-only file (the
 /// cached artifacts are mode 0444 → "storage device attachment is invalid"), and
 /// two supervisors must never share one mutable disk — so each probe boots from
 /// its own copy.
@@ -404,7 +407,7 @@ struct SaveRestoreOutcome {
 
 /// Save/restore parity: boot one supervisor, `SAVE` a snapshot, stop it, then
 /// spawn a fresh supervisor in `Restore` mode against that snapshot and check it
-/// reaches running. Contract (see `vz.rs`): `SAVE <path>` is a control verb that
+/// reaches running. Contract (see `legacy_macos.rs`): `SAVE <path>` is a control verb that
 /// also writes a `<path>.machine-id` sidecar; RESTORE is a *startup mode*, not a
 /// verb. The phases use
 /// separate `boot/` and `restore/` state subdirs so their sockets/pid files
@@ -514,7 +517,7 @@ fn boot_config_matches_the_decoded_contract() {
         "Boot is the default and is skipped"
     );
     assert!(json.contains("\"control_socket_path\""));
-    assert_eq!(cfg.resolved_pid_file(), dir.join("vz.pid"));
+    assert_eq!(cfg.resolved_pid_file(), dir.join("legacy-macos.pid"));
 }
 
 #[test]
@@ -650,7 +653,7 @@ fn vsock_roundtrip_rust_correct() {
 /// self-deadlocked on async VZ ops — `synchronousVZCall`
 /// blocked the VM's serial queue awaiting a completion dispatched to that same
 /// queue. The Rust serial-queue→tokio bridge fixes it.) Set
-/// `MVM_VZ_PARITY_CMDLINE` to a long-lived guest so the VM stays up across the
+/// `MVM_LEGACY_MACOS_PARITY_CMDLINE` to a long-lived guest so the VM stays up across the
 /// sequence.
 #[test]
 fn control_verbs_rust_correct() {
@@ -675,7 +678,7 @@ fn control_verbs_rust_correct() {
     );
 }
 
-/// Rust save/restore correctness. Needs `MVM_VZ_PARITY_CMDLINE` set to a
+/// Rust save/restore correctness. Needs `MVM_LEGACY_MACOS_PARITY_CMDLINE` set to a
 /// long-lived guest (macOS 14+).
 #[test]
 fn save_restore_rust_correct() {

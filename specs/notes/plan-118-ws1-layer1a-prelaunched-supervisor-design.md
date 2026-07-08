@@ -128,7 +128,7 @@ v1); base compatibility (v1 standbys pre-load the default kernel; non-default �
 ## References
 
 - `specs/plans/118-supervisor-standby-pool-and-live-bench.md` PR-10b — authoritative design.
-- `specs/plans/159-vz-inspired-macos-dx.md` WS-1 — the warm-pool parent.
+- `removed legacy macOS archival spec` WS-1 — the warm-pool parent.
 - `crates/mvm-vm-host/src/bin/mvm-libkrun-supervisor.rs` — the bin (legacy + bridge paths).
 - `crates/deps/libkrun-sys/src/lib.rs:1293` — `SupervisorConfig` (+ the existing re-verify in `run_with_bridge`).
 - `reference_libkrun_gotchas` — `start_enter` exits the process (one supervisor per VM).

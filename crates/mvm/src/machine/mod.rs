@@ -306,22 +306,21 @@ mod tests {
     }
 
     #[test]
-    fn select_backend_fails_closed_for_host_vsock_proxy_until_brokers_exist() {
-        // No backend advertises the broker capabilities yet, so a brokered-net
-        // machine is rejected rather than degraded onto a guest-NIC path.
+    fn select_backend_picks_capable_host_vsock_proxy_backend() {
+        // Brokered networking can only select a backend that advertises the
+        // full no-guest-NIC host-vsock-proxy contract.
         let machine = Machine::builder()
             .image("alpine")
             .network(NetworkMode::HostVsockProxy)
             .build()
             .unwrap();
-        match machine.select_backend() {
-            Ok(_) => panic!("host-vsock-proxy has no capable backend yet; must fail closed"),
-            Err(err) => assert!(
-                err.shortfalls
-                    .iter()
-                    .all(|(_, m)| m.contains(&"host_vsock_proxy"))
-            ),
-        }
+        let backend = machine
+            .select_backend()
+            .expect("host-vsock-proxy should select a capable backend");
+        let caps = backend.capabilities();
+        assert!(caps.vsock);
+        assert!(caps.host_vsock_proxy);
+        assert!(caps.no_guest_nic);
     }
 
     #[test]

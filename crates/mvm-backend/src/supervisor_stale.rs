@@ -1,6 +1,6 @@
-//! Stale-supervisor hint for Vz early-exit diagnostics.
+//! Stale-supervisor hint for LegacyMacos early-exit diagnostics.
 //!
-//! Vz source-checkout launches normally rebuild helpers before spawn. This
+//! LegacyMacos source-checkout launches normally rebuild helpers before spawn. This
 //! module only appends a fallback hint when a supervisor exits early and its
 //! mtime still predates the running `mvmctl`.
 

@@ -1,6 +1,6 @@
 //! Cfg-free egress-substitution plan decode shared by every workload backend.
 //!
-//! libkrun, vz, and the Linux-gated Firecracker path (`microvm.rs`) all decode
+//! libkrun, legacy_macos, and the Linux-gated Firecracker path (`microvm.rs`) all decode
 //! the admitted plan's secret bindings through this one function — no OS gate,
 //! no per-backend copy.
 

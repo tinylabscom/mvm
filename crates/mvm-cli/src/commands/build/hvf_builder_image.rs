@@ -46,7 +46,7 @@ fn is_cached(out_dir: &Path) -> bool {
 /// Resolve the HVF-bootable builder image pair `(kernel, rootfs)`.
 ///
 /// - Reads the base `vmlinux` + `rootfs.ext4` from `builder_vm_cache_dir()/<arch>/`
-///   (the same source the libkrun/vz builders use).
+///   (the same source the libkrun builder uses).
 /// - Injects `mvm-host-vm-init` into a copy of the base rootfs using the
 ///   vsock-less HVF patcher VM.
 /// - Caches the result under `builder_vm_cache_dir()/hvf/<key>/`.

@@ -173,11 +173,11 @@ them here:
 
 - [ADR-002](002-microvm-security-posture.md) — security posture; one-guest-one-workload, claim numbering
 - [ADR-041](041-signed-audited-execution-plans.md) — claim 8, signed/audited `ExecutionPlan` (per-run admission)
-- [ADR-056](056-vz-backend.md) — Vz backend (why we stay on Virtualization.framework)
+- ADR-056 — Vz backend (why we stay on Virtualization.framework)
 - [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) §W6.A — no-bypass invariant, TSI removed
 - [ADR-071](071-stage0-bootstrap-trust-model.md) — bundled-kernel/embedded-init extraction shape
 - [Plan 140](../plans/140-snapshot-restore-productionization.md) — restore productionization (inherits page-cache warmth)
 - [Plan 148](../plans/148-microvm-fork-fanout-and-branch.md) — fork-fanout of fresh children from a paused base
-- [Plan 152](../plans/152-rust-native-vz-and-init-lifecycle-parity.md) — Rust-native VZ supervisor (HVF-direct data point)
+- Plan 152 — Rust-native VZ supervisor (HVF-direct data point)
 - [Plan 157](../plans/157-warmed-parent-recipes.md) — warmed-parent producer (page-cache follow-up lands here)
-- [Plan 159](../plans/159-vz-inspired-macos-dx.md) — vz-inspired macOS DX (warm path WS-1)
+- Plan 159 — vz-inspired macOS DX (warm path WS-1)

@@ -83,7 +83,7 @@
 
 ### Task 5: Docs — comments, ADR-056 addendum, REFACTOR-STATUS
 
-**Files:** `crates/mvm-backend/src/vz_control.rs:1-7`, `crates/mvm-hostd/src/supervisor/gateway_bridge.rs:18`, `Cargo.toml:17,69,326`, `specs/adrs/056-vz-backend.md`, `specs/REFACTOR-STATUS.md`, `.github/workflows/{ci-full,security}.yml`.
+**Files:** `crates/mvm-backend/src/vz_control.rs:1-7`, `crates/mvm-hostd/src/supervisor/gateway_bridge.rs:18`, `Cargo.toml:17,69,326`, `removed legacy macOS archival spec`, `specs/REFACTOR-STATUS.md`, `.github/workflows/{ci-full,security}.yml`.
 
 - [ ] **Step 1:** Fix stale "Swift" comments: `vz_control.rs` header ("Rust client for the Swift `mvm-vz-supervisor`" → "client for the supervisor control socket"); `gateway_bridge.rs:18` ("Splice happens in Swift (`Network.swift`)" → "in-process in the Rust supervisor"); `Cargo.toml` comments at :17/:69/:326 (drop "Swift `mvm-vz-supervisor`").
 - [ ] **Step 2:** CI — `ci-full.yml`: in the vz lane (~637-641, ~756-782) remove `MVM_VZ_BUILD_SUPERVISOR: "1"`; if the lane needs the supervisor, replace the Swift-build with `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`; update the `crates/mvm-vz-supervisor/**` path-filter trigger to `crates/mvm-vm-host/**`. `security.yml:290-295`: update the comment (the fuzz target is the Rust `SupervisorConfig`; drop the "Swift binary" framing + the Swift-corpus-equivalence note). **Read each lane fully before editing** to keep YAML valid.

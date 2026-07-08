@@ -10,10 +10,9 @@ Cold mode means a workload is not currently consuming a running guest, but it ha
 | Path | Backend | Commands | Status |
 | --- | --- | --- | --- |
 | Sealed instance snapshot | Firecracker | `mvmctl pause`, `mvmctl resume`, `mvmctl snapshot ls`, `mvmctl snapshot rm` | Shipped for the Firecracker snapshot path. |
-| Memory checkpoint (vm-full) | Vz | `mvmctl checkpoint create --class vm-full`, `mvmctl checkpoint restore`, `mvmctl checkpoint ls`, `mvmctl checkpoint rm` | Shipped on supported macOS versions. |
 | Pool instance sleep | Firecracker pool lifecycle | internal pool lifecycle APIs | Implemented in pool lifecycle; public docs should stay tied to the CLI surface. |
 
-Other backends may support stop/start without machine-state recovery. Do not assume snapshot or checkpoint support unless the active backend reports it.
+Other backends may support stop/start without machine-state recovery. Do not assume snapshot or checkpoint support unless the active backend reports it and the docs name that backend explicitly.
 
 ## Firecracker pause and resume
 
@@ -40,36 +39,14 @@ mvmctl snapshot ls
 mvmctl snapshot rm agent-sandbox
 ```
 
-## Vz memory checkpoints
+## Other backends
 
-On supported macOS hosts, Vz memory checkpoints capture full guest state:
-
-```sh
-mvmctl checkpoint create agent-sandbox --class vm-full
-mvmctl checkpoint restore agent-sandbox --name <checkpoint-name>
-```
-
-`checkpoint create` pauses the VM, saves machine state and memory to the checkpoint directory, and records the content hash in the audit chain. `checkpoint restore` re-hashes the checkpoint content and records whether it matches the prior chain entry before restoring.
-
-The restore proceeds even when the checkpoint hash is not in the local chain or has drifted, because operators may transfer checkpoints between hosts. The audit entry labels that result so the operator can review it.
-
-List and remove checkpoints:
-
-```sh
-mvmctl checkpoint ls
-mvmctl checkpoint rm agent-sandbox --name <checkpoint-name>
-```
-
-Fork a checkpoint to a new identity (new VM name, same state):
-
-```sh
-mvmctl checkpoint fork agent-sandbox --name <checkpoint-name> --into new-sandbox
-```
+Current macOS backends do not publish a user-facing full-memory checkpoint contract in the public docs. Until HVF or libkrun carries a documented restore path with explicit integrity semantics, treat cold-mode recovery as Firecracker-specific at the CLI/docs layer and name any backend-specific experiments separately.
 
 ## Security implications
 
 - Snapshot files contain guest memory and runtime state. Treat them as sensitive.
-- Restore integrity is backend-specific: Firecracker uses the sealed instance envelope; Vz uses audit-chain hash comparison.
+- Restore integrity is backend-specific: Firecracker uses the sealed instance envelope.
 - Deleting a snapshot removes the recovery artifact but does not by itself prove storage-level erasure.
 - Snapshots can preserve credentials or derived tokens that existed inside the guest at snapshot time.
 

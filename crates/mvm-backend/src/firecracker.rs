@@ -395,7 +395,7 @@ impl crate::checkpoint::VmFullControl for FcVmFullControl {
 ///    `warm_restore_instance_from_path` finds the right filename.
 /// 2. Calls `warm_restore_instance_from_path(child_vm_name, child_dir_str, [0u8; GENID_BYTES])`.
 ///    The VMGenID token is zeroed — the fork caller delivers the real grant/token
-///    over vsock after `restore_fork` returns (mirrors the Vz fork path).
+///    over vsock after `restore_fork` returns (mirrors the LegacyMacos fork path).
 pub struct FcForkRestorer;
 
 impl crate::checkpoint::ForkVmFullRestorer for FcForkRestorer {

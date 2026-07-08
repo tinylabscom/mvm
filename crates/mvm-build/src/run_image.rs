@@ -11,15 +11,19 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::oci_runtime_inject::MvmRuntimeBinaries;
+use crate::guest_agent_build::GuestRuntimeBinaryBytes;
+use crate::oci_runtime_inject::{MvmRuntimeBinaries, OciEntrypointConfig};
 use crate::rootfs::MaterializeExt4Input;
 
-/// Guest-agent binaries (`mvm-guest-agent` + `mvm-guest-netinit`) embedded in
-/// the host binary at build time — the end-user fallback for a shipped mvmctl
-/// with no source checkout to cross-compile from.
+/// Guest runtime binaries embedded in the host binary at build time — the
+/// end-user fallback for a shipped mvmctl with no source checkout to
+/// cross-compile from.
 pub struct PrebuiltGuestBinaries<'a> {
+    pub oci_init: &'a [u8],
     pub agent: &'a [u8],
     pub netinit: &'a [u8],
+    pub egress_client: &'a [u8],
+    pub entrypoint_runner: &'a [u8],
 }
 
 /// Inject the mvm runtime into `unpacked_root`, materialize it into `output` (a
@@ -36,10 +40,11 @@ pub fn inject_and_materialize(
     unpacked_root: &Path,
     output: &Path,
     label: &str,
+    entrypoint: Option<&OciEntrypointConfig>,
     prebuilt: Option<PrebuiltGuestBinaries<'_>>,
 ) -> Result<()> {
     let bins = resolve_guest_binaries(cache_root, prebuilt)?;
-    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins)
+    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint)
         .context("inject mvm runtime into OCI rootfs")?;
 
     // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
@@ -95,7 +100,16 @@ fn resolve_guest_binaries(
 
     if let Some(p) = prebuilt {
         return crate::guest_agent_build::install_prebuilt_guest_binaries(
-            p.agent, p.netinit, cache_root, version, arch,
+            GuestRuntimeBinaryBytes {
+                oci_init: p.oci_init,
+                agent: p.agent,
+                netinit: p.netinit,
+                egress_client: p.egress_client,
+                entrypoint_runner: p.entrypoint_runner,
+            },
+            cache_root,
+            version,
+            arch,
         )
         .context("install the embedded guest agent binaries");
     }

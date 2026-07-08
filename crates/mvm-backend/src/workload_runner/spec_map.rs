@@ -105,7 +105,7 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
 }
 
 /// Build the per-port (port, host-UDS) list for the interactive console data
-/// range, rooted under `<state_dir>/vsock/` to match the Vz socket convention.
+/// range, rooted under `<state_dir>/vsock/` to match the LegacyMacos socket convention.
 /// Returns an empty vec when `dev_console` is false (claim 15: sealed prod
 /// boots carry no console listeners).
 pub fn console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<(u32, PathBuf)> {
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn console_data_sockets_paths_follow_vz_convention() {
+    fn console_data_sockets_paths_follow_legacy_macos_convention() {
         use mvm_guest::vsock::CONSOLE_PORT_BASE;
         let state_dir = Path::new("/state/myvm");
         let sockets = console_data_sockets(state_dir, true);

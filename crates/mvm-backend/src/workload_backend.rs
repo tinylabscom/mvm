@@ -6,26 +6,20 @@ use crate::backend::{AnyBackend, FirecrackerBackend};
 use crate::hvf_backend::HvfBackend;
 use crate::libkrun::LibkrunBackend;
 use crate::mock::MockBackend;
-use crate::vz::VzBackend;
 use anyhow::{Result, anyhow};
-use mvm_core::vm_backend::VmBackend;
+use mvm_core::network_policy::NetworkPolicy;
+use mvm_core::vm_backend::{RequiredCapabilities, VmBackend};
 
 /// Declares how a workload backend carries the egress secret-substitution
 /// channel. The shared launch funnel interprets this to spawn the per-VM
 /// substitution endpoint; the backend only declares the mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EgressSubstitutionTransport {
-    /// Linux Firecracker: the guest's :80/:443 is steered to a host TCP
-    /// terminator via an nft PREROUTING REDIRECT; the funnel computes the
-    /// per-slot terminator address and installs the redirect post-boot.
-    NftTerminator,
-    /// macOS rvproxy-native path: the guest still has a proxy-aware vsock/UDS
-    /// channel, and ordinary `:80/:443` TCP is intercepted by the native gateway
-    /// and forwarded to the same host terminator.
-    RvproxyTransparentTerminator,
-    /// Proxy-aware channel only: the guest dials the substitution port over
-    /// vsock, bridged to a host unix socket; no transparent `:80/:443` leg.
-    VsockUdsChannel,
+    /// The guest's only workload egress path is the host-vsock proxy gate on
+    /// `EGRESS_PORT`: raw SOCKS5 (`mvm-egress-client`) for secret-free traffic,
+    /// or WireRequest substitution for secret-bearing traffic. No guest NIC and
+    /// no transparent `:80/:443` interception leg.
+    VsockHostProxy,
     /// This backend does not run egress substitution (the mock test double).
     None,
 }
@@ -34,15 +28,6 @@ impl EgressSubstitutionTransport {
     /// Whether this transport can carry proxy-aware substitution requests.
     pub fn supports_proxy_aware_substitution(self) -> bool {
         !matches!(self, Self::None)
-    }
-
-    /// Whether this transport can transparently intercept ordinary guest
-    /// `:80`/`:443` egress and deliver it to the host terminator.
-    pub fn supports_transparent_terminator(self) -> bool {
-        matches!(
-            self,
-            Self::NftTerminator | Self::RvproxyTransparentTerminator
-        )
     }
 }
 
@@ -55,27 +40,22 @@ pub trait WorkloadBackend: VmBackend {
 
 impl WorkloadBackend for FirecrackerBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        EgressSubstitutionTransport::NftTerminator
+        EgressSubstitutionTransport::VsockHostProxy
     }
 }
+
 impl WorkloadBackend for LibkrunBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        EgressSubstitutionTransport::RvproxyTransparentTerminator
+        EgressSubstitutionTransport::VsockHostProxy
     }
 }
-impl WorkloadBackend for VzBackend {
-    fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        EgressSubstitutionTransport::VsockUdsChannel
-    }
-}
+
 impl WorkloadBackend for HvfBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        // Proxy-aware substitution over the vsock gateway: the guest dials the
-        // egress port, the hvf VMM's bridge enforces claim-10 then relays to
-        // the per-VM endpoint (claims 12/13). No transparent :80/:443 terminator.
-        EgressSubstitutionTransport::VsockUdsChannel
+        EgressSubstitutionTransport::VsockHostProxy
     }
 }
+
 // `MockBackend` is the hermetic lifecycle test double — it carries no real
 // workload, so it stands in for a workload backend on the admitted path in
 // tests. `QemuBackend` (a real dev/test VMM) is deliberately NOT a
@@ -88,8 +68,7 @@ impl WorkloadBackend for MockBackend {
 
 /// The single boundary the admitted launch path goes through. Returns the
 /// backend as `&dyn WorkloadBackend`, or a typed refusal for backends not
-/// permitted to carry an untrusted workload (the dev/test backends). The
-/// bar is permission, not tier — libkrun and vz are Tier-2 yet workload-capable.
+/// permitted to carry an untrusted workload (the dev/test backends).
 pub fn require_workload_backend(backend: &AnyBackend) -> Result<&dyn WorkloadBackend> {
     backend.as_workload_backend().ok_or_else(|| {
         anyhow!(
@@ -100,20 +79,39 @@ pub fn require_workload_backend(backend: &AnyBackend) -> Result<&dyn WorkloadBac
     })
 }
 
-/// Require the backend's substitution transport to include the transparent
-/// `:80`/`:443` terminator leg. Proxy-aware substitution alone is not enough
-/// for deleting the in-line gateway splice because non-proxy-aware workloads
-/// would otherwise lose SDK-free egress substitution.
-pub fn require_transparent_egress_terminator(backend: &dyn WorkloadBackend) -> Result<()> {
-    if backend
-        .egress_substitution_transport()
-        .supports_transparent_terminator()
-    {
-        return Ok(());
+fn legacy_workload_egress_note(_backend: &AnyBackend) -> Option<&'static str> {
+    None
+}
+
+/// Require the fail-closed workload-egress contract for any boot that carries
+/// network policy: vsock transport, no guest NIC, and a host/vsock proxy gate.
+/// Policy selects admission only — it never enables legacy guest networking.
+pub fn require_vsock_only_workload_egress<'a>(
+    backend: &'a AnyBackend,
+    policy: &NetworkPolicy,
+    surface: &str,
+) -> Result<&'a dyn WorkloadBackend> {
+    let workload = require_workload_backend(backend)?;
+    let required = RequiredCapabilities::vsock_only_workload_egress();
+    let missing = workload.capabilities().shortfall(&required);
+    if missing.is_empty() {
+        return Ok(workload);
     }
+
+    let legacy_note = legacy_workload_egress_note(backend)
+        .map(|note| format!(" {note}"))
+        .unwrap_or_default();
     anyhow::bail!(
-        "backend `{}` does not provide a transparent :80/:443 egress terminator",
-        backend.name()
+        "refusing {surface} on backend `{}`: workload network policy `{}` requires \
+         backend capabilities [vsock, no_guest_nic, host_vsock_proxy], but `{}` lacks \
+         [{}]. `--net` and `--allow-host` select policy only; they never enable a \
+         guest NIC, TAP, gvproxy, passt, or any backend-specific L2/L3 workload \
+         dataplane.{}",
+        backend.name(),
+        policy.posture_label(),
+        backend.name(),
+        missing.join(", "),
+        legacy_note,
     )
 }
 
@@ -121,52 +119,35 @@ pub fn require_transparent_egress_terminator(backend: &dyn WorkloadBackend) -> R
 mod tests {
     use super::*;
 
-    // Compile-time proof the workload backends implement the marker (incl. the
-    // mock test double; qemu is intentionally absent).
     fn assert_is_workload_backend<T: WorkloadBackend>() {}
 
     #[test]
     fn workload_backends_implement_marker() {
         assert_is_workload_backend::<FirecrackerBackend>();
         assert_is_workload_backend::<LibkrunBackend>();
-        assert_is_workload_backend::<VzBackend>();
         assert_is_workload_backend::<HvfBackend>();
         assert_is_workload_backend::<MockBackend>();
     }
 
     #[test]
-    fn hvf_declares_vsock_uds_channel() {
+    fn hvf_declares_vsock_host_proxy() {
         let transport = HvfBackend.egress_substitution_transport();
-        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
+        assert_eq!(transport, EgressSubstitutionTransport::VsockHostProxy);
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
-    fn firecracker_declares_nft_terminator() {
+    fn firecracker_declares_vsock_host_proxy() {
         let transport = FirecrackerBackend.egress_substitution_transport();
-        assert_eq!(transport, EgressSubstitutionTransport::NftTerminator);
+        assert_eq!(transport, EgressSubstitutionTransport::VsockHostProxy);
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(transport.supports_transparent_terminator());
     }
 
     #[test]
-    fn libkrun_declares_rvproxy_transparent_terminator() {
+    fn libkrun_declares_vsock_host_proxy() {
         let transport = LibkrunBackend.egress_substitution_transport();
-        assert_eq!(
-            transport,
-            EgressSubstitutionTransport::RvproxyTransparentTerminator
-        );
+        assert_eq!(transport, EgressSubstitutionTransport::VsockHostProxy);
         assert!(transport.supports_proxy_aware_substitution());
-        assert!(transport.supports_transparent_terminator());
-    }
-
-    #[test]
-    fn vz_declares_vsock_uds_channel() {
-        let transport = VzBackend.egress_substitution_transport();
-        assert_eq!(transport, EgressSubstitutionTransport::VsockUdsChannel);
-        assert!(transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
@@ -174,15 +155,14 @@ mod tests {
         let transport = MockBackend::new().egress_substitution_transport();
         assert_eq!(transport, EgressSubstitutionTransport::None);
         assert!(!transport.supports_proxy_aware_substitution());
-        assert!(!transport.supports_transparent_terminator());
     }
 
     #[test]
     fn require_workload_backend_accepts_firecracker() {
         let backend = AnyBackend::from_hypervisor("firecracker");
         let workload = match require_workload_backend(&backend) {
-            Ok(w) => w,
-            Err(e) => panic!("firecracker is a workload backend: {e}"),
+            Ok(workload) => workload,
+            Err(err) => panic!("firecracker is a workload backend: {err}"),
         };
         assert_eq!(workload.name(), "firecracker");
     }
@@ -190,10 +170,9 @@ mod tests {
     #[test]
     fn require_workload_backend_refuses_qemu() {
         let backend = AnyBackend::from_hypervisor("qemu");
-        // `&dyn WorkloadBackend` isn't `Debug`, so match rather than `expect_err`.
         let err = match require_workload_backend(&backend) {
             Ok(_) => panic!("qemu is a Tier-2 dev/test backend, not a workload backend"),
-            Err(e) => e,
+            Err(err) => err,
         };
         assert!(
             err.to_string().contains("not a workload backend"),
@@ -202,32 +181,35 @@ mod tests {
     }
 
     #[test]
-    fn transparent_egress_terminator_requirement_accepts_firecracker() {
-        require_transparent_egress_terminator(&FirecrackerBackend)
-            .expect("firecracker declares the nft terminator leg");
+    fn vsock_only_workload_egress_accepts_hvf() {
+        let backend = AnyBackend::from_hypervisor("hvf");
+        let workload =
+            require_vsock_only_workload_egress(&backend, &NetworkPolicy::deny_all(), "machine run")
+                .expect("hvf satisfies the vsock-only workload-egress contract");
+        assert_eq!(workload.name(), "hvf");
     }
 
     #[test]
-    fn transparent_egress_terminator_requirement_accepts_libkrun() {
-        require_transparent_egress_terminator(&LibkrunBackend)
-            .expect("libkrun declares the rvproxy terminator leg");
+    fn vsock_only_workload_egress_accepts_firecracker() {
+        let backend = AnyBackend::from_hypervisor("firecracker");
+        let workload =
+            require_vsock_only_workload_egress(&backend, &NetworkPolicy::deny_all(), "machine run")
+                .expect("firecracker satisfies the vsock-only workload-egress contract");
+        assert_eq!(workload.name(), "firecracker");
     }
 
     #[test]
-    fn transparent_egress_terminator_requirement_refuses_proxy_only_backends() {
-        let mock = MockBackend::new();
-        for backend in [
-            &VzBackend as &dyn WorkloadBackend,
-            &mock as &dyn WorkloadBackend,
-        ] {
-            let err = match require_transparent_egress_terminator(backend) {
-                Ok(()) => panic!("{} should not satisfy the terminator gate", backend.name()),
-                Err(e) => e,
-            };
-            assert!(
-                err.to_string().contains("transparent :80/:443"),
-                "refusal must name the missing terminator leg, got: {err}"
-            );
-        }
+    fn vsock_only_workload_egress_accepts_libkrun() {
+        let backend = AnyBackend::from_hypervisor("libkrun");
+        let workload = require_vsock_only_workload_egress(
+            &backend,
+            &NetworkPolicy::allow_list(vec![mvm_core::network_policy::HostPort::new(
+                "api.example.com",
+                443,
+            )]),
+            "transient workload run",
+        )
+        .expect("libkrun satisfies the vsock-only workload-egress contract");
+        assert_eq!(workload.name(), "libkrun");
     }
 }

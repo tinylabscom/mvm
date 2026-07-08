@@ -4,7 +4,7 @@
 //! Apple Virtualization.framework refuses to launch a VM unless the
 //! launching binary carries both `com.apple.security.virtualization` and
 //! `com.apple.security.hypervisor`. The CLI (`mvmctl`) and whichever
-//! per-VM supervisor a backend resolves (vz / libkrun) must both be
+//! per-VM supervisor a backend resolves (legacy_macos / libkrun) must both be
 //! signed. Everything here is a no-op off macOS.
 
 use std::path::{Path, PathBuf};
@@ -56,7 +56,7 @@ pub fn collect_sign_targets() -> Vec<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         out.push(exe);
     }
-    if let Ok(p) = crate::vz::resolve_supervisor_path() {
+    if let Ok(p) = crate::legacy_macos_backend::resolve_supervisor_path() {
         out.push(p);
     }
     if let Ok(p) = crate::libkrun::resolve_supervisor_path() {

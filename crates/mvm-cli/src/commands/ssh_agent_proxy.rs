@@ -161,7 +161,7 @@ fn cleanup_proxy_files(vm_name: &str) {
         vm_name,
         mvm_guest::vsock::SSH_AGENT_PORT,
     ));
-    let _ = std::fs::remove_file(mvm_core::config::vm_vz_vsock_port_socket(
+    let _ = std::fs::remove_file(mvm_core::config::vm_legacy_macos_vsock_port_socket(
         vm_name,
         mvm_guest::vsock::SSH_AGENT_PORT,
     ));

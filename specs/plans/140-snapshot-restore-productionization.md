@@ -21,7 +21,7 @@ loop relies on Plan 139 cold-boot shaving instead.
 **macOS-native and already implemented** — `Vz::snapshot_save` /
 `snapshot_restore` (`mvm-backend/src/vz.rs:678/708`, via
 `VZVirtualMachine.saveMachineStateTo` / `restoreMachineStateFrom`, macOS 14+),
-gated by `macos_supports_vz_snapshots()`. So the snapshot lever splits:
+gated by `macos_supports_legacy_macos_snapshots()`. So the snapshot lever splits:
 - **Firecracker/CH** — Linux/KVM; the fleet target; E2E-testable only on Linux
   (or Lima KVM). The four gaps below were written against this path.
 - **Vz** — macOS-native, testable on a dev Mac *today*. The gaps map differently:

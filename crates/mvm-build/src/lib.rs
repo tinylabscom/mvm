@@ -15,7 +15,7 @@ pub mod builder_protocol;
 pub mod builder_route;
 pub mod builder_vm;
 /// Hypervisor-agnostic builder-VM orchestration helper that wraps a
-/// `VmBackendForBuilder` implementation (libkrun and Vz).
+/// `VmBackendForBuilder` implementation (libkrun and LegacyMacos).
 pub mod builder_vm_runtime;
 /// Request-handling core of the resident `mvm-builderd` builder-VM
 /// daemon: stateless request dispatch + the framed connection serve
@@ -43,6 +43,11 @@ pub mod firecracker;
 pub mod hvf_supervisor;
 /// Hash-verify a fetched kernel image against its [`mvm_core::kernel_artifact::KernelArtifactId`].
 pub mod kernel_fetch;
+/// Type-safe interface to the legacy macOS supervisor binary —
+/// `SupervisorConfig` + on-disk path helpers. It lives in mvm-build
+/// (not mvm-backend) because the legacy builder consumes it and sits
+/// below mvm-backend, which would cycle.
+pub mod legacy_supervisor_config;
 /// Portable signed `.mvm` artifacts. A tar.gz wrapper around kernel +
 /// rootfs + verity sidecars + cmdline, with an Ed25519-signed manifest
 /// that hashes every payload.
@@ -66,17 +71,11 @@ pub mod rootfs_inject;
 pub mod run_image;
 pub mod stage0;
 pub mod template_reuse;
-/// Type-safe interface to the `mvm-vz-supervisor` binary —
-/// `SupervisorConfig` + on-disk path helpers. It lives in mvm-build
-/// (not mvm-backend) because mvm-build's `vz_builder` consumes it and
-/// sits below mvm-backend, which would cycle. mvm-backend's `VzBackend`
-/// reaches it via `mvm_build::vz`.
-pub mod vz;
 
 /// Host-side gvproxy lifecycle (detached spawn + PID-sidecar
-/// tear-down). Lives here (not mvm-backend) so the Vz *builder*
-/// (`vz_builder`) can reach it for cold-`nix build` egress;
-/// mvm-backend's `VzBackend` consumes it via `mvm_build::host_gvproxy`.
+/// tear-down). Lives here (not mvm-backend) so the LegacyMacos *builder*
+/// (`legacy_macos_builder`) can reach it for cold-`nix build` egress;
+/// mvm-backend's `LegacyMacosBackend` consumes it via `mvm_build::host_gvproxy`.
 /// Gated by `builder-vm` because it links `libkrun_sys::gvproxy` for
 /// the binary locator + free-port reservation.
 #[cfg(feature = "builder-vm")]
@@ -103,16 +102,16 @@ pub mod guest_net;
 
 pub mod qemu_builder;
 
-/// Vz-backed builder VM (gated by `builder-vm` for symmetry with
+/// Legacy macOS builder VM (gated by `builder-vm` for symmetry with
 /// `libkrun_builder`). Implements the second
 /// [`builder_vm::VmBackendForBuilder`] impl alongside
 /// `LibkrunBuilderBackend`; both feed the same hypervisor-agnostic
 /// `BuilderVmRuntime` orchestration on top.
 #[cfg(feature = "builder-vm")]
-pub mod vz_builder;
+pub mod legacy_builder_vm;
 
 /// Builder-runtime selection. `MVM_BUILDER_BACKEND` picks between
-/// `libkrun` (default) and `vz`; the caller receives a
+/// `libkrun` (default) and `legacy_macos`; the caller receives a
 /// `Box<dyn BuilderVm>` so the dispatch site doesn't depend on which
 /// concrete driver the env-var resolved to.
 #[cfg(feature = "builder-vm")]

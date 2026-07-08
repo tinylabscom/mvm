@@ -1,7 +1,7 @@
 //! Live end-to-end smoke for `mvmctl run --image <oci>`.
 //!
 //! Disabled by default. Set `MVM_OCI_IMAGE_RUNNER_SMOKE=1` on a host with
-//! a working workload backend (Vz on macOS 26+, libkrun on macOS 13-25,
+//! a working workload backend (LegacyMacos on macOS 26+, libkrun on macOS 13-25,
 //! Firecracker on Linux/KVM), the matching supervisor/drainer helper
 //! binaries built into the workspace `target/`, a populated builder-VM
 //! image cache, and network access to the registry.

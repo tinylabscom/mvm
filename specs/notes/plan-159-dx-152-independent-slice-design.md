@@ -2,7 +2,7 @@
 
 > **Status (2026-06-05):** Brainstormed, approved for first steps. This is
 > the scoping/design artifact for the first independent increment of
-> `specs/plans/159-vz-inspired-macos-dx.md`. The numbered implementation
+> `removed legacy macOS archival spec`. The numbered implementation
 > plan is produced from this via writing-plans.
 >
 > **Naming:** the inspiration project is referred to obliquely ("the DX
@@ -222,11 +222,11 @@ The rest of the path to parity:
 
 ## References
 
-- `specs/plans/159-vz-inspired-macos-dx.md` — parent plan (WS map +
+- `removed legacy macOS archival spec` — parent plan (WS map +
   parity checklist).
-- `specs/plans/163-vz-support-execution-roadmap.md` — sequencing; this
+- `removed legacy macOS archival spec` — sequencing; this
   slice is the 152-independent subset of S5.
-- `specs/plans/152-rust-native-vz-and-init-lifecycle-parity.md` — the
+- `removed legacy macOS archival spec` — the
   supervisor the gated features depend on.
 - `crates/mvm-backend/src/providers/apple_container/macos.rs` — sign
   harness (WS-3).

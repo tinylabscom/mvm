@@ -147,10 +147,12 @@ mod tests {
 
     #[test]
     fn build_packs_inputs_boots_the_builder_spec_and_extracts_the_output() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        // Isolate per-VM state to the tempdir. nextest runs each test in its own
-        // process, so this env override doesn't leak to sibling tests.
-        // SAFETY: single-threaded test setup, before any VM state is resolved.
+        let prev_data = std::env::var_os("MVM_DATA_DIR");
+        // SAFETY: serialized by HOME_TEST_LOCK because process env is global.
         unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
 
         // Real input trees + placeholder image files on disk.
@@ -199,5 +201,13 @@ mod tests {
         // mock guest, which writes nothing).
         assert!(tmp.path().join("vms/bld-unit/input.img").exists());
         assert!(outcome.output_dir.exists());
+
+        // SAFETY: serialized by HOME_TEST_LOCK because process env is global.
+        unsafe {
+            match prev_data {
+                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
+                None => std::env::remove_var("MVM_DATA_DIR"),
+            }
+        }
     }
 }

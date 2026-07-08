@@ -221,7 +221,7 @@ pub struct BrokerSpawnParams<'a> {
     /// The per-VM `BROKER_PORT` socket the broker binds — the **backend-specific**
     /// path the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` to:
     /// `vm_vsock_port_socket` on libkrun (the VMM proxies straight to it),
-    /// `vm_vz_vsock_port_socket` on vz (the supervisor splices to it). Passed in
+    /// `vm_legacy_macos_vsock_port_socket` on legacy_macos (the supervisor splices to it). Passed in
     /// rather than derived because the two backends use different socket paths.
     pub broker_uds_path: &'a Path,
     /// Per-VM state dir; holds the broker PID file.
@@ -265,7 +265,7 @@ fn spawn_broker_with_timeout(
     let bin = resolve_subprocess_bin("mvm-broker", "MVM_BROKER_PATH")?;
     // The broker binds the backend-specific per-VM BROKER_PORT socket the VMM
     // forwards the guest's `connect_host_vsock(BROKER_PORT)` dial to (the caller
-    // passes the right path — libkrun and vz differ).
+    // passes the right path — libkrun and legacy_macos differ).
     let uds_path = broker_uds_path;
     if let Some(parent) = uds_path.parent() {
         std::fs::create_dir_all(parent)
@@ -373,8 +373,8 @@ pub struct BrokerServicesSpawnParams<'a> {
     /// Per-VM state dir.
     pub state_dir: &'a Path,
     /// The `BROKER_PORT` socket the broker binds — backend-specific (the caller
-    /// passes `vm_vsock_port_socket` on libkrun, `vm_vz_vsock_port_socket` on
-    /// vz; the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` here).
+    /// passes `vm_vsock_port_socket` on libkrun, `vm_legacy_macos_vsock_port_socket` on
+    /// legacy_macos; the VMM forwards the guest's `connect_host_vsock(BROKER_PORT)` here).
     pub broker_listen_socket: &'a Path,
 }
 

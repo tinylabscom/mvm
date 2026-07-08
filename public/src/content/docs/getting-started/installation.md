@@ -115,7 +115,7 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 | Platform | Backend | What happens |
 |----------|---------|-------------|
 | **Linux with `/dev/kvm`** | Firecracker | Runs directly on KVM. Smallest attack surface, fastest cold boot. |
-| **macOS 26+ Apple Silicon** | HVF | Hypervisor.framework, bundled with the OS; vsock-only. Vz is opt-in (`--hypervisor vz`, sunsetting). |
+| **macOS 26+ Apple Silicon** | HVF | Hypervisor.framework, bundled with the OS; vsock-only. |
 | **macOS 13–25 Apple Silicon** | libkrun | In-process VMM via the Homebrew `slp/krun` trio. |
 
 There is no Docker or container backend on the runtime path. A `qemu`
@@ -131,7 +131,7 @@ After installation, run the setup wizard:
 mvmctl init
 ```
 
-This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for Apple Virtualization.framework on macOS 26+), default network setup, and XDG directory creation. Use `--non-interactive` for scripted environments.
+This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for HVF on macOS 26+), default network setup, and XDG directory creation. Use `--non-interactive` for scripted environments.
 
 Running `mvmctl dev` or `mvmctl bootstrap` also handles setup automatically -- they detect your platform, select the backend, and stage the builder microVM image on first use.
 
@@ -140,7 +140,6 @@ You can force a specific backend with `--hypervisor`:
 ```bash
 mvmctl machine run --flake . --hypervisor firecracker  # Linux KVM
 mvmctl machine run --flake . --hypervisor hvf          # macOS 26+ Apple Silicon (default)
-mvmctl machine run --flake . --hypervisor vz           # macOS 26+ opt-in (sunsetting)
 mvmctl machine run --flake . --hypervisor libkrun      # macOS 13–25 Apple Silicon
 mvmctl machine run --flake . --hypervisor qemu         # microvm.nix — dev/test only
 ```

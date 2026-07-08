@@ -5,7 +5,7 @@ description: Drive model, mount points, and filesystem layout inside microVMs.
 
 ## Drive Model
 
-Each microVM gets up to four virtio-block drives (on all backends -- Firecracker, Vz, libkrun, microvm.nix):
+Each microVM gets up to four virtio-block drives (on supported backends -- Firecracker, HVF, libkrun):
 
 | Drive | Mount Point | Permissions | Purpose |
 |-------|-------------|-------------|---------|

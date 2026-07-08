@@ -27,7 +27,7 @@ pub(in crate::commands) struct Args {
     /// whatever the image ships
     #[arg(long = "kernel-pin")]
     pub kernel_pin: Option<String>,
-    /// Hypervisor backend for the new boot (firecracker, libkrun, qemu, vz)
+    /// Hypervisor backend for the new boot (firecracker, libkrun, qemu, hvf)
     #[arg(long, default_value = "libkrun")]
     pub hypervisor: String,
 }

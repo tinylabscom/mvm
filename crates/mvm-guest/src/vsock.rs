@@ -98,7 +98,7 @@ pub const DEV_CONSOLE_DATA_PORT_COUNT: u32 = 128;
 /// interactive PTY (`machine run -t`, `machine shell`, `up --console`) can
 /// reach the agent-allocated `CONSOLE_PORT_BASE + session_id` data channel.
 ///
-/// The per-port-UDS backends (libkrun, Vz) bind a *static* vsock port list at
+/// The per-port-UDS backends (libkrun, LegacyMacos) bind a *static* vsock port list at
 /// start, so a dynamic data port is unreachable unless it was pre-declared;
 /// Firecracker multiplexes every port over one UDS and ignores this range.
 pub fn dev_console_data_ports() -> impl Iterator<Item = u32> {
@@ -7148,6 +7148,16 @@ mod rpc_client_tests {
         assert!(enforce_verb_grant(&run, Some(&grant)).is_none());
         // baseline => allowed even though not listed
         assert!(enforce_verb_grant(&GuestRequest::Ping, Some(&grant)).is_none());
+        assert!(
+            enforce_verb_grant(
+                &GuestRequest::PostRestore {
+                    token: [0; mvm_core::crypto::vmgenid::GENID_BYTES],
+                    grant_envelope: None,
+                },
+                Some(&grant)
+            )
+            .is_none()
+        );
         // ProdSafe but unlisted => denied
         let idle = GuestRequest::UpdateIdleTimeout { secs: 0 };
         let idle_name = idle.kind_name();

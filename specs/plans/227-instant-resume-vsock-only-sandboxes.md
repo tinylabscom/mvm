@@ -70,8 +70,9 @@ The hvf guest agent must answer host RPC. Root-cause the guest-no-reply (host de
 
 Adopt Plan 214 S4/S6/S7 into execution, with the **builder as a policy profile, not a networking exception**:
 
-- [ ] **B1 (libkrun workloads):** flip the built-but-inert guest vsock egress on by default (`MVM_VSOCK_EGRESS` becomes opt-out during bake-in, then removed); retire the workload NIC + gvproxy/passt spawn on the workload path.
-- [ ] **B2 (firecracker workloads):** egress via vhost-vsock → gating endpoint; retire workload TAP + nftables enforcement (endpoint enforces `PlanFlowPolicy` uniformly). nftables remains only as belt-and-braces during transition, then removed.
+- [x] **B0 (fail-closed contract):** before the dataplane cutover is complete, any workload boot that carries network policy requires backend capabilities `vsock + no_guest_nic + host_vsock_proxy`; unsupported backends are rejected with a clear error instead of falling back to TAP/gvproxy/passt/Vz networking.
+- [x] **B1 (libkrun workloads):** the workload path now always spawns the host-vsock egress gate, the guest vsock-egress token is emitted by runtime shape instead of `MVM_VSOCK_EGRESS`, and the workload NIC + gvproxy/passt path is retired for workload egress.
+- [x] **B2 (firecracker workloads):** workload egress now runs through the host-vsock gate; the workload TAP/network-interface provisioning, guest-IP metadata, and workload-side redirect path are retired from the workload launch path.
 - [ ] **B3 (builders):** builder VMs boot with **no NIC**. Nix egress rides `HTTP(S)_PROXY` → in-guest forward proxy (existing `127.0.0.1:18080` machinery + the already-embedded `mvm-egress-proxy` builder binary) → AF_VSOCK → host gating endpoint running a **builder profile**: fetch-host allowlist + **chain-signed audit entry per fetch (URL + content hash)**. Remove `host_gvproxy` spawn sites on the builder path.
 - [ ] **B4 (supply-chain manifest):** the per-build fetch log + flake.lock forms a reviewable manifest; `mvmctl trust audit verify` covers it. Optional host-side content-addressed fetch cache at the endpoint (faster warm builds, offline replay).
 - [ ] Acceptance: zero gvproxy/passt/TAP processes during `machine run` (all sources) **and** during `build image` / Stage 0, on macOS and Linux; egress verdicts + fetch audit entries present in the chain.
@@ -134,6 +135,7 @@ New capability on the seam WS-B consolidates (prior art: claim 13's S25 outbound
 
 ### WS-H — Docs, claims, rollup
 
+- [x] Active docs scrub + archival spec purge: current product docs/specs now describe HVF + Firecracker + libkrun as the live workload surface, remove Vz as a current backend choice, stop presenting macOS full-memory checkpoint restore as a shipped public contract until a backend-specific restore path is documented again, and delete the legacy-macos archival plans/notes/research/perf specs while normalizing surviving historical references.
 - [ ] ADR for the vsock-only data plane + builder policy profile (supersedes NIC-era egress ADol sections; cross-ref ADR-055/058/082 lineage).
 - [ ] Update ADR-002 tier matrix once WS-B/C land; queue claim promotion.
 - [ ] Keep `specs/REFACTOR-STATUS.md` + `specs/SPRINT.md` rows current per workstream (Definition of Done items 5–7).

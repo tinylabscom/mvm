@@ -1,7 +1,7 @@
 //! Config contract for `mvm-hvf-supervisor` — the per-VM host process for the
 //! raw HVF macOS backend. Lives here (below both `mvm-backend` and
 //! `mvm-vm-host`) so the writer (`mvm_backend::hvf::HvfBackend`) and the reader
-//! (the `mvm-hvf-supervisor` bin) share one definition — the same way the vz
+//! (the `mvm-hvf-supervisor` bin) share one definition — the same way the legacy_macos
 //! `SupervisorConfig` does. The backend writes this as JSON on the supervisor's
 //! stdin; the supervisor boots the guest and captures its console.
 //!
@@ -56,6 +56,11 @@ pub struct HvfSupervisorConfig {
     /// `MVM_HVF_BOOTARGS` env override still wins over this (dev hook).
     #[serde(default)]
     pub cmdline: Option<String>,
+    /// Additional kernel cmdline tokens appended after the selected base cmdline.
+    /// This carries per-VM launch data such as verb grants without forcing the
+    /// backend to duplicate the supervisor's default root/init arguments.
+    #[serde(default)]
+    pub cmdline_extra: Option<String>,
     /// Guest RAM in MiB. `0` (the default) ⇒ the supervisor's built-in default
     /// (512 MiB). A builder sets several GiB so `nix build` doesn't OOM.
     #[serde(default)]
@@ -130,6 +135,7 @@ mod tests {
         let cfg = HvfSupervisorConfig {
             kernel: "/k/Image".into(),
             cmdline: Some("console=ttyAMA0 root=/dev/vda ro init=/sbin/mvm-host-vm-init".into()),
+            cmdline_extra: Some("mvm.verb_grant=abcd mvm.require_grant=1".into()),
             memory_mib: 8192,
             initramfs: Some("/k/initrd.cpio".into()),
             disks: vec![
@@ -179,6 +185,7 @@ mod tests {
         let json = r#"{"kernel":"/k/Image","console_log":"/c.log","pid_file":"/p.pid","workload_exit":"/w.exit","timeout_secs":5}"#;
         let cfg: HvfSupervisorConfig = serde_json::from_str(json).unwrap();
         assert_eq!(cfg.cmdline, None);
+        assert_eq!(cfg.cmdline_extra, None);
         assert_eq!(cfg.initramfs, None);
         assert!(cfg.disks.is_empty());
         assert!(!cfg.vsock);
@@ -197,6 +204,7 @@ mod tests {
         let cfg = HvfSupervisorConfig {
             kernel: "/k/Image".into(),
             cmdline: None,
+            cmdline_extra: None,
             memory_mib: 0,
             initramfs: None,
             disks: vec![],

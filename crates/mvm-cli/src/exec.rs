@@ -617,6 +617,11 @@ fn run_inner(
     posture: Option<&PostureSink>,
 ) -> Result<Either<i32, ExecOutput>> {
     let backend = AnyBackend::auto_select();
+    mvm_backend::workload_backend::require_vsock_only_workload_egress(
+        &backend,
+        &req.network_policy,
+        "transient workload run",
+    )?;
 
     // Phase timing (off unless `MVM_PHASE_TIMING` is set): capture a
     // host-monotonic mark at each run seam, then emit a one-line breakdown
@@ -739,7 +744,7 @@ fn run_inner(
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
-    // `..Default::default()`) so the libkrun/Vz backends take the legacy
+    // `..Default::default()`) so the libkrun/LegacyMacos backends take the legacy
     // `run_supervisor` dispatch. Routing template restores through
     // admission would add an `admit_for_run` call here and a
     // `populate_audit_substrate` invocation after the struct literal.
@@ -779,7 +784,7 @@ fn run_inner(
     };
 
     // Admit the transient run as a locally-signed workload. Setting
-    // tenant_id + plan_json makes the libkrun/Vz supervisor spawn the gateway
+    // tenant_id + plan_json makes the libkrun/LegacyMacos supervisor spawn the gateway
     // bridge (so it enforces `network_policy` + chain-audits the run) instead
     // of the legacy unfiltered path; on Firecracker the policy already enforces
     // via the FlakeRunConfig firewall. Force cold boot when admitted — the
@@ -880,7 +885,7 @@ fn run_inner(
     let _ = backend.stop_transient(&VmId(vm_name.clone()));
 
     // Top the warm pool back toward target after the run (best-effort,
-    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; Vz
+    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; LegacyMacos
     // boot+capture rewarm stays explicit via `pool warm` so teardown does not
     // spawn background work that can contend with foreground launches.
     if let Err(e) = crate::commands::pool::replenish_after_launch(&backend, &start_config) {

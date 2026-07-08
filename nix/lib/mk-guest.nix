@@ -359,7 +359,7 @@ let
   # PID 1 stays uid 0 (kernel mandate); both children run rootless
   # by default in production (see uids resolution above).
   initScript = pkgs.writeScript "mvm-init" ''
-    #!/bin/sh
+#!/bin/sh
     # mvm /init — busybox PID 1.
 
     # Stage 1 — kernel pseudofs. Required before anything else
@@ -731,7 +731,7 @@ let
       # agent (forked above) serves the interactive shell over vsock — it
       # openpty()s and forks its OWN `/bin/sh -i` (mvm-guest::console),
       # independent of PID 1 — so PID 1 doesn't need to be a shell at all.
-      # Running `/bin/sh` on /dev/console here is fatal on Vz: its serial
+      # Running `/bin/sh` on /dev/console here is fatal on legacy macOS: its serial
       # console is input-less, the read hits EOF, the shell exits, PID 1
       # dies, and the VM powers off ~5 s after boot.
       # On libkrun this just swaps a blocking console read for an explicit

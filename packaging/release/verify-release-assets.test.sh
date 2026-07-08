@@ -19,7 +19,7 @@ sha256_of() {
 
 bins_for() {
   case "$1" in
-    *apple-darwin) echo "mvmctl mvm-bridge mvm-vz-supervisor mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint" ;;
+    *apple-darwin) echo "mvmctl mvm-bridge mvm-legacy-macos-supervisor mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint" ;;
     *)             echo "mvmctl mvm-bridge mvm-substitution-endpoint" ;;
   esac
 }

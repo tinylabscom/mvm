@@ -43,7 +43,6 @@ pub enum PackKind {
 pub enum PackBackend {
     Firecracker,
     Libkrun,
-    Vz,
     Qemu,
     Docker,
     Hvf,
@@ -54,7 +53,6 @@ impl fmt::Display for PackBackend {
         f.write_str(match self {
             PackBackend::Firecracker => "firecracker",
             PackBackend::Libkrun => "libkrun",
-            PackBackend::Vz => "vz",
             PackBackend::Qemu => "qemu",
             PackBackend::Docker => "docker",
             PackBackend::Hvf => "hvf",
@@ -1271,7 +1269,7 @@ mod tests {
             schema_version: PACK_SCHEMA_VERSION,
             kind,
             target_arch: GuestArch::host(),
-            backend_compatibility: vec![PackBackend::Libkrun, PackBackend::Vz],
+            backend_compatibility: vec![PackBackend::Libkrun, PackBackend::Hvf],
             required_host_capabilities: vec![HostCapability("vsock".to_string())],
             policy_compatibility: PolicyCompatibility {
                 policy_hash: policy_hash.clone(),

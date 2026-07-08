@@ -13,7 +13,7 @@
 > use checkbox (`- [ ]`) syntax for tracking.
 >
 > **Design source:** `specs/notes/plan-152-wsa-init-exit-poweroff-design.md`.
-> **Parent:** `specs/plans/152-rust-native-vz-and-init-lifecycle-parity.md`
+> **Parent:** `removed legacy macOS archival spec`
 > WS-A (roadmap S2 in `specs/plans/163-...`).
 
 **Goal:** A finished one-shot sealed workload writes its exit code to the

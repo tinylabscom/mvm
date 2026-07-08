@@ -690,7 +690,7 @@ pub enum BuilderSessionPolicyDecision {
 
 /// Decide what the keeper should do with a live persistent-builder session.
 ///
-/// The Vz dev-builder has a real snapshot path; this hidden
+/// The LegacyMacos dev-builder has a real snapshot path; this hidden
 /// `persistent-builder` session is currently libkrun-backed, so a policy-level
 /// `Park` decision degrades to teardown rather than pretending a snapshot was
 /// captured.

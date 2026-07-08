@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 /// Verbs always permitted regardless of grant state or trust-policy configuration.
 /// Referenced by both the verb-grant gate and the verb-trust gate so the two
 /// allow-sets stay in sync from one definition.
-pub const VERB_GRANT_BASELINE: [&str; 3] = ["protocol-hello", "ping", "readiness-status"];
+pub const VERB_GRANT_BASELINE: [&str; 4] =
+    ["protocol-hello", "ping", "post-restore", "readiness-status"];
 
 /// Host-signer-signed, session- and time-bound capability granting a
 /// workload a subset of agent control verbs. Signed by the admission
@@ -182,8 +183,9 @@ mod tests {
     fn verb_grant_baseline_contains_expected_verbs() {
         assert!(VERB_GRANT_BASELINE.contains(&"protocol-hello"));
         assert!(VERB_GRANT_BASELINE.contains(&"ping"));
+        assert!(VERB_GRANT_BASELINE.contains(&"post-restore"));
         assert!(VERB_GRANT_BASELINE.contains(&"readiness-status"));
-        assert_eq!(VERB_GRANT_BASELINE.len(), 3);
+        assert_eq!(VERB_GRANT_BASELINE.len(), 4);
     }
 
     #[test]

@@ -5,9 +5,6 @@
 //! - **macOS Apple Silicon with libkrun** → boots the dev VM via
 //!   libkrun on Hypervisor.framework and exposes a PTY-over-vsock
 //!   console.
-//! - **macOS 26+ Apple Silicon (or explicit `--builder vz`)** →
-//!   `super::dev_vz` boots a long-lived Vz builder VM via Apple
-//!   Virtualization.framework and exposes a PTY-over-vsock console.
 //! - **native Linux + KVM** → `super::linux_native` treats the host shell as
 //!   the dev environment, installs Firecracker + downloads kernel/
 //!   rootfs assets, and optionally spawns an interactive subshell.
@@ -17,7 +14,7 @@
 //! nested KVM and a Hyper-V managed Linux builder are future backend
 //! projects, not supported local paths today.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::ui;
@@ -26,14 +23,14 @@ use crate::commands::shared::{
     clap_volume_spec, materialize_disk_volumes, merge_volume_specs, parse_volume_spec,
     vm_volume_from_spec_validated,
 };
-use mvm_backend::{LibkrunBackend, VzBackend};
+use mvm_backend::LibkrunBackend;
 use mvm_core::platform::{self, Platform};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig, VmStatus, VmVolume};
 
 use super::super::vm::console;
 use super::Cli;
-use super::dev_vz;
+use super::dev_vm;
 use super::linux_native;
 
 /// Which `mvmctl dev` backend the current host uses.
@@ -41,12 +38,6 @@ use super::linux_native;
 enum DevBackend {
     /// macOS with libkrun — Hypervisor.framework-backed dev VM.
     Libkrun,
-    /// macOS 13+ with Apple Virtualization.framework — long-lived Vz
-    /// builder VM. The canonical macOS dev path. Selected by macOS 26+
-    /// Apple Silicon auto-detect and by an explicit `--builder vz` /
-    /// `MVM_BUILDER_BACKEND=vz` override, so the dev VM rides the same
-    /// VMM (and nix-store overlay + `/work` share) as the build path.
-    Vz,
     /// Native Linux with `/dev/kvm` — host shell is the dev environment;
     /// Firecracker runs natively.
     LinuxKvm,
@@ -62,53 +53,26 @@ enum DevBackend {
 /// source of truth.
 ///
 /// Selection order:
-///   1. Builder override prefers Vz **and** Vz is available → `Vz`.
-///      Catches both `--builder vz` (folded into the env at startup by
-///      `commands::run`) and a bare `MVM_BUILDER_BACKEND=vz`. Vz on
-///      macOS 13-25 stays opt-in — auto-detect won't pick it because
-///      the deployment baseline is macOS 26+.
-///   2. Builder override *explicitly* prefers libkrun **and** libkrun
+///   1. Builder override *explicitly* prefers libkrun **and** libkrun
 ///      is available on macOS → `Libkrun`. The symmetric counterpart
-///      to rule 1: an operator who asks for libkrun gets the dev VM on
-///      libkrun even on a macOS 26+ box where Vz would otherwise win
-///      rule 3.
-///   3. macOS 26+ Apple Silicon (the Vz default tier) → `Vz`.
-///   4. macOS with libkrun → Libkrun (legacy fallback).
-///   5. Linux with KVM → LinuxKvm.
-///   6. Otherwise → Unsupported.
-///
-/// On the *auto-detect* path (no explicit override) Vz still wins over
-/// Libkrun (rule 3 vs 4) per the CLAUDE.md "Dev mode" rationale: Vz is
-/// the documented Stage 0 boundary AND the build boundary
-/// `RuntimeBuildEnv::shell_exec_visible` routes through. Splitting the
-/// dev VM (Libkrun) from the build boundary (`VzDevEnv`) would leave
-/// each under a runtime the other never starts. An explicit
-/// `prefers_libkrun` is the one signal that overrides this — because it
-/// also moves the build boundary onto libkrun, keeping both halves on
-/// the same VMM.
+///      to the HVF default: an operator who asks for libkrun gets the dev VM
+///      on libkrun.
+///   2. macOS with libkrun → Libkrun.
+///   3. Linux with KVM → LinuxKvm.
+///   4. Otherwise → Unsupported.
 fn select_dev_backend(
     plat: Platform,
-    prefers_vz: bool,
+    _prefers_removed_backend: bool,
     prefers_libkrun: bool,
-    has_vz: bool,
-    is_vz_default_tier: bool,
+    _has_removed_backend: bool,
+    _is_removed_backend_default_tier: bool,
     has_libkrun: bool,
     has_kvm: bool,
 ) -> DevBackend {
-    // 1. Builder override picked Vz AND Vz is actually usable.
-    if prefers_vz && has_vz {
-        return DevBackend::Vz;
-    }
-    // 2. Explicit libkrun override on macOS — run the dev VM on libkrun
-    //    even where Vz would win auto-detect, so the dev VM rides the
-    //    same VMM the build path uses.
     if prefers_libkrun && has_libkrun && matches!(plat, Platform::MacOS) {
         return DevBackend::Libkrun;
     }
-    // 3-6. Standard auto-detect tree.
-    if is_vz_default_tier {
-        DevBackend::Vz
-    } else if matches!(plat, Platform::MacOS) && has_libkrun {
+    if matches!(plat, Platform::MacOS) && has_libkrun {
         DevBackend::Libkrun
     } else if has_kvm && matches!(plat, Platform::LinuxNative) {
         DevBackend::LinuxKvm
@@ -118,14 +82,12 @@ fn select_dev_backend(
 }
 
 #[cfg(feature = "builder-vm")]
-fn builder_prefers_vz() -> bool {
-    use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_choice};
-
-    matches!(resolve_choice(), BuilderBackendChoice::Vz)
+fn builder_prefers_removed_backend() -> bool {
+    false
 }
 
 #[cfg(not(feature = "builder-vm"))]
-fn builder_prefers_vz() -> bool {
+fn builder_prefers_removed_backend() -> bool {
     false
 }
 
@@ -133,9 +95,8 @@ fn builder_prefers_vz() -> bool {
 // `--builder libkrun` flag (folded into the env at startup) or a bare
 // `MVM_BUILDER_BACKEND=libkrun`. We read the explicit env override here
 // rather than `resolve_choice()` on purpose — libkrun is also the silent
-// auto-detect fallback on every macOS box that isn't 26+ Apple Silicon,
-// so keying off the resolved choice would drag all of them off the
-// Vz default. Only an explicit ask should do that.
+// auto-detect fallback on macOS, so keying off the resolved choice would
+// make implicit fallback look like an explicit ask.
 #[cfg(feature = "builder-vm")]
 fn builder_prefers_libkrun() -> bool {
     use mvm_build::builder_backend_select::{BuilderBackendChoice, resolve_env_override};
@@ -152,10 +113,10 @@ fn current_backend() -> DevBackend {
     let plat = platform::current();
     select_dev_backend(
         plat,
-        builder_prefers_vz(),
+        builder_prefers_removed_backend(),
         builder_prefers_libkrun(),
-        plat.has_vz(),
-        plat.is_vz_default_tier(),
+        plat.has_legacy_macos(),
+        plat.is_hvf_default_tier(),
         plat.has_libkrun(),
         plat.has_kvm(),
     )
@@ -202,9 +163,8 @@ pub(in crate::commands) enum DevAction {
         /// or /mnt (system mounts stay read-only).
         #[arg(long, short = 'v', value_parser = clap_volume_spec)]
         volume: Vec<String>,
-        /// Boot the Vz dev VM from a built template, slot, or installed
-        /// bundle instead of the default dev image. Use `name@revision` to
-        /// pin an exact template/slot revision.
+        /// Reserved for image-backed dev VM bases. Not supported by the current
+        /// libkrun and native Linux dev paths.
         #[arg(long, value_name = "BASE")]
         base: Option<String>,
         /// Emit a machine-readable JSON result after boot instead of text.
@@ -222,7 +182,7 @@ pub(in crate::commands) enum DevAction {
         #[arg(long)]
         json: bool,
     },
-    /// Snapshot and stop the Vz dev VM so the next `dev up` restores it.
+    /// Snapshot and stop the dev VM when supported by the selected backend.
     Park {
         /// Emit a machine-readable JSON result instead of text.
         #[arg(long)]
@@ -307,7 +267,6 @@ fn bail_no_dev_backend() -> Result<()> {
     anyhow::bail!(
         "`mvmctl dev` requires either:\n  \
            - macOS Apple Silicon with libkrun (Hypervisor.framework dev VM),\n  \
-           - macOS 26+ Apple Silicon (Vz dev VM), or\n  \
            - native Linux with /dev/kvm (Firecracker runs on the host).\n\
          This host has neither. WSL2 with nested KVM and a Hyper-V \
          managed Linux builder are future backend work, not supported \
@@ -316,55 +275,25 @@ fn bail_no_dev_backend() -> Result<()> {
     );
 }
 
-/// Cross-backend coexistence helpers for the libkrun dev path.
-///
-/// The libkrun dev VM and a Vz workload VM can both bind the runtime
-/// name `dev_vz::DEV_VM_NAME` ("mvm-dev"). LibkrunBackend's status
-/// probe only sees its *own* state, so without an explicit cross-check
-/// a `dev up` on libkrun would silently leave a stale Vz "mvm-dev"
-/// running. The canonical Vz dev path is a separate persistent builder
-/// that reaps its own supervisor, so this dance is libkrun-only.
-///
-/// Returns `Some("vz")` when a Vz "mvm-dev" is currently running,
-/// otherwise `None`. Errors propagated — a status probe failure
-/// shouldn't be silently swallowed (it may mean the backend is wedged,
-/// which is its own kind of "running").
-fn vz_dev_vm_running() -> Result<Option<&'static str>> {
-    let id = VmId(dev_vz::DEV_VM_NAME.to_string());
-    if matches!(
-        VzBackend.status(&id)?,
-        VmStatus::Running | VmStatus::Starting
-    ) {
-        Ok(Some("vz"))
-    } else {
-        Ok(None)
-    }
+/// Legacy coexistence hook for old dev state. New starts never select the
+/// removed backend, so there is nothing to cross-stop here.
+fn legacy_macos_dev_vm_running() -> Result<Option<&'static str>> {
+    Ok(None)
 }
 
-/// Pure: the info line to print when libkrun takes over a stale Vz dev
-/// VM (None = stay quiet). Lifted out for hermetic unit tests; the
+/// Pure: the info line to print when libkrun takes over stale dev state
+/// (None = stay quiet). Lifted out for hermetic unit tests; the
 /// caller passes the probe result so the test doesn't need to spoof the
 /// live host.
 fn switch_notice(other_running: Option<&str>) -> Option<String> {
     other_running.map(|other| format!("Switching dev builder backend {other} → libkrun."))
 }
 
-/// When a stale Vz `mvm-dev` is up, stop it and take over instead of
-/// refusing. The dev VM is an ephemeral builder; both backends share
-/// the `mvm-dev` name + dev network and so can't coexist, making
-/// "switch" the only sensible outcome. Mirrors the best-effort
-/// cross-stop already in `cmd_dev_libkrun_down`.
-fn take_over_stale_vz_dev_vm() -> Result<()> {
-    let probe = vz_dev_vm_running()?;
+/// Legacy takeover hook; new starts never select the removed backend.
+fn take_over_stale_legacy_macos_dev_vm() -> Result<()> {
+    let probe = legacy_macos_dev_vm_running()?;
     if let Some(line) = switch_notice(probe) {
         ui::info(&line);
-        let id = VmId(dev_vz::DEV_VM_NAME.to_string());
-        if let Err(e) = VzBackend.stop(&id) {
-            // Don't block the new boot on a stale-VM stop failure; surface it.
-            ui::warn(&format!(
-                "Could not stop the stale dev VM cleanly: {e}. Continuing."
-            ));
-        }
     }
     Ok(())
 }
@@ -390,10 +319,9 @@ fn resolve_dev_volumes(flag: &[String]) -> Result<Vec<VmVolume>> {
     Ok(volumes)
 }
 
-/// Custom dev volumes are wired for the libkrun dev VM only. The Vz
-/// builder VM (which wires its own `/dev/vdb` overlay + `/work` share)
-/// and the native-Linux dev path don't thread them yet — warn loudly
-/// rather than silently dropping the user's `-v` request.
+/// Custom dev volumes are wired for the libkrun dev VM only. The native-Linux
+/// dev path doesn't thread them yet — warn loudly rather than silently
+/// dropping the user's `-v` request.
 fn warn_dev_volumes_unsupported(volumes: &[VmVolume], backend: &str) {
     if !volumes.is_empty() {
         ui::warn(&format!(
@@ -411,24 +339,23 @@ fn cmd_dev_libkrun(
     volumes: &[VmVolume],
 ) -> Result<&'static str> {
     let backend = LibkrunBackend;
-    let id = VmId(dev_vz::DEV_VM_NAME.to_string());
+    let id = VmId(dev_vm::DEV_VM_NAME.to_string());
 
-    // Take over a stale Vz dev VM rather than refusing.
-    take_over_stale_vz_dev_vm()?;
+    take_over_stale_legacy_macos_dev_vm()?;
 
     if matches!(backend.status(&id)?, VmStatus::Running) {
         ui::success("libkrun dev VM already running.");
         if open_shell {
-            console::console_interactive(dev_vz::DEV_VM_NAME)?;
+            console::console_interactive(dev_vm::DEV_VM_NAME)?;
         }
         return Ok("already-running");
     }
 
     ui::progress("Starting dev environment via libkrun...");
-    let (kernel, rootfs) = dev_vz::ensure_dev_image()?;
+    let (kernel, rootfs) = dev_vm::ensure_dev_image()?;
     let memory_mib = memory_gib.saturating_mul(1024);
     let config = VmStartConfig {
-        name: dev_vz::DEV_VM_NAME.to_string(),
+        name: dev_vm::DEV_VM_NAME.to_string(),
         rootfs_path: rootfs,
         kernel_path: Some(kernel),
         cpus,
@@ -441,7 +368,7 @@ fn cmd_dev_libkrun(
     backend.start(&config)?;
     ui::success("Dev environment ready (libkrun).");
     if open_shell {
-        console::console_interactive(dev_vz::DEV_VM_NAME)?;
+        console::console_interactive(dev_vm::DEV_VM_NAME)?;
     }
     Ok("started")
 }
@@ -452,18 +379,11 @@ fn cmd_dev_libkrun(
 /// surface; the other-backend stop is best-effort (logged but not
 /// surfaced as a hard error).
 fn cmd_dev_libkrun_down(json: bool) -> Result<bool> {
-    let id = VmId(dev_vz::DEV_VM_NAME.to_string());
+    let id = VmId(dev_vm::DEV_VM_NAME.to_string());
     let was_running = matches!(
         LibkrunBackend.status(&id),
         Ok(VmStatus::Running | VmStatus::Starting | VmStatus::Paused)
     );
-    // Best-effort stop of the Vz side too (no-op if not running;
-    // status check + stop is cheap).
-    if let Ok(VmStatus::Running | VmStatus::Starting | VmStatus::Paused) = VzBackend.status(&id)
-        && let Err(e) = VzBackend.stop(&id)
-    {
-        tracing::warn!(error = %e, "best-effort Vz dev VM stop failed during libkrun dev down");
-    }
     LibkrunBackend.stop(&id)?;
     if !json && was_running {
         ui::success("Dev VM stopped.");
@@ -474,7 +394,6 @@ fn cmd_dev_libkrun_down(json: bool) -> Result<bool> {
 /// Stable backend identifier for the JSON lifecycle reports.
 fn dev_backend_report_name(backend: DevBackend) -> &'static str {
     match backend {
-        DevBackend::Vz => "vz",
         DevBackend::Libkrun => "libkrun",
         DevBackend::LinuxKvm => "linux-native",
         DevBackend::Unsupported => "unsupported",
@@ -504,7 +423,7 @@ fn reset_nix_store_overlay(json: bool) -> bool {
 }
 
 fn cmd_dev_libkrun_status(json: bool) -> Result<()> {
-    let id = VmId(dev_vz::DEV_VM_NAME.to_string());
+    let id = VmId(dev_vm::DEV_VM_NAME.to_string());
     let status = LibkrunBackend.status(&id)?;
     let state = match status {
         VmStatus::Starting => "starting",
@@ -516,13 +435,13 @@ fn cmd_dev_libkrun_status(json: bool) -> Result<()> {
     if json {
         // libkrun has no in-guest kernel probe here; the dev-image +
         // builder caches are backend-agnostic, so report them too.
-        return crate::json_out::emit_json(&dev_vz::build_dev_status_json("libkrun", state, None));
+        return crate::json_out::emit_json(&dev_vm::build_dev_status_json("libkrun", state, None));
     }
     ui::info("Backend:  libkrun (Hypervisor.framework)");
-    ui::info(&format!("VM:       {}", dev_vz::DEV_VM_NAME));
+    ui::info(&format!("VM:       {}", dev_vm::DEV_VM_NAME));
     ui::info(&format!("Status:   {state}"));
     // Surface the other backend's state too.
-    if let Ok(Some(other)) = vz_dev_vm_running() {
+    if let Ok(Some(other)) = legacy_macos_dev_vm_running() {
         ui::info(&format!(
             "Note: a {other} dev VM is also running. The next `mvmctl dev up` \
              switches to this backend automatically; `mvmctl dev down` stops both."
@@ -549,9 +468,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         json: false,
     });
 
-    // `current_backend()` honours `MVM_BUILDER_BACKEND=vz` / `--builder vz`
-    // (folded into env at startup by `commands::run`) directly, routing the
-    // dev VM through `VzBackend`.
     let backend = current_backend();
     match action {
         DevAction::Up {
@@ -595,27 +511,23 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 );
             }
             let dev_volumes = resolve_dev_volumes(&volume)?;
-            let dev_base = base.as_deref().map(dev_vz::DevBaseRef::parse).transpose()?;
+            let dev_base = base.as_deref().map(dev_vm::DevBaseRef::parse).transpose()?;
 
             // Reap helpers (gvproxy/supervisor) leaked by a prior killed
             // run before booting a fresh builder VM. Kill-only, quiet,
             // non-fatal — see `sweep_orphaned_vm_helpers_on_startup`.
-            dev_vz::sweep_orphaned_vm_helpers_on_startup();
+            dev_vm::sweep_orphaned_vm_helpers_on_startup();
 
             let outcome = match backend {
                 DevBackend::Libkrun => {
                     if dev_base.is_some() {
-                        anyhow::bail!("`mvmctl dev up --base` is only supported by the Vz backend");
+                        anyhow::bail!("`mvmctl dev up --base` is not supported");
                     }
                     cmd_dev_libkrun(effective_cpus, effective_mem, open_shell, &dev_volumes)
                 }
-                DevBackend::Vz => {
-                    warn_dev_volumes_unsupported(&dev_volumes, "Vz");
-                    dev_vz::cmd_dev_vz(effective_cpus, effective_mem, open_shell, dev_base.as_ref())
-                }
                 DevBackend::LinuxKvm => {
                     if dev_base.is_some() {
-                        anyhow::bail!("`mvmctl dev up --base` is only supported by the Vz backend");
+                        anyhow::bail!("`mvmctl dev up --base` is not supported");
                     }
                     warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
                     linux_native::cmd_dev_linux_native(open_shell)
@@ -623,7 +535,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 DevBackend::Unsupported => return bail_no_dev_backend(),
             }?;
             if json {
-                return crate::json_out::emit_json(&dev_vz::build_dev_up_json(
+                return crate::json_out::emit_json(&dev_vm::build_dev_up_json(
                     dev_backend_report_name(backend),
                     outcome,
                 ));
@@ -633,7 +545,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         DevAction::Down { reset, json } => {
             let was_running = match backend {
                 DevBackend::Libkrun => cmd_dev_libkrun_down(json),
-                DevBackend::Vz => dev_vz::cmd_dev_vz_down(json, reset),
                 DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(json),
                 // Nothing to stop on unsupported hosts. The gc-root
                 // cleanup below still runs.
@@ -645,7 +556,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 false
             };
             if json {
-                return crate::json_out::emit_json(&dev_vz::build_dev_down_json(
+                return crate::json_out::emit_json(&dev_vm::build_dev_down_json(
                     dev_backend_report_name(backend),
                     was_running,
                     reset_done,
@@ -653,64 +564,43 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             }
             Ok(())
         }
-        DevAction::Park { json } => {
-            let parked = match backend {
-                DevBackend::Vz => dev_vz::cmd_dev_vz_park(json),
-                DevBackend::Libkrun => anyhow::bail!(
-                    "`mvmctl dev park` is only supported by the Vz dev backend; \
-                     libkrun has no persistent memory snapshot"
-                ),
-                DevBackend::LinuxKvm => {
-                    anyhow::bail!("`mvmctl dev park` is only supported by the Vz dev backend")
-                }
-                DevBackend::Unsupported => {
-                    bail_no_dev_backend()?;
-                    unreachable!("bail_no_dev_backend always returns Err")
-                }
-            }?;
-            if json {
-                return crate::json_out::emit_json(&dev_vz::build_dev_park_json(
-                    dev_backend_report_name(backend),
-                    parked,
-                ));
+        DevAction::Park { json: _ } => match backend {
+            DevBackend::Libkrun => {
+                anyhow::bail!("`mvmctl dev park` is not supported by the libkrun dev backend")
             }
-            Ok(())
-        }
+            DevBackend::LinuxKvm => {
+                anyhow::bail!("`mvmctl dev park` is not supported by the native Linux dev backend")
+            }
+            DevBackend::Unsupported => {
+                bail_no_dev_backend()?;
+                unreachable!("bail_no_dev_backend always returns Err")
+            }
+        },
         DevAction::Shell { project: _project } => match backend {
             DevBackend::Libkrun => {
                 if !matches!(
-                    LibkrunBackend.status(&VmId(dev_vz::DEV_VM_NAME.to_string()))?,
+                    LibkrunBackend.status(&VmId(dev_vm::DEV_VM_NAME.to_string()))?,
                     VmStatus::Running
                 ) {
                     anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up");
                 }
-                console::console_interactive(dev_vz::DEV_VM_NAME)
-            }
-            DevBackend::Vz => {
-                if !dev_vz::is_vz_dev_running() {
-                    anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up");
-                }
-                #[cfg(feature = "builder-vm")]
-                dev_vz::touch_dev_vz_activity_now();
-                console::console_interactive(dev_vz::DEV_VM_NAME)
-                    .context("Dev VM is running, but console attach failed")
+                console::console_interactive(dev_vm::DEV_VM_NAME)
             }
             DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_shell(),
             DevBackend::Unsupported => bail_no_dev_backend(),
         },
         DevAction::Status { json } => match backend {
             DevBackend::Libkrun => cmd_dev_libkrun_status(json),
-            DevBackend::Vz => dev_vz::cmd_dev_vz_status(json),
             DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_status(json),
             DevBackend::Unsupported => {
                 if json {
-                    return crate::json_out::emit_json(&dev_vz::build_dev_status_json_vmless(
+                    return crate::json_out::emit_json(&dev_vm::build_dev_status_json_vmless(
                         "unsupported",
                         "unsupported",
                     ));
                 }
                 ui::info(
-                    "Dev environment: not configured on this host (Vz dev VM \
+                    "Dev environment: not configured on this host (libkrun \
                      unavailable and native /dev/kvm missing). WSL2 nested KVM and \
                      Hyper-V managed Linux builders are future backend work.",
                 );
@@ -719,13 +609,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         },
         DevAction::Cache {
             action: DevCacheAction::Inspect { json },
-        } => dev_vz::cmd_dev_cache_inspect(json),
+        } => dev_vm::cmd_dev_cache_inspect(json),
         DevAction::ImportImage {
             manifest,
             bundle,
             vmlinux,
             rootfs,
-        } => dev_vz::cmd_dev_import_image(&manifest, &bundle, &vmlinux, &rootfs),
+        } => dev_vm::cmd_dev_import_image(&manifest, &bundle, &vmlinux, &rootfs),
         DevAction::Rebuild {
             cpus,
             memory,
@@ -737,8 +627,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             // re-up).
             let _ = match backend {
                 DevBackend::Libkrun => cmd_dev_libkrun_down(false),
-                // Rebuild discards state, so don't park — cold-boot next.
-                DevBackend::Vz => dev_vz::cmd_dev_vz_down(false, /* reset = */ true),
                 DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(false),
                 DevBackend::Unsupported => Ok(false),
             };
@@ -759,10 +647,6 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
                 DevBackend::Libkrun => {
                     cmd_dev_libkrun(effective_cpus, effective_mem, shell, &dev_volumes).map(|_| ())
                 }
-                DevBackend::Vz => {
-                    warn_dev_volumes_unsupported(&dev_volumes, "Vz");
-                    dev_vz::cmd_dev_vz(effective_cpus, effective_mem, shell, None).map(|_| ())
-                }
                 DevBackend::LinuxKvm => {
                     warn_dev_volumes_unsupported(&dev_volumes, "native Linux/KVM");
                     linux_native::cmd_dev_linux_native(shell).map(|_| ())
@@ -779,14 +663,14 @@ mod tests {
     use mvm_core::platform::Platform;
 
     // ──────────────────────────────────────────────────────────────
-    // Cross-backend coexistence dispatch (libkrun taking over a stale
-    // Vz dev VM).
+    // Cross-backend coexistence dispatch (libkrun taking over stale state).
     // ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn switch_notice_libkrun_takes_over_vz() {
-        let line = switch_notice(Some("vz")).expect("a running vz VM must yield a switch notice");
-        assert!(line.contains("vz → libkrun"), "got: {line}");
+    fn switch_notice_libkrun_takes_over_stale_backend() {
+        let line =
+            switch_notice(Some("legacy")).expect("a running stale VM must yield a switch notice");
+        assert!(line.contains("legacy → libkrun"), "got: {line}");
         assert!(
             !line.contains("--builder"),
             "must not leak --builder: {line}"
@@ -794,8 +678,8 @@ mod tests {
     }
 
     #[test]
-    fn switch_notice_silent_when_no_stale_vz() {
-        // No leftover Vz VM → nothing to announce, boot proceeds.
+    fn switch_notice_silent_when_no_stale_backend() {
+        // No leftover VM → nothing to announce, boot proceeds.
         assert!(switch_notice(None).is_none());
     }
 
@@ -817,47 +701,37 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn builder_vz_with_vz_available_picks_vz_dev_backend() {
-        // Regression test: `MVM_BUILDER_BACKEND=vz` (or `--builder vz`)
-        // must actually route the dev VM through `VzBackend` when the
-        // host supports it — an earlier grace guard silently rejected.
+    fn removed_backend_preference_does_not_select_removed_backend() {
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
-                /* prefers_vz */ true,
+                /* prefers_removed_backend */ true,
                 /* prefers_libkrun */ false,
-                /* has_vz */ true,
-                /* is_vz_default_tier */ false,
+                /* has_removed_backend */ true,
+                /* is_removed_backend_default_tier */ false,
                 /* has_libkrun */ true,
                 /* has_kvm */ false,
             ),
-            DevBackend::Vz,
+            DevBackend::Libkrun,
         );
     }
 
     #[test]
-    fn builder_vz_on_vz_default_tier_still_picks_vz() {
-        // Explicit Vz override (rule 1) and the macOS-26 Vz auto-detect
-        // tier (rule 3) both land on Vz; the override path is exercised
-        // here independent of the default tier.
+    fn removed_backend_on_default_tier_uses_supported_backend() {
         assert_eq!(
             select_dev_backend(Platform::MacOS, true, false, true, true, true, false,),
-            DevBackend::Vz,
+            DevBackend::Libkrun,
         );
     }
 
     #[test]
-    fn builder_vz_without_vz_available_falls_through() {
-        // Selection layer should refuse Vz on Linux already, but the
-        // dev dispatch defends in depth: if somehow Vz was chosen but
-        // `has_vz()` is false, fall through to the standard tree
-        // instead of returning a Vz backend that can't run.
+    fn removed_backend_preference_without_supported_backend_falls_through() {
         assert_eq!(
             select_dev_backend(
                 Platform::LinuxNative,
                 true,
                 /* prefers_libkrun */ false,
-                /* has_vz */ false,
+                /* has_removed_backend */ false,
                 false,
                 false,
                 /* has_kvm */ true,
@@ -867,38 +741,32 @@ mod tests {
     }
 
     #[test]
-    fn auto_detect_picks_vz_on_default_tier() {
-        // Auto-detect tree (no explicit override): the macOS-26 Vz
-        // default tier wins over libkrun even though both are present
-        // (CLAUDE.md "Dev mode" rationale). Regression guard that
-        // auto-detect libkrun does *not* divert off Vz — only an
-        // explicit ask does (next test).
+    fn auto_detect_picks_libkrun_on_default_tier() {
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
-                /* prefers_vz */ false,
+                /* prefers_removed_backend */ false,
                 /* prefers_libkrun */ false,
                 true,
-                /* is_vz_default_tier */ true,
+                /* is_removed_backend_default_tier */ true,
                 true,
                 false,
             ),
-            DevBackend::Vz,
+            DevBackend::Libkrun,
         );
     }
 
     #[test]
-    fn explicit_libkrun_overrides_vz_default_tier() {
-        // The symmetric counterpart to the Vz override: an operator who
-        // sets MVM_BUILDER_BACKEND=libkrun on a macOS 26+ box (Vz default
-        // tier) gets the dev VM on libkrun, not Vz.
+    fn explicit_libkrun_uses_libkrun_on_default_tier() {
+        // An operator who sets MVM_BUILDER_BACKEND=libkrun on a macOS 26+ box
+        // gets the dev VM on libkrun.
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
-                /* prefers_vz */ false,
+                /* prefers_removed_backend */ false,
                 /* prefers_libkrun */ true,
-                /* has_vz */ true,
-                /* is_vz_default_tier */ true,
+                /* has_removed_backend */ true,
+                /* is_removed_backend_default_tier */ true,
                 /* has_libkrun */ true,
                 /* has_kvm */ false,
             ),
@@ -908,31 +776,30 @@ mod tests {
 
     #[test]
     fn explicit_libkrun_without_libkrun_falls_through() {
-        // Defend in depth (mirrors the Vz fall-through): if libkrun was
+        // Defend in depth: if libkrun was
         // asked for but isn't actually installed, don't return a Libkrun
-        // backend that can't run — fall through to the auto-detect tree
-        // (the Vz default tier).
+        // backend that can't run.
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
-                /* prefers_vz */ false,
+                /* prefers_removed_backend */ false,
                 /* prefers_libkrun */ true,
-                /* has_vz */ false,
-                /* is_vz_default_tier */ true,
+                /* has_removed_backend */ false,
+                /* is_removed_backend_default_tier */ true,
                 /* has_libkrun */ false,
                 /* has_kvm */ false,
             ),
-            DevBackend::Vz,
+            DevBackend::Unsupported,
         );
     }
 
     #[test]
     fn builder_libkrun_falls_back_to_libkrun_on_older_macos() {
-        // macOS 13-25 (not the Vz default tier) + libkrun installed.
+        // macOS + libkrun installed.
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
-                /* prefers_vz */ false,
+                /* prefers_removed_backend */ false,
                 /* prefers_libkrun */ false,
                 true,
                 false,
@@ -948,7 +815,7 @@ mod tests {
         assert_eq!(
             select_dev_backend(
                 Platform::LinuxNative,
-                /* prefers_vz */ false,
+                /* prefers_removed_backend */ false,
                 /* prefers_libkrun */ false,
                 false,
                 false,
@@ -966,7 +833,7 @@ mod tests {
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
-                /* prefers_vz */ false,
+                /* prefers_removed_backend */ false,
                 /* prefers_libkrun */ false,
                 false,
                 false,

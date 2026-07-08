@@ -289,9 +289,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> WorkloadBackend
     for WorkloadRunner<D, S>
 {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
-        // The runner always routes egress through the per-VM vsock UDS endpoint —
-        // the sole gate off the box. No transparent :80/:443 terminator.
-        EgressSubstitutionTransport::VsockUdsChannel
+        EgressSubstitutionTransport::VsockHostProxy
     }
 }
 
@@ -552,7 +550,7 @@ mod tests {
             "console ports must be HostDials"
         );
 
-        // Paths live under <state_dir>/vsock/ — same shape as the Vz convention.
+        // Paths live under <state_dir>/vsock/ — same shape as the LegacyMacos convention.
         let first = &console[0];
         assert!(
             first.host_uds.to_string_lossy().contains("/vsock/vsock-"),

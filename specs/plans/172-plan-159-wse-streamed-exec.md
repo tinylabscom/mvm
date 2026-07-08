@@ -6,7 +6,7 @@
 > use checkbox (`- [ ]`) syntax for tracking.
 >
 > **Design source:** `specs/docs/plan-159-wse-streamed-exec-design.md`.
-> **Parent:** `specs/plans/159-vz-inspired-macos-dx.md` (WS-5 E).
+> **Parent:** `removed legacy macOS archival spec` (WS-5 E).
 > **Numbering:** 172 was free (main tops at 171; no open PR claims it).
 > Re-confirm before merge — `check-spec-numbers` rejects duplicates.
 

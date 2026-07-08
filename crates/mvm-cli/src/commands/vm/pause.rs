@@ -26,7 +26,6 @@ use mvm_backend::backend::AnyBackend;
 use mvm_core::config::vm_state_dir;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::VmId;
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -63,18 +62,16 @@ pub(in crate::commands) struct ResumeArgs {
     /// `firecracker`. See `pause --help` for the `mock` variant.
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
-    /// Drive the resume through the backend's live-memory warm-start path
-    /// (`VmBackend::warm_start`) instead of the plain verify-and-resume.
-    /// Fails closed with a typed recovery hint on a backend that can't
-    /// warm-start at the live-memory tier (e.g. libkrun is disk-only).
+    /// Drive the resume through the backend's live-memory warm-start path.
+    /// Firecracker uses this path by default; the flag is kept for explicitness
+    /// and for unsupported-backend recovery hints.
     #[arg(long)]
     pub warm: bool,
 }
 
-/// A running VM whose state dir carries a `vz.pid` marker is a Vz VM — it gets
-/// native vCPU pause/resume rather than the Firecracker snapshot-seal path.
-fn is_vz_vm(name: &str) -> bool {
-    matches!(AnyBackend::for_started_vm(name), Some(AnyBackend::Vz(_)))
+fn is_legacy_macos_vm(name: &str) -> bool {
+    let _ = name;
+    false
 }
 
 /// Pick the `SnapshotIO` impl matching the hypervisor selector.
@@ -133,35 +130,8 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
         await_primed_barrier(&source, timeout)
             .with_context(|| format!("primed barrier for VM {:?}", args.name))?;
     }
-    if is_vz_vm(&args.name) {
-        AnyBackend::Vz(mvm_backend::vz::VzBackend)
-            .pause(&VmId::from(args.name.as_str()))
-            .with_context(|| format!("pausing Vz VM {:?}", args.name))?;
-        // Stamp the live supervisor pid into a marker so the fs_quick gate
-        // can confirm the VM is quiesced without depending on the name
-        // registry (which `up`-created VMs may never have populated).
-        // The marker is only valid while the same pid is alive; a re-launched
-        // or crashed VM will have a different or absent pid, so the marker
-        // self-invalidates without any explicit cleanup on those paths.
-        let state_dir = vm_state_dir(&args.name);
-        match std::fs::read_to_string(state_dir.join("vz.pid")) {
-            Ok(pid) => {
-                if let Err(e) = std::fs::write(state_dir.join("vz.paused"), pid.trim()) {
-                    tracing::warn!(error = %e, vm = %args.name, "could not write vz.paused marker (pause succeeded)");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, vm = %args.name, "vz.pid unreadable; vz.paused marker not written (pause succeeded)");
-            }
-        }
-        let registry_path = mvm::vm::name_registry::registry_path();
-        if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
-            let _ = registry.set_paused(&args.name, true);
-            let _ = registry.save(&registry_path);
-        }
-        println!("{}: paused (vz, vCPUs quiesced)", args.name);
-        mvm_core::audit_emit!(WorkloadSleep, vm: &args.name, "backend=vz");
-        return Ok(());
+    if is_legacy_macos_vm(&args.name) {
+        anyhow::bail!("the LegacyMacos backend has been removed");
     }
     let io = snapshot_io_for(&args.hypervisor, &args.name)?;
 
@@ -209,6 +179,51 @@ fn warm_start_success_line(name: &str, reseed: mvm_core::vm_backend::ReseedStatu
     )
 }
 
+fn reseed_status_from_post_restore_outcome(
+    outcome: &mvm::vm::instance_snapshot::PostRestoreOutcome,
+) -> mvm_core::vm_backend::ReseedStatus {
+    use mvm_core::vm_backend::ReseedStatus;
+
+    if outcome.acknowledged && outcome.reseeded {
+        ReseedStatus::Rotated
+    } else {
+        ReseedStatus::NotRotated
+    }
+}
+
+fn resume_uses_backend_warm_start(hypervisor: &str, warm: bool) -> bool {
+    warm || hypervisor != "mock"
+}
+
+fn retry_undelivered_reseed(
+    name: &str,
+    reseed: mvm_core::vm_backend::ReseedStatus,
+) -> mvm_core::vm_backend::ReseedStatus {
+    use mvm_core::vm_backend::ReseedStatus;
+
+    if reseed != ReseedStatus::Undelivered {
+        return reseed;
+    }
+
+    let token = mvm_core::crypto::vmgenid::fresh_generation_token(name).token;
+    crate::commands::shared::emit_vsock_rpc_audit(
+        name,
+        &mvm_guest::vsock::GuestRequest::PostRestore {
+            token,
+            grant_envelope: None,
+        },
+    );
+    match signal_post_restore(name, &VsockPostRestoreSignal { token }) {
+        Ok(outcome) => reseed_status_from_post_restore_outcome(&outcome),
+        Err(e) => {
+            tracing::warn!(
+                "warm-start of '{name}': CLI post-restore retry failed after backend delivery miss: {e}"
+            );
+            ReseedStatus::Undelivered
+        }
+    }
+}
+
 fn run_warm_start(name: &str, hypervisor: &str) -> Result<()> {
     use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
 
@@ -219,6 +234,7 @@ fn run_warm_start(name: &str, hypervisor: &str) -> Result<()> {
     };
     match backend.warm_start(&config, SnapshotCapability::LiveMemory) {
         Ok(outcome) => {
+            let reseed = retry_undelivered_reseed(name, outcome.reseed);
             // Remove the FC pause marker on a successful warm resume. Same
             // rationale as the plain resume path: FC keeps its pid alive
             // across pause/resume, so the marker must be cleared explicitly.
@@ -229,7 +245,7 @@ fn run_warm_start(name: &str, hypervisor: &str) -> Result<()> {
                 let _ = registry.touch_last_active(name, mvm_core::time::utc_now());
                 let _ = registry.save(&registry_path);
             }
-            println!("{}", warm_start_success_line(name, outcome.reseed));
+            println!("{}", warm_start_success_line(name, reseed));
             mvm_core::audit_emit!(WorkloadWake, vm: name, "warm_start backend={hypervisor}");
             Ok(())
         }
@@ -247,31 +263,15 @@ pub(in crate::commands) fn run_resume(
     _cfg: &MvmConfig,
 ) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
-    if is_vz_vm(&args.name) {
-        AnyBackend::Vz(mvm_backend::vz::VzBackend)
-            .resume(&VmId::from(args.name.as_str()))
-            .with_context(|| format!("resuming Vz VM {:?}", args.name))?;
-        // Remove the pause marker now that vCPUs are running again.
-        // Tolerate a missing file — it may have already been cleaned up or
-        // was never written (best-effort on the pause side).
-        let marker = vm_state_dir(&args.name).join("vz.paused");
-        let _ = std::fs::remove_file(&marker);
-        let registry_path = mvm::vm::name_registry::registry_path();
-        if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
-            let _ = registry.set_paused(&args.name, false);
-            let _ = registry.touch_last_active(&args.name, mvm_core::time::utc_now());
-            let _ = registry.save(&registry_path);
-        }
-        println!("{}: resumed (vz, vCPUs running)", args.name);
-        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "backend=vz");
-        return Ok(());
+    if is_legacy_macos_vm(&args.name) {
+        anyhow::bail!("the LegacyMacos backend has been removed");
     }
-    // `--warm` routes the resume through the backend's live-memory
-    // warm-start path (`VmBackend::warm_start`). It mints a fresh VMGenID
-    // token, loads + resumes the sealed snapshot, and delivers the token so
-    // the guest reseeds — and fails closed with a typed recovery hint on a
-    // backend that can't satisfy the live-memory tier (e.g. libkrun).
-    if args.warm {
+    // Real Firecracker resume uses the backend live-memory warm-start path.
+    // It stops the paused VMM, starts a blank VMM, loads the sealed snapshot
+    // with Firecracker's current `mem_backend` API, resumes vCPUs, and delivers
+    // a VMGenID token. The old direct SnapshotIO loader is retained only for
+    // the hermetic mock path.
+    if resume_uses_backend_warm_start(&args.hypervisor, args.warm) {
         return run_warm_start(&args.name, &args.hypervisor);
     }
 
@@ -515,14 +515,50 @@ mod tests {
     }
 
     #[test]
-    fn is_vz_vm_true_for_vz_marker() {
+    fn post_restore_retry_status_reflects_guest_ack_and_reseed() {
+        use mvm::vm::instance_snapshot::PostRestoreOutcome;
+        use mvm_core::vm_backend::ReseedStatus;
+
+        let rotated = reseed_status_from_post_restore_outcome(&PostRestoreOutcome {
+            acknowledged: true,
+            detail: None,
+            reseeded: true,
+        });
+        assert_eq!(rotated, ReseedStatus::Rotated);
+
+        let not_reseeded = reseed_status_from_post_restore_outcome(&PostRestoreOutcome {
+            acknowledged: true,
+            detail: None,
+            reseeded: false,
+        });
+        assert_eq!(not_reseeded, ReseedStatus::NotRotated);
+
+        let not_acknowledged = reseed_status_from_post_restore_outcome(&PostRestoreOutcome {
+            acknowledged: false,
+            detail: Some("guest rejected post-restore".to_string()),
+            reseeded: true,
+        });
+        assert_eq!(not_acknowledged, ReseedStatus::NotRotated);
+    }
+
+    #[test]
+    fn real_resume_uses_backend_warm_start_by_default() {
+        assert!(resume_uses_backend_warm_start("firecracker", false));
+        assert!(resume_uses_backend_warm_start("firecracker", true));
+        assert!(resume_uses_backend_warm_start("libkrun", false));
+        assert!(!resume_uses_backend_warm_start("mock", false));
+        assert!(resume_uses_backend_warm_start("mock", true));
+    }
+
+    #[test]
+    fn is_legacy_macos_vm_stays_false_after_backend_removal() {
         let tmp = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set("MVM_DATA_DIR", tmp.path());
         let dir = mvm_core::config::vm_state_dir("vzvm");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("vz.pid"), "1").unwrap();
-        assert!(is_vz_vm("vzvm"));
-        assert!(!is_vz_vm("nope"));
+        std::fs::write(dir.join("legacy-macos.pid"), "1").unwrap();
+        assert!(!is_legacy_macos_vm("vzvm"));
+        assert!(!is_legacy_macos_vm("nope"));
     }
 }

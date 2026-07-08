@@ -34,8 +34,8 @@ The installer and runtime automatically detect the platform and select the best 
 
 | Platform | Runtime Backend | Notes |
 |----------|-----------------|-------|
-| **Linux + KVM** | Firecracker | Native, sub-200ms boot, Tier 1 |
-| **macOS 26+ Apple Silicon** | Vz | Bundled with OS, zero extra deps |
+| **Linux + KVM** | Firecracker | Native, sub-200ms boot target, Tier 1 |
+| **macOS 26+ Apple Silicon** | HVF | Bundled with OS, zero extra deps, vsock-only workload egress |
 | **macOS 13–25 Apple Silicon** | libkrun | Homebrew-managed, in-process VMM |
 
 ### 4. Builder VM is Runtime-Transparent
@@ -46,7 +46,6 @@ Users **do not** run Nix on the host. On first workload build:
 2. Nix evaluation + `nix build` run **inside** the builder VM
 3. Extracted rootfs is copied back to the host cache
 4. Runtime backends boot **already-built** images
-
 5. Security: build-time Nix runs in the builder VM; host touches only tarballs
 
 ### 5.契約 (Contract)
@@ -85,10 +84,10 @@ Each `.tar.gz` contains:
 mvmctl-<target>/
   mvmctl                         # main CLI binary
   mvm-bridge                     # per-VM Firecracker bridge (Linux)
-  mvm-vz-supervisor              # per-VM Vz supervisor (macOS 26+)
-  mvm-libkrun-supervisor        # per-VM libkrun supervisor (macOS 13-25)
+  mvm-hvf-supervisor             # per-VM HVF supervisor (macOS 26+)
+  mvm-libkrun-supervisor         # per-VM libkrun supervisor (supported hosts)
   resources/
-    mvmctl.entitlements         # macOS Hypervisor entitlements file
+    mvmctl.entitlements          # macOS Hypervisor entitlements file
 ```
 
 All per-VM host binaries are **installed beside `mvmctl`** so the backend's "adjacent-to-exe" resolver finds them at runtime.

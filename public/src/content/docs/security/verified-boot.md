@@ -19,7 +19,7 @@ with its limits.
 | Backend | Posture |
 | --- | --- |
 | Firecracker on Linux/KVM | Strongest target for dm-verity/root hash enforcement. |
-| Apple Virtualization / libkrun | Useful microVM isolation, but verified-boot evidence differs by backend support. |
+| Apple Hypervisor.framework / libkrun | Useful microVM isolation, but verified-boot evidence differs by backend support. |
 | QEMU (Linux, dev/test) | Partial verified-boot support; Tier 2 dev/test, not a production target. |
 
 Use [Matryoshka model](/security/matryoshka/) for the tier matrix before making
@@ -27,9 +27,7 @@ a user-facing claim.
 
 ## Snapshots and restore
 
-Snapshots are separate from first boot. Firecracker sealed pause/resume and Vz
-machine-state save/restore have their own integrity evidence. A restore is a
-lifecycle transition, not a new security boundary.
+Snapshots are separate from first boot. Firecracker sealed pause/resume and any future backend-specific machine-state restore path have their own integrity evidence. A restore is a lifecycle transition, not a new security boundary.
 
 ## Documentation rule
 

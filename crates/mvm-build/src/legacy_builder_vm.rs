@@ -1,15 +1,15 @@
-//! Apple Virtualization.framework (Vz) backend for the builder VM,
+//! Apple Virtualization.framework (LegacyMacos) backend for the builder VM,
 //! parallel to [`crate::libkrun_builder::LibkrunBuilderBackend`].
 //!
 //! Second `VmBackendForBuilder` impl. Owns the
-//! Vz-specific spawn (`mvm-vz-supervisor` binary with
-//! [`crate::vz::SupervisorConfig`] JSON on stdin) and surfaces the
+//! LegacyMacos-specific spawn (`mvm-legacy-macos-supervisor` binary with
+//! [`crate::legacy_supervisor_config::SupervisorConfig`] JSON on stdin) and surfaces the
 //! resulting `BuilderVmExitInfo` back to the seam.
 //!
 //! ## Scope
 //!
 //! This module is the **trait impl only**. The high-level
-//! `VzBuilderVm` driver that wraps `BuilderVmRuntime` around this
+//! `LegacyBuilderVm` driver that wraps `BuilderVmRuntime` around this
 //! backend (mirroring `LibkrunBuilderVm`) lands in a follow-up.
 //!
 //! ## Why no panic detector
@@ -17,11 +17,11 @@
 //! The libkrun panic detector exists because
 //! `krun_start_enter` blocks indefinitely on a panicked guest —
 //! `Child::wait()` never returns, so a host-side console-log watcher
-//! has to kill the supervisor. The Vz Swift supervisor uses
+//! has to kill the supervisor. The LegacyMacos Swift supervisor uses
 //! `VZVirtualMachine.start()` instead and exits cleanly when the guest
 //! powers off or panics (`main.swift` contract: 0
 //! clean / 1 guest error / 2 config parse / 3 supervisor startup).
-//! So the Vz path can rely on `Child::wait()` plus a wall-clock
+//! So the LegacyMacos path can rely on `Child::wait()` plus a wall-clock
 //! timeout — no console-log polling needed.
 
 use std::io::{Read, Write};
@@ -48,8 +48,8 @@ use crate::libkrun_builder::{
     builder_vm_cache_dir, ensure_builder_vm_image, ensure_utf8_path, host_arch_tag, unique_job_id,
 };
 
-/// Standard kernel cmdline the Vz supervisor pairs with the builder
-/// VM's rootfs. Matches `mvm_backend::vz::DEFAULT_CMDLINE`'s shape —
+/// Standard kernel cmdline the LegacyMacos supervisor pairs with the builder
+/// VM's rootfs. Matches `mvm_backend::legacy_macos_backend::DEFAULT_CMDLINE`'s shape —
 /// console on the virtio-hvc port (so `Self::console_log_path`
 /// captures it), rootfs as the first virtio-blk device, builder VM
 /// init at `/init`.
@@ -59,10 +59,10 @@ use crate::libkrun_builder::{
 /// callers that pass an empty cmdline get a sensible boot.
 pub const DEFAULT_VZ_BUILDER_CMDLINE: &str = "console=hvc0 root=/dev/vda ro init=/init panic=1";
 
-/// Tear-down guard for the host-side gvproxy the Vz builder VM uses
+/// Tear-down guard for the host-side gvproxy the LegacyMacos builder VM uses
 /// for egress. Stops the detached gvproxy via its PID-sidecar file on
 /// `Drop` so a build that times out or errors out doesn't leak the
-/// daemon. Mirrors `mvm_backend::vz::AttachedGvproxyGuard`.
+/// daemon. Mirrors `mvm_backend::legacy_macos_backend::AttachedGvproxyGuard`.
 struct BuilderGvproxyGuard {
     state_dir: PathBuf,
 }
@@ -71,7 +71,7 @@ impl BuilderGvproxyGuard {
     /// Disarm the guard so it does NOT reap gvproxy on drop. Used by
     /// the persistent VM's `start` once the supervisor is spawned: the
     /// detached gvproxy must outlive the CLI and is reaped later,
-    /// cross-process, by `stop_persistent_vz_by_pid_file`.
+    /// cross-process, by `stop_persistent_legacy_macos_by_pid_file`.
     fn defuse(self) {
         std::mem::forget(self);
     }
@@ -89,22 +89,22 @@ impl Drop for BuilderGvproxyGuard {
     }
 }
 
-/// Vz parallel of [`crate::libkrun_builder::LibkrunBuilderBackend`]. Holds
+/// LegacyMacos parallel of [`crate::libkrun_builder::LibkrunBuilderBackend`]. Holds
 /// the resolved supervisor binary path + cached builder VM image so
 /// a missing prerequisite surfaces at `new()`-time, not mid-build.
 ///
-/// Only the [`BuilderVmImage::Rootfs`] variant is supported — Vz has
+/// Only the [`BuilderVmImage::Rootfs`] variant is supported — LegacyMacos has
 /// no analog of libkrun's `krun_set_root` directory-as-rootfs path.
 /// [`Self::new_with_rootfs_image`] enforces the variant at
 /// construction so `run_attached_with_mounts` can't be reached with
 /// an incompatible image.
 #[derive(Debug)]
-pub struct VzBuilderBackend {
+pub struct LegacyBuilderBackend {
     supervisor_path: PathBuf,
     image: BuilderVmImage,
 }
 
-impl VzBuilderBackend {
+impl LegacyBuilderBackend {
     /// Construct over an already-resolved supervisor path + image.
     /// Refuses [`BuilderVmImage::RootDir`] — that variant is
     /// libkrun-only. Used by `Self::new` and by tests that want to
@@ -117,8 +117,8 @@ impl VzBuilderBackend {
             BuilderVmImage::Rootfs { .. } => {}
             BuilderVmImage::RootDir { .. } => {
                 return Err(BuilderVmError::ExtractionFailed(
-                    "VzBuilderBackend requires a Rootfs image; RootDir is libkrun-specific \
-                     (krun_set_root has no Vz analog)"
+                    "LegacyBuilderBackend requires a Rootfs image; RootDir is libkrun-specific \
+                     (krun_set_root has no LegacyMacos analog)"
                         .to_string(),
                 ));
             }
@@ -130,10 +130,10 @@ impl VzBuilderBackend {
     }
 }
 
-impl VzBuilderBackend {
+impl LegacyBuilderBackend {
     /// `run_attached_with_mounts` with an optional host-side gvproxy.
     /// The trait method delegates here with `None`; `run_build` calls
-    /// it with `Some` so the Vz builder VM gets egress for cold
+    /// it with `Some` so the LegacyMacos builder VM gets egress for cold
     /// `nix build`s. Kept inherent (not on the trait) so the libkrun
     /// backend — which spawns gvproxy in-process via
     /// `libkrun_sys::gvproxy::spawn` — doesn't inherit a param it
@@ -146,7 +146,7 @@ impl VzBuilderBackend {
         timeout: Duration,
         gvproxy: Option<&host_gvproxy::HostGvproxyInfo>,
     ) -> Result<BuilderVmExitInfo, BuilderVmError> {
-        if !mvm_core::platform::current().has_vz() {
+        if !mvm_core::platform::current().has_legacy_macos() {
             return Err(BuilderVmError::ExtractionFailed(
                 "Apple Virtualization.framework is not available on this host. \
                  Requires macOS 13 or later."
@@ -161,7 +161,8 @@ impl VzBuilderBackend {
             ))
         })?;
 
-        let cfg = build_vz_supervisor_config(config, &self.image, mounts, extra_disks, gvproxy)?;
+        let cfg =
+            build_legacy_supervisor_config(config, &self.image, mounts, extra_disks, gvproxy)?;
         let json = cfg.to_json().map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("serialize SupervisorConfig: {e}"))
         })?;
@@ -173,7 +174,7 @@ impl VzBuilderBackend {
             .spawn()
             .map_err(|e| {
                 BuilderVmError::ExtractionFailed(format!(
-                    "spawn mvm-vz-supervisor at {}: {e}",
+                    "spawn mvm-legacy-macos-supervisor at {}: {e}",
                     self.supervisor_path.display()
                 ))
             })?;
@@ -182,13 +183,13 @@ impl VzBuilderBackend {
             .take()
             .ok_or_else(|| {
                 BuilderVmError::ExtractionFailed(
-                    "mvm-vz-supervisor stdin was not piped after spawn".to_string(),
+                    "mvm-legacy-macos-supervisor stdin was not piped after spawn".to_string(),
                 )
             })?
             .write_all(json.as_bytes())
             .map_err(|e| {
                 BuilderVmError::ExtractionFailed(format!(
-                    "pipe SupervisorConfig JSON to mvm-vz-supervisor stdin: {e}"
+                    "pipe SupervisorConfig JSON to mvm-legacy-macos-supervisor stdin: {e}"
                 ))
             })?;
 
@@ -203,13 +204,13 @@ impl VzBuilderBackend {
                 self.console_log_path(&config.vm_state_dir).display(),
             ))),
             Err(e) => Err(BuilderVmError::ExtractionFailed(format!(
-                "wait on mvm-vz-supervisor child: {e}"
+                "wait on mvm-legacy-macos-supervisor child: {e}"
             ))),
         }
     }
 }
 
-impl VmBackendForBuilder for VzBuilderBackend {
+impl VmBackendForBuilder for LegacyBuilderBackend {
     fn run_attached_with_mounts(
         &self,
         config: &BuilderVmRunConfig,
@@ -224,7 +225,7 @@ impl VmBackendForBuilder for VzBuilderBackend {
     }
 
     fn console_log_path(&self, vm_state_dir: &Path) -> PathBuf {
-        // Same path the libkrun backend uses + the Vz supervisor
+        // Same path the libkrun backend uses + the LegacyMacos supervisor
         // already captures into via `console_output_path`. Both
         // backends keep the file at the same relative location so
         // operators don't have to know which backend produced a
@@ -233,17 +234,17 @@ impl VmBackendForBuilder for VzBuilderBackend {
     }
 }
 
-/// Build the Vz [`crate::vz::SupervisorConfig`] from the trait's
+/// Build the LegacyMacos [`crate::legacy_supervisor_config::SupervisorConfig`] from the trait's
 /// hypervisor-agnostic inputs. Pulled out of
 /// `run_attached_with_mounts` so unit tests can exercise the mapping
 /// without spawning a supervisor.
-fn build_vz_supervisor_config(
+fn build_legacy_supervisor_config(
     config: &BuilderVmRunConfig,
     image: &BuilderVmImage,
     mounts: &[BuilderVmMount],
     extra_disks: &[BuilderVmDisk],
     gvproxy: Option<&host_gvproxy::HostGvproxyInfo>,
-) -> Result<crate::vz::SupervisorConfig, BuilderVmError> {
+) -> Result<crate::legacy_supervisor_config::SupervisorConfig, BuilderVmError> {
     let BuilderVmImage::Rootfs {
         kernel_path,
         rootfs_path,
@@ -254,7 +255,7 @@ fn build_vz_supervisor_config(
         // if a future refactor exposes a builder that skips the
         // variant check.
         return Err(BuilderVmError::ExtractionFailed(
-            "VzBuilderBackend reached run with non-Rootfs image".to_string(),
+            "LegacyBuilderBackend reached run with non-Rootfs image".to_string(),
         ));
     };
 
@@ -278,7 +279,7 @@ fn build_vz_supervisor_config(
         cmdline.clone()
     };
 
-    let mut disks = vec![crate::vz::DiskConfig {
+    let mut disks = vec![crate::legacy_supervisor_config::DiskConfig {
         id: "rootfs".to_string(),
         path: rootfs,
         // Rootfs is RO at boot (matches the verified-boot model
@@ -287,7 +288,7 @@ fn build_vz_supervisor_config(
         read_only: true,
     }];
     for d in extra_disks {
-        disks.push(crate::vz::DiskConfig {
+        disks.push(crate::legacy_supervisor_config::DiskConfig {
             id: d.id.clone(),
             path: path_to_string(&d.host_path, "extra_disk")?,
             read_only: d.read_only,
@@ -296,7 +297,7 @@ fn build_vz_supervisor_config(
 
     let mut virtio_fs = Vec::with_capacity(mounts.len());
     for m in mounts {
-        virtio_fs.push(crate::vz::VirtioFsShare {
+        virtio_fs.push(crate::legacy_supervisor_config::VirtioFsShare {
             tag: m.tag.clone(),
             host_path: path_to_string(&m.host_path, "mount_host_path")?,
             read_only: m.read_only,
@@ -308,24 +309,24 @@ fn build_vz_supervisor_config(
         None => None,
     };
 
-    Ok(crate::vz::SupervisorConfig {
+    Ok(crate::legacy_supervisor_config::SupervisorConfig {
         name: config.name.clone(),
         vm_state_dir: state_dir,
         pid_file_name: Some("builder.pid".to_string()),
-        kernel: crate::vz::KernelConfig {
+        kernel: crate::legacy_supervisor_config::KernelConfig {
             path: kernel,
             cmdline: effective_cmdline,
             initrd_path,
         },
-        resources: crate::vz::ResourceConfig {
+        resources: crate::legacy_supervisor_config::ResourceConfig {
             // BuilderVmRunConfig.vcpus is u8 (caller-bound by host
-            // cap checks); crate::vz::ResourceConfig.cpu_count is u32.
+            // cap checks); crate::legacy_supervisor_config::ResourceConfig.cpu_count is u32.
             cpu_count: u32::from(config.vcpus),
             memory_mib: u64::from(config.memory_mib),
         },
         disks,
         virtio_fs,
-        vsock: crate::vz::VsockConfig {
+        vsock: crate::legacy_supervisor_config::VsockConfig {
             ports: config.vsock_ports.clone(),
             socket_dir: vsock_dir,
             // The builder VM has no egress-substitution endpoint; no host-listen
@@ -341,14 +342,16 @@ fn build_vz_supervisor_config(
         // VM is a TRUSTED dev-tier build VM whose only egress is
         // fetching nixpkgs — NOT a workload subject to the claim-10
         // gateway flow-audit. So no flow-audit drainer; plain gvproxy.
-        network: gvproxy.map(|g| crate::vz::NetworkConfig::Gvproxy {
-            socket_path: g.socket_path.to_string_lossy().into_owned(),
-            mac: host_gvproxy::derive_mac(&config.name),
-            events_ingest_socket_path: None,
-        }),
+        network: gvproxy.map(
+            |g| crate::legacy_supervisor_config::NetworkConfig::Gvproxy {
+                socket_path: g.socket_path.to_string_lossy().into_owned(),
+                mac: host_gvproxy::derive_mac(&config.name),
+                events_ingest_socket_path: None,
+            },
+        ),
         balloon: None,
         control_socket_path: None,
-        startup_mode: crate::vz::StartupMode::Boot,
+        startup_mode: crate::legacy_supervisor_config::StartupMode::Boot,
         // Builder VMs are trusted dev-tier — no claim-10 flow audit.
         tenant_id: None,
         plan: None,
@@ -413,7 +416,7 @@ fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::io::Result<Opt
                 // No portable cross-platform pid-kill; on non-unix
                 // we wait for the watcher thread to surface the
                 // child and kill via its handle. Drops the timeout
-                // contract slightly, but Vz is macOS-only so this
+                // contract slightly, but LegacyMacos is macOS-only so this
                 // path is unreachable in practice.
                 let _ = id;
             }
@@ -439,48 +442,48 @@ fn path_to_string(p: &Path, field: &str) -> Result<String, BuilderVmError> {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// VzBuilderVm — high-level driver, parallel to LibkrunBuilderVm.
+// LegacyBuilderVm — high-level driver, parallel to LibkrunBuilderVm.
 //
-// Wraps `VzBuilderBackend` (the seam impl) with the same
+// Wraps `LegacyBuilderBackend` (the seam impl) with the same
 // orchestration LibkrunBuilderVm performs: validate, acquire the
 // shared `/nix-store` virtio-blk image lock, stage the per-job dir,
 // dispatch through the seam, then finalize per job variant. The
 // shared bits (NixStoreImageLock, stage_job_dir, finalize_flake_job,
 // finalize_install_job, builder_vm_timeout, supervisor_exit_error)
 // all live in `builder_vm_runtime`; this driver is just the
-// Vz-specific glue.
+// LegacyMacos-specific glue.
 // ─────────────────────────────────────────────────────────────────
 
-/// Default vCPU count for Vz builder VM runs. Same value as
+/// Default vCPU count for LegacyMacos builder VM runs. Same value as
 /// [`crate::libkrun_builder::DEFAULT_VCPUS`] — nix builds parallelise at
 /// the derivation level, so 4 cores keeps a build saturated without
 /// pinning the host.
 pub const VZ_BUILDER_DEFAULT_VCPUS: u8 = crate::libkrun_builder::DEFAULT_VCPUS;
 
-/// Default guest RAM (MiB) for Vz builder VM runs. Same value as
+/// Default guest RAM (MiB) for LegacyMacos builder VM runs. Same value as
 /// [`crate::libkrun_builder::DEFAULT_MEMORY_MIB`] for parity with the
 /// libkrun path; the Stage 0 tmpfs cap inside the builder VM rootfs
 /// is what actually limits build memory, not the VM-level cap.
 pub const VZ_BUILDER_DEFAULT_MEMORY_MIB: u32 = crate::libkrun_builder::DEFAULT_MEMORY_MIB;
 
-/// Default persistent `/nix-store` sparse-image cap (MiB) for Vz
+/// Default persistent `/nix-store` sparse-image cap (MiB) for LegacyMacos
 /// builder VM runs. Same value as
 /// [`crate::libkrun_builder::DEFAULT_NIX_STORE_MIB`] so swapping backends
 /// doesn't change the on-disk cache footprint.
 pub const VZ_BUILDER_DEFAULT_NIX_STORE_MIB: u32 = crate::libkrun_builder::DEFAULT_NIX_STORE_MIB;
 
-/// Vz parallel of [`crate::libkrun_builder::LibkrunBuilderVm`]. Implements
-/// [`BuilderVm::run_build`] against the [`VzBuilderBackend`] seam,
+/// LegacyMacos parallel of [`crate::libkrun_builder::LibkrunBuilderVm`]. Implements
+/// [`BuilderVm::run_build`] against the [`LegacyBuilderBackend`] seam,
 /// sharing every bit of substrate orchestration with the libkrun
 /// driver via the shared `builder_vm_runtime` helpers.
 ///
 /// Field shape mirrors `LibkrunBuilderVm` so a caller switching
 /// backends at the env-var level finds the same knobs.
 /// `supervisor_path_override`
-/// is Vz-only — useful in tests + the `MVM_VZ_SUPERVISOR_PATH`
+/// is LegacyMacos-only — useful in tests + the `MVM_LEGACY_MACOS_SUPERVISOR_PATH`
 /// override path.
 #[derive(Debug, Clone, Default)]
-pub struct VzBuilderVm {
+pub struct LegacyBuilderVm {
     /// Guest vCPU count. See [`VZ_BUILDER_DEFAULT_VCPUS`].
     pub vcpus: u8,
     /// Guest RAM in MiB. See [`VZ_BUILDER_DEFAULT_MEMORY_MIB`].
@@ -495,12 +498,12 @@ pub struct VzBuilderVm {
     /// driver's [`crate::libkrun_builder::LibkrunBuilderVm::image_override`].
     pub image_override: Option<BuilderVmImage>,
     /// Optional supervisor binary path override. When `None`,
-    /// [`resolve_vz_supervisor_path`] is consulted. Useful for tests
+    /// [`resolve_legacy_macos_supervisor_path`] is consulted. Useful for tests
     /// that inject a fake supervisor.
     pub supervisor_path_override: Option<PathBuf>,
 }
 
-impl VzBuilderVm {
+impl LegacyBuilderVm {
     /// Construct with the canonical defaults.
     pub fn new() -> Self {
         Self {
@@ -527,17 +530,17 @@ impl VzBuilderVm {
 
     /// Boot from a caller-supplied kernel/rootfs/cmdline instead of
     /// resolving the builder VM image from
-    /// `~/.cache/mvm/builder-vm/<arch>/`. The Vz path only supports
+    /// `~/.cache/mvm/builder-vm/<arch>/`. The LegacyMacos path only supports
     /// [`BuilderVmImage::Rootfs`]; [`Self::run_build`] returns an
     /// `ExtractionFailed` error if the override is a `RootDir`
-    /// variant (Vz has no `krun_set_root` analog).
+    /// variant (LegacyMacos has no `krun_set_root` analog).
     pub fn with_image_override(mut self, image: BuilderVmImage) -> Self {
         self.image_override = Some(image);
         self
     }
 
     /// Override the supervisor binary path. Mostly for tests; the
-    /// production path uses [`resolve_vz_supervisor_path`].
+    /// production path uses [`resolve_legacy_macos_supervisor_path`].
     pub fn with_supervisor_path_override(mut self, path: PathBuf) -> Self {
         self.supervisor_path_override = Some(path);
         self
@@ -546,7 +549,7 @@ impl VzBuilderVm {
     /// Mirror of [`crate::libkrun_builder::LibkrunBuilderVm::validate_mounts`].
     /// Same shape — the validation is hypervisor-agnostic so we
     /// reuse the wording but keep the function private so each
-    /// backend can evolve its own surface (e.g. Vz refusing a
+    /// backend can evolve its own surface (e.g. LegacyMacos refusing a
     /// `host_nix_store` field that we never consume).
     fn validate_mounts(&self, mounts: &BuilderMounts) -> Result<(), BuilderVmError> {
         ensure_utf8_path(&mounts.flake_src, "flake_src")?;
@@ -650,7 +653,7 @@ impl VzBuilderVm {
         Ok(())
     }
 
-    /// Run a narrow builder shell job on the Vz builder backend.
+    /// Run a narrow builder shell job on the LegacyMacos builder backend.
     ///
     /// This mirrors the libkrun/QEMU shell-job contract used by OCI
     /// rootfs materialization: `/work` is the input tree, `/out` is
@@ -663,7 +666,7 @@ impl VzBuilderVm {
     ) -> Result<BuilderShellResult, BuilderVmError> {
         self.validate_shell_job(job)?;
 
-        if !mvm_core::platform::current().has_vz() {
+        if !mvm_core::platform::current().has_legacy_macos() {
             return Err(BuilderVmError::ExtractionFailed(
                 "Apple Virtualization.framework is not available on this host. \
                  Requires macOS 13 or later."
@@ -673,7 +676,7 @@ impl VzBuilderVm {
 
         let supervisor_path = match &self.supervisor_path_override {
             Some(p) => p.clone(),
-            None => resolve_vz_supervisor_path()?,
+            None => resolve_legacy_macos_supervisor_path()?,
         };
         let image = match &self.image_override {
             Some(image) => image.clone(),
@@ -681,8 +684,8 @@ impl VzBuilderVm {
         };
         if let BuilderVmImage::RootDir { .. } = image {
             return Err(BuilderVmError::ExtractionFailed(
-                "VzBuilderVm shell jobs require a Rootfs builder image; RootDir is libkrun-specific \
-                 (krun_set_root has no Vz analog)"
+                "LegacyBuilderVm shell jobs require a Rootfs builder image; RootDir is libkrun-specific \
+                 (krun_set_root has no LegacyMacos analog)"
                     .to_string(),
             ));
         }
@@ -697,25 +700,27 @@ impl VzBuilderVm {
         stage_shell_job_dir(&job_dir, &job.script)?;
         tracing::info!(
             job_dir = %job_dir.display(),
-            "Vz builder VM shell job dir staged"
+            "LegacyMacos builder VM shell job dir staged"
         );
 
-        let vm_name = vz_shell_vm_name(&job_id);
+        let vm_name = legacy_macos_shell_vm_name(&job_id);
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
-                "creating Vz builder shell VM state dir {}: {e}",
+                "creating LegacyMacos builder shell VM state dir {}: {e}",
                 vm_state_dir.display()
             ))
         })?;
         let gvproxy = host_gvproxy::spawn_detached(&vm_state_dir).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("spawn gvproxy for Vz builder shell VM: {e}"))
+            BuilderVmError::ExtractionFailed(format!(
+                "spawn gvproxy for LegacyMacos builder shell VM: {e}"
+            ))
         })?;
         let _gvproxy_guard = BuilderGvproxyGuard {
             state_dir: vm_state_dir.clone(),
         };
 
-        let backend = VzBuilderBackend::new_with_rootfs_image(supervisor_path, image.clone())?;
+        let backend = LegacyBuilderBackend::new_with_rootfs_image(supervisor_path, image.clone())?;
         let (kernel_path, kernel_cmdline) = match &image {
             BuilderVmImage::Rootfs {
                 kernel_path,
@@ -783,7 +788,7 @@ impl VzBuilderVm {
             Some(other) => return Err(supervisor_exit_error(other, &vm_state_dir)),
             None => {
                 return Err(BuilderVmError::NixBuildFailed(format!(
-                    "Vz builder shell supervisor exited without a status code. \
+                    "LegacyMacos builder shell supervisor exited without a status code. \
                      Console log at {}.",
                     backend.console_log_path(&vm_state_dir).display(),
                 )));
@@ -802,7 +807,7 @@ impl VzBuilderVm {
     }
 }
 
-impl BuilderVm for VzBuilderVm {
+impl BuilderVm for LegacyBuilderVm {
     fn run_build(
         &self,
         job: &BuilderJob,
@@ -811,15 +816,15 @@ impl BuilderVm for VzBuilderVm {
         // 1. Caller-supplied input validation — same shape as
         //    LibkrunBuilderVm. Surfacing this here keeps the error
         //    pinned to the offending field rather than failing
-        //    inside the Vz supervisor.
+        //    inside the LegacyMacos supervisor.
         self.validate_mounts(mounts)?;
         self.validate_job(job)?;
 
-        // 2. Refuse on a host without Vz. The runtime detector
+        // 2. Refuse on a host without LegacyMacos. The runtime detector
         //    (`mvm_core::platform`) honestly reports `false` on
         //    Linux / Windows / pre-macOS-13. The seam impl checks
         //    this again, but we fail fast here for clearer errors.
-        if !mvm_core::platform::current().has_vz() {
+        if !mvm_core::platform::current().has_legacy_macos() {
             return Err(BuilderVmError::ExtractionFailed(
                 "Apple Virtualization.framework is not available on this host. \
                  Requires macOS 13 or later (Plan 97 §\"Minimum macOS version\")."
@@ -832,15 +837,15 @@ impl BuilderVm for VzBuilderVm {
         //    resolution does I/O.
         let supervisor_path = match &self.supervisor_path_override {
             Some(p) => p.clone(),
-            None => resolve_vz_supervisor_path()?,
+            None => resolve_legacy_macos_supervisor_path()?,
         };
 
-        // 4. Find or initialise the builder VM image. The Vz path
+        // 4. Find or initialise the builder VM image. The LegacyMacos path
         //    reuses the same image cache layout as libkrun — the
         //    kernel + rootfs are hypervisor-agnostic (booted via
         //    direct-kernel VZLinuxBootLoader / libkrun's KrunContext
-        //    respectively). Vz refuses [`BuilderVmImage::RootDir`]:
-        //    that variant boots via `krun_set_root` and has no Vz
+        //    respectively). LegacyMacos refuses [`BuilderVmImage::RootDir`]:
+        //    that variant boots via `krun_set_root` and has no LegacyMacos
         //    analog.
         let image = match &self.image_override {
             Some(image) => image.clone(),
@@ -848,8 +853,8 @@ impl BuilderVm for VzBuilderVm {
         };
         if let BuilderVmImage::RootDir { .. } = image {
             return Err(BuilderVmError::ExtractionFailed(
-                "VzBuilderVm requires a Rootfs builder image; RootDir is libkrun-specific \
-                 (krun_set_root has no Vz analog)"
+                "LegacyBuilderVm requires a Rootfs builder image; RootDir is libkrun-specific \
+                 (krun_set_root has no LegacyMacos analog)"
                     .to_string(),
             ));
         }
@@ -886,18 +891,18 @@ impl BuilderVm for VzBuilderVm {
         )?;
         tracing::info!(
             job_dir = %job_dir.display(),
-            "Vz builder VM job dir staged (nix-stderr.log streams here as the build runs)"
+            "LegacyMacos builder VM job dir staged (nix-stderr.log streams here as the build runs)"
         );
 
         // 7. Per-VM state directory under the shared cache root.
-        //    Naming: `mvm-builder-vz-<job_id>` so concurrent
-        //    libkrun + Vz runs on the same host don't collide
+        //    Naming: `mvm-builder-legacy-macos-<job_id>` so concurrent
+        //    libkrun + LegacyMacos runs on the same host don't collide
         //    (libkrun uses `mvm-builder-vm-<job_id>`).
-        let vm_name = format!("mvm-builder-vz-{job_id}");
+        let vm_name = format!("mvm-builder-legacy-macos-{job_id}");
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
-                "creating Vz builder VM state dir {}: {e}",
+                "creating LegacyMacos builder VM state dir {}: {e}",
                 vm_state_dir.display()
             ))
         })?;
@@ -907,7 +912,9 @@ impl BuilderVm for VzBuilderVm {
         //     every exit path below — including the timeout/error arms —
         //     so a failed build doesn't leak the daemon.
         let gvproxy = host_gvproxy::spawn_detached(&vm_state_dir).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("spawn gvproxy for Vz builder VM: {e}"))
+            BuilderVmError::ExtractionFailed(format!(
+                "spawn gvproxy for LegacyMacos builder VM: {e}"
+            ))
         })?;
         let _gvproxy_guard = BuilderGvproxyGuard {
             state_dir: vm_state_dir.clone(),
@@ -917,7 +924,7 @@ impl BuilderVm for VzBuilderVm {
         //    Construction enforces the Rootfs-only invariant a
         //    second time (defense in depth — we already checked
         //    above).
-        let backend = VzBuilderBackend::new_with_rootfs_image(supervisor_path, image.clone())?;
+        let backend = LegacyBuilderBackend::new_with_rootfs_image(supervisor_path, image.clone())?;
 
         // 9. Build the hypervisor-agnostic run config. Kernel +
         //    cmdline come from the resolved image; the seam impl
@@ -1006,7 +1013,7 @@ impl BuilderVm for VzBuilderVm {
             crate::builder_vm_runtime::JobLogStreamer::start(job_dir.join("nix-stderr.log"));
 
         // 13. Hand off to the seam. The backend spawns the
-        //     `mvm-vz-supervisor`, pipes the JSON config to stdin,
+        //     `mvm-legacy-macos-supervisor`, pipes the JSON config to stdin,
         //     and blocks until the supervisor exits.
         let exit_info = backend.run_attached_with_mounts_gvproxy(
             &run_config,
@@ -1016,12 +1023,12 @@ impl BuilderVm for VzBuilderVm {
             Some(&gvproxy),
         )?;
 
-        // 14. Branch on the exit info. The Vz supervisor exits 0
+        // 14. Branch on the exit info. The LegacyMacos supervisor exits 0
         //     for clean guest power-off, 1 for guest error, 2 for
         //     config parse error, 3 for supervisor startup error
         //     (per the supervisor's `main.swift` contract). Anything
         //     non-zero is fatal; the panic_line arm is defensive —
-        //     today the Vz seam never sets it because the supervisor
+        //     today the LegacyMacos seam never sets it because the supervisor
         //     exits cleanly even on guest kernel panic, but if a
         //     future iteration starts emitting it we want a clean
         //     surface rather than the supervisor exit branch
@@ -1042,7 +1049,7 @@ impl BuilderVm for VzBuilderVm {
             }
             None => {
                 return Err(BuilderVmError::NixBuildFailed(format!(
-                    "Vz supervisor exited without a status code. \
+                    "LegacyMacos supervisor exited without a status code. \
                      Console log at {}.",
                     backend.console_log_path(&vm_state_dir).display(),
                 )));
@@ -1054,7 +1061,7 @@ impl BuilderVm for VzBuilderVm {
         //     in `artifact_out`; `finalize_install_job` reads
         //     `<artifact_out>/result.json` + validates the sealed
         //     volume sidecars. Both functions live in
-        //     `builder_vm_runtime` so the Vz path reuses the
+        //     `builder_vm_runtime` so the LegacyMacos path reuses the
         //     libkrun-equivalent finalize logic verbatim.
         let artifacts = match job {
             BuilderJob::Flake { .. } => finalize_flake_job(&job_dir, &mounts.artifact_out, &job_id),
@@ -1070,35 +1077,35 @@ impl BuilderVm for VzBuilderVm {
     fn cleanup(&self) -> Result<(), BuilderVmError> {
         // Stateless cleanup today. Prune of stale job dirs lives in
         // the shared `mvmctl cache prune` path, which already
-        // handles the libkrun + Vz convention together (both
+        // handles the libkrun + LegacyMacos convention together (both
         // backends share `~/.cache/mvm/builder-vm/jobs/`).
         Ok(())
     }
 }
 
-fn vz_shell_vm_name(job_id: &str) -> String {
+fn legacy_macos_shell_vm_name(job_id: &str) -> String {
     format!("vzsh-{job_id}")
 }
 
-/// Short, unique, filesystem-safe session id for a minted Vz persistent builder.
+/// Short, unique, filesystem-safe session id for a minted LegacyMacos persistent builder.
 /// Hashing `unique_job_id()` (unique per call) to 8 hex chars keeps the derived
-/// `mvm-persistent-builder-vz-<id>/vsock/vsock-<port>.sock` under the AF_UNIX
+/// `mvm-persistent-builder-legacy-macos-<id>/vsock/vsock-<port>.sock` under the AF_UNIX
 /// sun_path limit on normal cache paths — the old `unique_job_id` (~19 chars)
 /// overran it. The always-short `dev` session is why `mvmctl dev up` never hit this.
-fn short_vz_persistent_session_id() -> String {
+fn short_legacy_macos_persistent_session_id() -> String {
     host_gvproxy::short_token(&unique_job_id(), 4)
 }
 
-/// Fail closed if a Vz persistent builder's builderd control socket
+/// Fail closed if a LegacyMacos persistent builder's builderd control socket
 /// (`<state_dir>/vsock/vsock-<port>.sock`) would exceed the AF_UNIX sun_path
-/// limit. The Vz supervisor only *warns* and skips an over-long bind, leaving
+/// limit. The LegacyMacos supervisor only *warns* and skips an over-long bind, leaving
 /// the daemon unreachable and the typed `mvm-builderd` route silently falling
 /// back to legacy — so catch it here with an actionable error instead.
-fn ensure_vz_control_socket_fits(vm_state_dir: &Path) -> Result<(), BuilderVmError> {
-    let ctrl = crate::builderd::builderd_vz_control_socket_path(vm_state_dir);
+fn ensure_legacy_macos_control_socket_fits(vm_state_dir: &Path) -> Result<(), BuilderVmError> {
+    let ctrl = crate::builderd::builderd_legacy_supervisor_control_socket_path(vm_state_dir);
     if ctrl.as_os_str().len() >= host_gvproxy::SUN_PATH_MAX {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "Vz builder control socket path {} is {} bytes, at/over the {}-byte AF_UNIX \
+            "LegacyMacos builder control socket path {} is {} bytes, at/over the {}-byte AF_UNIX \
              sun_path limit; use a shorter MVM_CACHE_DIR",
             ctrl.display(),
             ctrl.as_os_str().len(),
@@ -1108,68 +1115,70 @@ fn ensure_vz_control_socket_fits(vm_state_dir: &Path) -> Result<(), BuilderVmErr
     Ok(())
 }
 
-/// Resolve the absolute path to the `mvm-vz-supervisor` binary.
+/// Resolve the absolute path to the `mvm-legacy-macos-supervisor` binary.
 ///
-/// Mirrors `mvm_backend::vz::resolve_supervisor_path` (which is
+/// Mirrors `mvm_backend::legacy_macos_backend::resolve_supervisor_path` (which is
 /// private to that crate) in the four lookup sources it consults:
 ///
-/// 1. `MVM_VZ_SUPERVISOR_PATH` — explicit override for tests +
+/// 1. `MVM_LEGACY_MACOS_SUPERVISOR_PATH` — explicit override for tests +
 ///    `cargo run` workflows. If set but pointing at a non-file,
 ///    fails loudly so a typo doesn't fall through to the other
 ///    sources.
-/// 2. A binary named `mvm-vz-supervisor` adjacent to the current
+/// 2. A binary named `mvm-legacy-macos-supervisor` adjacent to the current
 ///    exe — the layout produced by `cargo install` + Homebrew
 ///    bottles that ship `mvmctl` alongside it.
 /// 3. The source-checkout build output via
-///    [`crate::vz::source_tree_binary_path`] — CLAUDE.md "Source-checkout
+///    [`crate::legacy_supervisor_config::source_tree_binary_path`] — CLAUDE.md "Source-checkout
 ///    builds never depend on mvm-published artifacts".
 /// 4. The version-pinned release layout
-///    `~/.mvm/bin/mvm-vz-supervisor-<version>` via
-///    [`crate::vz::supervisor_binary_path`].
+///    `~/.mvm/bin/mvm-legacy-macos-supervisor-<version>` via
+///    [`crate::legacy_supervisor_config::supervisor_binary_path`].
 ///
 /// Returned errors are
-/// `BuilderVmError::ExtractionFailed` rather than a Vz-specific
+/// `BuilderVmError::ExtractionFailed` rather than a LegacyMacos-specific
 /// variant; the supervisor-missing case is just an environment-gap
 /// the operator needs to install around, not a hypervisor failure
 /// per se.
-pub fn resolve_vz_supervisor_path() -> Result<PathBuf, BuilderVmError> {
-    if let Some(p) = std::env::var_os("MVM_VZ_SUPERVISOR_PATH") {
+pub fn resolve_legacy_macos_supervisor_path() -> Result<PathBuf, BuilderVmError> {
+    if let Some(p) = std::env::var_os("MVM_LEGACY_MACOS_SUPERVISOR_PATH") {
         let path = PathBuf::from(p);
         if path.is_file() {
             return Ok(path);
         }
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "MVM_VZ_SUPERVISOR_PATH points at {} which is not a file",
+            "MVM_LEGACY_MACOS_SUPERVISOR_PATH points at {} which is not a file",
             path.display()
         )));
     }
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("mvm-vz-supervisor");
+        let candidate = dir.join("mvm-legacy-macos-supervisor");
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
     if let Some(workspace_root) = workspace_root_from_manifest_dir() {
-        let candidate = crate::vz::source_tree_binary_path(&workspace_root);
+        let candidate = crate::legacy_supervisor_config::source_tree_binary_path(&workspace_root);
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
     if let Some(home) = std::env::var_os("HOME") {
-        let candidate =
-            crate::vz::supervisor_binary_path(Path::new(&home), env!("CARGO_PKG_VERSION"));
+        let candidate = crate::legacy_supervisor_config::supervisor_binary_path(
+            Path::new(&home),
+            env!("CARGO_PKG_VERSION"),
+        );
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
     Err(BuilderVmError::ExtractionFailed(format!(
-        "mvm-vz-supervisor binary not found. Looked for: \
-         $MVM_VZ_SUPERVISOR_PATH, alongside the current exe, \
-         <workspace>/target/debug/mvm-vz-supervisor (source-checkout), and \
-         ~/.mvm/bin/mvm-vz-supervisor-{} (release-installed). Build it with \
-         `cargo build -p mvm-vm-host --bin mvm-vz-supervisor`.",
+        "mvm-legacy-macos-supervisor binary not found. Looked for: \
+         $MVM_LEGACY_MACOS_SUPERVISOR_PATH, alongside the current exe, \
+         <workspace>/target/debug/mvm-legacy-macos-supervisor (source-checkout), and \
+         ~/.mvm/bin/mvm-legacy-macos-supervisor-{} (release-installed). Build it with \
+         `cargo build -p mvm-vm-host --bin mvm-legacy-macos-supervisor`.",
         env!("CARGO_PKG_VERSION")
     )))
 }
@@ -1191,7 +1200,7 @@ fn workspace_root_from_crate_manifest_dir(manifest_dir: &Path) -> Option<PathBuf
 }
 
 // ──────────────────────────────────────────────────────────────────
-// VzPersistentBuilderVm
+// LegacyPersistentBuilderVm
 // ──────────────────────────────────────────────────────────────────
 //
 // Parallel of [`crate::libkrun_builder::LibkrunPersistentHostVm`]. Same
@@ -1204,11 +1213,11 @@ fn workspace_root_from_crate_manifest_dir(manifest_dir: &Path) -> Option<PathBuf
 //
 // State-dir layout is shared with libkrun under
 // `~/.cache/mvm/builder-vm/vms/`, distinguished by name prefix
-// (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-vz-*`
-// for Vz). The Stage 0 reaper is prefix-agnostic so both backends
+// (`mvm-persistent-builder-vm-*` for libkrun, `mvm-persistent-builder-legacy-macos-*`
+// for LegacyMacos). The Stage 0 reaper is prefix-agnostic so both backends
 // participate in cleanup without code changes.
 
-/// Persistent-VM parallel of [`VzBuilderVm`]. Boots a long-lived
+/// Persistent-VM parallel of [`LegacyBuilderVm`]. Boots a long-lived
 /// builder guest and returns a handle pointing at the dispatch
 /// socket — used by `mvmctl dev up` to keep a warm-pool VM alive
 /// across multiple `mvmctl build` / `mvmctl up --prod` invocations.
@@ -1217,7 +1226,7 @@ fn workspace_root_from_crate_manifest_dir(manifest_dir: &Path) -> Option<PathBuf
 /// (`crate::builder_protocol` wire types); only the host VMM and
 /// supervisor binary differ.
 #[derive(Debug, Clone)]
-pub struct VzPersistentBuilderVm {
+pub struct LegacyPersistentBuilderVm {
     vcpus: u8,
     memory_mib: u32,
     nix_store_mib: u32,
@@ -1239,9 +1248,9 @@ pub struct VzPersistentBuilderVm {
     expose_guest_agent: bool,
 }
 
-impl VzPersistentBuilderVm {
-    /// Construct a persistent Vz builder rooted at `workspace_root`.
-    /// Defaults match the one-shot [`VzBuilderVm`] (which itself
+impl LegacyPersistentBuilderVm {
+    /// Construct a persistent LegacyMacos builder rooted at `workspace_root`.
+    /// Defaults match the one-shot [`LegacyBuilderVm`] (which itself
     /// inherits libkrun's defaults) so resource ceilings stay
     /// parallel across backends.
     pub fn new(workspace_root: impl Into<PathBuf>) -> Self {
@@ -1285,7 +1294,7 @@ impl VzPersistentBuilderVm {
     /// Pin the session id so the per-VM state dir is stable across
     /// processes. Callers that need cross-process reap (the dev VM)
     /// pass a fixed value; everything else lets `start` mint a random
-    /// one. The id flows straight into the `mvm-persistent-builder-vz-<id>`
+    /// one. The id flows straight into the `mvm-persistent-builder-legacy-macos-<id>`
     /// state-dir name — keep it filesystem-safe.
     pub fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
         self.session_id = Some(session_id.into());
@@ -1304,22 +1313,22 @@ impl VzPersistentBuilderVm {
         &self.workspace_root
     }
 
-    /// Spawn the `mvm-vz-supervisor` and Vz guest in the background.
+    /// Spawn the `mvm-legacy-macos-supervisor` and LegacyMacos guest in the background.
     /// Returns once the supervisor process is launched (the guest may
     /// still be booting); the caller observes guest-side readiness
     /// through the dispatch socket that
-    /// [`VzPersistentVmHandle::dispatch_socket_path`] points at.
+    /// [`LegacyPersistentVmHandle::dispatch_socket_path`] points at.
     ///
     /// Layered like `LibkrunPersistentHostVm::start`:
-    /// pre-flight checks (Vz available, workspace dir exists,
+    /// pre-flight checks (LegacyMacos available, workspace dir exists,
     /// supervisor binary resolvable) → image + nix-store lock
     /// acquisition → state dir + job dir staging →
-    /// `crate::vz::SupervisorConfig` build → `mvm-vz-supervisor` spawn.
+    /// `crate::legacy_supervisor_config::SupervisorConfig` build → `mvm-legacy-macos-supervisor` spawn.
     /// The nix-store flock is held inside the returned handle for
     /// the VM's lifetime so a concurrent `mvmctl up --prod` Install
     /// dispatch on the same host can't corrupt the shared ext4.
-    pub fn start(&self) -> Result<VzPersistentVmHandle, BuilderVmError> {
-        if !mvm_core::platform::current().has_vz() {
+    pub fn start(&self) -> Result<LegacyPersistentVmHandle, BuilderVmError> {
+        if !mvm_core::platform::current().has_legacy_macos() {
             return Err(BuilderVmError::ExtractionFailed(
                 "Apple Virtualization.framework is not available on this host. \
                  Requires macOS 13 or later (Plan 97 §\"Minimum macOS version\")."
@@ -1336,7 +1345,7 @@ impl VzPersistentBuilderVm {
 
         let supervisor_path = match &self.supervisor_path_override {
             Some(p) => p.clone(),
-            None => resolve_vz_supervisor_path()?,
+            None => resolve_legacy_macos_supervisor_path()?,
         };
 
         let image = match &self.image_override {
@@ -1345,8 +1354,8 @@ impl VzPersistentBuilderVm {
         };
         if let BuilderVmImage::RootDir { .. } = image {
             return Err(BuilderVmError::ExtractionFailed(
-                "VzPersistentBuilderVm requires a Rootfs builder image; RootDir is libkrun-specific \
-                 (krun_set_root has no Vz analog)"
+                "LegacyPersistentBuilderVm requires a Rootfs builder image; RootDir is libkrun-specific \
+                 (krun_set_root has no LegacyMacos analog)"
                     .to_string(),
             ));
         }
@@ -1362,7 +1371,7 @@ impl VzPersistentBuilderVm {
         )?;
 
         // A minted session id must be SHORT: it lands in the
-        // `mvm-persistent-builder-vz-{session}` state-dir name, and the Vz
+        // `mvm-persistent-builder-legacy-macos-{session}` state-dir name, and the LegacyMacos
         // supervisor's sockets nest one level deeper under `<state_dir>/vsock/`.
         // The old `unique_job_id` (~19 chars) pushed `vsock/vsock-<port>.sock`
         // past the AF_UNIX sun_path limit (the supervisor warns + skips the
@@ -1372,19 +1381,19 @@ impl VzPersistentBuilderVm {
         let session_id = self
             .session_id
             .clone()
-            .unwrap_or_else(short_vz_persistent_session_id);
+            .unwrap_or_else(short_legacy_macos_persistent_session_id);
         let job_dir = builder_vm_cache_dir().join("jobs").join(&session_id);
-        stage_persistent_vz_job_dir(&job_dir)?;
+        stage_persistent_legacy_macos_job_dir(&job_dir)?;
 
         // Name-prefix isolation under the shared cache root.
-        // libkrun uses `mvm-persistent-builder-vm-{session}`; Vz uses
-        // `mvm-persistent-builder-vz-{session}`. The Stage 0 reaper is
+        // libkrun uses `mvm-persistent-builder-vm-{session}`; LegacyMacos uses
+        // `mvm-persistent-builder-legacy-macos-{session}`. The Stage 0 reaper is
         // prefix-agnostic so both participate in cleanup without code changes.
-        let vm_name = format!("mvm-persistent-builder-vz-{session_id}");
+        let vm_name = format!("mvm-persistent-builder-legacy-macos-{session_id}");
         let vm_state_dir = builder_vm_cache_dir().join("vms").join(&vm_name);
         std::fs::create_dir_all(&vm_state_dir).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
-                "creating Vz persistent builder VM state dir {}: {e}",
+                "creating LegacyMacos persistent builder VM state dir {}: {e}",
                 vm_state_dir.display()
             ))
         })?;
@@ -1392,24 +1401,24 @@ impl VzPersistentBuilderVm {
         // MVM_CACHE_DIR/$HOME. If the builderd control socket still wouldn't fit
         // sun_path, fail loud here rather than booting a builder whose control
         // socket can't bind (which surfaces only as a silent typed→legacy fallback).
-        ensure_vz_control_socket_fits(&vm_state_dir)?;
+        ensure_legacy_macos_control_socket_fits(&vm_state_dir)?;
 
         // Spawn host-side gvproxy so the long-lived dev VM has egress
         // (a cold `nix build` from `dev shell` fetches nixpkgs). The
         // guard reaps it if any fallible step below (config build,
         // supervisor spawn) returns early; on success we `defuse()` so
         // the detached gvproxy outlives the CLI — it's reaped later,
-        // cross-process, by `stop_persistent_vz_by_pid_file`.
+        // cross-process, by `stop_persistent_legacy_macos_by_pid_file`.
         let gvproxy = host_gvproxy::spawn_detached(&vm_state_dir).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
-                "spawn gvproxy for Vz persistent builder VM: {e}"
+                "spawn gvproxy for LegacyMacos persistent builder VM: {e}"
             ))
         })?;
         let gvproxy_guard = BuilderGvproxyGuard {
             state_dir: vm_state_dir.clone(),
         };
 
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
             vm_name: &vm_name,
             vm_state_dir: &vm_state_dir,
             image: &image,
@@ -1424,12 +1433,12 @@ impl VzPersistentBuilderVm {
 
         persist_builder_supervisor_config(&vm_state_dir, &cfg)?;
 
-        let child = spawn_vz_supervisor_in_background(&supervisor_path, &cfg)?;
+        let child = spawn_legacy_macos_supervisor_in_background(&supervisor_path, &cfg)?;
 
         // Supervisor is up; hand gvproxy's lifetime to the detached VM.
         gvproxy_guard.defuse();
 
-        Ok(VzPersistentVmHandle {
+        Ok(LegacyPersistentVmHandle {
             vm_state_dir,
             job_dir,
             session_id,
@@ -1444,28 +1453,28 @@ impl VzPersistentBuilderVm {
 /// single-shot cmd.sh / install_spec flow. The marker body is
 /// intentionally empty — its mere presence is the signal. Same shape
 /// libkrun's `stage_persistent_job_dir` uses.
-fn stage_persistent_vz_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
+fn stage_persistent_legacy_macos_job_dir(job_dir: &Path) -> Result<(), BuilderVmError> {
     std::fs::create_dir_all(job_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
-            "creating Vz persistent job dir {}: {e}",
+            "creating LegacyMacos persistent job dir {}: {e}",
             job_dir.display()
         ))
     })?;
     let marker_path = job_dir.join(DISPATCH_SOCK_MARKER);
     std::fs::write(&marker_path, b"").map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
-            "staging Vz dispatch marker {}: {e}",
+            "staging LegacyMacos dispatch marker {}: {e}",
             marker_path.display()
         ))
     })?;
     Ok(())
 }
 
-/// Inputs to [`build_vz_persistent_supervisor_config`]. A struct
+/// Inputs to [`build_legacy_persistent_supervisor_config`]. A struct
 /// rather than a long positional arg list — the fields carry distinct
 /// borrow lifetimes and one optional toggle.
 #[derive(Clone, Copy)]
-struct VzPersistentConfigParams<'a> {
+struct LegacyPersistentConfigParams<'a> {
     vm_name: &'a str,
     vm_state_dir: &'a Path,
     image: &'a BuilderVmImage,
@@ -1481,17 +1490,17 @@ struct VzPersistentConfigParams<'a> {
     gvproxy: Option<&'a host_gvproxy::HostGvproxyInfo>,
 }
 
-/// Build a [`crate::vz::SupervisorConfig`] for the persistent VM.
-/// Distinct from [`build_vz_supervisor_config`] because the
+/// Build a [`crate::legacy_supervisor_config::SupervisorConfig`] for the persistent VM.
+/// Distinct from [`build_legacy_supervisor_config`] because the
 /// persistent path doesn't come through the
 /// [`VmBackendForBuilder`] seam — `BuilderVmRunConfig` would force
 /// a one-shot mounts/disks shape that doesn't carry the dispatch
 /// port. Lifted out so unit tests can exercise the mapping without
 /// spawning a supervisor.
-fn build_vz_persistent_supervisor_config(
-    params: VzPersistentConfigParams<'_>,
-) -> Result<crate::vz::SupervisorConfig, BuilderVmError> {
-    let VzPersistentConfigParams {
+fn build_legacy_persistent_supervisor_config(
+    params: LegacyPersistentConfigParams<'_>,
+) -> Result<crate::legacy_supervisor_config::SupervisorConfig, BuilderVmError> {
+    let LegacyPersistentConfigParams {
         vm_name,
         vm_state_dir,
         image,
@@ -1510,7 +1519,7 @@ fn build_vz_persistent_supervisor_config(
     } = image
     else {
         return Err(BuilderVmError::ExtractionFailed(
-            "VzPersistentBuilderVm reached config-build with non-Rootfs image".to_string(),
+            "LegacyPersistentBuilderVm reached config-build with non-Rootfs image".to_string(),
         ));
     };
 
@@ -1532,21 +1541,21 @@ fn build_vz_persistent_supervisor_config(
         cmdline.clone()
     };
 
-    Ok(crate::vz::SupervisorConfig {
+    Ok(crate::legacy_supervisor_config::SupervisorConfig {
         name: vm_name.to_string(),
         vm_state_dir: state_dir,
         pid_file_name: Some("builder.pid".to_string()),
-        kernel: crate::vz::KernelConfig {
+        kernel: crate::legacy_supervisor_config::KernelConfig {
             path: kernel,
             cmdline: effective_cmdline,
             initrd_path: None,
         },
-        resources: crate::vz::ResourceConfig {
+        resources: crate::legacy_supervisor_config::ResourceConfig {
             cpu_count: u32::from(vcpus),
             memory_mib: u64::from(memory_mib),
         },
         disks: vec![
-            crate::vz::DiskConfig {
+            crate::legacy_supervisor_config::DiskConfig {
                 id: "rootfs".to_string(),
                 path: rootfs,
                 read_only: true,
@@ -1554,7 +1563,7 @@ fn build_vz_persistent_supervisor_config(
             // `/nix-store` rides as the second virtio-blk; the
             // in-guest `mvm-host-vm-init` mounts it before invoking
             // cmd.sh. Same layout libkrun uses.
-            crate::vz::DiskConfig {
+            crate::legacy_supervisor_config::DiskConfig {
                 id: "nix-store".to_string(),
                 path: nix_store,
                 read_only: false,
@@ -1563,7 +1572,7 @@ fn build_vz_persistent_supervisor_config(
         virtio_fs: vec![
             // `/work` is the workspace bind. Bound at VM start, not
             // per-dispatch.
-            crate::vz::VirtioFsShare {
+            crate::legacy_supervisor_config::VirtioFsShare {
                 tag: "work".to_string(),
                 host_path: work,
                 // Builder writes into the workspace under
@@ -1577,19 +1586,19 @@ fn build_vz_persistent_supervisor_config(
             // `/out`. Two shares (same host path) match libkrun's
             // convention; the dispatch protocol assumes that
             // shape.
-            crate::vz::VirtioFsShare {
+            crate::legacy_supervisor_config::VirtioFsShare {
                 tag: "out".to_string(),
                 host_path: job.clone(),
                 read_only: false,
             },
-            crate::vz::VirtioFsShare {
+            crate::legacy_supervisor_config::VirtioFsShare {
                 tag: "job".to_string(),
                 host_path: job,
                 read_only: false,
             },
         ],
-        vsock: crate::vz::VsockConfig {
-            ports: vz_persistent_guest_vsock_ports(expose_guest_agent),
+        vsock: crate::legacy_supervisor_config::VsockConfig {
+            ports: legacy_persistent_guest_vsock_ports(expose_guest_agent),
             socket_dir: vsock_dir,
             // The builder VM has no egress-substitution endpoint; no host-listen
             // ports.
@@ -1603,11 +1612,13 @@ fn build_vz_persistent_supervisor_config(
         // VM, not a workload subject to the claim-10 gateway flow-audit,
         // so it gets plain gvproxy with no flow-audit drainer
         // (events_ingest_socket_path stays None).
-        network: gvproxy.map(|g| crate::vz::NetworkConfig::Gvproxy {
-            socket_path: g.socket_path.to_string_lossy().into_owned(),
-            mac: host_gvproxy::derive_mac(vm_name),
-            events_ingest_socket_path: None,
-        }),
+        network: gvproxy.map(
+            |g| crate::legacy_supervisor_config::NetworkConfig::Gvproxy {
+                socket_path: g.socket_path.to_string_lossy().into_owned(),
+                mac: host_gvproxy::derive_mac(vm_name),
+                events_ingest_socket_path: None,
+            },
+        ),
         balloon: None,
         // Enables the idle snapshot-park: the supervisor binds this socket so a
         // later slice can send SAVE/RESTORE commands.
@@ -1617,7 +1628,7 @@ fn build_vz_persistent_supervisor_config(
                 .to_string_lossy()
                 .into_owned(),
         ),
-        startup_mode: crate::vz::StartupMode::Boot,
+        startup_mode: crate::legacy_supervisor_config::StartupMode::Boot,
         // Builder VMs are trusted dev-tier — no claim-10 flow audit.
         tenant_id: None,
         plan: None,
@@ -1632,13 +1643,13 @@ fn build_vz_persistent_supervisor_config(
     })
 }
 
-fn vz_persistent_guest_vsock_ports(expose_guest_agent: bool) -> Vec<u32> {
+fn legacy_persistent_guest_vsock_ports(expose_guest_agent: bool) -> Vec<u32> {
     let mut ports = vec![mvm_guest::builder_agent::BUILDER_DISPATCH_PORT];
     // The resident builder control daemon's typed control plane, reached at
     // `<vsock_dir>/vsock-21473.sock`.
     ports.push(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT);
     // The long-lived dev VM additionally serves the guest agent plus dev-only
-    // PTY data sockets. Vz's host proxy is configured with a static port list
+    // PTY data sockets. LegacyMacos's host proxy is configured with a static port list
     // at VM start, while `ConsoleOpen` returns dynamic
     // `CONSOLE_PORT_BASE + session_id` ports. Pre-open a bounded dev range so
     // repeated `mvmctl dev shell` attaches can reach the data channel.
@@ -1655,7 +1666,7 @@ const VZ_CONTROL_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 const VZ_CONTROL_READ_POLL_TIMEOUT: Duration = Duration::from_millis(250);
 const VZ_CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Result of parking a persistent Vz builder. The snapshot and matching
+/// Result of parking a persistent LegacyMacos builder. The snapshot and matching
 /// machine-id sidecar are the two files required to restore the guest's memory
 /// and identity on the next build.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1664,7 +1675,7 @@ pub struct ParkedVzBuilderSnapshot {
     pub machine_id_path: PathBuf,
 }
 
-/// Result of restoring a parked persistent Vz builder.
+/// Result of restoring a parked persistent LegacyMacos builder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestoredVzBuilder {
     pub supervisor_pid: u32,
@@ -1687,7 +1698,7 @@ pub fn builder_snapshot_machine_id_path(snapshot_path: &Path) -> PathBuf {
 /// so a later snapshot-restore can reload it and flip `startup_mode` to `Restore`.
 fn persist_builder_supervisor_config(
     state_dir: &Path,
-    cfg: &crate::vz::SupervisorConfig,
+    cfg: &crate::legacy_supervisor_config::SupervisorConfig,
 ) -> Result<PathBuf, BuilderVmError> {
     let path = builder_supervisor_config_path(state_dir);
     let json = serde_json::to_vec_pretty(cfg).map_err(|e| {
@@ -1704,7 +1715,7 @@ fn persist_builder_supervisor_config(
 
 fn read_builder_supervisor_config(
     state_dir: &Path,
-) -> Result<crate::vz::SupervisorConfig, BuilderVmError> {
+) -> Result<crate::legacy_supervisor_config::SupervisorConfig, BuilderVmError> {
     let path = builder_supervisor_config_path(state_dir);
     let body = std::fs::read(&path).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
@@ -1720,36 +1731,36 @@ fn read_builder_supervisor_config(
     })
 }
 
-/// Save the live persistent Vz builder to `<state_dir>/state.vzsave`, then stop
+/// Save the live persistent LegacyMacos builder to `<state_dir>/state.vzsave`, then stop
 /// the supervisor so the resident builder becomes a parked saved-state instead
 /// of a live VM. The control socket is host-only and already bound mode 0700 by
-/// `mvm-vz-supervisor`; this client sends only the fixed `SAVE <absolute-path>`
+/// `mvm-legacy-macos-supervisor`; this client sends only the fixed `SAVE <absolute-path>`
 /// verb.
-pub fn park_persistent_vz_builder(
+pub fn park_persistent_legacy_macos_builder(
     state_dir: &Path,
 ) -> Result<ParkedVzBuilderSnapshot, BuilderVmError> {
     let snapshot_path = builder_snapshot_path(state_dir);
-    save_persistent_vz_builder_snapshot(state_dir, &snapshot_path)?;
-    kill_persistent_vz_by_pid_file(state_dir);
+    save_persistent_legacy_macos_builder_snapshot(state_dir, &snapshot_path)?;
+    kill_persistent_legacy_macos_by_pid_file(state_dir);
     Ok(ParkedVzBuilderSnapshot {
         machine_id_path: builder_snapshot_machine_id_path(&snapshot_path),
         snapshot_path,
     })
 }
 
-fn save_persistent_vz_builder_snapshot(
+fn save_persistent_legacy_macos_builder_snapshot(
     state_dir: &Path,
     snapshot_path: &Path,
 ) -> Result<(), BuilderVmError> {
     if !snapshot_path.is_absolute() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "Vz builder snapshot path must be absolute: {}",
+            "LegacyMacos builder snapshot path must be absolute: {}",
             snapshot_path.display()
         )));
     }
-    if !persistent_vz_supervisor_alive(state_dir) {
+    if !persistent_legacy_macos_supervisor_alive(state_dir) {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "persistent Vz builder supervisor is not alive under {}",
+            "persistent LegacyMacos builder supervisor is not alive under {}",
             state_dir.display()
         )));
     }
@@ -1762,17 +1773,17 @@ fn save_persistent_vz_builder_snapshot(
         .unwrap_or_else(|| state_dir.join("control.sock"));
     remove_stale_builder_snapshot(snapshot_path)?;
     let command = format!("SAVE_PARK {}", snapshot_path.display());
-    send_builder_vz_control_command(&socket_path, &command)?;
+    send_builder_legacy_macos_control_command(&socket_path, &command)?;
     let machine_id_path = builder_snapshot_machine_id_path(snapshot_path);
     if !snapshot_path.is_file() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "Vz builder SAVE reported success but snapshot {} was not created",
+            "LegacyMacos builder SAVE reported success but snapshot {} was not created",
             snapshot_path.display()
         )));
     }
     if !machine_id_path.is_file() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "Vz builder SAVE reported success but machine-id sidecar {} was not created",
+            "LegacyMacos builder SAVE reported success but machine-id sidecar {} was not created",
             machine_id_path.display()
         )));
     }
@@ -1787,7 +1798,7 @@ fn remove_stale_builder_snapshot(snapshot_path: &Path) -> Result<(), BuilderVmEr
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| {
                 BuilderVmError::ExtractionFailed(format!(
-                    "removing stale Vz builder snapshot file {}: {e}",
+                    "removing stale LegacyMacos builder snapshot file {}: {e}",
                     path.display()
                 ))
             })?;
@@ -1804,47 +1815,47 @@ fn remove_stale_builder_snapshot(snapshot_path: &Path) -> Result<(), BuilderVmEr
 /// supervisor at disk-attach (a hard `image not found` error). Checking up front
 /// lets the caller discard the stale snapshot and cold-boot instead. Pure, so it
 /// is unit-tested without a VM.
-fn first_missing_disk(disks: &[crate::vz::DiskConfig]) -> Option<&str> {
+fn first_missing_disk(disks: &[crate::legacy_supervisor_config::DiskConfig]) -> Option<&str> {
     disks
         .iter()
         .find(|d| !Path::new(&d.path).is_file())
         .map(|d| d.path.as_str())
 }
 
-/// Restore a parked persistent Vz builder by reloading its saved supervisor
+/// Restore a parked persistent LegacyMacos builder by reloading its saved supervisor
 /// config, switching the startup mode to `Restore`, respawning gvproxy, and
-/// launching a fresh `mvm-vz-supervisor`.
-pub fn restore_persistent_vz_builder_from_snapshot(
+/// launching a fresh `mvm-legacy-macos-supervisor`.
+pub fn restore_persistent_legacy_macos_builder_from_snapshot(
     state_dir: &Path,
 ) -> Result<RestoredVzBuilder, BuilderVmError> {
     let snapshot_path = builder_snapshot_path(state_dir);
     if !snapshot_path.is_file() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "persistent Vz builder snapshot {} does not exist",
+            "persistent LegacyMacos builder snapshot {} does not exist",
             snapshot_path.display()
         )));
     }
-    if persistent_vz_supervisor_alive(state_dir) {
+    if persistent_legacy_macos_supervisor_alive(state_dir) {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "persistent Vz builder supervisor is already alive under {}",
+            "persistent LegacyMacos builder supervisor is already alive under {}",
             state_dir.display()
         )));
     }
 
-    let supervisor_path = resolve_vz_supervisor_path()?;
+    let supervisor_path = resolve_legacy_macos_supervisor_path()?;
     let mut cfg = read_builder_supervisor_config(state_dir)?;
     // Fail fast (before spawning gvproxy/supervisor) if a referenced disk was
     // purged: returning an error here routes through the caller's snapshot-discard
     // + cold-boot fallback instead of dying at disk-attach inside the supervisor.
     if let Some(missing) = first_missing_disk(&cfg.disks) {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "persistent Vz builder snapshot references a disk image that no longer \
+            "persistent LegacyMacos builder snapshot references a disk image that no longer \
              exists ({missing}); discarding the stale snapshot and cold-booting"
         )));
     }
     let gvproxy = host_gvproxy::spawn_detached(state_dir).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
-            "spawn gvproxy for restored Vz persistent builder VM: {e}"
+            "spawn gvproxy for restored LegacyMacos persistent builder VM: {e}"
         ))
     })?;
     let gvproxy_guard = BuilderGvproxyGuard {
@@ -1861,7 +1872,7 @@ pub fn restore_persistent_vz_builder_from_snapshot(
     );
     persist_builder_supervisor_config(state_dir, &cfg)?;
 
-    let child = spawn_vz_supervisor_in_background(&supervisor_path, &cfg)?;
+    let child = spawn_legacy_macos_supervisor_in_background(&supervisor_path, &cfg)?;
     let supervisor_pid = child.id();
     drop(child);
     gvproxy_guard.defuse();
@@ -1875,13 +1886,13 @@ pub fn restore_persistent_vz_builder_from_snapshot(
 }
 
 fn prepare_restored_builder_supervisor_config(
-    cfg: &mut crate::vz::SupervisorConfig,
+    cfg: &mut crate::legacy_supervisor_config::SupervisorConfig,
     state_dir: &Path,
     snapshot_path: &Path,
     machine_id_path: &Path,
     gvproxy: &host_gvproxy::HostGvproxyInfo,
 ) {
-    if let Some(crate::vz::NetworkConfig::Gvproxy {
+    if let Some(crate::legacy_supervisor_config::NetworkConfig::Gvproxy {
         ref mut socket_path,
         ref mut mac,
         ..
@@ -1890,7 +1901,7 @@ fn prepare_restored_builder_supervisor_config(
         *socket_path = gvproxy.socket_path.to_string_lossy().into_owned();
         *mac = host_gvproxy::derive_mac(&cfg.name);
     }
-    cfg.startup_mode = crate::vz::StartupMode::Restore {
+    cfg.startup_mode = crate::legacy_supervisor_config::StartupMode::Restore {
         snapshot_path: snapshot_path.to_string_lossy().into_owned(),
         machine_id_path: Some(machine_id_path.to_string_lossy().into_owned()),
     };
@@ -1903,18 +1914,18 @@ fn prepare_restored_builder_supervisor_config(
 }
 
 #[cfg(unix)]
-fn send_builder_vz_control_command(
+fn send_builder_legacy_macos_control_command(
     socket_path: &Path,
     command: &str,
 ) -> Result<String, BuilderVmError> {
     if command.contains('\n') {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "Vz control command must not contain a newline: {command:?}"
+            "LegacyMacos control command must not contain a newline: {command:?}"
         )));
     }
     let mut stream = UnixStream::connect(socket_path).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
-            "connect Vz builder control socket {}: {e}",
+            "connect LegacyMacos builder control socket {}: {e}",
             socket_path.display()
         ))
     })?;
@@ -1925,18 +1936,20 @@ fn send_builder_vz_control_command(
         .set_write_timeout(Some(VZ_CONTROL_WRITE_TIMEOUT))
         .ok();
     stream.write_all(command.as_bytes()).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("write Vz control command {command:?}: {e}"))
+        BuilderVmError::ExtractionFailed(format!(
+            "write LegacyMacos control command {command:?}: {e}"
+        ))
     })?;
-    stream
-        .write_all(b"\n")
-        .map_err(|e| BuilderVmError::ExtractionFailed(format!("write Vz control newline: {e}")))?;
+    stream.write_all(b"\n").map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("write LegacyMacos control newline: {e}"))
+    })?;
 
-    let line = read_builder_vz_control_response(&mut stream, Instant::now())?;
-    parse_builder_vz_control_response(command, line)
+    let line = read_builder_legacy_macos_control_response(&mut stream, Instant::now())?;
+    parse_builder_legacy_macos_control_response(command, line)
 }
 
 #[cfg(unix)]
-fn read_builder_vz_control_response<R: Read>(
+fn read_builder_legacy_macos_control_response<R: Read>(
     reader: &mut R,
     started_at: Instant,
 ) -> Result<String, BuilderVmError> {
@@ -1956,7 +1969,7 @@ fn read_builder_vz_control_response<R: Read>(
             {
                 if Instant::now() >= deadline {
                     return Err(BuilderVmError::ExtractionFailed(format!(
-                        "timed out waiting for Vz control response after {:?}",
+                        "timed out waiting for LegacyMacos control response after {:?}",
                         VZ_CONTROL_RESPONSE_TIMEOUT
                     )));
                 }
@@ -1964,23 +1977,23 @@ fn read_builder_vz_control_response<R: Read>(
             }
             Err(e) => {
                 return Err(BuilderVmError::ExtractionFailed(format!(
-                    "read Vz control response: {e}"
+                    "read LegacyMacos control response: {e}"
                 )));
             }
         }
     }
     String::from_utf8(response).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("Vz control response was not UTF-8: {e}"))
+        BuilderVmError::ExtractionFailed(format!("LegacyMacos control response was not UTF-8: {e}"))
     })
 }
 
-fn parse_builder_vz_control_response(
+fn parse_builder_legacy_macos_control_response(
     command: &str,
     line: String,
 ) -> Result<String, BuilderVmError> {
     if let Some(rest) = line.strip_prefix("ERR") {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "Vz builder supervisor refused {command:?}: {}",
+            "LegacyMacos builder supervisor refused {command:?}: {}",
             rest.trim_start()
         )));
     }
@@ -1989,25 +2002,25 @@ fn parse_builder_vz_control_response(
 }
 
 #[cfg(not(unix))]
-fn send_builder_vz_control_command(
+fn send_builder_legacy_macos_control_command(
     _socket_path: &Path,
     _command: &str,
 ) -> Result<String, BuilderVmError> {
     Err(BuilderVmError::ExtractionFailed(
-        "Vz builder control sockets require Unix-domain sockets".to_string(),
+        "LegacyMacos builder control sockets require Unix-domain sockets".to_string(),
     ))
 }
 
-/// Spawn `mvm-vz-supervisor` in the background with the
+/// Spawn `mvm-legacy-macos-supervisor` in the background with the
 /// `SupervisorConfig` JSON piped to its stdin. Same shape libkrun's
 /// `spawn_supervisor_in_background` uses for the persistent VM;
 /// returns the live `Child` so the caller can `wait()` or `kill()`.
-fn spawn_vz_supervisor_in_background(
+fn spawn_legacy_macos_supervisor_in_background(
     supervisor_path: &Path,
-    cfg: &crate::vz::SupervisorConfig,
+    cfg: &crate::legacy_supervisor_config::SupervisorConfig,
 ) -> Result<Child, BuilderVmError> {
     let cfg_json = serde_json::to_string(cfg).map_err(|e| {
-        BuilderVmError::ExtractionFailed(format!("serialising Vz SupervisorConfig: {e}"))
+        BuilderVmError::ExtractionFailed(format!("serialising LegacyMacos SupervisorConfig: {e}"))
     })?;
 
     let mut child = Command::new(supervisor_path)
@@ -2017,7 +2030,7 @@ fn spawn_vz_supervisor_in_background(
         .spawn()
         .map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
-                "spawning mvm-vz-supervisor at {}: {e}",
+                "spawning mvm-legacy-macos-supervisor at {}: {e}",
                 supervisor_path.display()
             ))
         })?;
@@ -2025,12 +2038,12 @@ fn spawn_vz_supervisor_in_background(
     {
         let stdin = child.stdin.as_mut().ok_or_else(|| {
             BuilderVmError::ExtractionFailed(
-                "mvm-vz-supervisor child had no stdin handle".to_string(),
+                "mvm-legacy-macos-supervisor child had no stdin handle".to_string(),
             )
         })?;
         stdin.write_all(cfg_json.as_bytes()).map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
-                "writing SupervisorConfig JSON to mvm-vz-supervisor stdin: {e}"
+                "writing SupervisorConfig JSON to mvm-legacy-macos-supervisor stdin: {e}"
             ))
         })?;
     }
@@ -2040,13 +2053,13 @@ fn spawn_vz_supervisor_in_background(
     Ok(child)
 }
 
-/// Handle to a live persistent Vz builder VM. Owns the supervisor
+/// Handle to a live persistent LegacyMacos builder VM. Owns the supervisor
 /// `Child` for its lifetime; dropping without [`Self::wait_for_shutdown`]
 /// or [`Self::kill`] leaks the supervisor process. Same Drop posture
 /// as libkrun's `PersistentVmHandle` — callers always reach one of the
 /// two before dropping.
 #[derive(Debug)]
-pub struct VzPersistentVmHandle {
+pub struct LegacyPersistentVmHandle {
     vm_state_dir: PathBuf,
     job_dir: PathBuf,
     session_id: String,
@@ -2059,15 +2072,15 @@ pub struct VzPersistentVmHandle {
     _nix_store_lock: NixStoreImageLock,
 }
 
-impl VzPersistentVmHandle {
+impl LegacyPersistentVmHandle {
     /// Per-VM state directory under
-    /// `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-<session>/`.
+    /// `~/.cache/mvm/builder-vm/vms/mvm-persistent-builder-legacy-macos-<session>/`.
     /// Hosts the vsock socket dir, console log, PID file.
     pub fn vm_state_dir(&self) -> &Path {
         &self.vm_state_dir
     }
 
-    /// Host-side path of the Vz-supervisor-managed Unix socket that
+    /// Host-side path of the LegacyMacos-supervisor-managed Unix socket that
     /// proxies to AF_VSOCK
     /// [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`] inside the
     /// guest. `PersistentBuilderSupervisor::new` takes this directly.
@@ -2079,7 +2092,7 @@ impl VzPersistentVmHandle {
             ))
     }
 
-    /// Directory the Vz supervisor exposes per-port vsock sockets in
+    /// Directory the LegacyMacos supervisor exposes per-port vsock sockets in
     /// (`<vm_state_dir>/vsock/`). Pair with
     /// [`mvm_core::config::vsock_socket_filename`] to reach a specific
     /// port — the dev VM connects the guest agent here.
@@ -2104,16 +2117,18 @@ impl VzPersistentVmHandle {
     /// this is the supervisor receiving `HostVmRequest::Shutdown`,
     /// the guest dispatch loop processing it + replying `Bye`, then
     /// `mvm-host-vm-init` calling `reboot(RB_POWER_OFF)`, then the
-    /// Vz supervisor exiting `main`. Consumes the child; subsequent
+    /// LegacyMacos supervisor exiting `main`. Consumes the child; subsequent
     /// calls return [`BuilderVmError::ExtractionFailed`].
     pub fn wait_for_shutdown(mut self) -> Result<i32, BuilderVmError> {
         let mut child = self.supervisor.take().ok_or_else(|| {
             BuilderVmError::ExtractionFailed(
-                "VzPersistentVmHandle::wait_for_shutdown called twice".to_string(),
+                "LegacyPersistentVmHandle::wait_for_shutdown called twice".to_string(),
             )
         })?;
         let status = child.wait().map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!("waiting on Vz persistent supervisor: {e}"))
+            BuilderVmError::ExtractionFailed(format!(
+                "waiting on LegacyMacos persistent supervisor: {e}"
+            ))
         })?;
         Ok(status.code().unwrap_or(-1))
     }
@@ -2132,37 +2147,37 @@ impl VzPersistentVmHandle {
     }
 }
 
-/// PID-file name the persistent Vz supervisor writes inside its state
-/// dir (mirrors the value passed in [`build_vz_persistent_supervisor_config`]).
+/// PID-file name the persistent LegacyMacos supervisor writes inside its state
+/// dir (mirrors the value passed in [`build_legacy_persistent_supervisor_config`]).
 const PERSISTENT_VZ_PID_FILE: &str = "builder.pid";
 
 /// Session id of the always-warm dev builder VM that `mvmctl dev up` boots
-/// (`mvm-persistent-builder-vz-dev`). Fixed — not the random per-build id the
+/// (`mvm-persistent-builder-legacy-macos-dev`). Fixed — not the random per-build id the
 /// warm pool uses — so `dev down`, the dev shell, and the flake-build dev env
 /// all agree on which persistent builder is "the dev VM".
 pub const DEV_SESSION_ID: &str = "dev";
 
-/// State dir for a [`VzPersistentBuilderVm`] booted with a known
+/// State dir for a [`LegacyPersistentBuilderVm`] booted with a known
 /// `session_id`. Same layout `start` derives, lifted out so a separate
 /// process (e.g. `mvmctl dev down`) can locate the VM without the
 /// in-memory handle.
-pub fn persistent_vz_state_dir(session_id: &str) -> PathBuf {
+pub fn persistent_legacy_macos_state_dir(session_id: &str) -> PathBuf {
     builder_vm_cache_dir()
         .join("vms")
-        .join(format!("mvm-persistent-builder-vz-{session_id}"))
+        .join(format!("mvm-persistent-builder-legacy-macos-{session_id}"))
 }
 
-/// Vsock socket dir for a persistent Vz VM started with `session_id`.
+/// Vsock socket dir for a persistent LegacyMacos VM started with `session_id`.
 /// Pair with [`mvm_core::config::vsock_socket_filename`] to reach a
 /// specific guest port.
-pub fn persistent_vz_vsock_dir(session_id: &str) -> PathBuf {
-    persistent_vz_state_dir(session_id).join("vsock")
+pub fn persistent_legacy_macos_vsock_dir(session_id: &str) -> PathBuf {
+    persistent_legacy_macos_state_dir(session_id).join("vsock")
 }
 
 /// Host path of the persistent dev builder VM's `console.log`.
 ///
 /// The `"dev"` session id mirrors the CLI's `DEV_VM_SESSION_ID` — the id
-/// `mvmctl dev up` boots the long-lived Vz builder VM under. It is
+/// `mvmctl dev up` boots the long-lived LegacyMacos builder VM under. It is
 /// duplicated here as a string literal rather than imported because the
 /// CLI's dev session module is off-limits to this crate's dependency
 /// direction; if the CLI's id ever changes, this must move with it.
@@ -2170,8 +2185,8 @@ pub fn persistent_vz_vsock_dir(session_id: &str) -> PathBuf {
 /// The guest writes its network-bootstrap outcome (DHCP lease / static
 /// fallback / failure) to this log, so it is the host-readable source for
 /// the `mvmctl doctor` builder-egress diagnostic.
-pub fn dev_builder_vz_console_log() -> PathBuf {
-    persistent_vz_state_dir("dev").join("console.log")
+pub fn dev_builder_legacy_macos_console_log() -> PathBuf {
+    persistent_legacy_macos_state_dir("dev").join("console.log")
 }
 
 /// Read the supervisor PID file under `state_dir` and SIGTERM the
@@ -2179,17 +2194,17 @@ pub fn dev_builder_vz_console_log() -> PathBuf {
 /// Idempotent: a missing PID file or an already-dead process is a
 /// clean no-op (the file is unlinked either way). Returns whether a
 /// live supervisor was actually signalled. Mirrors the
-/// `VzBackend::stop` reap ladder without depending on its private
+/// `LegacyMacosBackend::stop` reap ladder without depending on its private
 /// helpers across the crate boundary.
-pub fn stop_persistent_vz_by_pid_file(state_dir: &Path) -> bool {
-    stop_persistent_vz_by_pid_file_inner(state_dir, libc::SIGTERM)
+pub fn stop_persistent_legacy_macos_by_pid_file(state_dir: &Path) -> bool {
+    stop_persistent_legacy_macos_by_pid_file_inner(state_dir, libc::SIGTERM)
 }
 
-fn kill_persistent_vz_by_pid_file(state_dir: &Path) -> bool {
-    stop_persistent_vz_by_pid_file_inner(state_dir, libc::SIGKILL)
+fn kill_persistent_legacy_macos_by_pid_file(state_dir: &Path) -> bool {
+    stop_persistent_legacy_macos_by_pid_file_inner(state_dir, libc::SIGKILL)
 }
 
-fn stop_persistent_vz_by_pid_file_inner(state_dir: &Path, signal: libc::c_int) -> bool {
+fn stop_persistent_legacy_macos_by_pid_file_inner(state_dir: &Path, signal: libc::c_int) -> bool {
     // Best-effort reap of the VM's host-side gvproxy. The supervisor
     // detaches it, so `dev down` owns its teardown. Idempotent (a
     // missing PID sidecar is a clean no-op), so it's safe even on the
@@ -2221,10 +2236,10 @@ fn stop_persistent_vz_by_pid_file_inner(state_dir: &Path, signal: libc::c_int) -
     true
 }
 
-/// Whether a persistent Vz VM's supervisor PID file points at a live
+/// Whether a persistent LegacyMacos VM's supervisor PID file points at a live
 /// process. Cheap liveness probe for `dev status` / re-entrant
 /// `dev up`.
-pub fn persistent_vz_supervisor_alive(state_dir: &Path) -> bool {
+pub fn persistent_legacy_macos_supervisor_alive(state_dir: &Path) -> bool {
     read_pid_file(&state_dir.join(PERSISTENT_VZ_PID_FILE)).is_some_and(pid_alive)
 }
 
@@ -2250,23 +2265,25 @@ mod tests {
     use std::os::unix::net::UnixListener;
 
     #[test]
-    fn short_vz_persistent_session_id_is_short_hex() {
-        let id = short_vz_persistent_session_id();
+    fn short_legacy_macos_persistent_session_id_is_short_hex() {
+        let id = short_legacy_macos_persistent_session_id();
         assert_eq!(id.len(), 8, "8 hex chars keeps the state-dir name short");
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "{id}");
     }
 
     #[test]
-    fn vz_control_socket_guard_accepts_short_rejects_overlong() {
+    fn legacy_supervisor_control_socket_guard_accepts_short_rejects_overlong() {
         // Normal cache + short (hashed) session id → control socket fits.
-        let ok = Path::new("/Users/u/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-deadbeef");
-        assert!(ensure_vz_control_socket_fits(ok).is_ok());
+        let ok = Path::new(
+            "/Users/u/.cache/mvm/builder-vm/vms/mvm-persistent-builder-legacy-macos-deadbeef",
+        );
+        assert!(ensure_legacy_macos_control_socket_fits(ok).is_ok());
         // Pathologically long cache/$HOME → control socket over sun_path → loud error.
         let long = PathBuf::from(format!(
-            "/Users/{}/.cache/mvm/builder-vm/vms/mvm-persistent-builder-vz-deadbeef",
+            "/Users/{}/.cache/mvm/builder-vm/vms/mvm-persistent-builder-legacy-macos-deadbeef",
             "x".repeat(60)
         ));
-        let err = ensure_vz_control_socket_fits(&long).unwrap_err();
+        let err = ensure_legacy_macos_control_socket_fits(&long).unwrap_err();
         assert!(format!("{err}").contains("sun_path"), "{err}");
     }
 
@@ -2287,14 +2304,14 @@ mod tests {
 
     fn run_config() -> BuilderVmRunConfig {
         BuilderVmRunConfig {
-            name: "builder-vz-test".to_string(),
+            name: "builder-legacy-macos-test".to_string(),
             kernel_path: PathBuf::from("/tmp/unused-vmlinux"),
             kernel_cmdline: String::new(),
             initrd_path: None,
             vcpus: 4,
             memory_mib: 8192,
             vsock_ports: vec![5252, 5253],
-            vm_state_dir: PathBuf::from("/tmp/mvm-test/builder-vz"),
+            vm_state_dir: PathBuf::from("/tmp/mvm-test/builder-legacy_macos"),
         }
     }
 
@@ -2379,12 +2396,14 @@ mod tests {
 
     #[test]
     fn builder_snapshot_paths_live_under_state_dir() {
-        let state_dir = Path::new("/abs/cache/vms/mvm-persistent-builder-vz-dev");
+        let state_dir = Path::new("/abs/cache/vms/mvm-persistent-builder-legacy-macos-dev");
         let snapshot = builder_snapshot_path(state_dir);
         assert_eq!(snapshot, state_dir.join("state.vzsave"));
         assert_eq!(
             builder_snapshot_machine_id_path(&snapshot),
-            PathBuf::from("/abs/cache/vms/mvm-persistent-builder-vz-dev/state.vzsave.machine-id")
+            PathBuf::from(
+                "/abs/cache/vms/mvm-persistent-builder-legacy-macos-dev/state.vzsave.machine-id"
+            )
         );
         assert_eq!(
             builder_supervisor_config_path(state_dir),
@@ -2394,31 +2413,35 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn builder_vz_control_client_strips_ok_prefix() {
+    fn builder_legacy_macos_control_client_strips_ok_prefix() {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket_path = dir.path().join("control.sock");
         let handle = fake_control_socket(socket_path.clone(), "OK saved");
-        let response = send_builder_vz_control_command(&socket_path, "STATUS").expect("ok");
+        let response =
+            send_builder_legacy_macos_control_command(&socket_path, "STATUS").expect("ok");
         assert_eq!(response, "saved");
         assert_eq!(handle.join().expect("join fake supervisor"), "STATUS");
     }
 
     #[cfg(unix)]
     #[test]
-    fn builder_vz_control_client_retries_would_block_response_reads() {
+    fn builder_legacy_macos_control_client_retries_would_block_response_reads() {
         let mut reader = WouldBlockThenResponse::new(b"OK saved\n");
-        let line =
-            read_builder_vz_control_response(&mut reader, Instant::now()).expect("read response");
-        let response = parse_builder_vz_control_response("SAVE /tmp/snap", line).expect("ok");
+        let line = read_builder_legacy_macos_control_response(&mut reader, Instant::now())
+            .expect("read response");
+        let response =
+            parse_builder_legacy_macos_control_response("SAVE /tmp/snap", line).expect("ok");
         assert_eq!(response, "saved");
     }
 
     #[cfg(unix)]
     #[test]
-    fn builder_vz_control_client_rejects_newline_injection() {
-        let err =
-            send_builder_vz_control_command(Path::new("/missing.sock"), "SAVE /tmp/a\nSTATUS")
-                .expect_err("newline rejected before connect");
+    fn builder_legacy_macos_control_client_rejects_newline_injection() {
+        let err = send_builder_legacy_macos_control_command(
+            Path::new("/missing.sock"),
+            "SAVE /tmp/a\nSTATUS",
+        )
+        .expect_err("newline rejected before connect");
         assert!(
             err.to_string().contains("must not contain a newline"),
             "error explains newline rejection: {err}"
@@ -2427,11 +2450,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn builder_vz_control_client_propagates_err_response() {
+    fn builder_legacy_macos_control_client_propagates_err_response() {
         let dir = tempfile::tempdir().expect("tempdir");
         let socket_path = dir.path().join("control.sock");
         let handle = fake_control_socket(socket_path.clone(), "ERR no snapshot support");
-        let err = send_builder_vz_control_command(&socket_path, "SAVE /tmp/snap")
+        let err = send_builder_legacy_macos_control_command(&socket_path, "SAVE /tmp/snap")
             .expect_err("err response propagated");
         assert!(
             err.to_string().contains("no snapshot support"),
@@ -2444,10 +2467,11 @@ mod tests {
     }
 
     #[test]
-    fn save_persistent_vz_builder_snapshot_requires_absolute_path() {
+    fn save_persistent_legacy_macos_builder_snapshot_requires_absolute_path() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let err = save_persistent_vz_builder_snapshot(dir.path(), Path::new("relative.vzsave"))
-            .expect_err("relative path rejected");
+        let err =
+            save_persistent_legacy_macos_builder_snapshot(dir.path(), Path::new("relative.vzsave"))
+                .expect_err("relative path rejected");
         assert!(
             err.to_string().contains("absolute"),
             "error explains absolute-path requirement: {err}"
@@ -2456,7 +2480,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn save_persistent_vz_builder_snapshot_sends_save_and_replaces_stale_files() {
+    fn save_persistent_legacy_macos_builder_snapshot_sends_save_and_replaces_stale_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_dir = dir.path();
         let socket_path = state_dir.join("control.sock");
@@ -2473,8 +2497,8 @@ mod tests {
         )
         .expect("write live pid");
 
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
-            vm_name: "mvm-persistent-builder-vz-dev",
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-legacy-macos-dev",
             vm_state_dir: state_dir,
             image: &rootfs_image(),
             workspace_root: Path::new("/tmp/work"),
@@ -2491,7 +2515,8 @@ mod tests {
         persist_builder_supervisor_config(state_dir, &cfg).expect("persist config");
 
         let handle = fake_save_control_socket(socket_path, snapshot_path.clone());
-        save_persistent_vz_builder_snapshot(state_dir, &snapshot_path).expect("save snapshot");
+        save_persistent_legacy_macos_builder_snapshot(state_dir, &snapshot_path)
+            .expect("save snapshot");
         assert_eq!(
             handle.join().expect("join fake supervisor"),
             format!("SAVE_PARK {}", snapshot_path.display())
@@ -2516,8 +2541,8 @@ mod tests {
             socket_path: state_dir.join("fresh-gvproxy.sock"),
             pid: 42,
         };
-        let mut cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
-            vm_name: "mvm-persistent-builder-vz-dev",
+        let mut cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-legacy-macos-dev",
             vm_state_dir: state_dir,
             image: &rootfs_image(),
             workspace_root: Path::new("/tmp/work"),
@@ -2546,7 +2571,7 @@ mod tests {
             Some("/abs/state/control.sock")
         );
         match cfg.startup_mode {
-            crate::vz::StartupMode::Restore {
+            crate::legacy_supervisor_config::StartupMode::Restore {
                 snapshot_path,
                 machine_id_path,
             } => {
@@ -2556,16 +2581,18 @@ mod tests {
                     Some("/abs/state/state.vzsave.machine-id")
                 );
             }
-            crate::vz::StartupMode::Boot => panic!("restore mode expected"),
+            crate::legacy_supervisor_config::StartupMode::Boot => panic!("restore mode expected"),
         }
         match cfg.network {
-            Some(crate::vz::NetworkConfig::Gvproxy {
-                socket_path, mac, ..
+            Some(crate::legacy_supervisor_config::NetworkConfig::Gvproxy {
+                socket_path,
+                mac,
+                ..
             }) => {
                 assert_eq!(socket_path, "/abs/state/fresh-gvproxy.sock");
                 assert_eq!(
                     mac,
-                    host_gvproxy::derive_mac("mvm-persistent-builder-vz-dev")
+                    host_gvproxy::derive_mac("mvm-persistent-builder-legacy-macos-dev")
                 );
             }
             None => panic!("gvproxy network expected"),
@@ -2574,7 +2601,7 @@ mod tests {
 
     #[test]
     fn rejects_root_dir_image_at_construction() {
-        let err = VzBuilderBackend::new_with_rootfs_image(
+        let err = LegacyBuilderBackend::new_with_rootfs_image(
             PathBuf::from("/tmp/supervisor"),
             rundir_image(),
         )
@@ -2587,12 +2614,12 @@ mod tests {
 
     #[test]
     fn console_log_lives_under_vm_state_dir() {
-        let backend = VzBuilderBackend::new_with_rootfs_image(
+        let backend = LegacyBuilderBackend::new_with_rootfs_image(
             PathBuf::from("/tmp/supervisor"),
             rootfs_image(),
         )
         .expect("Rootfs accepted");
-        let dir = PathBuf::from("/tmp/state/builder-vz-foo");
+        let dir = PathBuf::from("/tmp/state/builder-legacy-macos-foo");
         let log = backend.console_log_path(&dir);
         assert_eq!(log, dir.join("console.log"));
         // Trait-object safety check — pins object-safety for the
@@ -2602,9 +2629,9 @@ mod tests {
 
     #[test]
     fn build_supervisor_config_maps_run_config_fields() {
-        let cfg = build_vz_supervisor_config(&run_config(), &rootfs_image(), &[], &[], None)
+        let cfg = build_legacy_supervisor_config(&run_config(), &rootfs_image(), &[], &[], None)
             .expect("build supervisor config");
-        assert_eq!(cfg.name, "builder-vz-test");
+        assert_eq!(cfg.name, "builder-legacy-macos-test");
         assert_eq!(cfg.resources.cpu_count, 4);
         assert_eq!(cfg.resources.memory_mib, 8192);
         assert_eq!(cfg.kernel.path, "/tmp/vmlinux");
@@ -2629,20 +2656,28 @@ mod tests {
         // NOT a claim-10 workload, so events_ingest_socket_path stays
         // None: plain gvproxy, no flow-audit drainer.
         let gvproxy = host_gvproxy::HostGvproxyInfo {
-            socket_path: PathBuf::from("/tmp/mvm-test/builder-vz/gvproxy.sock"),
+            socket_path: PathBuf::from("/tmp/mvm-test/builder-legacy_macos/gvproxy.sock"),
             pid: 4242,
         };
-        let cfg =
-            build_vz_supervisor_config(&run_config(), &rootfs_image(), &[], &[], Some(&gvproxy))
-                .expect("build supervisor config");
+        let cfg = build_legacy_supervisor_config(
+            &run_config(),
+            &rootfs_image(),
+            &[],
+            &[],
+            Some(&gvproxy),
+        )
+        .expect("build supervisor config");
         match cfg.network {
-            Some(crate::vz::NetworkConfig::Gvproxy {
+            Some(crate::legacy_supervisor_config::NetworkConfig::Gvproxy {
                 socket_path,
                 mac,
                 events_ingest_socket_path,
             }) => {
-                assert_eq!(socket_path, "/tmp/mvm-test/builder-vz/gvproxy.sock");
-                assert_eq!(mac, host_gvproxy::derive_mac("builder-vz-test"));
+                assert_eq!(
+                    socket_path,
+                    "/tmp/mvm-test/builder-legacy_macos/gvproxy.sock"
+                );
+                assert_eq!(mac, host_gvproxy::derive_mac("builder-legacy-macos-test"));
                 assert_eq!(
                     events_ingest_socket_path, None,
                     "trusted builder VM gets no flow-audit drainer"
@@ -2659,7 +2694,7 @@ mod tests {
             rootfs_path: PathBuf::from("/tmp/rootfs.ext4"),
             cmdline: String::new(),
         };
-        let cfg = build_vz_supervisor_config(&run_config(), &image, &[], &[], None)
+        let cfg = build_legacy_supervisor_config(&run_config(), &image, &[], &[], None)
             .expect("build with empty");
         assert_eq!(cfg.kernel.cmdline, DEFAULT_VZ_BUILDER_CMDLINE);
         assert!(
@@ -2688,8 +2723,9 @@ mod tests {
             host_path: PathBuf::from("/host/nix-store.img"),
             read_only: false,
         }];
-        let cfg = build_vz_supervisor_config(&run_config(), &rootfs_image(), &mounts, &disks, None)
-            .expect("build supervisor config");
+        let cfg =
+            build_legacy_supervisor_config(&run_config(), &rootfs_image(), &mounts, &disks, None)
+                .expect("build supervisor config");
 
         // Rootfs is disks[0]; nix-store rides as disks[1] with the
         // caller-supplied read_only flag.
@@ -2707,15 +2743,15 @@ mod tests {
     }
 
     // ─────────────────────────────────────────────────────────────
-    // VzBuilderVm driver tests — high-level driver
+    // LegacyBuilderVm driver tests — high-level driver
     // ─────────────────────────────────────────────────────────────
 
     #[test]
-    fn vz_builder_vm_defaults_match_libkrun_constants() {
+    fn legacy_macos_builder_vm_defaults_match_libkrun_constants() {
         // Cross-backend parity check: a contributor reading either
         // driver's defaults sees the same VM shape. The constants
         // are deliberately equal, not coincidentally equal.
-        let vm = VzBuilderVm::new();
+        let vm = LegacyBuilderVm::new();
         assert_eq!(vm.vcpus, crate::libkrun_builder::DEFAULT_VCPUS);
         assert_eq!(vm.memory_mib, crate::libkrun_builder::DEFAULT_MEMORY_MIB);
         assert_eq!(
@@ -2727,13 +2763,13 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_builder_methods_chain() {
+    fn legacy_macos_builder_vm_builder_methods_chain() {
         let custom = BuilderVmImage::Rootfs {
             kernel_path: PathBuf::from("/tmp/k"),
             rootfs_path: PathBuf::from("/tmp/r"),
             cmdline: "console=hvc0".into(),
         };
-        let vm = VzBuilderVm::new()
+        let vm = LegacyBuilderVm::new()
             .with_resources(2, 1024)
             .with_nix_store_mib(4096)
             .with_image_override(custom.clone())
@@ -2749,7 +2785,7 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_validate_mounts_rejects_missing_flake_src() {
+    fn legacy_macos_builder_vm_validate_mounts_rejects_missing_flake_src() {
         let scratch = tempfile::TempDir::new().unwrap();
         let host_bins = scratch.path().join("host-bins");
         std::fs::create_dir_all(&host_bins).unwrap();
@@ -2760,7 +2796,7 @@ mod tests {
             host_bin_dir: host_bins,
             staged_user_flake: None,
         };
-        let err = VzBuilderVm::new().validate_mounts(&mounts).unwrap_err();
+        let err = LegacyBuilderVm::new().validate_mounts(&mounts).unwrap_err();
         assert!(
             matches!(err, BuilderVmError::ExtractionFailed(ref msg) if msg.contains("does not exist")),
             "got: {err:?}"
@@ -2768,7 +2804,7 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_validate_mounts_rejects_flake_src_as_file() {
+    fn legacy_macos_builder_vm_validate_mounts_rejects_flake_src_as_file() {
         let scratch = tempfile::TempDir::new().unwrap();
         let flake = scratch.path().join("flake-file");
         std::fs::write(&flake, b"not a dir").unwrap();
@@ -2781,7 +2817,7 @@ mod tests {
             host_bin_dir: host_bins,
             staged_user_flake: None,
         };
-        let err = VzBuilderVm::new().validate_mounts(&mounts).unwrap_err();
+        let err = LegacyBuilderVm::new().validate_mounts(&mounts).unwrap_err();
         assert!(
             matches!(err, BuilderVmError::ExtractionFailed(ref msg) if msg.contains("must be a directory")),
             "got: {err:?}"
@@ -2789,7 +2825,7 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_validate_mounts_creates_artifact_out() {
+    fn legacy_macos_builder_vm_validate_mounts_creates_artifact_out() {
         let scratch = tempfile::TempDir::new().unwrap();
         let flake = scratch.path().join("flake");
         std::fs::create_dir(&flake).unwrap();
@@ -2803,13 +2839,13 @@ mod tests {
             host_bin_dir: host_bins,
             staged_user_flake: None,
         };
-        VzBuilderVm::new().validate_mounts(&mounts).unwrap();
+        LegacyBuilderVm::new().validate_mounts(&mounts).unwrap();
         assert!(artifact_out.is_dir(), "artifact_out must be created");
     }
 
     #[test]
-    fn vz_builder_vm_validate_job_rejects_empty_flake_ref() {
-        let err = VzBuilderVm::new()
+    fn legacy_macos_builder_vm_validate_job_rejects_empty_flake_ref() {
+        let err = LegacyBuilderVm::new()
             .validate_job(&BuilderJob::Flake {
                 flake_ref: "  ".into(),
                 attr_path: "x".into(),
@@ -2822,8 +2858,8 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_validate_job_rejects_empty_attr_path() {
-        let err = VzBuilderVm::new()
+    fn legacy_macos_builder_vm_validate_job_rejects_empty_attr_path() {
+        let err = LegacyBuilderVm::new()
             .validate_job(&BuilderJob::Flake {
                 flake_ref: "path:/work".into(),
                 attr_path: "".into(),
@@ -2836,9 +2872,9 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_validate_job_rejects_missing_install_spec() {
+    fn legacy_macos_builder_vm_validate_job_rejects_missing_install_spec() {
         let scratch = tempfile::TempDir::new().unwrap();
-        let err = VzBuilderVm::new()
+        let err = LegacyBuilderVm::new()
             .validate_job(&BuilderJob::Install {
                 spec_path: scratch.path().join("missing-spec.json"),
             })
@@ -2850,7 +2886,7 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_validate_shell_job_creates_artifact_out() {
+    fn legacy_macos_builder_vm_validate_shell_job_creates_artifact_out() {
         let scratch = tempfile::TempDir::new().unwrap();
         let work = scratch.path().join("work");
         std::fs::create_dir(&work).unwrap();
@@ -2871,12 +2907,12 @@ mod tests {
             }],
         };
 
-        VzBuilderVm::new().validate_shell_job(&job).unwrap();
+        LegacyBuilderVm::new().validate_shell_job(&job).unwrap();
         assert!(artifact_out.is_dir(), "artifact_out must be created");
     }
 
     #[test]
-    fn vz_builder_vm_validate_shell_job_rejects_missing_extra_disk() {
+    fn legacy_macos_builder_vm_validate_shell_job_rejects_missing_extra_disk() {
         let scratch = tempfile::TempDir::new().unwrap();
         let work = scratch.path().join("work");
         std::fs::create_dir(&work).unwrap();
@@ -2891,7 +2927,7 @@ mod tests {
             }],
         };
 
-        let err = VzBuilderVm::new().validate_shell_job(&job).unwrap_err();
+        let err = LegacyBuilderVm::new().validate_shell_job(&job).unwrap_err();
         assert!(
             matches!(err, BuilderVmError::ExtractionFailed(ref msg) if msg.contains("extra disk path")),
             "got: {err:?}"
@@ -2899,7 +2935,7 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_validate_shell_job_rejects_empty_script() {
+    fn legacy_macos_builder_vm_validate_shell_job_rejects_empty_script() {
         let scratch = tempfile::TempDir::new().unwrap();
         let work = scratch.path().join("work");
         std::fs::create_dir(&work).unwrap();
@@ -2910,7 +2946,7 @@ mod tests {
             extra_disks: Vec::new(),
         };
 
-        let err = VzBuilderVm::new().validate_shell_job(&job).unwrap_err();
+        let err = LegacyBuilderVm::new().validate_shell_job(&job).unwrap_err();
         assert!(
             matches!(err, BuilderVmError::NixBuildFailed(ref msg) if msg.contains("empty")),
             "got: {err:?}"
@@ -2918,11 +2954,11 @@ mod tests {
     }
 
     #[test]
-    fn vz_shell_vm_name_keeps_gvproxy_reply_socket_under_macos_limit() {
-        let vm_name = vz_shell_vm_name("1781993470214-14925");
+    fn legacy_macos_shell_vm_name_keeps_gvproxy_reply_socket_under_macos_limit() {
+        let vm_name = legacy_macos_shell_vm_name("1781993470214-14925");
         let path = Path::new("/tmp/mvm-plan205-live-proof3/cache/builder-vm/vms")
             .join(vm_name)
-            .join("vz-net-reply.sock");
+            .join("legacy-macos-net-reply.sock");
 
         assert!(
             path.to_string_lossy().len() <= 103,
@@ -2932,15 +2968,15 @@ mod tests {
     }
 
     #[test]
-    fn vz_builder_vm_run_build_refuses_root_dir_image_override() {
+    fn legacy_macos_builder_vm_run_build_refuses_root_dir_image_override() {
         // The override path lets a caller hand us any BuilderVmImage
         // variant; the run pipeline must refuse RootDir before any
-        // I/O happens since Vz has no krun_set_root analog.
+        // I/O happens since LegacyMacos has no krun_set_root analog.
         //
         // We can't reach the full pipeline on a Linux CI runner
-        // (`has_vz()` returns false), so this test runs the pipeline
+        // (`has_legacy_macos()` returns false), so this test runs the pipeline
         // far enough to surface either the RootDir refusal (macOS)
-        // or the has_vz refusal (non-macOS) — either is a valid
+        // or the has_legacy_macos refusal (non-macOS) — either is a valid
         // refusal. Pin both to guard against silent skips.
         let scratch = tempfile::TempDir::new().unwrap();
         let flake = scratch.path().join("flake");
@@ -2958,7 +2994,7 @@ mod tests {
             flake_ref: "path:.".into(),
             attr_path: "packages.x86_64-linux.default".into(),
         };
-        let vm = VzBuilderVm::new()
+        let vm = LegacyBuilderVm::new()
             .with_supervisor_path_override(PathBuf::from("/dev/null"))
             .with_image_override(BuilderVmImage::RootDir {
                 root_dir: PathBuf::from("/tmp/root"),
@@ -2969,20 +3005,20 @@ mod tests {
         assert!(
             msg.contains("Apple Virtualization.framework is not available")
                 || msg.contains("RootDir is libkrun-specific"),
-            "expected has_vz or RootDir refusal, got: {msg}"
+            "expected has_legacy_macos or RootDir refusal, got: {msg}"
         );
     }
 
     #[test]
-    fn vz_builder_vm_run_build_surfaces_environment_gaps_on_clean_input() {
+    fn legacy_macos_builder_vm_run_build_surfaces_environment_gaps_on_clean_input() {
         // Mirrors `libkrun_builder::tests::run_build_surfaces_environment_gaps_on_clean_input`
         // shape. Clean inputs hit one of these in order:
-        //   - macOS / Vz unavailable     → ExtractionFailed
+        //   - macOS / LegacyMacos unavailable     → ExtractionFailed
         //   - supervisor binary missing  → ExtractionFailed
         //   - builder image cache empty  → ExtractionFailed
         //   - supervisor exits non-zero  → NixBuildFailed
         //     (`supervisor_exit_error`; the libkrun builder image's
-        //      kernel won't direct-boot under Vz, so on a fully-
+        //      kernel won't direct-boot under LegacyMacos, so on a fully-
         //      configured dev box we trip this branch instead)
         // Any of those is a valid pre-cutover state.
         let scratch = tempfile::TempDir::new().unwrap();
@@ -3004,7 +3040,7 @@ mod tests {
             flake_ref: "path:.".into(),
             attr_path: "packages.x86_64-linux.default".into(),
         };
-        let err = VzBuilderVm::new().run_build(&job, &mounts).unwrap_err();
+        let err = LegacyBuilderVm::new().run_build(&job, &mounts).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -3016,40 +3052,41 @@ mod tests {
 
     fn with_supervisor_env<F: FnOnce() -> R, R>(value: Option<&Path>, f: F) -> R {
         // `TestEnv` serializes env-mutating tests behind a shared lock and
-        // restores MVM_VZ_SUPERVISOR_PATH on drop (after `f` returns).
+        // restores MVM_LEGACY_MACOS_SUPERVISOR_PATH on drop (after `f` returns).
         let mut env = mvm_core::util::test_env::TestEnv::new();
         match value {
-            Some(v) => env.set("MVM_VZ_SUPERVISOR_PATH", v),
-            None => env.remove("MVM_VZ_SUPERVISOR_PATH"),
+            Some(v) => env.set("MVM_LEGACY_MACOS_SUPERVISOR_PATH", v),
+            None => env.remove("MVM_LEGACY_MACOS_SUPERVISOR_PATH"),
         }
         f()
     }
 
     #[test]
-    fn resolve_vz_supervisor_path_honors_env_override_when_present() {
+    fn resolve_legacy_macos_supervisor_path_honors_env_override_when_present() {
         // Hermetic: write a file to a TempDir, point the env at it,
         // assert resolution finds it. Avoids touching the operator's
         // real `~/.mvm/bin/` layout.
         let scratch = tempfile::TempDir::new().unwrap();
-        let candidate = scratch.path().join("fake-vz-supervisor");
+        let candidate = scratch.path().join("fake-legacy_macos-supervisor");
         std::fs::write(&candidate, b"fake").unwrap();
 
         with_supervisor_env(Some(&candidate), || {
-            let resolved = resolve_vz_supervisor_path().expect("env override must resolve");
+            let resolved =
+                resolve_legacy_macos_supervisor_path().expect("env override must resolve");
             assert_eq!(resolved, candidate);
         });
     }
 
     #[test]
-    fn resolve_vz_supervisor_path_rejects_env_override_pointing_at_nonfile() {
-        // A typo in `MVM_VZ_SUPERVISOR_PATH` should fail loudly
+    fn resolve_legacy_macos_supervisor_path_rejects_env_override_pointing_at_nonfile() {
+        // A typo in `MVM_LEGACY_MACOS_SUPERVISOR_PATH` should fail loudly
         // rather than fall through to PATH-style resolution and
         // pick up an unintended binary.
         let scratch = tempfile::TempDir::new().unwrap();
         let bogus = scratch.path().join("nonexistent-supervisor");
 
         with_supervisor_env(Some(&bogus), || {
-            let err = resolve_vz_supervisor_path().expect_err("missing file must reject");
+            let err = resolve_legacy_macos_supervisor_path().expect_err("missing file must reject");
             assert!(format!("{err}").contains("not a file"), "got: {err:?}");
         });
     }
@@ -3065,7 +3102,7 @@ mod tests {
     #[test]
     fn build_supervisor_config_rejects_non_utf8_paths() {
         // Construct a non-UTF-8 PathBuf via OsStr. On macOS APFS this
-        // is APFS-illegal but PathBuf still accepts it; the Vz
+        // is APFS-illegal but PathBuf still accepts it; the LegacyMacos
         // supervisor JSON shape requires UTF-8, so we must fail
         // closed before spawning.
         #[cfg(unix)]
@@ -3078,14 +3115,14 @@ mod tests {
                 rootfs_path: PathBuf::from("/tmp/rootfs"),
                 cmdline: "x".to_string(),
             };
-            let err = build_vz_supervisor_config(&run_config(), &image, &[], &[], None)
+            let err = build_legacy_supervisor_config(&run_config(), &image, &[], &[], None)
                 .expect_err("non-UTF-8 path must reject");
             assert!(format!("{err}").contains("not valid UTF-8"), "got: {err}");
         }
     }
 
     // ──────────────────────────────────────────────────────────────
-    // VzPersistentBuilderVm
+    // LegacyPersistentBuilderVm
     // ──────────────────────────────────────────────────────────────
 
     fn persistent_workspace() -> tempfile::TempDir {
@@ -3093,9 +3130,9 @@ mod tests {
     }
 
     #[test]
-    fn vz_persistent_defaults_match_vz_one_shot_constants() {
+    fn legacy_macos_persistent_defaults_match_legacy_macos_one_shot_constants() {
         let scratch = persistent_workspace();
-        let vm = VzPersistentBuilderVm::new(scratch.path());
+        let vm = LegacyPersistentBuilderVm::new(scratch.path());
         assert_eq!(vm.vcpus, VZ_BUILDER_DEFAULT_VCPUS);
         assert_eq!(vm.memory_mib, VZ_BUILDER_DEFAULT_MEMORY_MIB);
         assert_eq!(vm.nix_store_mib, VZ_BUILDER_DEFAULT_NIX_STORE_MIB);
@@ -3105,9 +3142,9 @@ mod tests {
     }
 
     #[test]
-    fn vz_persistent_builder_methods_chain() {
+    fn legacy_macos_persistent_builder_methods_chain() {
         let scratch = persistent_workspace();
-        let vm = VzPersistentBuilderVm::new(scratch.path())
+        let vm = LegacyPersistentBuilderVm::new(scratch.path())
             .with_vcpus(2)
             .with_memory_mib(2048)
             .with_nix_store_mib(8192)
@@ -3122,10 +3159,10 @@ mod tests {
     }
 
     #[test]
-    fn stage_persistent_vz_job_dir_writes_dispatch_marker() {
+    fn stage_persistent_legacy_macos_job_dir_writes_dispatch_marker() {
         let scratch = tempfile::tempdir().unwrap();
         let job_dir = scratch.path().join("job-xyz");
-        stage_persistent_vz_job_dir(&job_dir).expect("staging succeeds");
+        stage_persistent_legacy_macos_job_dir(&job_dir).expect("staging succeeds");
         assert!(job_dir.is_dir(), "job dir created");
         let marker = job_dir.join(DISPATCH_SOCK_MARKER);
         assert!(marker.is_file(), "dispatch marker file exists");
@@ -3137,17 +3174,17 @@ mod tests {
     }
 
     #[test]
-    fn build_vz_persistent_supervisor_config_rejects_root_dir_image() {
+    fn build_legacy_macos_persistent_supervisor_config_rejects_root_dir_image() {
         let scratch = tempfile::tempdir().unwrap();
         let vm_state_dir = scratch
             .path()
             .join("vms")
-            .join("mvm-persistent-builder-vz-abc");
+            .join("mvm-persistent-builder-legacy-macos-abc");
         let workspace = scratch.path().join("work");
         let job_dir = scratch.path().join("job");
         let nix_store = scratch.path().join("nix-store.img");
-        let err = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
-            vm_name: "mvm-persistent-builder-vz-abc",
+        let err = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-legacy-macos-abc",
             vm_state_dir: &vm_state_dir,
             image: &rundir_image(),
             workspace_root: &workspace,
@@ -3163,14 +3200,14 @@ mod tests {
     }
 
     #[test]
-    fn build_vz_persistent_supervisor_config_assembles_expected_shape() {
+    fn build_legacy_macos_persistent_supervisor_config_assembles_expected_shape() {
         let scratch = tempfile::tempdir().unwrap();
-        let vm_name = "mvm-persistent-builder-vz-test";
+        let vm_name = "mvm-persistent-builder-legacy-macos-test";
         let vm_state_dir = scratch.path().join("vms").join(vm_name);
         let workspace = scratch.path().join("work");
         let job_dir = scratch.path().join("job");
         let nix_store = scratch.path().join("nix-store.img");
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
             vm_name,
             vm_state_dir: &vm_state_dir,
             image: &rootfs_image(),
@@ -3218,20 +3255,23 @@ mod tests {
 
         // No gvproxy passed → VM stays offline (cached-derivation path).
         assert!(cfg.network.is_none());
-        // Boot startup; persistent Vz doesn't yet restore from a saved
+        // Boot startup; persistent LegacyMacos doesn't yet restore from a saved
         // snapshot.
-        assert!(matches!(cfg.startup_mode, crate::vz::StartupMode::Boot));
+        assert!(matches!(
+            cfg.startup_mode,
+            crate::legacy_supervisor_config::StartupMode::Boot
+        ));
     }
 
     #[test]
     fn persistent_config_enables_control_socket_for_snapshot_park() {
         let scratch = tempfile::tempdir().unwrap();
-        let vm_name = "mvm-persistent-builder-vz-test";
+        let vm_name = "mvm-persistent-builder-legacy-macos-test";
         let vm_state_dir = scratch.path().join("vms").join(vm_name);
         let workspace = scratch.path().join("work");
         let job_dir = scratch.path().join("job");
         let nix_store = scratch.path().join("nix-store.img");
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
             vm_name,
             vm_state_dir: &vm_state_dir,
             image: &rootfs_image(),
@@ -3253,15 +3293,15 @@ mod tests {
     }
 
     #[test]
-    fn build_vz_persistent_supervisor_config_wires_gvproxy_when_present() {
+    fn build_legacy_macos_persistent_supervisor_config_wires_gvproxy_when_present() {
         let scratch = tempfile::tempdir().unwrap();
-        let vm_name = "mvm-persistent-builder-vz-net";
+        let vm_name = "mvm-persistent-builder-legacy-macos-net";
         let vm_state_dir = scratch.path().join("vms").join(vm_name);
         let gvproxy = host_gvproxy::HostGvproxyInfo {
             socket_path: scratch.path().join("gvproxy.sock"),
             pid: 4242,
         };
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
             vm_name,
             vm_state_dir: &vm_state_dir,
             image: &rootfs_image(),
@@ -3279,7 +3319,7 @@ mod tests {
         // drainer), MAC derived from the VM name, socket pointed at the
         // spawned listener.
         match cfg.network.expect("network wired when gvproxy is present") {
-            crate::vz::NetworkConfig::Gvproxy {
+            crate::legacy_supervisor_config::NetworkConfig::Gvproxy {
                 socket_path,
                 mac,
                 events_ingest_socket_path,
@@ -3295,7 +3335,7 @@ mod tests {
     }
 
     #[test]
-    fn build_vz_persistent_supervisor_config_falls_back_to_default_cmdline_when_image_cmdline_empty()
+    fn build_legacy_macos_persistent_supervisor_config_falls_back_to_default_cmdline_when_image_cmdline_empty()
      {
         let scratch = tempfile::tempdir().unwrap();
         let image = BuilderVmImage::Rootfs {
@@ -3303,7 +3343,7 @@ mod tests {
             rootfs_path: PathBuf::from("/tmp/rootfs.ext4"),
             cmdline: String::new(),
         };
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
             vm_name: "vm",
             vm_state_dir: &scratch.path().join("state"),
             image: &image,
@@ -3320,14 +3360,14 @@ mod tests {
     }
 
     #[test]
-    fn build_vz_persistent_supervisor_config_console_path_under_state_dir() {
+    fn build_legacy_macos_persistent_supervisor_config_console_path_under_state_dir() {
         let scratch = tempfile::tempdir().unwrap();
         let vm_state_dir = scratch
             .path()
             .join("vms")
-            .join("mvm-persistent-builder-vz-abc");
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
-            vm_name: "mvm-persistent-builder-vz-abc",
+            .join("mvm-persistent-builder-legacy-macos-abc");
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-legacy-macos-abc",
             vm_state_dir: &vm_state_dir,
             image: &rootfs_image(),
             workspace_root: &scratch.path().join("work"),
@@ -3348,9 +3388,10 @@ mod tests {
     }
 
     #[test]
-    fn vz_persistent_supervisor_config_vsock_socket_dir_matches_handle_dispatch_path_shape() {
-        // The `VzPersistentVmHandle::dispatch_socket_path()` method
-        // and `build_vz_persistent_supervisor_config()`'s
+    fn legacy_macos_persistent_supervisor_config_vsock_socket_dir_matches_handle_dispatch_path_shape()
+     {
+        // The `LegacyPersistentVmHandle::dispatch_socket_path()` method
+        // and `build_legacy_persistent_supervisor_config()`'s
         // `vsock.socket_dir` must agree on layout — the supervisor
         // creates sockets under `socket_dir`, the host-side dispatcher
         // dials `dispatch_socket_path()`. A divergence here means a
@@ -3362,9 +3403,9 @@ mod tests {
         let vm_state_dir = scratch
             .path()
             .join("vms")
-            .join("mvm-persistent-builder-vz-test");
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
-            vm_name: "mvm-persistent-builder-vz-test",
+            .join("mvm-persistent-builder-legacy-macos-test");
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
+            vm_name: "mvm-persistent-builder-legacy-macos-test",
             vm_state_dir: &vm_state_dir,
             image: &rootfs_image(),
             workspace_root: &scratch.path().join("work"),
@@ -3389,7 +3430,7 @@ mod tests {
     #[test]
     fn guest_agent_port_opens_only_when_requested() {
         let scratch = tempfile::tempdir().unwrap();
-        let base = VzPersistentConfigParams {
+        let base = LegacyPersistentConfigParams {
             vm_name: "vm",
             vm_state_dir: &scratch.path().join("state"),
             image: &rootfs_image(),
@@ -3401,11 +3442,12 @@ mod tests {
             expose_guest_agent: false,
             gvproxy: None,
         };
-        let dispatch_only = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
-            expose_guest_agent: false,
-            ..base
-        })
-        .expect("config builds");
+        let dispatch_only =
+            build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
+                expose_guest_agent: false,
+                ..base
+            })
+            .expect("config builds");
         // The dispatch + builder-daemon control ports are always present;
         // only the guest-agent port is gated on expose_guest_agent.
         assert_eq!(
@@ -3416,56 +3458,62 @@ mod tests {
             ]
         );
 
-        let with_agent = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+        let with_agent = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
             expose_guest_agent: true,
             ..base
         })
         .expect("config builds");
         assert_eq!(
             with_agent.vsock.ports,
-            vz_persistent_guest_vsock_ports(true)
+            legacy_persistent_guest_vsock_ports(true)
         );
         assert!(
             with_agent
                 .vsock
                 .ports
                 .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + 1)),
-            "Vz dev shell must expose the first PTY data port"
+            "LegacyMacos dev shell must expose the first PTY data port"
         );
         assert!(
             with_agent.vsock.ports.contains(
                 &(mvm_guest::vsock::CONSOLE_PORT_BASE
                     + mvm_guest::vsock::DEV_CONSOLE_DATA_PORT_COUNT)
             ),
-            "Vz dev shell must expose the configured PTY data range"
+            "LegacyMacos dev shell must expose the configured PTY data range"
         );
     }
 
     #[test]
-    fn persistent_vz_paths_derive_from_session_id() {
-        let state = persistent_vz_state_dir("dev");
-        assert!(state.ends_with("mvm-persistent-builder-vz-dev"));
-        assert_eq!(persistent_vz_vsock_dir("dev"), state.join("vsock"));
+    fn persistent_legacy_macos_paths_derive_from_session_id() {
+        let state = persistent_legacy_macos_state_dir("dev");
+        assert!(state.ends_with("mvm-persistent-builder-legacy-macos-dev"));
+        assert_eq!(
+            persistent_legacy_macos_vsock_dir("dev"),
+            state.join("vsock")
+        );
     }
 
     #[test]
     fn dev_builder_console_log_is_under_dev_state_dir() {
-        let log = dev_builder_vz_console_log();
+        let log = dev_builder_legacy_macos_console_log();
         assert!(log.ends_with("console.log"));
-        assert_eq!(log, persistent_vz_state_dir("dev").join("console.log"));
+        assert_eq!(
+            log,
+            persistent_legacy_macos_state_dir("dev").join("console.log")
+        );
     }
 
     #[test]
     fn stop_by_pid_file_is_noop_when_missing_or_dead() {
         let scratch = tempfile::tempdir().unwrap();
         // No PID file at all.
-        assert!(!stop_persistent_vz_by_pid_file(scratch.path()));
-        assert!(!persistent_vz_supervisor_alive(scratch.path()));
+        assert!(!stop_persistent_legacy_macos_by_pid_file(scratch.path()));
+        assert!(!persistent_legacy_macos_supervisor_alive(scratch.path()));
 
         // A PID file pointing at a definitely-dead process. PID 2^31-1
         // is outside any live range on the platforms we run on.
         std::fs::write(scratch.path().join(PERSISTENT_VZ_PID_FILE), "2147483647").unwrap();
-        assert!(!stop_persistent_vz_by_pid_file(scratch.path()));
+        assert!(!stop_persistent_legacy_macos_by_pid_file(scratch.path()));
         // The stale file is unlinked on the dead-pid path.
         assert!(!scratch.path().join(PERSISTENT_VZ_PID_FILE).exists());
     }
@@ -3473,13 +3521,13 @@ mod tests {
     #[test]
     fn persist_builder_supervisor_config_roundtrips_and_lands_under_state_dir() {
         let scratch = tempfile::tempdir().unwrap();
-        let vm_name = "mvm-persistent-builder-vz-test";
+        let vm_name = "mvm-persistent-builder-legacy-macos-test";
         let vm_state_dir = scratch.path().join("vms").join(vm_name);
         std::fs::create_dir_all(&vm_state_dir).unwrap();
         let workspace = scratch.path().join("work");
         let job_dir = scratch.path().join("job");
         let nix_store = scratch.path().join("nix-store.img");
-        let cfg = build_vz_persistent_supervisor_config(VzPersistentConfigParams {
+        let cfg = build_legacy_persistent_supervisor_config(LegacyPersistentConfigParams {
             vm_name,
             vm_state_dir: &vm_state_dir,
             image: &rootfs_image(),
@@ -3499,7 +3547,7 @@ mod tests {
         assert!(written.exists(), "config file not written");
 
         let raw = std::fs::read(&written).unwrap();
-        let reloaded: crate::vz::SupervisorConfig =
+        let reloaded: crate::legacy_supervisor_config::SupervisorConfig =
             serde_json::from_slice(&raw).expect("deserialise");
         assert!(
             reloaded.control_socket_path.is_some(),
@@ -3515,7 +3563,7 @@ mod tests {
         std::fs::write(&present, b"x").expect("write present disk");
         let missing = dir.path().join("nix-store.img"); // never created
 
-        let disk = |id: &str, p: &std::path::Path| crate::vz::DiskConfig {
+        let disk = |id: &str, p: &std::path::Path| crate::legacy_supervisor_config::DiskConfig {
             id: id.to_string(),
             path: p.to_string_lossy().into_owned(),
             read_only: false,

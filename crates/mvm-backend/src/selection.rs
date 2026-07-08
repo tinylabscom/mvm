@@ -8,9 +8,9 @@
 use mvm_core::vm_backend::{RequiredCapabilities, VmCapabilities};
 
 use crate::backend::{AnyBackend, FirecrackerBackend};
+use crate::hvf_backend::HvfBackend;
 use crate::libkrun::LibkrunBackend;
 use crate::qemu::QemuBackend;
-use crate::vz::VzBackend;
 
 /// No backend could be selected: every candidate lacked a required capability.
 /// Carries the per-candidate shortfall so the caller gets a recovery action
@@ -63,7 +63,7 @@ impl AnyBackend {
     fn capability_candidates() -> [AnyBackend; 4] {
         [
             AnyBackend::Firecracker(FirecrackerBackend),
-            AnyBackend::Vz(VzBackend),
+            AnyBackend::Hvf(HvfBackend),
             AnyBackend::Libkrun(LibkrunBackend),
             AnyBackend::Qemu(QemuBackend),
         ]
@@ -154,5 +154,14 @@ mod tests {
 
         let backend = AnyBackend::select_capable(&required).unwrap();
         assert!(backend.capabilities().vsock);
+    }
+
+    #[test]
+    fn select_capable_picks_firecracker_for_vsock_only_workload_egress() {
+        let backend =
+            AnyBackend::select_capable(&RequiredCapabilities::vsock_only_workload_egress())
+                .expect("firecracker should satisfy the vsock-only workload-egress contract");
+
+        assert_eq!(backend.name(), "firecracker");
     }
 }

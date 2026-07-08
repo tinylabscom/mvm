@@ -5,7 +5,7 @@
 //! read-write and copies each binary in `/payload` to its install path per
 //! `/payload/manifest` (built by `mvm_build::rootfs_inject`), then powers off.
 //! The result is a rootfs with the current mvm host binaries baked in, produced
-//! with no legacy (vz/libkrun) builder — the primitive that breaks the builder
+//! with no legacy (legacy_macos/libkrun) builder — the primitive that breaks the builder
 //! bootstrap chicken-and-egg.
 //!
 //! Linux-only (mount/reboot syscalls). Cross-compiled to static aarch64-musl; a

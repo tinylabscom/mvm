@@ -9,7 +9,7 @@
 //! On macOS the workload microVM runs via libkrun (vsock-capable; the
 //! path the guest agent answers on). `--hypervisor libkrun` is passed
 //! explicitly so the test doesn't depend on `up`'s per-host auto-select
-//! preferring libkrun over Vz on macOS 26+ (which is a deliberate Vz
+//! preferring libkrun over LegacyMacos on macOS 26+ (which is a deliberate LegacyMacos
 //! priority for general use; the demo wants the vsock path).
 //!
 //! `machine run --flake` waits for the guest agent (`wait_for_guest_agent`
@@ -76,9 +76,9 @@ fn mvmctl(args: &[&str], scratch: &std::path::Path, label: &str, budget: Duratio
         // the whole tree — mvmctl, its supervisor, and gvproxy.
         .process_group(0);
     // The E2E pins the builder backend to libkrun on macOS so the test
-    // doesn't depend on the Swift mvm-vz-supervisor having been built.
-    // Auto-select would otherwise pick Vz on macOS 26+ Apple Silicon and
-    // bail with "mvm-vz-supervisor binary not found." Both pins are
+    // doesn't depend on the Swift mvm-legacy-macos-supervisor having been built.
+    // Auto-select would otherwise pick LegacyMacos on macOS 26+ Apple Silicon and
+    // bail with "mvm-legacy-macos-supervisor binary not found." Both pins are
     // per-child so they don't leak into other tests in the same cargo
     // invocation.
     #[cfg(target_os = "macos")]

@@ -1,5 +1,5 @@
 // Claim 5 — fuzz the host-side `SupervisorConfig` JSON parser the
-// `mvm-vz-supervisor` Swift binary reads on stdin.
+// `mvm-legacy-macos-supervisor` Swift binary reads on stdin.
 //
 // The Rust parser is the canonical schema; the Swift `JSONDecoder`
 // mirrors it field-for-field with deny-unknown-fields semantics
@@ -12,7 +12,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mvm_build::vz::SupervisorConfig;
+use mvm_build::legacy_supervisor_config::SupervisorConfig;
 
 fuzz_target!(|data: &[u8]| {
     let _ = serde_json::from_slice::<SupervisorConfig>(data);

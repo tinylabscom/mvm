@@ -1372,7 +1372,7 @@ path (`BridgeEndpoints::VzGvproxy`) now routes the resolved `flow_policy` to the
 in-process bridge instead of `cfg.policy` (`AllowAll`) — without this, a bare
 deny-all run on Vz (which installs no L4 scan) left general egress open, since the
 flow gate was the sole enforcement. Proven by
-`bare_deny_all_policy_drops_egress_through_the_live_vz_bridge`. Remaining
+`bare_deny_all_policy_drops_egress_through_the_live_legacy_macos_bridge`. Remaining
 follow-ups:
 
 - [x] **Uniform `host:port` L4 egress enforcement on the libkrun/Vz bare path.** Was: the

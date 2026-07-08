@@ -153,7 +153,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         let backend_name: String = AnyBackend::for_started_vm(&vm.name)
             .map(|b| b.name().to_string())
             .unwrap_or_else(|| {
-                if mvm_core::platform::current().is_vz_default_tier() {
+                if mvm_core::platform::current().is_hvf_default_tier() {
                     "hvf".to_string()
                 } else {
                     "firecracker".to_string()
@@ -261,13 +261,13 @@ mod tests {
 
     #[test]
     fn registry_only_rows_appear_when_all_requested() {
-        let registry = registered("detached-vz");
+        let registry = registered("detached-legacy_macos");
         let mut rows = Vec::new();
 
         merge_registry_only_stopped_rows(&mut rows, &registry, true);
 
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "detached-vz");
+        assert_eq!(rows[0].name, "detached-legacy_macos");
         assert!(matches!(
             rows[0].status,
             mvm_core::vm_backend::VmStatus::Stopped
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn registry_only_rows_are_hidden_without_all() {
-        let registry = registered("detached-vz");
+        let registry = registered("detached-legacy_macos");
         let mut rows = Vec::new();
 
         merge_registry_only_stopped_rows(&mut rows, &registry, false);
@@ -286,8 +286,8 @@ mod tests {
 
     #[test]
     fn registry_merge_does_not_duplicate_backend_rows() {
-        let registry = registered("running-vz");
-        let mut rows = vec![running_vm("running-vz")];
+        let registry = registered("running-legacy_macos");
+        let mut rows = vec![running_vm("running-legacy_macos")];
 
         merge_registry_only_stopped_rows(&mut rows, &registry, true);
 

@@ -248,7 +248,6 @@ fn materialize_ext4_in_builder_vm(
     use crate::builder_backend_select::BuilderBackendChoice;
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob, LibkrunBuilderVm};
     use crate::qemu_builder::QemuBuilderVm;
-    use crate::vz_builder::VzBuilderVm;
 
     let artifact_out = input
         .output
@@ -283,7 +282,6 @@ fn materialize_ext4_in_builder_vm(
             BuilderBackendChoice::Qemu => QemuBuilderVm::new()
                 .run_shell_script(&shell_job)
                 .map(|_| ()),
-            BuilderBackendChoice::Vz => VzBuilderVm::new().run_shell_script(&shell_job).map(|_| ()),
         }
     })?;
     Ok(())
@@ -300,7 +298,7 @@ fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendCh
 
 /// Safety margin (bytes) left between the formatted ext4 size and the
 /// backing device size. The builder VM (libkrun) and the workload
-/// backends (Vz, Firecracker) can report a virtio-blk device size that
+/// backends (HVF, Firecracker) can report a virtio-blk device size that
 /// differs from the host sparse file by up to ~64 KiB in either
 /// direction (kernel/VMM rounding). Formatting `mkfs.ext4` to the full
 /// device size makes a filesystem that boots on the backend whose device
@@ -812,8 +810,8 @@ mod tests {
         let mut env = TestEnv::new();
         env.remove(MVM_BUILDER_BACKEND_ENV);
 
-        // No override → the resolved backend (macOS 26+ Apple Silicon → Vz,
-        // everywhere else → libkrun). On a Vz Mac, forcing libkrun looked for an
+        // No override → the resolved backend (macOS 26+ Apple Silicon → hvf,
+        // everywhere else → libkrun). On an hvf Mac, forcing libkrun looked for an
         // `aarch64` builder image that is never built there.
         assert_eq!(
             ext4_materializer_choice(),
@@ -832,11 +830,11 @@ mod tests {
 
     #[cfg(feature = "builder-vm")]
     #[test]
-    fn materializer_honors_explicit_vz_backend() {
+    fn materializer_honors_explicit_hvf_backend() {
         let mut env = TestEnv::new();
-        env.set(MVM_BUILDER_BACKEND_ENV, "vz");
+        env.set(MVM_BUILDER_BACKEND_ENV, "hvf");
 
-        assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Vz);
+        assert_eq!(ext4_materializer_choice(), BuilderBackendChoice::Hvf);
     }
 
     #[cfg(not(feature = "builder-vm"))]

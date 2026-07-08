@@ -367,7 +367,7 @@ mod tests {
         assert!(SupervisorStandbyPool::is_live_or_saved(&saved));
     }
 
-    // ── saved-state standby tests (Vz) ───────────────────────────────────────────
+    // ── saved-state standby tests (LegacyMacos) ───────────────────────────────────────────
 
     fn saved_handle(id: &str, kernel: &str, image: &str, state: StandbyState) -> StandbyHandle {
         StandbyHandle {
@@ -384,7 +384,7 @@ mod tests {
         }
     }
 
-    fn vz_compat(kernel: &str, image: &str) -> StandbyCompat {
+    fn legacy_macos_compat(kernel: &str, image: &str) -> StandbyCompat {
         StandbyCompat {
             kernel_sha256: kernel.into(),
             vcpus: 2,
@@ -401,7 +401,7 @@ mod tests {
         pool.record(&saved_handle("vz1", "kk", "img-aa", StandbyState::Idle))
             .unwrap();
         let picked = pool
-            .select_idle_compatible(&vz_compat("kk", "img-aa"))
+            .select_idle_compatible(&legacy_macos_compat("kk", "img-aa"))
             .unwrap();
         assert_eq!(picked.unwrap().id, "vz1");
     }
@@ -413,7 +413,7 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path());
         pool.record(&saved_handle("vz1", "kk", "img-aa", StandbyState::Idle))
             .unwrap();
-        // libkrun compat (None) does not match a Vz standby (Some).
+        // libkrun compat (None) does not match a LegacyMacos standby (Some).
         assert!(
             pool.select_idle_compatible(&compat("kk"))
                 .unwrap()
@@ -421,7 +421,7 @@ mod tests {
         );
         // Different image sha also misses.
         assert!(
-            pool.select_idle_compatible(&vz_compat("kk", "img-bb"))
+            pool.select_idle_compatible(&legacy_macos_compat("kk", "img-bb"))
                 .unwrap()
                 .is_none()
         );
@@ -494,7 +494,7 @@ mod tests {
     fn select_claims_compatible_parked_saved_state_standby() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
-        let want = vz_compat("aa", "img");
+        let want = legacy_macos_compat("aa", "img");
         let parked = saved_handle("vzp", "aa", "img", StandbyState::Parked);
         pool.record(&parked).unwrap();
 
@@ -508,11 +508,11 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path());
         let now = now_unix_secs();
 
-        let mut recent = saved_handle("vz-keep", "kk", "img", StandbyState::Idle);
+        let mut recent = saved_handle("legacy_macos-keep", "kk", "img", StandbyState::Idle);
         recent.spawned_unix_secs = now;
         pool.record(&recent).unwrap();
 
-        let mut old = saved_handle("vz-old", "kk", "img", StandbyState::Idle);
+        let mut old = saved_handle("legacy_macos-old", "kk", "img", StandbyState::Idle);
         old.spawned_unix_secs = 1; // ancient — past warm TTL, demoted to Parked
         pool.record(&old).unwrap();
 
@@ -520,13 +520,13 @@ mod tests {
             .reap_stale(std::time::Duration::from_secs(3600), now)
             .unwrap();
 
-        assert!(!reaped.contains(&"vz-keep".to_string()));
+        assert!(!reaped.contains(&"legacy_macos-keep".to_string()));
         assert!(
-            !reaped.contains(&"vz-old".to_string()),
+            !reaped.contains(&"legacy_macos-old".to_string()),
             "demoted, not reaped"
         );
-        assert!(pool.load("vz-keep").is_ok());
-        assert_eq!(pool.load("vz-old").unwrap().state, StandbyState::Parked);
+        assert!(pool.load("legacy_macos-keep").is_ok());
+        assert_eq!(pool.load("legacy_macos-old").unwrap().state, StandbyState::Parked);
     }
 
     #[test]

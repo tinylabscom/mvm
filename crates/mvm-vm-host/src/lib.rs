@@ -2,9 +2,9 @@
 //!
 //! One process per guest VM. The roles ship as `[[bin]]`s (see Cargo.toml):
 //! `mvm-libkrun-supervisor` (libkrun VMM + merged in-process bridge;
-//! libkrun-sys-gated), `mvm-vz-supervisor` (Vz VMM), and the shared `mvm-bridge`
-//! sidecar — the single external-VMM gateway/audit bridge for Firecracker + vz
-//! (replaces the former `mvm-firecracker-bridge` / `mvm-vz-drainer`). They are
+//! libkrun-sys-gated), `mvm-legacy-macos-supervisor` (LegacyMacos VMM), and the shared `mvm-bridge`
+//! sidecar — the single external-VMM gateway/audit bridge for Firecracker + legacy_macos
+//! (replaces the former `mvm-firecracker-bridge` / `mvm-legacy-macos-drainer`). They are
 //! leaf binaries — nothing depends on them as a library; `mvm-backend`'s spawner
 //! resolves them by binary name on the launch path.
 //!
@@ -31,10 +31,10 @@ pub mod firecracker_bridge;
 /// `start_enter`) so the rejection ladder is unit-testable.
 pub mod prelaunch;
 
-// Rust-native Vz supervisor objc2 bridge. macOS-only — the
+// Rust-native LegacyMacos supervisor objc2 bridge. macOS-only — the
 // objc2 Virtualization.framework stack only exists there; the
-// `mvm-vz-supervisor` bin is the sole consumer. Kept in the lib (not inline in
+// `mvm-legacy-macos-supervisor` bin is the sole consumer. Kept in the lib (not inline in
 // the bin) so the config→VZ translation and the dispatch/delegate bridge get
 // unit coverage independent of a live VM boot.
 #[cfg(target_os = "macos")]
-pub mod vz_objc;
+pub mod legacy_macos_objc;

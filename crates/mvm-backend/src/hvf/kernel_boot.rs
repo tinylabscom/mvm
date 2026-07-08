@@ -141,7 +141,7 @@ pub struct KernelBootResult {
 /// Kernel cmdline used when `MVM_HVF_BOOTARGS` is unset. Always wires the PL011
 /// console (earlycon + `ttyAMA0`). When a virtio-blk disk is attached it is a
 /// real mkGuest workload rootfs, so mount it and run the baked init —
-/// `root=/dev/vda rw init=/init`, the same contract the Vz/firecracker backends
+/// `root=/dev/vda rw init=/init`, the same contract the LegacyMacos/firecracker backends
 /// boot mkGuest images with. Disk-less boots (initramfs / freestanding payloads)
 /// keep the bare console args.
 fn default_bootargs(has_disk: bool) -> String {
@@ -190,6 +190,9 @@ pub struct HostChannels {
     /// `/sbin/mvm-host-vm-init`, not the `/init` shell script — sets it here.
     /// `MVM_HVF_BOOTARGS` still overrides both (dev hook).
     pub cmdline: Option<String>,
+    /// Additional kernel cmdline tokens appended after the selected base cmdline.
+    /// Used for per-VM launch data without duplicating the HVF default bootargs.
+    pub cmdline_extra: Option<String>,
     /// Guest RAM in MiB. `0` ⇒ the built-in default (512 MiB). A builder sets
     /// several GiB so `nix build` doesn't OOM.
     pub mem_mib: u32,
@@ -458,6 +461,13 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 default_bootargs(!disks.is_empty())
             }
         });
+    if let Some(extra) = channels.cmdline_extra.as_deref() {
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            bootargs.push(' ');
+            bootargs.push_str(extra);
+        }
+    }
     if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
         let extra = extra.trim();
         if !extra.is_empty() {

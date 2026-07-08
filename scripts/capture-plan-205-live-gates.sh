@@ -14,7 +14,7 @@ usage() {
   cat <<USAGE
 Plan 205 live gate capture.
 
-This script boots and manages real macOS Vz dev-builder state and runs an OCI
+This script boots and manages real macOS legacy macOS dev-builder state and runs an OCI
 image. It is intentionally opt-in.
 
 Required:
@@ -28,7 +28,7 @@ Useful overrides:
   MVM_PLAN205_OCI_IMAGE=ref               OCI image for run --image
   MVM_PLAN205_WARM_REUSE_MAX_MS=250       warm reuse latency budget
   MVM_PLAN205_RESTORE_P50_MAX_MS=800      restore p50 latency budget
-  MVM_VZ_SUPERVISOR_PATH=/path/to/bin     use an existing Vz supervisor binary
+  MVM_LEGACY_MACOS_SUPERVISOR_PATH=/path/to/bin     use an existing legacy macOS supervisor binary
   MVM_PLAN205_SKIP_SIGN=1                 skip macOS entitlement signing step
   MVM_PLAN205_USE_DEFAULT_STATE=1         use current MVM_DATA_DIR/MVM_CACHE_DIR
   MVM_PLAN205_DATA_DIR=/tmp/path          isolated data dir when not using default state
@@ -60,7 +60,7 @@ else
   host_ok=0
 fi
 if [[ "${host_ok}" != "1" && "${MVM_PLAN205_ALLOW_UNSUPPORTED_HOST:-0}" != "1" ]]; then
-  echo "refusing: Plan 205 Vz live gate expects macOS 26+ on Apple Silicon" >&2
+  echo "refusing: Plan 205 legacy macOS live gate expects macOS 26+ on Apple Silicon" >&2
   echo "host: os=$(uname -s) arch=$(uname -m) macos=${macos_version}" >&2
   exit 65
 fi
@@ -74,7 +74,7 @@ if [[ "${MVM_PLAN205_USE_DEFAULT_STATE:-0}" != "1" ]]; then
   export MVM_DATA_DIR="${MVM_PLAN205_DATA_DIR:-${OUT_DIR}/data}"
   export MVM_CACHE_DIR="${MVM_PLAN205_CACHE_DIR:-${OUT_DIR}/cache}"
 fi
-export MVM_BUILDER_BACKEND="${MVM_BUILDER_BACKEND:-vz}"
+export MVM_BUILDER_BACKEND="${MVM_BUILDER_BACKEND:-legacy-macos}"
 
 if [[ -n "${MVM_PLAN205_MVMCTL:-}" ]]; then
   MVMCTL="${MVM_PLAN205_MVMCTL}"
@@ -87,17 +87,17 @@ else
 fi
 
 TARGET_DIR="${CARGO_TARGET_DIR:-${ROOT}/target}"
-if [[ -z "${MVM_VZ_SUPERVISOR_PATH:-}" && "${MVM_PLAN205_SKIP_BUILD:-0}" != "1" ]]; then
-  cargo build --release -p mvm-vm-host --bin mvm-vz-supervisor
-  export MVM_VZ_SUPERVISOR_PATH="${TARGET_DIR}/release/mvm-vz-supervisor"
+if [[ -z "${MVM_LEGACY_MACOS_SUPERVISOR_PATH:-}" && "${MVM_PLAN205_SKIP_BUILD:-0}" != "1" ]]; then
+  cargo build --release -p mvm-vm-host --bin mvm-legacy-macos-supervisor
+  export MVM_LEGACY_MACOS_SUPERVISOR_PATH="${TARGET_DIR}/release/mvm-legacy-macos-supervisor"
 fi
 
 if [[ ! -x "${MVMCTL}" ]]; then
   echo "refusing: mvmctl binary is not executable: ${MVMCTL}" >&2
   exit 66
 fi
-if [[ -n "${MVM_VZ_SUPERVISOR_PATH:-}" && ! -x "${MVM_VZ_SUPERVISOR_PATH}" ]]; then
-  echo "refusing: MVM_VZ_SUPERVISOR_PATH is not executable: ${MVM_VZ_SUPERVISOR_PATH}" >&2
+if [[ -n "${MVM_LEGACY_MACOS_SUPERVISOR_PATH:-}" && ! -x "${MVM_LEGACY_MACOS_SUPERVISOR_PATH}" ]]; then
+  echo "refusing: MVM_LEGACY_MACOS_SUPERVISOR_PATH is not executable: ${MVM_LEGACY_MACOS_SUPERVISOR_PATH}" >&2
   exit 67
 fi
 
@@ -110,7 +110,7 @@ if [[ "${MVM_PLAN205_KEEP_CARGO_TARGET_DIR:-0}" != "1" ]]; then
 fi
 
 CACHE_ROOT="${MVM_CACHE_DIR:-${XDG_CACHE_HOME:-${HOME}/.cache}/mvm}"
-SNAPSHOT="${CACHE_ROOT}/builder-vm/vms/mvm-persistent-builder-vz-dev/state.vzsave"
+SNAPSHOT="${CACHE_ROOT}/builder-vm/vms/mvm-persistent-builder-legacy-macos-dev/state.vzsave"
 SNAPSHOT_MACHINE_ID="${SNAPSHOT}.machine-id"
 
 now_ns() {

@@ -28,7 +28,7 @@
 | `crates/mvm-cli/src/commands/vm/pause.rs` | retire `snapshot save`/`snapshot restore` arms |
 | `crates/mvm-cli/src/commands/mod.rs` | drop the retired snapshot subcommands from help if needed |
 | `tests/audit_total_coverage.rs` | register `CheckpointRestored` + posture |
-| `specs/REFACTOR-STATUS.md`, `specs/plans/159-vz-inspired-macos-dx.md` | rollup |
+| `specs/REFACTOR-STATUS.md`, `removed legacy macOS archival spec` | rollup |
 
 ---
 
@@ -582,7 +582,7 @@ git commit -m "feat(cli): checkpoint --class vm_full + restore; retire snapshot 
 ## Task 10: Full gates + rollup + PR
 
 - [ ] **Step 1:** `cargo fmt --all` → `cargo clippy --workspace -- -D warnings` (zero) → `cargo nextest run --workspace -E 'not package(mvm-backend)'` + `cargo nextest run -p mvm-backend -E 'test(checkpoint) or test(vz)'` (the mvm-backend codesign-SIGKILL workaround) → `cargo test --workspace --doc`. Fix any REAL failure in checkpoint/vz code; known `HOME_TEST_LOCK`/fs2-flock flakes pass single-threaded — confirm, don't chase.
-- [ ] **Step 2:** Update `specs/REFACTOR-STATUS.md` PLAN 159 WS-2 line to note vm_full + restore + fork landed (PR3 = `checkpoint diff` + pause/resume wiring remains); bump the date. Tick the matching items in `specs/plans/159-vz-inspired-macos-dx.md`.
+- [ ] **Step 2:** Update `specs/REFACTOR-STATUS.md` PLAN 159 WS-2 line to note vm_full + restore + fork landed (PR3 = `checkpoint diff` + pause/resume wiring remains); bump the date. Tick the matching items in `removed legacy macOS archival spec`.
 - [ ] **Step 3:** Commit docs; push; open the PR (the controller does the final review + finishing-a-development-branch).
 
 ---

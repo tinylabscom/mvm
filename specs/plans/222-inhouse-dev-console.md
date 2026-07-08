@@ -6,7 +6,7 @@
 
 **Architecture:** The hvf runner today exposes only `agent.sock` + write-only `console.log`, and `pick_console_transport` has no hvf case, so `-it` fails at console attach. This plan gives the runner a **dev-gated `dev_console` pre-open** (mirroring libkrun/vz) that binds the guest console data-port range as host UDS, plus a backend-neutral `DevConsoleTransport` + an hvf probe in `pick_console_transport`. The one new device mechanism is a `ConsoleBridge` in `vmm/vsock.rs` — a clone of the existing `AgentBridge` — that host-dials arbitrary console ports.
 
-**Source:** spike 2026-07-02 (in-session); design `specs/notes/2026-07-02-vz-deprecation-design.md` §"Design: dev-only interactive PTY shell".
+**Source:** spike 2026-07-02 (in-session); design `removed legacy macOS archival spec` §"Design: dev-only interactive PTY shell".
 
 ## Global Constraints
 - Claim 15: sealed prod must link/open nothing. The pre-open binds host UDS ONLY when `config.dev_console` is true (matches `libkrun.rs:316` / `vz.rs:2025`); the guest console verbs are already `dev-shell`-gated; `enforce_accessible_gate` (`console.rs:91`) refuses sealed attach.

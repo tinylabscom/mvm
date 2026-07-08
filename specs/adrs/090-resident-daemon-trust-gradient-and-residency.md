@@ -9,8 +9,8 @@
 [ADR-088](088-dev-vm-promotion-boundary.md),
 [ADR-089](089-builder-vm-resident-control-plane.md),
 [Plan 118](../plans/118-supervisor-standby-pool-and-live-bench.md),
-[Plan 152](../plans/152-rust-native-vz-and-init-lifecycle-parity.md),
-[Plan 159](../plans/159-vz-inspired-macos-dx.md),
+Plan 152,
+Plan 159,
 [Plan 196](../plans/196-warm-builder-store-kernel-cache.md),
 [Plan 202](../plans/202-host-services-daemon.md),
 [Plan 204](../plans/204-builder-vm-resident-control-plane.md), and

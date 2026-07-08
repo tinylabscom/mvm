@@ -365,6 +365,23 @@ fn mk_guest_rejects_ssh_template_inputs_structurally() {
 }
 
 #[test]
+fn mk_guest_init_script_starts_with_kernel_shebang() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|e| panic!("mk-guest.nix must be present: {e}"));
+    let marker = "initScript = pkgs.writeScript \"mvm-init\" ''\n";
+    let body_start = content
+        .find(marker)
+        .map(|idx| idx + marker.len())
+        .expect("mkGuest must render the initScript with pkgs.writeScript");
+
+    assert!(
+        content[body_start..].starts_with("#!/bin/sh\n"),
+        "mkGuest /init must place the shebang at byte zero so the Linux kernel can exec it"
+    );
+}
+
+#[test]
 fn installation_docs_keep_host_nix_optional() {
     let path = repo_dir()
         .join("public")

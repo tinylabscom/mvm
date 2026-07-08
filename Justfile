@@ -139,7 +139,7 @@ e2e-core-demo:
 build-supervisors:
     cargo build -p mvm-hostd --bin mvm-substitution-endpoint
     cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
-    cargo build -p mvm-vm-host --bin mvm-vz-supervisor
+    cargo build -p mvm-vm-host --bin mvm-legacy-macos-supervisor
     cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
 
 # ── Lint & Format ────────────────────────────────────────────────────────

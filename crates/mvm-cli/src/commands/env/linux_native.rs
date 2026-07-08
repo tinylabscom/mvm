@@ -15,7 +15,7 @@
 //! gone; the asset pipeline now runs directly on the host via the
 //! `mvm_backend::firecracker::*` functions.
 //!
-//! macOS 26+ Apple Silicon hosts use `super::dev_vz` instead; macOS
+//! macOS 26+ Apple Silicon hosts use `super::dev_vm` instead; macOS
 //! Intel / pre-26 / no-KVM-Linux hosts fall through to a "no dev
 //! backend" error in `super::dev::run` — those need the
 //! libkrun builder VM.
@@ -99,7 +99,7 @@ pub(super) fn cmd_dev_linux_native_status(json: bool) -> Result<()> {
     let has_assets = firecracker::has_base_assets().unwrap_or(false);
 
     if json {
-        return crate::json_out::emit_json(&super::dev_vz::build_dev_status_json_linux_native(
+        return crate::json_out::emit_json(&super::dev_vm::build_dev_status_json_linux_native(
             has_kvm,
             fc_installed,
             has_assets,

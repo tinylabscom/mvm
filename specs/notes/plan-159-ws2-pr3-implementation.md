@@ -30,7 +30,7 @@
 | `crates/mvm-cli/src/commands/vm/checkpoint.rs` | `Diff { a, b, json }` subcommand + `diff()` render |
 | `crates/mvm-cli/src/commands/vm/pause.rs` | Vz dispatch branch in `run_pause`/`run_resume` |
 | `crates/mvm-cli/src/commands/tests.rs` (or the checkpoint/pause test modules) | parse tests |
-| `specs/REFACTOR-STATUS.md`, `specs/plans/159-vz-inspired-macos-dx.md` | flip WS-2 to done |
+| `specs/REFACTOR-STATUS.md`, `removed legacy macOS archival spec` | flip WS-2 to done |
 
 ---
 
@@ -479,11 +479,11 @@ cargo test --workspace --doc 2>&1 | tail -10
 ```
 Fix REAL failures in the new code. Known `HOME_TEST_LOCK`/fs2-flock + degraded-builder-store flakes pass single-threaded / are pre-existing — confirm, don't chase.
 
-- [ ] **Step 2: Flip WS-2 to done.** In `specs/REFACTOR-STATUS.md`, change the PLAN 159 `WS-2 checkpoint+fork` line from `[~]` to `[x]` and update its tail from `Remaining: checkpoint diff + pause/resume wiring (PR3)` to note both landed (PR3) — WS-2 complete. Bump `**Last updated:**` to 2026-06-11. In `specs/plans/159-vz-inspired-macos-dx.md`, tick the WS-2 `checkpoint diff` + `pause/resume` items.
+- [ ] **Step 2: Flip WS-2 to done.** In `specs/REFACTOR-STATUS.md`, change the PLAN 159 `WS-2 checkpoint+fork` line from `[~]` to `[x]` and update its tail from `Remaining: checkpoint diff + pause/resume wiring (PR3)` to note both landed (PR3) — WS-2 complete. Bump `**Last updated:**` to 2026-06-11. In `removed legacy macOS archival spec`, tick the WS-2 `checkpoint diff` + `pause/resume` items.
 
 - [ ] **Step 3: Commit + push + open PR** (controller runs final review + finishing-a-development-branch).
 ```bash
-git add specs/REFACTOR-STATUS.md specs/plans/159-vz-inspired-macos-dx.md
+git add specs/REFACTOR-STATUS.md removed legacy macOS archival spec
 git commit -m "docs(plan-159): WS-2 complete — checkpoint diff + Vz pause/resume"
 ```
 

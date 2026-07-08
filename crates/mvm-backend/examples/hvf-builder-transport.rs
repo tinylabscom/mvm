@@ -120,7 +120,7 @@ fn main() {
     if ok {
         println!(
             "PROOF: the builder ran on the HVF VMM and the output tar came \
-             back to the host. No vz, no virtio-fs."
+             back to the host. No legacy_macos, no virtio-fs."
         );
     } else {
         eprintln!("FAILED: job did not complete cleanly (see output + result above)");

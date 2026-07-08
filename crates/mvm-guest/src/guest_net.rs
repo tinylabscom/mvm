@@ -50,7 +50,7 @@ pub fn encode_iface_name(iface: &str) -> Result<[libc::c_char; libc::IFNAMSIZ], 
 /// The gateway-local resolver line for the active VMM's virtual network.
 ///
 /// QEMU user-mode networking serves DNS at 10.0.2.3; the gvproxy backends
-/// (libkrun, Vz) at 192.168.127.1. Host-side resolution through the gateway
+/// (libkrun, LegacyMacos) at 192.168.127.1. Host-side resolution through the gateway
 /// works on any network — baked public resolvers only work where the local
 /// network permits direct external UDP/53.
 pub fn resolver_seed(cmdline: &str) -> &'static [u8] {

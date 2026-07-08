@@ -42,12 +42,7 @@ mvmctl pause agent-sandbox
 mvmctl resume agent-sandbox
 ```
 
-For Vz memory checkpoints (vm-full class):
-
-```sh
-mvmctl checkpoint create agent-sandbox --class vm-full
-mvmctl checkpoint restore agent-sandbox --name <checkpoint-name>
-```
+Current public docs only publish the Firecracker sealed snapshot path. If another backend gains a documented restore flow, name that backend and its integrity semantics explicitly rather than presenting checkpoint restore as universal behavior.
 
 Snapshots can contain memory, files, and runtime credentials. Apply retention and deletion policy.
 

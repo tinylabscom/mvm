@@ -4,7 +4,7 @@ version = "0.0.0"
 publish = false
 edition = "2024"
 
-# Detach from the parent workspace — `crates/mvm-vz/fuzz` is listed
+# Detach from the parent workspace — `crates/mvm-legacy-macos/fuzz` is listed
 # under `workspace.exclude` in the repo root Cargo.toml because
 # `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper
 # (which injects sanitizer + linker flags). An empty `[workspace]`
@@ -26,7 +26,7 @@ path = ".."
 default-features = false
 
 # claim 5 — fuzz the host-side `SupervisorConfig`
-# JSON parser. The Swift `mvm-vz-supervisor` reads attacker-
+# JSON parser. The Swift `mvm-legacy-macos-supervisor` reads attacker-
 # influenced JSON on stdin; the Rust shape this fuzzes is the
 # canonical source the Swift `JSONDecoder` mirrors, so a panic-free
 # Rust decoder is the foundation for the Rust↔Swift corpus

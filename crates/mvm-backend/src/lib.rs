@@ -5,8 +5,6 @@
 //!
 //! - **Firecracker** (`backend::FirecrackerBackend`) + the `AnyBackend`
 //!   dispatch enum + `FirecrackerConfig` — the production Tier 1 path.
-//! - **Vz** (`vz::VzBackend`) — the one Apple Virtualization.framework
-//!   backend (per-VM Rust objc2 supervisor); macOS-26 auto-default.
 //! - **libkrun** (`libkrun::LibkrunBackend`) — raw libkrun shim
 //!   (Linux KVM / macOS HVF).
 //!
@@ -94,7 +92,7 @@ pub mod standby_pool;
 /// Shared per-VM substitution-endpoint spawn/reap helpers used by the
 /// QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;
-/// Vz-specific stale-supervisor hint for early child-exit diagnostics. The
+/// LegacyMacos-specific stale-supervisor hint for early child-exit diagnostics. The
 /// source-checkout helper resolver handles normal freshness before spawn.
 pub(crate) mod supervisor_stale;
 /// Portable, hypervisor-agnostic VMM device model (guest memory, FDT, kernel
@@ -104,16 +102,16 @@ pub mod vmm;
 /// The single host-side vsock egress bridge. Backend-agnostic; every VMM path
 /// enforces claim-10 / claims-12/13 through exactly this module.
 pub mod vsock_egress_bridge;
-// Vz (Apple Virtualization.framework) backend. Currently a skeleton:
-// trait surface + capabilities + security profile + availability
-// probe; lifecycle methods land in a follow-up slice.
-pub mod vz;
-// Rust client for the Vz supervisor's control socket
-// (PAUSE / RESUME / BALLOON / SAVE). Used by VzBackend.
+// Legacy macOS backend. Retained only so older
+// state dirs and non-workload maintenance flows can still be understood while
+// the supported product surface moves fully to hvf/libkrun/firecracker.
+pub mod legacy_macos_backend;
+// Rust client for the legacy supervisor's control socket
+// (PAUSE / RESUME / BALLOON / SAVE).
 /// The builder role layer: boots a builder VM over the `VmmDriver` seam with the
 /// disk-only job/artifact transport (trusted, no egress endpoint, no virtio-fs).
 pub mod builder_runner;
-pub mod vz_control;
+pub mod legacy_supervisor_control;
 /// `WorkloadBackend` marker trait — the type-level permission to carry an
 /// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`
 /// only, so a non-workload backend (QEMU dev/test, mock) cannot reach it.
@@ -125,7 +123,6 @@ pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 pub use libkrun::LibkrunBackend;
 pub use mock::MockBackend;
 pub use qemu::QemuBackend;
-pub use vz::VzBackend;
 pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 
 /// The per-VM egress-TLS cert/key split helper. `mvmctl up`

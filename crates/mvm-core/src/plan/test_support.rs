@@ -179,14 +179,14 @@ mod tests {
             .tenant("acme")
             .plan_id("p-1")
             .workload("w-1")
-            .runtime_profile("vz")
+            .runtime_profile("hvf")
             .nonce([7u8; 16])
             .validity(from, until)
             .build();
         assert_eq!(plan.tenant.0, "acme");
         assert_eq!(plan.plan_id.0, "p-1");
         assert_eq!(plan.workload.0, "w-1");
-        assert_eq!(plan.runtime_profile.0, "vz");
+        assert_eq!(plan.runtime_profile.0, "hvf");
         assert_eq!(plan.nonce, Nonce::from_bytes([7u8; 16]));
         assert_eq!(plan.valid_from, from);
         assert_eq!(plan.valid_until, until);

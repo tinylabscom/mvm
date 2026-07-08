@@ -21,7 +21,7 @@ substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + b
 # facade-only re-export pattern.
 #
 # Lives here:
-#   - vz.rs                (Apple Virtualization.framework, macOS 13+)
+#   - legacy-macos.rs                (Apple Virtualization.framework, macOS 13+)
 #   - libkrun.rs           (raw libkrun shim — Linux KVM / macOS HVF)
 #
 # Stays in `mvm` (a later move will pull these out):
@@ -51,14 +51,14 @@ mvm-guest.workspace = true
 # `start` impl. The base substrate's sidecar reader already pulls
 # `mvm-build`, so this doesn't widen the dependency graph.
 #
-# `builder-vm` is enabled because `vz.rs` reaches
-# `mvm_build::host_gvproxy` (moved down from this crate so the Vz
+# `builder-vm` is enabled because `legacy-macos.rs` reaches
+# `mvm_build::host_gvproxy` (moved down from this crate so the legacy macOS
 # *builder* can also spawn gvproxy). That feature pulls `libkrun-sys`,
 # which this crate already depends on non-optionally — so no new dep.
 mvm-build = { workspace = true, features = ["builder-vm"] }
 libkrun-sys.workspace = true
 mio.workspace = true
-# Vz backend foundation crate (SupervisorConfig types, supervisor-binary
+# legacy macOS backend foundation crate (SupervisorConfig types, supervisor-binary
 # path resolution). Pure data + helpers; no Swift dep.
 # Folded in with the former mvm-base crate: the base substrate's ui
 # (colored/indicatif/inquire spinners + prompts) and secret handling

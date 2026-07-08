@@ -2,7 +2,7 @@
 //!
 //! Resuming two clones of one snapshot leaves both guests with identical
 //! CSPRNG state — they'd generate the same nonces/keys, a real key-reuse
-//! break. Hardware VMGenID exists on Firecracker but not libkrun/Vz, so the
+//! break. Hardware VMGenID exists on Firecracker but not libkrun/LegacyMacos, so the
 //! host emits a fresh generation token over the config/vsock path on every
 //! resume; the guest reseeds and drops its session when the token changes.
 //!

@@ -15,14 +15,9 @@ cargo run -- resume agent-sandbox
 
 Firecracker pause/resume writes sealed instance state and verifies it before resume. This is the local `mvm` primitive.
 
-## Vz memory checkpoints
+## Other backends
 
-```sh
-cargo run -- checkpoint create agent-sandbox --class vm-full
-cargo run -- checkpoint restore agent-sandbox --name <checkpoint-name>
-```
-
-Vz checkpoints capture full machine state. `mvm` records the checkpoint content hash in the audit chain when the launch plan and host signer are available, and restore records whether the content matched the prior chain entry.
+Current public docs do not publish a user-facing full-memory checkpoint flow for the active macOS backends. When restore support is documented for another backend, the tutorial must name the backend and its integrity evidence instead of implying universal checkpoint recovery.
 
 ## Security checklist
 

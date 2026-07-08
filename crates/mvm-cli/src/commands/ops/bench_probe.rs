@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 
 use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy};
 
-use crate::commands::env::dev_vz::ensure_default_microvm_image;
+use crate::commands::env::dev_vm::ensure_default_microvm_image;
 use mvm_core::plan::SynthesisInput;
 use mvm_hostd::plan_admission::{AdmittedPlan, InMemoryNonceLedger, SystemClock, admit_for_run};
 

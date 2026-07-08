@@ -2,7 +2,7 @@
 
 **Status**: Proposed
 **Date**: 2026-06-05
-**Cross-refs**: ADR-001 (Firecracker-only *execution* — the production runtime path), ADR-002 (security posture / per-backend tier matrix), ADR-055 (passt/gvproxy virtio-net), ADR-066 §1 (name by role, front with a trait, hide impls), ADR-068 (Stage 0 dispatches through the `BuilderVm` trait), Plan 98 (`98-vz-builder-vm.md` — builder-backend selection libkrun/vz). Planning input: Plan 164 (multi-arch embed — surfaced the Linux provisioning pain that motivated this) + Plan 166 (this ADR's implementation).
+**Cross-refs**: ADR-001 (Firecracker-only *execution* — the production runtime path), ADR-002 (security posture / per-backend tier matrix), ADR-055 (passt/gvproxy virtio-net), ADR-066 §1 (name by role, front with a trait, hide impls), ADR-068 (Stage 0 dispatches through the `BuilderVm` trait), Plan 98 (`removed legacy macOS archival spec` — builder-backend selection libkrun/vz). Planning input: Plan 164 (multi-arch embed — surfaced the Linux provisioning pain that motivated this) + Plan 166 (this ADR's implementation).
 
 ## Context
 

@@ -69,7 +69,7 @@ use crate::builder_vm::{
     BuilderVmExitInfo, BuilderVmMount, BuilderVmRunConfig, VmBackendForBuilder,
 };
 // These items previously lived in this file; they migrated to
-// `builder_vm_runtime` so the future VzBuilderVm path can reuse the
+// `builder_vm_runtime` so the future LegacyBuilderVm path can reuse the
 // same logic without duplicating it. `INSTALL_SPEC_FILENAME` and
 // `shell_single_quote_escape` are imported only inside the test
 // module below.
@@ -1045,7 +1045,7 @@ impl BuilderVm for LibkrunBuilderVm {
 ///
 /// `LibkrunBuilderVm::run_build` does not yet use this — a
 /// follow-up slice introduces `BuilderVmRuntime` and flips the
-/// migration. Today it exists so the `VzBuilderVm` work has a
+/// migration. Today it exists so the `LegacyBuilderVm` work has a
 /// worked example of how to wrap a hypervisor-specific supervisor
 /// behind the seam.
 pub struct LibkrunBuilderBackend {
@@ -1127,7 +1127,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // libkrun's add_virtio_fs takes only (tag, host_path) —
             // every share is RW from the guest's perspective. The
             // `BuilderVmMount::read_only` flag is currently ignored
-            // on this backend; Vz's impl will honour it via
+            // on this backend; LegacyMacos's impl will honour it via
             // VZSharedDirectory's `readOnly:` parameter.
             krun = krun.add_virtio_fs(
                 mount.tag.clone(),
@@ -1662,7 +1662,7 @@ pub fn ensure_builder_vm_image() -> Result<BuilderVmImage, BuilderVmError> {
 /// host don't clobber each other's job dirs even if they hit
 /// the same second.
 ///
-/// `pub(crate)` so the parallel `vz_builder::VzBuilderVm`
+/// `pub(crate)` so the parallel `legacy_macos_builder::LegacyBuilderVm`
 /// driver can reuse the same per-job ID shape; the two backends
 /// share a cache root, so collisions on it would corrupt each
 /// other's job dirs.
@@ -1684,7 +1684,7 @@ pub(crate) fn unique_job_id() -> String {
 // `JobResult`, `INSTALL_RESULT_FILENAME`, `read_last_bytes_of`,
 // `finalize_flake_job`, `read_revision_hash`, `extract_nix_store_hash`,
 // `finalize_install_job`, and `InstallResultReport` all live in
-// `crate::builder_vm_runtime` so the future VzBuilderVm path can reuse
+// `crate::builder_vm_runtime` so the future LegacyBuilderVm path can reuse
 // them.
 
 /// Locate the `mvm-libkrun-supervisor` binary. Mirrors the

@@ -200,12 +200,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             json,
             force,
         } => {
-            use super::super::env::dev_vz;
+            use super::super::env::dev_vm;
 
             // Guard 1 — never yank the store from an in-flight bootstrap. A
             // held Stage 0 lock means another `dev up`/`build` is mid-bootstrap.
             // `--force` overrides (for a stale lock left by a crash).
-            if !force && dev_vz::stage0_bootstrap_in_flight() {
+            if !force && dev_vm::stage0_bootstrap_in_flight() {
                 anyhow::bail!(
                     "a Stage 0 builder bootstrap appears to be in progress (lock held at \
                      {}/builder-vm/stage0.lock). Refusing to clear the builder store from under \
@@ -220,10 +220,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // `dev up` restarts it. Skipped under --dry-run (which mutates
             // nothing). The stop is the reversible half of repair, so we do it
             // automatically rather than refuse.
-            if !dry_run && dev_vz::is_vz_dev_running() {
+            if !dry_run && dev_vm::is_dev_vm_running() {
                 ui::warn("A dev builder VM is running; stopping it before clearing the store.");
                 // Clearing the store invalidates any snapshot, so don't park.
-                let _ = dev_vz::cmd_dev_vz_down(/* json = */ false, /* reset = */ true);
+                let _ = dev_vm::cmd_dev_vm_down(/* json = */ false, /* reset = */ true);
             }
 
             let repair = mvm_build::builder_vm::clear_builder_store(dry_run)
@@ -273,7 +273,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // list and so the sweeper can drop the per-VM cache dirs along with
             // the helpers that were holding their sockets/PIDs.
             if !no_reap_orphans {
-                match super::super::env::dev_vz::reap_orphaned_vm_helpers(dry_run) {
+                match super::super::env::dev_vm::reap_orphaned_vm_helpers(dry_run) {
                     Ok(o) => {
                         if o.killed == 0 && o.removed_dirs == 0 {
                             ui::info("No orphaned VM helpers.");
@@ -345,15 +345,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // takes the Stage 0 advisory lock to avoid racing a live
             // bootstrap; if the lock is held it skips silently and we
             // proceed with the temp-file sweep.
-            match super::super::env::dev_vz::sweep_orphaned_stage0_staging_dirs(dry_run) {
-                Ok(super::super::env::dev_vz::Stage0SweepOutcome::Swept {
+            match super::super::env::dev_vm::sweep_orphaned_stage0_staging_dirs(dry_run) {
+                Ok(super::super::env::dev_vm::Stage0SweepOutcome::Swept {
                     removed: r,
                     freed_bytes,
                 }) => {
                     removed += r;
                     freed += freed_bytes;
                 }
-                Ok(super::super::env::dev_vz::Stage0SweepOutcome::SkippedLockHeld) => {
+                Ok(super::super::env::dev_vm::Stage0SweepOutcome::SkippedLockHeld) => {
                     ui::info(
                         "Stage 0 builder VM bootstrap appears to be running on this host; \
                          skipping orphan staging cleanup.",

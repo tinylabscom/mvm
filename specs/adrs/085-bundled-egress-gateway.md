@@ -3,7 +3,7 @@
 **Status:** Proposed
 **Extends:** [ADR-082](082-rust-native-egress-gateway.md) — from "adopt the Rust-native gateway" to "ship it in the box"
 **Depends on:** [Plan 193](../plans/193-rvproxy-network-substrate.md) (substrate cutover), [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) (host packaging)
-**Preserves:** [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) no-bypass invariant; claim 10 (default-deny egress); [Plan 129](../plans/129-secrets-subsystem.md) substitution; [Plan 141](../plans/141-vz-payload-tap-and-rust-owned-shuffle.md) flow observation
+**Preserves:** [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) no-bypass invariant; claim 10 (default-deny egress); [Plan 129](../plans/129-secrets-subsystem.md) substitution; Plan 141 flow observation
 
 ## Context
 
@@ -95,4 +95,4 @@ regression here is a claim-10 regression.
 - [ADR-055](055-passt-virtio-net.md) — gvproxy / passt gateway choice
 - [Plan 193](../plans/193-rvproxy-network-substrate.md) — substrate cutover
 - [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) — host packaging
-- [Plan 129](../plans/129-secrets-subsystem.md), [Plan 141](../plans/141-vz-payload-tap-and-rust-owned-shuffle.md), [Plan 156](../plans/156-binary-size-reduction.md)
+- [Plan 129](../plans/129-secrets-subsystem.md), Plan 141, [Plan 156](../plans/156-binary-size-reduction.md)

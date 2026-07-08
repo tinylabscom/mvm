@@ -106,7 +106,7 @@ impl BuilderVm for HvfBuilderVm {
         )?;
 
         // Stage the job dir: renders the flake `cmd.sh` (the same one the
-        // libkrun/vz builders run). Override mode threads the workspace src.
+        // libkrun/legacy_macos builders run). Override mode threads the workspace src.
         let job_id = unique_job_id();
         let job_dir = cache.join("jobs").join(&job_id);
         stage_job_dir(

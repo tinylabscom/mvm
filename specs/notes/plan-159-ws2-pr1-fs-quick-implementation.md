@@ -1517,7 +1517,7 @@ git commit -m "feat(cache): prune untagged checkpoints, keep tagged"
 
 **Files:**
 - Modify: `specs/REFACTOR-STATUS.md`
-- Modify: `specs/plans/159-vz-inspired-macos-dx.md` (tick the WS-2 fs_quick items the PR delivers)
+- Modify: `removed legacy macOS archival spec` (tick the WS-2 fs_quick items the PR delivers)
 
 - [ ] **Step 1: Format + full lint + full test**
 
@@ -1538,12 +1538,12 @@ Expected: fmt clean; zero clippy warnings; tests pass. (The `mvm-backend` exclus
       + capability + GC) landed; vm_full (memory save/restore) + diff remain
 ```
 
-  Bump `**Last updated:**`. In `specs/plans/159-vz-inspired-macos-dx.md`, tick the WS-2 checklist items this PR satisfies (fs_quick class, fork, `--tag` GC, capability flip) and leave `vm_full` / `checkpoint diff` / `pause/resume` wiring unticked.
+  Bump `**Last updated:**`. In `removed legacy macOS archival spec`, tick the WS-2 checklist items this PR satisfies (fs_quick class, fork, `--tag` GC, capability flip) and leave `vm_full` / `checkpoint diff` / `pause/resume` wiring unticked.
 
 - [ ] **Step 3: Commit**
 
 ```bash
-git add specs/REFACTOR-STATUS.md specs/plans/159-vz-inspired-macos-dx.md
+git add specs/REFACTOR-STATUS.md removed legacy macOS archival spec
 git commit -m "docs(plan-159): WS-2 fs_quick checkpoint+fork landed"
 ```
 

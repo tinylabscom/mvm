@@ -14,7 +14,7 @@ and which backend limitations apply.
 | Host | Architecture | Runtime backend | Status | Notes |
 | --- | --- | --- | --- | --- |
 | Linux with `/dev/kvm` | x86_64, aarch64 | Firecracker | Supported | Strongest local target; direct KVM microVM path. |
-| macOS Apple Silicon | aarch64 | Apple Virtualization / libkrun-backed paths | Supported | Local development and runtime path for M-series Macs. |
+| macOS Apple Silicon | aarch64 | HVF / libkrun-backed paths | Supported | Local development and runtime path for M-series Macs. |
 | Linux without `/dev/kvm` | x86_64, aarch64 | QEMU (TCG) | Dev/test | Software-emulated microVM (`--hypervisor qemu`); Tier 2 dev/test — slower, not for production. |
 | Windows native | x86_64, aarch64 | None | Future | Tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428). |
 | WSL2 with nested KVM | x86_64, aarch64 | Experimental Linux path | Future/experimental | May expose `/dev/kvm`; not a supported host path today. |
@@ -65,7 +65,7 @@ The OS segment is `linux` because the workload runs inside a Linux guest.
 | Backend path | Security posture |
 | --- | --- |
 | Firecracker on Linux/KVM | Preferred local microVM isolation target. |
-| Apple Virtualization / libkrun-backed macOS path | Supported local microVM path with backend-specific feature differences. |
+| HVF / libkrun-backed macOS path | Supported local microVM path with backend-specific feature differences. |
 | QEMU (TCG, no `/dev/kvm`) | Tier 2 dev/test microVM; do not use for untrusted code or security-sensitive workloads. |
 | WSL2 nested KVM | Research/future path until tested and documented as supported. |
 

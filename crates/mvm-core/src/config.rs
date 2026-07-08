@@ -496,22 +496,22 @@ pub fn vm_inhouse_agent_socket(name: &str) -> std::path::PathBuf {
     vm_inhouse_agent_socket_at(&vm_state_dir(name))
 }
 
-/// The directory the Vz supervisor nests its per-port vsock listener
+/// The directory the LegacyMacos supervisor nests its per-port vsock listener
 /// sockets under: `<vm_state_dir>/vsock`. Unlike libkrun (which binds
-/// `<vm_state_dir>/vsock-<port>.sock` directly), the Vz `VsockProxy`
+/// `<vm_state_dir>/vsock-<port>.sock` directly), the LegacyMacos `VsockProxy`
 /// listens inside this subdir. Single source of truth for the subdir so
-/// `mvm-backend`'s supervisor config and the host-side `VzTransport`
+/// `mvm-backend`'s supervisor config and the host-side `LegacySupervisorTransport`
 /// can't drift.
-pub fn vm_vz_vsock_dir(name: &str) -> std::path::PathBuf {
+pub fn vm_legacy_macos_vsock_dir(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("vsock")
 }
 
-/// Vz's per-port vsock listener socket: `<vm_state_dir>/vsock/vsock-<port>.sock`.
-/// The Vz supervisor listens here and forwards to the guest's vsock port, so a
+/// LegacyMacos's per-port vsock listener socket: `<vm_state_dir>/vsock/vsock-<port>.sock`.
+/// The LegacyMacos supervisor listens here and forwards to the guest's vsock port, so a
 /// host client connects directly with no port handshake (same shape as libkrun,
-/// one subdir deeper). Pairs with [`vm_vz_vsock_dir`] + [`vsock_socket_filename`].
-pub fn vm_vz_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
-    vm_vz_vsock_dir(name).join(vsock_socket_filename(port))
+/// one subdir deeper). Pairs with [`vm_legacy_macos_vsock_dir`] + [`vsock_socket_filename`].
+pub fn vm_legacy_macos_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
+    vm_legacy_macos_vsock_dir(name).join(vsock_socket_filename(port))
 }
 
 /// libkrun supervisor pid file: `<vm_state_dir>/libkrun.pid`.
@@ -534,7 +534,7 @@ pub fn vm_substitution_env_path(name: &str) -> std::path::PathBuf {
 
 /// Per-VM Unix socket the `mvm-substitution-endpoint` binds and the hvf VMM's
 /// substitution bridge connects to: `<vm_state_dir>/substitution-endpoint.sock`
-///. Unlike the Vz path (where the Swift supervisor proxies the guest
+///. Unlike the LegacyMacos path (where the Swift supervisor proxies the guest
 /// vsock dial to a `vsock/`-nested socket), the hvf VMM's device bridges
 /// `EGRESS_PORT` straight to this socket, so it lives at the state-dir root. Single
 /// source of truth: the backend spawn (which binds it) and the supervisor config
@@ -557,7 +557,7 @@ pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
 /// (or, on the fork path, the per-VM broker) binds on behalf of this VM:
 /// `<vm_state_dir>/hvf-broker.sock`. Sits at the state-dir root like the
 /// substitution-endpoint socket (the hvf device model has no `vsock/` subdir
-/// the way vz does). Single source of truth so the backend (which passes it
+/// the way legacy_macos does). Single source of truth so the backend (which passes it
 /// to registration) and whatever eventually bridges the guest's `BROKER_PORT`
 /// dial to it cannot drift.
 pub fn vm_hvf_broker_socket(name: &str) -> std::path::PathBuf {
@@ -1008,16 +1008,16 @@ mod tests {
             vm_vsock_proxy_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/vsock.sock")
         );
-        // Vz nests its per-port listener under a `vsock/` subdir (vz.rs
-        // builds `<state_dir>/vsock`); the console VzTransport must derive
+        // LegacyMacos nests its per-port listener under a `vsock/` subdir (legacy_macos.rs
+        // builds `<state_dir>/vsock`); the console LegacySupervisorTransport must derive
         // the same path so they can't drift.
         assert_eq!(
-            vm_vz_vsock_port_socket("foo", 5252),
+            vm_legacy_macos_vsock_port_socket("foo", 5252),
             std::path::PathBuf::from("/custom/data/vms/foo/vsock/vsock-5252.sock")
         );
         assert_eq!(
-            vm_vz_vsock_dir("foo").join(vsock_socket_filename(5252)),
-            vm_vz_vsock_port_socket("foo", 5252)
+            vm_legacy_macos_vsock_dir("foo").join(vsock_socket_filename(5252)),
+            vm_legacy_macos_vsock_port_socket("foo", 5252)
         );
         // The dev-VM connect resolver (mvm-backend) and the console transport
         // (mvm) both build the libkrun socket as state-dir + shared filename,

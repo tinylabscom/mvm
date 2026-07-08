@@ -155,9 +155,9 @@ supervisor accept-thread → `<vm_state_dir>/workload.exit` → guest
 
 ## References
 
-- `specs/plans/152-rust-native-vz-and-init-lifecycle-parity.md` — WS-A
+- `removed legacy macOS archival spec` — WS-A
   (this) + WS-B (the Vz supervisor that reuses the shared unit).
-- `specs/plans/163-vz-support-execution-roadmap.md` — S2 = this.
+- `removed legacy macOS archival spec` — S2 = this.
 - `nix/lib/mk-guest.nix` (`/init`), `nix/lib/factories/mkFunctionService.nix`
   — guest contract edit sites.
 - `crates/mvm-guest/src/vsock.rs`, `crates/mvm-guest/src/entrypoint.rs` —

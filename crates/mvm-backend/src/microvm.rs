@@ -7,7 +7,7 @@ use crate::base::ui;
 use crate::image::RuntimeVolume;
 use crate::network_provider::BridgeTapNetworkProvider;
 use crate::{firecracker, network};
-use mvm_network::{NetHandle, NetworkProvider, NetworkSpec};
+use mvm_network::{NetHandle, NetworkProvider};
 
 // ============================================================================
 // RAII resource guards — prevent leaks when VM launch fails partway through
@@ -859,73 +859,16 @@ fn run_configured_firecracker(
     abs_socket: &str,
     start_daemon: bool,
 ) -> Result<()> {
-    let slot = &config.slot;
-
-    // Provision the VM's bridge+TAP network + egress policy through the
-    // NetworkProvider seam. `provision` is transactional
-    // — it drops the TAP itself if the policy apply fails — and the TapGuard
-    // below re-arms to tear the TAP down if a *later* start step fails. Same
-    // operations, same order, as the direct calls this replaces.
-    BridgeTapNetworkProvider::new()
-        .provision(
-            &mvm_core::protocol::vm_backend::VmId(slot.name.clone()),
-            &NetworkSpec {
-                policy: config.network_policy.clone(),
-                slot_index: slot.index,
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("network provision: {e}"))?;
-    let mut tap_guard = TapGuard::new(slot);
-
-    // Spawn `mvm-bridge` alongside the Firecracker VM.
-    // The sidecar runs under
-    // `mvm-jailer-lite` confinement (seccomp + Landlock), verifies the
-    // operator-pinned passt SHA256, inherits both halves of a
-    // socketpair from this process, and runs
-    // `mvm-supervisor::gateway_bridge` with `BridgeEndpoints::Passt`.
-    //
-    // The guard kills the bridge on early return / panic between
-    // spawn and the FC VM's boot completion; after the VM is healthy
-    // the guard's child is detached and a watchdog thread takes over
-    // (writes `fc-bridge.pid` and SIGTERMs the FC VM on bridge death
-    // via `fc.pid`, hard-fail policy).
-    //
-    // No-op on non-Linux hosts (this Firecracker spawn path is Linux-only; the
-    // shared sidecar binary lives at `crates/mvm-vm-host/src/bin/mvm-bridge.rs`).
-    //
-    // Opt-in via MVM_GATEWAY_BRIDGE=1, the same gate the libkrun/Vz
-    // gateway-bridge factory sits behind: the FC bridge lane is not yet
-    // working end-to-end (its confinement spec doesn't grant the
-    // observer-allowlist path it reads post-confinement), and its
-    // watchdog hard-fail policy would tear down an otherwise healthy
-    // VM. Before the egress moat landed, no producer wrote `plan.json`
-    // pre-boot on this path, so the bridge never actually spawned;
-    // the gate preserves that default while the moat (substitution
-    // endpoint + nft redirect below) runs unconditionally.
-    #[cfg(target_os = "linux")]
-    let mut bridge_guard = if std::env::var("MVM_GATEWAY_BRIDGE").as_deref() == Ok("1") {
-        spawn_fc_bridge(&config.slot.name, abs_dir)?
-    } else {
-        tracing::debug!(
-            vm = %config.slot.name,
-            "MVM_GATEWAY_BRIDGE not set; skipping mvm-bridge sidecar"
-        );
-        AttachedBridgeGuard { child: None }
-    };
-
     if start_daemon {
         // Start Firecracker daemon in per-VM directory.
         start_vm_firecracker(abs_dir, abs_socket)?;
     }
     let mut fc_guard = FirecrackerGuard::new(abs_dir);
 
-    // Spawn the substitution endpoint BEFORE configuring boot args,
-    // so the placeholders it mints land in
-    // `vm_substitution_env_path` and `configure_flake_microvm` can carry them on
-    // the cmdline (`mvm.secret_env=`) into a sealed entrypoint. The endpoint
-    // binds its listener now; the nft REDIRECT that feeds it is installed
-    // post-boot (the TAP must exist). The guard reaps the endpoint if any step
-    // below fails before the VM is fully up. No-op without egress secrets.
+    // Spawn the host-vsock proxy gate BEFORE configuring boot args, so any
+    // placeholders it mints land in `vm_substitution_env_path` and the raw
+    // secret-free path can also advertise `mvm.vsock_egress=1` on the kernel
+    // cmdline. This endpoint is the workload egress seam for every FC boot.
     #[cfg(target_os = "linux")]
     let mut endpoint_guard = spawn_egress_endpoint(config)?;
 
@@ -953,59 +896,14 @@ fn run_configured_firecracker(
     // Persist run info for `mvm status`
     write_vm_run_info(config, abs_dir)?;
 
-    // VM is healthy. Detach the bridge guard so its child outlives
-    // this stack frame; persist the bridge PID to
-    // `<abs_dir>/fc-bridge.pid` and spawn the watchdog thread that
-    // SIGTERMs the FC VM if the bridge dies (hard-fail bridge crash
-    // policy).
-    //
-    // A failure here is non-fatal: the VM is already running. We log
-    // and proceed; the guard remains attached, so the bridge will be
-    // killed at function exit — observers lose flow events but the
-    // workload is fine. The next `stop_vm` reaps any orphan via the
-    // PID file if it was persisted.
-    #[cfg(target_os = "linux")]
-    if let Err(e) = detach_and_spawn_bridge_watchdog(&config.slot.name, abs_dir, &mut bridge_guard)
-    {
-        warn!(
-            vm = %config.slot.name,
-            "detach/watchdog setup for mvm-bridge failed (non-fatal): {e}"
-        );
-    }
-
-    // When the admitted plan carries secret bindings, stand up this
-    // VM's transparent egress moat now that the guest is healthy:
-    //   1. spawn the per-VM substitution endpoint with the terminator listener
-    //      bound on a per-slot host port, and
-    //   2. install the nft TAP prerouting REDIRECT that steers the guest's
-    //      outbound :80 to that terminator.
-    // Fail closed: a secret-bearing workload must not keep running without its
-    // substitution path, so any failure rolls the VM back. Linux-only (nft +
-    // the FC path itself). The plan source is the same `plan.json` the bridge
-    // parsed; a missing/unsigned file means a legacy/non-admitted boot with no
-    // secrets — nothing to install.
-    #[cfg(target_os = "linux")]
-    if let Err(e) = install_egress_redirect(config) {
-        // Roll back the running VM + its network. The guards were about to be
-        // defused; instead let them fire by returning before defuse — but the
-        // bridge watchdog already detached, so tear down explicitly. `stop_vm`
-        // reaps the substitution endpoint, so the (still-armed) endpoint_guard's
-        // Drop is then a harmless no-op.
-        warn!(vm = %config.slot.name, "egress redirect install failed; rolling back VM: {e}");
-        let _ = stop_vm(&config.slot.name);
-        return Err(e);
-    }
-
     // VM is fully started — defuse guards so normal stop path handles cleanup
     fc_guard.defuse();
-    tap_guard.defuse();
     #[cfg(target_os = "linux")]
     endpoint_guard.defuse();
 
     ui::banner(&[
         &format!("MicroVM '{}' is running!", config.name),
         "",
-        &format!("  Guest IP: {}", slot.guest_ip),
         &format!("  Revision: {}", config.revision_hash),
         "",
         &format!("Use 'mvmctl stop {}' to shut down this VM.", config.name),
@@ -1064,22 +962,6 @@ pub fn restore_from_template_snapshot(
         ui::info("Use 'mvmctl stop <name>' to shut it down first.");
         return Ok(());
     }
-
-    // Provision the VM's bridge+TAP network + egress policy through the
-    // NetworkProvider seam. `provision` is transactional
-    // — it drops the TAP itself if the policy apply fails — and the TapGuard
-    // below re-arms to tear the TAP down if a *later* start step fails. Same
-    // operations, same order, as the direct calls this replaces.
-    BridgeTapNetworkProvider::new()
-        .provision(
-            &mvm_core::protocol::vm_backend::VmId(slot.name.clone()),
-            &NetworkSpec {
-                policy: config.network_policy.clone(),
-                slot_index: slot.index,
-            },
-        )
-        .map_err(|e| anyhow::anyhow!("network provision: {e}"))?;
-    let mut tap_guard = TapGuard::new(slot);
 
     // Copy snapshot files to per-VM directory
     run_in_vm(&format!(
@@ -1208,12 +1090,10 @@ pub fn restore_from_template_snapshot(
 
     // VM is fully restored — defuse guards so normal stop path handles cleanup
     fc_guard.defuse();
-    tap_guard.defuse();
 
     ui::banner(&[
         &format!("MicroVM '{}' restored from snapshot!", config.name),
         "",
-        &format!("  Guest IP: {}", slot.guest_ip),
         &format!("  Revision: {}", config.revision_hash),
         "",
         &format!("Use 'mvmctl stop {}' to shut down this VM.", config.name),
@@ -1667,6 +1547,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
 
     // Read run info to find the TAP device to destroy
     if let Some(info) = read_vm_run_info_from(&abs_dir)
+        && info.guest_ip.is_some()
         && let Some(ref vm_name) = info.name
     {
         // Reconstruct slot to find TAP name — scan for the index
@@ -2287,8 +2168,6 @@ pub fn configure_flake_microvm_with_drives_dir(
     socket: &str,
     drives_dir: &str,
 ) -> Result<()> {
-    let slot = &config.slot;
-
     ui::info("Configuring logger...");
     api_put_socket(
         socket,
@@ -2299,15 +2178,10 @@ pub fn configure_flake_microvm_with_drives_dir(
         ),
     )?;
 
-    // Boot args: pass guest IP and gateway via kernel cmdline.
-    // When initrd is present (NixOS guest or verity initrd), the initrd
+    // Boot args. When initrd is present (NixOS guest or verity initrd), the initrd
     // handles root mounting. When absent (minimal guest, no verity),
     // the kernel mounts /dev/vda directly.
-    let base_args = format!(
-        "console=ttyS0 reboot=k panic=1 net.ifnames=0 mvm.ip={ip}/24 mvm.gw={gw}",
-        ip = slot.guest_ip,
-        gw = BRIDGE_IP,
-    );
+    let base_args = "console=ttyS0 reboot=k panic=1 net.ifnames=0".to_string();
 
     // dm-verity boot path: when verity is on, the kernel
     // mounts the verity initramfs first, which is `mvm-verity-init`
@@ -2394,6 +2268,10 @@ pub fn configure_flake_microvm_with_drives_dir(
         None => boot_args,
     };
     let boot_args = match require_grant_cmdline_token(&config.slot.name) {
+        Some(token) => format!("{boot_args} {token}"),
+        None => boot_args,
+    };
+    let boot_args = match firecracker_vsock_egress_cmdline_token(&config.slot.name) {
         Some(token) => format!("{boot_args} {token}"),
         None => boot_args,
     };
@@ -2564,20 +2442,6 @@ pub fn configure_flake_microvm_with_drives_dir(
         )?;
     }
 
-    ui::info(&format!(
-        "Setting network interface: {} (MAC {})",
-        slot.tap_dev, slot.mac
-    ));
-    api_put_socket(
-        socket,
-        "/network-interfaces/net1",
-        &format!(
-            r#"{{"iface_id": "net1", "guest_mac": "{mac}", "host_dev_name": "{tap}"}}"#,
-            mac = slot.mac,
-            tap = slot.tap_dev,
-        ),
-    )?;
-
     ui::info("Setting vsock device...");
     prepare_vsock_runtime_dir(drives_dir);
     let vsock = firecracker_vsock_uds_path(drives_dir);
@@ -2630,7 +2494,7 @@ pub fn write_vm_run_info(config: &FlakeRunConfig, abs_dir: &str) -> Result<()> {
         name: Some(config.name.clone()),
         revision: Some(config.revision_hash.clone()),
         flake_ref: Some(config.flake_ref.clone()),
-        guest_ip: Some(config.slot.guest_ip.clone()),
+        guest_ip: None,
         profile: config.profile.clone(),
         guest_user: String::new(),
         cpus: config.cpus,
@@ -2807,8 +2671,8 @@ pub fn read_run_info() -> Option<RunInfo> {
 // ============================================================================
 // mvm-bridge spawn + watchdog (Linux only)
 //
-// Mirrors Vz's `AttachedDrainerGuard` shape
-// (`crates/mvm-backend/src/vz.rs`) — Drop kills+waits the child on
+// Mirrors LegacyMacos's `AttachedDrainerGuard` shape
+// (`crates/mvm-backend/src/legacy_macos_backend.rs`) — Drop kills+waits the child on
 // early return, `detach()` hands ownership to the caller which
 // records the PID in
 // `<state_dir>/fc-bridge.pid` and lets the watchdog thread inherit it.
@@ -2824,7 +2688,7 @@ pub fn read_run_info() -> Option<RunInfo> {
 const FC_BRIDGE_PID_FILE_NAME: &str = "fc-bridge.pid";
 
 /// RAII guard for a spawned `mvm-bridge` child. Mirrors
-/// the Vz `AttachedDrainerGuard` pattern: dropping the guard kills +
+/// the LegacyMacos `AttachedDrainerGuard` pattern: dropping the guard kills +
 /// waits the child so an early return / panic between bridge spawn
 /// and VM boot completion cleans up the bridge process.
 ///
@@ -2883,8 +2747,8 @@ fn passt_path_from_env_or_default() -> std::path::PathBuf {
 
 /// Resolve the `mvm-bridge` binary path, checking three
 /// sources in order. Pure resolver — exercised directly from tests
-/// without touching `std::env`. Mirrors the Vz
-/// `resolve_vz_drainer_path_inner` shape.
+/// without touching `std::env`. Mirrors the LegacyMacos
+/// `resolve_legacy_macos_drainer_path_inner` shape.
 #[cfg(target_os = "linux")]
 fn resolve_fc_bridge_path_inner(
     env_override: Option<&std::path::Path>,
@@ -2943,71 +2807,45 @@ fn resolve_fc_bridge_path() -> Result<std::path::PathBuf> {
     )
 }
 
-/// Spawn the per-VM substitution endpoint **before** the guest boots,
-/// so the `(var → placeholder)` pairs it mints (and
-/// writes to `vm_substitution_env_path`) are available when `boot_args` is built
-/// and can ride the cmdline (`mvm.secret_env=`) into a sealed entrypoint. Binds
-/// the terminator listener too; the nft REDIRECT that feeds it is installed
-/// post-boot by [`install_egress_redirect`] (it needs the guest's TAP). No-op
-/// when the plan carries no egress secrets. Returns an armed [`EndpointGuard`]
-/// the caller defuses once the VM is fully up.
+/// Spawn the per-VM host-vsock proxy gate **before** the guest boots, so the
+/// `(var → placeholder)` pairs it mints (and writes to
+/// `vm_substitution_env_path`) are available when `boot_args` is built and can
+/// ride the cmdline (`mvm.secret_env=`) into a sealed entrypoint. Secret-free
+/// workloads still spawn the same endpoint in `raw_egress` mode: their only
+/// workload egress path is guest→vsock→host endpoint, not a TAP/NIC. Returns
+/// an armed [`EndpointGuard`] the caller defuses once the VM is fully up.
 #[cfg(target_os = "linux")]
 fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
-    use crate::egress_redirect::terminator_port_for;
     use crate::substitution_spawn::spawn_substitution_endpoint;
-    use std::net::SocketAddr;
-
     let name = &config.slot.name;
     let state_dir = mvm_core::config::vm_state_dir(name);
-    let Some((secrets, redaction, tenant)) =
-        crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?
-    else {
-        return Ok(EndpointGuard { vm_name: None });
+    let default_redaction = mvm_core::policy::RedactionPolicy::default();
+    let decoded = crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?;
+    let (secrets, redaction, tenant): (&[_], &mvm_core::policy::RedactionPolicy, &str) =
+        match &decoded {
+            Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
+            None => (&[], &default_redaction, "local"),
+        };
+    let tls_intermediate = if secrets.is_empty() {
+        None
+    } else {
+        crate::substitution_spawn::read_egress_intermediate(&state_dir)?
     };
-
-    // Per-slot terminator port so concurrent VMs never collide host-side.
-    // 0.0.0.0: a PREROUTING REDIRECT delivers the forwarded packet to a local
-    // socket on the host, so the terminator must accept on the host's addrs.
-    let term_port = terminator_port_for(config.slot.index);
-    let listen = SocketAddr::from(([0, 0, 0, 0], term_port));
-    // `mvmctl up` staged the per-VM name-constrained intermediate (cert+key) in
-    // the sidecar. Hand the KEY to the endpoint so the `https` terminator can
-    // mint per-SNI leaves; it never reaches the guest. Absent ⇒ `http`-only.
-    let tls_intermediate = crate::substitution_spawn::read_egress_intermediate(&state_dir)?;
     spawn_substitution_endpoint(crate::substitution_spawn::SubstitutionSpawnParams {
         vm_name: name,
         state_dir: &state_dir,
-        tenant: &tenant,
-        secrets: &secrets,
-        redaction: &redaction,
+        tenant,
+        secrets,
+        redaction,
         transport: crate::substitution_spawn::EndpointTransport::Vsock {
             port: mvm_guest::vsock::EGRESS_PORT,
         },
-        terminator_listen: Some(listen),
+        terminator_listen: None,
         tls_intermediate,
-        network_policy: None,
-        raw_egress: false,
+        network_policy: Some(&config.network_policy),
+        raw_egress: secrets.is_empty(),
     })?;
     Ok(EndpointGuard::new(name))
-}
-
-/// Install the per-VM nft TAP REDIRECT (`:80`/`:443` → the terminator)
-/// **after** the guest boots (the TAP exists). No-op when the plan carries no
-/// egress secrets. Persists the table so it outlives this frame; `stop_vm`
-/// removes it by name.
-#[cfg(target_os = "linux")]
-fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
-    use crate::egress_redirect::{EgressRedirect, terminator_port_for};
-
-    let name = &config.slot.name;
-    let state_dir = mvm_core::config::vm_state_dir(name);
-    if crate::egress_shared::decode_plan_secrets_from_state(&state_dir)?.is_none() {
-        return Ok(());
-    }
-    let term_port = terminator_port_for(config.slot.index);
-    let redirect = EgressRedirect::install(name, &config.slot.tap_dev, term_port)?;
-    redirect.persist();
-    Ok(())
 }
 
 /// The `mvm.egress_ca=<hex>` kernel-cmdline token for `vm_name`,
@@ -3022,6 +2860,16 @@ fn egress_ca_cmdline_token(vm_name: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let cert = v["cert_pem"].as_str()?;
     mvm_core::vm_backend::encode_egress_ca_cmdline(cert)
+}
+
+/// Turn on the in-guest vsock egress client when the workload carries no bound
+/// secrets. Secret-bearing workloads use the forward proxy + WireRequest path;
+/// secret-free workloads use `mvm-egress-client` and `ALL_PROXY=socks5h://…`,
+/// but both still egress only through `EGRESS_PORT`.
+fn firecracker_vsock_egress_cmdline_token(vm_name: &str) -> Option<String> {
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
+    (!crate::egress_shared::state_has_bound_secrets(&state_dir).ok()?)
+        .then(|| "mvm.vsock_egress=1".to_string())
 }
 
 /// The `mvm.secret_env=<hex>` cmdline token for `vm_name`, or `None`
@@ -3043,7 +2891,7 @@ fn secret_env_cmdline_token(vm_name: &str) -> Option<String> {
 /// and encodes it. Best-effort: a missing or malformed sidecar yields `None`
 /// (grant-less boot), mirroring `secret_env_cmdline_token`.
 ///
-/// Exported as `pub(crate)` so the libkrun, Vz, and QEMU cmdline builders
+/// Exported as `pub(crate)` so the libkrun, LegacyMacos, and QEMU cmdline builders
 /// can append the same token without duplicating the sidecar-read logic.
 pub(crate) fn verb_grant_cmdline_token(vm_name: &str) -> Option<String> {
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
@@ -3279,7 +3127,7 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
 }
 
 /// Atomically write the bridge PID file at mode 0600. Same shape as
-/// Vz's `write_drainer_pid_file` — tmp + rename so a concurrent
+/// LegacyMacos's `write_drainer_pid_file` — tmp + rename so a concurrent
 /// reader (a future `stop_vm` reaper) never sees a partial value.
 #[cfg(target_os = "linux")]
 fn write_fc_bridge_pid_file(path: &std::path::Path, pid: u32) -> Result<()> {

@@ -100,12 +100,12 @@ fn main() {
         );
     }
 
-    // Guest-agent binaries (`mvm-guest-agent` + `mvm-guest-netinit`, dev-shell,
-    // guest arch = host arch). Embedded alongside the host bins so an end-user
-    // mvmctl with no source checkout can inject them into an OCI `run --image`
-    // rootfs. Built in one cargo invocation; they ride the same `EMBEDDED` array
-    // and are looked up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte
-    // stubs) — a stub build can't materialize an OCI run, same as the host bins.
+    // Guest runtime binaries (OCI PID 1 + entrypoint runner + agent + netinit + egress-client,
+    // guest arch = host arch). Embedded alongside the host bins so an end-user mvmctl with no
+    // source checkout can inject them into an OCI `run --image` rootfs. Built in
+    // one cargo invocation; they ride the same `EMBEDDED` array and are looked
+    // up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte stubs) — a stub
+    // build can't materialize an OCI run, same as the host bins.
     if !skip_embed {
         run_guest_zigbuild(
             &workspace_root,
@@ -115,7 +115,13 @@ fn main() {
             &bins_out,
         );
     }
-    for name in ["mvm-guest-agent", "mvm-guest-netinit"] {
+    for name in [
+        "mvm-oci-init",
+        "mvm-oci-entrypoint",
+        "mvm-guest-agent",
+        "mvm-guest-netinit",
+        "mvm-egress-client",
+    ] {
         let out_file = bins_out.join(name);
         if skip_embed {
             std::fs::write(&out_file, b"")
@@ -313,14 +319,14 @@ fn run_cargo_zigbuild(
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
 }
 
-/// Cross-compile the guest agent + netinit (one invocation, dev-shell feature)
-/// to the static musl `target`, copying both into `out_dir`. Same zig/rustup
-/// handling as `run_cargo_zigbuild`; the guest binaries are a single `mvm-guest`
-/// package build with two `--bin`s, not one bin per call.
+/// Cross-compile the guest runtime binaries (one invocation, dev-shell feature)
+/// to the static musl `target`, copying them into `out_dir`. Same zig/rustup
+/// handling as `run_cargo_zigbuild`.
 fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
     eprintln!(
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-guest \
-         --bin mvm-guest-agent --bin mvm-guest-netinit --features mvm-guest/dev-shell"
+         --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-guest-agent --bin mvm-guest-netinit -p mvm-guest-helpers \
+         --bin mvm-egress-client --features mvm-guest/dev-shell"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
     let mut cmd = Command::new(&cargo);
@@ -332,9 +338,17 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "-p",
         "mvm-guest",
         "--bin",
+        "mvm-oci-init",
+        "--bin",
+        "mvm-oci-entrypoint",
+        "--bin",
         "mvm-guest-agent",
         "--bin",
         "mvm-guest-netinit",
+        "-p",
+        "mvm-guest-helpers",
+        "--bin",
+        "mvm-egress-client",
         "--features",
         "mvm-guest/dev-shell",
     ])
@@ -355,7 +369,13 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "cargo zigbuild failed for the guest agent"
     );
     let rel = target_dir.join(strip_glibc(target)).join("release");
-    for name in ["mvm-guest-agent", "mvm-guest-netinit"] {
+    for name in [
+        "mvm-oci-init",
+        "mvm-oci-entrypoint",
+        "mvm-guest-agent",
+        "mvm-guest-netinit",
+        "mvm-egress-client",
+    ] {
         let built = rel.join(name);
         let dest = out_dir.join(name);
         std::fs::copy(&built, &dest)

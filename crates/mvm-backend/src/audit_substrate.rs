@@ -1,9 +1,9 @@
 //! Shared audit-substrate resolution for backends that own a
-//! `SupervisorConfig`-shaped audit surface (libkrun, Vz).
+//! `SupervisorConfig`-shaped audit surface (libkrun, LegacyMacos).
 //!
 //! Lifts the path-derivation + `vm_name` / `tenant_id` allowlist
 //! validation out of the per-backend `start()` paths so libkrun.rs and
-//! vz.rs share one source of truth. A future `NetworkProvider` trait
+//! legacy_macos.rs share one source of truth. A future `NetworkProvider` trait
 //! will lift `compute_audit_substrate(...)` into a trait method
 //! (`provider.activate_audit(...)`). Keeping the free-function
 //! signature stable now makes that extraction mechanical.

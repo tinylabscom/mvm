@@ -269,8 +269,8 @@ fn wait_until_ready(spec: &BenchSpec, name: &str) -> Result<()> {
 }
 
 fn wait_for_guest_agent(backend: &str, name: &str) -> Result<()> {
-    if backend == "vz" {
-        return wait_for_vz_guest_agent(name);
+    if backend == "legacy-macos" {
+        return wait_for_legacy_macos_guest_agent(name);
     }
     let uds_path = guest_agent_socket_path(backend, name)?;
     let deadline = Instant::now() + READY_TIMEOUT;
@@ -293,8 +293,8 @@ fn wait_for_guest_agent(backend: &str, name: &str) -> Result<()> {
     }))
 }
 
-fn wait_for_vz_guest_agent(name: &str) -> Result<()> {
-    let transport = mvm::vsock_transport::VzTransport::for_vm(name);
+fn wait_for_legacy_macos_guest_agent(name: &str) -> Result<()> {
+    let transport = mvm::vsock_transport::LegacySupervisorTransport::for_vm(name);
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_err = None;
 
@@ -419,7 +419,7 @@ fn env_string_opt(var: &str, configured: Option<String>) -> Option<String> {
 
 fn default_ready_for_backend(backend: &Option<String>) -> String {
     match backend.as_deref() {
-        Some("vz") => ReadySignal::StartReturn.as_str().to_string(),
+        Some("legacy-macos") => ReadySignal::StartReturn.as_str().to_string(),
         _ => DEFAULT_READY.as_str().to_string(),
     }
 }
@@ -494,10 +494,10 @@ fn summary_reports_percentiles_and_max() {
 }
 
 #[test]
-fn config_file_shape_accepts_vz_defaults() {
+fn config_file_shape_accepts_legacy_macos_defaults() {
     let config: RawBenchConfig = toml::from_str(
         r#"
-backend = "vz"
+backend = "legacy-macos"
 kernel = "/tmp/vmlinux"
 rootfs = "/tmp/rootfs.ext4"
 runs = 2
@@ -509,7 +509,7 @@ memory-mib = 256
     )
     .expect("parse runtime boot bench config");
 
-    assert_eq!(config.backend.as_deref(), Some("vz"));
+    assert_eq!(config.backend.as_deref(), Some("legacy-macos"));
     assert_eq!(config.runs, Some(2));
     assert_eq!(config.concurrent, Some(3));
     assert_eq!(

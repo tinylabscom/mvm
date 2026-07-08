@@ -181,7 +181,7 @@ intermediate frames directly — same contract as `handle_run_entrypoint`):
 
 ## References
 
-- Parent: `specs/plans/159-vz-inspired-macos-dx.md` (WS-5 E).
+- Parent: `removed legacy macOS archival spec` (WS-5 E).
 - `crates/mvm-guest/src/vsock.rs` — `GuestRequest`/`GuestResponse`,
   `EntrypointEvent`, `send_run_entrypoint` (the pattern to mirror),
   `read_frame`/`send_request` framing.

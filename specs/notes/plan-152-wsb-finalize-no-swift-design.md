@@ -104,7 +104,7 @@ so the gate validates the Rust supervisor directly. Concretely:
 
 ## References
 
-- `specs/plans/152-rust-native-vz-and-init-lifecycle-parity.md` — WS-B finalize steps.
+- `removed legacy macOS archival spec` — WS-B finalize steps.
 - `specs/adrs/056-*.md` — entitled-TCB / drop-Swift rationale (gets the addendum).
 - `crates/mvm-backend/src/libkrun.rs` — the Rust-supervisor resolver pattern to mirror.
 - #700 (Rust supervisor, merged), #703 (parity gate, merged), #730 (gate-hardening — superseded by §3).

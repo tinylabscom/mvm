@@ -316,16 +316,21 @@ mod tests {
     struct IsolatedMachineState {
         _env: TestEnv,
         _tmp: tempfile::TempDir,
+        _guard: std::sync::MutexGuard<'static, ()>,
     }
 
     impl IsolatedMachineState {
         fn new() -> Self {
+            let guard = crate::vm::DATA_DIR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let mut env = TestEnv::new();
             let tmp = tempfile::tempdir().expect("tempdir");
             env.set("MVM_DATA_DIR", tmp.path());
             Self {
                 _env: env,
                 _tmp: tmp,
+                _guard: guard,
             }
         }
     }

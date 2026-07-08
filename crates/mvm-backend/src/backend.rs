@@ -18,7 +18,6 @@ use crate::libkrun::LibkrunBackend;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
-use crate::vz::VzBackend;
 use crate::workload_runner::{RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
 
@@ -202,16 +201,19 @@ impl VmBackend for FirecrackerBackend {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        // Firecracker ships a virtio-balloon device with PATCH-able
-        // target via `/balloon`; the start path attaches it whenever
-        // `VmStartConfig::mem_initial_mib` is `Some`. Capability is
-        // advertised unconditionally so the host-side controller can
-        // discover support before deciding to plumb a workload.
+        // Firecracker ships a virtio-balloon device with PATCH-able target via
+        // `/balloon`; the start path attaches it whenever
+        // `VmStartConfig::mem_initial_mib` is `Some`. Capability is advertised
+        // unconditionally so the host-side controller can discover support
+        // before deciding to plumb a workload. Workload egress is
+        // guest→vsock→host endpoint only: no guest NIC and no TAP dataplane.
         VmCapabilities {
             pause_resume: true,
             snapshots: true,
             vsock: true,
-            tap_networking: true,
+            tap_networking: false,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
             balloon: true,
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
@@ -262,16 +264,14 @@ impl VmBackend for FirecrackerBackend {
         // Firecracker boot fault deep in the API handshake. Firecracker
         // is the production runtime and *requires* `/dev/kvm`; a no-KVM
         // host should use `--hypervisor qemu` for local dev/test
-        // (Tier-3 TCG), never a silent Firecracker fallback. On macOS
-        // the runtime path nests through libkrun/Vz, so this probe is
-        // Linux-only.
+        // (Tier-3 TCG), never a silent Firecracker fallback.
         #[cfg(target_os = "linux")]
         if !crate::qemu::kvm_available() {
             anyhow::bail!(
                 "Firecracker requires /dev/kvm, which is not available on this host. \
                  Firecracker is the production runtime; for local dev/test on a no-KVM \
                  host run with `--hypervisor qemu` (Tier-3 TCG software emulation, \
-                 ADR-072). To run Firecracker, use a host with KVM enabled."
+                 software emulation). To run Firecracker, use a host with KVM enabled."
             );
         }
         let fc_config = FirecrackerConfig::from_start_config(config)?;
@@ -468,11 +468,6 @@ pub enum AnyBackend {
     Firecracker(FirecrackerBackend),
     /// libkrun — Linux KVM / macOS Apple Silicon HVF.
     Libkrun(LibkrunBackend),
-    /// Vz — the one Apple Virtualization.framework backend (per-VM Rust
-    /// objc2 supervisor: snapshot/restore, pause/resume, flow-audited
-    /// networking). The macOS-26 auto-default; opt-in elsewhere via
-    /// `--hypervisor vz` / `MVM_BACKEND=vz`.
-    Vz(VzBackend),
     /// QEMU workload runtime — Linux dev/test substrate (KVM where
     /// present, TCG fallback). Opt-in via `--hypervisor qemu` /
     /// `MVM_BACKEND=qemu`; `auto_select` never picks it (Firecracker
@@ -489,13 +484,12 @@ pub enum AnyBackend {
     /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
     /// driven by the unified `vmm::run` loop via the detached
     /// `mvm-hvf-supervisor`. Selectable via `--hypervisor hvf` / `MVM_BACKEND=hvf`,
-    /// and the macOS-26 auto-detect default (Vz is sunset, opt-in only). Its
-    /// `start()` spawns the per-VM gating endpoint that is the sole claim-10 egress
-    /// gate over vsock — no gvproxy sidecar. The destination macOS backend.
+    /// and the macOS-26 auto-detect default. Its `start()` spawns the per-VM
+    /// gating endpoint that is the sole claim-10 egress gate over vsock.
     Hvf(HvfBackend),
     /// The hvf VMM driven through the unified `WorkloadRunner` over the
     /// driver seam — the role-runner that will replace the per-backend
-    /// Hvf/Libkrun/Vz/FC `start()` copies. Opt-in via `--hypervisor hvf`.
+    /// Hvf/Libkrun/FC `start()` copies. Opt-in via `--hypervisor hvf`.
     /// Same hvf VMM, tier, and security profile as `Hvf` — just reached via
     /// the runner role. `auto_select` picks the raw [`Self::Hvf`] variant on the
     /// macOS-26 tier today, not this one.
@@ -522,8 +516,8 @@ impl AnyBackend {
     /// Select backend by hypervisor name.
     ///
     /// Supported: `"firecracker"` (default), `"qemu"` (Linux dev/test),
-    /// `"vz"` (Apple Virtualization.framework, macOS), `"libkrun"`
-    /// (Linux KVM / macOS HVF). Unknown names fall back to Firecracker.
+    /// `"libkrun"` (Linux KVM / macOS HVF), and `"hvf"` (macOS HVF).
+    /// Unknown names fall back to Firecracker.
     pub fn from_hypervisor(name: &str) -> Self {
         // The runner isn't const-constructible, so it can't live in the catalog
         // table; special-case its opt-in selector before the descriptor lookup.
@@ -543,7 +537,7 @@ impl AnyBackend {
     ///
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
-    /// 2. HVF VMM (macOS 26+ Apple Silicon — vsock-only egress, no Vz/gvproxy)
+    /// 2. HVF VMM (macOS 26+ Apple Silicon — vsock-only egress)
     /// 3. raw libkrun
     ///
     /// If none of the above match, the function returns Firecracker as
@@ -560,10 +554,9 @@ impl AnyBackend {
             return Self::Firecracker(FirecrackerBackend);
         }
 
-        // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`). Vz is sunset
-        //    (opt-in only via `--hypervisor vz`); the hvf path enforces claim-10
-        //    egress via its per-VM gating endpoint over vsock — no gvproxy sidecar.
-        if plat.is_vz_default_tier() {
+        // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`). The hvf path
+        //    enforces claim-10 egress via its per-VM gating endpoint over vsock.
+        if plat.is_hvf_default_tier() {
             return Self::Hvf(HvfBackend);
         }
 
@@ -582,7 +575,7 @@ impl AnyBackend {
     /// state-dir marker file, so `down` / `status` dispatch to the VMM that
     /// actually launched it rather than a platform default. The pid-file
     /// backends each drop a distinct marker under `vm_state_dir(name)`:
-    /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`, Vz `vz.pid`.
+    /// QEMU `qemu.pid`, libkrun `libkrun.pid`, Firecracker `fc.pid`, HVF `hvf.pid`.
     ///
     /// Returns `None` when no marker is present — the VM isn't one of the
     /// pid-file backends (e.g. Apple Container, which tracks state
@@ -614,13 +607,12 @@ impl AnyBackend {
     }
 
     /// The typed discriminant for this backend. Lets callers branch on
-    /// `BackendKind::Vz` etc. instead of string-matching `name()`. The runner-role
+    /// `BackendKind` values instead of string-matching `name()`. The runner-role
     /// variant reports the same hvf VMM kind as the raw `Hvf` variant.
     pub fn kind(&self) -> catalog::BackendKind {
         match self {
             Self::Firecracker(_) => catalog::BackendKind::Firecracker,
             Self::Libkrun(_) => catalog::BackendKind::Libkrun,
-            Self::Vz(_) => catalog::BackendKind::Vz,
             Self::Qemu(_) => catalog::BackendKind::Qemu,
             Self::Mock(_) => catalog::BackendKind::Mock,
             Self::Hvf(_) | Self::HvfRunner(_) => catalog::BackendKind::Hvf,
@@ -631,7 +623,6 @@ impl AnyBackend {
         match self {
             Self::Firecracker(backend) => backend,
             Self::Libkrun(backend) => backend,
-            Self::Vz(backend) => backend,
             Self::Qemu(backend) => backend,
             Self::Mock(backend) => backend,
             Self::Hvf(backend) => backend,
@@ -647,7 +638,6 @@ impl AnyBackend {
                 std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
             }
             Self::Libkrun(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
-            Self::Vz(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Qemu(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Mock(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
@@ -700,16 +690,13 @@ impl AnyBackend {
         match self {
             AnyBackend::Firecracker(b) => Some(b),
             AnyBackend::Libkrun(b) => Some(b),
-            AnyBackend::Vz(b) => Some(b),
             AnyBackend::Mock(b) => Some(b),
             AnyBackend::Qemu(_) => None,
-            // HVF carries untrusted workloads: claim-10 default-deny egress, a real
-            // mkGuest workload boot, a host-reachable guest agent, and now the
-            // secret-substitution gateway (claim-10 at the substitution bridge,
-            // claims 12/13 at the per-VM endpoint) all run on the hvf VMM.
+            // HVF carries untrusted workloads through the no-guest-NIC vsock
+            // path: default-deny egress, a real mkGuest workload boot, a
+            // host-reachable guest agent, and the secret-substitution gateway.
             AnyBackend::Hvf(b) => Some(b),
-            // Same hvf VMM as Hvf, reached via the runner role: claim-10 at
-            // the endpoint, claims 12/13 at the per-VM substitution endpoint.
+            // Same hvf VMM as Hvf, reached through the runner role.
             AnyBackend::HvfRunner(b) => Some(b),
         }
     }
@@ -783,8 +770,7 @@ impl AnyBackend {
     }
 
     /// Fast teardown for an ephemeral transient run. See
-    /// [`VmBackend::stop_transient`]. Vz overrides it to skip the graceful
-    /// grace; other backends fall through to the default (== `stop`).
+    /// [`VmBackend::stop_transient`].
     pub fn stop_transient(&self, id: &VmId) -> Result<()> {
         self.inner().stop_transient(id)
     }
@@ -864,7 +850,9 @@ mod tests {
         assert!(caps.pause_resume);
         assert!(caps.snapshots);
         assert!(caps.vsock);
-        assert!(caps.tap_networking);
+        assert!(!caps.tap_networking);
+        assert!(caps.no_guest_nic);
+        assert!(caps.host_vsock_proxy);
     }
 
     #[test]
@@ -981,16 +969,13 @@ mod tests {
     }
 
     #[test]
-    fn test_any_backend_from_hypervisor_vz() {
-        // `--backend vz` and the longer `--backend virtualization`
-        // both still route to the Vz backend — Vz stays selectable as an
-        // opt-in. `auto_select()` no longer picks it on macOS 26+; the
-        // hvf VMM is the workload default there.
-        for alias in ["vz", "virtualization"] {
+    fn test_any_backend_from_hypervisor_legacy_macos_is_not_supported() {
+        for alias in ["legacy-macos", "virtualization"] {
             let backend = AnyBackend::from_hypervisor(alias);
-            assert!(matches!(backend, AnyBackend::Vz(_)), "alias {alias}");
-            assert_eq!(backend.name(), "vz");
-            assert_eq!(backend.tier(), BackendTier::Tier2);
+            assert!(
+                matches!(backend, AnyBackend::Firecracker(_)),
+                "unsupported selector {alias} must not construct a backend"
+            );
         }
     }
 
@@ -1105,7 +1090,7 @@ mod tests {
         let backend = AnyBackend::default_backend();
         let caps = backend.capabilities();
         assert!(caps.vsock);
-        assert!(caps.tap_networking);
+        assert!(!caps.tap_networking);
     }
 
     #[test]
@@ -1143,7 +1128,7 @@ mod tests {
     }
 
     #[test]
-    fn for_started_vm_resolves_vz_by_marker() {
+    fn for_started_vm_ignores_legacy_macos_marker() {
         let _legacy_guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1151,11 +1136,11 @@ mod tests {
         let temp = tempfile::tempdir().expect("create temp HOME");
         let vms = temp.path().join(".mvm/vms");
         std::fs::create_dir_all(vms.join("vzvm")).expect("mkdir vm dir");
-        std::fs::write(vms.join("vzvm").join("vz.pid"), "12345").expect("write marker");
+        std::fs::write(vms.join("vzvm").join("legacy-macos.pid"), "12345").expect("write marker");
         env.set("HOME", temp.path());
         env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
         let result = AnyBackend::for_started_vm("vzvm");
-        assert!(matches!(result, Some(AnyBackend::Vz(_))), "vz.pid → Vz");
+        assert!(result.is_none(), "legacy legacy-macos.pid must not resolve a backend");
     }
 
     #[test]
@@ -1211,16 +1196,6 @@ mod tests {
                     Some(2),
                     true,
                     true,
-                    true,
-                ),
-                (
-                    "vz",
-                    vec!["virtualization"],
-                    BackendTier::Tier2,
-                    Some("vz.pid"),
-                    Some(4),
-                    false,
-                    false,
                     true,
                 ),
                 (
@@ -1362,23 +1337,12 @@ mod tests {
                 assert_eq!(requested, SnapshotCapability::LiveMemory);
                 assert_eq!(available, SnapshotCapability::DiskOnly);
                 assert!(
-                    hint.contains("Firecracker") || hint.contains("Vz"),
+                    hint.contains("Firecracker") || hint.contains("cold boot"),
                     "{hint}"
                 );
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn snapshot_capability_vz_tracks_macos_support() {
-        // SaveRestore on macOS 26+, Unsupported elsewhere — never silently
-        // LiveMemory/DiskOnly. (Runs on Linux CI, where it's Unsupported.)
-        let cap = AnyBackend::from_hypervisor("vz").snapshot_capability();
-        assert!(matches!(
-            cap,
-            SnapshotCapability::SaveRestore | SnapshotCapability::Unsupported
-        ));
     }
 
     #[test]
@@ -1404,11 +1368,6 @@ mod tests {
             fc.capabilities().pause_resume,
             "firecracker: capability flag must say pause_resume=true (matches the real impl)"
         );
-        let vz = AnyBackend::from_hypervisor("vz");
-        assert!(
-            vz.capabilities().pause_resume,
-            "vz: capability flag must say pause_resume=true (matches the real impl)"
-        );
     }
 
     // BackendTier coverage.
@@ -1418,7 +1377,6 @@ mod tests {
         let cases: &[(&str, BackendTier)] = &[
             ("firecracker", BackendTier::Tier1),
             ("libkrun", BackendTier::Tier2),
-            ("vz", BackendTier::Tier2),
             ("qemu", BackendTier::Tier2),
             ("mock", BackendTier::Tier3),
         ];
@@ -1435,7 +1393,7 @@ mod tests {
         // long-standing per-backend tier declaration. `AnyBackend::tier()`
         // is the closed-enum view of the same fact. Bumping one without
         // the other is a regression — keep them wired.
-        let names = ["firecracker", "libkrun", "vz", "qemu", "mock"];
+        let names = ["firecracker", "libkrun", "qemu", "mock", "hvf"];
         for name in names {
             let b = AnyBackend::from_hypervisor(name);
             let enum_tier = b.tier();
@@ -1463,11 +1421,27 @@ mod tests {
     fn as_workload_backend_some_for_workload_variants() {
         // mock is included: it is the hermetic lifecycle test double that
         // stands in for a workload backend on the admitted path.
-        for name in ["firecracker", "libkrun", "vz", "hvf", "mock"] {
+        for name in ["firecracker", "libkrun", "hvf", "mock"] {
             let backend = AnyBackend::from_hypervisor(name);
             assert!(
                 backend.as_workload_backend().is_some(),
                 "{name}: must be a workload backend"
+            );
+        }
+    }
+
+    #[test]
+    fn workload_backends_all_satisfy_vsock_only_contract() {
+        let required = mvm_core::vm_backend::RequiredCapabilities::vsock_only_workload_egress();
+        for name in ["firecracker", "libkrun", "hvf", "mock"] {
+            let backend = AnyBackend::from_hypervisor(name);
+            let workload = backend
+                .as_workload_backend()
+                .unwrap_or_else(|| panic!("{name}: expected workload backend"));
+            let shortfall = workload.capabilities().shortfall(&required);
+            assert!(
+                shortfall.is_empty(),
+                "{name}: workload backend must be vsock-only, missing {shortfall:?}"
             );
         }
     }
@@ -1543,9 +1517,9 @@ mod tests {
         let backends: [(&str, AnyBackend); 5] = [
             ("firecracker", AnyBackend::Firecracker(FirecrackerBackend)),
             ("libkrun", AnyBackend::Libkrun(LibkrunBackend)),
-            ("vz", AnyBackend::Vz(VzBackend)),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
             ("mock", AnyBackend::Mock(MockBackend::new())),
+            ("hvf", AnyBackend::Hvf(HvfBackend)),
         ];
         for (name, backend) in backends {
             assert!(

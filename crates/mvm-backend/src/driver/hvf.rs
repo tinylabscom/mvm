@@ -148,6 +148,7 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
     Ok(HvfSupervisorConfig {
         kernel,
         cmdline,
+        cmdline_extra: None,
         memory_mib: spec.memory_mib,
         initramfs: spec.initramfs.clone(),
         disks,

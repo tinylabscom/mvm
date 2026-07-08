@@ -113,8 +113,10 @@ impl VmBackend for MockBackend {
         VmCapabilities {
             pause_resume: true,
             snapshots: true,
-            vsock: false,
+            vsock: true,
             tap_networking: false,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
             balloon: false,
             fs_quick_checkpoint: false,
             ..VmCapabilities::default()
@@ -467,9 +469,12 @@ mod tests {
         let caps = b.capabilities();
         assert!(caps.pause_resume);
         assert!(caps.snapshots);
-        // No vsock / tap-networking — mock has no guest channel.
-        assert!(!caps.vsock);
+        // The mock guest-agent exposes the same filesystem-backed vsock shape
+        // the CLI uses for lifecycle and audit fixtures.
+        assert!(caps.vsock);
         assert!(!caps.tap_networking);
+        assert!(caps.no_guest_nic);
+        assert!(caps.host_vsock_proxy);
     }
 
     #[test]

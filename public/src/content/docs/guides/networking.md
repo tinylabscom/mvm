@@ -3,27 +3,29 @@ title: Networking
 description: Network layout and connectivity in mvmctl microVMs.
 ---
 
-## Network by Backend
+## Workload Egress Contract
 
-Networking differs by backend:
+For **workload** microVMs, networking is a backend capability contract, not a
+backend-specific escape hatch:
 
-| Backend | Network Type | Guest IP | Host Access |
-|---------|-------------|----------|-------------|
-| Firecracker (Linux native) | TAP device | 172.16.0.2/30 | Direct via TAP |
-| HVF (macOS 26+, default) | vsock-only | — | Guest I/O over vsock; no guest NIC |
-| Vz (macOS 26+, opt-in) | vmnet | DHCP-assigned | Via vmnet bridge |
-| libkrun (macOS) | TSI (transparent socket impl) | host-loopback | Via per-port vsock listeners |
-| microvm.nix | TAP device | 172.16.0.2/30 | Direct via TAP |
+- `--net` and `--allow-host` select **policy only**.
+- A workload boot that carries network policy requires backend capabilities
+  `vsock + no_guest_nic + host_vsock_proxy`.
+- If the selected backend cannot satisfy that contract, `mvmctl` refuses the
+  boot instead of silently enabling guest NIC, TAP, gvproxy, passt, vmnet, or
+  any other backend-specific L2/L3 dataplane for workload traffic.
 
-## Firecracker Network Layout
+Current workload-backend status:
 
-```
-Firecracker microVM (172.16.0.2/30, eth0)
-    | TAP interface (tap0)
-Linux host (172.16.0.1/30, tap0)  --  iptables NAT  --  internet
-```
+| Backend | Workload egress status |
+|---------|------------------------|
+| HVF (macOS 26+, default) | Supported. Guest I/O crosses the host vsock gate; no guest NIC. |
+| Firecracker (Linux/KVM) | Supported. Workload egress is guest→vsock→host gate; no guest NIC or TAP dataplane. |
+| libkrun (macOS 13-25 & Linux) | Supported. Workload egress is guest→vsock→host gate; no guest NIC or gvproxy/passt dataplane. |
+| qemu | Dev/test only; not a workload backend. |
 
-On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. The TAP device connects the microVM to the host network namespace and gets NAT'd to the internet. On macOS hosts, networking is backend-specific: the default HVF backend is vsock-only (guest I/O crosses vsock, no guest NIC); Vz (opt-in) uses vmnet bridge mode; libkrun uses TSI (transparent socket impl) where outbound TCP/UDP appears as host-side socket calls.
+Builder-VM and other internal build networking are separate implementation
+details. The contract above is specifically for **workload** microVM egress.
 
 ## Port Forwarding
 
@@ -44,7 +46,7 @@ MicroVMs don't use networking for host communication -- they use **vsock**:
 |------|----------|---------|
 | 5252 | Length-prefixed JSON | Guest agent (health checks, status, snapshot lifecycle) |
 
-The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, Vz, and microvm.nix backends.
+The host connects by writing `CONNECT 5252\n` to the vsock socket and reading `OK 5252\n`. All requests are request/response pairs. vsock is supported on Firecracker, HVF, libkrun, and qemu.
 
 For Firecracker, the host-side vsock UDS is scoped to the running VM directory:
 `<vm-dir>/runtime/v.sock`. It is not a global or master socket. `mvmctl machine run`
@@ -66,8 +68,10 @@ For debugging dev builds, use `mvmctl machine logs <name>` to view guest console
 
 By default, a workload gets **no outbound network** (deny-all egress). Opt in
 with `--net` (broad dev egress) or narrow to specific hosts with `--allow-host
-HOST[:PORT]` (repeatable; `--allow-host` wins over `--net`). For a deny-first
-review workflow, see [Network egress policy](/guides/network-egress-policy/).
+HOST[:PORT]` (repeatable; `--allow-host` wins over `--net`). These flags select
+the admitted egress policy only; they do **not** enable guest networking on an
+unsupported backend. For a deny-first review workflow, see
+[Network egress policy](/guides/network-egress-policy/).
 
 ```bash
 # Broad dev egress (DNS + general outbound)
@@ -79,7 +83,8 @@ mvmctl machine run --flake . \
     --allow-host api.openai.com:443
 ```
 
-Network policies are enforced via iptables FORWARD rules on the bridge interface (Firecracker backend on Linux). DNS (port 53) is always allowed so domain resolution works. Rules are automatically cleaned up when the VM stops. On macOS backends, policies are enforced at the host-side layer rather than via iptables.
+On supported workload backends, policy enforcement happens at the host-side
+vsock gate. DNS is mediated by the same gate; no workload guest NIC is involved.
 
 ## Security Profiles
 
@@ -103,7 +108,9 @@ The resolved profile is copied into the signed `ExecutionPlan` admission record 
 
 ## DNS
 
-The guest's `/etc/resolv.conf` is configured at build time to use the host's DNS resolver. Internet access works out of the box through the NAT chain (Firecracker), vmnet (Vz).
+The guest's `/etc/resolv.conf` is configured at build time to use the host's
+resolver chain. On supported workload backends, DNS egress crosses the same
+host-side vsock gate as every other outbound flow.
 
 ### Local addon DNS (opt-in)
 

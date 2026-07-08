@@ -102,7 +102,7 @@ pub struct VmStartConfig {
     /// Directory containing microvm.nix-lineage runner scripts (QEMU backend only).
     pub runner_dir: Option<String>,
     /// Tenant identifier from the admitted `ExecutionPlan`
-    /// (`AdmittedPlan.plan.tenant.0`). When `Some`, the libkrun/Vz
+    /// (`AdmittedPlan.plan.tenant.0`). When `Some`, the libkrun/LegacyMacos
     /// backends activate the gateway audit substrate (bridge factory +
     /// chain-signed audit emit). `None` keeps the legacy
     /// `run_supervisor` path for callers
@@ -129,7 +129,7 @@ pub struct VmStartConfig {
     /// backend-agnostic config, not a libkrun-specific knob).
     pub warm_pool_size: u32,
     /// Effective egress policy for this VM, enforced identically across
-    /// every workload backend (Firecracker nftables, libkrun/Vz gateway
+    /// every workload backend (Firecracker nftables, libkrun/LegacyMacos gateway
     /// bridge). The mechanism is the per-backend enforcer; the policy and
     /// its observable deny/allow effect are the same value here.
     ///
@@ -141,7 +141,7 @@ pub struct VmStartConfig {
     pub network_policy: crate::network_policy::NetworkPolicy,
     /// Pre-open the host-side interactive-console data-port range so a PTY can
     /// attach (`machine run -t`, `machine shell`, `up --console`). The
-    /// per-port-UDS backends (libkrun, Vz) bind a static vsock port list at
+    /// per-port-UDS backends (libkrun, LegacyMacos) bind a static vsock port list at
     /// start and otherwise can't reach the agent's dynamic
     /// `CONSOLE_PORT_BASE + session_id` data port; Firecracker multiplexes
     /// every port over one UDS and ignores this. Off by default — set only
@@ -586,6 +586,25 @@ pub struct RequiredCapabilities {
     pub pty_exec: bool,
 }
 
+impl RequiredCapabilities {
+    /// Capability contract for any workload boot that carries network policy:
+    /// workload traffic stays on vsock, the guest gets no NIC, and the host
+    /// owns the egress proxy/gate over vsock.
+    pub const fn vsock_only_workload_egress() -> Self {
+        Self {
+            eager_cow_restore: false,
+            guest_memory_mapping: false,
+            fixed_address_remap: false,
+            device_state_snapshot: false,
+            vcpu_state_snapshot: false,
+            vsock: true,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
+            pty_exec: false,
+        }
+    }
+}
+
 impl VmCapabilities {
     /// Names of the capabilities `required` asks for that this backend does
     /// not advertise. Empty means the backend can serve the request.
@@ -646,7 +665,7 @@ impl VmCapabilities {
 pub enum SnapshotCapability {
     /// Full live-memory snapshot + fast resume (Firecracker: UFFD/NBD/hugepages).
     LiveMemory,
-    /// Coarse save/restore of machine state (Vz `saveMachineState`, macOS 26+).
+    /// Coarse save/restore of machine state (LegacyMacos `saveMachineState`, macOS 26+).
     SaveRestore,
     /// No memory snapshot — warm-start is a fast reboot from a disk/overlay
     /// snapshot (libkrun).
@@ -777,7 +796,7 @@ pub struct WarmStartOutcome {
 
 /// How a prelaunched standby is to be set up. Backend-agnostic:
 /// the caller (the launch path) fills this in; the backend's [`VmBackend::spawn_standby`]
-/// translates it to its own wire config (libkrun → `SupervisorBaseConfig`; Vz → boots a
+/// translates it to its own wire config (libkrun → `SupervisorBaseConfig`; LegacyMacos → boots a
 /// seed VM, captures its memory state, and stops the supervisor).
 #[derive(Debug, Clone)]
 pub struct StandbySpec {
@@ -802,7 +821,7 @@ pub struct StandbySpec {
     pub control_socket: std::path::PathBuf,
     /// Per-VM state dir the standby writes its pid into.
     pub vm_state_dir: String,
-    /// Source rootfs image path for Vz saved-standbys. `None` for libkrun (no rootfs
+    /// Source rootfs image path for LegacyMacos saved-standbys. `None` for libkrun (no rootfs
     /// is baked in at spawn; any workload rootfs attaches at claim time).
     pub image_path: Option<String>,
     /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
@@ -813,7 +832,7 @@ pub struct StandbySpec {
 /// workload exactly, else the launch cold-boots.
 ///
 /// `image_sha256` is `None` for libkrun (any image attaches; libkrun standbys carry no
-/// rootfs) and `Some(sha)` for Vz saved-standbys (which are image-specific; a Vz standby
+/// rootfs) and `Some(sha)` for LegacyMacos saved-standbys (which are image-specific; a LegacyMacos standby
 /// is a frozen {rootfs, memory, machine-id} triple captured from one particular image).
 /// Two standbys are compatible only when both image fields are identical — `None == None`
 /// (libkrun) and `Some(a) == Some(b)` iff `a == b`.
@@ -822,13 +841,13 @@ pub struct StandbyCompat {
     pub kernel_sha256: String,
     pub vcpus: u8,
     pub mem_mib: u32,
-    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for Vz (image-bound).
+    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for LegacyMacos (image-bound).
     pub image_sha256: Option<String>,
 }
 
 /// A recorded standby (persisted as `~/.mvm/pool/<id>/standby.json`).
 ///
-/// `pid` is 0 for saved-state standbys (Vz): the supervisor that booted the seed VM was
+/// `pid` is 0 for saved-state standbys (LegacyMacos): the supervisor that booted the seed VM was
 /// stopped at capture time; no process is running. `reap_stale` and the liveness checks
 /// treat pid=0 as "TTL-only" — the standby is never pruned for a dead process, only for
 /// expiry. No real process has pid 0.
@@ -843,7 +862,7 @@ pub struct StandbyHandle {
     pub binding_nonce: String,
     pub spawned_unix_secs: u64,
     pub state: StandbyState,
-    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for Vz saved-standbys.
+    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for LegacyMacos saved-standbys.
     #[serde(default)]
     pub image_sha256: Option<String>,
 }
@@ -1120,14 +1139,14 @@ pub struct VmInfo {
 /// }
 /// ```
 pub trait VmBackend: Send + Sync {
-    /// Human-readable backend name (e.g., "firecracker", "vz", "libkrun").
+    /// Human-readable backend name (e.g., "firecracker", "legacy-macos", "libkrun").
     fn name(&self) -> &str;
 
     /// Capabilities supported by this backend.
     fn capabilities(&self) -> VmCapabilities;
 
     /// Warm-start snapshot tier — `LiveMemory` (Firecracker), `SaveRestore`
-    /// (Vz, macOS 26+), `DiskOnly` (libkrun), or `Unsupported`. Defaults to
+    /// (LegacyMacos, macOS 26+), `DiskOnly` (libkrun), or `Unsupported`. Defaults to
     /// `Unsupported` so a backend opts in explicitly; consumers check this
     /// before requesting a snapshot rather than discovering a silent
     /// degrade.
@@ -1144,7 +1163,7 @@ pub trait VmBackend: Send + Sync {
     /// admits the request but the backend wires no warm-start path, the
     /// default returns [`WarmStartError::Failed`] rather than fabricating a
     /// VM; backends that implement warm-start (libkrun disk-only,
-    /// Firecracker live-memory, Vz save/restore) override this.
+    /// Firecracker live-memory, LegacyMacos save/restore) override this.
     fn warm_start(
         &self,
         _config: &VmStartConfig,
@@ -1425,18 +1444,18 @@ mod tests {
             mem_mib: 2048,
             ..want.clone()
         }));
-        // Vz image sha must match exactly: Some(a) ≠ None, Some(a) ≠ Some(b).
-        let vz_handle = StandbyHandle {
+        // LegacyMacos image sha must match exactly: Some(a) ≠ None, Some(a) ≠ Some(b).
+        let legacy_macos_handle = StandbyHandle {
             image_sha256: Some("c".repeat(64)),
             ..h.clone()
         };
-        let vz_want = StandbyCompat {
+        let legacy_macos_want = StandbyCompat {
             image_sha256: Some("c".repeat(64)),
             ..want.clone()
         };
-        assert!(vz_handle.is_compatible(&vz_want));
-        assert!(!vz_handle.is_compatible(&want)); // None ≠ Some
-        assert!(!vz_handle.is_compatible(&StandbyCompat {
+        assert!(legacy_macos_handle.is_compatible(&legacy_macos_want));
+        assert!(!legacy_macos_handle.is_compatible(&want)); // None ≠ Some
+        assert!(!legacy_macos_handle.is_compatible(&StandbyCompat {
             image_sha256: Some("d".repeat(64)),
             ..want
         }));
@@ -1558,13 +1577,13 @@ mod tests {
         assert!(h.is_compatible(&want));
     }
 
-    /// A Vz saved-standby uses pid=0 (no running supervisor) and must be treated
+    /// A LegacyMacos saved-standby uses pid=0 (no running supervisor) and must be treated
     /// as TTL-only by the liveness path (is_saved_state()).
     #[test]
     fn standby_handle_saved_state_pid_zero_flag() {
         let saved = StandbyHandle {
-            id: "standby-vz".into(),
-            control_socket: "/p/standby-vz/control.sock".into(),
+            id: "standby-legacy_macos".into(),
+            control_socket: "/p/standby-legacy_macos/control.sock".into(),
             pid: 0,
             kernel_sha256: "cc".repeat(32),
             vcpus: 2,
@@ -1967,6 +1986,17 @@ mod tests {
 
         assert!(caps.shortfall(&required).is_empty());
         assert!(caps.satisfies(&required));
+    }
+
+    #[test]
+    fn vsock_only_workload_egress_contract_requires_the_named_trio() {
+        let required = RequiredCapabilities::vsock_only_workload_egress();
+
+        assert!(required.vsock);
+        assert!(required.no_guest_nic);
+        assert!(required.host_vsock_proxy);
+        assert!(!required.eager_cow_restore);
+        assert!(!required.pty_exec);
     }
 
     #[test]

@@ -87,7 +87,7 @@ pub struct SynthesisInput<'a> {
     pub vm_name: &'a str,
     /// Optional tenant override. `None` → `DEFAULT_TENANT`.
     pub tenant: Option<&'a str>,
-    /// Resolved runtime profile (`firecracker` / `libkrun` / `vz` / `qemu`).
+    /// Resolved runtime profile (`firecracker` / `libkrun` / `legacy_macos` / `qemu`).
     pub backend_name: &'a str,
     /// Image reference for `SignedImageRef`. `sha256` is the
     /// lowercase-hex digest of the rootfs (computed by `mvm-core::crypto::

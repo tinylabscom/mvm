@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-use super::super::env::dev_vz::{ensure_default_microvm_image, ensure_workload_kernel};
+use super::super::env::dev_vm::{ensure_default_microvm_image, ensure_workload_kernel};
 use super::Cli;
 use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
@@ -331,12 +331,12 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let network_policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
 
     // Every transient run is admitted as a locally-signed workload (uniform
-    // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
-    // libkrun/Vz supervisor spawn the enforcing gateway bridge (so the egress
-    // policy is enforced and the run is chain-audited) instead of the legacy
-    // unfiltered path. The closure runs inside the boot path with the resolved
-    // rootfs + generated vm_name. cpus/mem are captured here because `args` is
-    // consumed by `into_exec_args()` below.
+    // with `up`): the signed `ExecutionPlan` threads the resolved network
+    // policy into the workload gate. Backends that cannot honor the vsock-only
+    // workload-egress contract are refused before boot rather than falling back
+    // to legacy guest networking. The closure runs inside the boot path with
+    // the resolved rootfs + generated vm_name. cpus/mem are captured here
+    // because `args` is consumed by `into_exec_args()` below.
     let admit_backend = mvm_backend::backend::AnyBackend::auto_select()
         .name()
         .to_string();
@@ -822,7 +822,7 @@ struct ReceiptInput {
     /// How faithfully the resolved backend actually enforces that posture
     /// (`flow-drop`, `open`, `<backend>:l4-host-port`). Recorded so the signed
     /// receipt cannot overstate enforcement fidelity — a host:port allow-list is
-    /// now port-gated on every backend (Firecracker nftables; libkrun/Vz via the
+    /// now port-gated on every backend (Firecracker nftables; libkrun/LegacyMacos via the
     /// admission-time DNS pin → L4 scan). See `shared::egress_enforcement_label`.
     egress_enforcement: String,
     command: ReceiptCommand,
@@ -943,6 +943,13 @@ impl RunJsonSummary {
 
 impl RunPreflightSummary {
     fn from_args(args: &RunArgs) -> Result<Self> {
+        let backend = mvm_backend::backend::AnyBackend::auto_select()
+            .name()
+            .to_string();
+        Self::from_args_for_backend(args, &backend)
+    }
+
+    fn from_args_for_backend(args: &RunArgs, backend: &str) -> Result<Self> {
         let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
         for kv in &args.env {
             parse_env_pair(kv)?;
@@ -978,12 +985,9 @@ impl RunPreflightSummary {
             );
         }
 
-        // Report the backend the real run would auto-select, so the dry-run's
-        // enforcement tier matches what an actual boot would record.
-        let backend = mvm_backend::backend::AnyBackend::auto_select()
-            .name()
-            .to_string();
-        let receipt_input = ReceiptInput::from_run_args(args, &backend)?;
+        // Report the backend the real run would use, so the dry-run's
+        // enforcement tier and admission checks match an actual boot.
+        let receipt_input = ReceiptInput::from_run_args(args, backend)?;
 
         Ok(Self {
             schema_version: 1,
@@ -1073,6 +1077,12 @@ impl ReceiptInput {
         // Resolve the egress policy once: the requested posture and the honest
         // per-backend enforcement tier are two views of the same policy.
         let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+        let selected_backend = mvm_backend::backend::AnyBackend::from_hypervisor(backend);
+        mvm_backend::workload_backend::require_vsock_only_workload_egress(
+            &selected_backend,
+            &policy,
+            "transient workload run",
+        )?;
         let command = if let Some(path) = &args.launch_plan {
             ReceiptCommand::LaunchPlan {
                 path_sha256: sha256_hex(path.as_bytes()),
@@ -1357,17 +1367,17 @@ mod tests {
     fn dry_run_posture_reflects_resolved_policy() {
         // Default: deny-all.
         let mut args = run_args(RunProfile::Standard);
-        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        let s = RunPreflightSummary::from_args_for_backend(&args, "hvf").expect("preflight");
         assert_eq!(s.invocation.network_posture, "deny-all");
 
         // --net → dev preset.
         args.net = true;
-        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        let s = RunPreflightSummary::from_args_for_backend(&args, "hvf").expect("preflight");
         assert_eq!(s.invocation.network_posture, "preset:dev");
 
         // --allow-host wins over --net and defaults the port.
         args.allow_host = vec!["a.com".into(), "b.com:8443".into()];
-        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        let s = RunPreflightSummary::from_args_for_backend(&args, "hvf").expect("preflight");
         assert_eq!(
             s.invocation.network_posture,
             "allow-list:a.com:443,b.com:8443"
@@ -1378,28 +1388,35 @@ mod tests {
     fn receipt_records_resolved_posture() {
         let mut args = run_args(RunProfile::Standard);
         args.allow_host = vec!["api.example.com".into()];
-        let r = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
+        let r = ReceiptInput::from_run_args(&args, "hvf").expect("receipt input");
         assert_eq!(r.network_posture, "allow-list:api.example.com:443");
     }
 
     #[test]
-    fn receipt_enforcement_tier_is_uniform_l4_host_port() {
-        // The signed receipt records the REQUESTED posture and, separately, the
-        // enforcement fidelity. host:port is now L4-enforced on every backend, so
-        // the tier is uniformly `<backend>:l4-host-port` (the backend is still
-        // named so the receipt records which substrate enforced).
+    fn receipt_enforcement_tier_records_hvf_l4_host_port() {
         let mut args = run_args(RunProfile::Standard);
         args.allow_host = vec!["api.example.com".into()];
-        let fc = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
-        assert_eq!(fc.egress_enforcement, "firecracker:l4-host-port");
-        let krun = ReceiptInput::from_run_args(&args, "libkrun").expect("receipt input");
-        assert_eq!(krun.egress_enforcement, "libkrun:l4-host-port");
+        let hvf = ReceiptInput::from_run_args(&args, "hvf").expect("receipt input");
+        assert_eq!(hvf.egress_enforcement, "hvf:l4-host-port");
 
-        // deny-all is uniform across backends.
         let deny = run_args(RunProfile::Standard);
-        let r = ReceiptInput::from_run_args(&deny, "vz").expect("receipt input");
+        let r = ReceiptInput::from_run_args(&deny, "hvf").expect("receipt input");
         assert_eq!(r.network_posture, "deny-all");
         assert_eq!(r.egress_enforcement, "flow-drop");
+    }
+
+    #[test]
+    fn receipt_input_refuses_legacy_workload_egress_backends() {
+        let args = run_args(RunProfile::Standard);
+
+        for backend in ["firecracker", "libkrun"] {
+            let err = ReceiptInput::from_run_args(&args, backend)
+                .expect_err("legacy workload-egress backend must fail closed");
+            let msg = err.to_string();
+            assert!(msg.contains("vsock"), "{msg}");
+            assert!(msg.contains("no_guest_nic"), "{msg}");
+            assert!(msg.contains("host_vsock_proxy"), "{msg}");
+        }
     }
 
     fn run_args(profile: RunProfile) -> RunArgs {
@@ -1539,7 +1556,7 @@ mod tests {
         args.env.push("API_TOKEN=secret-value".to_string());
         args.add_dir.push("/private/project:/work:ro".to_string());
 
-        let receipt = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
+        let receipt = ReceiptInput::from_run_args(&args, "hvf").expect("receipt input");
         let json = serde_json::to_string(&receipt).expect("json");
 
         assert!(!json.contains("token-secret"));
@@ -1576,7 +1593,7 @@ mod tests {
             stderr: "sensitive stderr".to_string(),
         };
         let summary = RunJsonSummary::from_parts(
-            ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
+            ReceiptInput::from_run_args(&args, "hvf").expect("receipt input"),
             &output,
             Some(PathBuf::from("/tmp/receipt.json")),
         );
@@ -1599,7 +1616,8 @@ mod tests {
         args.add_dir.push("/private/project:/work:ro".to_string());
         args.receipt = Some(PathBuf::from("/tmp/run-receipt.json"));
 
-        let summary = RunPreflightSummary::from_args(&args).expect("preflight summary");
+        let summary =
+            RunPreflightSummary::from_args_for_backend(&args, "hvf").expect("preflight summary");
         let json = serde_json::to_string(&summary).expect("serialize summary");
 
         assert!(summary.dry_run);
@@ -1639,7 +1657,7 @@ mod tests {
             schema_version: 1,
             receipt_id: "receipt-1".to_string(),
             recorded_at: "2026-05-14T00:00:00Z".to_string(),
-            invocation: ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
+            invocation: ReceiptInput::from_run_args(&args, "hvf").expect("receipt input"),
             outcome: ReceiptOutcome {
                 exit_code: 0,
                 success: true,
@@ -1683,7 +1701,7 @@ mod tests {
             schema_version: 1,
             receipt_id: "receipt-1".to_string(),
             recorded_at: "2026-05-14T00:00:00Z".to_string(),
-            invocation: ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
+            invocation: ReceiptInput::from_run_args(&args, "hvf").expect("receipt input"),
             outcome: ReceiptOutcome {
                 exit_code: 0,
                 success: true,

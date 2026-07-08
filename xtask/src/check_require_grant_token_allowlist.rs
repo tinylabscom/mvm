@@ -17,7 +17,7 @@ const ALLOWLIST: &[&str] = &[
     "crates/mvm-backend/src/microvm.rs",
     "crates/mvm-backend/src/qemu.rs",
     "crates/mvm-backend/src/libkrun.rs",
-    "crates/mvm-backend/src/vz.rs",
+    "crates/mvm-backend/src/legacy_macos_backend.rs",
     "crates/mvm-guest/src/vsock.rs",
 ];
 

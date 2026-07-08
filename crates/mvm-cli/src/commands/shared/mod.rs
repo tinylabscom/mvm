@@ -24,8 +24,9 @@ pub(super) use parse::{
     parse_volume_spec, vm_volume_from_spec_validated,
 };
 pub(super) use resolve::{
-    ManifestArgRef, egress_enforcement_label, resolve_effective_hypervisor, resolve_flake_ref,
-    resolve_manifest_arg, resolve_run_network_policy, resolve_running_vm,
+    ManifestArgRef, egress_enforcement_label, reject_removed_hypervisor,
+    resolve_effective_hypervisor, resolve_flake_ref, resolve_manifest_arg,
+    resolve_run_network_policy, resolve_running_vm,
 };
 pub(super) use start::VmStartParams;
 pub(super) use state::{CHILD_PIDS, IN_CONSOLE_MODE};

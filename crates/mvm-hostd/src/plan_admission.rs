@@ -213,7 +213,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Populate the three `VmStartConfig` audit-substrate fields
 /// (`tenant_id`, `plan_json`, `bundle_json`) from the admitted
 /// plan. Call after the `VmStartConfig` is built and before
-/// `backend.start()`; the libkrun/Vz backends read these to wire
+/// `backend.start()`; the libkrun/LegacyMacos backends read these to wire
 /// `SupervisorConfig.{tenant_id, audit_dir, gateway_audit_socket,
 /// gateway_events_socket, signing_key_path}` and activate the
 /// bridge-factory path.
@@ -235,7 +235,7 @@ const BUNDLE_JSON_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// workload must carry it — `host.audit.v1` is implicitly available to any
 /// admitted workload. This is decoupled from
 /// [`populate_audit_substrate`]: the broker needs the tenant string, **not**
-/// the signed `plan_json`, whose presence flips libkrun/Vz workload boots onto
+/// the signed `plan_json`, whose presence flips libkrun/LegacyMacos workload boots onto
 /// the claim-10 gateway-bridge supervisor path. Call this unconditionally; call
 /// `populate_audit_substrate` when a backend has a signed-plan consumer.
 pub fn thread_tenant_id(cfg: &mut mvm_core::vm_backend::VmStartConfig, admitted: &AdmittedPlan) {
@@ -993,7 +993,7 @@ mod tests {
             Some(admitted.plan.tenant.0.as_str())
         );
         // It must NOT thread the signed plan / policy bundle — that flips
-        // libkrun/Vz onto the gateway-bridge supervisor (+ its ~/.mvm/keys
+        // libkrun/LegacyMacos onto the gateway-bridge supervisor (+ its ~/.mvm/keys
         // substrate validation), which is a separate opt-in concern.
         assert!(
             cfg.plan_json.is_none(),

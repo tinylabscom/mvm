@@ -3519,9 +3519,9 @@ fn test_dev_status_json_flag_parses() {
 }
 
 #[test]
-fn test_is_vz_dev_running_returns_bool() {
+fn test_is_dev_vm_running_returns_bool() {
     // Just verify it doesn't panic — actual result depends on platform
-    let _ = super::env::dev_vz::is_vz_dev_running();
+    let _ = super::env::dev_vm::is_dev_vm_running();
 }
 
 // ---- admission flags (up retired; pin removal) ----
@@ -3663,7 +3663,7 @@ fn builder_flag_appears_in_help() {
         "`--builder` flag not surfaced in `mvmctl --help`; help text was:\n{help}"
     );
     assert!(
-        help.contains("libkrun") && help.contains("vz"),
+        help.contains("libkrun") && help.contains("hvf"),
         "`--builder` value choices missing from help; help text was:\n{help}"
     );
 }
@@ -3675,14 +3675,24 @@ fn builder_flag_accepts_libkrun() {
 }
 
 #[test]
-fn builder_flag_accepts_vz() {
-    let cli = Cli::try_parse_from(["mvmctl", "--builder", "vz", "doctor"]).expect("parse");
-    assert_eq!(cli.builder.as_deref(), Some("vz"));
+fn builder_flag_accepts_hvf_value() {
+    let cli = Cli::try_parse_from(["mvmctl", "--builder", "hvf", "doctor"]).expect("parse");
+    assert_eq!(cli.builder.as_deref(), Some("hvf"));
+}
+
+#[test]
+fn builder_flag_rejects_vz() {
+    let err = Cli::try_parse_from(["mvmctl", "--builder", "legacy-macos", "doctor"]).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("invalid value") || msg.contains("possible values"),
+        "expected clap rejection for removed legacy_macos builder backend, got: {msg}"
+    );
 }
 
 #[test]
 fn builder_flag_rejects_unknown_value() {
-    // Clap's `value_parser = ["libkrun", "vz"]` should refuse
+    // Clap's `value_parser` should refuse
     // anything outside that set. Catches typos like `=vmz` early
     // rather than letting `MVM_BUILDER_BACKEND_ENV`'s
     // warn-and-fall-through path eat them.
@@ -3708,12 +3718,6 @@ fn builder_flag_lists_hvf() {
         help.contains("hvf"),
         "expected --builder to accept hvf; help text was:\n{help}"
     );
-}
-
-#[test]
-fn builder_flag_accepts_hvf() {
-    let cli = Cli::try_parse_from(["mvmctl", "--builder", "hvf", "doctor"]).expect("parse");
-    assert_eq!(cli.builder.as_deref(), Some("hvf"));
 }
 
 // --- Session start --ephemeral tests ---

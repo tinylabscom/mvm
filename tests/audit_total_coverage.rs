@@ -266,7 +266,7 @@ const PROC_SUB: &[(&str, AuditPosture)] = &[
 ];
 
 // `snapshot` now covers only the Firecracker instance-snapshot inventory verbs
-// (`ls` / `rm`). The Vz machine-state save/restore verbs were retired in favor
+// (`ls` / `rm`). The LegacyMacos machine-state save/restore verbs were retired in favor
 // of `checkpoint --class vm-full` / `checkpoint restore`.
 const SNAPSHOT_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),

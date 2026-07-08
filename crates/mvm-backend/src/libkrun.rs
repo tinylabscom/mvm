@@ -49,40 +49,44 @@ pub struct LibkrunBackend;
 
 use crate::substitution_spawn::EndpointGuard;
 
-/// Spawn the per-VM substitution endpoint when the admitted plan carries egress
-/// secrets, returning an armed [`EndpointGuard`]; a secret-free plan (or no
-/// `plan.json`) yields a defused no-op guard. The libkrun guest reaches the
-/// proxy-aware endpoint by dialing `connect_host_vsock(EGRESS_PORT)`.
-/// The native gateway forwards intercepted `:80/:443` flows to the host
-/// loopback terminator on `terminator_port`.
-fn spawn_libkrun_egress_endpoint_if_needed(
+/// Spawn the per-VM host-vsock proxy gate for every workload libkrun boot. A
+/// secret-bearing plan speaks WireRequest substitution over `EGRESS_PORT`; a
+/// secret-free plan speaks raw TCP via `mvm-egress-client`. In both cases the
+/// guest's only workload egress path is guest→vsock→host endpoint.
+fn spawn_libkrun_egress_endpoint(
     vm_name: &str,
     state_dir: &Path,
-    terminator_port: u16,
+    network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
 ) -> Result<EndpointGuard> {
     use crate::substitution_spawn::{
         EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
-    use std::net::SocketAddr;
-    let Some((secrets, redaction, tenant)) =
-        crate::egress_shared::decode_plan_secrets_from_state(state_dir)?
-    else {
-        return Ok(EndpointGuard::defused());
+    use mvm_core::policy::RedactionPolicy;
+
+    let default_redaction = RedactionPolicy::default();
+    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let (secrets, redaction, tenant): (&[_], &RedactionPolicy, &str) = match &decoded {
+        Some((s, r, t)) => (s.as_slice(), r, t.as_str()),
+        None => (&[], &default_redaction, "local"),
     };
-    let tls_intermediate = crate::substitution_spawn::read_egress_intermediate(state_dir)?;
+    let tls_intermediate = if secrets.is_empty() {
+        None
+    } else {
+        crate::substitution_spawn::read_egress_intermediate(state_dir)?
+    };
     spawn_substitution_endpoint(SubstitutionSpawnParams {
         vm_name,
         state_dir,
-        tenant: &tenant,
-        secrets: &secrets,
-        redaction: &redaction,
+        tenant,
+        secrets,
+        redaction,
         transport: EndpointTransport::Uds {
             path: mvm_core::config::vm_vsock_port_socket(vm_name, mvm_guest::vsock::EGRESS_PORT),
         },
-        terminator_listen: Some(SocketAddr::from(([127, 0, 0, 1], terminator_port))),
+        terminator_listen: None,
         tls_intermediate,
-        network_policy: None,
-        raw_egress: false,
+        network_policy: Some(network_policy),
+        raw_egress: secrets.is_empty(),
     })?;
     Ok(EndpointGuard::new(vm_name))
 }
@@ -132,15 +136,15 @@ const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 
 /// Build the supervisor config for one VM, lifting
 /// the audit-substrate resolution into the shared `audit_substrate`
-/// module so libkrun and Vz share one source of truth (and the future
+/// module so libkrun and LegacyMacos share one source of truth (and the future
 /// `NetworkProvider` trait extraction is mechanical).
 ///
 /// **Do not log** `config.plan_json` or `config.bundle_json` — they
 /// may carry secret bindings, env vars, or policy refs that resolve
 /// to credentials. They're opaque transport bytes; the supervisor
 /// re-verifies the signed envelope before trusting any decoded field.
-/// Workload-**independent** KrunContext: kernel + resources + cmdline + vsock wiring +
-/// the configured virtio-net gateway. **No rootfs** (the cold path sets the workload
+/// Workload-**independent** KrunContext: kernel + resources + cmdline + vsock wiring.
+/// **No rootfs** (the cold path sets the workload
 /// rootfs; a prelaunched standby leaves it `None` until claim) and **no user volumes**.
 /// Shared verbatim by `build_supervisor_config` (cold) and `standby_base_config` (warm)
 /// so the two launch paths can't drift.
@@ -175,23 +179,7 @@ fn krun_context_base(
         // the per-machine proxy that connects to SSH_AUTH_SOCK.
         .add_host_listen_port(mvm_guest::vsock::SSH_AGENT_PORT);
     krun.rootfs_path = None;
-    // Select the gateway through the same
-    // `resolve_networking_mode` the builder VM + cold path use (TSI is rejected by the
-    // claim-10 no-bypass bridge). Workload-independent, so it belongs in the base.
-    let scratch = state_dir.to_string_lossy().into_owned();
-    match mvm_build::libkrun_builder::resolve_networking_mode() {
-        mvm_build::libkrun_builder::NetworkingPreference::Gvproxy => {
-            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
-        }
-        mvm_build::libkrun_builder::NetworkingPreference::Passt => {
-            krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
-        }
-        // Native reuses the gvproxy vfkit backend; the binary swap happens
-        // in gvproxy::locate_gvproxy via MVM_GATEWAY_BIN.
-        mvm_build::libkrun_builder::NetworkingPreference::Native => {
-            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
-        }
-    }
+    krun
 }
 
 /// Translate a backend-agnostic [`StandbySpec`] into the `SupervisorBaseConfig`
@@ -248,10 +236,7 @@ fn standby_attach_config(
         plan,
         bundle,
         network_policy,
-        transparent_terminator_port: claim
-            .start_config
-            .as_ref()
-            .map(|config| crate::egress_redirect::terminator_port_for_vm_name(&config.name)),
+        transparent_terminator_port: None,
     })
 }
 
@@ -274,12 +259,12 @@ fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
 }
 
 /// Kernel cmdline token that turns on the in-guest vsock egress client. Emitted
-/// only when the host opted in AND the workload carries no bound secrets (Phase A
-/// scope — a secrets workload still uses the substitution endpoint on the NIC).
+/// whenever the workload carries no bound secrets, so cooperative traffic uses
+/// the host-vsock proxy gate instead of a guest NIC.
 /// mkGuest's `/init` parses `mvm.vsock_egress=1` and exports `MVM_VSOCK_EGRESS`,
 /// which starts `mvm-egress-client` and points the workload's proxy env at it.
-fn vsock_egress_cmdline_token(opt_in: bool, has_bound_secrets: bool) -> Option<String> {
-    (opt_in && !has_bound_secrets).then(|| "mvm.vsock_egress=1".to_string())
+fn vsock_egress_cmdline_token(has_bound_secrets: bool) -> Option<String> {
+    (!has_bound_secrets).then(|| "mvm.vsock_egress=1".to_string())
 }
 
 fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<SupervisorConfig> {
@@ -305,12 +290,8 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    let vsock_egress_opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
     if let Some(token) = vsock_egress_cmdline_token(
-        vsock_egress_opt_in,
-        // Only read plan.json for secrets when the flag is on (short-circuit).
-        vsock_egress_opt_in
-            && crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false),
+        crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false),
     ) {
         cmdline.push(' ');
         cmdline.push_str(&token);
@@ -353,7 +334,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // toggle, so a "read-only" virtio-fs share would only be ro by the
     // guest's own mount flag — a compromised guest could remount it rw.
     // Rather than make a false ro promise, refuse it and point at the
-    // hypervisor-enforced alternatives. (Vz/Firecracker enforce ro shares
+    // hypervisor-enforced alternatives. (LegacyMacos/Firecracker enforce ro shares
     // natively; this restriction is libkrun-specific.)
     for (idx, vol) in config.volumes.iter().enumerate() {
         let tag = format!("uvol{idx}");
@@ -365,7 +346,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
                          krun_add_virtiofs has no host-side read-only toggle, so a compromised \
                          guest could remount it read-write. Use a read-only disk image \
                          (host:/guest:SIZE) for hypervisor-enforced read-only, share it ':rw' if \
-                         writes are intended, or run on the Vz backend.",
+                         writes are intended, or run on the LegacyMacos backend.",
                         vol.host,
                         vol.guest
                     );
@@ -433,10 +414,9 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         signing_key_path: substrate.signing_key_path,
         plan,
         bundle,
-        // Always carry the resolved egress policy so the bridge enforces it
-        // on the no-bundle path (deny-all included — that's the enforced
-        // default). Inert for the legacy non-bridge path (it only spawns the
-        // bridge when admitted), and superseded by `bundle` when one resolves.
+        // Always carry the resolved egress policy so the host-vsock proxy gate
+        // enforces it on every workload boot (deny-all included — that's the
+        // enforced default).
         network_policy: Some(
             serde_json::to_value(&config.network_policy)
                 .map_err(|e| anyhow!("serialize VmStartConfig.network_policy: {e}"))?,
@@ -446,9 +426,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         // explicit while a future change can introduce policy-driven
         // selection.
         bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
-        transparent_terminator_port: Some(crate::egress_redirect::terminator_port_for_vm_name(
-            &config.name,
-        )),
+        transparent_terminator_port: None,
     })
 }
 
@@ -458,15 +436,17 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn capabilities(&self) -> VmCapabilities {
-        // libkrun does not support memory snapshots (same trade as
-        // Apple Container) — vsock and TAP are available; pause/resume
-        // is theoretically possible but not exposed by libkrun's public
-        // C API today.
+        // libkrun does not support memory snapshots (same trade as Apple
+        // Container). Workload egress is guest→vsock→host endpoint only: no
+        // guest NIC and no gvproxy/passt dataplane. pause/resume is
+        // theoretically possible but not exposed by libkrun's public C API today.
         VmCapabilities {
             pause_resume: false,
             snapshots: false,
             vsock: true,
             tap_networking: false,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
             // libkrun's C API doesn't expose virtio-balloon control
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
@@ -521,12 +501,8 @@ impl VmBackend for LibkrunBackend {
 
         let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
         let cfg = build_supervisor_config(config, &state_dir)?;
-        let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(
-            &config.name,
-            &state_dir,
-            cfg.transparent_terminator_port
-                .expect("libkrun transparent terminator port is set"),
-        )?;
+        let mut endpoint_guard =
+            spawn_libkrun_egress_endpoint(&config.name, &state_dir, &config.network_policy)?;
         let pid_file = cfg.pid_file();
         // Remove any stale PID file from a previous crashed supervisor
         // so the wait-loop below can detect the new one unambiguously.
@@ -782,7 +758,7 @@ impl VmBackend for LibkrunBackend {
                 requested,
                 available,
                 hint: "libkrun has no live-memory snapshot — use the Firecracker (Linux) or \
-                       Vz (macOS 26+) backend for a live-memory resume, or `mvmctl up` for a \
+                       LegacyMacos (macOS 26+) backend for a live-memory resume, or `mvmctl up` for a \
                        cold boot"
                     .to_string(),
             });
@@ -1192,6 +1168,8 @@ mod tests {
         assert!(!caps.snapshots);
         assert!(!caps.pause_resume);
         assert!(!caps.tap_networking);
+        assert!(caps.no_guest_nic);
+        assert!(caps.host_vsock_proxy);
     }
 
     #[test]
@@ -1630,32 +1608,11 @@ mod tests {
     /// returned guard is defused (its Drop is a no-op, so an early return can't
     /// reap a process that was never started).
     #[test]
-    fn libkrun_substitution_not_spawned_when_no_secrets() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Empty state dir: no plan.json at all.
-        let guard = spawn_libkrun_egress_endpoint_if_needed("no-secrets-vm", tmp.path(), 18080)
-            .expect("no-secrets path must succeed");
-        assert!(
-            guard.vm_name.is_none(),
-            "a secret-free plan must yield a defused (no-op) guard"
-        );
-        // No pidfile was written (nothing spawned).
-        assert!(
-            !tmp.path()
-                .join(crate::substitution_spawn::SUBST_PID_FILE)
-                .exists()
-        );
-    }
-
-    #[test]
-    fn vsock_egress_cmdline_token_only_when_eligible() {
-        // Eligible: opted in, no secrets → token present.
+    fn vsock_egress_cmdline_token_only_when_secret_free() {
         assert_eq!(
-            vsock_egress_cmdline_token(true, false).as_deref(),
+            vsock_egress_cmdline_token(false).as_deref(),
             Some("mvm.vsock_egress=1")
         );
-        // Any disqualifier → no token (legacy NIC path, byte-identical cmdline).
-        assert_eq!(vsock_egress_cmdline_token(false, false), None);
-        assert_eq!(vsock_egress_cmdline_token(true, true), None);
+        assert_eq!(vsock_egress_cmdline_token(true), None);
     }
 }

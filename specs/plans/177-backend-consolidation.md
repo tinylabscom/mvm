@@ -198,4 +198,4 @@ Modified:
 ## deferred follow-ups
 - [x] DX-parity workstream (surface `save`/`restore`, cached fast-boot
       default, `--json` coverage, base pinning) — spun out to its own plan:
-      **[Plan 189](./189-vz-dx-parity.md)**.
+      **Plan 189**.

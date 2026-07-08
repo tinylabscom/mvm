@@ -65,7 +65,7 @@ function loads.
 - [ ] **Backend coverage:** libkrun + Vz first (matches the gateway-audit
       substrate coverage note — Firecracker/apple-container deferred, and
       apple-container is blocked on the `vmlinux` papercut, see
-      `specs/notes/vz-and-apple-container-builder-papercuts.md`).
+      `removed legacy macOS archival spec`).
 - [ ] **Tests:** unit — binding → mount-config mapping per language; negative —
       tampered volume refused before boot. E2E — `mvmctl up` a Python deps
       example (`examples/python/hello-app-with-deps`) and confirm the workload
@@ -119,4 +119,4 @@ copy — deps are not installed and the function fails at runtime with no signal
 - `crates/mvm-build/src/libkrun_builder.rs` — `BuilderJob::Install` arm.
 - `crates/mvm-sdk/src/compile/{flake,deps_audit}.rs` — nix-native bake + volume verify.
 - `crates/mvm-plan/src/types.rs` — `DepsVolumeBinding`.
-- `specs/notes/vz-and-apple-container-builder-papercuts.md` — backend blockers for full coverage.
+- `removed legacy macOS archival spec` — backend blockers for full coverage.

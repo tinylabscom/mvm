@@ -164,7 +164,7 @@ pub struct HostAgentServicesParams<'a> {
     /// Per-VM state dir (audit-signer pid/sock + the tenant-ref marker).
     pub state_dir: &'a Path,
     /// The backend-specific `BROKER_PORT` socket the daemon should bind for this
-    /// VM (libkrun `vm_vsock_port_socket`, vz `vm_vz_vsock_port_socket`).
+    /// VM (libkrun `vm_vsock_port_socket`, legacy_macos `vm_legacy_macos_vsock_port_socket`).
     pub broker_listen_socket: &'a Path,
 }
 
@@ -278,7 +278,7 @@ impl Drop for HostAgentServicesGuard {
 }
 
 /// Whether the host-agent daemon path is selected. **Default: enabled** — the
-/// per-tenant daemon is the default for an admitted libkrun/vz workload, so
+/// per-tenant daemon is the default for an admitted libkrun/legacy_macos workload, so
 /// `host.audit.v1` is available on a plain `up` (no `MVM_GATEWAY_BRIDGE`).
 /// `MVM_HOST_AGENT_DAEMON=0` is the opt-out escape hatch back to the per-VM
 /// broker fork during the transition; the fork is removed once the daemon path

@@ -211,11 +211,11 @@ pub fn sweep(
 }
 
 /// Supervisor pid-file names a per-VM state dir may carry. `pid` is the
-/// Apple-Container dev-VM owner file; `libkrun.pid` / `vz.pid` / `hvf.pid` are
+/// Apple-Container dev-VM owner file; `libkrun.pid` / `legacy-macos.pid` / `hvf.pid` are
 /// the workload-supervisor files (one per backend). The first one that exists
 /// and points at a live process marks the dir as having a live owner. HVF must
 /// be listed here or convergence reaps every running HVF machine's state dir.
-const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid", "pid"];
+const PID_FILE_NAMES: &[&str] = &["libkrun.pid", "legacy-macos.pid", "hvf.pid", "pid"];
 
 /// `kill(pid, 0)` existence probe — delivers no signal, just checks the
 /// process is alive. The cheap half of the live-vs-orphan discrimination
@@ -743,7 +743,7 @@ mod tests {
         let root = tmp.path();
         let dir = root.join("hvf-vm");
         std::fs::create_dir_all(&dir).unwrap();
-        // Only hvf.pid present (no libkrun.pid / vz.pid), pointing at us.
+        // Only hvf.pid present (no libkrun.pid / legacy-macos.pid), pointing at us.
         std::fs::write(dir.join("hvf.pid"), std::process::id().to_string()).unwrap();
 
         let view = FsRuntimeView::new(root);

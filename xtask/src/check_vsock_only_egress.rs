@@ -7,7 +7,7 @@
 //! a tap, or a userspace net gateway to that path re-introduces a guest NIC and
 //! fails closed here.
 //!
-//! Scope note: Firecracker / libkrun / vz still attach a virtio-net NIC today and
+//! Scope note: Firecracker / libkrun / legacy_macos still attach a virtio-net NIC today and
 //! are converging onto the vsock gateway separately (vsock-only egress step 2) — they are
 //! deliberately **out of scope** for this gate until that lands, so it guards only
 //! the directories that are supposed to already be NIC-free.

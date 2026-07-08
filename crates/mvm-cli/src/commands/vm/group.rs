@@ -34,10 +34,10 @@ pub(in crate::commands) enum VmCmd {
     /// Manage sealed instance snapshots (`ls`, `rm`)
     #[command(hide = true)]
     Snapshot(pause::SnapshotArgs),
-    /// Save a running Vz VM's memory + disk state
+    /// Save a running VM's memory + disk state when supported
     #[command(hide = true)]
     Save(checkpoint::SaveArgs),
-    /// Restore a Vz VM from a saved memory checkpoint
+    /// Restore a VM from a saved memory checkpoint when supported
     #[command(hide = true)]
     Restore(checkpoint::RestoreArgs),
     /// Capture, list, remove, or fork rootfs checkpoints

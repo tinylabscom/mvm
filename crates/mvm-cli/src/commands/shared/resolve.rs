@@ -176,6 +176,16 @@ pub fn resolve_run_network_policy(
     }
 }
 
+pub fn reject_removed_hypervisor(hypervisor: &str) -> Result<()> {
+    if matches!(hypervisor, "legacy-macos" | "virtualization") {
+        anyhow::bail!(
+            "the `{hypervisor}` backend has been removed; use `hvf` on macOS, \
+             `libkrun` where available, or `firecracker` on Linux/KVM"
+        );
+    }
+    Ok(())
+}
+
 /// How faithfully the resolved `backend` enforces `policy` on the transient
 /// (no-signed-bundle) run path. Recorded in the signed receipt **alongside**
 /// the requested `network_posture` so a verifier never mistakes a requested
@@ -186,7 +196,7 @@ pub fn resolve_run_network_policy(
 ///   identically on every backend (the flow-open gate / no gate), so the tier
 ///   is backend-independent.
 /// - An **allow-list / preset** is now host **and** port enforced on every
-///   backend: Firecracker via nftables (`-d <host> --dport <port>`), libkrun/Vz
+///   backend: Firecracker via nftables (`-d <host> --dport <port>`), libkrun/HVF
 ///   via the admission-time DNS pin feeding the `L4PolicyScan` (a direct-IP dial
 ///   to an unlisted address is dropped, not just an unlisted name). The tier is
 ///   uniformly `<backend>:l4-host-port`; the backend is still named so the
@@ -238,8 +248,8 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
 
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
-/// → hvf (the HVF VMM with vsock-only egress — no Vz supervisor, no
-/// gvproxy), macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
+/// → hvf (the HVF VMM with vsock-only egress), macOS 13-25 + libkrun → libkrun,
+/// else firecracker (surfaces a clear
 /// "not available" error). Any explicit value is returned as-is. The `MVM_HYPERVISOR`
 /// env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM override
 /// mirroring `MVM_BUILDER_BACKEND` for the builder, so a Linux/KVM host can opt into
@@ -250,7 +260,7 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
         return requested.to_string();
     }
     // Env override (auto-detect mode only — an explicit `--hypervisor` flag already
-    // won above): `MVM_HYPERVISOR=<firecracker|libkrun|vz|hvf|qemu>`, with the older
+    // won above): `MVM_HYPERVISOR=<firecracker|libkrun|hvf|qemu>`, with the older
     // `MVM_BACKEND` kept as a back-compat alias. Does not change the platform default.
     for var in ["MVM_HYPERVISOR", "MVM_BACKEND"] {
         if let Some(name) = std::env::var_os(var) {
@@ -263,11 +273,10 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
     let plat = mvm_core::platform::current();
     if plat.has_kvm() {
         "firecracker"
-    } else if plat.is_vz_default_tier() {
+    } else if plat.is_hvf_default_tier() {
         // macOS 26+ Apple Silicon: the HVF VMM (`hvf`) is the workload
-        // default. Vz is sunset (opt-in only via `--hypervisor vz`); the hvf path
-        // carries claim-10 egress over vsock via its per-VM gating endpoint — no
-        // gvproxy sidecar.
+        // default. The hvf path carries claim-10 egress over vsock via its
+        // per-VM gating endpoint.
         "hvf"
     } else if plat.has_libkrun() {
         "libkrun"
@@ -350,7 +359,7 @@ mod tests {
     fn enforcement_tier_uniform_for_deny_all_and_unrestricted() {
         // deny-all and unrestricted are enforced the same way on every backend,
         // so the receipt records a backend-independent tier.
-        for backend in ["firecracker", "libkrun", "vz"] {
+        for backend in ["firecracker", "libkrun", "hvf"] {
             assert_eq!(
                 egress_enforcement_label(backend, &NetworkPolicy::deny_all()),
                 "flow-drop"
@@ -365,7 +374,7 @@ mod tests {
     #[test]
     fn enforcement_tier_allow_list_is_uniform_l4_host_port() {
         // host:port is now L4-enforced on every backend (Firecracker nftables;
-        // libkrun/Vz via the admission-time DNS pin → L4 scan), so the receipt
+        // libkrun/HVF via the admission-time DNS pin → L4 scan), so the receipt
         // records `<backend>:l4-host-port` uniformly — no more `dns-name-only`.
         let p = NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
         assert_eq!(
@@ -376,7 +385,7 @@ mod tests {
             egress_enforcement_label("libkrun", &p),
             "libkrun:l4-host-port"
         );
-        assert_eq!(egress_enforcement_label("vz", &p), "vz:l4-host-port");
+        assert_eq!(egress_enforcement_label("hvf", &p), "hvf:l4-host-port");
     }
 
     /// An explicit `--hypervisor <x>` (anything but the `firecracker`
@@ -385,9 +394,21 @@ mod tests {
     #[test]
     fn explicit_hypervisor_is_returned_verbatim() {
         assert_eq!(resolve_effective_hypervisor("libkrun"), "libkrun");
-        assert_eq!(resolve_effective_hypervisor("vz"), "vz");
         assert_eq!(resolve_effective_hypervisor("hvf"), "hvf");
         assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
+    }
+
+    #[test]
+    fn reject_removed_hypervisor_refuses_legacy_macos_selectors() {
+        for selector in ["legacy-macos", "virtualization"] {
+            let err =
+                reject_removed_hypervisor(selector).expect_err("legacy_macos must be rejected");
+            assert!(
+                err.to_string().contains("has been removed"),
+                "unexpected error: {err}"
+            );
+        }
+        reject_removed_hypervisor("hvf").expect("hvf remains supported");
     }
 
     /// `MVM_HYPERVISOR` overrides auto-detect (and `MVM_BACKEND` is the
@@ -404,7 +425,7 @@ mod tests {
         }
         assert_eq!(resolve_effective_hypervisor("firecracker"), "libkrun");
         // An explicit flag wins over the env override.
-        assert_eq!(resolve_effective_hypervisor("vz"), "vz");
+        assert_eq!(resolve_effective_hypervisor("hvf"), "hvf");
         // The older alias is still honored.
         unsafe {
             std::env::remove_var("MVM_HYPERVISOR");
@@ -425,13 +446,12 @@ mod tests {
     }
 
     /// On the macOS-26 Apple Silicon tier the auto-detect default is the
-    /// HVF VMM (`hvf`) — never `vz`. Vz is sunset and reachable
-    /// only via an explicit `--hypervisor vz`. Host-conditioned: the assertion
-    /// only fires on a host that actually reports the tier.
+    /// HVF VMM (`hvf`). Host-conditioned: the assertion only fires on a host
+    /// that actually reports the tier.
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_26_default_is_hvf_not_vz() {
-        if !mvm_core::platform::current().is_vz_default_tier() {
+        if !mvm_core::platform::current().is_hvf_default_tier() {
             return; // Not on the macOS-26 tier (e.g. macOS 13-25 CI runner).
         }
         let saved_hv = std::env::var_os("MVM_HYPERVISOR");

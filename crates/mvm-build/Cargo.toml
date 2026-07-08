@@ -92,11 +92,11 @@ reqwest = { workspace = true, default-features = false, features = ["blocking", 
 # launcher (`libkrun_builder::LibkrunBuilderVm`). Gated by
 # `builder-vm`; default-off until the cutover flips polarity.
 libkrun-sys = { workspace = true, optional = true }
-# `VzBuilderBackend` builds a `vz::SupervisorConfig`
-# JSON document and pipes it to the Swift `mvm-vz-supervisor`. The
+# `LegacyBuilderBackend` builds a `legacy_macos::SupervisorConfig`
+# JSON document and pipes it to the Swift `mvm-legacy-macos-supervisor`. The
 # crate is pure types (no C linkage, no platform-specific deps) so
 # it costs nothing on non-macOS hosts; the runtime spawn bails when
-# Vz isn't available.
+# legacy macOS isn't available.
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

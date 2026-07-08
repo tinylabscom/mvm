@@ -270,7 +270,7 @@ impl GuestSidecar {
     /// genuinely overlay-aware: the `/mvm/runtime` mount point exists
     /// and the injected `/init` prefers an overlay-resident agent when
     /// one is attached (Firecracker) and falls back to the baked agent
-    /// otherwise (libkrun/Vz). `overlay_aware: true` is therefore an
+    /// otherwise (libkrun/LegacyMacos). `overlay_aware: true` is therefore an
     /// honest claim, not a gate bypass — only emit this sidecar once
     /// the injection has actually run.
     ///
@@ -375,7 +375,7 @@ pub trait BuilderVm {
         Err(BuilderVmError::VmmUnavailable {
             requested: "stage0-bootstrap".to_string(),
             reason: "Stage 0 builder-VM bootstrap is implemented for the libkrun \
-                     backend only; Vz and Firecracker Stage 0 are tracked in \
+                     backend only; LegacyMacos and Firecracker Stage 0 are tracked in \
                      ADR-068 §\"Backend gaps\". Bootstrap with the libkrun builder \
                      backend."
                 .to_string(),
@@ -410,7 +410,7 @@ pub enum BuilderVmError {
 
     /// A host VMM the operator explicitly asked for isn't available on
     /// this platform. Carries the requested label (e.g.
-    /// `"linux-builder-vm"`, `"vz"`) and an
+    /// `"linux-builder-vm"`, `"legacy-macos"`) and an
     /// actionable hint pointing at the kernel-module parameter,
     /// platform-version gap, or install step the operator needs.
     #[error("{requested} is not available on this host: {reason}")]
@@ -606,16 +606,16 @@ impl BuilderVm for StubBuilderVm {
 // substrate orchestration (cmd.sh emission, /job/result parsing, panic
 // detection, NixStoreImageLock, stderr-tail capture) and the
 // hypervisor-specific spawn/wait. Lifting the substrate out behind this
-// trait lets a future `VzBuilderVm` reuse ~850 lines of orchestration
-// code with only a Vz-side mount glue (~600 lines).
+// trait lets a future `LegacyBuilderVm` reuse ~850 lines of orchestration
+// code with only a LegacyMacos-side mount glue (~600 lines).
 //
 // Today the trait + supporting types exist with no impls yet;
 // subsequent slices wire it for libkrun (port LibkrunBuilderVm) and
-// Vz (new VzBuilderVm).
+// LegacyMacos (new LegacyBuilderVm).
 // ============================================================================
 
 /// Per-run configuration the builder helper passes to the underlying
-/// hypervisor. Hypervisor-agnostic — both libkrun and Vz consume it
+/// hypervisor. Hypervisor-agnostic — both libkrun and LegacyMacos consume it
 /// identically.
 ///
 /// Resources (`vcpus`, `memory_mib`) are caller-supplied; the
@@ -632,7 +632,7 @@ pub struct BuilderVmRunConfig {
     pub kernel_cmdline: String,
     /// Optional initrd path.
     pub initrd_path: Option<PathBuf>,
-    /// vCPU count. The libkrun + Vz backends both refuse values
+    /// vCPU count. The libkrun + LegacyMacos backends both refuse values
     /// above their host-determined caps.
     pub vcpus: u8,
     /// Guest memory in MiB.
@@ -648,7 +648,7 @@ pub struct BuilderVmRunConfig {
 
 /// virtio-fs share to attach for the builder run. Maps onto
 /// `libkrun_add_virtiofs` (libkrun) or
-/// `VZVirtioFileSystemDeviceConfiguration` (Vz).
+/// `VZVirtioFileSystemDeviceConfiguration` (LegacyMacos).
 ///
 /// Builder mode is the *only* path that attaches virtio-fs shares
 /// today; workload microVMs default to zero shares and refuse
@@ -697,7 +697,7 @@ pub struct BuilderVmExitInfo {
 /// builds on top of.
 ///
 /// Both `LibkrunBuilderVm` (today, via the libkrun supervisor) and
-/// the future `VzBuilderVm` (via the `mvm-vz-supervisor`) implement
+/// the future `LegacyBuilderVm` (via the `mvm-legacy-macos-supervisor`) implement
 /// this trait. The shared orchestration logic — cmd.sh emission,
 /// `/job/result` JSON parsing, `NixStoreImageLock`, kernel-panic
 /// detection on the console log, stderr-tail capture — lives in the
@@ -718,7 +718,7 @@ pub struct BuilderVmExitInfo {
 ///
 /// - `LibkrunBuilderBackend` — `mvm-build/src/libkrun_builder.rs`,
 ///   wraps `spawn_supervisor_and_wait` + `wait_with_panic_detector`.
-/// - `VzBuilderBackend` — wraps `VzBackend::run_attached` with
+/// - `LegacyBuilderBackend` — wraps `LegacyMacosBackend::run_attached` with
 ///   builder-side virtio-fs share configuration.
 pub trait VmBackendForBuilder: Send + Sync {
     /// Spawn the supervisor for a builder run, attach the given
@@ -1175,7 +1175,7 @@ mod tests {
 
     #[test]
     fn run_stage0_default_is_a_documented_backend_gap() {
-        // Backends without a Stage 0 impl (Stub, and Vz until a future
+        // Backends without a Stage 0 impl (Stub, and LegacyMacos until a future
         // slice) inherit the trait default — a fail-closed error that
         // names the gap and the recovery path, never a silent no-op or
         // a todo!() panic.

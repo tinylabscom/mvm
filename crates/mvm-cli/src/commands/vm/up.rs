@@ -12,7 +12,7 @@ use mvm_backend::image;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::naming::validate_vm_name;
 
-use super::super::env::dev_vz::ensure_workload_kernel;
+use super::super::env::dev_vm::ensure_workload_kernel;
 use super::audit_chain::{AuditEmitter, default_audit_dir};
 use super::host_signer::load_or_init_at;
 use super::policy_resolver::{
@@ -608,12 +608,11 @@ pub(super) fn admit_plan_for_boot(
 
 /// Build the boot-time admission hook for an **untrusted transient run** —
 /// deny-all egress, no secrets, tenant `local`. The locally-signed
-/// `ExecutionPlan` sets `tenant_id`, which makes the libkrun/Vz supervisor
+/// `ExecutionPlan` sets `tenant_id`, which makes the bridge-backed runtimes
 /// spawn the enforcing gateway bridge (so the resolved egress policy is
 /// actually applied) instead of the legacy unfiltered path; Firecracker reads
 /// the same field through nftables. Shared by `mvmctl run` and the MCP
-/// code-runner so both admit identically — neither leaves a deny-all inert on
-/// the bridge backends.
+/// code-runner so both admit identically.
 ///
 /// The returned closure owns a fresh nonce ledger per boot and yields the
 /// `SessionAuditSubstrate` (tenant + signed plan) the exec layer hands to the
@@ -883,14 +882,13 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
 /// off disk to decide whether to stand up its egress moat needs the pre-start
 /// persist:
 ///
-/// - **Firecracker**: the nft TAP-redirect moat reads the plan at spawn time.
-/// - **vz / libkrun / hvf (macOS)**: the substitution endpoint reads
+/// - **Firecracker / libkrun / hvf (macOS)**: the host-vsock proxy gate reads
 ///   `<state_dir>/plan.json` inside `start()` to decide whether to spawn.
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
 pub(super) fn persists_plan_before_start(hypervisor: &str) -> bool {
-    matches!(hypervisor, "firecracker" | "vz" | "libkrun" | "hvf")
+    matches!(hypervisor, "firecracker" | "libkrun" | "hvf")
 }
 
 pub(super) fn load_workload_ir(
@@ -936,7 +934,7 @@ pub(in crate::commands) struct Args {
     /// under /data, /work, or /mnt (system mounts are read-only).
     #[arg(short, long, value_parser = clap_volume_spec)]
     pub volume: Vec<String>,
-    /// Hypervisor backend (firecracker, libkrun, qemu, vz). Default: auto-detect per host
+    /// Hypervisor backend (firecracker, libkrun, qemu, hvf). Default: auto-detect per host
     #[arg(long, default_value = "firecracker")]
     pub hypervisor: String,
     /// Port mapping (format: HOST:GUEST or PORT). Repeatable
@@ -962,7 +960,7 @@ pub(in crate::commands) struct Args {
     /// Keep this many prelaunched supervisor standbys warm so the next
     /// auto-named `up` claims one instead of cold-booting. Omit to use the
     /// residency-policy default (`MVM_RESIDENCY`); pass `0` to disable.
-    /// Supported by Firecracker, libkrun, and platform-gated Vz.
+    /// Supported by Firecracker and libkrun.
     #[arg(long)]
     pub warm_pool_size: Option<u32>,
     /// Reload ~/.mvm/config.toml automatically when it changes
@@ -1065,7 +1063,7 @@ pub(in crate::commands) struct Args {
     pub from_workload_ir: Option<std::path::PathBuf>,
     /// Explicit operator acknowledgement that the
     /// selected backend's isolation tier is acceptable for this launch.
-    /// A non-Tier-1 backend (libkrun, qemu, Apple Container, vz) requires
+    /// A non-Tier-1 backend (libkrun, qemu, Apple Container, hvf) requires
     /// this flag. A future `--prod` mode will *block* rather than warn;
     /// today we surface the signal without changing default behaviour.
     /// libkrun isolation is not Firecracker isolation.
@@ -1109,6 +1107,7 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub image_label: &'a str,
     pub resolved_digest: &'a str,
     pub rootfs_path: &'a std::path::Path,
+    pub unpacked_root: Option<&'a std::path::Path>,
     pub profile: &'a str,
     pub cpus: u32,
     pub memory_mib: u32,
@@ -1131,6 +1130,30 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     /// carry an attenuated ProdSafe-only grant. Baked-entrypoint boots (no
     /// trailing argv, non-dev profile) may still receive the grant.
     pub has_ad_hoc_argv: bool,
+}
+
+fn persistent_oci_root_strategy(
+    unpacked_root: Option<&std::path::Path>,
+    backend_virtiofs_root: bool,
+    sealed: bool,
+) -> (
+    mvm_build::run_image::RootStrategy,
+    Option<std::path::PathBuf>,
+) {
+    let Some(root) = unpacked_root else {
+        return (mvm_build::run_image::RootStrategy::BlockExt4, None);
+    };
+    let strategy =
+        mvm_build::run_image::select_root_strategy(mvm_build::run_image::RootStrategySelection {
+            backend_virtiofs_root,
+            prod: false,
+            sealed,
+        });
+    let root = match strategy {
+        mvm_build::run_image::RootStrategy::VirtiofsRoot => Some(root.to_path_buf()),
+        mvm_build::run_image::RootStrategy::BlockExt4 => None,
+    };
+    (strategy, root)
 }
 
 fn register_vm_name(vm_name: &str, network_name: &str) {
@@ -1159,6 +1182,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         image_label,
         resolved_digest,
         rootfs_path,
+        unpacked_root,
         profile,
         cpus,
         memory_mib,
@@ -1176,6 +1200,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     let effective_hypervisor = hypervisor_override
         .map(String::from)
         .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
+    super::shared::reject_removed_hypervisor(&effective_hypervisor)?;
     let kernel_path = if let Some(k) = kernel_path {
         k
     } else {
@@ -1191,6 +1216,17 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     register_vm_name(name, "default");
 
     let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
+    mvm_backend::workload_backend::require_vsock_only_workload_egress(
+        &backend,
+        &network_policy,
+        "persistent workload boot",
+    )?;
+    let sealed_image = super::agent_verbs::image_is_sealed(rootfs_path);
+    let (root_strategy, virtiofs_root) = persistent_oci_root_strategy(
+        unpacked_root,
+        backend.capabilities().virtiofs_root,
+        sealed_image,
+    );
     let admission_ledger = InMemoryNonceLedger::new();
     let admission = admit_plan_for_boot(AdmitPlanForBootParams {
         tenant: "local",
@@ -1222,7 +1258,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             false,
             has_ad_hoc_argv,
             profile == "dev",
-            super::agent_verbs::image_is_sealed(rootfs_path),
+            sealed_image,
         ),
     })?;
     let mut start_config = VmStartParams {
@@ -1248,11 +1284,12 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         network_policy,
     }
     .into_start_config();
+    start_config.virtiofs_root = virtiofs_root.map(|p| p.display().to_string());
     // A persistent named/detached machine is dev-accessible for its lifetime:
     // `machine run -t` boots through here, and `machine shell` / `machine
     // console` attach to it later. Pre-open the interactive-console data range
     // so those attaches reach the agent's dynamic data port on the
-    // per-port-UDS backends (libkrun, Vz). Claim 15 still bars a sealed prod
+    // per-port-UDS backends. Claim 15 still bars a sealed prod
     // guest at the agent + `enforce_accessible_gate`, leaving the listeners
     // inert there.
     start_config.dev_console = true;
@@ -1274,6 +1311,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         return Err(err);
     }
     emit_launched_if(&admission, &effective_hypervisor);
+    emit_boot_posture_if(&admission, root_strategy);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);
     Ok(())
@@ -1283,7 +1321,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
 /// populating `VmStartConfig`'s overlay fields from the resolver's cache
 /// probe. **Firecracker-only**: it's the sole backend that attaches the
 /// overlay (a second virtio-blk + `mvm.runtime_roothash=` on the cmdline);
-/// libkrun/Vz ignore the fields, so we skip them.
+/// other backends ignore the fields, so we skip them.
 /// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
 /// fields `None` and the VM boots legacy. `resolve()` is a pure cache read
 /// — no build, no download, no `nix` — so this is safe on every host.
@@ -1309,7 +1347,7 @@ fn attach_runtime_overlay(
 
 /// Kernel-less images (mkGuest ships no kernel) boot fine on libkrun,
 /// which materializes its own bundled kernel and ignores this path. The
-/// out-of-process backends (vz and firecracker) need a real kernel file;
+/// out-of-process Firecracker needs a real kernel file;
 /// fall back to the cached builder-VM kernel — the same kernel the builder
 /// and dev VMs boot — rather than handing them a missing path.
 ///
@@ -1323,11 +1361,8 @@ pub(super) fn resolve_workload_kernel(
     if std::path::Path::new(vmlinux_path).exists() {
         return Ok(vmlinux_path.to_string());
     }
-    // `virtualization` is the long-form alias the backend dispatcher
-    // accepts for vz; missing it here would skip the fallback and hand
-    // the backend a nonexistent kernel path. libkrun supplies its own
-    // bundled kernel, so it never needs the fallback.
-    if !matches!(hypervisor, "vz" | "virtualization" | "firecracker") {
+    // libkrun supplies its own bundled kernel, so it never needs the fallback.
+    if !matches!(hypervisor, "firecracker") {
         return Ok(vmlinux_path.to_string());
     }
     let arch = if cfg!(target_arch = "aarch64") {
@@ -1395,7 +1430,7 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
     } else {
         "x86_64"
     };
-    let source_checkout = super::super::env::dev_vz::find_builder_vm_flake_is_source_checkout();
+    let source_checkout = super::super::env::dev_vm::find_builder_vm_flake_is_source_checkout();
     Ok(Some(resolve_pinned_kernel(
         &cache_dir,
         arch,
@@ -1496,35 +1531,17 @@ mod resolve_workload_kernel_tests {
         let tmp = tempfile::tempdir().unwrap();
         let vmlinux = tmp.path().join("vmlinux");
         std::fs::write(&vmlinux, b"kernel").unwrap();
-        let result = resolve_workload_kernel(vmlinux.to_str().unwrap(), "vz").unwrap();
+        let result = resolve_workload_kernel(vmlinux.to_str().unwrap(), "hvf").unwrap();
         assert_eq!(result, vmlinux.to_str().unwrap());
     }
 
     #[test]
-    fn non_vz_hypervisor_passes_through_even_when_missing() {
+    fn non_firecracker_hypervisor_passes_through_even_when_missing() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", tmp.path());
         let result = resolve_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
         assert_eq!(result, "/nonexistent/vmlinux");
-    }
-
-    #[test]
-    fn vz_missing_kernel_falls_back_to_builder_vm_cache() {
-        let mut env = TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let arch = if cfg!(target_arch = "aarch64") {
-            "aarch64"
-        } else {
-            "x86_64"
-        };
-        let fallback_dir = tmp.path().join("builder-vm").join(arch);
-        std::fs::create_dir_all(&fallback_dir).unwrap();
-        let fallback = fallback_dir.join("vmlinux");
-        std::fs::write(&fallback, b"builder-kernel").unwrap();
-        env.set("MVM_CACHE_DIR", tmp.path());
-        let result = resolve_workload_kernel("/nonexistent/vmlinux", "vz").unwrap();
-        assert_eq!(result, fallback.to_str().unwrap());
     }
 
     #[test]
@@ -1550,14 +1567,17 @@ mod resolve_workload_kernel_tests {
     }
 
     #[test]
-    fn vz_both_missing_returns_error_mentioning_dev_up() {
+    fn firecracker_both_missing_returns_error_mentioning_dev_up() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", tmp.path());
-        let err = resolve_workload_kernel("/nonexistent/vmlinux", "vz").unwrap_err();
+        let err = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("dev up"), "expected 'dev up' in: {msg}");
-        assert!(msg.contains("vz"), "expected hypervisor name in: {msg}");
+        assert!(
+            msg.contains("firecracker"),
+            "expected hypervisor name in: {msg}"
+        );
     }
 }
 
@@ -1866,7 +1886,7 @@ mod admit_plan_tests {
     // The shared untrusted-transient admit closure (used by both `mvmctl run`
     // and the MCP code-runner) must produce a real audit substrate — a
     // non-empty `tenant_id` + signed `plan_json`. That substrate is precisely
-    // what makes the libkrun/Vz supervisor spawn the enforcing gateway bridge,
+    // what makes bridge-backed runtimes spawn the enforcing gateway bridge,
     // so a `Some` here is the proof that a deny-all is no longer inert on the
     // bridge backends (the bug: the MCP path passed `admit = None`).
     #[test]
@@ -2163,7 +2183,7 @@ mod admit_plan_tests {
         let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
             tenant: "local",
             vm_name: "vm-unrestricted",
-            backend_name: "vz",
+            backend_name: "hvf",
             rootfs_path: &rootfs,
             precomputed_image_sha256: None,
             cpus: 1,
@@ -2781,12 +2801,42 @@ port_hi  = 443
     }
 
     #[test]
+    fn persistent_oci_root_strategy_uses_unpacked_root_when_backend_supports_it() {
+        let unpacked_root = std::path::Path::new("/cache/oci/unpacked/example");
+        let (strategy, virtiofs_root) =
+            persistent_oci_root_strategy(Some(unpacked_root), true, false);
+
+        assert_eq!(strategy, mvm_build::run_image::RootStrategy::VirtiofsRoot);
+        assert_eq!(virtiofs_root.as_deref(), Some(unpacked_root));
+    }
+
+    #[test]
+    fn persistent_oci_root_strategy_falls_back_for_block_only_cases() {
+        let unpacked_root = std::path::Path::new("/cache/oci/unpacked/example");
+
+        for (candidate, backend_virtiofs_root, sealed) in [
+            (None, true, false),
+            (Some(unpacked_root), false, false),
+            (Some(unpacked_root), true, true),
+        ] {
+            let (strategy, virtiofs_root) =
+                persistent_oci_root_strategy(candidate, backend_virtiofs_root, sealed);
+
+            assert_eq!(strategy, mvm_build::run_image::RootStrategy::BlockExt4);
+            assert!(
+                virtiofs_root.is_none(),
+                "block-root persistent boot must not pass a virtiofs root"
+            );
+        }
+    }
+
+    #[test]
     fn persists_plan_before_start_covers_the_substitution_backends() {
         // The substitution endpoint reads <state_dir>/plan.json inside start() to
         // decide whether to spawn, so every backend that spawns it must persist the
         // plan first — including the hvf backend. QEMU must not (it would
         // overwrite the in-memory config).
-        for hv in ["firecracker", "vz", "libkrun", "hvf"] {
+        for hv in ["firecracker", "libkrun", "hvf"] {
             assert!(
                 persists_plan_before_start(hv),
                 "{hv} spawns the substitution endpoint and must persist plan.json"

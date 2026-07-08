@@ -280,20 +280,19 @@ mvmctl dev up --cpus 8 --memory 16
 Force a specific backend:
 ```bash
 mvmctl machine run --flake . --hypervisor firecracker
-mvmctl machine run --flake . --hypervisor vz
+mvmctl machine run --flake . --hypervisor hvf
 mvmctl machine run --flake . --hypervisor libkrun
 mvmctl machine run --flake . --hypervisor qemu    # dev/test, no /dev/kvm
 mvmctl doctor   # check available backends
 ```
 
-### macOS: first-run codesigning for `hvf`, `vz`, and `libkrun`
+### macOS: first-run codesigning for `hvf` and `libkrun`
 
-The macOS backends — `hvf` (the default), `vz`, and `libkrun` — need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
+The macOS backends — `hvf` (the default) and `libkrun` — need ad-hoc codesigning before the macOS kernel will let the binary touch the hypervisor APIs:
 
-- `com.apple.security.virtualization` — required by `Virtualization.framework` (the `vz` backend).
 - `com.apple.security.hypervisor` — required by direct `Hypervisor.framework` callers (the `hvf` and `libkrun` backends).
 
-On the **first** run of either backend, `mvmctl` ad-hoc signs itself with both entitlements and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `hvf`, `vz`, and `libkrun` does not re-sign.
+On the **first** run of either backend, `mvmctl` ad-hoc signs itself and re-spawns the current invocation. The same signed binary covers both backends, so swapping `--hypervisor` between `hvf` and `libkrun` does not re-sign.
 
 What you'll see on the first run:
 
