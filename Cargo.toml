@@ -241,7 +241,6 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 names = { version = "0.14", default-features = false }
 
 # Signal handling
-ctrlc = "3.4"
 libc = "0.2"
 # Readiness-driven event loop for the in-house VMM's host↔guest vsock I/O thread
 # (os-poll = kqueue/epoll + Waker; os-ext = SourceFd to register std sockets).

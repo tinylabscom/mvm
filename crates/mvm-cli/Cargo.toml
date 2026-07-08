@@ -36,7 +36,6 @@ uuid.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 clap_complete.workspace = true
-ctrlc.workspace = true
 libc.workspace = true
 indicatif.workspace = true
 inquire.workspace = true

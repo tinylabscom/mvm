@@ -862,7 +862,7 @@ fn run_inner(
     {
         let interrupted = interrupted.clone();
         let vm_name = vm_name.clone();
-        let _ = ctrlc::set_handler(move || {
+        let _ = crate::signal::set_ctrlc_handler(move || {
             interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
             let backend = AnyBackend::auto_select();
             let _ = backend.stop_transient(&VmId(vm_name.clone()));
