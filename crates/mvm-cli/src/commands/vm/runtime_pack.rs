@@ -19,7 +19,7 @@ use crate::exec::ImageSource;
 /// `Ok(None)`), or any resolve error, is an `Err` here — never a fallback to
 /// building or pulling an image. The caller asked for this specific source.
 #[cfg(feature = "manifest-verify")]
-pub(super) fn resolve_runtime_pack_image_source(prod: bool) -> Result<ImageSource> {
+pub(in crate::commands) fn resolve_runtime_pack_image_source(prod: bool) -> Result<ImageSource> {
     use std::collections::BTreeSet;
 
     use anyhow::Context;
@@ -76,7 +76,7 @@ pub(super) fn resolve_runtime_pack_image_source(prod: bool) -> Result<ImageSourc
 }
 
 #[cfg(not(feature = "manifest-verify"))]
-pub(super) fn resolve_runtime_pack_image_source(_prod: bool) -> Result<ImageSource> {
+pub(in crate::commands) fn resolve_runtime_pack_image_source(_prod: bool) -> Result<ImageSource> {
     anyhow::bail!(
         "--runtime-pack requires an mvmctl build with keyless pack verification (the \
          manifest-verify feature); this binary was built without it"

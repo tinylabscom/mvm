@@ -12,12 +12,14 @@ pub(super) fn resolve_persistent_spec(
     let has_source = args.image.is_some()
         || args.manifest.is_some()
         || resolved_manifest_slot.is_some()
+        || args.runtime_pack
         || direct_boot;
     if !has_source {
         return match existing {
             Some(spec) => Ok((spec, SpecReconcile::Reuse)),
             None => anyhow::bail!(
-                "machine {name:?} does not exist; pass --image, --manifest, or --flake to create it"
+                "machine {name:?} does not exist; pass --image, --manifest, --flake, or \
+                 --runtime-pack to create it"
             ),
         };
     }

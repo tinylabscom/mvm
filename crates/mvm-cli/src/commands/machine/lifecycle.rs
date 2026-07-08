@@ -86,12 +86,32 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volume_cfg = build_machine_volume_cfg(&spec.volumes)?;
 
-    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest) = if std::env::var(
-        "MVM_DIRECT_BOOT",
-    )
-    .as_deref()
-        == Ok("1")
+    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest, boot_verity) = if spec
+        .runtime_pack
     {
+        let src = crate::commands::vm::runtime_pack::resolve_runtime_pack_image_source(false)?;
+        let crate::exec::ImageSource::Prebuilt {
+            kernel_path,
+            rootfs_path,
+            label,
+            ..
+        } = src
+        else {
+            anyhow::bail!("runtime pack did not resolve to a prebuilt image source");
+        };
+        let digest = label
+            .strip_prefix("runtime-pack:")
+            .unwrap_or(&label)
+            .to_string();
+        let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs_path);
+        (
+            Some(kernel_path),
+            label,
+            std::path::PathBuf::from(rootfs_path),
+            digest,
+            (verity_path, roothash),
+        )
+    } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
         let kernel = std::env::var("MVM_KERNEL_PATH")
             .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_KERNEL_PATH"))?;
         let rootfs = std::env::var("MVM_ROOTFS_PATH")
@@ -101,6 +121,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
             "direct-boot".to_string(),
             std::path::PathBuf::from(rootfs),
             "direct-boot".to_string(),
+            (None, None),
         )
     } else {
         let (label, rootfs, digest) = if let Some(slot_hash) = &spec.manifest {
@@ -136,11 +157,11 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
             )
         } else {
             anyhow::bail!(
-                "machine {name:?} spec has neither image nor manifest — use `machine rm` to remove and recreate it",
+                "machine {name:?} spec has neither an image, a manifest, nor a runtime-pack source — use `machine rm` to remove and recreate it",
                 name = spec.name
             );
         };
-        (None, label, rootfs, digest)
+        (None, label, rootfs, digest, (None, None))
     };
     let kernel_path = match direct_boot_kernel {
         Some(k) => Some(k),
@@ -161,6 +182,8 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         backend_name: &effective_hypervisor,
         no_supervisor: args.no_supervisor,
         kernel_path,
+        verity_path: boot_verity.0,
+        roothash: boot_verity.1,
         agent_verb: spec.agent_verb.clone(),
         has_ad_hoc_argv: args.has_ad_hoc_argv,
     })?;
