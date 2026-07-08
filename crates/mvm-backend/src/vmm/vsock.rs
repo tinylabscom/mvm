@@ -180,6 +180,16 @@ pub(super) struct VsockShared {
     /// Inbound vsock header per substitution stream (keyed by guest `src_port`), so
     /// an endpoint reply can be framed back on the right stream.
     substitution_hdrs: std::collections::HashMap<u32, Hdr>,
+    /// Per-VM host-services broker relay. `BROKER_PORT` streams are relayed
+    /// byte-for-byte to the per-VM broker UDS the host-agent daemon bound, so a
+    /// guest `host.audit.v1` call reaches the broker exactly as on the other
+    /// backends. Reuses the same generic guest-stream↔UDS relay the egress path
+    /// uses: it opens the UDS on the first frame and relays verbatim in both
+    /// directions, failing closed when no broker socket is wired.
+    broker: super::substitution_bridge::SubstitutionBridge,
+    /// Inbound vsock header per broker stream (keyed by guest `src_port`), so a
+    /// broker reply can be framed back on the right stream.
+    broker_hdrs: std::collections::HashMap<u32, Hdr>,
     /// Host→guest console bridge (dev-only). Host console clients connect to a
     /// per-port Unix socket the supervisor bound and reach the guest console
     /// listener on that data port. Empty (binds nothing) for a sealed prod config —
@@ -208,6 +218,8 @@ impl VsockShared {
             agent: super::agent_bridge::AgentBridge::new(),
             substitution: super::substitution_bridge::SubstitutionBridge::new(),
             substitution_hdrs: std::collections::HashMap::new(),
+            broker: super::substitution_bridge::SubstitutionBridge::new(),
+            broker_hdrs: std::collections::HashMap::new(),
             console: super::console_bridge::ConsoleBridge::new(),
         }
     }
@@ -242,6 +254,22 @@ impl VsockShared {
         counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     ) {
         self.substitution.set_activity(counter);
+    }
+
+    /// Point the broker relay at this VM's host-services broker Unix socket (the
+    /// per-VM UDS the host-agent daemon bound). Once set, a guest connect to
+    /// `BROKER_PORT` is relayed byte-for-byte to the broker, so a guest
+    /// `host.audit.v1` call reaches it. Without it, `BROKER_PORT` streams fail
+    /// closed.
+    pub fn set_broker_endpoint(&mut self, path: &std::path::Path) {
+        self.broker.set_endpoint(path);
+    }
+
+    /// Share the heartbeat activity counter with the broker relay so an open
+    /// stream awaiting a broker reply keeps the run loop waking an idle guest
+    /// (the same counter the egress relay and agent bridge use).
+    pub fn set_broker_activity(&mut self, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        self.broker.set_activity(counter);
     }
 
     /// Capture the transient workload-exit code: a guest write of a 4-byte LE i32
@@ -452,6 +480,15 @@ impl VsockShared {
                     self.handle_substitution_request(&hdr, &payload[..n]);
                     self.add_recv(&hdr, n as u32);
                     return;
+                } else if hdr.dst_port == mvm_guest::vsock::BROKER_PORT {
+                    // The broker port is a pure relay to the per-VM host-services
+                    // broker UDS the host-agent daemon bound — the same generic relay
+                    // the egress path uses. The device parses nothing and gates
+                    // nothing; it only relays the stream both ways. With no broker
+                    // socket wired the bridge fails closed (resets the stream).
+                    self.handle_broker_request(&hdr, &payload[..n]);
+                    self.add_recv(&hdr, n as u32);
+                    return;
                 } else {
                     self.received.extend_from_slice(&payload[..n]);
                 }
@@ -465,6 +502,11 @@ impl VsockShared {
                 // endpoint connection so the endpoint sees EOF on the request.
                 if self.substitution_hdrs.remove(&hdr.src_port).is_some() {
                     self.substitution.close(hdr.src_port);
+                }
+                // Likewise for a broker stream the guest is done with: drop its
+                // endpoint connection so the broker sees EOF on the request.
+                if self.broker_hdrs.remove(&hdr.src_port).is_some() {
+                    self.broker.close(hdr.src_port);
                 }
                 self.recv_cnt.remove(&(hdr.dst_port, hdr.src_port));
                 self.queue_reply(&hdr, OP_RST, &[]);
@@ -494,6 +536,28 @@ impl VsockShared {
         }
     }
 
+    /// Frame an inbound broker request to the broker [`SubstitutionBridge`] and map
+    /// its action to a vsock control reply. Reuses the same generic guest-stream↔UDS
+    /// relay the egress path uses: it relays the stream to the per-VM broker UDS the
+    /// host-agent daemon bound; the device owns only the rx framing and the
+    /// per-stream header.
+    fn handle_broker_request(&mut self, hdr: &Hdr, payload: &[u8]) {
+        use super::substitution_bridge::SubstitutionAction;
+        match self.broker.handle_frame(hdr.src_port, payload) {
+            // Relayed: ack the bytes so the guest's credit recovers, and keep the
+            // stream's header for framing replies / a later reset.
+            SubstitutionAction::Relayed => {
+                self.broker_hdrs.insert(hdr.src_port, *hdr);
+                self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
+            }
+            // Fail-closed: no broker socket or a connect failure → reset the stream.
+            SubstitutionAction::Refused => {
+                self.broker_hdrs.remove(&hdr.src_port);
+                self.queue_reply(hdr, OP_RST, &[]);
+            }
+        }
+    }
+
     /// Drain endpoint replies into the guest's rx queue — the host→guest half of
     /// the substitution relay, called on every timer tick (via [`RunDevice::poll`])
     /// so a `WireResponse` reaches a guest blocked in `recv`. Returns `Some(irq)`
@@ -510,6 +574,31 @@ impl VsockShared {
         }
         for conn_id in drained.closed {
             self.substitution_hdrs.remove(&conn_id);
+        }
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+
+    /// Drain broker replies into the guest's rx queue — the host→guest half of the
+    /// broker relay, mirroring [`drain_substitution`](Self::drain_substitution). A
+    /// `host.audit.v1` response from the broker reaches a guest blocked in `recv`
+    /// via this pump. Returns `Some(irq)` if a reply was delivered into a posted rx
+    /// buffer.
+    pub fn drain_broker(&mut self) -> Option<u32> {
+        if !self.broker.has_active() {
+            return None;
+        }
+        let drained = self.broker.drain();
+        for (conn_id, bytes) in drained.ready {
+            if let Some(h) = self.broker_hdrs.get(&conn_id).copied() {
+                self.queue_reply(&h, OP_RW, &bytes);
+            }
+        }
+        for conn_id in drained.closed {
+            self.broker_hdrs.remove(&conn_id);
         }
         if self.flush_rx() {
             Some(self.irq)
@@ -705,8 +794,9 @@ impl VsockShared {
     pub(super) fn service_host_io(&mut self) -> bool {
         let agent = self.drain_agent();
         let subst = self.drain_substitution();
+        let broker = self.drain_broker();
         let console = self.drain_console();
-        agent.is_some() || subst.is_some() || console.is_some()
+        agent.is_some() || subst.is_some() || broker.is_some() || console.is_some()
     }
 
     /// Raw fd of the bound host agent listener, for the I/O thread to register
@@ -775,6 +865,16 @@ impl VirtioVsock {
     /// Share the heartbeat activity counter with the egress relay.
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_substitution_activity(counter);
+    }
+
+    /// Point the broker relay at this VM's host-services broker Unix socket.
+    pub fn set_broker_endpoint(&mut self, path: &std::path::Path) {
+        self.lock().set_broker_endpoint(path);
+    }
+
+    /// Share the heartbeat activity counter with the broker relay.
+    pub fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.lock().set_broker_activity(counter);
     }
 
     /// Capture the transient workload-exit code (guest write to the exit port).
@@ -1059,6 +1159,91 @@ mod tests {
         assert!(
             d.pending_rx.iter().any(|(h, _)| h.op == OP_RST),
             "egress with no endpoint must fail closed (reset)"
+        );
+    }
+
+    /// With a broker socket wired, a guest OP_RW to `BROKER_PORT` is relayed
+    /// byte-for-byte to the per-VM broker UDS (not captured, not parsed), and the
+    /// broker's reply frames back to the guest as OP_RW on the same stream — the
+    /// same relay the egress path uses, so `host.audit.v1` reaches the broker.
+    #[test]
+    fn broker_port_relays_frame_to_endpoint_and_back() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("hvf-broker.sock");
+
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 64];
+            let n = c.read(&mut buf).unwrap();
+            let mut reply = b"OK:".to_vec();
+            reply.extend_from_slice(&buf[..n]);
+            c.write_all(&reply).unwrap();
+            buf[..n].to_vec()
+        });
+
+        let mut d = dev();
+        d.set_broker_endpoint(&sock);
+
+        let raw = b"host.audit.v1 request\n".to_vec();
+        let rw = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 1600,
+            dst_port: mvm_guest::vsock::BROKER_PORT,
+            len: raw.len() as u32,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(rw, &raw);
+
+        // Relayed (not captured), stream acked.
+        assert!(d.received.is_empty());
+        assert!(d.pending_rx.iter().any(|(h, _)| h.op == OP_CREDIT_UPDATE));
+
+        let got_by_broker = server.join().unwrap();
+        assert_eq!(got_by_broker, raw, "broker got the raw bytes verbatim");
+
+        let mut reply = None;
+        for _ in 0..200 {
+            let _ = d.drain_broker();
+            if let Some((h, payload)) = d
+                .pending_rx
+                .iter()
+                .find(|(h, _)| h.op == OP_RW && h.dst_port == 1600)
+            {
+                reply = Some((*h, payload.clone()));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let (h, payload) = reply.expect("broker reply framed back to the guest");
+        assert_eq!(h.src_port, mvm_guest::vsock::BROKER_PORT); // swapped from inbound
+        assert!(payload.starts_with(b"OK:"));
+    }
+
+    /// Fail-closed: with no broker socket wired, a guest OP_RW to `BROKER_PORT` is
+    /// reset (OP_RST), never captured as raw bytes — mirrors the egress path.
+    #[test]
+    fn broker_port_resets_without_endpoint() {
+        let mut d = dev();
+        let rw = Hdr {
+            src_cid: GUEST_CID,
+            dst_cid: HOST_CID,
+            src_port: 2100,
+            dst_port: mvm_guest::vsock::BROKER_PORT,
+            len: 8,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+        d.handle_packet(rw, b"audit v1");
+        assert!(d.received.is_empty());
+        assert!(
+            d.pending_rx.iter().any(|(h, _)| h.op == OP_RST),
+            "broker with no socket must fail closed (reset)"
         );
     }
 
