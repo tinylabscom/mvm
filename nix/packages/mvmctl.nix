@@ -40,7 +40,7 @@ let
 in
 rustPlatform.buildRustPackage {
   pname = "mvmctl";
-  version = "0.16.1";
+  version = "0.17.0";
 
   src = mvmSrc;
 
