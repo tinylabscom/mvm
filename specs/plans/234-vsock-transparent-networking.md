@@ -64,8 +64,10 @@
       Include `mvm-guest-netd` in the OCI runtime injection set, source-checkout guest-runtime cache, shipped `mvmctl` embedded binaries, and prebuilt install path; have the injected PID 1 start it only when `mvm.netd=1` is present; and have the HVF boot path append that token only when a transparent-network authority socket is wired.
 - [x] **B2b2b2c — Fail closed when requested guest netd cannot stay up.**
       When `mvm.netd=1` is present, make the injected PID 1 treat `mvm-guest-netd` as required: it records the started pid, verifies the process survives startup, and refuses to start the guest agent if netd is missing or exits immediately.
+- [x] **B2b2b2d — Add the first in-process guest DNS/TCP acceptance path.**
+      Add a `guest,host` feature test that drives raw guest DNS and TCP packets through `GuestBridgePump`, a real `HostAuthority`, and a recording TCP connector, proving synthetic DNS allocation, guest TCP open mapping back to the DNS name, SYN-ACK synthesis, and guest-to-host TCP data forwarding without booting a VM.
 - [ ] **B2b2b2 — Connect the guest bridge to the backend authority stream.**
-      Add the first end-to-end guest DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd`, then prove live stop/reap behavior for both sides.
+      Prove live stop/reap behavior for both sides and add a live microVM DNS/TCP acceptance path through `mvm-guest-netd` and `mvm-host-netd`.
 - [ ] **C1 — Add DNS plus TCP MVP.**
       Support A/AAAA DNS answers, synthetic IP mapping, TCP connect/data/close, allow-host default port handling, denied-host failure behavior, and bounded backpressure.
 - [ ] **C2 — Add mandatory TLS transform for secret-bearing flows.**

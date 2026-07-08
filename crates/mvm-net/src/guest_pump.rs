@@ -471,10 +471,14 @@ mod tests {
     use super::*;
     use crate::guest::{DEFAULT_GUEST_ADDRESS, DEFAULT_HOST_GATEWAY};
     use crate::guest_packet::{GuestPacketTranslator, GuestPacketTranslatorConfig};
+    #[cfg(feature = "host")]
+    use crate::host::{
+        AllowAllHostPolicy, HostAuthority, HostRoute, HostTcpConnector, NoopHostAuditSink,
+    };
     use crate::proto::{
-        DnsAnswer, DnsName, DnsRecordData, DnsRecordType, DnsResponse, DnsResponseCode,
-        EndpointRole, FlowDirection, FlowId, Hello, IcmpEchoResponse, IcmpEchoStatus, StreamChunk,
-        TcpOpenResult,
+        CloseReason, DnsAnswer, DnsName, DnsRecordData, DnsRecordType, DnsResponse,
+        DnsResponseCode, EndpointRole, FlowDirection, FlowId, Hello, IcmpEchoResponse,
+        IcmpEchoStatus, StreamChunk, Target, TcpOpenResult, TransportError,
     };
 
     const DNS_PORT: u16 = 53;
@@ -531,6 +535,39 @@ mod tests {
                 return Err(err);
             }
             self.packets.push(packet.to_vec());
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "host")]
+    #[derive(Debug, Default)]
+    struct RecordingConnector {
+        opens: Vec<(FlowId, String, u16, HostRoute)>,
+        sends: Vec<(FlowId, Vec<u8>, bool)>,
+        closes: Vec<(FlowId, CloseReason)>,
+    }
+
+    #[cfg(feature = "host")]
+    impl HostTcpConnector for RecordingConnector {
+        fn open(
+            &mut self,
+            flow_id: FlowId,
+            target: &Target,
+            route: &HostRoute,
+        ) -> Result<(), TransportError> {
+            self.opens
+                .push((flow_id, target.host().to_string(), target.port(), *route));
+            Ok(())
+        }
+
+        fn send(&mut self, chunk: &StreamChunk) -> Result<(), TransportError> {
+            self.sends
+                .push((chunk.flow_id, chunk.bytes.clone(), chunk.end_stream));
+            Ok(())
+        }
+
+        fn close(&mut self, flow_id: FlowId, reason: CloseReason) -> Result<(), TransportError> {
+            self.closes.push((flow_id, reason));
             Ok(())
         }
     }
@@ -724,6 +761,32 @@ mod tests {
         match pump.authority().sent.last() {
             Some(NetMessage::OpenTcp(open)) => open.flow_id,
             other => panic!("unexpected authority message: {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "host")]
+    fn pop_sent_message(pump: &mut GuestBridgePump<MockAuthority>) -> NetMessage {
+        assert_eq!(
+            pump.authority().sent.len(),
+            1,
+            "acceptance harness processes one guest-to-host message at a time"
+        );
+        pump.authority_mut().sent.remove(0)
+    }
+
+    #[cfg(feature = "host")]
+    fn synthetic_ip_from_dns_response(messages: &[NetMessage]) -> Ipv4Addr {
+        match messages {
+            [NetMessage::DnsResponse(response)] => match response.answers.as_slice() {
+                [
+                    DnsAnswer {
+                        data: DnsRecordData::Ip(IpAddr::V4(ip)),
+                        ..
+                    },
+                ] => *ip,
+                other => panic!("unexpected DNS answers: {other:?}"),
+            },
+            other => panic!("unexpected DNS response messages: {other:?}"),
         }
     }
 
@@ -1076,6 +1139,96 @@ mod tests {
             AuthorityMessageOutcome::WrotePacket { bytes } if bytes == sink.packets[1].len()
         ));
         assert_eq!(sink.packets.len(), 2);
+    }
+
+    #[cfg(feature = "host")]
+    #[test]
+    fn guest_dns_then_tcp_packets_reach_host_authority_and_connector() {
+        let mut pump = pump();
+        let mut sink = MockSink::default();
+        let mut authority = HostAuthority::new(
+            AllowAllHostPolicy,
+            NoopHostAuditSink,
+            RecordingConnector::default(),
+        );
+
+        let dns_packet = udp_ipv4_packet(
+            40000,
+            DEFAULT_HOST_GATEWAY,
+            DNS_PORT,
+            &dns_query_payload(0x1234, "Example.COM", 1),
+        );
+        assert_eq!(pump.send_outbound_packet(&dns_packet), Ok(1));
+        let dns_responses = authority
+            .handle_message(pop_sent_message(&mut pump))
+            .expect("host authority accepts guest DNS");
+        let synthetic_ip = synthetic_ip_from_dns_response(&dns_responses);
+        for message in dns_responses {
+            pump.apply_authority_message(&mut sink, message)
+                .expect("guest pump applies DNS response");
+        }
+        assert_eq!(
+            sink.packets.len(),
+            1,
+            "DNS response must be written back to the guest"
+        );
+
+        let syn_packet = tcp_ipv4_packet(synthetic_ip, 80, 0x02, &[]);
+        assert_eq!(pump.send_outbound_packet(&syn_packet), Ok(1));
+        let open_message = pop_sent_message(&mut pump);
+        let flow_id = match &open_message {
+            NetMessage::OpenTcp(open) => {
+                assert_eq!(open.target.host(), "example.com");
+                assert_eq!(open.target.port(), 80);
+                open.flow_id
+            }
+            other => panic!("unexpected TCP open message: {other:?}"),
+        };
+        let open_responses = authority
+            .handle_message(open_message)
+            .expect("host authority opens admitted TCP flow");
+        for message in open_responses {
+            pump.apply_authority_message(&mut sink, message)
+                .expect("guest pump applies TCP open response");
+        }
+        assert_eq!(
+            authority.tcp_connector_mut().opens,
+            vec![(
+                flow_id,
+                "example.com".to_string(),
+                80,
+                HostRoute::unresolved()
+            )]
+        );
+        assert_eq!(
+            sink.packets.len(),
+            2,
+            "TCP SYN-ACK must be written back to the guest"
+        );
+
+        let request = b"GET / HTTP/1.0\r\n\r\n";
+        let data_packet = tcp_ipv4_packet(synthetic_ip, 80, 0x18, request);
+        assert_eq!(pump.send_outbound_packet(&data_packet), Ok(1));
+        let data_message = pop_sent_message(&mut pump);
+        match &data_message {
+            NetMessage::TcpData(chunk) => {
+                assert_eq!(chunk.flow_id, flow_id);
+                assert_eq!(chunk.direction, FlowDirection::GuestToHost);
+                assert_eq!(chunk.bytes.as_slice(), request);
+            }
+            other => panic!("unexpected TCP data message: {other:?}"),
+        }
+        let data_responses = authority
+            .handle_message(data_message)
+            .expect("host authority forwards guest TCP data");
+        assert!(
+            data_responses.is_empty(),
+            "guest-to-host TCP data does not synthesize an immediate response"
+        );
+        assert_eq!(
+            authority.tcp_connector_mut().sends,
+            vec![(flow_id, request.to_vec(), false)]
+        );
     }
 
     #[test]
