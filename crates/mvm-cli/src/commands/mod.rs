@@ -88,6 +88,9 @@ pub(in crate::commands) enum Commands {
     /// System diagnostics and dependency checks
     #[command(display_order = 5)]
     Doctor(env::doctor::Args),
+    /// Report whether a verified runtime pack is ready for instant launch
+    #[command(display_order = 6)]
+    Prepare(vm::prepare::Args),
     /// List running VMs
     Ls(vm::ps::Args),
     /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing

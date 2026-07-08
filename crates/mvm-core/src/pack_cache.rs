@@ -17,8 +17,8 @@ use crate::arch::GuestArch;
 use crate::config::{pack_cache_dir, pack_dir};
 use crate::packs::{
     COSIGN_BUNDLE_FILE_NAME, KeylessTrust, LocalPackPolicy, PackBackend, PackKind, PackManifest,
-    PackManifestError, PackRevocationChecker, PackTrustStore, PackVerifyError, VerifiedPack,
-    verify_pack_at, verify_pack_keyless_at,
+    PackManifestError, PackRevocationChecker, PackTrustStore, PackVerifyError, Sha256Hex,
+    VerifiedPack, verify_pack_at, verify_pack_keyless_at,
 };
 
 /// Serialized manifest written alongside the verified file set so a promoted
@@ -282,6 +282,86 @@ pub fn resolve_pack(
         }
     }
     Ok(None)
+}
+
+/// Why a compatible runtime/builder pack is or is not ready for instant launch.
+#[derive(Debug)]
+pub enum PackDiagnosis {
+    /// A pack of the requested kind verified against `ctx` and is ready.
+    Ready {
+        pack_hash: Sha256Hex,
+        file_count: usize,
+    },
+    /// No cache dir, or no promoted entry of the requested kind at all.
+    NoCompatiblePack,
+    /// A promoted entry of the requested kind exists but failed verification;
+    /// `reason` is the first such rejection observed.
+    Rejected {
+        pack_hash: Sha256Hex,
+        reason: PackVerifyError,
+    },
+}
+
+/// Diagnose the best available pack of `kind` for the caller. Unlike
+/// [`resolve_pack`], which silently skips every non-verifying entry and
+/// returns `Ok(None)`, this surfaces the rejection reason so callers can
+/// explain precisely why instant launch is unavailable. Filters by `kind`
+/// only (not arch/backend) so `ctx.verify` reports architecture/backend
+/// incompatibility as a reason rather than hiding those entries.
+pub fn diagnose_pack(
+    kind: PackKind,
+    ctx: &PackVerifyCtx<'_>,
+) -> Result<PackDiagnosis, PackCacheError> {
+    let root = pack_cache_dir();
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        // No cache dir yet means no packs — not an error.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(PackDiagnosis::NoCompatiblePack);
+        }
+        Err(error) => return Err(io_at(&root)(error)),
+    };
+
+    let mut rejected: Option<PackDiagnosis> = None;
+    for entry in entries {
+        let entry = entry.map_err(io_at(&root))?;
+        let dir = entry.path();
+        let name = entry.file_name();
+        if !dir.is_dir() || name.to_str() == Some(QUARANTINE_DIR_NAME) {
+            continue;
+        }
+        // A dir with no sidecar, or an unreadable/undecodable one, is foreign
+        // content — skip it and keep scanning, same as `resolve_pack`.
+        let Some(manifest) = read_manifest(&dir) else {
+            continue;
+        };
+        // Defense in depth: a content-addressed dir must be named for the pack
+        // hash it holds.
+        if name.to_str() != Some(manifest.outputs.pack_hash.as_str()) {
+            continue;
+        }
+        if manifest.kind != kind {
+            continue;
+        }
+        match ctx.verify(&manifest, &dir) {
+            Ok(verified) => {
+                // A ready pack wins immediately — no need to keep scanning.
+                return Ok(PackDiagnosis::Ready {
+                    pack_hash: verified.pack_hash,
+                    file_count: verified.file_count,
+                });
+            }
+            Err(reason) => {
+                if rejected.is_none() {
+                    rejected = Some(PackDiagnosis::Rejected {
+                        pack_hash: manifest.outputs.pack_hash.clone(),
+                        reason,
+                    });
+                }
+            }
+        }
+    }
+    Ok(rejected.unwrap_or(PackDiagnosis::NoCompatiblePack))
 }
 
 /// Read a promoted pack's serialized manifest. Any dir that does not present a
@@ -832,5 +912,67 @@ mod tests {
             matches!(err, PackCacheError::ReservedFileName(name) if name == COSIGN_BUNDLE_FILE_NAME)
         );
         assert!(!pack_dir(manifest.outputs.pack_hash.as_str()).exists());
+    }
+
+    #[test]
+    fn diagnose_pack_reports_no_compatible_pack_on_empty_cache() {
+        let (_cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let diagnosis = diagnose_pack(PackKind::Builder, &ctx).expect("diagnose ok");
+        assert!(matches!(diagnosis, PackDiagnosis::NoCompatiblePack));
+    }
+
+    #[test]
+    fn diagnose_pack_reports_ready_for_a_verifiable_promoted_pack() {
+        let (_cache, _env) = isolated_cache();
+        let (staged, manifest) = staged_builder_pack();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+        promote(staged.path(), &manifest, &ctx).expect("promote");
+
+        let diagnosis = diagnose_pack(PackKind::Builder, &ctx).expect("diagnose ok");
+        match diagnosis {
+            PackDiagnosis::Ready {
+                pack_hash,
+                file_count,
+            } => {
+                assert_eq!(pack_hash, manifest.outputs.pack_hash);
+                assert_eq!(file_count, 2);
+            }
+            other => panic!("expected Ready, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn diagnose_pack_reports_rejected_reason_for_tampered_promoted_pack() {
+        let (_cache, _env) = isolated_cache();
+        let (staged, manifest) = staged_builder_pack();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+        let promoted = promote(staged.path(), &manifest, &ctx).expect("promote");
+
+        // Flip a single byte in place (same length as the original) so
+        // re-verify fails with a file hash mismatch, not a size mismatch.
+        fs::write(promoted.root.join("boot/kernel"), b"buildep-kernel").expect("poison");
+
+        let diagnosis = diagnose_pack(PackKind::Builder, &ctx).expect("diagnose ok");
+        match diagnosis {
+            PackDiagnosis::Rejected { pack_hash, reason } => {
+                assert_eq!(pack_hash, manifest.outputs.pack_hash);
+                assert!(
+                    matches!(reason, PackVerifyError::FileHashMismatch { .. }),
+                    "expected FileHashMismatch, got {reason:?}"
+                );
+            }
+            other => panic!("expected Rejected, got {other:?}"),
+        }
     }
 }

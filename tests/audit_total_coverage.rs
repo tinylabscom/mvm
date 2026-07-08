@@ -386,6 +386,9 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("bootstrap", AuditPosture::InteractiveOrControl),
     ("dev", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
+    // Runtime-pack readiness report — reads the local pack cache only, no
+    // mutation and no audit-chain emission.
+    ("prepare", AuditPosture::ReadOnly),
     ("shell-init", AuditPosture::InteractiveOrControl),
     ("init", AuditPosture::InteractiveOrControl),
     // VM lifecycle. `up` and `invoke` are retired (folded into `machine run`'s

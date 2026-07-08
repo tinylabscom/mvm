@@ -742,7 +742,21 @@ fn build_exec_request(
                 }
             }
             (None, None) => {
-                ui::info("No --manifest specified; using bundled default microVM image.");
+                // Explain precisely why this launch isn't instant from a
+                // verified runtime pack, rather than a generic "no manifest"
+                // notice — the diagnosis scan surfaces the exact
+                // verification-failure reason `resolve_pack` would otherwise
+                // swallow (expired, revoked, tampered, incompatible, or
+                // simply absent).
+                let reason = super::runtime_pack::runtime_pack_diagnosis()
+                    .ok()
+                    .and_then(|d| super::runtime_pack::not_instant_reason(&d))
+                    .unwrap_or_else(|| {
+                        "no verified runtime pack is cached for this host".to_string()
+                    });
+                ui::info(&format!(
+                    "{reason}; building the bundled default microVM in the builder VM."
+                ));
                 let (kernel_path, rootfs_path) =
                     ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
                 crate::exec::ImageSource::Prebuilt {

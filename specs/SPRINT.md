@@ -32,6 +32,27 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-08 Plan 213 §D `mvm prepare` + precise not-instant reasons
+      (runtime-pack scope): `mvm_core::pack_cache::diagnose_pack` re-scans the
+      promoted-pack cache like `resolve_pack` but surfaces the first captured
+      `PackVerifyError` (or cache-empty) instead of silently returning `None`.
+      `mvm-cli`'s `not_instant_reason` maps that to a precise human-facing
+      cause (architecture/backend mismatch, expired/revoked signature,
+      untrusted signer, tampered/corrupt, policy mismatch, mutable OCI ref,
+      …). New `mvm prepare [--dry-run]` reports that reason for the host
+      default runtime pack (no positional `<image-or-flake>` input yet — see
+      the plan doc's §D Deferred note, gated on §C/§F). The default
+      `machine run` build-fallback message states the precise reason instead
+      of a generic notice. Validation: `cargo fmt --all --check`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo build --workspace --all-targets`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo build -p mvm-cli --features
+      release-artifact-bootstrap,manifest-verify`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run -p mvm-core --lib
+      pack_cache` (19/19); `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run -p
+      mvm-cli --lib runtime_pack` (10/10);
+      `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace` (6987/6987);
+      `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D
+      warnings` green.
 - [x] 2026-07-08 Plan 213 §I builder-pack revocation consumer: the installed
       attested builder-pack path now refreshes a signed
       `pack-revocations.json` from the `revocations` release, caches it under
