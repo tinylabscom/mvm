@@ -43,7 +43,7 @@ fn exe_has_hypervisor_entitlement(exe: &std::path::Path) -> bool {
 /// bin unsigned and HVF rejects it otherwise. `MVM_HVF_SIGNED` breaks the exec
 /// loop; `exec()` preserves the pid + the stdin config pipe. A file lock
 /// serializes concurrent launches (codesign --force rewrites the shared binary
-/// in place). Mirrors `mvm-vz-supervisor`'s `ensure_self_signed`.
+/// in place). Mirrors the libkrun supervisor's `ensure_self_signed`.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 fn ensure_self_signed() {
     use std::os::fd::AsRawFd;

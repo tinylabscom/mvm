@@ -113,11 +113,12 @@ pub enum BridgeEndpointKind {
         /// Raw fd of the supervisor half of the inner virtio-net socketpair.
         supervisor_fd_raw: i32,
     },
-    /// Vz Swift supervisor + gvproxy: the splice happens in Swift, which writes
-    /// NDJSON `FlowEvent`s over the unix stream at `events_socket_path`.
+    /// Legacy per-VM supervisor + gvproxy NDJSON flow-event ingest. Inert
+    /// dead config since the Vz backend was removed; kept as a bridge endpoint
+    /// shape pending a full removal (no live producer emits it).
     VzIngest {
-        /// Socket the Swift `mvm-vz-supervisor` writes its NDJSON
-        /// `FlowEventWire` stream to; the bridge binds (mode 0700) and reads.
+        /// Socket the supervisor writes its NDJSON `FlowEventWire` stream to;
+        /// the bridge binds (mode 0700) and reads.
         events_socket_path: PathBuf,
     },
     /// macOS libkrun + gvproxy: gvproxy owns its listener at
