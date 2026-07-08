@@ -73,3 +73,54 @@ client.stop_machine(&machine.id).await?;
 The builder is equivalent to a struct literal — every field stays public — but
 reads far better at call sites and lets new optional fields land without churning
 existing callers.
+
+### Embedding it — studio, mvmd, and custom frontends
+
+`connect(Target)` returns a `Box<dyn MvmClient>` and hides the transport, so one
+piece of UI/service code drives either this host or a remote fleet:
+
+```rust
+use mvm_client::{connect, MvmClient, Target};
+
+// In-process — this host's microVMs (auto-selected VMM). No daemon required.
+let local = connect(Target::Local)?;          // == mvm_client_local::LocalBackend::new()
+
+// Remote — a hosted fleet or a local sidecar over REST (feature `remote`).
+let remote = connect(Target::Gateway {
+    base_url: "https://fleet.example.com".into(),
+    token: std::env::var("MVM_TOKEN")?,
+})?;
+
+for m in remote.list_machines(Default::default()).await? {
+    println!("{}", m.id);
+}
+```
+
+The **studio** desktop app is this pattern: a `GatewayBackend` by default, or the
+in-process `LocalBackend` when built `--features local` with
+`MVM_STUDIO_BACKEND=local` — one `dyn MvmClient` behind its Tauri commands.
+
+```toml
+# a frontend that drives machines
+mvm-client       = { path = "../mvm/crates/mvm-client", features = ["remote"] }
+mvm-client-local = { path = "../mvm/crates/mvm-client-local" }   # optional, in-process backend
+```
+
+A **host-side daemon that manages instances directly** — the **mvmd** fleet
+orchestrator, or your own controller — instead links the `mvmctl` library facade
+for the runtime types, host shell seam, and the gated host↔guest IPC transport.
+`default-features = false` keeps it lean (no async runtime unless you opt into the
+transport):
+
+```toml
+# a daemon that runs the host that hosts sandboxes
+mvmctl = { path = "../mvm", default-features = false, features = ["hostd-transport"] }
+```
+
+```rust
+use mvmctl::core::{instance::InstanceStatus, pool::Role, protocol};
+use mvmctl::runtime::shell;   // host command-execution seam
+```
+
+Rule of thumb: **drive sandboxes → the `MvmClient` facade; run the host that hosts
+them → the `mvmctl` facade.**
