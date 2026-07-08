@@ -644,33 +644,33 @@ pub(super) fn cmd_dev_cache_inspect(json: bool) -> Result<()> {
     Ok(())
 }
 
+/// Locate the builder-VM flake at `nix/images/builder-vm/flake.nix`.
+///
+/// The consolidated flake produces both the headless builder VM
+/// (`packages.<sys>.default`) and the interactive
+/// dev-shell image (`packages.<sys>.dev`). Used by `ensure_dev_image`
+/// to detect a source checkout, and by `bootstrap_builder_vm_image`
+/// to locate Layer 1. Returns `Err` when not in a source checkout,
+/// signalling the caller to fall back to the published prebuilt.
+fn find_builder_vm_flake() -> Result<String> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let workspace_root = std::path::Path::new(manifest_dir)
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow::anyhow!("Cannot find workspace root"))?;
 
-    let out_dir_path = std::path::Path::new(out_dir);
-    let staging_dir = unique_builder_vm_stage0_staging_dir(out_dir_path)?;
-    std::fs::create_dir_all(&staging_dir)
-        .with_context(|| format!("creating Stage 0 staging dir {}", staging_dir.display()))?;
+    let candidate = workspace_root.join("nix").join("images").join("builder-vm");
+    if candidate.join("flake.nix").exists() {
+        return Ok(candidate.to_str().unwrap_or(".").to_string());
+    }
 
-    let started = std::time::Instant::now();
-    let fingerprint_prefix = stage0_fingerprint_prefix(source_fingerprint);
-    mvm_core::audit_emit!(
-        Stage0Boot,
-        "seed=root-dir fingerprint_prefix={fingerprint_prefix} flavor={flavor}",
-        flavor = STAGE0_FLAVOR_CURRENT,
-    );
+    anyhow::bail!("Builder VM flake not found. Expected at nix/images/builder-vm/flake.nix.")
+}
 
-    // Extract the embedded host-vm binaries so the Stage 0 nix build
-    // can install them from /mvm-bins instead of building them with
-    // the guest's nix. Same cache dir the steady-state job path uses.
-    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
-        std::path::Path::new(&host_bins_cache),
-    )
-    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
-
-    // Kernel acquisition override (MVM_KERNEL_SOURCE / --kernel-source).
-    // `download` (and `auto` when a publish exists) boots the builder VM
-    // on a published, hash-verified kernel — build only the rootfs and
-    // pair the kernel in, skipping the in-image kernel compile. Unset or
-    // `compile` → the normal `default` build (kernel compiled in-image;
-    // also the cheaper single-boot path, so `dev up --kernel-source
-    // compile` deliberately stays on it).
+/// Returns `true` when the running `mvmctl` is a source-checkout build
+/// (the in-repo builder-VM flake is present). The local-build invariant
+/// applies when this is true: source checkouts must build kernels
+/// locally and never fetch pre-built artifacts.
+pub(in crate::commands) fn find_builder_vm_flake_is_source_checkout() -> bool {
+    find_builder_vm_flake().is_ok()
+}
