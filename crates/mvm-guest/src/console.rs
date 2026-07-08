@@ -622,8 +622,8 @@ mod tests {
         assert_eq!(ConsoleError::OpenPtyFailed.to_string(), "openpty() failed");
         assert_eq!(ConsoleError::ForkFailed.to_string(), "fork() failed");
         assert_eq!(
-            ConsoleError::InvalidCommand.to_string(),
-            "console command contains an interior NUL"
+            ConsoleError::InvalidCommand("argv must not contain NUL bytes".to_string()).to_string(),
+            "invalid console command: argv must not contain NUL bytes"
         );
         assert_eq!(
             ConsoleError::BindFailed(20001).to_string(),
