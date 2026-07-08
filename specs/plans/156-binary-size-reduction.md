@@ -4,7 +4,7 @@
 
 **Goal:** Shrink the shipped `mvmctl` binary — the artifact users download — and lock a size budget so it stays small. This is the size counterpart to 126's dependency-*count* cut: 126 removes whole crates from the closure (the primary size driver), 156 measures the resulting binary, tunes the release profile for size, trims features inside the crates that stay, and gates regressions. Every step records a measured size delta (`ls -l` / `cargo bloat`) — no asserted numbers.
 
-**Architecture:** Measure, tune, trim, gate — mirrors 126's discipline. The headline target is `mvmctl` (it embeds the cross-compiled musl host-vm binaries `mvm-host-vm-init` + `mvm-egress-proxy` as baked-in data, so their weight already counts toward it). The per-VM subprocess binaries (`mvm-libkrun-supervisor`, `mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`, `mvm-vz-drainer`, `mvm-firecracker-bridge`) get a measured baseline row but do not drive profile decisions.
+**Architecture:** Measure, tune, trim, gate — mirrors 126's discipline. The headline target is `mvmctl` (it embeds the cross-compiled musl host-vm binaries `mvm-host-vm-init` + `mvm-egress-proxy` as baked-in data, so their weight already counts toward it). The per-VM subprocess binaries that the release bundle actually ships today (`mvm-bridge`, `mvm-substitution-endpoint`, and on macOS also `mvm-vz-supervisor`, `mvm-hvf-supervisor`, `mvm-libkrun-supervisor`) get a measured baseline row but do not drive profile decisions.
 
 **Tech Stack:** `cargo bloat` (installed), `ls -l` / `size`, the root `[profile.release]` table, a new `xtask check-binary-size` gate (sibling to `check-forbidden-deps`).
 
@@ -27,9 +27,9 @@
 
 ### Task A1: one measurement method, written down
 
-- [ ] **Step 1:** Define the canonical commands. File size = `ls -l target/release/mvmctl` (bytes, the headline) + `size target/release/mvmctl` (section breakdown). Crate attribution = `cargo bloat --release --bin mvmctl --crates`; function-level = `cargo bloat --release --bin mvmctl -n 50`. Embedded musl pair = `ls -l target/aarch64-unknown-linux-musl/release/{mvm-host-vm-init,mvm-egress-proxy}` (they are baked into `mvmctl` as data; `cargo bloat` won't attribute them). Build with the *current* profile (`opt-level=3`, `lto=true`, `codegen-units=1`, `strip=true`) and record that the baseline is taken under it.
-- [ ] **Step 2:** Add a baseline row per secondary binary: `cargo bloat --release --bin <name> --crates` for `mvm-libkrun-supervisor`, `mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`, `mvm-vz-drainer`, `mvm-firecracker-bridge`.
-- [ ] **Step 3:** Commit `docs/investigations/binary-size-baseline.md` with the method + the numbers (sibling to 126's `dep-baseline.md`; 127's dashboard reads both). Every later task appends its delta.
+- [x] **Step 1:** Define the canonical commands. File size = `ls -l target/release/mvmctl` (bytes, the headline) + `size target/release/mvmctl` (section breakdown). Crate attribution = `cargo bloat --release --bin mvmctl --crates`; function-level = `cargo bloat --release --bin mvmctl -n 50`. Embedded musl pair = `ls -l target/aarch64-unknown-linux-musl/release/{mvm-host-vm-init,mvm-egress-proxy}` (they are baked into `mvmctl` as data; `cargo bloat` won't attribute them). Build with the *current* profile (`opt-level=3`, `lto=true`, `codegen-units=1`, `strip=true`) and record that the baseline is taken under it.
+- [x] **Step 2:** Add a baseline row per release-bundled secondary binary: `cargo bloat --release --bin <name> --crates` for the Linux-shared `mvm-bridge` + `mvm-substitution-endpoint` pair and the macOS-only `mvm-vz-supervisor`, `mvm-hvf-supervisor`, and `mvm-libkrun-supervisor`.
+- [x] **Step 3:** Commit `docs/investigations/binary-size-baseline.md` with the method + the numbers (sibling to 126's `dep-baseline.md`; 127's dashboard reads both). Every later task appends its delta.
 
 ## Phase B — release-profile tuning (evidence-driven)
 
@@ -56,6 +56,36 @@ Driven by `cargo bloat --crates` — coordinates with 126 (126 removes whole dep
 ### Task C2: `regex` / `clap` / serde-stack feature audit
 
 - [ ] **Step 1:** From the A1 `cargo bloat --crates` output, take the top non-126 contributors (likely `regex`, `clap`, the serde/hyper stack). For each, check whether a lighter feature set or `default-features = false` covers the actual use (e.g. `regex` without Unicode tables if the patterns are ASCII; `clap` already on `derive` only). Failing test — the affected command/parse paths still pass. Re-measure. Commit each non-zero delta.
+  Progress 2026-07-08: the direct workspace `regex` dependency was narrowed to
+  `default-features = false` with `perf`, `std`, and `unicode-perl`, and
+  `mvm-core` now consumes that workspace declaration instead of re-enabling
+  default features locally. Focused `mvm-core`/`mvm-hostd` check, clippy, and
+  regex-heavy tests are green, and the current stubbed local `mvmctl` build
+  measures 21,158,544 bytes, which only claws back the earlier provisional
+  `+16` byte drift from the Tokio slice rather than moving below the original
+  local baseline. `tree-sitter` still pulls the full regex Unicode feature set
+  transitively on the default path. Follow-up 2026-07-08: the workspace `clap`
+  dependency was narrowed to `default-features = false` with only `derive`,
+  `help`, `std`, and `usage`; focused `mvm-cli` help-surface tests and clippy
+  are green, `cargo tree` confirms the default path no longer carries `color`,
+  `error-context`, or `suggestions`, and the current stubbed local `mvmctl`
+  size dropped from 21,158,544 to 21,108,960 bytes (`-49,584`). Keep this box
+  open until the remaining serde-stack audit is done and the final set of C2
+  deltas is recorded. Follow-up 2026-07-08: the direct workspace `serde` /
+  `serde_json` declarations were narrowed to explicit `std`/`derive` feature
+  sets and validated with workspace check, workspace clippy, and focused core /
+  CLI / hostd serialization tests, but the stubbed local `mvmctl` size stayed
+  flat at 21,108,960 bytes. `cargo tree` still shows transitive default-feature
+  users through `reqwest`, `schemars`, and build-time `tree-sitter`, so this
+  slice is recorded as dependency-hygiene cleanup rather than a second measured
+  C2 size win. Follow-up 2026-07-08: `mvm-sdk`'s `schemars` dependency was
+  narrowed to derive-only and the workspace `tree-sitter` dependency to `std`
+  only; targeted `mvm-sdk`/`mvm-cli` check, full `mvm-sdk` library tests, and
+  targeted clippy are green. The stubbed local `mvmctl` size still stayed flat
+  at 21,108,960 bytes. The useful finding is that `tree-sitter`'s remaining
+  `std` path still pulls regex Unicode support, so further regex-size work must
+  route around `mvm-sdk` on the default path rather than merely trimming
+  `tree-sitter` feature flags.
 
 ## Phase D — size budget + CI gate
 

@@ -2,11 +2,11 @@
 //!
 //! The [`ManifestFetcher`] trait is the contract that downstream
 //! code consumes; [`OciManifestFetcher`] is the real implementation
-//! over `oci-client`. Splitting the trait from the impl lets test
+//! over the crate's internal registry client. Splitting the trait from the impl lets test
 //! code substitute a fixture without standing up a registry — the
 //! hermetic in-process registry fixture in `tests/common.rs`
-//! exercises [`OciManifestFetcher`] directly via a wiremock-backed
-//! HTTP server on a random localhost port.
+//! exercises [`OciManifestFetcher`] directly via a tiny localhost
+//! HTTP server.
 //!
 //! Digest verification is always content-addressable: the SHA-256
 //! over the manifest bytes is compared against the digest the caller
@@ -15,84 +15,11 @@
 
 use crate::OciError;
 use crate::layer::LayerDescriptor;
+use crate::manifest_types::OciManifest;
 use crate::reference::ImageReference;
+use crate::registry::{ClientConfig, RegistryAuthConfig, RegistryClient};
 use async_trait::async_trait;
-use oci_client::client::Client;
-pub use oci_client::client::{ClientConfig, ClientProtocol};
-use oci_client::manifest::OciManifest;
-use oci_client::secrets::RegistryAuth;
-use secrecy::{ExposeSecret, SecretString};
 use sha2::{Digest, Sha256};
-
-/// Explicit registry authentication material for OCI pulls.
-///
-/// This deliberately does not read Docker credential helpers or
-/// `~/.docker/config.json`. Callers pass the credential source they
-/// trust, and this crate only forwards it to the OCI Distribution
-/// client for the current process.
-#[derive(Clone, Default)]
-pub enum RegistryAuthConfig {
-    #[default]
-    Anonymous,
-    Bearer {
-        token: SecretString,
-    },
-    Basic {
-        username: String,
-        password: SecretString,
-    },
-}
-
-impl std::fmt::Debug for RegistryAuthConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Anonymous => f.write_str("RegistryAuthConfig::Anonymous"),
-            Self::Bearer { .. } => f.write_str("RegistryAuthConfig::Bearer { token: REDACTED }"),
-            Self::Basic { username, .. } => f
-                .debug_struct("RegistryAuthConfig::Basic")
-                .field("username", username)
-                .field("password", &"REDACTED")
-                .finish(),
-        }
-    }
-}
-
-impl RegistryAuthConfig {
-    pub fn bearer(token: impl Into<String>) -> Self {
-        Self::Bearer {
-            token: SecretString::from(token.into()),
-        }
-    }
-
-    pub fn basic(username: impl Into<String>, password: impl Into<String>) -> Self {
-        Self::Basic {
-            username: username.into(),
-            password: SecretString::from(password.into()),
-        }
-    }
-
-    pub fn kind(&self) -> &'static str {
-        match self {
-            Self::Anonymous => "anonymous",
-            Self::Bearer { .. } => "bearer",
-            Self::Basic { .. } => "basic",
-        }
-    }
-
-    pub fn is_authenticated(&self) -> bool {
-        !matches!(self, Self::Anonymous)
-    }
-
-    pub(crate) fn to_registry_auth(&self) -> RegistryAuth {
-        match self {
-            Self::Anonymous => RegistryAuth::Anonymous,
-            Self::Bearer { token } => RegistryAuth::Bearer(token.expose_secret().to_string()),
-            Self::Basic { username, password } => {
-                RegistryAuth::Basic(username.clone(), password.expose_secret().to_string())
-            }
-        }
-    }
-}
 
 /// Result of a manifest fetch. Bytes are kept verbatim because
 /// digest verification is byte-exact — any normalization
@@ -185,12 +112,9 @@ pub trait ManifestFetcher: Send + Sync {
     async fn fetch(&self, reference: &ImageReference) -> Result<FetchedManifest, OciError>;
 }
 
-/// Real fetcher backed by [`oci_client`]. Private-registry auth
-/// flows the credential material through [`secrecy::SecretString`]
-/// and the `check-no-display-on-secret-types` lint.
+/// Real fetcher backed by the crate's internal registry client.
 pub struct OciManifestFetcher {
-    client: Client,
-    auth: RegistryAuthConfig,
+    client: RegistryClient,
 }
 
 impl Default for OciManifestFetcher {
@@ -205,15 +129,13 @@ impl OciManifestFetcher {
     }
 
     /// Construct a fetcher with a custom `ClientConfig`. Used by
-    /// tests to point at a wiremock server with
+    /// tests to point at a hermetic localhost registry with
     /// `protocol: ClientProtocol::HttpsExcept(vec![local_addr])`,
     /// and by future production callers that need to thread proxy
-    /// or timeout settings through. The supplied config is passed
-    /// to `oci_client::Client::new` verbatim — no normalization.
+    /// or timeout settings through.
     pub fn with_config(config: ClientConfig) -> Self {
         Self {
-            client: Client::new(config),
-            auth: RegistryAuthConfig::Anonymous,
+            client: RegistryClient::new(config, RegistryAuthConfig::Anonymous),
         }
     }
 
@@ -223,33 +145,31 @@ impl OciManifestFetcher {
 
     pub fn with_config_and_auth(config: ClientConfig, auth: RegistryAuthConfig) -> Self {
         Self {
-            client: Client::new(config),
-            auth,
+            client: RegistryClient::new(config, auth),
         }
     }
 
-    /// Construct from a pre-built `oci_client::Client`. Useful when
-    /// a manifest fetcher and a layer fetcher share one client to
-    /// pool connections.
-    pub fn with_client(client: Client) -> Self {
+    /// Construct from a pre-built `reqwest::Client`. Useful when tests
+    /// point the fetcher at a hermetic localhost registry without
+    /// rebuilding the underlying transport.
+    pub fn with_client(client: reqwest::Client) -> Self {
         Self {
-            client,
-            auth: RegistryAuthConfig::Anonymous,
+            client: RegistryClient::with_http_client(
+                client,
+                ClientConfig::default(),
+                RegistryAuthConfig::Anonymous,
+            ),
         }
     }
 
-    pub fn with_client_and_auth(client: Client, auth: RegistryAuthConfig) -> Self {
-        Self { client, auth }
+    pub fn with_client_and_auth(client: reqwest::Client, auth: RegistryAuthConfig) -> Self {
+        Self {
+            client: RegistryClient::with_http_client(client, ClientConfig::default(), auth),
+        }
     }
 
-    /// Borrow the underlying client. Layer fetcher consumes this
-    /// so the two share a connection pool.
-    pub(crate) fn client(&self) -> &Client {
+    pub(crate) fn client(&self) -> &RegistryClient {
         &self.client
-    }
-
-    pub(crate) fn auth(&self) -> &RegistryAuthConfig {
-        &self.auth
     }
 
     /// Fetch a platform-specific Linux image manifest.
@@ -276,8 +196,8 @@ impl OciManifestFetcher {
             .iter()
             .find(|entry| {
                 entry.platform.as_ref().is_some_and(|p| {
-                    p.os.to_string() == "linux"
-                        && p.architecture.to_string() == platform.architecture
+                    p.os == "linux"
+                        && p.architecture == platform.architecture
                         && p.variant.as_deref() == platform.variant.as_deref()
                 })
             })
@@ -312,30 +232,18 @@ const ACCEPTED_MANIFEST_MEDIA: &[&str] = &[
 #[async_trait]
 impl ManifestFetcher for OciManifestFetcher {
     async fn fetch(&self, reference: &ImageReference) -> Result<FetchedManifest, OciError> {
-        // Convert mvm's structured reference into the shape
-        // `oci_client` consumes. Canonical form is round-tripped
-        // through the upstream parser — round-trip failure here
-        // would indicate our `canonical()` and oci-client disagree
-        // about the same string, which is a bug we want to surface
-        // immediately rather than paper over.
-        let canonical = reference.canonical();
-        let upstream_ref: oci_client::Reference = canonical
-            .parse()
-            .map_err(|e| OciError::InvalidReference(format!("{canonical}: {e}")))?;
-
-        // Fetch the *raw* wire bytes, not the parsed-then-
-        // re-serialized form. JSON re-serialization is not
-        // byte-stable (key ordering, whitespace, escape choices),
-        // so hashing the re-serialized form mis-computes the
-        // digest against what the registry advertised. The
-        // content digest is a property of the *wire* bytes;
-        // anything else is a bug.
-        let auth = self.auth.to_registry_auth();
-        let (bytes, advertised_digest) = self
+        let response = self
             .client
-            .pull_manifest_raw(&upstream_ref, &auth, ACCEPTED_MANIFEST_MEDIA)
+            .get_manifest(reference, ACCEPTED_MANIFEST_MEDIA)
+            .await?;
+        let bytes = response
+            .response
+            .bytes()
             .await
-            .map_err(|e| OciError::Registry(e.to_string()))?;
+            .map_err(|e| OciError::Registry(format!("read manifest response body: {e}")))?;
+        let advertised_digest = response.docker_content_digest.ok_or_else(|| {
+            OciError::Registry("registry manifest response missing Docker-Content-Digest".into())
+        })?;
 
         let computed = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
         if computed != advertised_digest {
@@ -359,16 +267,13 @@ impl ManifestFetcher for OciManifestFetcher {
         // above is the load-bearing one.
         let manifest: OciManifest = serde_json::from_slice(&bytes)
             .map_err(|e| OciError::Registry(format!("parse manifest after digest verify: {e}")))?;
-        let media_type = manifest_media_type(&manifest).to_string();
+        let media_type = response
+            .content_type
+            .unwrap_or_else(|| manifest_media_type(&manifest).to_string());
 
         Ok(FetchedManifest {
             reference: reference.clone(),
             digest: computed,
-            // `pull_manifest_raw` hands back `bytes::Bytes`; the
-            // public `FetchedManifest::bytes` field is `Vec<u8>`
-            // so callers don't have to depend on the `bytes`
-            // crate. The `.to_vec()` is one copy, which is fine
-            // for manifest-sized payloads (single-digit KB).
             bytes: bytes.to_vec(),
             media_type,
         })

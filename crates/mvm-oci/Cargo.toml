@@ -17,7 +17,7 @@ hex.workspace = true
 # `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)` handle (rustix), so a
 # parent component swapped to a symlink can't redirect the write.
 libc = { workspace = true }
-oci-client = { version = "0.16", default-features = false, features = ["rustls-tls"] }
+reqwest.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -28,21 +28,21 @@ sha2.workspace = true
 # allow-lists); each entry's header drives a manual write through
 # our own safety-checking helpers.
 tar = { workspace = true }
-thiserror = "1"
+thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "time"] }
 xattr = { workspace = true }
 
 [dev-dependencies]
+base64.workspace = true
 # Tests build in-memory tar fixtures into a temp tree and assert
 # post-unpack invariants.
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "rt-multi-thread", "test-util", "time"] }
-# Hermetic OCI registry fixture — wiremock spawns a real HTTP
-# server on a random localhost port. We point our client at it
+# Hermetic OCI registry fixture — tests run a tiny in-repo HTTP
+# server on a random localhost port and point the client at it
 # with `ClientConfig { protocol: HttpsExcept(["127.0.0.1:N"]) }`
 # so the same fetcher exercises the same code paths it would
 # against ghcr.io / docker.io.
-wiremock = "0.6"
 
 [lints]
 workspace = true

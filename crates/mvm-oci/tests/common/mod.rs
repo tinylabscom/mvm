@@ -1,7 +1,7 @@
 //! Hermetic OCI registry fixture for integration tests.
 //!
-//! Spawns a wiremock-backed HTTP server on a random localhost
-//! port that speaks just enough of the OCI distribution spec to
+//! Spawns a tiny in-repo HTTP server on a random localhost port
+//! that speaks just enough of the OCI distribution spec to
 //! exercise [`mvm_oci::OciManifestFetcher`] and
 //! [`mvm_oci::OciLayerFetcher`] end-to-end:
 //!
@@ -17,45 +17,102 @@
 //! happy path plus a couple of error injections (5xx-then-200 for
 //! retry tests, content tamper for digest-mismatch tests). Auth,
 //! manifest upload, and the full v2 catalog API are out of scope —
-//! the fixture is anonymous-pull-only.
+//! the fixture is anonymous-pull-only unless a test registers a
+//! bearer-protected route explicitly.
 
-#![allow(dead_code)] // not every helper is used by every test
+mod http_fixture;
 
+use base64::Engine as _;
+use http_fixture::{FlakyResponder, Responder, Route, TestHttpServer, TestResponse};
 use mvm_oci::{ClientConfig, ClientProtocol, ImageReference};
-use oci_client::client::Client as OciClient;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
-use wiremock::matchers::{header, method, path, path_regex};
-use wiremock::{Mock, MockServer, Respond, ResponseTemplate};
 
 /// A running hermetic registry. Drop the value to tear it down.
 pub struct HermeticRegistry {
-    pub server: MockServer,
+    server: TestHttpServer,
+}
+
+pub struct BearerChallengeFixture {
+    issued_token: String,
+    basic_auth: Option<BasicAuthFixture>,
+    realm_path: String,
+    scope: String,
+    service: String,
+}
+
+impl BearerChallengeFixture {
+    pub fn builder(repository: &str) -> BearerChallengeFixtureBuilder {
+        BearerChallengeFixtureBuilder {
+            basic_auth: None,
+            issued_token: None,
+            realm_path: "/token".to_string(),
+            scope: format!("repository:{repository}:pull"),
+            service: "test-registry".to_string(),
+        }
+    }
+}
+
+pub struct BearerChallengeFixtureBuilder {
+    basic_auth: Option<BasicAuthFixture>,
+    issued_token: Option<String>,
+    realm_path: String,
+    scope: String,
+    service: String,
+}
+
+impl BearerChallengeFixtureBuilder {
+    pub fn issued_token(mut self, token: impl Into<String>) -> Self {
+        self.issued_token = Some(token.into());
+        self
+    }
+
+    pub fn basic_auth(mut self, username: impl Into<String>, password: impl Into<String>) -> Self {
+        self.basic_auth = Some(BasicAuthFixture {
+            password: password.into(),
+            username: username.into(),
+        });
+        self
+    }
+
+    pub fn build(self) -> BearerChallengeFixture {
+        BearerChallengeFixture {
+            issued_token: self
+                .issued_token
+                .expect("bearer challenge fixture must define an issued token"),
+            basic_auth: self.basic_auth,
+            realm_path: self.realm_path,
+            scope: self.scope,
+            service: self.service,
+        }
+    }
+}
+
+struct BasicAuthFixture {
+    password: String,
+    username: String,
 }
 
 impl HermeticRegistry {
-    /// Spin up a fresh wiremock server on a random localhost port
-    /// and register the `/v2/` ping handler.
+    /// Spin up a fresh localhost registry fixture and register the
+    /// `/v2/` ping handler.
     pub async fn start() -> Self {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v2/"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Docker-Distribution-API-Version", "registry/2.0"),
-            )
-            .mount(&server)
-            .await;
+        let server = TestHttpServer::start().await;
+        server.register(Route::exact(
+            "GET",
+            "/v2/",
+            Responder::Static(
+                TestResponse::builder(200)
+                    .header("Docker-Distribution-API-Version", "registry/2.0")
+                    .build(),
+            ),
+        ));
         Self { server }
     }
 
     /// `host:port` form, suitable for use as the registry portion
     /// of an `ImageReference`.
     pub fn host(&self) -> String {
-        // `MockServer::address()` is `127.0.0.1:NNNN`.
-        self.server.address().to_string()
+        self.server.addr().to_string()
     }
 
     /// An `ImageReference` whose registry points at this fixture
@@ -64,13 +121,6 @@ impl HermeticRegistry {
         format!("{}/{repository}:{tag}", self.host())
             .parse()
             .expect("fixture-built reference parses")
-    }
-
-    /// An `ImageReference` pinned to the given digest (no tag).
-    pub fn image_ref_by_digest(&self, repository: &str, digest: &str) -> ImageReference {
-        format!("{}/{repository}@{digest}", self.host())
-            .parse()
-            .expect("fixture-built digest reference parses")
     }
 
     /// Serve `bytes` at `/v2/<repository>/manifests/<reference>`
@@ -84,17 +134,14 @@ impl HermeticRegistry {
         bytes: &[u8],
     ) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
-        let path = format!("/v2/{repository}/manifests/{reference}");
-        Mock::given(method("GET"))
-            .and(wiremock::matchers::path(path))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Content-Type", media_type)
-                    .insert_header("Docker-Content-Digest", digest.as_str())
-                    .set_body_bytes(bytes.to_vec()),
-            )
-            .mount(&self.server)
-            .await;
+        self.register_manifest_route(
+            repository,
+            reference,
+            media_type,
+            bytes,
+            digest.as_str(),
+            None,
+        );
         digest
     }
 
@@ -112,18 +159,14 @@ impl HermeticRegistry {
         let digest = self
             .register_manifest(repository, reference, media_type, bytes)
             .await;
-        // also register the by-digest path
-        let digest_path = format!("/v2/{repository}/manifests/{digest}");
-        Mock::given(method("GET"))
-            .and(wiremock::matchers::path(digest_path))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Content-Type", media_type)
-                    .insert_header("Docker-Content-Digest", digest.as_str())
-                    .set_body_bytes(bytes.to_vec()),
-            )
-            .mount(&self.server)
-            .await;
+        self.register_manifest_route(
+            repository,
+            digest.as_str(),
+            media_type,
+            bytes,
+            digest.as_str(),
+            None,
+        );
         digest
     }
 
@@ -140,19 +183,75 @@ impl HermeticRegistry {
     ) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
         for manifest_ref in [reference, digest.as_str()] {
-            let path = format!("/v2/{repository}/manifests/{manifest_ref}");
-            Mock::given(method("GET"))
-                .and(wiremock::matchers::path(path))
-                .and(header("authorization", format!("Bearer {token}")))
-                .respond_with(
-                    ResponseTemplate::new(200)
-                        .insert_header("Content-Type", media_type)
-                        .insert_header("Docker-Content-Digest", digest.as_str())
-                        .set_body_bytes(bytes.to_vec()),
-                )
-                .mount(&self.server)
-                .await;
+            self.register_manifest_route(
+                repository,
+                manifest_ref,
+                media_type,
+                bytes,
+                digest.as_str(),
+                Some(token),
+            );
         }
+        digest
+    }
+
+    /// Serve a manifest via the bearer-challenge flow: the first
+    /// unauthenticated request gets a `WWW-Authenticate` challenge,
+    /// the client exchanges it for a token at the fixture token
+    /// endpoint, and the retried manifest GET succeeds with the
+    /// issued bearer token.
+    pub async fn register_challenged_manifest_with_digest_path(
+        &self,
+        repository: &str,
+        reference: &str,
+        media_type: &str,
+        bytes: &[u8],
+        challenge: BearerChallengeFixture,
+    ) -> String {
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        let challenge_header = format!(
+            r#"Bearer realm="http://{}{realm}",service="{service}",scope="{scope}""#,
+            self.host(),
+            realm = challenge.realm_path,
+            service = challenge.service,
+            scope = challenge.scope,
+        );
+        for manifest_ref in [reference, digest.as_str()] {
+            self.server.register(Route::exact(
+                "GET",
+                format!("/v2/{repository}/manifests/{manifest_ref}"),
+                Responder::Static(
+                    TestResponse::builder(401)
+                        .header("WWW-Authenticate", challenge_header.clone())
+                        .body_string("auth required")
+                        .build(),
+                ),
+            ));
+            if let Some(auth) = &challenge.basic_auth {
+                self.server.register(
+                    Route::exact(
+                        "GET",
+                        format!("/v2/{repository}/manifests/{manifest_ref}"),
+                        Responder::Static(
+                            TestResponse::builder(401)
+                                .header("WWW-Authenticate", challenge_header.clone())
+                                .body_string("auth required")
+                                .build(),
+                        ),
+                    )
+                    .with_authorization(basic_authorization(auth)),
+                );
+            }
+            self.register_manifest_route(
+                repository,
+                manifest_ref,
+                media_type,
+                bytes,
+                digest.as_str(),
+                Some(challenge.issued_token.as_str()),
+            );
+        }
+        self.register_token_route(&challenge);
         digest
     }
 
@@ -161,16 +260,7 @@ impl HermeticRegistry {
     /// against the manifest's layer descriptor).
     pub async fn register_blob(&self, repository: &str, media_type: &str, bytes: &[u8]) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
-        let path = format!("/v2/{repository}/blobs/{digest}");
-        Mock::given(method("GET"))
-            .and(wiremock::matchers::path(path))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Content-Type", media_type)
-                    .set_body_bytes(bytes.to_vec()),
-            )
-            .mount(&self.server)
-            .await;
+        self.register_blob_route(repository, media_type, bytes, digest.as_str(), None);
         digest
     }
 
@@ -184,17 +274,7 @@ impl HermeticRegistry {
         token: &str,
     ) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
-        let path = format!("/v2/{repository}/blobs/{digest}");
-        Mock::given(method("GET"))
-            .and(wiremock::matchers::path(path))
-            .and(header("authorization", format!("Bearer {token}")))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Content-Type", media_type)
-                    .set_body_bytes(bytes.to_vec()),
-            )
-            .mount(&self.server)
-            .await;
+        self.register_blob_route(repository, media_type, bytes, digest.as_str(), Some(token));
         digest
     }
 
@@ -207,16 +287,16 @@ impl HermeticRegistry {
         claimed_digest: &str,
         actual_bytes: &[u8],
     ) {
-        let path = format!("/v2/{repository}/blobs/{claimed_digest}");
-        Mock::given(method("GET"))
-            .and(wiremock::matchers::path(path))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("Content-Type", "application/octet-stream")
-                    .set_body_bytes(actual_bytes.to_vec()),
-            )
-            .mount(&self.server)
-            .await;
+        self.server.register(Route::exact(
+            "GET",
+            format!("/v2/{repository}/blobs/{claimed_digest}"),
+            Responder::Static(
+                TestResponse::builder(200)
+                    .header("Content-Type", "application/octet-stream")
+                    .body_bytes(actual_bytes.to_vec())
+                    .build(),
+            ),
+        ));
     }
 
     /// Serve a blob that fails `n` times with 503, then succeeds
@@ -228,32 +308,109 @@ impl HermeticRegistry {
         fail_first: u32,
     ) -> String {
         let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
-        let path = format!("/v2/{repository}/blobs/{digest}");
-        let responder = FlakyResponder {
-            calls: Arc::new(AtomicU32::new(0)),
-            fail_first,
-            success_body: bytes.to_vec(),
-            success_content_type: "application/octet-stream".to_string(),
-        };
-        Mock::given(method("GET"))
-            .and(wiremock::matchers::path(path))
-            .respond_with(responder)
-            .mount(&self.server)
-            .await;
+        let success = TestResponse::builder(200)
+            .header("Content-Type", "application/octet-stream")
+            .body_bytes(bytes.to_vec())
+            .build();
+        self.server.register(Route::exact(
+            "GET",
+            format!("/v2/{repository}/blobs/{digest}"),
+            Responder::Flaky(FlakyResponder::new(fail_first, success)),
+        ));
         digest
+    }
+
+    fn register_manifest_route(
+        &self,
+        repository: &str,
+        reference: &str,
+        media_type: &str,
+        bytes: &[u8],
+        digest: &str,
+        token: Option<&str>,
+    ) {
+        let route = Route::exact(
+            "GET",
+            format!("/v2/{repository}/manifests/{reference}"),
+            Responder::Static(
+                TestResponse::builder(200)
+                    .header("Content-Type", media_type)
+                    .header("Docker-Content-Digest", digest)
+                    .body_bytes(bytes.to_vec())
+                    .build(),
+            ),
+        );
+        self.server.register(match token {
+            Some(value) => route.with_bearer_auth(value),
+            None => route,
+        });
+    }
+
+    fn register_blob_route(
+        &self,
+        repository: &str,
+        media_type: &str,
+        bytes: &[u8],
+        digest: &str,
+        token: Option<&str>,
+    ) {
+        let route = Route::exact(
+            "GET",
+            format!("/v2/{repository}/blobs/{digest}"),
+            Responder::Static(
+                TestResponse::builder(200)
+                    .header("Content-Type", media_type)
+                    .body_bytes(bytes.to_vec())
+                    .build(),
+            ),
+        );
+        self.server.register(match token {
+            Some(value) => route.with_bearer_auth(value),
+            None => route,
+        });
+    }
+
+    fn register_token_route(&self, challenge: &BearerChallengeFixture) {
+        let response = TestResponse::builder(200)
+            .header("Content-Type", "application/json")
+            .body_string(format!(r#"{{"token":"{}"}}"#, challenge.issued_token))
+            .build();
+        let token_path = token_path(challenge);
+        let route = Route::exact("GET", token_path, Responder::Static(response));
+        self.server.register(match &challenge.basic_auth {
+            Some(auth) => route.with_authorization(basic_authorization(auth)),
+            None => route,
+        });
     }
 }
 
-/// Build an `oci_client::Client` configured to talk plaintext HTTP
-/// to the fixture's localhost address. Production callers use
-/// `ClientProtocol::Https`; tests need `HttpsExcept` listing the
-/// fixture's `host:port` so the same `OciManifestFetcher` /
-/// `OciLayerFetcher` code path is exercised against both.
-pub fn client_for(registry: &HermeticRegistry) -> OciClient {
-    OciClient::new(ClientConfig {
+fn basic_authorization(auth: &BasicAuthFixture) -> String {
+    let credential = format!("{}:{}", auth.username, auth.password);
+    let encoded = base64::engine::general_purpose::STANDARD.encode(credential);
+    format!("Basic {encoded}")
+}
+
+fn token_path(challenge: &BearerChallengeFixture) -> String {
+    let mut url = reqwest::Url::parse(&format!("http://fixture{}", challenge.realm_path))
+        .expect("fixture token URL parses");
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("service", &challenge.service);
+        query.append_pair("scope", &challenge.scope);
+    }
+    let query = url.query().expect("fixture token URL has query");
+    format!("{}?{query}", challenge.realm_path)
+}
+
+/// Build a fetcher config that talks plaintext HTTP to the fixture's
+/// localhost address. Production callers use `ClientProtocol::Https`; tests
+/// need `HttpsExcept` listing the fixture's `host:port` so the same
+/// `OciManifestFetcher` / `OciLayerFetcher` code path is exercised against
+/// both.
+pub fn client_config_for(registry: &HermeticRegistry) -> ClientConfig {
+    ClientConfig {
         protocol: ClientProtocol::HttpsExcept(vec![registry.host()]),
-        ..ClientConfig::default()
-    })
+    }
 }
 
 /// Builds a minimal OCI image manifest JSON pointing at one layer.
@@ -279,42 +436,4 @@ pub fn minimal_image_manifest(layer_bytes: &[u8], media_type: &str) -> (Vec<u8>,
         serde_json::to_vec(&manifest).expect("manifest serializes"),
         layer_digest,
     )
-}
-
-/// Custom responder that fails the first `fail_first` calls with
-/// 503 then serves a success body. We track call count via
-/// `AtomicU32` because `Respond::respond` takes `&self`.
-struct FlakyResponder {
-    calls: Arc<AtomicU32>,
-    fail_first: u32,
-    success_body: Vec<u8>,
-    success_content_type: String,
-}
-
-impl Respond for FlakyResponder {
-    fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
-        let attempt = self.calls.fetch_add(1, Ordering::SeqCst);
-        if attempt < self.fail_first {
-            ResponseTemplate::new(503)
-                .insert_header("Content-Type", "text/plain")
-                .set_body_string("Service Unavailable")
-        } else {
-            ResponseTemplate::new(200)
-                .insert_header("Content-Type", self.success_content_type.as_str())
-                .set_body_bytes(self.success_body.clone())
-        }
-    }
-}
-
-/// Unused-but-exposed so the warnings don't fire on shared
-/// helpers that not every test exercises.
-#[allow(unused_imports)]
-pub use wiremock::matchers as wm_matchers;
-
-// Silence dead-code warnings on the helper structs / fields when
-// only a subset of tests is built.
-#[allow(dead_code)]
-fn _silence_unused() {
-    let _: HashMap<String, String> = HashMap::new();
-    let _ = path_regex(".*");
 }

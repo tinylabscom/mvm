@@ -9,6 +9,7 @@ pub(super) mod bench_probe;
 pub(super) mod cache;
 pub(super) mod config;
 pub(super) mod group;
+#[cfg(feature = "mcp")]
 pub(super) mod mcp;
 pub(super) mod metrics;
 pub(super) mod network;

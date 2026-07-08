@@ -10,6 +10,7 @@ use clap::Args as ClapArgs;
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
+use super::shell_completion::{Shell, render};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -17,13 +18,12 @@ pub(in crate::commands) struct Args {
     /// (replaces the old `mvmctl completions <shell>` verb). Hidden
     /// because it's an implementation detail of the `eval` block.
     #[arg(long, value_name = "SHELL", hide = true)]
-    pub emit_completions: Option<clap_complete::Shell>,
+    pub emit_completions: Option<Shell>,
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     if let Some(shell) = args.emit_completions {
-        let mut cmd = super::super::cli_command();
-        clap_complete::generate(shell, &mut cmd, "mvmctl", &mut std::io::stdout());
+        print!("{}", render(super::super::cli_command(), shell));
         return Ok(());
     }
     crate::shell_init::print_shell_init()

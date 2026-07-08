@@ -26,11 +26,12 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// default Linux release path. Lower it freely as deps drop; raising it must be
 /// justified in the change that does.
 ///
-/// 337 (was 336): the default `run --image` path now materializes the rootfs
-/// in-process via `mvm-ext4` (`pure-mkfs`), one small `forbid(unsafe)` crate,
-/// instead of booting a builder VM to shell `mkfs.ext4` — a net removal of a
-/// whole VM launch from the run path for one audited crate.
-const CLOSURE_BUDGET: usize = 337;
+/// 267 (was 337): remeasured 2026-07-08 after the dependency-slimming follow-up
+/// removed `oci-client`, `clap_complete`, and the default-path `mvm-mcp`
+/// surface, plus the earlier in-repo UI/test-fixture/bindgen cuts already in
+/// this branch state. Lower it freely as deps drop; raising it must be
+/// justified in the change that does.
+const CLOSURE_BUDGET: usize = 267;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

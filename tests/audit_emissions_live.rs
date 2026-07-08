@@ -87,7 +87,7 @@
 //!   (top-level ReadOnly verbs — three more rows from
 //!   `AUDIT_POSTURE` pinned against a future regression that
 //!   adds an emit to a read-only path)
-//! - `mvmctl update` (against an `httpmock` server returning the
+//! - `mvmctl update` (against a loopback HTTP server returning the
 //!   current version) → `UpdateInstall` (Plan 69: the
 //!   `MVM_UPDATE_API_URL` env-var redirects the
 //!   `https://api.github.com/.../releases/latest` query to a local
@@ -138,7 +138,11 @@
 //! parallelism.
 
 use assert_cmd::Command;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
 use tempfile::TempDir;
 
 /// A test sandbox: tempdir + the env vars wired to point every
@@ -269,6 +273,56 @@ fn read_audit_log(path: &Path) -> String {
 fn count_entries_with_kind(log: &str, kind: &str) -> usize {
     let needle = format!("\"kind\":\"{kind}\"");
     log.matches(&needle).count()
+}
+
+fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback fixture");
+    let addr = listener.local_addr().expect("read loopback fixture addr");
+    listener
+        .set_nonblocking(true)
+        .expect("mark loopback fixture nonblocking");
+    let (tx, rx) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        loop {
+            if rx.try_recv().is_ok() {
+                return;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut buf = [0u8; 2048];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let path = req
+                        .lines()
+                        .next()
+                        .and_then(|line| line.split_whitespace().nth(1))
+                        .unwrap_or("/");
+                    let body = if path.contains("/releases/latest") {
+                        Some(response_body.as_bytes())
+                    } else {
+                        None
+                    };
+                    match body {
+                        Some(body) => {
+                            let headers = format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                body.len()
+                            );
+                            let _ = stream.write_all(headers.as_bytes());
+                            let _ = stream.write_all(body);
+                        }
+                        None => {
+                            let _ = stream.write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                            );
+                        }
+                    }
+                }
+                Err(_) => thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    });
+    (format!("http://{addr}"), tx)
 }
 
 #[test]
@@ -1432,28 +1486,20 @@ fn catalog_list_does_not_emit_audit_entry() {
 
 #[test]
 fn update_emits_update_install_audit_entry_against_mocked_github() {
-    // Plan 69: `mvmctl update` reaches `api.github.com/releases/latest`
-    // by default. The `MVM_UPDATE_API_URL` env-var redirects the
-    // base URL to a local `httpmock` server, which returns the
-    // current binary's own version. `update::update` then exits
-    // early on the "already up to date" branch — Ok(()) without
-    // swapping the binary — and the outer wrapper at
-    // `commands/env/update.rs` emits `UpdateInstall`. No real
-    // network, no binary swap, no install dance.
-    let server = httpmock::MockServer::start();
+    // `mvmctl update` reaches `api.github.com/releases/latest` by
+    // default. `MVM_UPDATE_API_URL` redirects the base URL to a
+    // loopback server, which returns the current binary's own
+    // version. `update::update` then exits early on the "already
+    // up to date" branch and the outer wrapper emits
+    // `UpdateInstall`. No real network, no binary swap.
     let current_version = env!("CARGO_PKG_VERSION");
-    let _api_mock = server.mock(|when, then| {
-        when.method(httpmock::Method::GET)
-            .path_includes("/releases/latest");
-        then.status(200)
-            .header("content-type", "application/json")
-            .body(format!(r#"{{"tag_name":"v{current_version}"}}"#));
-    });
+    let (base_url, _stop) =
+        serve_release_latest_fixture(format!(r#"{{"tag_name":"v{current_version}"}}"#));
 
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .env("MVM_UPDATE_API_URL", server.base_url())
+        .env("MVM_UPDATE_API_URL", base_url)
         .args(["env", "update"])
         .output()
         .expect("spawn mvmctl update");
@@ -1477,19 +1523,12 @@ fn update_check_does_not_emit_audit_entry() {
     // path AND before the outer wrapper's audit-emit branch
     // (`!args.check` guard at `commands/env/update.rs`). Read-only;
     // pins that against a future regression that emits on check.
-    let server = httpmock::MockServer::start();
-    let _api_mock = server.mock(|when, then| {
-        when.method(httpmock::Method::GET)
-            .path_includes("/releases/latest");
-        then.status(200)
-            .header("content-type", "application/json")
-            .body(r#"{"tag_name":"v0.999.0"}"#);
-    });
+    let (base_url, _stop) = serve_release_latest_fixture(r#"{"tag_name":"v0.999.0"}"#.to_string());
 
     let sandbox = AuditSandbox::new();
     let output = sandbox
         .mvmctl()
-        .env("MVM_UPDATE_API_URL", server.base_url())
+        .env("MVM_UPDATE_API_URL", base_url)
         .args(["env", "update", "--check"])
         .output()
         .expect("spawn mvmctl update --check");

@@ -14,11 +14,11 @@
 use std::collections::BTreeMap;
 use std::io::Read;
 
-use oci_client::manifest::OciManifest;
 use serde::Deserialize;
 
 use crate::layer::LayerDescriptor;
 use crate::manifest::LinuxPlatform;
+use crate::manifest_types::OciManifest;
 use crate::{OciError, verify_sha256_digest};
 
 /// Hard cap on the total bytes buffered from one archive. Blobs are
@@ -239,8 +239,8 @@ fn select_manifest_digest(
     }
     if let Some(matched) = image_manifests.iter().find(|entry| {
         entry.platform.as_ref().is_some_and(|p| {
-            p.os.to_string() == "linux"
-                && p.architecture.to_string() == platform.architecture
+            p.os == "linux"
+                && p.architecture == platform.architecture
                 && p.variant.as_deref() == platform.variant.as_deref()
         })
     }) {

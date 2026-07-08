@@ -23,7 +23,7 @@ build = "build.rs"
 #     return `Error::NotYetWired`. The workspace builds cleanly on hosts
 #     without libkrun installed.
 #
-#   * `libkrun-sys` — bindgen-generated FFI + `-lkrun` link. Requires
+#   * `libkrun-sys` — checked-in FFI bindings + `-lkrun` link. Requires
 #     libkrun.h on the host (probed by build.rs at the standard install
 #     locations) and a working libkrun shared library at link time.
 #
@@ -71,13 +71,6 @@ serde_json.workspace = true
 # (mvm-cli/mvm-build); pulling it in here keeps the dep graph
 # uniform and avoids reinventing PATH search.
 which.workspace = true
-
-[build-dependencies]
-# `bindgen` is required only when the `libkrun-sys` feature is on; we
-# still list it unconditionally so the crate manifest reflects the real
-# build-time graph. The build script returns early when the feature is
-# off, so libclang isn't invoked in the default workspace build.
-bindgen = "0.72"
 
 [features]
 default = []

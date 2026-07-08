@@ -2,12 +2,12 @@
 //! OCI registry. Spec for the fixture lives in `tests/common/mod.rs`.
 //!
 //! These tests deliberately do NOT hit any real network — every
-//! `oci-client` call goes to a wiremock server on a random
-//! localhost port. They run in CI in seconds.
+//! registry-client call goes to a hermetic localhost fixture. They
+//! run in CI in seconds.
 
 mod common;
 
-use common::{HermeticRegistry, client_for, minimal_image_manifest};
+use common::{HermeticRegistry, client_config_for, minimal_image_manifest};
 use mvm_oci::{
     LayerDescriptor, LayerFetchOptions, LinuxPlatform, ManifestFetcher, OciError, OciLayerFetcher,
     OciManifestFetcher, RegistryAuthConfig, verify_sha256_digest,
@@ -28,7 +28,7 @@ async fn manifest_fetch_round_trip_against_hermetic_registry() {
         .register_manifest_with_digest_path("library/test", "v1", MANIFEST_MEDIA, &manifest_bytes)
         .await;
 
-    let fetcher = OciManifestFetcher::with_client(client_for(&reg));
+    let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
     let image = reg.image_ref("library/test", "v1");
     let fetched = fetcher.fetch(&image).await.expect("manifest fetch");
 
@@ -59,8 +59,8 @@ async fn manifest_fetch_uses_explicit_bearer_auth() {
         )
         .await;
 
-    let fetcher = OciManifestFetcher::with_client_and_auth(
-        client_for(&reg),
+    let fetcher = OciManifestFetcher::with_config_and_auth(
+        client_config_for(&reg),
         RegistryAuthConfig::bearer(token),
     );
     let image = reg.image_ref("private/app", "v1");
@@ -84,7 +84,7 @@ async fn manifest_fetch_rejects_missing_bearer_auth() {
     )
     .await;
 
-    let fetcher = OciManifestFetcher::with_client(client_for(&reg));
+    let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
     let image = reg.image_ref("private/app", "v1");
     let err = fetcher.fetch(&image).await.unwrap_err();
 
@@ -106,14 +106,68 @@ async fn manifest_fetch_rejects_wrong_bearer_auth() {
     )
     .await;
 
-    let fetcher = OciManifestFetcher::with_client_and_auth(
-        client_for(&reg),
+    let fetcher = OciManifestFetcher::with_config_and_auth(
+        client_config_for(&reg),
         RegistryAuthConfig::bearer("wrong-token"),
     );
     let image = reg.image_ref("private/app", "v1");
     let err = fetcher.fetch(&image).await.unwrap_err();
 
     assert!(matches!(err, OciError::Registry(_)));
+}
+
+#[tokio::test]
+async fn manifest_fetch_follows_bearer_challenge_token_flow() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = b"challenge-layer";
+    let (manifest_bytes, _layer_digest) = minimal_image_manifest(layer_bytes, LAYER_MEDIA);
+
+    let manifest_digest = reg
+        .register_challenged_manifest_with_digest_path(
+            "private/challenge",
+            "v1",
+            MANIFEST_MEDIA,
+            &manifest_bytes,
+            common::BearerChallengeFixture::builder("private/challenge")
+                .issued_token("challenge-token")
+                .build(),
+        )
+        .await;
+
+    let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
+    let image = reg.image_ref("private/challenge", "v1");
+    let fetched = fetcher.fetch(&image).await.expect("manifest fetch");
+
+    assert_eq!(fetched.digest, manifest_digest);
+}
+
+#[tokio::test]
+async fn manifest_fetch_uses_basic_auth_when_redeeming_bearer_challenge() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = b"basic-challenge-layer";
+    let (manifest_bytes, _layer_digest) = minimal_image_manifest(layer_bytes, LAYER_MEDIA);
+
+    let manifest_digest = reg
+        .register_challenged_manifest_with_digest_path(
+            "private/basic-challenge",
+            "v1",
+            MANIFEST_MEDIA,
+            &manifest_bytes,
+            common::BearerChallengeFixture::builder("private/basic-challenge")
+                .issued_token("basic-challenge-token")
+                .basic_auth("fixture-user", "fixture-pass")
+                .build(),
+        )
+        .await;
+
+    let fetcher = OciManifestFetcher::with_config_and_auth(
+        client_config_for(&reg),
+        RegistryAuthConfig::basic("fixture-user", "fixture-pass"),
+    );
+    let image = reg.image_ref("private/basic-challenge", "v1");
+    let fetched = fetcher.fetch(&image).await.expect("manifest fetch");
+
+    assert_eq!(fetched.digest, manifest_digest);
 }
 
 #[tokio::test]
@@ -125,7 +179,7 @@ async fn manifest_layers_extracts_single_layer() {
     reg.register_manifest_with_digest_path("library/test", "v1", MANIFEST_MEDIA, &manifest_bytes)
         .await;
 
-    let fetcher = OciManifestFetcher::with_client(client_for(&reg));
+    let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
     let image = reg.image_ref("library/test", "v1");
     let fetched = fetcher.fetch(&image).await.expect("manifest fetch");
 
@@ -177,7 +231,7 @@ async fn platform_manifest_fetch_follows_matching_linux_index_entry() {
     )
     .await;
 
-    let fetcher = OciManifestFetcher::with_client(client_for(&reg));
+    let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
     let image = reg.image_ref("library/alpine", "3.20");
     let fetched = fetcher
         .fetch_linux_platform_manifest(
@@ -209,7 +263,8 @@ async fn layer_fetch_happy_path_verifies_digest_and_byte_count() {
         size: layer_bytes.len() as u64,
         media_type: LAYER_MEDIA.to_string(),
     };
-    let fetcher = OciLayerFetcher::with_client(client_for(&reg), LayerFetchOptions::default());
+    let fetcher =
+        OciLayerFetcher::with_config(client_config_for(&reg), LayerFetchOptions::default());
 
     let image = reg.image_ref("library/test", "v1");
     let mut sink: Vec<u8> = Vec::new();
@@ -240,7 +295,8 @@ async fn layer_fetch_rejects_tampered_blob_with_digest_mismatch() {
         size: intended_bytes.len() as u64,
         media_type: LAYER_MEDIA.to_string(),
     };
-    let fetcher = OciLayerFetcher::with_client(client_for(&reg), LayerFetchOptions::default());
+    let fetcher =
+        OciLayerFetcher::with_config(client_config_for(&reg), LayerFetchOptions::default());
 
     let image = reg.image_ref("library/test", "v1");
     let mut sink: Vec<u8> = Vec::new();
@@ -249,9 +305,10 @@ async fn layer_fetch_rejects_tampered_blob_with_digest_mismatch() {
         .await
         .unwrap_err();
 
-    // oci-client may surface tamper as its own digest check or
-    // bubble through to ours. Either error class is acceptable as
-    // long as we fail closed and the bytes never escape as "OK".
+    // The registry client may surface tamper as its own digest
+    // check or bubble through to ours. Either error class is
+    // acceptable as long as we fail closed and the bytes never
+    // escape as "OK".
     match err {
         OciError::DigestMismatch { .. } | OciError::Registry(_) => {}
         other => panic!("expected DigestMismatch or Registry (tamper), got {other:?}"),
@@ -277,7 +334,7 @@ async fn layer_fetch_rejects_declared_size_exceeding_cap() {
         max_size: 1024, // 1 KiB cap
         ..LayerFetchOptions::default()
     };
-    let fetcher = OciLayerFetcher::with_client(client_for(&reg), options);
+    let fetcher = OciLayerFetcher::with_config(client_config_for(&reg), options);
 
     let image = reg.image_ref("library/test", "v1");
     let mut sink: Vec<u8> = Vec::new();
@@ -320,7 +377,7 @@ async fn layer_fetch_streamed_byte_count_cap_aborts_mid_stream() {
         max_size: 100,
         ..LayerFetchOptions::default()
     };
-    let fetcher = OciLayerFetcher::with_client(client_for(&reg), options);
+    let fetcher = OciLayerFetcher::with_config(client_config_for(&reg), options);
 
     let image = reg.image_ref("library/test", "v1");
     let mut sink: Vec<u8> = Vec::new();
@@ -364,7 +421,7 @@ async fn layer_fetch_retries_transient_5xx_and_eventually_succeeds() {
         initial_backoff: Duration::from_millis(10),
         ..LayerFetchOptions::default()
     };
-    let fetcher = OciLayerFetcher::with_client(client_for(&reg), options);
+    let fetcher = OciLayerFetcher::with_config(client_config_for(&reg), options);
 
     let image = reg.image_ref("library/test", "v1");
     let mut sink: Vec<u8> = Vec::new();
@@ -396,7 +453,7 @@ async fn layer_fetch_exhausts_retries_on_persistent_5xx() {
         initial_backoff: Duration::from_millis(1),
         ..LayerFetchOptions::default()
     };
-    let fetcher = OciLayerFetcher::with_client(client_for(&reg), options);
+    let fetcher = OciLayerFetcher::with_config(client_config_for(&reg), options);
 
     let image = reg.image_ref("library/test", "v1");
     let mut sink: Vec<u8> = Vec::new();
@@ -428,7 +485,7 @@ async fn layer_fetch_round_trip_manifest_to_layers_to_blob() {
     reg.register_manifest_with_digest_path("library/multi", "v1", MANIFEST_MEDIA, &manifest_bytes)
         .await;
 
-    let manifest_fetcher = OciManifestFetcher::with_client(client_for(&reg));
+    let manifest_fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
     let layer_fetcher =
         OciLayerFetcher::from_manifest_fetcher(&manifest_fetcher, LayerFetchOptions::default());
     let image = reg.image_ref("library/multi", "v1");
@@ -465,8 +522,8 @@ async fn layer_fetch_reuses_manifest_fetcher_bearer_auth() {
     )
     .await;
 
-    let manifest_fetcher = OciManifestFetcher::with_client_and_auth(
-        client_for(&reg),
+    let manifest_fetcher = OciManifestFetcher::with_config_and_auth(
+        client_config_for(&reg),
         RegistryAuthConfig::bearer(token),
     );
     let layer_fetcher =

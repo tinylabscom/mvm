@@ -9,7 +9,9 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{bench, config, mcp, metrics};
+#[cfg(feature = "mcp")]
+use super::mcp;
+use super::{bench, config, metrics};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -26,6 +28,7 @@ pub(in crate::commands) enum OpsCmd {
     /// Read or write global operator config (~/.mvm/config.toml)
     Config(config::Args),
     /// Expose mvmctl over Model Context Protocol
+    #[cfg(feature = "mcp")]
     Mcp(mcp::Args),
 }
 
@@ -36,6 +39,7 @@ impl OpsCmd {
             OpsCmd::Metrics(_) => "metrics",
             OpsCmd::Bench(_) => "bench",
             OpsCmd::Config(_) => "config",
+            #[cfg(feature = "mcp")]
             OpsCmd::Mcp(_) => "mcp",
         }
     }
@@ -44,7 +48,14 @@ impl OpsCmd {
     /// stdout stays clean JSON-RPC). Lets `run()` keep its mcp special-case
     /// after the grouping.
     pub(in crate::commands) fn is_mcp(&self) -> bool {
-        matches!(self, OpsCmd::Mcp(_))
+        #[cfg(feature = "mcp")]
+        {
+            matches!(self, OpsCmd::Mcp(_))
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            false
+        }
     }
 }
 
@@ -53,6 +64,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         OpsCmd::Metrics(a) => metrics::run(cli, a, cfg),
         OpsCmd::Bench(a) => bench::run(cli, a, cfg),
         OpsCmd::Config(a) => config::run(cli, a, cfg),
+        #[cfg(feature = "mcp")]
         OpsCmd::Mcp(a) => mcp::run(cli, a, cfg),
     }
 }
