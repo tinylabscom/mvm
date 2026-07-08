@@ -40,6 +40,8 @@
       Add `TunPacketIo` for the Linux TUN packet source/sink boundary and an opt-in `wire-json` feature with bounded length-prefixed `NetMessage` framing, partial-read preservation, guest authority trait impls, closed-stream handling, and oversized-frame refusal.
 - [x] **B1c2e — Add the concrete Linux TUN/vsock runner.**
       Add the real runner that reads from the Linux TUN fd, writes protocol frames to the vsock authority stream, consumes host responses, synthesizes TCP replies to the guest, and enforces bounded readiness/backpressure across both directions.
+- [ ] **B1d — Package the guest bridge binary.**
+      Add the lean guest entrypoint that loads its bridge config, runs the Linux executor plus guest runner, reports startup/runtime failures clearly, and can be embedded into guest images without pulling host-side networking code.
 - [ ] **B2 — Build the host network authority.**
       Add the host-side module and binary that accepts the per-VM vsock stream, owns synthetic DNS/IP mapping, reuses the canonical network policy projection, opens real host sockets only after admission, and records flow-open/flow-close audit events.
 - [ ] **C1 — Add DNS plus TCP MVP.**
