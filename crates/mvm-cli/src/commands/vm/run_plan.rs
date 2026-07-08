@@ -533,6 +533,7 @@ mod tests {
             pty: false,
             vm_name: None,
             image: None,
+            runtime_pack: false,
             net: false,
             allow_host: Vec::new(),
             cpus: 2,

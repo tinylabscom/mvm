@@ -26,6 +26,7 @@ pub(super) mod readiness;
 pub(super) mod redaction_flags;
 pub(super) mod rekernel;
 pub(super) mod run_plan;
+pub(super) mod runtime_pack;
 pub(super) mod sandbox;
 pub(super) mod sdk_no_vm;
 pub(super) mod session;

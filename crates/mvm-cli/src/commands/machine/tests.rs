@@ -208,6 +208,32 @@ fn run_parses_image_and_trailing_argv() {
 }
 
 #[test]
+fn run_parses_runtime_pack_flag_and_forwards_to_run_args() {
+    let args = parse_run(&["run", "--runtime-pack", "--", "true"]).expect("parse");
+    assert!(args.runtime_pack);
+
+    let run = args.into_run_args();
+    assert!(run.runtime_pack);
+    assert!(run.image.is_none());
+    assert!(run.manifest.is_none());
+}
+
+#[test]
+fn run_runtime_pack_conflicts_with_image_manifest_and_flake() {
+    let err = parse_run(&["run", "--runtime-pack", "--image", "alpine", "--", "true"])
+        .expect_err("--runtime-pack conflicts with --image");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+    let err = parse_run(&["run", "--runtime-pack", "--manifest", "base", "--", "true"])
+        .expect_err("--runtime-pack conflicts with --manifest");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+
+    let err = parse_run(&["run", "--runtime-pack", "--flake", ".", "--", "true"])
+        .expect_err("--runtime-pack conflicts with --flake");
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
+
+#[test]
 fn run_parses_and_forwards_net_flags() {
     let args = parse_run(&[
         "run",

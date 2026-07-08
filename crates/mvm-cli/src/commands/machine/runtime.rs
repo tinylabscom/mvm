@@ -299,6 +299,7 @@ pub(in crate::commands) fn boot_persistent_by_name(
             detach: true,
             image: None,
             manifest: None,
+            runtime_pack: false,
             flake_profile: None,
             net: false,
             allow_host: Vec::new(),
