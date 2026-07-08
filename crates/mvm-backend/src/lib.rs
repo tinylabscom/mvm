@@ -71,6 +71,7 @@ pub mod hvf;
 /// PID files; only availability probing is macOS-specific), so it registers in
 /// `AnyBackend`/the catalog without cfg-gymnastics.
 pub mod hvf_backend;
+pub(crate) mod hvf_bootargs;
 pub mod image;
 /// KVM (Linux) backend — drives [`vmm`] on Linux via `kvm-ioctls`, implementing
 /// the [`vmm::hv`] seam. `kvm::x86_boot` is pure logic

@@ -198,7 +198,7 @@ fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<Stri
     let token = vsock_egress_cmdline_token(config, state_dir)?;
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
-    let mut cmdline = crate::hvf::workload_bootargs(virtiofs_root, has_disk);
+    let mut cmdline = crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk);
     cmdline.push(' ');
     cmdline.push_str(&token);
     Some(cmdline)

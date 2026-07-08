@@ -20,11 +20,11 @@ mod kernel_boot;
 mod sys;
 mod vcpu;
 
+pub use crate::hvf_bootargs::workload_bootargs;
 pub use crate::vmm::virtio::DiskImage;
 pub use boot_smoke::{BootProof, HvfError, MAGIC, boot_smoke, probe_available};
 pub use console_smoke::{ConsoleProof, console_smoke};
 pub use hv_impl::{HvfHandle, HvfVcpu, HvfVm};
 pub use kernel_boot::{
     HostChannels, KernelBootResult, KernelBootUntilParams, boot_kernel, boot_kernel_until,
-    workload_bootargs,
 };
