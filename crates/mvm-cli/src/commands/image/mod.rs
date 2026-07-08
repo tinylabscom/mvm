@@ -472,8 +472,8 @@ fn inject_runtime_and_materialize(
 }
 
 /// The guest-agent binaries embedded in this mvmctl at build time (build.rs).
-/// `None` when this build baked zero-byte stubs (`MVM_SKIP_EMBED_BINARIES`), in
-/// which case the run path falls back to a source-checkout cross-compile.
+/// `None` when this build baked zero-byte stubs, in which case the run path
+/// falls back to a source-checkout cross-compile.
 fn embedded_guest_binaries() -> Option<mvm_build::run_image::PrebuiltGuestBinaries<'static>> {
     let find = |name: &str| {
         crate::host_binaries::embedded::EMBEDDED

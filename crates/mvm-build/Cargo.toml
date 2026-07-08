@@ -87,7 +87,7 @@ anyhow.workspace = true
 chrono.workspace = true
 fs2.workspace = true
 hex.workspace = true
-reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls-tls"] }
+reqwest = { workspace = true, default-features = false, features = ["blocking", "rustls"] }
 # Optional libkrun FFI dep for the in-tree builder VM
 # launcher (`libkrun_builder::LibkrunBuilderVm`). Gated by
 # `builder-vm`; default-off until the cutover flips polarity.
