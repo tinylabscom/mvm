@@ -18,6 +18,8 @@ ASSETS_DIR=""
 # Keep in lockstep with the release.yml `build` matrix. x86_64-apple-darwin is
 # deferred there (no Intel runner), so it is deliberately absent here too.
 TARGETS="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
+# Keep in lockstep with the release.yml `builder-vm-image` matrix.
+BUILDER_ARCHES="aarch64 x86_64"
 DO_COSIGN=0
 EXPECT_VERSION=""
 
@@ -25,6 +27,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --assets-dir)     ASSETS_DIR="$2"; shift 2 ;;
     --targets)        TARGETS="$2"; shift 2 ;;
+    --builder-arches) BUILDER_ARCHES="$2"; shift 2 ;;
     --cosign)         DO_COSIGN=1; shift ;;
     # Assert the packaged binary reports this version. Only the target that
     # matches the host can be executed; cross-arch targets are skipped (their
@@ -133,6 +136,45 @@ done
 # The SBOM ships signed alongside the binaries on every release.
 [ -f "$ASSETS_DIR/sbom.cdx.json" ]        || fail "SBOM missing: sbom.cdx.json"
 [ -f "$ASSETS_DIR/sbom.cdx.json.bundle" ] || fail "SBOM signature bundle missing: sbom.cdx.json.bundle"
+
+# Attested builder packs are an accelerator, published best-effort: a signing
+# outage skips them and the plain vmlinux/rootfs still ship. So a pack is valid
+# either COMPLETE (manifest + cosign bundle + SBOM, each listed in and matching
+# the per-arch builder checksums manifest) or entirely ABSENT — a partial pack
+# is a packaging bug and fails closed, because an installed binary would fetch
+# it, fail to verify, and silently fall back to the plain download.
+for arch in $BUILDER_ARCHES; do
+  bp_manifest="builder-vm-${arch}.pack-manifest.json"
+  bp_bundle="builder-vm-${arch}.pack-manifest.json.bundle"
+  bp_sbom="builder-vm-${arch}.sbom.txt"
+  bp_checks="$ASSETS_DIR/builder-vm-${arch}-checksums-sha256.txt"
+
+  present=0
+  for f in "$bp_manifest" "$bp_bundle" "$bp_sbom"; do
+    [ -f "$ASSETS_DIR/$f" ] && present=$((present + 1))
+  done
+
+  if [ "$present" -eq 0 ]; then
+    echo "note: [$arch] no attested builder pack published (accelerator absent) — ok"
+    continue
+  fi
+  if [ "$present" -ne 3 ]; then
+    fail "[$arch] partial attested builder pack: manifest=$([ -f "$ASSETS_DIR/$bp_manifest" ] && echo y || echo n) bundle=$([ -f "$ASSETS_DIR/$bp_bundle" ] && echo y || echo n) sbom=$([ -f "$ASSETS_DIR/$bp_sbom" ] && echo y || echo n)"
+    continue
+  fi
+
+  [ -f "$bp_checks" ] || { fail "[$arch] builder checksums manifest missing: builder-vm-${arch}-checksums-sha256.txt"; continue; }
+  for f in "$bp_manifest" "$bp_bundle" "$bp_sbom"; do
+    want=$(awk -v n="$f" '$2 == n { print $1 }' "$bp_checks" | head -1)
+    if [ -z "$want" ]; then
+      fail "[$arch] $f not listed in builder-vm-${arch}-checksums-sha256.txt"
+      continue
+    fi
+    got=$(sha256_of "$ASSETS_DIR/$f")
+    [ "$want" = "$got" ] || fail "[$arch] $f sha256 mismatch: recorded=$want actual=$got"
+  done
+  [ "$FAILED" = 0 ] && echo "ok: [$arch] attested builder pack complete (manifest + bundle + SBOM, checksummed)."
+done
 
 if [ "$FAILED" = 0 ]; then
   echo "ok: all $(echo "$TARGETS" | wc -w | tr -d ' ') target(s) have tarball + matching sha256 + signature bundle + manifest entry; SBOM signed."
