@@ -171,70 +171,79 @@ preflight: ci
 # ── Release ──────────────────────────────────────────────────────────────
 
 # Cut a release with automatic version bump (based on conventional commits)
+# Cut the next release (auto-detected version) via a PR. `main` is protected
+# (enforce_admins + merge queue), so the version bump lands through a PR — a
+# direct `git push` to main is rejected. After the PR merges, run
+# `just release-tag <version>` to publish.
 release-auto:
     #!/usr/bin/env bash
     set -euo pipefail
-    echo "==> Preparing automatic release"
-    # 1. Quality gates — auto-fix fmt and clippy, then test
+    echo "==> Preparing automatic release (PR-based)"
+    # Quality gates — auto-fix fmt and clippy, then test.
     cargo fmt --all
     cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
     cargo clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
-    # 2. Determine next version from conventional commits
     NEXT_VERSION=$(git cliff --bumped-version | sed 's/^v//')
     echo "==> Auto-detected next version: $NEXT_VERSION"
-    # 3. Update version in Cargo.toml (workspace.package.version and internal crate versions)
-    sed -i.bak -e "s/^version = \".*\"/version = \"$NEXT_VERSION\"/" \
-               -e "s/\(mvm-[a-z]* = .*version = \)\"[^\"]*\"/\1\"$NEXT_VERSION\"/" Cargo.toml
-    rm Cargo.toml.bak
-    cargo update -w
-    git add Cargo.toml Cargo.lock
-    # 4. Generate changelog and create tag
-    git-cliff --tag "v$NEXT_VERSION" --unreleased --prepend CHANGELOG.md
-    # Fail closed if git-cliff did not add the new section (silently shipped
-    # v0.15.2/v0.16.0/v0.16.1 with no changelog entry — never again).
-    if ! grep -qE "^## \[$NEXT_VERSION\]" CHANGELOG.md; then
-        echo "ERROR: git-cliff did not add a '## [$NEXT_VERSION]' section to CHANGELOG.md — aborting (no changelog for the release)." >&2
-        exit 1
-    fi
-    git add CHANGELOG.md
-    git commit -m "chore(release): prepare v$NEXT_VERSION"
-    git tag "v$NEXT_VERSION"
-    # 5. Push commits and tags
-    git push --follow-tags
-    echo "==> Release v$NEXT_VERSION complete. CI workflow will build and publish."
+    just _release-prep "$NEXT_VERSION"
 
-# Cut a release with specific version: just release 0.4.1
+# Cut a specific version via a PR: just release 0.17.0
 release VERSION:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "==> Preparing release v{{VERSION}}"
-    # 1. Quality gates — auto-fix fmt and clippy, then test
     cargo fmt --all
     cargo clippy --fix --allow-dirty --workspace --all-targets -- -D warnings
     cargo clippy --workspace --all-targets -- -D warnings
     cargo nextest run --workspace
-    # 2. Update version in Cargo.toml (workspace.package.version and internal crate versions)
-    sed -i.bak -e 's/^version = ".*"/version = "{{VERSION}}"/' \
-               -e 's/\(mvm-[a-z]* = .*version = \)"[^"]*"/\1"{{VERSION}}"/' Cargo.toml
+    just _release-prep "{{VERSION}}"
+
+# Shared release prep: on a `release/v<version>` branch, bump every version pin,
+# prepend the changelog, commit, push, and open the release PR. Bumps the
+# workspace version AND every internal path-dep pin — the old `mvm-[a-z]*` regex
+# missed `mvm`, `mvm-ext4`, `libkrun-sys`, `mvm-egress-proxy`, which then
+# version-mismatched on `cargo update`.
+_release-prep VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    V="{{VERSION}}"
+    BRANCH="release/v$V"
+    git switch -c "$BRANCH"
+    sed -i.bak -E \
+        -e "s/^version = \"[^\"]*\"/version = \"$V\"/" \
+        -e "s/(path = \"[^\"]*\", version = )\"[^\"]*\"/\1\"$V\"/" Cargo.toml
     rm Cargo.toml.bak
     cargo update -w
-    git add Cargo.toml Cargo.lock
-    # 3. Use git-cliff to generate changelog and create tag
-    # --tag: use specified version instead of auto-bump
-    # --prepend: add new changelog entry to CHANGELOG.md
-    git-cliff --tag "v{{VERSION}}" --unreleased --prepend CHANGELOG.md
-    # Fail closed if git-cliff did not add the new section (see release-auto).
-    if ! grep -qE "^## \[{{VERSION}}\]" CHANGELOG.md; then
-        echo "ERROR: git-cliff did not add a '## [{{VERSION}}]' section to CHANGELOG.md — aborting (no changelog for the release)." >&2
+    git-cliff --tag "v$V" --unreleased --prepend CHANGELOG.md
+    # Fail closed if git-cliff did not add the new section (silently shipped
+    # v0.15.2/v0.16.0/v0.16.1 with no changelog entry — never again).
+    if ! grep -qE "^## \[$V\]" CHANGELOG.md; then
+        echo "ERROR: git-cliff did not add a '## [$V]' section to CHANGELOG.md — aborting (no changelog for the release)." >&2
         exit 1
     fi
-    git add CHANGELOG.md
-    git commit -m "chore(release): prepare v{{VERSION}}"
-    git tag "v{{VERSION}}"
-    # 4. Push commits and tags
-    git push --follow-tags
-    echo "==> Release v{{VERSION}} complete. CI workflow will build and publish."
+    git add Cargo.toml Cargo.lock CHANGELOG.md
+    git commit -m "release: v$V"
+    git push -u origin "$BRANCH"
+    gh pr create --base main --head "$BRANCH" --title "release: v$V" \
+        --body "Version bump + git-cliff changelog for v$V. Merge via the queue, then \`just release-tag $V\`."
+    echo "==> Opened release PR for v$V. Merge it via the queue, then run: just release-tag $V"
+
+# After the release PR merges: tag the merged main commit and push the tag,
+# which triggers the build + publish pipeline. Tags are not branch-protected.
+release-tag VERSION:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    V="{{VERSION}}"
+    git fetch origin main
+    # The bump commit must be on main (the release PR merged) before tagging.
+    if ! git show "origin/main:Cargo.toml" | grep -qE "^version = \"$V\""; then
+        echo "ERROR: origin/main is not at version $V — merge the release PR first." >&2
+        exit 1
+    fi
+    git tag "v$V" origin/main
+    git push origin "v$V"
+    echo "==> Pushed tag v$V — the release pipeline will build + publish."
 
 # Build optimized release binary
 release-build:
