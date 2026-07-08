@@ -1100,8 +1100,8 @@ mod tests {
     }
 
     #[test]
-    fn endpoint_with_query_appends_and_encodes_params() {
-        let url = endpoint_with_query(
+    fn build_query_url_appends_and_encodes_params() {
+        let url = build_query_url(
             "https://example.test/search",
             &[("q", "rust async"), ("count", "20")],
         )
