@@ -1022,6 +1022,27 @@ fn do_exec_streaming(
 /// (docker `-d` semantics). The reaper never blocks the agent request loop.
 #[cfg(feature = "dev-shell")]
 fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
+    do_run_detached_with(
+        argv,
+        env,
+        std::path::Path::new("/dev/console"),
+        std::path::Path::new("/usr/local/bin/mvm-exit-report"),
+    )
+}
+
+/// Testable core of [`do_run_detached`]. `console` receives the workload's
+/// stdout/stderr (production: `/dev/console`, captured by the backend to
+/// `console.log`); `exit_report_bin` is the reporter the reaper execs with the
+/// workload's exit code (production: `/usr/local/bin/mvm-exit-report`). A test
+/// points both at a tempdir to observe the spawn, the console redirect, and the
+/// reported exit code without a live guest.
+#[cfg(feature = "dev-shell")]
+fn do_run_detached_with(
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+    console: &std::path::Path,
+    exit_report_bin: &std::path::Path,
+) -> GuestResponse {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
@@ -1041,19 +1062,19 @@ fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestRespon
     };
     // Two independent write handles to the console so stdout and stderr
     // each own their fd (no shared-offset surprises).
-    let console_out = match std::fs::OpenOptions::new().write(true).open("/dev/console") {
+    let console_out = match std::fs::OpenOptions::new().write(true).open(console) {
         Ok(f) => f,
         Err(e) => {
             return GuestResponse::Error {
-                message: format!("run-detached: open /dev/console: {e}"),
+                message: format!("run-detached: open console {}: {e}", console.display()),
             };
         }
     };
-    let console_err = match std::fs::OpenOptions::new().write(true).open("/dev/console") {
+    let console_err = match std::fs::OpenOptions::new().write(true).open(console) {
         Ok(f) => f,
         Err(e) => {
             return GuestResponse::Error {
-                message: format!("run-detached: open /dev/console: {e}"),
+                message: format!("run-detached: open console {}: {e}", console.display()),
             };
         }
     };
@@ -1103,13 +1124,14 @@ fn do_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestRespon
     // Reaper: wait for the detached workload, then report its exit code
     // to the host so the VM powers off (best-effort). Never touches the
     // agent request loop.
+    let exit_report_bin = exit_report_bin.to_path_buf();
     std::thread::spawn(move || {
         let mut child = child;
         let code = match child.wait() {
             Ok(status) => status.code().unwrap_or(-1),
             Err(_) => -1,
         };
-        let _ = std::process::Command::new("/usr/local/bin/mvm-exit-report")
+        let _ = std::process::Command::new(&exit_report_bin)
             .arg(code.to_string())
             .status();
     });
@@ -3338,6 +3360,82 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The detached-workload handler actually spawns the argv, redirects its
+    /// stdout to the console target, and the reaper reports the exit code — the
+    /// end-to-end behaviour behind `machine run -d -- <cmd>`, exercised on the
+    /// host without a live guest. This is the regression guard for a guest agent
+    /// that links the `RunDetached` handler but doesn't actually run the workload.
+    #[cfg(feature = "dev-shell")]
+    #[test]
+    fn run_detached_spawns_redirects_console_and_reports_exit() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let console = dir.path().join("console");
+        let reported = dir.path().join("reported-code");
+        // The handler opens the console for writing (it exists in production as
+        // `/dev/console`); pre-create the stand-in so the open succeeds.
+        std::fs::File::create(&console).unwrap();
+
+        // Stand-in for `mvm-exit-report`: records its exit-code argument so the
+        // reaper's report is observable.
+        let reporter = dir.path().join("exit-report.sh");
+        std::fs::write(
+            &reporter,
+            format!("#!/bin/sh\nprintf '%s' \"$1\" > {}\n", reported.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&reporter, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let resp = do_run_detached_with(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf RAN-DETACHED; exit 7".into(),
+            ],
+            vec![],
+            &console,
+            &reporter,
+        );
+        let pid = match resp {
+            GuestResponse::DetachedStarted { pid } => pid,
+            other => panic!("expected DetachedStarted, got {other:?}"),
+        };
+        assert!(pid > 0, "expected a positive pid, got {pid}");
+
+        // The spawn is asynchronous: poll until the workload's stdout reaches the
+        // console target AND the reaper reports the exit code.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let console_body = std::fs::read_to_string(&console).unwrap_or_default();
+            let reported_code = std::fs::read_to_string(&reported).unwrap_or_default();
+            if console_body.contains("RAN-DETACHED") && reported_code == "7" {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "detached workload did not complete: console={console_body:?} reported_code={reported_code:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    #[cfg(feature = "dev-shell")]
+    #[test]
+    fn run_detached_refuses_empty_argv() {
+        match do_run_detached_with(
+            vec![],
+            vec![],
+            std::path::Path::new("/dev/null"),
+            std::path::Path::new("/bin/true"),
+        ) {
+            GuestResponse::Error { message } => {
+                assert!(message.contains("empty argv"), "got: {message}")
+            }
+            other => panic!("expected Error, got {other:?}"),
+        }
+    }
     use mvm_guest::integrations::{IntegrationEntry, IntegrationHealthResult, IntegrationStatus};
     use mvm_guest::vsock::{GuestCapability, read_frame, write_frame};
     use std::os::fd::IntoRawFd;
