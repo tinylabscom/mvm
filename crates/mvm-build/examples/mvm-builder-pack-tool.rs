@@ -47,7 +47,8 @@ use std::process::ExitCode;
 use chrono::{Duration, Utc};
 use ed25519_dalek::SigningKey;
 use mvm_build::builder_pack::{
-    BuildBuilderPackParams, build_builder_pack, build_keyless_builder_pack,
+    BuildBuilderPackParams, BuildRuntimePackParams, build_builder_pack, build_keyless_builder_pack,
+    build_keyless_runtime_pack,
 };
 use mvm_core::arch::GuestArch;
 use mvm_core::packs::{
@@ -76,13 +77,16 @@ fn main() -> ExitCode {
 fn usage() {
     eprintln!(
         "usage: mvm-builder-pack-tool \\\n\
-         \x20 --vmlinux <path> --rootfs <path> --arch <x86_64|aarch64> \\\n\
+         \x20 --vmlinux <path> --arch <x86_64|aarch64> \\\n\
+         \x20 (--rootfs <path> | --kind runtime --initramfs <path>) \\\n\
          \x20 --channel <name> --out-dir <dir> \\\n\
          \x20 --sbom <path> --revocation-channel <url> \\\n\
          \x20 (--signing-key <hex-file> | --keyless --identity <SAN>) \\\n\
          \x20 [--builder-identity <s>] [--build-env <s>] \\\n\
          \x20 [--valid-days <n>] [--mirror-identity <s>] [--sbom-uri <url>]\n\
          \n\
+         --kind defaults to builder (needs --rootfs); --kind runtime needs \
+         --initramfs and is keyless-only (--keyless --identity).\n\
          --sbom-uri overrides the manifest's SBOM reference uri with a \
          published location (e.g. a release download URL) instead of the \
          default file:// path of the local --sbom file; the sha256 is \
@@ -97,9 +101,52 @@ fn run(rest: &[String]) -> Result<(), String> {
     // The producers are pure; this wrapper owns the single wall-clock read.
     let now = Utc::now();
     let expires_at = now + Duration::days(parsed.valid_days);
+
+    if parsed.runtime {
+        // Runtime packs are keyless-only; `parse_args` guarantees --keyless
+        // --identity and --initramfs when --kind runtime.
+        let identity = parsed
+            .identity
+            .expect("parse_args guarantees --identity for --kind runtime");
+        let initramfs = parsed
+            .initramfs
+            .expect("parse_args guarantees --initramfs for --kind runtime");
+        let params = BuildRuntimePackParams {
+            vmlinux: parsed.vmlinux,
+            initramfs,
+            target_arch: parsed.arch,
+            channel: parsed.channel,
+            builder_identity: parsed.builder_identity,
+            build_environment_identity: parsed.build_environment_identity,
+            build_timestamp: now,
+            reproducibility: ReproducibilityStatus::NotChecked,
+            sbom,
+            expires_at,
+            revocation_channel: parsed.revocation_channel,
+            mirror_identity: parsed.mirror_identity,
+            transparency_log: None::<TransparencyLogReference>,
+            signature: SignatureValidity {
+                signed_at: now,
+                expires_at,
+            },
+        };
+        let produced = build_keyless_runtime_pack(&params, &identity, &parsed.out_dir)
+            .map_err(|e| e.to_string())?;
+        println!(
+            "wrote unsigned keyless runtime pack manifest {} to {} (sign {} with cosign)",
+            produced.manifest.outputs.pack_hash.as_str(),
+            parsed.out_dir.display(),
+            produced.manifest_path.display()
+        );
+        return Ok(());
+    }
+
+    let rootfs = parsed
+        .rootfs
+        .expect("parse_args guarantees --rootfs for a builder pack");
     let params = BuildBuilderPackParams {
         vmlinux: parsed.vmlinux,
-        rootfs: parsed.rootfs,
+        rootfs,
         target_arch: parsed.arch,
         channel: parsed.channel,
         builder_identity: parsed.builder_identity,
@@ -152,7 +199,13 @@ fn run(rest: &[String]) -> Result<(), String> {
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedArgs {
     vmlinux: PathBuf,
-    rootfs: PathBuf,
+    /// Builder pack artifact (`--rootfs`). `Some` for a builder pack, `None` for
+    /// a runtime pack (which carries `initramfs` instead).
+    rootfs: Option<PathBuf>,
+    /// Runtime pack artifact (`--initramfs`). `Some` iff `--kind runtime`.
+    initramfs: Option<PathBuf>,
+    /// `--kind runtime`. A runtime pack is keyless-only (no ed25519 producer).
+    runtime: bool,
     arch: GuestArch,
     channel: String,
     signing_key: Option<PathBuf>,
@@ -179,9 +232,25 @@ fn parse_args(rest: &[String]) -> Result<ParsedArgs, String> {
             "missing required arg: --signing-key (or pass --keyless --identity)".to_string(),
         );
     }
+    let runtime = matches!(optional(rest, "kind"), Some("runtime"));
+    if runtime && !keyless {
+        return Err(
+            "--kind runtime requires --keyless --identity (no ed25519 runtime producer)"
+                .to_string(),
+        );
+    }
+    // Each kind carries exactly one image artifact: a builder pack's rootfs or a
+    // runtime pack's initramfs.
+    let (rootfs, initramfs) = if runtime {
+        (None, Some(PathBuf::from(required(rest, "initramfs")?)))
+    } else {
+        (Some(PathBuf::from(required(rest, "rootfs")?)), None)
+    };
     Ok(ParsedArgs {
         vmlinux: PathBuf::from(required(rest, "vmlinux")?),
-        rootfs: PathBuf::from(required(rest, "rootfs")?),
+        rootfs,
+        initramfs,
+        runtime,
         arch: required(rest, "arch")?
             .parse::<GuestArch>()
             .map_err(|e| e.to_string())?,
@@ -288,11 +357,66 @@ mod tests {
         ])
     }
 
+    /// A runtime pack: `--kind runtime --initramfs ...` (no `--rootfs`) and
+    /// keyless (`--keyless --identity ...`).
+    fn runtime_args() -> Vec<String> {
+        let mut a = args(&[
+            ("vmlinux", "/tmp/vmlinux"),
+            ("kind", "runtime"),
+            ("initramfs", "/tmp/initramfs"),
+            ("arch", "aarch64"),
+            ("channel", "stable"),
+            ("out-dir", "/tmp/out"),
+            ("sbom", "/tmp/sbom.json"),
+            (
+                "revocation-channel",
+                "https://example.test/revocations.json",
+            ),
+            ("identity", "https://example.test/wf.yml@refs/tags/v1"),
+        ]);
+        a.push("--keyless".to_string());
+        a
+    }
+
+    #[test]
+    fn parses_runtime_kind_with_initramfs_and_keyless() {
+        let parsed = parse_args(&runtime_args()).expect("parse runtime");
+        assert!(parsed.runtime);
+        assert_eq!(parsed.initramfs, Some(PathBuf::from("/tmp/initramfs")));
+        assert_eq!(parsed.rootfs, None);
+        assert_eq!(
+            parsed.identity.as_deref(),
+            Some("https://example.test/wf.yml@refs/tags/v1")
+        );
+    }
+
+    #[test]
+    fn runtime_kind_without_keyless_is_rejected() {
+        // Runtime is keyless-only: swap the keyless flag for an ed25519 key.
+        let a = args(&[
+            ("vmlinux", "/tmp/vmlinux"),
+            ("kind", "runtime"),
+            ("initramfs", "/tmp/initramfs"),
+            ("arch", "aarch64"),
+            ("channel", "stable"),
+            ("out-dir", "/tmp/out"),
+            ("sbom", "/tmp/sbom.json"),
+            (
+                "revocation-channel",
+                "https://example.test/revocations.json",
+            ),
+            ("signing-key", "/tmp/key.hex"),
+        ]);
+        let err = parse_args(&a).expect_err("runtime requires keyless");
+        assert!(err.contains("keyless"), "got: {err}");
+    }
+
     #[test]
     fn parses_required_args_with_defaults() {
         let parsed = parse_args(&full_args()).expect("parse");
         assert_eq!(parsed.vmlinux, PathBuf::from("/tmp/vmlinux"));
-        assert_eq!(parsed.rootfs, PathBuf::from("/tmp/rootfs.ext4"));
+        assert_eq!(parsed.rootfs, Some(PathBuf::from("/tmp/rootfs.ext4")));
+        assert!(!parsed.runtime);
         assert_eq!(parsed.arch, GuestArch::Aarch64);
         assert_eq!(parsed.channel, "stable");
         assert_eq!(parsed.sbom, PathBuf::from("/tmp/sbom.json"));

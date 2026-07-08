@@ -29,6 +29,8 @@ use thiserror::Error;
 pub const KERNEL_FILE: &str = "vmlinux";
 /// In-pack path of the builder rootfs image.
 pub const ROOTFS_FILE: &str = "rootfs.ext4";
+/// In-pack path of a runtime pack's initramfs.
+pub const INITRAMFS_FILE: &str = "initramfs";
 /// Self-describing manifest written next to the artifacts so a produced pack dir
 /// can be published as-is. Distinct from the cache's own `.pack-manifest.json`
 /// sidecar, and never a declared pack file.
@@ -53,6 +55,42 @@ pub struct BuildBuilderPackParams {
     pub target_arch: GuestArch,
     /// Publish channel; becomes `TrustMetadata.channel_identity`, the value the
     /// host's allowed-channel set must contain.
+    pub channel: String,
+    /// Identity of the builder that produced the artifacts.
+    pub builder_identity: String,
+    /// Identity of the environment the build ran in.
+    pub build_environment_identity: String,
+    /// When the artifacts were built.
+    pub build_timestamp: DateTime<Utc>,
+    /// Whether the build was reproduced.
+    pub reproducibility: ReproducibilityStatus,
+    /// SBOM enumerating the pack's contents.
+    pub sbom: SbomReference,
+    /// When the pack's trust metadata expires.
+    pub expires_at: DateTime<Utc>,
+    /// Where a consumer looks up revocations for this signer.
+    pub revocation_channel: String,
+    /// Optional mirror identity.
+    pub mirror_identity: Option<String>,
+    /// Optional transparency-log anchor for the signature.
+    pub transparency_log: Option<TransparencyLogReference>,
+    /// Validity window stamped onto the produced signature.
+    pub signature: SignatureValidity,
+}
+
+/// Inputs to [`build_keyless_runtime_pack`]. Mirrors [`BuildBuilderPackParams`]
+/// but carries a runtime pack's artifacts (`vmlinux` + `initramfs`) instead of
+/// the builder VM's disk image. Every timestamp is an input, keeping the
+/// producer pure.
+#[derive(Debug, Clone)]
+pub struct BuildRuntimePackParams {
+    /// Source `vmlinux` on disk; copied into the pack as [`KERNEL_FILE`].
+    pub vmlinux: PathBuf,
+    /// Source initramfs on disk; copied into the pack as [`INITRAMFS_FILE`].
+    pub initramfs: PathBuf,
+    /// Architecture the artifacts target.
+    pub target_arch: GuestArch,
+    /// Publish channel; becomes `TrustMetadata.channel_identity`.
     pub channel: String,
     /// Identity of the builder that produced the artifacts.
     pub builder_identity: String,
@@ -195,6 +233,56 @@ pub fn build_keyless_builder_pack(
     })
 }
 
+/// A keyless (Sigstore-authority) Runtime pack: the manifest plus the path of
+/// the file its signable bytes were written to, exactly as [`KeylessBuilderPack`]
+/// but for a runtime pack (kernel + initramfs).
+#[derive(Debug, Clone)]
+pub struct KeylessRuntimePack {
+    pub manifest: PackManifest,
+    pub manifest_path: PathBuf,
+}
+
+/// Keyless counterpart of the builder producer for a `Runtime` pack: copies
+/// `vmlinux` + `initramfs` into `out_dir`, hashes them into the typed
+/// `kernel_hash` / `initramfs_hash` outputs a `Runtime` pack requires, assembles
+/// the manifest via `PackBuilder::new_keyless` (no ed25519 key, no in-manifest
+/// signature), and writes `manifest.canonical_bytes()` verbatim to
+/// `out_dir/manifest.json` — the exact bytes a release pipeline signs out of band
+/// and a keyless verifier re-derives at verify time. Never signs anything.
+pub fn build_keyless_runtime_pack(
+    params: &BuildRuntimePackParams,
+    identity: &str,
+    out_dir: &Path,
+) -> Result<KeylessRuntimePack, BuilderPackError> {
+    fs::create_dir_all(out_dir).map_err(io_at(out_dir))?;
+
+    let kernel_dest = out_dir.join(KERNEL_FILE);
+    copy_file(&params.vmlinux, &kernel_dest)?;
+    let initramfs_dest = out_dir.join(INITRAMFS_FILE);
+    copy_file(&params.initramfs, &initramfs_dest)?;
+
+    let kernel_hash = sha256_file(&kernel_dest)?;
+    let initramfs_hash = sha256_file(&initramfs_dest)?;
+
+    let manifest = PackBuilder::new_keyless(out_dir, runtime_metadata(params), identity)
+        .files([KERNEL_FILE, INITRAMFS_FILE])
+        .output_hashes(PackOutputHashes {
+            kernel_hash: Some(kernel_hash),
+            initramfs_hash: Some(initramfs_hash),
+            ..Default::default()
+        })
+        .build()?;
+
+    let manifest_bytes = manifest.canonical_bytes()?;
+    let manifest_path = out_dir.join(MANIFEST_FILE);
+    fs::write(&manifest_path, &manifest_bytes).map_err(io_at(&manifest_path))?;
+
+    Ok(KeylessRuntimePack {
+        manifest,
+        manifest_path,
+    })
+}
+
 /// Assemble the [`PackMetadata`] a produced Builder pack carries. The hash-derived
 /// outputs and the signature bundle are the builder's job; this is everything the
 /// caller supplies plus the fixed hvf/vsock host contract.
@@ -206,6 +294,39 @@ fn builder_metadata(params: &BuildBuilderPackParams) -> PackMetadata {
         required_host_capabilities: vec![HostCapability(VSOCK_CAPABILITY.to_string())],
         policy_compatibility: PolicyCompatibility {
             // Shared with the host verifier so the two sides cannot drift.
+            policy_hash: host_pack_policy_hash(params.target_arch),
+            local_rebuild_required: false,
+            allowed_channels: vec![params.channel.clone()],
+        },
+        inputs: empty_inputs(),
+        provenance: PackProvenanceMeta {
+            builder_identity: params.builder_identity.clone(),
+            build_environment_identity: params.build_environment_identity.clone(),
+            build_timestamp: params.build_timestamp,
+            reproducibility: params.reproducibility.clone(),
+            sbom: params.sbom.clone(),
+        },
+        trust: PackTrustMeta {
+            expires_at: params.expires_at,
+            revocation_channel: params.revocation_channel.clone(),
+            channel_identity: params.channel.clone(),
+            mirror_identity: params.mirror_identity.clone(),
+            transparency_log: params.transparency_log.clone(),
+        },
+        signature: params.signature.clone(),
+    }
+}
+
+/// Assemble the [`PackMetadata`] a produced Runtime pack carries — the same
+/// hvf/vsock host contract as a builder pack, but `kind = Runtime` so the
+/// verifier requires the runtime output hashes (kernel + initramfs).
+fn runtime_metadata(params: &BuildRuntimePackParams) -> PackMetadata {
+    PackMetadata {
+        kind: PackKind::Runtime,
+        target_arch: params.target_arch,
+        backend_compatibility: vec![PackBackend::Hvf],
+        required_host_capabilities: vec![HostCapability(VSOCK_CAPABILITY.to_string())],
+        policy_compatibility: PolicyCompatibility {
             policy_hash: host_pack_policy_hash(params.target_arch),
             local_rebuild_required: false,
             allowed_channels: vec![params.channel.clone()],
@@ -331,6 +452,58 @@ mod tests {
                 expires_at: utc(2026, 12, 31),
             },
         }
+    }
+
+    /// Write synthetic `vmlinux` + `initramfs` sources and return runtime
+    /// producer params pointing at them.
+    fn runtime_params_in(src: &TempDir) -> BuildRuntimePackParams {
+        let vmlinux = src.path().join("vmlinux.src");
+        let initramfs = src.path().join("initramfs.src");
+        fs::write(&vmlinux, KERNEL_BYTES).expect("write kernel src");
+        fs::write(&initramfs, b"runtime-initramfs-bytes").expect("write initramfs src");
+        BuildRuntimePackParams {
+            vmlinux,
+            initramfs,
+            target_arch: GuestArch::host(),
+            channel: CHANNEL.to_string(),
+            builder_identity: "ci-builder".to_string(),
+            build_environment_identity: "github-actions".to_string(),
+            build_timestamp: utc(2026, 6, 23),
+            reproducibility: ReproducibilityStatus::Reproduced,
+            sbom: SbomReference {
+                uri: "https://example.test/sbom.spdx.json".to_string(),
+                sha256: Sha256Hex::from_bytes(b"sbom"),
+            },
+            expires_at: utc(2026, 12, 31),
+            revocation_channel: "https://example.test/revocations.json".to_string(),
+            mirror_identity: None,
+            transparency_log: None,
+            signature: SignatureValidity {
+                signed_at: utc(2026, 6, 24),
+                expires_at: utc(2026, 12, 31),
+            },
+        }
+    }
+
+    #[test]
+    fn keyless_runtime_pack_has_runtime_kind_outputs_and_no_signature() {
+        let src = TempDir::new().expect("src");
+        let out = TempDir::new().expect("out");
+        let produced =
+            build_keyless_runtime_pack(&runtime_params_in(&src), KEYLESS_IDENTITY, out.path())
+                .expect("produce runtime pack");
+        let m = &produced.manifest;
+        assert_eq!(m.kind, PackKind::Runtime);
+        let files: Vec<&str> = m.outputs.files.iter().map(|f| f.path.as_str()).collect();
+        assert!(files.contains(&KERNEL_FILE) && files.contains(&INITRAMFS_FILE));
+        // A Runtime pack requires kernel + initramfs (or agent-rootfs) hashes.
+        assert!(m.outputs.kernel_hash.is_some());
+        assert!(m.outputs.initramfs_hash.is_some());
+        // Keyless: no in-manifest signature, and the written file is the exact
+        // signable bytes (canonical), so an out-of-band signature stays valid.
+        assert!(m.provenance.signature_bundle.signatures.is_empty());
+        let on_disk = fs::read(&produced.manifest_path).expect("read manifest file");
+        assert_eq!(on_disk, m.canonical_bytes().expect("canonical bytes"));
     }
 
     /// The host policy an hvf machine derives for the running arch — the one the
