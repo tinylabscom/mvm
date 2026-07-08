@@ -101,8 +101,9 @@ The target user-visible shape is:
       in builder packs.
 - [ ] Emit SBOMs, checksums, signatures, provenance, and pack manifests for every
       release pack.
-- [ ] Add release verification checks that fail closed when any pack lacks a
+- [x] Add release verification checks that fail closed when any pack lacks a
       manifest, signature bundle, checksum, SBOM, or expected version metadata.
+      (builder-pack gate in `packaging/release/verify-release-assets.sh`)
 - [ ] Add a reproducibility verification job that rebuilds at least one published
       runtime pack and one published builder pack from source pins and compares
       output hashes.
@@ -608,8 +609,10 @@ The design decisions (settled before this slice; see ADR-097 §9):
       (Runtime pack producer/publish deferred — builder pack first.)
 - [ ] Restrict the signing job to protected tag refs / a protected environment so
       the pinned subject identity cannot be minted from an arbitrary ref.
-- [ ] Add the release verification gate (plan §B) that fails closed when any pack
+- [x] Add the release verification gate (plan §B) that fails closed when any pack
       lacks a manifest, bundle, checksum, SBOM, or expected version metadata.
+      (`verify-release-assets.sh` builder-pack gate: complete-or-absent, checksum-
+      matched; self-tested + CI-linted.)
 - [ ] Validate the workflow off release tags via `gh workflow run --ref <branch>`
       (the release/security workflows are tag/nightly-gated and PR-invisible).
 
@@ -702,10 +705,15 @@ OIDC signing, the nix image build + SBOM step, and end-to-end publish→download
 Prove on the next tagged release (or `gh workflow run` against the branch, which the
 release job's dry-run guards partially exercise).
 
-### Units 3–4 follow-ups (not done)
+### Units 3–4 follow-ups
 
-- **Release verification gate (§B):** extend the "Verify release asset set" job to
-  fail closed when a builder pack lacks its manifest / bundle / checksum / SBOM.
+- ✅ **Release verification gate (§B)** — `verify-release-assets.sh` now fails the
+  release closed on a partial / checksum-mismatched / unlisted builder pack
+  (complete-or-absent), with a self-contained fixture test wired into CI Lint.
+- ✅ **cosign bundle format** — the Rust `sigstore-verify` stack rejects the legacy
+  `cosign sign-blob --bundle` output; every Rust-verified signing step (builder
+  pack + dev-image manifest) now signs `--new-bundle-format`, proven live by the
+  pack-signing smoke round-tripping both paths.
 - **Protected environment for the signing job** so the pinned SAN can't be minted
   from an arbitrary ref (beyond the existing tag-push gate).
 - **Producer SBOM URI is `file://<local path>`** (unverified provenance metadata,
