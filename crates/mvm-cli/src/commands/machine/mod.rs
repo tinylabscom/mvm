@@ -1392,10 +1392,9 @@ fn run_machine_init_commands(name: &str, commands: &[String], ssh_agent: bool) -
     Ok(())
 }
 
-fn stop_failed_machine_start(name: &str) {
+fn stop_failed_machine_start(name: &str, backend_name: &str) {
     reap_proxy(name);
-    let backend =
-        AnyBackend::from_hypervisor(&super::shared::resolve_effective_hypervisor("firecracker"));
+    let backend = AnyBackend::from_hypervisor(backend_name);
     if let Err(err) = backend.stop(&VmId(name.to_string())) {
         tracing::warn!(error = %err, machine = name, "stopping machine after failed init failed");
     }

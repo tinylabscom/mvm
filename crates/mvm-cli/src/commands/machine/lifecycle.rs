@@ -57,7 +57,11 @@ pub(super) fn run_restart(cmd: MachineStartCmd) -> Result<()> {
 pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     let mut spec = ensure_machine_spec_exists(&args.name)?;
     if args.dry_run {
-        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        let summary = machine_start_preflight_summary(
+            &spec,
+            args.receipt.as_deref(),
+            args.hypervisor.as_deref(),
+        )?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {
@@ -70,11 +74,8 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         return Ok(());
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
-    let effective_hypervisor = args
-        .hypervisor
-        .as_deref()
-        .map(String::from)
-        .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
+    let effective_hypervisor =
+        super::receipt::select_machine_start_backend(&spec, args.hypervisor.as_deref())?;
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let ssh_auth_sock = if spec.ssh_agent {
         Some(ssh_auth_sock_from_env()?)
@@ -168,13 +169,13 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         && let Err(err) =
             configure_machine_ssh_agent_forwarding(&spec.name, &effective_hypervisor, host_sock)
     {
-        stop_failed_machine_start(&spec.name);
+        stop_failed_machine_start(&spec.name, &effective_hypervisor);
         return Err(err);
     }
     if !spec.init.is_empty()
         && let Err(err) = run_machine_init_commands(&spec.name, &spec.init, spec.ssh_agent)
     {
-        stop_failed_machine_start(&spec.name);
+        stop_failed_machine_start(&spec.name, &effective_hypervisor);
         return Err(err);
     }
     mark_machine_started(&mut spec, boot_digest);
