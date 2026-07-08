@@ -5,7 +5,7 @@
 //! [`timed_step`] are CLI-local, and `timed_step` routes through the
 //! gated [`info`] so it follows the same toggle.
 
-use indicatif::ProgressBar;
+pub type Spinner = mvm::ui::Spinner;
 
 // ---------------------------------------------------------------------------
 // Message helpers (delegate to mvm::ui)
@@ -110,9 +110,20 @@ pub fn confirm(msg: &str) -> bool {
     mvm::ui::confirm(msg)
 }
 
+/// Show an interactive free-form prompt and return the entered line.
+pub fn prompt_text(msg: &str) -> std::io::Result<String> {
+    mvm::ui::prompt_text(msg)
+}
+
+/// Show an interactive secret prompt with terminal echo disabled while the
+/// user types.
+pub fn prompt_secret(msg: &str) -> std::io::Result<String> {
+    mvm::ui::prompt_secret(msg)
+}
+
 /// Create and start a spinner with the given message.
 /// Call `.finish_with_message()` or `.finish_and_clear()` when done.
-pub fn spinner(msg: &str) -> ProgressBar {
+pub fn spinner(msg: &str) -> mvm::ui::Spinner {
     mvm::ui::spinner(msg)
 }
 

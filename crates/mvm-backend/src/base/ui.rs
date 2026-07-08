@@ -1,6 +1,6 @@
-use colored::Colorize;
-use indicatif::{ProgressBar, ProgressStyle};
+use std::io::{self, BufRead, IsTerminal as _, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
 // Verbosity
@@ -61,11 +61,62 @@ fn chatter_enabled() -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Colored message helpers
+// Styled message helpers
 // ---------------------------------------------------------------------------
 
-fn prefix() -> String {
-    "[mvm]".bold().cyan().to_string()
+#[derive(Clone, Copy)]
+enum Stream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Clone, Copy)]
+enum Style {
+    Bold,
+    Cyan,
+    Green,
+    Red,
+    Yellow,
+    Dim,
+}
+
+fn style_codes(styles: &[Style]) -> &'static str {
+    match styles {
+        [Style::Bold] => "1",
+        [Style::Cyan] => "36",
+        [Style::Green] => "32",
+        [Style::Red] => "31",
+        [Style::Yellow] => "33",
+        [Style::Dim] => "2",
+        [Style::Bold, Style::Cyan] => "1;36",
+        [Style::Bold, Style::Red] => "1;31",
+        [Style::Bold, Style::Yellow] => "1;33",
+        [Style::Bold, Style::Green] => "1;32",
+        _ => "",
+    }
+}
+
+fn stream_supports_color(stream: Stream) -> bool {
+    match stream {
+        Stream::Stdout => io::stdout().is_terminal(),
+        Stream::Stderr => io::stderr().is_terminal(),
+    }
+}
+
+fn style_text(stream: Stream, text: &str, styles: &[Style]) -> String {
+    render_styled_text(text, styles, stream_supports_color(stream))
+}
+
+fn render_styled_text(text: &str, styles: &[Style], enabled: bool) -> String {
+    let codes = style_codes(styles);
+    if codes.is_empty() || !enabled {
+        return text.to_string();
+    }
+    format!("\x1b[{codes}m{text}\x1b[0m")
+}
+
+fn prefix(stream: Stream) -> String {
+    style_text(stream, "[mvm]", &[Style::Bold, Style::Cyan])
 }
 
 /// Print an informational message: `[mvm]` message. Opt-in chatter —
@@ -75,9 +126,9 @@ pub fn info(msg: &str) {
         return;
     }
     if chrome_to_stderr() {
-        eprintln!("{} {}", prefix(), msg);
+        eprintln!("{} {}", prefix(Stream::Stderr), msg);
     } else {
-        println!("{} {}", prefix(), msg);
+        println!("{} {}", prefix(Stream::Stdout), msg);
     }
 }
 
@@ -88,23 +139,43 @@ pub fn success(msg: &str) {
         return;
     }
     if chrome_to_stderr() {
-        eprintln!("{} {}", prefix(), msg.green());
+        eprintln!(
+            "{} {}",
+            prefix(Stream::Stderr),
+            style_text(Stream::Stderr, msg, &[Style::Green])
+        );
     } else {
-        println!("{} {}", prefix(), msg.green());
+        println!(
+            "{} {}",
+            prefix(Stream::Stdout),
+            style_text(Stream::Stdout, msg, &[Style::Green])
+        );
     }
 }
 
 /// Print an error message: `[mvm]` ERROR: message (in red).
 pub fn error(msg: &str) {
-    eprintln!("{} {}", "[mvm]".bold().red(), msg.red());
+    eprintln!(
+        "{} {}",
+        style_text(Stream::Stderr, "[mvm]", &[Style::Bold, Style::Red]),
+        style_text(Stream::Stderr, msg, &[Style::Red])
+    );
 }
 
 /// Print a warning message: `[mvm]` message (in yellow)
 pub fn warn(msg: &str) {
     if chrome_to_stderr() {
-        eprintln!("{} {}", prefix(), msg.yellow());
+        eprintln!(
+            "{} {}",
+            prefix(Stream::Stderr),
+            style_text(Stream::Stderr, msg, &[Style::Yellow])
+        );
     } else {
-        println!("{} {}", prefix(), msg.yellow());
+        println!(
+            "{} {}",
+            prefix(Stream::Stdout),
+            style_text(Stream::Stdout, msg, &[Style::Yellow])
+        );
     }
 }
 
@@ -115,9 +186,9 @@ pub fn warn(msg: &str) {
 /// which must remain visible in the default quiet mode.
 pub fn notice(msg: &str) {
     if chrome_to_stderr() {
-        eprintln!("{} {}", prefix(), msg);
+        eprintln!("{} {}", prefix(Stream::Stderr), msg);
     } else {
-        println!("{} {}", prefix(), msg);
+        println!("{} {}", prefix(Stream::Stdout), msg);
     }
 }
 
@@ -127,10 +198,19 @@ pub fn step(n: u32, total: u32, msg: &str) {
     if !chatter_enabled() {
         return;
     }
+    let stream = if chrome_to_stderr() {
+        Stream::Stderr
+    } else {
+        Stream::Stdout
+    };
     let formatted = format!(
         "\n{} {} {}",
-        prefix(),
-        format!("Step {}/{}:", n, total).bold().yellow(),
+        prefix(stream),
+        style_text(
+            stream,
+            &format!("Step {}/{}:", n, total),
+            &[Style::Bold, Style::Yellow]
+        ),
         msg,
     );
     if chrome_to_stderr() {
@@ -148,9 +228,9 @@ pub fn progress(msg: &str) {
         return;
     }
     if chrome_to_stderr() {
-        eprintln!("{} {}", prefix(), msg);
+        eprintln!("{} {}", prefix(Stream::Stderr), msg);
     } else {
-        println!("{} {}", prefix(), msg);
+        println!("{} {}", prefix(Stream::Stdout), msg);
     }
 }
 
@@ -164,15 +244,25 @@ pub fn banner(lines: &[&str]) {
     let rule = "=".repeat(width);
 
     println!();
-    println!("{}", rule.bold().green());
+    println!(
+        "{}",
+        style_text(Stream::Stdout, &rule, &[Style::Bold, Style::Green])
+    );
     for line in lines {
         let pad = width - line.len() - 4;
         println!(
             "{}",
-            format!("  {}{}  ", line, " ".repeat(pad)).bold().green()
+            style_text(
+                Stream::Stdout,
+                &format!("  {}{}  ", line, " ".repeat(pad)),
+                &[Style::Bold, Style::Green]
+            )
         );
     }
-    println!("{}", rule.bold().green());
+    println!(
+        "{}",
+        style_text(Stream::Stdout, &rule, &[Style::Bold, Style::Green])
+    );
     println!();
 }
 
@@ -182,26 +272,36 @@ pub fn banner(lines: &[&str]) {
 
 /// Print the status header.
 pub fn status_header() {
-    println!("{}", "mvmctl status".bold());
-    println!("{}", "-------------".dimmed());
+    println!(
+        "{}",
+        style_text(Stream::Stdout, "mvmctl status", &[Style::Bold])
+    );
+    println!(
+        "{}",
+        style_text(Stream::Stdout, "-------------", &[Style::Dim])
+    );
 }
 
 /// Print a status line with a bold label and a colored value.
 /// Recognized values: "Running", "Stopped", "Not running", etc.
 pub fn status_line(label: &str, value: &str) {
     let colored_value = if value.starts_with("Running") {
-        value.green().to_string()
+        style_text(Stream::Stdout, value, &[Style::Green])
     } else if value == "Stopped" {
-        value.yellow().to_string()
+        style_text(Stream::Stdout, value, &[Style::Yellow])
     } else if value.starts_with("Not ") || value == "-" {
-        value.dimmed().to_string()
+        style_text(Stream::Stdout, value, &[Style::Dim])
     } else if value.starts_with("Starting") {
-        value.yellow().to_string()
+        style_text(Stream::Stdout, value, &[Style::Yellow])
     } else {
         value.to_string()
     };
 
-    println!("{} {}", format!("{:<14}", label).bold(), colored_value);
+    println!(
+        "{} {}",
+        style_text(Stream::Stdout, &format!("{:<14}", label), &[Style::Bold]),
+        colored_value
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -210,29 +310,186 @@ pub fn status_line(label: &str, value: &str) {
 
 /// Show an interactive confirmation prompt. Returns true if confirmed.
 pub fn confirm(msg: &str) -> bool {
-    inquire::Confirm::new(msg)
-        .with_default(false)
-        .prompt()
+    prompt_text(msg)
+        .map(|answer| matches_confirm(&answer))
         .unwrap_or(false)
+}
+
+/// Show an interactive free-form prompt and return the entered line.
+pub fn prompt_text(msg: &str) -> io::Result<String> {
+    let mut stdout = io::stdout();
+    write_prompt(&mut stdout, msg)?;
+    read_line_from(io::stdin().lock())
+}
+
+/// Show an interactive secret prompt with terminal echo disabled while the
+/// user types.
+pub fn prompt_secret(msg: &str) -> io::Result<String> {
+    let mut stdout = io::stdout();
+    write_prompt(&mut stdout, msg)?;
+    #[cfg(unix)]
+    {
+        let stdin = io::stdin();
+        let guard = EchoGuard::disable(libc::STDIN_FILENO)?;
+        let line = read_line_from(stdin.lock());
+        drop(guard);
+        writeln!(stdout)?;
+        line
+    }
+    #[cfg(not(unix))]
+    {
+        read_line_from(io::stdin().lock())
+    }
+}
+
+fn write_prompt(mut out: impl Write, msg: &str) -> io::Result<()> {
+    write!(out, "{msg} ")?;
+    out.flush()
+}
+
+fn read_line_from(mut reader: impl BufRead) -> io::Result<String> {
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+    Ok(trim_single_trailing_newline(buf))
+}
+
+fn trim_single_trailing_newline(mut buf: String) -> String {
+    if buf.ends_with('\n') {
+        buf.pop();
+        if buf.ends_with('\r') {
+            buf.pop();
+        }
+    }
+    buf
+}
+
+fn matches_confirm(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
+}
+
+#[cfg(unix)]
+struct EchoGuard {
+    fd: libc::c_int,
+    original: libc::termios,
+}
+
+#[cfg(unix)]
+impl EchoGuard {
+    fn disable(fd: libc::c_int) -> io::Result<Self> {
+        if !io::stdin().is_terminal() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secret prompt requires a terminal",
+            ));
+        }
+        // SAFETY: tcgetattr/tcsetattr operate on the calling process's stdin fd,
+        // and Drop restores the captured terminal settings before returning.
+        unsafe {
+            let mut original: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut original) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut hidden = original;
+            hidden.c_lflag &= !libc::ECHO;
+            if libc::tcsetattr(fd, libc::TCSANOW, &hidden) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(Self { fd, original })
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for EchoGuard {
+    fn drop(&mut self) {
+        // SAFETY: restore the previously captured terminal settings for stdin.
+        unsafe {
+            libc::tcsetattr(self.fd, libc::TCSANOW, &self.original);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Spinners
 // ---------------------------------------------------------------------------
 
+struct SpinnerInner {
+    message: Mutex<String>,
+    stop: AtomicBool,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    active: bool,
+}
+
+#[derive(Clone)]
+pub struct Spinner {
+    inner: Arc<SpinnerInner>,
+}
+
+impl Spinner {
+    pub fn set_message(&self, msg: impl Into<String>) {
+        if let Ok(mut current) = self.inner.message.lock() {
+            *current = msg.into();
+        }
+    }
+
+    pub fn finish_and_clear(&self) {
+        self.inner.stop.store(true, Ordering::Relaxed);
+        if let Ok(mut handle) = self.inner.handle.lock()
+            && let Some(join) = handle.take()
+        {
+            let _ = join.join();
+        }
+        if self.inner.active {
+            let _ = clear_spinner_line();
+        }
+    }
+}
+
+fn clear_spinner_line() -> io::Result<()> {
+    let mut stderr = io::stderr().lock();
+    write!(stderr, "\r\x1b[2K")?;
+    stderr.flush()
+}
+
 /// Create and start a spinner with the given message.
 /// Call `.finish_with_message()` or `.finish_and_clear()` when done.
-pub fn spinner(msg: &str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-            .template("{spinner:.cyan} {msg}")
-            .expect("invalid spinner template"),
-    );
-    pb.set_message(msg.to_string());
-    pb.enable_steady_tick(std::time::Duration::from_millis(80));
-    pb
+pub fn spinner(msg: &str) -> Spinner {
+    let active = io::stderr().is_terminal();
+    let inner = Arc::new(SpinnerInner {
+        message: Mutex::new(msg.to_string()),
+        stop: AtomicBool::new(false),
+        handle: Mutex::new(None),
+        active,
+    });
+    if active {
+        let thread_inner = Arc::clone(&inner);
+        let handle = std::thread::spawn(move || {
+            const FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let mut frame = 0usize;
+            while !thread_inner.stop.load(Ordering::Relaxed) {
+                let msg = thread_inner
+                    .message
+                    .lock()
+                    .map(|s| s.clone())
+                    .unwrap_or_default();
+                let glyph =
+                    style_text(Stream::Stderr, FRAMES[frame % FRAMES.len()], &[Style::Cyan]);
+                let mut stderr = io::stderr().lock();
+                if write!(stderr, "\r\x1b[2K{glyph} {msg}").is_err() {
+                    break;
+                }
+                if stderr.flush().is_err() {
+                    break;
+                }
+                frame += 1;
+                std::thread::sleep(std::time::Duration::from_millis(80));
+            }
+        });
+        if let Ok(mut slot) = inner.handle.lock() {
+            *slot = Some(handle);
+        }
+    }
+    Spinner { inner }
 }
 
 #[cfg(test)]
@@ -257,5 +514,55 @@ mod tests {
         assert!(chatter_enabled(), "chatter opts in with verbose/RUST_LOG");
 
         set_verbose(prev);
+    }
+
+    #[test]
+    fn trim_single_trailing_newline_strips_once() {
+        assert_eq!(trim_single_trailing_newline("hello\n".into()), "hello");
+        assert_eq!(trim_single_trailing_newline("hello\r\n".into()), "hello");
+        assert_eq!(trim_single_trailing_newline("hello".into()), "hello");
+        assert_eq!(trim_single_trailing_newline("hello\n\n".into()), "hello\n");
+    }
+
+    #[test]
+    fn matches_confirm_accepts_only_yes_values() {
+        assert!(matches_confirm("y"));
+        assert!(matches_confirm("YES"));
+        assert!(matches_confirm(" yes "));
+        assert!(!matches_confirm(""));
+        assert!(!matches_confirm("n"));
+        assert!(!matches_confirm("delete-everything"));
+    }
+
+    #[test]
+    fn style_text_is_plain_when_color_disabled() {
+        assert_eq!(
+            render_styled_text("plain", &[Style::Bold, Style::Green], false),
+            "plain"
+        );
+    }
+
+    #[test]
+    fn style_text_wraps_ansi_codes_when_enabled() {
+        assert_eq!(
+            render_styled_text("ok", &[Style::Bold, Style::Green], true),
+            "\u{1b}[1;32mok\u{1b}[0m"
+        );
+    }
+
+    #[test]
+    fn spinner_set_message_and_finish_are_safe_without_active_tty() {
+        let spinner = Spinner {
+            inner: Arc::new(SpinnerInner {
+                message: Mutex::new("start".to_string()),
+                stop: AtomicBool::new(false),
+                handle: Mutex::new(None),
+                active: false,
+            }),
+        };
+        spinner.set_message("next");
+        assert_eq!(spinner.inner.message.lock().unwrap().as_str(), "next");
+        spinner.finish_and_clear();
+        assert!(spinner.inner.stop.load(Ordering::Relaxed));
     }
 }

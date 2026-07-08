@@ -447,9 +447,7 @@ fn resolve_value(
 
 fn read_secret_from_prompt_or_stdin(secret_name: &str) -> Result<String> {
     if std::io::stdin().is_terminal() {
-        inquire::Password::new(&format!("Secret value for '{secret_name}'"))
-            .without_confirmation()
-            .prompt()
+        crate::ui::prompt_secret(&format!("Secret value for '{secret_name}'"))
             .context("reading secret value from interactive prompt")
     } else {
         read_secret_from_stdin()

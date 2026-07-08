@@ -16,7 +16,7 @@
 //! - `--nuclear` always requires an interactive text confirmation
 //!   (`DELETE-EVERYTHING`). `--yes` does not bypass it.
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use clap::{ArgGroup, Args as ClapArgs};
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -265,9 +265,8 @@ fn confirm_tier(tier: Tier, yes_flag: bool) -> Result<bool> {
              sealed-deps master keys, secrets, config.toml, and templates. \
              Past audit logs will become unverifiable.",
         );
-        let entered = inquire::Text::new("Type DELETE-EVERYTHING to confirm:")
-            .prompt()
-            .map_err(|e| anyhow!("prompt aborted: {e}"))?;
+        let entered = ui::prompt_text("Type DELETE-EVERYTHING to confirm:")
+            .context("reading destructive confirmation from interactive prompt")?;
         Ok(entered.trim() == "DELETE-EVERYTHING")
     } else if yes_flag {
         Ok(true)
