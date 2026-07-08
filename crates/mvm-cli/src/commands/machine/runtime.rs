@@ -48,7 +48,11 @@ fn run_persistent(
     let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
 
     if args.dry_run {
-        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        let summary = machine_start_preflight_summary(
+            &spec,
+            args.receipt.as_deref(),
+            args.hypervisor.as_deref(),
+        )?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&summary)?);
         } else {

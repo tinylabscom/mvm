@@ -741,32 +741,39 @@ fn build_exec_request(
                     }),
                 }
             }
-            (None, None) => {
-                // Explain precisely why this launch isn't instant from a
-                // verified runtime pack, rather than a generic "no manifest"
-                // notice — the diagnosis scan surfaces the exact
-                // verification-failure reason `resolve_pack` would otherwise
-                // swallow (expired, revoked, tampered, incompatible, or
-                // simply absent).
-                let reason = super::runtime_pack::runtime_pack_diagnosis()
-                    .ok()
-                    .and_then(|d| super::runtime_pack::not_instant_reason(&d))
-                    .unwrap_or_else(|| {
-                        "no verified runtime pack is cached for this host".to_string()
-                    });
-                ui::info(&format!(
-                    "{reason}; building the bundled default microVM in the builder VM."
-                ));
-                let (kernel_path, rootfs_path) =
-                    ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
-                crate::exec::ImageSource::Prebuilt {
-                    kernel_path,
-                    rootfs_path,
-                    initrd_path: None,
-                    label: "default-microvm".to_string(),
-                    virtiofs_oci_root: None,
+            (None, None) => match super::runtime_pack::try_runtime_pack_image_source(prod) {
+                Some(src) => {
+                    let label = match &src {
+                        crate::exec::ImageSource::Prebuilt { label, .. } => label.clone(),
+                        crate::exec::ImageSource::Template(name) => name.clone(),
+                    };
+                    ui::info(&format!(
+                        "Instant boot from verified runtime pack ({label}); \
+                             skipping the build."
+                    ));
+                    src
                 }
-            }
+                None => {
+                    let reason = super::runtime_pack::runtime_pack_diagnosis()
+                        .ok()
+                        .and_then(|d| super::runtime_pack::not_instant_reason(&d))
+                        .unwrap_or_else(|| {
+                            "no verified runtime pack is cached for this host".to_string()
+                        });
+                    ui::info(&format!(
+                        "{reason}; building the bundled default microVM in the builder VM."
+                    ));
+                    let (kernel_path, rootfs_path) =
+                        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+                    crate::exec::ImageSource::Prebuilt {
+                        kernel_path,
+                        rootfs_path,
+                        initrd_path: None,
+                        label: "default-microvm".to_string(),
+                        virtiofs_oci_root: None,
+                    }
+                }
+            },
         }
     };
     Ok(crate::exec::ExecRequest {

@@ -36,7 +36,7 @@ Today `ensure_save_restore_supported()` hard-codes `VzBackend` as the snapshot s
 - Consumes: `mvm_core::vm_backend::{SnapshotCapability, VmBackend}` (already imported at line 23); `AnyBackend::snapshot_capability()` / `.name()`.
 - Produces: `fn ensure_save_restore_supported(backend: &AnyBackend, action: &str) -> Result<()>` — later tasks and existing callers use this signature.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to the `#[cfg(test)]` module in `checkpoint.rs`:
 
@@ -54,12 +54,12 @@ fn save_restore_gate_rejects_backend_without_capability() {
 }
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `cargo nextest run -p mvm-cli save_restore_gate_rejects_backend_without_capability`
 Expected: FAIL — `ensure_save_restore_supported` still takes one arg / references `VzBackend`.
 
-- [ ] **Step 3: Rewrite the gate to consult the active backend**
+- [x] **Step 3: Rewrite the gate to consult the active backend**
 
 Replace lines 361-373 with:
 
@@ -82,16 +82,16 @@ fn ensure_save_restore_supported(backend: &mvm_backend::AnyBackend, action: &str
 
 If `inner()` is `pub(crate)` and unreachable from this module, use the public `AnyBackend::snapshot_capability()` accessor instead; if none exists, add a thin `pub fn snapshot_capability(&self) -> SnapshotCapability { self.inner().snapshot_capability() }` to `AnyBackend` in `backend.rs` and call that.
 
-- [ ] **Step 4: Update the callers to pass the active backend**
+- [x] **Step 4: Update the callers to pass the active backend**
 
 Find every `ensure_save_restore_supported(` call in `checkpoint.rs` (grep within the file). Each call site already resolves an `AnyBackend` for the operation — thread that value in as the first argument. If a call site has no backend in scope, resolve it with `AnyBackend::auto_select()` at that point (matching how the surrounding command resolves its backend).
 
-- [ ] **Step 5: Run the test + workspace build to verify green**
+- [x] **Step 5: Run the test + workspace build to verify green**
 
 Run: `cargo nextest run -p mvm-cli save_restore_gate_rejects_backend_without_capability && cargo build -p mvm-cli`
 Expected: PASS + clean build.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/mvm-cli/src/commands/vm/checkpoint.rs crates/mvm-backend/src/backend.rs
@@ -112,11 +112,11 @@ git commit -m "refactor(checkpoint): backend-agnostic save/restore gate, tracked
 - Consumes: `mvm_backend::AnyBackend` / `HvfBackend`; `Platform`, `is_vz_default_tier`.
 - Produces: `DevBackend::InHouse`; `select_dev_backend(...) -> DevBackend` returns `InHouse` on the macOS-26 tier.
 
-- [ ] **Step 1: Read the in-house dev-VM lifecycle entry points**
+- [x] **Step 1: Read the in-house dev-VM lifecycle entry points**
 
 Run: `rg -n "DevBackend::(Libkrun|Vz)" crates/mvm-cli/src/commands/env/dev.rs` and read the three lifecycle sites (status/stop/takeover at 335, 362, 462-463). Confirm the in-house dev VM's status/stop entry point — grep `rg -n "fn (status|stop)" crates/mvm-backend/src/hvf` and `rg -n "InHouse|HvfBackend" crates/mvm-cli/src/commands/env/dev.rs`. Record the exact call you will substitute for `VzBackend.status()` / `VzBackend.stop()`.
 
-- [ ] **Step 2: Write the failing selection test**
+- [x] **Step 2: Write the failing selection test**
 
 Add to the `#[cfg(test)]` module:
 
@@ -136,12 +136,12 @@ fn macos_26_apple_silicon_selects_inhouse_dev_backend() {
 }
 ```
 
-- [ ] **Step 3: Run test to verify it fails**
+- [x] **Step 3: Run test to verify it fails**
 
 Run: `cargo nextest run -p mvm-cli macos_26_apple_silicon_selects_inhouse_dev_backend`
 Expected: FAIL — `DevBackend::InHouse` does not exist / rule 3 returns `Vz`.
 
-- [ ] **Step 4: Add the `InHouse` variant and flip the selection**
+- [x] **Step 4: Add the `InHouse` variant and flip the selection**
 
 In the `DevBackend` enum (lines 39-56) replace the `Vz` variant with:
 
@@ -172,16 +172,16 @@ In `select_dev_backend` remove the two `prefers_vz`/`has_vz` Vz branches and rul
 
 Delete the now-unused `prefers_vz`, `has_vz` parameters from `select_dev_backend` and update its one caller. Delete `builder_prefers_vz()` (lines 121-125) and its call sites.
 
-- [ ] **Step 5: Re-home the lifecycle calls**
+- [x] **Step 5: Re-home the lifecycle calls**
 
 At lines 335, 362, 462-463 replace each `VzBackend` status/stop call with the in-house entry point recorded in Step 1, matched on `DevBackend::InHouse`. Remove `VzBackend` from the `use mvm_backend::{...}` import at line 29 (keep `LibkrunBackend`).
 
-- [ ] **Step 6: Run tests + build**
+- [x] **Step 6: Run tests + build**
 
 Run: `cargo nextest run -p mvm-cli -- dev && cargo build -p mvm-cli`
 Expected: PASS + clean build. Fix any match-exhaustiveness errors on `DevBackend` (the compiler lists them).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add crates/mvm-cli/src/commands/env/dev.rs
@@ -203,7 +203,7 @@ The macOS-26 builder already auto-detects `InHouse` with a libkrun fallback (`bu
 - Consumes: `BuilderBackendChoice::{InHouse, Libkrun, Qemu}`.
 - Produces: `builder_attempt_order` no longer has a `Vz` arm; `BuilderBackendChoice` has no `Vz` variant.
 
-- [ ] **Step 1: Write the failing guard test**
+- [x] **Step 1: Write the failing guard test**
 
 ```rust
 #[test]
@@ -226,12 +226,12 @@ fn builder_backend_choice_has_no_vz_variant() {
 }
 ```
 
-- [ ] **Step 2: Run to verify the first passes, second compiles**
+- [x] **Step 2: Run to verify the first passes, second compiles**
 
 Run: `cargo nextest run -p mvm-build macos_inhouse_auto_falls_back_to_libkrun_only builder_backend_choice_has_no_vz_variant`
 Expected: `macos_inhouse_auto_falls_back_to_libkrun_only` PASS (behaviour already correct); the second will keep passing until Vz is removed — it is a regression guard.
 
-- [ ] **Step 3: Delete the Vz builder wiring**
+- [x] **Step 3: Delete the Vz builder wiring**
 
 - Remove `use crate::vz_builder::VzBuilderVm;` (line 31).
 - Remove the `Vz` arm from `BuilderBackendChoice` (line 73) and its `.name()` case (line 89).
@@ -240,16 +240,16 @@ Expected: `macos_inhouse_auto_falls_back_to_libkrun_only` PASS (behaviour alread
 - Remove the `BuilderBackendChoice::Vz => vec![...]` arm from `builder_attempt_order` (line ~309).
 - `git rm crates/mvm-build/src/vz_builder.rs` and remove its `mod vz_builder;` declaration.
 
-- [ ] **Step 4: Fix fallout + build**
+- [x] **Step 4: Fix fallout + build**
 
 Run: `cargo build -p mvm-build` and resolve every match-exhaustiveness / unused-import error the compiler reports (these enumerate the remaining Vz references).
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo nextest run -p mvm-build`
 Expected: PASS. Delete or update any Vz-specific builder test that no longer compiles.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A crates/mvm-build/
@@ -272,7 +272,7 @@ With the two runtime consumers severed (Tasks 1-3), delete the `Vz` variant from
 - Consumes: nothing new.
 - Produces: `AnyBackend` with no `Vz` variant; `BackendKind` with no `Vz`; `capability_candidates() -> [AnyBackend; 3]`.
 
-- [ ] **Step 1: Write the failing guard test**
+- [x] **Step 1: Write the failing guard test**
 
 Add to the `#[cfg(test)]` module in `backend.rs`:
 
@@ -285,12 +285,12 @@ fn from_hypervisor_vz_falls_back_to_default_not_vz() {
 }
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 Run: `cargo nextest run -p mvm-backend from_hypervisor_vz_falls_back_to_default_not_vz`
 Expected: FAIL — `"vz"` still resolves through the catalog to `AnyBackend::Vz`.
 
-- [ ] **Step 3: Delete the variant and dispatch arms**
+- [x] **Step 3: Delete the variant and dispatch arms**
 
 - Remove `use crate::vz::VzBackend;` (backend.rs:21) and `selection.rs:13`.
 - Remove the `Vz(VzBackend)` variant (backend.rs:474-476).
@@ -299,17 +299,17 @@ Expected: FAIL — `"vz"` still resolves through the catalog to `AnyBackend::Vz`
 - In `catalog.rs`, remove the `"vz"`/`"apple-container"` selector descriptor and the `BackendKind::Vz` variant (and any `BackendKind::Vz` match arms the compiler flags).
 - Delete/rewrite the Vz-specific tests at backend.rs:988-994 (`test_any_backend_from_hypervisor_vz`) and adjust the `vz.pid` → `Vz` test at 1162-1163 (drop the Vz expectation).
 
-- [ ] **Step 4: Build and chase the errors**
+- [x] **Step 4: Build and chase the errors**
 
 Run: `cargo build -p mvm-backend`
 Expected: the compiler enumerates every remaining `Vz` / `BackendKind::Vz` reference. Fix each (they are all in dispatch/selection/tests). Repeat until clean.
 
-- [ ] **Step 5: Run tests**
+- [x] **Step 5: Run tests**
 
 Run: `cargo nextest run -p mvm-backend from_hypervisor_vz_falls_back_to_default_not_vz && cargo nextest run -p mvm-backend`
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add crates/mvm-backend/src/backend.rs crates/mvm-backend/src/selection.rs crates/mvm-backend/src/catalog.rs
@@ -328,7 +328,7 @@ Now that nothing references the `Vz` variant, delete the implementation files. `
 
 **Interfaces:** none produced; pure deletion.
 
-- [ ] **Step 1: Delete the files and module declarations**
+- [x] **Step 1: Delete the files and module declarations**
 
 ```bash
 git rm crates/mvm-backend/src/vz.rs crates/mvm-backend/src/vz_control.rs \
@@ -338,21 +338,21 @@ git rm crates/mvm-backend/src/vz.rs crates/mvm-backend/src/vz_control.rs \
 
 Remove the matching `mod vz;` / `mod vz_control;` / `pub mod vz;` / `mod host_gvproxy;` / `mod vz_objc;` lines (grep each crate's `lib.rs`), and delete the `[[bin]] name = "mvm-vz-supervisor"` block in `crates/mvm-vm-host/Cargo.toml`.
 
-- [ ] **Step 2: Build and remove now-unused deps**
+- [x] **Step 2: Build and remove now-unused deps**
 
 Run: `cargo build --workspace`
 Expected: compiler flags any remaining `crate::vz::` / `mvm_build::vz::` / `host_gvproxy` references (e.g. `substitution_spawn.rs` UDS transport, `standby_pool.rs` `vz_compat`) and unused deps. Delete the dead code paths (the UDS/`vz_compat` arms are Vz-only). If `objc2`/`objc2-virtualization` are now unreferenced, remove them from `crates/mvm-vm-host/Cargo.toml` and run `cargo update -w` to drop them from the lockfile.
 
-- [ ] **Step 3: Confirm the facade re-export contract is intact**
+- [x] **Step 3: Confirm the facade re-export contract is intact**
 
 Run: `rg -n "pub use|pub mod" src/lib.rs crates/mvm/src/lib.rs | rg -i "runtime|base"` and confirm no `mvmctl::runtime::*` re-export was removed. The deletion must not change the public facade mvmd consumes.
 
-- [ ] **Step 4: Full workspace gate**
+- [x] **Step 4: Full workspace gate**
 
 Run: `just ci` (or `cargo fmt --all -- --check && cargo nextest run --workspace && cargo test --workspace --doc && cargo clippy --workspace -- -D warnings`). Also run `just check-linux`.
 Expected: all green. Delete any remaining Vz-only tests that fail to compile.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A
@@ -368,20 +368,20 @@ git commit -m "feat(backend)!: delete the Vz backend, supervisor bin, and Vz-onl
 **Files:**
 - Modify: `crates/mvm-cli/src/commands/shared/resolve.rs:349-412` (tests only)
 
-- [ ] **Step 1: Decide the `vz` pass-through policy**
+- [x] **Step 1: Decide the `vz` pass-through policy**
 
 `resolve_effective_hypervisor` returns any explicit non-`firecracker` value unchanged (line 250-252). With Vz deleted, `--hypervisor vz` would pass `"vz"` down to `AnyBackend::from_hypervisor("vz")`, which now falls back to the default (Task 4). That is acceptable (clear behaviour: unknown → default). Keep the pass-through; just remove the test that asserts a distinct `vz` tier.
 
-- [ ] **Step 2: Remove the `vz` assertions**
+- [x] **Step 2: Remove the `vz` assertions**
 
 Delete the `"vz"` iterations and assertions in `enforcement_tier_uniform_for_deny_all_and_unrestricted` (drop `"vz"` from the `["firecracker", "libkrun", "vz"]` array → `["firecracker", "libkrun"]`), delete the `egress_enforcement_label("vz", &p)` assertion, and delete the `resolve_effective_hypervisor("vz")` assertions (lines ~404-406).
 
-- [ ] **Step 3: Run tests**
+- [x] **Step 3: Run tests**
 
 Run: `cargo nextest run -p mvm-cli -- resolve`
 Expected: PASS.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add crates/mvm-cli/src/commands/shared/resolve.rs
@@ -399,20 +399,20 @@ Two Vz-named witnesses must be retired without breaking `xtask check-claim-catal
 - Modify: `specs/claims/catalog.md:30` (claim 1 witness list)
 - Delete: `crates/mvm-build/fuzz/` Vz `fuzz_supervisor_config` target + corpus if it lived under the mvm-build fuzz dir (the libkrun one under `crates/deps/libkrun-sys/fuzz` stays)
 
-- [ ] **Step 1: Remove the Vz fuzz step**
+- [x] **Step 1: Remove the Vz fuzz step**
 
 Delete the `- name: Fuzz Vz SupervisorConfig (host-side)` step (security.yml:355-365) and, if present, its `fuzz_supervisor_config` target under `crates/mvm-build/fuzz/` (`git rm` the target + `Cargo.toml` entry). Leave the libkrun sibling step (lines 330-341) untouched.
 
-- [ ] **Step 2: Retire the `fn:vz_rootfs_disk_is_read_only` witness**
+- [x] **Step 2: Retire the `fn:vz_rootfs_disk_is_read_only` witness**
 
 The Vz test that backed it is gone. In `specs/claims/catalog.md` claim 1 (line 30), remove `fn:vz_rootfs_disk_is_read_only` from the comma-separated witness list. Confirm the remaining witnesses (`fn:libkrun_refuses_read_only_virtiofs_share`, the seccomp/setpriv ones, the share allow-list ones) still cover claim 1's "no host-fs access beyond explicit shares" property — they do (libkrun + backend-agnostic share enforcement).
 
-- [ ] **Step 3: Run the claim-catalog gate**
+- [x] **Step 3: Run the claim-catalog gate**
 
 Run: `cargo run -p xtask -- check-claim-catalog`
 Expected: PASS — no named witness points at a deleted symbol.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add .github/workflows/security.yml specs/claims/catalog.md
@@ -431,23 +431,23 @@ Move ADR-098 (HVF as the macOS backend) from Proposed to Accepted, scoping its V
 - Modify: `public/src/content/docs/**` any Vz references on the runtime path
 - Modify: `specs/REFACTOR-STATUS.md` (tick Plan 226 R1P1 workstreams)
 
-- [ ] **Step 1: Ratify ADR-098**
+- [x] **Step 1: Ratify ADR-098**
 
 Change ADR-098's `Status: Proposed` → `Status: Accepted (2026-…)`. In its "Vz sunset criteria" section, note: criteria scoped to macOS; representative-workload boot on HVF proven; warm-restore/save-restore criterion tracked separately in Plan 226 WS-E; Linux convergence tracked in Release 2 (Plan 226 R2).
 
-- [ ] **Step 2: Update CLAUDE.md + docs**
+- [x] **Step 2: Update CLAUDE.md + docs**
 
 In `CLAUDE.md`, remove statements that imply Vz is a selectable/auto backend (e.g. "Vz (Apple Virtualization.framework) is the macOS 26+ Apple Silicon backend", the `--builder vz` opt-in line, the `mvm-persistent-builder-vz-*` state-dir note). Replace with "Vz has been removed (Plan 226); HVF is the sole macOS backend." Grep docs: `rg -l -i "\bvz\b|Virtualization.framework|apple-container" public/src/content/docs` and prune runtime-path mentions.
 
-- [ ] **Step 3: Verify + close #1403**
+- [x] **Step 3: Verify + close #1403**
 
 Run: `gh issue view 1403` and confirm the "in-house builder not CLI-selectable" bug is fixed on `main` (it is — `--builder inhouse` + auto-detect). Close it: `gh issue close 1403 --comment "Fixed on main: in-house builder is --builder inhouse selectable and macOS-26 auto-detects it; the Vz-deletion residue is completed by Plan 226 R1P1."`
 
-- [ ] **Step 4: Update the rollup**
+- [x] **Step 4: Update the rollup**
 
 In `specs/REFACTOR-STATUS.md`, tick the Plan 226 R1P1 workstreams as landed and bump the "Last updated" date.
 
-- [ ] **Step 5: Gate + commit**
+- [x] **Step 5: Gate + commit**
 
 Run: `just ci`
 Expected: green (doc/ADR changes don't break tests, but the doc-link gate runs).
@@ -464,21 +464,21 @@ git commit -m "docs(adr-098): ratify HVF macOS backend; strip Vz from docs (Plan
 **Files:**
 - Modify: `CHANGELOG.md`, workspace `Cargo.toml` version, Homebrew formula (if versioned in-repo)
 
-- [ ] **Step 1: Full gate on both targets**
+- [x] **Step 1: Full gate on both targets**
 
 Run: `just ci && just check-linux`
 Expected: all green.
 
-- [ ] **Step 2: Confirm zero Vz residue**
+- [x] **Step 2: Confirm zero Vz residue**
 
 Run: `rg -n -i "VzBackend|mvm-vz-supervisor|vz_objc|vz_builder|host_gvproxy|BackendKind::Vz|DevBackend::Vz" crates/ src/`
 Expected: no matches (comments/docs referencing the *removal* are fine; live code/types are not).
 
-- [ ] **Step 3: Changelog + version**
+- [x] **Step 3: Changelog + version**
 
 Add a `v0.17.0` section to `CHANGELOG.md` summarizing "Removed the Vz (Apple Virtualization.framework) backend; HVF is the sole macOS backend; `machine checkpoint/fork` is temporarily unsupported on macOS pending HVF save/restore (Plan 226 WS-E)." Bump the workspace version to `0.17.0`.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add CHANGELOG.md Cargo.toml

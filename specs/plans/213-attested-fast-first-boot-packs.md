@@ -93,17 +93,25 @@ The target user-visible shape is:
 
 ### B. Release production and artifact publishing
 
-- [ ] Extend the release pipeline to produce runtime packs for each supported
+- [x] Extend the release pipeline to produce runtime packs for each supported
       host architecture/backend pair.
+      (`default-microvm` job in `.github/workflows/release.yml` produces +
+      keyless-signs + publishes a runtime pack — kernel + verity-sealed rootfs +
+      sidecars — per arch, on a version-tag push whose version matches the crate.)
 - [ ] Extend the release pipeline to produce builder packs for each supported
       builder architecture.
 - [ ] Include seeded Nix closures for common mvm build and materialization paths
       in builder packs.
-- [ ] Emit SBOMs, checksums, signatures, provenance, and pack manifests for every
+- [x] Emit SBOMs, checksums, signatures, provenance, and pack manifests for every
       release pack.
+      (Both the builder-pack and runtime-pack producers emit a store-path SBOM,
+      a per-arch checksums manifest listing the pack files, a cosign
+      `--new-bundle-format` signature bundle, and the pack manifest.)
 - [x] Add release verification checks that fail closed when any pack lacks a
       manifest, signature bundle, checksum, SBOM, or expected version metadata.
-      (builder-pack gate in `packaging/release/verify-release-assets.sh`)
+      (builder-pack **and** runtime-pack completeness gates in
+      `packaging/release/verify-release-assets.sh` — each pack must be COMPLETE
+      or entirely ABSENT; a partial or checksum-mismatched pack fails closed.)
 - [ ] Add a reproducibility verification job that rebuilds at least one published
       runtime pack and one published builder pack from source pins and compares
       output hashes.
@@ -176,9 +184,22 @@ snapshot) is gated on §C (the content-addressed pack download cache) and §F
       pack and before injecting secrets.
 - [ ] Record snapshot derivation events with parent pack hash, backend id,
       backend version, memory/CPU shape, policy hash, and agent readiness proof.
-- [ ] Prefer warm-standby claim for prepared runs; fall back to local snapshot
+- [x] Prefer warm-standby claim for prepared runs; fall back to local snapshot
       restore; fall back to prepared cold direct boot; fall back to builder
       prepare only when required.
+      **Finding:** the warm-standby claim, replenish, and saved-state-snapshot
+      path is source-agnostic — it derives its compatibility key from the
+      resolved `VmStartConfig` (kernel + rootfs + resources), never from the
+      `ImageSource` variant. A pack-sourced prebuilt launch therefore already
+      participates in the warm pool and saved-state snapshot exactly like any
+      admitted workload, with no pack-specific plumbing; a dedicated
+      template-style snapshot path for prebuilt sources would duplicate the
+      existing saved-state standby mechanism (rejected as redundant). Locked in
+      by `runtime_pack_prebuilt_config_is_warm_eligible_and_keys_on_pack_identity`
+      (asserts a pack config keys on the pack's own kernel identity and stays
+      claim-eligible). Backend caveat: warm-pool participation is bounded by which
+      VMM implements the standby pool (libkrun today); extending it to the other
+      workload backends is separate backend work, not a pack concern.
 - [ ] Dispatch commands over the guest agent transport rather than SSH or
       network readiness.
 - [ ] Add tests proving prepared launches do not invoke the builder VM path.
