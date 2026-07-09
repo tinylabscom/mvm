@@ -113,9 +113,10 @@ const BUILD_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_
 pub(super) struct BuildHeartbeat {
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     handle: Option<std::thread::JoinHandle<()>>,
-    // `Some` on a TTY: an animated spinner whose message is refreshed with the
-    // elapsed time. `None` when piped/redirected — there the text path emits a
-    // periodic line instead (a spinner draws nothing off a terminal).
+    // `Some` on a TTY: the CLI spinner abstraction whose message is refreshed
+    // with the elapsed time. `None` when piped/redirected — there the text
+    // path emits a periodic line instead (a spinner draws nothing off a
+    // terminal).
     spinner: Option<ui::Spinner>,
 }
 
@@ -134,8 +135,8 @@ impl BuildHeartbeat {
         }
     }
 
-    /// TTY path: an `indicatif` spinner refreshed with elapsed time. The spinner
-    /// self-animates via its steady tick; this thread only updates the message.
+    /// TTY path: the CLI spinner abstraction refreshed with elapsed time. The
+    /// spinner self-animates; this thread only updates the message.
     fn start_spinner(activity: &'static str) -> Self {
         use std::sync::atomic::Ordering;
         let pb = ui::spinner(&ui::format_build_progress(

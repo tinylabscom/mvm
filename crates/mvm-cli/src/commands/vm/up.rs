@@ -619,6 +619,7 @@ pub(super) fn admit_plan_for_boot(
 /// `SessionAuditSubstrate` (tenant + signed plan) the exec layer hands to the
 /// backend, persisting the bare plan first on the backends that read it from
 /// disk before `start()`.
+#[cfg(feature = "mcp")]
 pub(in crate::commands) fn untrusted_transient_admit(
     backend_name: String,
     cpus: u32,
@@ -630,6 +631,7 @@ pub(in crate::commands) fn untrusted_transient_admit(
 /// [`untrusted_transient_admit`] with explicit signer / audit directories so
 /// tests can admit against isolated `TempDir`s; production passes `None` (the
 /// default `~/.mvm` locations).
+#[cfg(any(feature = "mcp", test))]
 fn untrusted_transient_admit_in(
     backend_name: String,
     cpus: u32,

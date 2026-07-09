@@ -117,6 +117,10 @@ exclude = [
     # supervisor-config JSON fuzz harness. CI gate at
     # `.github/workflows/security.yml::fuzz`.
     "crates/deps/libkrun-sys/fuzz",
+    # Plan 97 / ADR-002 claim 5 — Vz supervisor JSON fuzz harness.
+    # Parallel role to mvm-libkrun/fuzz; same libfuzzer-sys linker
+    # constraints apply.
+    "crates/mvm-build/fuzz",
     # Plan 113 §Task 15 / ADR-064 — `BridgeConfigJson` JSON +
     # `PasstHashesFile` TOML fuzz harnesses. Same libfuzzer-sys
     # linker-flag constraints as the mvm-libkrun/fuzz crate; the
@@ -176,21 +180,27 @@ too_many_arguments = "deny"
 # Narrowed from `features = ["full"]` to the union actually used
 # across the workspace. Dropping `io-std` (no `tokio::io::std*`
 # consumers) and `parking_lot` (no consumers; `tokio::sync::Mutex`
-# uses its own primitives). `test-util` is dev-dep-only — the
-# crates that need it (`mvm-oci`, `mvm-supervisor`, root) add it
-# on their own `[dev-dependencies] tokio` line. `rt-multi-thread`
-# stays because the bare consumers `mvm-addon-dns`,
-# `mvm-addon-vsock-bridge`, and `mvm-guest-netinit` use
-# `#[tokio::main]`, which expands to the multi-threaded runtime
+# uses its own primitives). `fs`, `process`, and `signal` are no
+# longer workspace-wide either: `mvm-storage`, `mvm-hostd`, and the
+# small set of signal-aware bins request them directly. `test-util`
+# is dev-dep-only — the crates that need it (`mvm-oci`,
+# `mvm-supervisor`, root) add it on their own `[dev-dependencies]
+# tokio` line. `rt-multi-thread` stays because the bare consumers
+# `mvm-addon-dns`, `mvm-addon-vsock-bridge`, and `mvm-guest-netinit`
+# use `#[tokio::main]`, which expands to the multi-threaded runtime
 # unless told otherwise.
 #
 # Per-crate consumers can extend with extra features as usual —
 # Cargo unions feature sets across the workspace.
-tokio = { version = "1", features = ["fs", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
 
 # Pattern matching
 aho-corasick = "1"
-regex = "1"
+# The workspace patterns are ASCII-oriented: explicit `[A-Za-z0-9]` classes,
+# ASCII word/digit boundaries, and a few explicit `\u{...}` codepoint ranges
+# for steganographic Unicode. Keep `perf` + `unicode-perl` for `\b`/`\d`
+# semantics without carrying the full default Unicode table set.
+regex = { version = "1", default-features = false, features = ["perf", "std", "unicode-case", "unicode-perl"] }
 
 # Crypto
 aes-gcm = "0.10"
@@ -212,24 +222,22 @@ sha2 = "0.10"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 # Serialization
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+thiserror = "2"
 toml = "0.8"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
-clap_complete = "4"
+clap = { version = "4", default-features = false, features = ["derive", "help", "std", "usage"] }
 clap_mangen = "0.2"
-indicatif = "0.18"
+colored = "3"
 
-# HTTP client. Keep the workspace on a single reqwest line so the direct
-# callers and `oci-client` share one HTTP/TLS stack instead of compiling both
-# 0.12 and 0.13 in the same workspace build.
+# HTTP client (for CLI upgrade)
 reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false }
 
 # Plan 129 Stage 2 — the egress terminator's server-side TLS (terminate the
 # guest's https to bound hosts under the per-VM name-constrained intermediate).
-# `ring` backend (matches reqwest's rustls surface + rcgen), no aws-lc-rs/cmake.
+# `ring` backend (matches reqwest's rustls-tls + rcgen), no aws-lc-rs/cmake.
 # Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 
@@ -315,7 +323,7 @@ xattr = "1"
 # raw-byte ext4 poking in the Stage 0 validators with a real inode lookup
 # (`fs.exists("/sbin/mvm-host-vm-init")`). `std` enables `load_from_path`.
 ext4-view = { version = "0.9", features = ["std"] }
-tree-sitter = "0.26.8"
+tree-sitter = { version = "0.26.8", default-features = false, features = ["std"] }
 tree-sitter-nix = "0.0.2"
 
 # Compile pipeline (mvm-sdk compile module, SDK port Phase 2 — ported
@@ -442,9 +450,6 @@ mvm-oci.workspace = true
 # `clap::Command` tree returned by `mvm_cli::commands::cli_command()`
 # to enforce that every subcommand has a declared audit posture.
 clap.workspace = true
-# Plan 69: local mock HTTP server for the `mvmctl update` live test.
-# Avoids reaching the real GitHub release API in CI / on dev machines.
-httpmock = "0.8"
 # Plan 60 Phase 7a — `tests/tenant_destroy_e2e.rs` exercises the
 # operator→auditor pipeline end-to-end. `mvm` (path dep above)
 # pulls these transitively at runtime; the integration test

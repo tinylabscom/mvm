@@ -68,6 +68,75 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `crates/deps/libkrun-sys/src/gvproxy.rs`, leaving passt/native-rvproxy
       coverage in place without carrying dead gvproxy-specific fixtures.
       Validation: `cargo fmt --all`; `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-hostd --lib gateway_bridge`; `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p libkrun-sys --lib`; `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo check --workspace`; `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D warnings`; serial `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo test --workspace -- --test-threads=1` green.
+- [x] 2026-07-08 dependency-slimming default-path follow-up: `mvm-cli`
+      replaced `clap_complete` with an in-tree shell-completion renderer for
+      `shell-init --emit-completions`, and the hidden `ops mcp` path now sits
+      behind an opt-in `mcp` feature so the default `mvmctl` build no longer
+      pulls `mvm-mcp`. Validation used `MVM_SKIP_EMBED_BINARIES=1` with an
+      isolated target dir: `cargo test -p mvm-cli commands::env::completions
+      --lib --offline`, `cargo test -p mvm-cli
+      test_ops_mcp_is_unrecognized_without_feature --lib --offline`, and
+      `cargo clippy -p mvm-cli --all-targets --offline -- -D warnings` green.
+- [x] 2026-07-08 dependency/binary baseline refresh: the default Linux
+      `mvmctl` closure is remeasured at 267 crates and the full lockfile at
+      486 packages in `docs/investigations/dep-baseline.md`, the closure
+      ratchet is lowered to match, and `docs/investigations/binary-size-baseline.md`
+      now records the current release-gated `aarch64-apple-darwin` size budget
+      (30,007,616-byte measurement, 32 MiB budget) plus a clearly marked
+      local stubbed release build note for this branch state. Validation:
+      `cargo run -p xtask -- check-closure-budget`; local release build note
+      from `CARGO_TARGET_DIR=/tmp/mvm-size-target MVM_SKIP_EMBED_BINARIES=1
+      cargo build --release --bin mvmctl --locked --offline`, then `ls -l`
+      and `size` on the resulting binary.
+- [x] 2026-07-08 direct regex feature audit progress: the workspace `regex`
+      dependency now uses `default-features = false` with only
+      `perf/std/unicode-perl`, and `mvm-core` now follows the workspace entry
+      instead of re-enabling regex defaults locally. Focused `mvm-core` /
+      `mvm-hostd` `cargo check`, `cargo clippy -- -D warnings`, and the
+      `secrets_scanner`, `injection_guard`, and `pii_redactor` suites are
+      green. The current local stubbed `mvmctl` size is back to 21,158,544
+      bytes, which only removes the earlier provisional `+16` byte drift from
+      the Tokio slice; `tree-sitter` still brings full regex Unicode features
+      onto the default path transitively, so Plan 156 Task C2 remains open for
+      the remaining `clap` / serde-stack audit rather than being checked off.
+- [x] 2026-07-08 `clap` feature trim: the workspace `clap` dependency now uses
+      `default-features = false` with only `derive/help/std/usage`, and the
+      default `mvmctl` path no longer carries `color`, `error-context`, or
+      `suggestions`. Focused `mvm-cli` `cargo check`, `cargo clippy -- -D warnings`,
+      and help-surface unit tests (`top_level_help_hides_infra`,
+      `machine_help_lists_run_first`, `builder_flag_appears_in_help`) are
+      green. The local stubbed `mvmctl` size dropped from 21,158,544 to
+      21,108,960 bytes (`-49,584`), so Plan 156 Task C2 now has a measured
+      non-zero delta while the remaining serde-stack audit stays open.
+- [x] 2026-07-08 direct serde-stack audit progress: the workspace `serde` and
+      `serde_json` declarations now explicitly request only `derive/std` and
+      `std` respectively. Validation used `cargo check --workspace --all-targets`,
+      `cargo clippy --workspace --all-targets -- -D warnings`, and focused
+      serialization tests in `mvm-core`, `mvm-cli`, and `mvm-hostd`. The local
+      stubbed `mvmctl` size stayed flat at 21,108,960 bytes because transitive
+      default-feature users (`reqwest`, `schemars`, and build-time
+      `tree-sitter`) still keep the serde stack alive on the default path, so
+      this is recorded as dependency hygiene rather than a new Plan 156 C2
+      binary-size delta.
+- [x] 2026-07-08 `mvm-sdk` feature audit progress: `mvm-sdk` now uses
+      derive-only `schemars`, and workspace `tree-sitter` now uses only its
+      `std` feature. Validation used `cargo check -p mvm-sdk -p mvm-cli
+      --all-targets`, `cargo test -p mvm-sdk --lib`, and `cargo clippy -p
+      mvm-sdk -p mvm-cli --all-targets -- -D warnings`. The local stubbed
+      `mvmctl` size stayed flat at 21,108,960 bytes, but the feature graph is
+      cleaner and confirms the remaining regex Unicode pull now comes from
+      `tree-sitter`'s `std` path itself rather than its broader default
+      feature set.
+- [x] 2026-07-08 release sidecar binary baseline refresh: `docs/investigations/binary-size-baseline.md`
+      now measures the current release-bundled helper set rather than the
+      stale historical sidecar list in Plan 156. The recorded bundle is the
+      Linux-shared `mvm-bridge` + `mvm-substitution-endpoint` pair plus the
+      macOS-only `mvm-vz-supervisor`, `mvm-hvf-supervisor`, and
+      `mvm-libkrun-supervisor`, with exact byte counts and `cargo bloat
+      --crates` snapshots for each. Validation: offline release builds into
+      `CARGO_TARGET_DIR=/tmp/mvm-size-target` for `mvm-vm-host` and
+      `mvm-hostd`, then `stat -f '%N %z'` and per-binary `cargo bloat
+      --release --crates --locked --target-dir /tmp/mvm-size-target -n 8`.
 - [x] 2026-07-06 internal `mvm-cli` modularity cleanup: `commands::run()` now delegates startup sequencing to small helpers and command execution to a trait-backed dispatcher in `crates/mvm-cli/src/commands/dispatch.rs`, and `crates/mvm-cli/src/commands/image/trust.rs` now owns the OCI registry-auth / cosign trust helpers previously in `image/mod.rs`. Validation used `MVM_SKIP_EMBED_BINARIES=1` for local dev-only build-script bypass: `cargo fmt --all`, targeted `cargo test -p mvm-cli --lib commands::tests::internal_helper_commands_short_circuit_before_startup_side_effects`, and `cargo clippy -p mvm-cli --all-targets -- -D warnings` green.
 - [x] 2026-07-08 OCI `--image` NIC-less vsock-egress activation: the runtime-injected guest `/init` now bakes and starts `mvm-egress-client`, exports SOCKS proxy env vars, and the embedded/cacheable guest runtime includes the third guest binary end-to-end. The final activation is now driven by the **requested outbound policy** (`--net` / `--allow-host`), not a hidden `MVM_VSOCK_EGRESS` toggle: `mvmctl` selects only backends that honestly provide `{ vsock, no_guest_nic, host_vsock_proxy }`, injects/records the proxy env vars automatically, and refuses incapable backends instead of silently degrading to a guest NIC. The same gate now covers persistent OCI-backed boots (`machine run -d --image ...` and `machine start` on an image-backed machine), so stored machine lifecycles cannot slip back onto the legacy NIC/gateway path after a safe transient dry-run. Today that means `hvf`; incapable backends are refused before boot. `ping` remains unsupported because ICMP is not tunneled. Validation: `cargo fmt --all --check`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo check -p mvm-core -p mvm-backend -p mvm-cli -p mvm`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-core allows_egress_covers_every_shape --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target cargo test -p mvm-backend vsock_egress_cmdline_token_only_when_policy_allows_egress --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli receipt_env_keys_include_injected_oci_proxy_vars --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-cli machine_start_backend_selection_refuses_firecracker_for_oci_egress --lib`; `CARGO_TARGET_DIR=/tmp/mvm-oci-egress-init-target MVM_SKIP_EMBED_BINARIES=1 cargo clippy -p mvm-core -p mvm-backend -p mvm-cli -p mvm --tests -- -D warnings` green.
 - [x] 2026-07-08 current-surface docs/spec scrub for Vz deletion: current roadmap and contributor docs now describe HVF + Firecracker + libkrun as the live workload/backend surface, stop advertising Vz as a current backend choice, and align the macOS contributor story around HVF/libkrun instead of Vz.
@@ -503,21 +572,21 @@ project only uses a narrow slice of functionality.
 
 ### Track A — Immediate low-risk cuts
 
-- [ ] Replace root-test `httpmock` usage with an in-repo
-      `tokio::net::TcpListener` fixture.
+- [x] Replace root-test `httpmock` usage with an in-repo
+      loopback HTTP fixture.
       Target surface: `tests/audit_emissions_live.rs` and any other
       root tests using `httpmock`.
       Expected impact: remove `httpmock`'s dev-only closure
       (`~187` unique packages in isolation), including `async-std`,
       `hyper 0.14`, `http 0.2`, and `base64 0.21`.
 
-- [ ] Replace `mvm-oci` test `wiremock` usage with the same in-repo
-      tokio-based fixture.
+- [x] Replace `mvm-oci` test `wiremock` usage with the same in-repo
+      loopback HTTP fixture.
       Target surface: `crates/mvm-oci/tests/`.
       Expected impact: remove `wiremock`'s dev-only closure
       (`~127` unique packages in isolation).
 
-- [ ] Unify `which` on one version workspace-wide.
+- [x] Unify `which` on one version workspace-wide.
       Current state: `which 6.0.3` is pulled by `mvm-build`; `which 7.0.3`
       is used elsewhere.
       Expected impact: remove duplicate `which`/`rustix` lineage and
@@ -527,17 +596,19 @@ project only uses a narrow slice of functionality.
       Current call site: `crates/mvm-cli/src/commands/vm/up.rs`.
       Expected impact: small package-count win, trivial rewrite.
 
-- [ ] Evaluate replacing `inquire` prompts with stdio helpers.
+- [x] Replace `inquire` prompts with local stdio helpers.
       Current call sites: `crates/mvm-base/src/ui.rs`,
       `crates/mvm-cli/src/ui.rs`,
       `crates/mvm-cli/src/commands/ops/secret.rs`.
-      Decision gate: accept simpler UX in exchange for lower dep count.
+      Landed shape: shared `mvm::ui` now owns local confirm/text/password
+      prompt helpers, preserving hidden secret input on Unix without the
+      third-party prompt stack.
 
-- [ ] Evaluate replacing `indicatif` spinners with a local stderr
-      spinner or no spinner.
+- [x] Replace `indicatif` spinners with a local stderr spinner.
       Current call sites: `crates/mvm-base/src/ui.rs`,
       `crates/mvm-cli/src/ui.rs`.
-      Decision gate: accept simpler UX in exchange for lower dep count.
+      Landed shape: shared `mvm::ui::Spinner` now provides the narrow
+      `set_message` / `finish_and_clear` surface the CLI and backend use.
 
 ### Track B — Feature trimming and duplicate-stack cleanup
 
@@ -553,6 +624,14 @@ project only uses a narrow slice of functionality.
 - [ ] Re-run `cargo tree --workspace --duplicates` after the tokio audit
       and record the post-audit duplicate list in this section.
 
+- [x] Collapse direct duplicate error/TLS support crates already
+      present transitively.
+      Completed: direct workspace `thiserror` consumers now share
+      `thiserror 2`, and the lone dev-only `mvm-core` `x509-parser 0.16`
+      pin now matches the transitive `0.18` line.
+      Expected impact: remove two easy duplicate-major stragglers before
+      the heavier `oci-client` / provider work.
+
 - [ ] Keep feature-gated optional stacks off the default path unless
       clearly justified.
       Review items when touched:
@@ -563,7 +642,7 @@ project only uses a narrow slice of functionality.
 
 ### Track C — Medium-cost structural cuts
 
-- [ ] Remove `bindgen` from the normal `mvm-libkrun` build path by
+- [x] Remove `bindgen` from the normal `mvm-libkrun` build path by
       checking in generated bindings or otherwise freezing the generated
       Rust surface.
       Current surface: `crates/mvm-libkrun/build.rs`.
@@ -602,20 +681,24 @@ project only uses a narrow slice of functionality.
 
 ### Track D — Strategic rewrites
 
-- [ ] Spike replacing `oci-client` inside `mvm-oci` with a minimal
+- [x] Replace `oci-client` inside `mvm-oci` with a minimal
       internal registry client built on the existing workspace
-      `reqwest 0.12` stack.
+      `reqwest 0.13` stack.
       Current surface:
       `crates/mvm-oci/src/manifest.rs`,
       `crates/mvm-oci/src/layer.rs`.
       Scope limit for the spike:
       manifest fetch, auth header wiring, image-index selection, blob
       download, digest verification.
+      Landed shape: internal `registry` + `manifest_types` modules now own
+      the HTTP/auth challenge flow and manifest decoding, while the public
+      fetcher surface remains `OciManifestFetcher` / `OciLayerFetcher`.
       Expected impact: remove `oci-client`'s large closure
-      (`~222` unique packages in isolation) and eliminate the second
-      `reqwest 0.13` / `hyper` / `http` family from the workspace.
+      (`~222` unique packages in isolation) and further shrink the
+      remaining OCI/TLS stack after the workspace `reqwest` major
+      unification.
 
-- [ ] If the `oci-client` spike succeeds, land it before attempting the
+- [x] Land the `oci-client` rewrite before attempting the
       PGP rewrite.
 
 - [ ] Rewrite the narrow Alpine detached-signature verifier in
@@ -644,11 +727,11 @@ First concrete evaluation: [Plan 109 — Guest control-layer dep-reduction + enc
 
 ### Execution order
 
-- [ ] PR 1: remove `httpmock` / `wiremock`
+- [x] PR 1: remove `httpmock` / `wiremock`
 - [ ] PR 2: tokio feature audit
-- [ ] PR 3: small utility cleanup (`which`, `names`, optional UI deps)
-- [ ] PR 4: `oci-client` spike branch and go/no-go review
-- [ ] PR 5: land `oci-client` rewrite if approved
+- [x] PR 3: small utility cleanup (`which`, `names`, optional UI deps)
+- [x] PR 4: `oci-client` spike branch and go/no-go review
+- [x] PR 5: land `oci-client` rewrite if approved
 - [ ] PR 6: `pgp` rewrite if still justified after the OCI work
 
 Recent maintenance:

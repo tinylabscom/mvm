@@ -10,8 +10,8 @@
 //!   admission rejects tag-pinned references.
 //! - **Manifest fetch.** The [`ManifestFetcher`] trait fronts the
 //!   actual registry call; [`OciManifestFetcher`] is the real impl
-//!   over [`oci_client`]. Test code points the same impl at a
-//!   wiremock-backed registry on localhost
+//!   over the crate's internal `reqwest`-based registry client. Test code points the same impl at a
+//!   hermetic localhost registry fixture
 //!   (see `tests/hermetic_registry.rs`).
 //! - **Digest verification.** Every fetched manifest's content digest
 //!   is verified before it leaves the fetcher.
@@ -51,7 +51,9 @@ pub mod archive;
 pub mod error;
 pub mod layer;
 pub mod manifest;
+mod manifest_types;
 pub mod reference;
+mod registry;
 // Layer-to-tree unpacker. Public because callers outside this crate
 // (`mvm-build::rootfs::materialize_ext4`; `mvm-cli`'s `image run` verb)
 // need the `UnpackOptions` / `UnpackReport` / `RefusalReason` surface to
@@ -62,10 +64,10 @@ pub use archive::{OciArchiveImage, OciArchiveLayer, read_oci_archive};
 pub use error::OciError;
 pub use layer::{LayerDescriptor, LayerFetchOptions, OciLayerFetcher};
 pub use manifest::{
-    ClientConfig, ClientProtocol, FetchedManifest, LinuxPlatform, ManifestFetcher,
-    OciManifestFetcher, RegistryAuthConfig, verify_sha256_digest,
+    FetchedManifest, LinuxPlatform, ManifestFetcher, OciManifestFetcher, verify_sha256_digest,
 };
 pub use reference::ImageReference;
+pub use registry::{ClientConfig, ClientProtocol, RegistryAuthConfig};
 pub use unpack::{
     RefusalReason, RefusedEntry, UnpackError, UnpackOptions, UnpackReport, unpack_layer,
 };

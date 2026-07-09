@@ -12,7 +12,9 @@
 //! has a declared audit posture**, recursively. The test walks
 //! `mvm_cli::cli_command()` and checks each leaf — top-level
 //! subcommands AND the leaves of every `DelegatesToSub` subgroup —
-//! against a static [`AUDIT_POSTURE`] table. Adding a new CLI verb
+//! against the declared [`AUDIT_POSTURE`] table. Feature-gated leaves
+//! that the clap tree exposes only in some builds are handled as
+//! small, explicit exceptions inside the walk. Adding a new CLI verb
 //! (top-level or nested) without a corresponding entry fails the
 //! test until the new verb is classified.
 //!
@@ -102,7 +104,6 @@ const OPS_SUB: &[(&str, AuditPosture)] = &[
     ("metrics", AuditPosture::ReadOnly),
     ("bench", AuditPosture::DelegatesToSub(BENCH_SUB)),
     ("config", AuditPosture::Emits("ConfigChange")),
-    ("mcp", AuditPosture::InteractiveOrControl),
 ];
 
 // `kernel build` compiles/downloads a microVM kernel into the local
@@ -464,7 +465,9 @@ fn audit_walk(
 
     // Missing-in-table: clap names not present in declared.
     for name in &clap_names {
-        if !declared_map.contains_key(name.as_str()) {
+        if !declared_map.contains_key(name.as_str())
+            && !is_declared_optional_leaf(parent_path, name.as_str())
+        {
             let mut p: Path = parent_path.to_vec();
             p.push(name.as_str());
             missing.push(path_str(&p));
@@ -490,6 +493,10 @@ fn audit_walk(
             audit_walk(inner, sub_clap, &child_path, missing, stale);
         }
     }
+}
+
+fn is_declared_optional_leaf(parent_path: &[&str], name: &str) -> bool {
+    matches!((parent_path, name), (["ops"], "mcp"))
 }
 
 #[test]

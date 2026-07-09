@@ -24,9 +24,9 @@
 //!   retry — those won't get better with more tries.
 
 use crate::OciError;
-use crate::manifest::{OciManifestFetcher, RegistryAuthConfig};
+use crate::manifest::OciManifestFetcher;
 use crate::reference::ImageReference;
-use oci_client::client::Client;
+use crate::registry::{ClientConfig, RegistryAuthConfig, RegistryClient};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -86,13 +86,12 @@ impl Default for LayerFetchOptions {
     }
 }
 
-/// Real layer fetcher backed by [`oci_client`]. Anonymous-only for
+/// Real layer fetcher backed by the crate's internal registry client. Anonymous-only for
 /// now; private-registry auth lands later with credential material
 /// flowing through `secrecy`.
 pub struct OciLayerFetcher {
-    client: Client,
+    client: RegistryClient,
     options: LayerFetchOptions,
-    auth: RegistryAuthConfig,
 }
 
 impl Default for OciLayerFetcher {
@@ -107,24 +106,34 @@ impl OciLayerFetcher {
     }
 
     pub fn with_options(options: LayerFetchOptions) -> Self {
+        Self::with_config(Default::default(), options)
+    }
+
+    pub fn with_config(config: ClientConfig, options: LayerFetchOptions) -> Self {
         Self {
-            client: Client::new(Default::default()),
+            client: RegistryClient::new(config, RegistryAuthConfig::Anonymous),
             options,
-            auth: RegistryAuthConfig::Anonymous,
         }
     }
 
     pub fn with_options_and_auth(options: LayerFetchOptions, auth: RegistryAuthConfig) -> Self {
+        Self::with_config_and_auth(Default::default(), options, auth)
+    }
+
+    pub fn with_config_and_auth(
+        config: ClientConfig,
+        options: LayerFetchOptions,
+        auth: RegistryAuthConfig,
+    ) -> Self {
         Self {
-            client: Client::new(Default::default()),
+            client: RegistryClient::new(config, auth),
             options,
-            auth,
         }
     }
 
     /// Share a client with an existing [`OciManifestFetcher`] so
     /// both halves of the pull pipeline pool connections through
-    /// the same underlying `oci-client`.
+    /// the same underlying HTTP client.
     pub fn from_manifest_fetcher(
         manifest_fetcher: &OciManifestFetcher,
         options: LayerFetchOptions,
@@ -132,29 +141,30 @@ impl OciLayerFetcher {
         Self {
             client: manifest_fetcher.client().clone(),
             options,
-            auth: manifest_fetcher.auth().clone(),
         }
     }
 
-    /// Construct from a pre-built `oci_client::Client`. Tests use
-    /// this to point at a wiremock-backed registry.
-    pub fn with_client(client: Client, options: LayerFetchOptions) -> Self {
+    /// Construct from a pre-built `reqwest::Client`. Tests use
+    /// this to point at a hermetic localhost registry fixture.
+    pub fn with_client(client: reqwest::Client, options: LayerFetchOptions) -> Self {
         Self {
-            client,
+            client: RegistryClient::with_http_client(
+                client,
+                Default::default(),
+                RegistryAuthConfig::Anonymous,
+            ),
             options,
-            auth: RegistryAuthConfig::Anonymous,
         }
     }
 
     pub fn with_client_and_auth(
-        client: Client,
+        client: reqwest::Client,
         options: LayerFetchOptions,
         auth: RegistryAuthConfig,
     ) -> Self {
         Self {
-            client,
+            client: RegistryClient::with_http_client(client, Default::default(), auth),
             options,
-            auth,
         }
     }
 
@@ -184,14 +194,6 @@ impl OciLayerFetcher {
         }
         validate_layer_digest(&layer.digest)?;
 
-        let upstream_ref: oci_client::Reference =
-            reference
-                .canonical()
-                .parse()
-                .map_err(|e: oci_client::ParseError| {
-                    OciError::InvalidReference(format!("{}: {e}", reference.canonical()))
-                })?;
-
         // Retries are only safe before any bytes have flowed
         // through the writer for this layer — past that point,
         // retrying would replay writes against an already-dirty
@@ -210,7 +212,7 @@ impl OciLayerFetcher {
             let attempt_started_at = count.load(Ordering::SeqCst);
             let res = self
                 .fetch_layer_once(
-                    &upstream_ref,
+                    reference,
                     layer,
                     writer,
                     &mut hasher,
@@ -255,7 +257,7 @@ impl OciLayerFetcher {
 
     async fn fetch_layer_once(
         &self,
-        reference: &oci_client::Reference,
+        reference: &ImageReference,
         layer: &LayerDescriptor,
         writer: &mut (dyn AsyncWrite + Send + Unpin),
         hasher: &mut Sha256,
@@ -271,18 +273,21 @@ impl OciLayerFetcher {
             cap,
         };
 
-        // `oci_client::Client::pull_blob` takes `impl AsLayerDescriptor`,
-        // which is implemented for `&str` (and for upstream's own
-        // layer-descriptor struct), but not `&String`. Pass the
-        // digest as a string slice explicitly.
-        let auth = self.auth.to_registry_auth();
-        self.client
-            .store_auth_if_needed(reference.resolve_registry(), &auth)
-            .await;
-        self.client
-            .pull_blob(reference, layer.digest.as_str(), &mut capped_writer)
+        let mut response = self
+            .client
+            .get_blob(reference, layer.digest.as_str())
+            .await?;
+        while let Some(chunk) = response
+            .response
+            .chunk()
             .await
-            .map_err(map_oci_error)?;
+            .map_err(|e| OciError::Registry(format!("read blob response chunk: {e}")))?
+        {
+            capped_writer
+                .write_all(&chunk)
+                .await
+                .map_err(|e| OciError::Registry(format!("write fetched blob chunk: {e}")))?;
+        }
 
         capped_writer
             .inner
@@ -310,7 +315,7 @@ impl OciLayerFetcher {
 /// the count past `cap` errors out immediately — the underlying
 /// writer never sees the over-cap bytes. `count` and `cap_hit`
 /// are exposed as atomics so the retry loop one level up can
-/// inspect them after `pull_blob` returns.
+/// inspect them after the HTTP fetch returns.
 struct CappedHashingWriter<'a, W: ?Sized> {
     inner: &'a mut W,
     hasher: &'a mut Sha256,
@@ -390,26 +395,11 @@ fn validate_layer_digest(d: &str) -> Result<(), OciError> {
     Ok(())
 }
 
-/// Best-effort classification of `oci_client` errors. We hand
-/// transient classes (network, 5xx, timeout) to the retry loop;
-/// everything else fails immediately.
-///
-/// `oci-client` 0.16's `OciDistributionError` doesn't expose
-/// structured status codes for every variant, so this is
-/// string-shaped today. Tightening it to typed status inspection
-/// is a follow-up — the optimistic-retry policy is good enough (the
-/// worst case is "we waited a bit before reporting a permanent
-/// error," which is harmless).
-fn map_oci_error(e: oci_client::errors::OciDistributionError) -> OciError {
-    OciError::Registry(e.to_string())
-}
-
 fn is_transient(e: &OciError) -> bool {
     match e {
-        // Most registry errors that bubble through `oci_client`
-        // become `OciError::Registry(...)`. Without structured
-        // status codes from upstream we optimistically retry — the
-        // bound is `LayerFetchOptions::max_retries`.
+        // Most registry errors surface as `OciError::Registry(...)`.
+        // We optimistically retry that class — the bound is
+        // `LayerFetchOptions::max_retries`.
         OciError::Registry(_) => true,
         // These are deterministic given the inputs. Retrying does
         // not change the answer.

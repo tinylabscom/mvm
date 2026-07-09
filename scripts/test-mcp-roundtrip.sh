@@ -40,8 +40,8 @@ fi
 
 MVMCTL_BIN="${MVMCTL_BIN:-}"
 if [ -z "$MVMCTL_BIN" ]; then
-    echo "==> building mvmctl"
-    cargo build --bin mvmctl
+    echo "==> building mvmctl with the mcp feature"
+    cargo build --bin mvmctl --features mvm-cli/mcp
     MVMCTL_BIN="./target/debug/mvmctl"
 fi
 

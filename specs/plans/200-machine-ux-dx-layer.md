@@ -1194,18 +1194,21 @@ Required behavior:
 - [x] Record dependency weight as a first-class DX/security goal for the
       machine UX, with default binary closure as the main metric and raw crate
       count as secondary.
-- [ ] Add a default `mvmctl` dependency/binary-size baseline for
+- [x] Add a default `mvmctl` dependency/binary-size baseline for
       `machine run --image ...` and publish the measured budget in Plan 126 or
       a follow-up dependency plan.
-- [ ] Replace or fork `oci-client` so the default path no longer pulls duplicate
+- [x] Replace or fork `oci-client` so the default path no longer pulls duplicate
       `reqwest`/native-crypto stacks.
-- [ ] Split builder/dev/backend extras out of the normal user path behind
-      features or sidecars where practical.
-- [ ] Replace heavy test-only HTTP fixtures with small in-repo TCP fixtures
+- [~] Split builder/dev/backend extras out of the normal user path behind
+      features or sidecars where practical. Progress: the hidden `ops mcp`
+      path is now behind the opt-in `mcp` feature, and shell completions no
+      longer pull `clap_complete` into the default build; broader builder/dev
+      path splits remain.
+- [x] Replace heavy test-only HTTP fixtures with small in-repo TCP fixtures
       where the tests do not need a full mock-server framework.
 - [ ] Audit `inquire`, `indicatif`, and `colored` usage for the machine path;
       keep deterministic plain output and `--json` as the default.
-- [ ] Move `libkrun-sys` bindgen/libclang usage to a regeneration-only path with
+- [x] Move `libkrun-sys` bindgen/libclang usage to a regeneration-only path with
       checked-in generated bindings for normal builds.
 - [~] Add CI gates for default closure size, duplicate major versions,
       forbidden heavy deps, and binary-size regressions. → **closure-size landed**

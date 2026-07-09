@@ -258,6 +258,33 @@ rather than silently creeping back:
   default closure.
 - **cargo-deny `multiple-versions = deny`** (D2) — the duplicate-major set
   is frozen behind an audited skip baseline.
+
+## Follow-up remeasure (2026-07-08, current dependency-slimming branch)
+
+Re-measured on this branch after the follow-up dependency cuts:
+
+```sh
+# Default mvmctl closure (Linux release target, no dev-deps)
+cargo tree -p mvmctl -e no-dev --prefix none --locked \
+  --target x86_64-unknown-linux-gnu | sed 's/ (.*)//' | sort -u | wc -l
+
+# Full lockfile
+grep -c '^name = ' Cargo.lock
+```
+
+| Metric | 2026-06-13 | 2026-07-08 branch | Delta |
+|---|---:|---:|---:|
+| Default `mvmctl` closure | 347 | **267** | **−80** |
+| Full lockfile | 683 | **486** | **−197** |
+
+The current branch-side drop comes from the follow-up dependency work now
+present here: the in-repo OCI registry client replaced `oci-client`, the
+shell-init path replaced `clap_complete`, the hidden MCP server path moved
+behind an opt-in `mcp` feature, the CLI/shared UI replaced `inquire` and
+`indicatif`, the hermetic tests replaced heavy HTTP mock frameworks, and
+`libkrun-sys` moved bindgen to a regeneration-only path with checked-in
+bindings. The closure ratchet in `xtask check-closure-budget` should track this
+new 267-crate baseline.
 - **cargo-deny / cargo-audit** (D2) — advisory + license drift.
 
 ### Remaining work (unchanged, decision-gated)

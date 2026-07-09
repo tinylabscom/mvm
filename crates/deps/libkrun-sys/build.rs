@@ -3,8 +3,7 @@
 //! When the `libkrun-sys` cargo feature is on:
 //!   1. Probe for `libkrun.h` at the three standard install locations
 //!      (Apple Silicon Homebrew, Intel/manual, Linux distro).
-//!   2. Run `bindgen` to emit Rust FFI bindings into `OUT_DIR/libkrun_sys.rs`.
-//!   3. Emit `cargo:rustc-link-lib=krun` so the linker pulls in the shared
+//!   2. Emit `cargo:rustc-link-lib=krun` so the linker pulls in the shared
 //!      library.
 //!
 //! When the feature is off, this script is a noop — the workspace builds
@@ -18,7 +17,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=MVM_LIBKRUN_HEADER");
 
     if env::var_os("CARGO_FEATURE_LIBKRUN_SYS").is_none() {
-        // Default build path — no FFI, no link, no bindgen invocation.
+        // Default build path — no FFI, no link.
         return;
     }
 
@@ -38,34 +37,10 @@ fn main() {
 
     println!("cargo:rerun-if-changed={}", header.display());
 
-    let out_path =
-        PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR set by cargo")).join("libkrun_sys.rs");
-
     let include_dir = header
         .parent()
         .expect("libkrun.h has a parent directory")
         .to_path_buf();
-
-    bindgen::Builder::default()
-        .header(header.to_string_lossy())
-        .clang_arg(format!("-I{}", include_dir.display()))
-        // Keep the generated surface small — only the symbols we wrap in
-        // sys.rs plus the KRUN_* constants we need at the type level.
-        // Also surface `NET_FEATURE_*` + `COMPAT_NET_FEATURES`
-        // for the passt virtio-net backend (`krun_add_net_unixstream`'s
-        // `features` arg expects a bitwise-or of those).
-        .allowlist_function("krun_.*")
-        .allowlist_var("KRUN_.*")
-        .allowlist_var("NET_FEATURE_.*")
-        .allowlist_var("COMPAT_NET_FEATURES")
-        .allowlist_var("NET_FLAG_.*")
-        .layout_tests(false)
-        .generate_comments(false)
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .generate()
-        .expect("bindgen failed to generate libkrun bindings")
-        .write_to_file(&out_path)
-        .expect("failed to write libkrun bindings");
 
     // Tell the linker to pull in libkrun. On macOS the dylib is found via
     // the standard Homebrew library path; on Linux via the distro install.

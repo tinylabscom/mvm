@@ -1,4 +1,4 @@
-//! Safe wrappers around the bindgen-generated libkrun FFI.
+//! Safe wrappers around the checked-in libkrun FFI bindings.
 //!
 //! Only compiled when the `libkrun-sys` feature is on. The wrappers
 //! translate libkrun's "negative i32 = errno" convention into
@@ -26,13 +26,13 @@ use crate::Error;
 use mvm_core::kernel_format::KernelFormat;
 
 mod bindings {
-    include!(concat!(env!("OUT_DIR"), "/libkrun_sys.rs"));
+    include!("libkrun_bindings.rs");
 }
 
 /// The `features` mask `krun_add_net_unixstream` expects for passt as
 /// the userspace network proxy. Mirrors the
 /// `COMPAT_NET_FEATURES` macro in libkrun.h:344 — a compound `|` of
-/// the NET_FEATURE_* constants that bindgen can't always fold into a
+/// the NET_FEATURE_* constants that the generated bindings don't fold into a
 /// single value. Re-deriving in Rust keeps the canonical mask close
 /// to the call site that uses it.
 pub const PASST_NET_FEATURES: u32 = (1 << 0)   // NET_FEATURE_CSUM

@@ -1448,6 +1448,16 @@ fn test_metrics_instance_flag_parses() {
     }
 }
 
+#[cfg(not(feature = "mcp"))]
+#[test]
+fn test_ops_mcp_is_unrecognized_without_feature() {
+    let result = Cli::try_parse_from(["mvmctl", "ops", "mcp", "stdio"]);
+    assert!(
+        result.is_err(),
+        "`ops mcp` is opt-in behind the `mcp` feature"
+    );
+}
+
 #[test]
 fn test_metrics_snapshot_serializes_to_json() {
     let snap = mvm_core::observability::metrics::global().snapshot();
@@ -2343,9 +2353,10 @@ fn secret_put_without_value_source_parses_for_interactive_prompt() {
 fn secret_get_rejects_force_flag() {
     let err = Cli::try_parse_from(["mvmctl", "secret", "get", "api-key", "--force"])
         .expect_err("secret get must not accept --force");
+    let msg = err.to_string();
     assert!(
-        err.to_string().contains("unexpected argument '--force'"),
-        "got: {err}"
+        msg.contains("unexpected argument '--force'") || msg.contains("unexpected argument found"),
+        "got: {msg}"
     );
 }
 
@@ -3650,7 +3661,10 @@ fn builder_flag_rejects_unknown_value() {
     let err = Cli::try_parse_from(["mvmctl", "--builder", "bogus", "doctor"]).unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("invalid value") || msg.contains("possible values") || msg.contains("bogus"),
+        msg.contains("invalid value")
+            || msg.contains("possible values")
+            || msg.contains("bogus")
+            || msg.contains("one of the values isn't valid for an argument"),
         "expected a clap value-parser error mentioning 'bogus', got: {msg}"
     );
 }

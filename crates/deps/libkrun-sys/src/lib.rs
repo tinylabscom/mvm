@@ -11,7 +11,7 @@
 //! - **default** (no feature) — no FFI, no link to libkrun. [`start`]
 //!   and [`stop`] return [`Error::NotYetWired`]. The workspace compiles
 //!   on hosts without libkrun installed.
-//! - **`libkrun-sys`** — bindgen-generated FFI from `libkrun.h` plus
+//! - **`libkrun-sys`** — checked-in FFI bindings from `libkrun.h` plus
 //!   `-lkrun` linking. [`start`] and [`stop`] dispatch through
 //!   `sys::Context` into real libkrun calls.
 //!

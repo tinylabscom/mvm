@@ -7,6 +7,7 @@
 pub(super) mod artifact_verify;
 pub(super) mod bootstrap;
 pub(super) mod cleanup;
+pub(super) mod completions;
 pub(super) mod dev;
 pub(super) mod dev_vz;
 pub(super) mod doctor;
@@ -14,6 +15,7 @@ pub(super) mod group;
 pub(super) mod init;
 pub(super) mod linux_native;
 pub(super) mod setup;
+pub(super) mod shell_completion;
 pub(super) mod shell_init;
 pub(super) mod sign;
 pub(super) mod uninstall;
