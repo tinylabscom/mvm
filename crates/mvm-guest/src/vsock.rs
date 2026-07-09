@@ -122,11 +122,14 @@ pub const MIN_SUPPORTED_PROTOCOL_VERSION: u32 = 1;
 /// Maximum response frame size (256 KiB).
 const MAX_FRAME_SIZE: usize = 256 * 1024;
 
-/// Number of CONNECT handshake retries before giving up.
-const CONNECT_RETRIES: u32 = 3;
+/// Number of transport reconnect attempts before giving up.
+const CONNECT_RETRIES: u32 = 4;
 
-/// Delay between CONNECT handshake retries.
-const CONNECT_RETRY_DELAY_MS: u64 = 500;
+/// Base delay for exponential reconnect backoff.
+const CONNECT_RETRY_BASE_DELAY_MS: u64 = 100;
+
+/// Cap for exponential reconnect backoff.
+const CONNECT_RETRY_CAP_DELAY_MS: u64 = 500;
 
 /// Base delay for the adaptive readiness-poll backoff. The first poll
 /// after a failed attempt waits this long.
@@ -2687,6 +2690,31 @@ fn is_timeout_error(err: &std::io::Error) -> bool {
     )
 }
 
+fn connect_retry_delay(attempt: u32) -> Duration {
+    let scaled = CONNECT_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(16));
+    Duration::from_millis(scaled.min(CONNECT_RETRY_CAP_DELAY_MS))
+}
+
+fn is_transient_connect_error(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::AddrNotAvailable
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::UnexpectedEof
+    )
+}
+
+fn should_retry_connect_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    err.downcast_ref::<std::io::Error>()
+        .is_some_and(is_transient_connect_error)
+}
+
 /// Single attempt to connect and perform the Firecracker CONNECT handshake.
 fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let timeout = Duration::from_secs(timeout_secs);
@@ -2722,7 +2750,7 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
     // Read response line: "OK <port>\n"
     let mut reader = BufReader::new(&stream);
     let mut response_line = String::new();
-    reader.read_line(&mut response_line).map_err(|e| {
+    let bytes = reader.read_line(&mut response_line).map_err(|e| {
         if is_timeout_error(&e) {
             anyhow::anyhow!(
                 "Guest agent did not respond within {}s \
@@ -2733,6 +2761,13 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
             anyhow::anyhow!("Failed to read CONNECT response: {}", e)
         }
     })?;
+    if bytes == 0 {
+        return Err(anyhow::Error::from(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "guest agent closed the CONNECT handshake before replying",
+        ))
+        .context("Failed to read CONNECT response"));
+    }
 
     if !response_line.starts_with("OK ") {
         bail!(
@@ -2764,21 +2799,18 @@ fn try_connect_once(uds_path: &str, port: u32, timeout_secs: u64) -> Result<Unix
 pub fn connect_to_port(uds_path: &str, port: u32, timeout_secs: u64) -> Result<UnixStream> {
     let mut last_err = None;
 
-    for attempt in 1..=CONNECT_RETRIES {
+    for attempt in 0..CONNECT_RETRIES {
         match try_connect_once(uds_path, port, timeout_secs) {
             Ok(stream) => return Ok(stream),
             Err(e) => {
-                let is_timeout = e.to_string().contains("did not respond within");
-
-                // Don't retry definitive failures (VM not running at all)
-                if !is_timeout {
+                if !should_retry_connect_error(e.root_cause()) {
                     return Err(e);
                 }
 
                 last_err = Some(e);
 
-                if attempt < CONNECT_RETRIES {
-                    std::thread::sleep(Duration::from_millis(CONNECT_RETRY_DELAY_MS));
+                if attempt + 1 < CONNECT_RETRIES {
+                    std::thread::sleep(connect_retry_delay(attempt));
                 }
             }
         }
@@ -2831,36 +2863,67 @@ pub fn connect_host_vsock(port: u32, timeout_secs: u64) -> Result<UnixStream> {
     }
     const _: () = assert!(std::mem::size_of::<SockaddrVm>() == 16);
 
-    // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; `addr` is fully
-    // initialized and sized exactly. The fd is adopted by `UnixStream` on
-    // success (closed on its drop) or closed explicitly on the error paths.
-    let stream = unsafe {
-        let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
-        if fd < 0 {
-            return Err(
-                anyhow::Error::from(std::io::Error::last_os_error()).context("AF_VSOCK socket()")
-            );
-        }
-        let addr = SockaddrVm {
-            svm_family: AF_VSOCK as libc::sa_family_t,
-            svm_reserved1: 0,
-            svm_port: port,
-            svm_cid: HOST_CID,
-            svm_zero: [0; 4],
+    let mut last_err = None;
+    let mut stream = None;
+    for attempt in 0..CONNECT_RETRIES {
+        // SAFETY: standard socket(2)/connect(2) on AF_VSOCK; `addr` is fully
+        // initialized and sized exactly. The fd is adopted by `UnixStream` on
+        // success (closed on its drop) or closed explicitly on the error path.
+        let connect_result = unsafe {
+            let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM, 0);
+            if fd < 0 {
+                Err(anyhow::Error::from(std::io::Error::last_os_error())
+                    .context("AF_VSOCK socket()"))
+            } else {
+                let addr = SockaddrVm {
+                    svm_family: AF_VSOCK as libc::sa_family_t,
+                    svm_reserved1: 0,
+                    svm_port: port,
+                    svm_cid: HOST_CID,
+                    svm_zero: [0; 4],
+                };
+                let rc = libc::connect(
+                    fd,
+                    std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
+                    std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
+                );
+                if rc < 0 {
+                    let err = std::io::Error::last_os_error();
+                    libc::close(fd);
+                    Err(anyhow::Error::from(err).context(format!(
+                        "AF_VSOCK connect to host CID {HOST_CID} port {port}"
+                    )))
+                } else {
+                    Ok(UnixStream::from_raw_fd(fd))
+                }
+            }
         };
-        let rc = libc::connect(
-            fd,
-            std::ptr::addr_of!(addr).cast::<libc::sockaddr>(),
-            std::mem::size_of::<SockaddrVm>() as libc::socklen_t,
-        );
-        if rc < 0 {
-            let err = std::io::Error::last_os_error();
-            libc::close(fd);
-            return Err(anyhow::Error::from(err).context(format!(
-                "AF_VSOCK connect to host CID {HOST_CID} port {port}"
-            )));
+
+        match connect_result {
+            Ok(open_stream) => {
+                stream = Some(open_stream);
+                break;
+            }
+            Err(e) => {
+                if !should_retry_connect_error(e.root_cause()) {
+                    return Err(e);
+                }
+                last_err = Some(e);
+                if attempt + 1 < CONNECT_RETRIES {
+                    std::thread::sleep(connect_retry_delay(attempt));
+                }
+            }
         }
-        UnixStream::from_raw_fd(fd)
+    }
+    let stream = match stream {
+        Some(stream) => stream,
+        None => {
+            return Err(last_err.unwrap_or_else(|| {
+                anyhow::anyhow!(
+                    "Failed to connect to host CID {HOST_CID} port {port} after {CONNECT_RETRIES} attempts"
+                )
+            }));
+        }
     };
     let timeout = Duration::from_secs(timeout_secs);
     stream.set_read_timeout(Some(timeout)).ok();
@@ -5382,6 +5445,39 @@ mod tests {
     }
 
     #[test]
+    fn test_connect_retry_delay_grows_then_caps() {
+        assert_eq!(connect_retry_delay(0), Duration::from_millis(100));
+        assert_eq!(connect_retry_delay(1), Duration::from_millis(200));
+        assert_eq!(connect_retry_delay(2), Duration::from_millis(400));
+        assert_eq!(connect_retry_delay(3), Duration::from_millis(500));
+        assert_eq!(connect_retry_delay(32), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn test_transient_connect_errors_include_restart_races() {
+        assert!(is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "socket missing during restart"
+        )));
+        assert!(is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "listener not ready"
+        )));
+        assert!(is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "worker restarted"
+        )));
+        assert!(is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "listener died before CONNECT ack"
+        )));
+        assert!(!is_transient_connect_error(&std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "caller bug"
+        )));
+    }
+
+    #[test]
     fn test_try_connect_once_nonexistent_path() {
         let result = try_connect_once("/nonexistent/v.sock", GUEST_AGENT_PORT, 1);
         assert!(result.is_err());
@@ -5394,17 +5490,61 @@ mod tests {
     }
 
     #[test]
-    fn test_connect_to_nonexistent_no_retry_delay() {
-        // Definitive failure (socket not found) should fail fast without retries
+    fn test_connect_to_nonexistent_retries_are_bounded() {
+        // A missing socket can be transient during restart. We retry briefly,
+        // but the bounded exponential backoff must still fail quickly.
         let start = std::time::Instant::now();
         let result = connect_to("/nonexistent/v.sock", 1);
         let elapsed = start.elapsed();
         assert!(result.is_err());
         assert!(
-            elapsed.as_secs() < 2,
-            "connect_to took {:?}, suggesting unnecessary retries",
+            elapsed.as_secs() < 3,
+            "connect_to took {:?}, suggesting an unbounded reconnect loop",
             elapsed
         );
+    }
+
+    #[test]
+    fn test_connect_to_port_retries_across_listener_restart_before_connect_ack() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::os::unix::net::UnixListener;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("v.sock");
+        let socket_path = socket.to_string_lossy().into_owned();
+        let port = 4242;
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+
+        let worker = std::thread::spawn({
+            let socket = socket.clone();
+            move || {
+                let listener = UnixListener::bind(&socket).unwrap();
+                ready_tx.send(()).unwrap();
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream);
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(line.trim(), format!("CONNECT {port}"));
+                drop(reader);
+                drop(listener);
+
+                std::fs::remove_file(&socket).unwrap();
+                let listener = UnixListener::bind(&socket).unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                assert_eq!(line.trim(), format!("CONNECT {port}"));
+                writeln!(stream, "OK {port}").unwrap();
+                stream.flush().unwrap();
+            }
+        });
+
+        ready_rx.recv().unwrap();
+        let stream =
+            connect_to_port(&socket_path, port, 1).expect("connect succeeds after restart");
+        drop(stream);
+        worker.join().unwrap();
     }
 
     #[test]
