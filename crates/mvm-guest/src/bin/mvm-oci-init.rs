@@ -300,10 +300,7 @@ mod linux {
             );
             return;
         }
-        // libc's ioctl request type differs per target (c_ulong on gnu,
-        // c_int on musl) — `as _` defers to whichever this libc declares.
-        let get_flags = libc::SIOCGIFFLAGS as _;
-        let set_flags = libc::SIOCSIFFLAGS as _;
+        let (get_flags, set_flags) = loopback_flag_requests();
         let mut ifr = IfReq::for_name("lo");
         let get_rc = unsafe { libc::ioctl(sock, get_flags, &mut ifr) };
         if get_rc == 0 {
@@ -324,6 +321,13 @@ mod linux {
         unsafe {
             libc::close(sock);
         }
+    }
+
+    fn loopback_flag_requests() -> (libc::Ioctl, libc::Ioctl) {
+        (
+            libc::SIOCGIFFLAGS as libc::Ioctl,
+            libc::SIOCSIFFLAGS as libc::Ioctl,
+        )
     }
 
     #[repr(C)]
@@ -383,6 +387,13 @@ mod linux {
             assert_eq!(ifr.name[0], b'l' as libc::c_char);
             assert_eq!(ifr.name[1], b'o' as libc::c_char);
             assert_eq!(ifr.name[2], 0);
+        }
+
+        #[test]
+        fn loopback_ioctl_requests_match_libc_constants() {
+            let (get_flags, set_flags) = loopback_flag_requests();
+            assert_eq!(get_flags, libc::SIOCGIFFLAGS as libc::Ioctl);
+            assert_eq!(set_flags, libc::SIOCSIFFLAGS as libc::Ioctl);
         }
     }
 }
