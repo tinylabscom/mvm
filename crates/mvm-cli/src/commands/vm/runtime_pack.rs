@@ -25,10 +25,7 @@ use crate::exec::ImageSource;
 /// this ctx identically and can't drift apart.
 #[cfg(feature = "manifest-verify")]
 fn with_runtime_pack_ctx<T>(
-    f: impl FnOnce(
-        &trust::RuntimePackTrustInputs,
-        &mvm_core::pack_cache::PackVerifyCtx<'_>,
-    ) -> T,
+    f: impl FnOnce(&trust::RuntimePackTrustInputs, &mvm_core::pack_cache::PackVerifyCtx<'_>) -> T,
 ) -> Result<T> {
     use anyhow::Context;
     use mvm_core::pack_cache::PackVerifyCtx;
