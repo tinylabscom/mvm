@@ -392,6 +392,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // argv lifecycle + `--entrypoint` action). `run` survives hidden as the SDK
     // Sandbox transport (`run --mode live/plan`); its posture is unchanged.
     ("ls", AuditPosture::ReadOnly),
+    ("explain", AuditPosture::ReadOnly),
     ("run", AuditPosture::InteractiveOrControl),
     ("__sdk-no-vm", AuditPosture::InteractiveOrControl),
     // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
