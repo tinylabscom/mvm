@@ -1,17 +1,9 @@
 //! Linux-gated integration test for [`mvm_build::oci_to_rootfs::
 //! materialize_to_ext4`].
 //!
-//! `mke2fs` is Linux-only and not present on macOS / Windows
-//! contributor laptops by default. These tests run when:
-//!
-//! 1. The target OS is Linux (`#[cfg(target_os = "linux")]`).
-//! 2. `mke2fs` is on `$PATH` at test time. If missing, the test
-//!    skips cleanly with a one-line note rather than failing —
-//!    contributor environments that don't have `e2fsprogs`
-//!    installed shouldn't see false negatives.
-//! 3. The CI lane that runs them is the same Linux KVM lane that
-//!    already runs the verity regression — the host has `mke2fs`
-//!    from `e2fsprogs` and the privilege bits `mke2fs -d` needs.
+//! The default deterministic path is in-process now, but the public API remains
+//! Linux-gated for parity with the builder-VM orchestration path. These tests
+//! therefore compile only on Linux.
 
 #![cfg(target_os = "linux")]
 
@@ -21,23 +13,6 @@ use mvm_build::oci_to_rootfs::{
 use std::io::Cursor;
 use std::path::Path;
 use tempfile::TempDir;
-
-/// Returns true when `mke2fs` is on `$PATH`. Tests that need a
-/// real `mke2fs` call this and exit early on miss.
-fn mke2fs_available() -> bool {
-    which::which("mke2fs").is_ok()
-}
-
-fn skip_if_no_mke2fs() -> bool {
-    if !mke2fs_available() {
-        eprintln!(
-            "mvm-oci ext4 integration test skipped: mke2fs not on $PATH \
-             (install e2fsprogs to run this test)"
-        );
-        return true;
-    }
-    false
-}
 
 fn write_file(root: &Path, rel: &str, bytes: &[u8]) {
     let dest = root.join(rel);
@@ -55,10 +30,6 @@ fn fresh_staging() -> (TempDir, ImageStaging) {
 
 #[test]
 fn materialize_produces_a_real_ext4_image() {
-    if skip_if_no_mke2fs() {
-        return;
-    }
-
     let (staging_dir, staging) = fresh_staging();
     write_file(staging_dir.path(), "etc/hello", b"hello mvm");
     write_file(staging_dir.path(), "bin/sh", b"#!/bin/sh\necho ok\n");
@@ -91,10 +62,6 @@ fn materialize_produces_a_real_ext4_image() {
 
 #[test]
 fn materialize_is_byte_deterministic_for_the_same_input() {
-    if skip_if_no_mke2fs() {
-        return;
-    }
-
     // The verity cache invariant: a single staging tree
     // materialised twice must produce byte-identical ext4 output.
     //
@@ -141,10 +108,6 @@ fn materialize_is_byte_deterministic_for_the_same_input() {
 
 #[test]
 fn materialize_through_unpack_round_trip() {
-    if skip_if_no_mke2fs() {
-        return;
-    }
-
     // Build a tar in memory, unpack it via ImageStaging, then
     // materialize. Covers the unpack → materialize boundary.
     use tar::{Builder, Header};

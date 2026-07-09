@@ -183,6 +183,26 @@ pub struct Xattr {
     pub value: Vec<u8>,
 }
 
+/// Deterministic superblock metadata to stamp into a built image.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BuildOptions {
+    pub uuid: [u8; 16],
+    pub volume_name: [u8; 16],
+}
+
+impl BuildOptions {
+    pub fn with_uuid(mut self, uuid: [u8; 16]) -> Self {
+        self.uuid = uuid;
+        self
+    }
+
+    pub fn with_volume_name(mut self, volume_name: &[u8]) -> Self {
+        let len = volume_name.len().min(self.volume_name.len());
+        self.volume_name[..len].copy_from_slice(&volume_name[..len]);
+        self
+    }
+}
+
 impl Node {
     fn path(&self) -> &str {
         match self {
@@ -412,6 +432,13 @@ impl RegionAllocator {
 /// Build a deterministic read-only ext4 image containing `nodes` (plus the
 /// implicit root directory). Returns the raw image bytes.
 pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
+    build_image_with_options(nodes, &BuildOptions::default())
+}
+
+pub fn build_image_with_options(
+    nodes: &[Node],
+    options: &BuildOptions,
+) -> Result<Vec<u8>, Ext4Error> {
     // 1. Deterministic order: sort by path so inode numbers + block layout are
     //    a pure function of the input set.
     let mut sorted: Vec<&Node> = nodes.iter().collect();
@@ -612,7 +639,7 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
 
     // 8. Emit.
     let mut img = Image::new(layout.total_blocks);
-    write_superblock(&mut img, &layout);
+    write_superblock(&mut img, &layout, options);
     write_group_descs(&mut img, &layout, &planned);
     write_bitmaps(&mut img, &layout);
     write_backups(&mut img, &layout);
@@ -692,7 +719,7 @@ fn dirent_len(name_len: usize) -> usize {
     (8 + name_len + 3) & !3
 }
 
-fn write_superblock(img: &mut Image, layout: &Layout) {
+fn write_superblock(img: &mut Image, layout: &Layout, options: &BuildOptions) {
     let sb = 1024usize;
     let free_inodes = layout.inode_slots - layout.used_inodes;
 
@@ -715,8 +742,10 @@ fn write_superblock(img: &mut Image, layout: &Layout) {
     img.put_u16(sb + 0x58, INODE_SIZE); // s_inode_size
     img.put_u16(sb + 0x5A, 0); // s_block_group_nr (primary)
     img.put_u32(sb + 0x60, INCOMPAT_FILETYPE_EXTENTS); // s_feature_incompat
+    img.put_bytes(sb + 0x68, &options.uuid);
+    img.put_bytes(sb + 0x78, &options.volume_name);
     // s_feature_ro_compat left 0 (no sparse_super: SB+GDT backups sit at the
-    // start of every group), UUID + volume name left zero for determinism.
+    // start of every group).
 }
 
 fn write_group_descs(img: &mut Image, layout: &Layout, planned: &[Planned]) {
@@ -1067,5 +1096,28 @@ fn leaf_name(path: &str) -> String {
     match path.rfind('/') {
         Some(i) => path[i + 1..].to_string(),
         None => path.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BuildOptions, build_image_with_options};
+
+    #[test]
+    fn build_options_stamp_superblock_uuid_and_volume_name() {
+        let uuid = [
+            0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd,
+            0xee, 0xff,
+        ];
+        let image = build_image_with_options(
+            &[],
+            &BuildOptions::default()
+                .with_uuid(uuid)
+                .with_volume_name(b"mvm-rootfs"),
+        )
+        .expect("build image");
+
+        assert_eq!(&image[1024 + 0x68..1024 + 0x78], &uuid);
+        assert_eq!(&image[1024 + 0x78..1024 + 0x82], b"mvm-rootfs");
     }
 }
