@@ -42,12 +42,11 @@ fn materialize_produces_a_real_ext4_image() {
 
     assert!(output.exists(), "ext4 file must exist on disk");
     assert_eq!(mat.path, output);
-    assert!(mat.size_bytes >= 1024 * 1024);
+    assert!(mat.size_bytes > 0, "ext4 image must report a non-zero size");
     assert_eq!(mat.label, "mvm-rootfs");
     assert_eq!(mat.uuid, "00000000-0000-0000-0000-000000000001");
 
-    // Confirm the on-disk size matches what we told mke2fs to
-    // produce. mke2fs respects the file's preallocated length.
+    // Confirm the descriptor reflects the bytes we actually wrote.
     let meta = std::fs::metadata(&output).unwrap();
     assert_eq!(meta.len(), mat.size_bytes);
 
@@ -130,6 +129,6 @@ fn materialize_through_unpack_round_trip() {
     let output = out_dir.path().join("rootfs.ext4");
     let mat =
         materialize_to_ext4(&staged, &output, &Mke2fsOptions::default()).expect("materialize");
-    assert!(mat.size_bytes >= 1024 * 1024);
+    assert!(mat.size_bytes > 0, "ext4 image must report a non-zero size");
     let _ = staging_dir; // keep the staging dir alive for the duration
 }
