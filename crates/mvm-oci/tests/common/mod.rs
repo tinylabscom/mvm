@@ -170,6 +170,36 @@ impl HermeticRegistry {
         digest
     }
 
+    /// Same as [`Self::register_manifest_with_digest_path`], but
+    /// deliberately omits the `Docker-Content-Digest` response
+    /// header to simulate registries that do not advertise it.
+    pub async fn register_manifest_without_digest_header_with_digest_path(
+        &self,
+        repository: &str,
+        reference: &str,
+        media_type: &str,
+        bytes: &[u8],
+    ) -> String {
+        let digest = format!("sha256:{}", hex::encode(Sha256::digest(bytes)));
+        self.register_manifest_route_without_digest_header(
+            repository,
+            reference,
+            media_type,
+            bytes,
+            digest.as_str(),
+            None,
+        );
+        self.register_manifest_route_without_digest_header(
+            repository,
+            digest.as_str(),
+            media_type,
+            bytes,
+            digest.as_str(),
+            None,
+        );
+        digest
+    }
+
     /// Serve a manifest only when the request includes the given
     /// bearer token. Also registers the digest path with the same
     /// auth requirement.
@@ -336,6 +366,31 @@ impl HermeticRegistry {
                 TestResponse::builder(200)
                     .header("Content-Type", media_type)
                     .header("Docker-Content-Digest", digest)
+                    .body_bytes(bytes.to_vec())
+                    .build(),
+            ),
+        );
+        self.server.register(match token {
+            Some(value) => route.with_bearer_auth(value),
+            None => route,
+        });
+    }
+
+    fn register_manifest_route_without_digest_header(
+        &self,
+        repository: &str,
+        reference: &str,
+        media_type: &str,
+        bytes: &[u8],
+        _digest: &str,
+        token: Option<&str>,
+    ) {
+        let route = Route::exact(
+            "GET",
+            format!("/v2/{repository}/manifests/{reference}"),
+            Responder::Static(
+                TestResponse::builder(200)
+                    .header("Content-Type", media_type)
                     .body_bytes(bytes.to_vec())
                     .build(),
             ),
