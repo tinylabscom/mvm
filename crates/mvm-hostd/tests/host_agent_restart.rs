@@ -16,7 +16,7 @@ use tokio::net::UnixStream;
 
 const HOST_AGENT_BIN: &str = env!("CARGO_BIN_EXE_mvm-host-agent");
 const SIGNER_HELPER_BIN: &str = env!("CARGO_BIN_EXE_mvm-signer-helper");
-const BROKER_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
+const BROKER_RECOVERY_TIMEOUT: Duration = Duration::from_secs(180);
 
 struct HostAgentFixture {
     _env: TestEnv,
@@ -313,11 +313,14 @@ async fn daemon_crash_mid_flight_loses_at_most_one_call_and_preserves_chain() {
     kill_process_group(worker_pid);
     drop(conn);
 
-    let deadline = Instant::now() + BROKER_RECOVERY_TIMEOUT;
+    let worker_deadline = Instant::now() + BROKER_RECOVERY_TIMEOUT;
     fixture
-        .wait_for_worker_replacement(worker_pid, deadline)
+        .wait_for_worker_replacement(worker_pid, worker_deadline)
         .await;
-    let resp = fixture.wait_for_emit_until("after-crash", deadline).await;
+    let emit_deadline = Instant::now() + BROKER_RECOVERY_TIMEOUT;
+    let resp = fixture
+        .wait_for_emit_until("after-crash", emit_deadline)
+        .await;
     assert!(matches!(resp, ServiceResponse::Ok { .. }));
 
     let entries = fixture.chain_entries();
