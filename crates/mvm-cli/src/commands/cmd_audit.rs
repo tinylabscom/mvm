@@ -211,6 +211,7 @@ impl Commands {
             Commands::Run(_) => "run",
             Commands::SdkNoVm(_) => "__sdk-no-vm",
             Commands::Doctor(_) => "doctor",
+            Commands::Prepare(_) => "prepare",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",
             // `machine <sub>`: folded advanced ops (pause/snapshot/set-ttl/…)

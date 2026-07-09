@@ -17,6 +17,25 @@ use anyhow::Result;
 
 use crate::exec::ImageSource;
 
+/// Build the keyless [`mvm_core::pack_cache::PackVerifyCtx`] this host resolves
+/// runtime packs against (operator trust config unioned with the compiled-in
+/// release channels), then hand it to `f` for the duration of the borrow.
+/// Factored out so every runtime-pack call site — explicit `--runtime-pack`,
+/// the fail-open auto-prefer path, and the read-only diagnosis helper — build
+/// this ctx identically and can't drift apart.
+#[cfg(feature = "manifest-verify")]
+fn with_runtime_pack_ctx<T>(
+    f: impl FnOnce(&trust::RuntimePackTrustInputs, &mvm_core::pack_cache::PackVerifyCtx<'_>) -> T,
+) -> Result<T> {
+    use anyhow::Context;
+    use mvm_core::pack_cache::PackVerifyCtx;
+
+    let inputs = trust::RuntimePackTrustInputs::load()
+        .context("building trust inputs for --runtime-pack resolution")?;
+    let ctx = PackVerifyCtx::keyless(&inputs.policy, &inputs.keyless, &inputs.trust);
+    Ok(f(&inputs, &ctx))
+}
+
 /// Resolve the local, verified runtime pack for this host into the
 /// `ImageSource` the launch path boots. `prod` only feeds the provenance
 /// audit line — pack verification itself carries no prod/dev distinction, a
@@ -28,19 +47,17 @@ use crate::exec::ImageSource;
 #[cfg(feature = "manifest-verify")]
 pub(in crate::commands) fn resolve_runtime_pack_image_source(prod: bool) -> Result<ImageSource> {
     use anyhow::Context;
-    use mvm_core::pack_cache::{PackVerifyCtx, resolve_pack};
+    use mvm_core::pack_cache::resolve_pack;
     use mvm_core::packs::{PackBackend, PackKind};
 
-    let inputs = trust::RuntimePackTrustInputs::load()
-        .context("building trust inputs for --runtime-pack resolution")?;
-    let ctx = PackVerifyCtx::keyless(&inputs.policy, &inputs.keyless, &inputs.trust);
-
-    let dir = resolve_pack(
-        PackKind::Runtime,
-        inputs.policy.host_arch,
-        PackBackend::Hvf,
-        &ctx,
-    )
+    let dir = with_runtime_pack_ctx(|inputs, ctx| {
+        resolve_pack(
+            PackKind::Runtime,
+            inputs.policy.host_arch,
+            PackBackend::Hvf,
+            ctx,
+        )
+    })?
     .context("resolving verified runtime pack from the local cache")?
     .ok_or_else(|| {
         anyhow::anyhow!(
@@ -76,28 +93,25 @@ pub(in crate::commands) fn resolve_runtime_pack_image_source(_prod: bool) -> Res
 /// building the bundled default microVM. Never returns an error.
 #[cfg(feature = "manifest-verify")]
 pub(super) fn try_runtime_pack_image_source(prod: bool) -> Option<ImageSource> {
-    use mvm_core::pack_cache::{PackVerifyCtx, resolve_pack};
+    use mvm_core::pack_cache::resolve_pack;
     use mvm_core::packs::{PackBackend, PackKind};
 
-    let inputs = match trust::RuntimePackTrustInputs::load() {
-        Ok(inputs) => inputs,
-        Err(e) => {
-            tracing::debug!(error = %e, "runtime-pack auto-prefer: trust setup unavailable");
+    let dir = match with_runtime_pack_ctx(|inputs, ctx| {
+        resolve_pack(
+            PackKind::Runtime,
+            inputs.policy.host_arch,
+            PackBackend::Hvf,
+            ctx,
+        )
+    }) {
+        Ok(Ok(Some(dir))) => dir,
+        Ok(Ok(None)) => return None,
+        Ok(Err(e)) => {
+            tracing::debug!(error = %e, "runtime-pack auto-prefer: no verified pack resolved");
             return None;
         }
-    };
-    let ctx = PackVerifyCtx::keyless(&inputs.policy, &inputs.keyless, &inputs.trust);
-
-    let dir = match resolve_pack(
-        PackKind::Runtime,
-        inputs.policy.host_arch,
-        PackBackend::Hvf,
-        &ctx,
-    ) {
-        Ok(Some(dir)) => dir,
-        Ok(None) => return None,
         Err(e) => {
-            tracing::debug!(error = %e, "runtime-pack auto-prefer: no verified pack resolved");
+            tracing::debug!(error = %e, "runtime-pack auto-prefer: trust setup unavailable");
             return None;
         }
     };
@@ -115,6 +129,79 @@ pub(super) fn try_runtime_pack_image_source(prod: bool) -> Option<ImageSource> {
 #[cfg(not(feature = "manifest-verify"))]
 pub(super) fn try_runtime_pack_image_source(_prod: bool) -> Option<ImageSource> {
     None
+}
+
+/// Diagnose the local runtime-pack cache for this host without booting or
+/// resolving an image source. Read-only, no side effects.
+#[cfg(feature = "manifest-verify")]
+pub(in crate::commands) fn runtime_pack_diagnosis() -> Result<mvm_core::pack_cache::PackDiagnosis> {
+    use anyhow::Context;
+    use mvm_core::pack_cache::diagnose_pack;
+    use mvm_core::packs::PackKind;
+
+    with_runtime_pack_ctx(|_, ctx| diagnose_pack(PackKind::Runtime, ctx))?
+        .context("diagnosing the local runtime pack cache")
+}
+
+#[cfg(not(feature = "manifest-verify"))]
+pub(in crate::commands) fn runtime_pack_diagnosis() -> Result<mvm_core::pack_cache::PackDiagnosis> {
+    Ok(mvm_core::pack_cache::PackDiagnosis::NoCompatiblePack)
+}
+
+/// Human-facing reason a runtime pack is not instant-launchable, or `None`
+/// when it is ready. Maps the verification failure to a precise cause.
+pub(in crate::commands) fn not_instant_reason(
+    d: &mvm_core::pack_cache::PackDiagnosis,
+) -> Option<String> {
+    use mvm_core::pack_cache::PackDiagnosis;
+    use mvm_core::packs::PackVerifyError;
+
+    match d {
+        PackDiagnosis::Ready { .. } => None,
+        PackDiagnosis::NoCompatiblePack => {
+            Some("no verified runtime pack is cached for this host".to_string())
+        }
+        PackDiagnosis::Rejected { reason, .. } => Some(match reason {
+            PackVerifyError::IncompatibleArchitecture { got, expected } => {
+                format!("cached runtime pack was built for {got} but this host is {expected}")
+            }
+            PackVerifyError::IncompatibleBackend { backend } => {
+                format!("cached runtime pack does not support this host's backend ({backend})")
+            }
+            PackVerifyError::MissingHostCapability(capability) => format!(
+                "cached runtime pack requires host capability {capability}, which is unavailable"
+            ),
+            PackVerifyError::ExpiredTrustMetadata { expired_at }
+            | PackVerifyError::ExpiredSignature { expired_at, .. } => {
+                format!("cached runtime pack signature expired at {expired_at}")
+            }
+            PackVerifyError::Revoked { reason, .. } => {
+                format!("cached runtime pack signer is revoked: {reason}")
+            }
+            PackVerifyError::UnknownSigningKey { .. } => {
+                "cached runtime pack is signed by an untrusted key".to_string()
+            }
+            PackVerifyError::ChannelNotAllowed(channel) => {
+                format!("cached runtime pack channel {channel:?} is not allowed by local policy")
+            }
+            PackVerifyError::PolicyHashMismatch { .. } => {
+                "cached runtime pack was built for a different local policy".to_string()
+            }
+            PackVerifyError::MutableOciReference { .. } => {
+                "cached runtime pack references a mutable OCI tag, which is not instant-eligible"
+                    .to_string()
+            }
+            PackVerifyError::FileHashMismatch { .. }
+            | PackVerifyError::PackHashMismatch { .. }
+            | PackVerifyError::FileSizeMismatch { .. }
+            | PackVerifyError::UnsafeFilePath(_)
+            | PackVerifyError::DuplicateFile(_) => {
+                "cached runtime pack failed integrity verification (tampered or corrupt)"
+                    .to_string()
+            }
+            other => format!("cached runtime pack failed verification: {other}"),
+        }),
+    }
 }
 
 /// Trust construction shared by the fail-closed `--runtime-pack` resolver and
@@ -316,5 +403,124 @@ mod tests {
         let inputs = trust::RuntimePackTrustInputs::load().expect("trust inputs load");
         assert_eq!(inputs.policy.backend, mvm_core::packs::PackBackend::Hvf);
         assert_eq!(inputs.policy.host_arch, mvm_core::arch::GuestArch::host());
+    }
+}
+
+/// `not_instant_reason` is a pure reason-mapper with no I/O, so its tests need
+/// neither a promoted pack cache nor the `manifest-verify` feature —
+/// `PackDiagnosis`/`PackVerifyError` are always available.
+#[cfg(test)]
+mod not_instant_reason_tests {
+    use mvm_core::arch::GuestArch;
+    use mvm_core::pack_cache::PackDiagnosis;
+    use mvm_core::packs::{PackBackend, PackVerifyError, Sha256Hex};
+
+    use super::not_instant_reason;
+
+    fn hash(value: &str) -> Sha256Hex {
+        Sha256Hex::from_bytes(value.as_bytes())
+    }
+
+    #[test]
+    fn ready_maps_to_none() {
+        let diagnosis = PackDiagnosis::Ready {
+            pack_hash: hash("pack"),
+            file_count: 2,
+        };
+        assert_eq!(not_instant_reason(&diagnosis), None);
+    }
+
+    #[test]
+    fn no_compatible_pack_maps_to_absence_reason() {
+        let reason = not_instant_reason(&PackDiagnosis::NoCompatiblePack)
+            .expect("NoCompatiblePack must produce a reason");
+        assert!(reason.contains("no verified runtime pack is cached"));
+    }
+
+    #[test]
+    fn incompatible_architecture_names_both_architectures() {
+        let diagnosis = PackDiagnosis::Rejected {
+            pack_hash: hash("pack"),
+            reason: PackVerifyError::IncompatibleArchitecture {
+                got: GuestArch::X86_64,
+                expected: GuestArch::Aarch64,
+            },
+        };
+        let reason = not_instant_reason(&diagnosis).expect("Rejected must produce a reason");
+        assert!(reason.contains("built for"));
+        assert!(reason.contains("x86_64"));
+        assert!(reason.contains("aarch64"));
+    }
+
+    #[test]
+    fn incompatible_backend_names_the_backend() {
+        let diagnosis = PackDiagnosis::Rejected {
+            pack_hash: hash("pack"),
+            reason: PackVerifyError::IncompatibleBackend {
+                backend: PackBackend::Libkrun,
+            },
+        };
+        let reason = not_instant_reason(&diagnosis).expect("Rejected must produce a reason");
+        assert!(reason.contains("backend"));
+        assert!(reason.contains("libkrun"));
+    }
+
+    #[test]
+    fn expired_signature_reports_the_expiry_timestamp() {
+        use chrono::TimeZone;
+
+        let expired_at = chrono::Utc
+            .with_ymd_and_hms(2026, 1, 1, 0, 0, 0)
+            .single()
+            .expect("valid timestamp");
+        let diagnosis = PackDiagnosis::Rejected {
+            pack_hash: hash("pack"),
+            reason: PackVerifyError::ExpiredSignature {
+                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+                expired_at,
+            },
+        };
+        let reason = not_instant_reason(&diagnosis).expect("Rejected must produce a reason");
+        assert!(reason.contains("expired at"));
+    }
+
+    #[test]
+    fn revoked_names_the_revocation_reason() {
+        let diagnosis = PackDiagnosis::Rejected {
+            pack_hash: hash("pack"),
+            reason: PackVerifyError::Revoked {
+                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+                reason: "compromised signing key".to_string(),
+            },
+        };
+        let reason = not_instant_reason(&diagnosis).expect("Rejected must produce a reason");
+        assert!(reason.contains("revoked"));
+        assert!(reason.contains("compromised signing key"));
+    }
+
+    #[test]
+    fn unknown_signing_key_names_untrusted() {
+        let diagnosis = PackDiagnosis::Rejected {
+            pack_hash: hash("pack"),
+            reason: PackVerifyError::UnknownSigningKey {
+                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+            },
+        };
+        let reason = not_instant_reason(&diagnosis).expect("Rejected must produce a reason");
+        assert!(reason.contains("untrusted"));
+    }
+
+    #[test]
+    fn file_hash_mismatch_names_tampered_or_corrupt() {
+        let diagnosis = PackDiagnosis::Rejected {
+            pack_hash: hash("pack"),
+            reason: PackVerifyError::FileHashMismatch {
+                path: "rootfs.ext4".to_string(),
+                declared: hash("declared"),
+                actual: hash("actual"),
+            },
+        };
+        let reason = not_instant_reason(&diagnosis).expect("Rejected must produce a reason");
+        assert!(reason.contains("tampered"));
     }
 }

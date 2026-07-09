@@ -20,6 +20,7 @@ impl TopLevelCommand for Commands {
             Commands::Run(a) => vm::exec::run_secure(cli, a, cfg),
             Commands::SdkNoVm(a) => vm::sdk_no_vm::run(&a),
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
+            Commands::Prepare(a) => vm::prepare::run(a),
             Commands::Build(a) => build::group::run(cli, a, cfg),
             Commands::Manifest(a) => manifest::run(cli, a, cfg),
             Commands::Image(a) => image::run(cli, a, cfg),

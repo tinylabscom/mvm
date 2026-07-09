@@ -30,6 +30,44 @@ fn machine_run_help_has_no_stdin_flag() {
     );
 }
 
+/// `prepare --help` parses and advertises `--dry-run`.
+#[test]
+fn prepare_help_lists_dry_run_flag() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["prepare", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "prepare --help must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        help.contains("--dry-run"),
+        "help is missing --dry-run:\n{help}"
+    );
+}
+
+/// `prepare --dry-run` parses as a valid invocation (parse-only — this test
+/// does not assert on the runtime-pack-cache-dependent output).
+#[test]
+fn prepare_dry_run_flag_parses() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["prepare", "--dry-run"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "prepare --dry-run must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn machine_reconfigure_help_lists_patch_flags() {
     #[allow(deprecated)]

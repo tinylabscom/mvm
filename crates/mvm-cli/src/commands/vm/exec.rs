@@ -754,10 +754,15 @@ fn build_exec_request(
                     src
                 }
                 None => {
-                    ui::info(
-                        "No verified runtime pack cached; building the bundled default \
-                             microVM in the builder VM.",
-                    );
+                    let reason = super::runtime_pack::runtime_pack_diagnosis()
+                        .ok()
+                        .and_then(|d| super::runtime_pack::not_instant_reason(&d))
+                        .unwrap_or_else(|| {
+                            "no verified runtime pack is cached for this host".to_string()
+                        });
+                    ui::info(&format!(
+                        "{reason}; building the bundled default microVM in the builder VM."
+                    ));
                     let (kernel_path, rootfs_path) =
                         ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
                     crate::exec::ImageSource::Prebuilt {

@@ -142,16 +142,38 @@ The target user-visible shape is:
       pack and builder pack when network and policy allow.
 - [ ] Add `mvm prepare <image-or-flake>` to resolve inputs, download or build
       packs, verify them, and optionally derive local snapshots/warm standbys.
-- [ ] Add `mvm prepare --dry-run <image-or-flake>` showing download size, cache
+      Partial: `mvm prepare [--dry-run]` ships for the host default runtime
+      pack (no positional input yet — see Deferred below).
+- [x] Add `mvm prepare --dry-run <image-or-flake>` showing download size, cache
       impact, builder-VM need, trust state, and expected fast-path eligibility.
-- [ ] Make `machine run` report precise preparation reasons when instant launch
+      Scoped to the host default runtime pack: reports the same readiness/
+      reason as the non-dry-run mode (no download/build side effect exists yet
+      to preview) — see Deferred below.
+- [x] Make `machine run` report precise preparation reasons when instant launch
       is unavailable: missing pack, mutable input, private input, expired
       signature, revoked signer, unsupported backend, incompatible host, or local
-      rebuild required.
-- [ ] Add CLI integration tests for prepared fast-path messages, cache-miss
+      rebuild required. `mvm_core::pack_cache::diagnose_pack` surfaces the first
+      rejection `resolve_pack` would otherwise swallow; `not_instant_reason`
+      maps it to one of these precise causes for the default (no `--manifest`/
+      `--image`/`--runtime-pack`) launch path's build-fallback message.
+- [x] Add CLI integration tests for prepared fast-path messages, cache-miss
       messages, policy-refusal messages, and explicit builder-VM prepare
-      messages.
+      messages. Coverage: `not_instant_reason` unit tests cover Ready/
+      NoCompatiblePack/several `Rejected` reasons (architecture, backend,
+      expiry, revocation, untrusted key, tamper); `mvm prepare --help`/
+      `--dry-run` CLI parse tests. No CLI-level "prepared fast-path" (Ready)
+      integration test exists — it needs a real promoted+keyless-verified pack
+      fixture, which no test in the tree constructs offline (same limitation
+      noted for the auto-prefer accelerator).
 - [ ] Update CLI reference and getting-started docs for prepare/cache behavior.
+
+#### Deferred
+
+Arbitrary `mvm prepare <image-or-flake>` (resolve + download + build +
+snapshot) is gated on §C (the content-addressed pack download cache) and §F
+(builder-prepare). This slice delivers the host-default-runtime-pack-scoped
+`mvm prepare [--dry-run]` plus precise `machine run` not-instant reasons only;
+`prepare` takes no positional argument yet.
 
 ### E. Runtime pack launch path
 
