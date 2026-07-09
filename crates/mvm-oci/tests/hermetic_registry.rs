@@ -43,6 +43,57 @@ async fn manifest_fetch_round_trip_against_hermetic_registry() {
 }
 
 #[tokio::test]
+async fn manifest_fetch_accepts_missing_docker_content_digest_header() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = b"layer-payload-no-header";
+    let (manifest_bytes, _layer_digest) = minimal_image_manifest(layer_bytes, LAYER_MEDIA);
+
+    let manifest_digest = reg
+        .register_manifest_without_digest_header_with_digest_path(
+            "library/test",
+            "v1",
+            MANIFEST_MEDIA,
+            &manifest_bytes,
+        )
+        .await;
+
+    let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
+    let image = reg.image_ref("library/test", "v1");
+    let fetched = fetcher.fetch(&image).await.expect("manifest fetch");
+
+    assert_eq!(fetched.digest, manifest_digest);
+    assert_eq!(fetched.bytes, manifest_bytes);
+}
+
+#[tokio::test]
+async fn manifest_fetch_pinned_digest_still_verifies_without_digest_header() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = b"layer-payload-pinned-no-header";
+    let (manifest_bytes, _layer_digest) = minimal_image_manifest(layer_bytes, LAYER_MEDIA);
+
+    let manifest_digest = reg
+        .register_manifest_without_digest_header_with_digest_path(
+            "library/test",
+            "v1",
+            MANIFEST_MEDIA,
+            &manifest_bytes,
+        )
+        .await;
+
+    let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
+    let image = format!("{}/library/test@{manifest_digest}", reg.host())
+        .parse()
+        .expect("digest-pinned reference parses");
+    let fetched = fetcher.fetch(&image).await.expect("manifest fetch");
+
+    assert_eq!(fetched.digest, manifest_digest);
+    assert_eq!(
+        fetched.reference.digest.as_deref(),
+        Some(manifest_digest.as_str())
+    );
+}
+
+#[tokio::test]
 async fn manifest_fetch_uses_explicit_bearer_auth() {
     let reg = HermeticRegistry::start().await;
     let layer_bytes = b"private-layer";

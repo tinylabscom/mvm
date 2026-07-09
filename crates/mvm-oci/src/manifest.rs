@@ -241,16 +241,14 @@ impl ManifestFetcher for OciManifestFetcher {
             .bytes()
             .await
             .map_err(|e| OciError::Registry(format!("read manifest response body: {e}")))?;
-        let advertised_digest = response.docker_content_digest.ok_or_else(|| {
-            OciError::Registry("registry manifest response missing Docker-Content-Digest".into())
-        })?;
-
         let computed = format!("sha256:{}", hex::encode(Sha256::digest(&bytes)));
-        if computed != advertised_digest {
-            return Err(OciError::DigestMismatch {
-                expected: advertised_digest,
-                computed,
-            });
+        if let Some(advertised_digest) = response.docker_content_digest {
+            if computed != advertised_digest {
+                return Err(OciError::DigestMismatch {
+                    expected: advertised_digest,
+                    computed,
+                });
+            }
         }
         if let Some(pinned) = &reference.digest {
             if pinned != &computed {

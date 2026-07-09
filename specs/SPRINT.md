@@ -53,6 +53,14 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace` (6987/6987);
       `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D
       warnings` green.
+- [x] 2026-07-08 OCI manifest fetch compatibility: `mvm-oci` no longer
+      requires registries to send `Docker-Content-Digest` on manifest GET
+      responses. It now always computes the SHA-256 over the returned bytes,
+      still rejects mismatches when the registry *does* advertise a digest, and
+      still enforces any caller-pinned `@sha256:...` reference. Validation:
+      `cargo test -p mvm-oci manifest_fetch_accepts_missing_docker_content_digest_header`;
+      `cargo test -p mvm-oci manifest_fetch_pinned_digest_still_verifies_without_digest_header`;
+      `cargo clippy -p mvm-oci --tests -- -D warnings`.
 - [x] 2026-07-08 Plan 213 §I builder-pack revocation consumer: the installed
       attested builder-pack path now refreshes a signed
       `pack-revocations.json` from the `revocations` release, caches it under
