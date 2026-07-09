@@ -230,6 +230,36 @@ plan 25 sequences the work into six independently-shippable workstreams.
       are rehomed to the shared Vz live-validation lane, not left as Plan 189
       implementation blockers.
 - [x] Advanced
+      [`plans/234-wsl2-workload-support.md`](plans/234-wsl2-workload-support.md)
+      from docs-only into implementation. `Platform::Wsl2` now exposes a
+      dedicated workload-host capability, backend auto-selection and CLI
+      hypervisor resolution pick `libkrun` for supported WSL2 + nested-KVM
+      hosts while keeping Firecracker off the WSL2 path, `mvmctl doctor`
+      reports supported vs unsupported WSL2 shapes explicitly and refuses
+      DrvFs-backed repo/state paths, and the WSL2 guide plus
+      `scripts/run-wsl2-libkrun-smoke.sh` now describe a self-contained
+      live-proof path (backend lifecycle smoke + scaffold/build + transient
+      JSON/receipt + guest-agent/exec + allow-host egress + port-forward +
+      cleanup). Local validation is green:
+      `cargo test -p mvm-core platform`,
+      `cargo test -p mvm-backend auto_select_kind`,
+      `cargo test -p mvm-cli auto_detect_hypervisor`,
+      `cargo test -p mvm-cli doctor`,
+      `cargo check --workspace`,
+      `cargo clippy --workspace --all-targets -- -D warnings`.
+      Remaining blocker before Plan 234 can be closed: run the WSL2 live smoke
+      on a real supported WSL2 host and capture that evidence.
+- [x] Proposed
+      [`plans/235-native-windows-whp-backend.md`](plans/235-native-windows-whp-backend.md)
+      as the deferred native-Windows follow-up. The spec keeps `WHP`/`whpx`
+      exploration explicit without collapsing it into Plan 234: it records the
+      architecture fit questions against the portable VMM seam, the need to
+      choose between `whpx` and direct bindings, the required Windows
+      host-feature/doctor/bootstrap work, and the requirement for a real
+      Windows validation lane. Scope stays deferred on purpose while Plan 234
+      remains the shipped Windows path (`WSL2 + libkrun`) pending live-host
+      proof.
+- [x] Advanced
       [`plans/189-vz-dx-parity.md`](plans/189-vz-dx-parity.md)
       WS-1 save/restore surface: `mvmctl vm save <name> [--tag] [--json]`
       and `mvmctl vm restore <checkpoint> [--json]` now exist as first-class

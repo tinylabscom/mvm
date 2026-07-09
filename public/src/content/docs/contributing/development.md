@@ -205,7 +205,7 @@ just lint         # Both format check + clippy
 
 ### Multi-Backend
 
-mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; HVF (macOS 26+ default, vsock-only) and libkrun-backed components cover Apple Silicon macOS. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
+mvmctl's supported local microVM hosts are native Linux with `/dev/kvm`, macOS Apple Silicon, and WSL2 with nested `/dev/kvm` for the libkrun-backed workload path. Firecracker is the Linux baseline; HVF (macOS 26+ default, vsock-only) and libkrun-backed components cover Apple Silicon macOS. Native Windows and a Hyper-V managed Linux builder remain future backend work.
 
 ### Host vs. VM
 

@@ -45,7 +45,7 @@ Override with `--hypervisor firecracker`, `--hypervisor hvf`, `--hypervisor qemu
 
 - Requires native Linux with `/dev/kvm` for Firecracker, or macOS 26+ Apple Silicon for Vz
 - libkrun support is scoped to Linux KVM and macOS Apple Silicon; macOS Intel is not a supported local host
-- WSL2 nested KVM and Hyper-V managed Linux builders are future backend work, not current support
+- WSL2 with nested `/dev/kvm` is the supported Windows-adjacent libkrun workload path; Hyper-V managed Linux builders remain future backend work
 - Guests must use a Linux kernel (no Windows/macOS guests)
 - No OCI image compatibility -- uses Nix flakes for image building instead
 - Snapshots only available on Firecracker backend
