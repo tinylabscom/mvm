@@ -1,39 +1,28 @@
 //! ext4 materialization from a staged rootfs.
 //!
-//! After [`crate::oci_to_rootfs::ImageStaging::apply_layer`] has
-//! populated a staging directory, this module produces the
-//! `rootfs.ext4` image that Firecracker / libkrun / Apple
-//! Container load as the guest's root device. Output is **byte-
-//! deterministic** for a given staged tree + options — this is
-//! load-bearing for the pull-time verity story: the verity
-//! sidecar generated next would otherwise differ across runs and
-//! defeat the per-digest verity cache.
+//! After [`crate::oci_to_rootfs::ImageStaging::apply_layer`] has populated a
+//! staging directory, this module produces the `rootfs.ext4` image that
+//! Firecracker / libkrun / Apple Container load as the guest's root device.
+//! Output is **byte-deterministic** for a given staged tree + options — this
+//! is load-bearing for the pull-time verity story: the verity sidecar
+//! generated next would otherwise differ across runs and defeat the per-digest
+//! verity cache.
 //!
-//! Determinism comes from pinning everything `mke2fs` randomizes
-//! by default:
-//!
-//! - `-U <uuid>` — filesystem UUID.
-//! - `-E hash_seed=<uuid>` — htree directory-hash seed (controls
-//!   dirent ordering inside a directory).
-//! - `SOURCE_DATE_EPOCH=0` and `E2FSPROGS_FAKE_TIME=0` env —
-//!   filesystem creation/check times and e2fsprogs current-time
-//!   fallbacks are pinned to the Unix epoch across versions.
-//! - `-E no_copy_xattrs` — xattrs are skipped uniformly (we don't
-//!   forward OCI xattrs through unpack today anyway).
-//! - `-b 4096` — fixed block size.
-//! - `-t ext4` — fixed FS type.
-//! - `-O ^has_journal,^orphan_file` — disable mutable ext4 features that can
-//!   carry run-specific bytes. The OCI rootfs is mounted read-only and sealed
-//!   with dm-verity, so a journal is not useful there.
+//! The default path now uses the in-process `mvm-ext4` writer, which is
+//! deterministic by construction and avoids `mke2fs` timestamp drift on newer
+//! e2fsprogs releases. Option combinations the pure writer does not model yet
+//! still fall back to `mke2fs` on Linux, keeping the existing escape hatch for
+//! non-default formatting requests.
 //!
 //! ## Host support
 //!
-//! `mke2fs` is Linux-only. On Linux, [`materialize_to_ext4`]
-//! shells out directly. On macOS / Windows the same function
-//! returns [`OciUnpackError::HostUnsupported`]; the CLI
-//! orchestrator routes the call through the libkrun builder VM.
-//! This module's job is to be the in-process orchestrator; the
-//! host-vs-VM routing decision lives one layer up.
+//! The public behavior stays Linux-only for now. On Linux,
+//! [`materialize_to_ext4`] uses the in-process writer for the default,
+//! deterministic profile and falls back to `mke2fs` for unsupported option
+//! combinations. On macOS / Windows the same function returns
+//! [`OciUnpackError::HostUnsupported`]; the CLI orchestrator routes the call
+//! through the libkrun builder VM. This module's job is to be the in-process
+//! orchestrator; the host-vs-VM routing decision lives one layer up.
 
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::unpack::StagedRootfs;
@@ -108,8 +97,7 @@ impl Default for Mke2fsOptions {
 pub struct MaterializedRootfs {
     /// Absolute path to the ext4 image file on the host fs.
     pub path: PathBuf,
-    /// File size in bytes, exactly what was passed to
-    /// `mke2fs` via the preallocated output file.
+    /// File size in bytes.
     pub size_bytes: u64,
     /// Label written into the superblock (matches `options.label`).
     pub label: String,
@@ -159,29 +147,136 @@ pub fn materialize_to_ext4(
     output: &Path,
     options: &Mke2fsOptions,
 ) -> Result<MaterializedRootfs, OciUnpackError> {
-    let size_bytes = estimate_image_size(&staged.root, options)?;
-
     #[cfg(target_os = "linux")]
     {
+        if let Some(build_options) = in_process_build_options(options) {
+            return materialize_in_process(&staged.root, output, options, &build_options);
+        }
+
+        let size_bytes = estimate_image_size(&staged.root, options)?;
         prepare_output_file(output, size_bytes)?;
         run_mke2fs(&staged.root, output, options)?;
-        Ok(MaterializedRootfs {
-            path: output.to_path_buf(),
-            size_bytes,
-            label: options.label.clone(),
-            uuid: options.uuid.clone(),
-        })
+        Ok(materialized_rootfs(output, size_bytes, options))
     }
 
     #[cfg(not(target_os = "linux"))]
     {
         // Touch the variables to silence unused-variable warnings
         // while keeping the same function signature across hosts.
-        let _ = (output, size_bytes);
+        let _ = (staged, output, options);
         Err(OciUnpackError::HostUnsupported {
             operation: "ext4 image materialization (mke2fs)",
             reason: "mke2fs is Linux-only; the W1.5 CLI orchestrator routes this through the libkrun builder VM (ADR-050)",
         })
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn materialized_rootfs(
+    output: &Path,
+    size_bytes: u64,
+    options: &Mke2fsOptions,
+) -> MaterializedRootfs {
+    MaterializedRootfs {
+        path: output.to_path_buf(),
+        size_bytes,
+        label: options.label.clone(),
+        uuid: options.uuid.clone(),
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn in_process_build_options(options: &Mke2fsOptions) -> Option<mvm_ext4::BuildOptions> {
+    let defaults = Mke2fsOptions::default();
+    if options.hash_seed != defaults.hash_seed
+        || options.block_size != mvm_ext4::BLOCK_SIZE
+        || options.size_padding_bytes != defaults.size_padding_bytes
+        || options.source_date_epoch != defaults.source_date_epoch
+        || options.mke2fs_binary.is_some()
+    {
+        return None;
+    }
+
+    let uuid = uuid::Uuid::parse_str(&options.uuid).ok()?;
+    Some(
+        mvm_ext4::BuildOptions::default()
+            .with_uuid(*uuid.as_bytes())
+            .with_volume_name(options.label.as_bytes()),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn materialize_in_process(
+    staged_root: &Path,
+    output: &Path,
+    options: &Mke2fsOptions,
+    build_options: &mvm_ext4::BuildOptions,
+) -> Result<MaterializedRootfs, OciUnpackError> {
+    let nodes = collect_nodes(staged_root)?;
+    let image = mvm_ext4::build_image_with_options(&nodes, build_options).map_err(|e| {
+        OciUnpackError::Mke2fsFailed {
+            reason: format!("in-process ext4 build failed: {e}"),
+        }
+    })?;
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(output, &image)?;
+    Ok(materialized_rootfs(output, image.len() as u64, options))
+}
+
+#[cfg(target_os = "linux")]
+fn collect_nodes(root: &Path) -> Result<Vec<mvm_ext4::Node>, OciUnpackError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let guest_path = guest_path_of(root, &path);
+            let ft = entry.file_type()?;
+            if ft.is_symlink() {
+                let target = std::fs::read_link(&path)?;
+                out.push(mvm_ext4::Node::Symlink {
+                    path: guest_path,
+                    target: target.to_string_lossy().into_owned(),
+                });
+            } else if ft.is_dir() {
+                out.push(mvm_ext4::Node::Dir {
+                    path: guest_path,
+                    mode: mode_of(&path, 0o755),
+                    xattrs: Vec::new(),
+                });
+                stack.push(path);
+            } else if ft.is_file() {
+                let data = std::fs::read(&path)?;
+                out.push(mvm_ext4::Node::File {
+                    path: guest_path,
+                    mode: mode_of(&path, 0o644),
+                    data,
+                    xattrs: Vec::new(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+fn guest_path_of(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) => format!("/{}", rel.to_string_lossy()),
+        Err(_) => format!("/{}", path.to_string_lossy()),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn mode_of(path: &Path, default: u16) -> u16 {
+    use std::os::unix::fs::PermissionsExt;
+
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => (metadata.permissions().mode() & 0o7777) as u16,
+        Err(_) => default,
     }
 }
 
@@ -364,6 +459,20 @@ mod tests {
             disabled.contains(&"^orphan_file"),
             "orphan-file bytes are not stable enough for verity-cache determinism"
         );
+    }
+
+    #[test]
+    fn in_process_path_supports_default_options() {
+        assert!(in_process_build_options(&defaults()).is_some());
+    }
+
+    #[test]
+    fn in_process_path_rejects_non_default_block_size() {
+        let options = Mke2fsOptions {
+            block_size: 1024,
+            ..defaults()
+        };
+        assert!(in_process_build_options(&options).is_none());
     }
 
     #[test]
