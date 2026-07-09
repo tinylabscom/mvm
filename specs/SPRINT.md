@@ -207,6 +207,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
 ## Planning updates
 
 - [x] Started
+      [`plans/237-hvf-density-memory-footprint.md`](plans/237-hvf-density-memory-footprint.md)
+      to turn the HVF density investigation into an execution plan. The
+      measured 25-VM Alpine sleep wave is recorded at 2.21 GiB counted RSS
+      across 25 `mvmctl` parents, 25 HVF supervisors, 25 substitution
+      endpoints, and the shared host-agent pair; the plan targets the concrete
+      reductions in order: reproducible cache/rootfs repair and density
+      harness, no retained foreground CLI parent for detached density runs,
+      skipping per-VM substitution endpoints for deny-all/no-secret workloads,
+      release-profile supervisor floor work, and a measured capacity preflight
+      before claiming 250 or 500 VM support.
+- [x] Started
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream A: `mvm_core::packs` now defines strict typed manifests for
       runtime, builder, and image/project packs, including input/output
