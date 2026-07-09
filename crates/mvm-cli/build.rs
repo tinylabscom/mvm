@@ -70,12 +70,6 @@ fn main() {
     let skip_embed = should_skip_embed_binaries();
     println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_BINARIES");
-    if skip_embed {
-        println!(
-            "cargo:warning=embedding zero-byte host-vm stubs for this non-release build; \
-             set MVM_EMBED_BINARIES=1 to force real embedded binaries"
-        );
-    }
 
     for name in manifest.iter() {
         let out_file = bins_out.join(name);

@@ -42,8 +42,21 @@ fn cold_cache_downloads_instead_of_building_locally() {
     let cache = tmp.path().to_str().unwrap();
     let arch = "x86_64";
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, true),
+        resolve_workload_kernel_bootstrap(cache, arch, true, false),
         WorkloadKernelBootstrap::Download(format!(
+            "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
+        ))
+    );
+}
+
+#[test]
+fn source_checkout_cold_cache_builds_locally() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().to_str().unwrap();
+    let arch = "aarch64";
+    assert_eq!(
+        resolve_workload_kernel_bootstrap(cache, arch, true, true),
+        WorkloadKernelBootstrap::Build(format!(
             "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
         ))
     );
@@ -72,11 +85,11 @@ fn find_reusable_builder_kernel_detects_builder_image_vmlinux() {
     // a deliberate separate step — the cache lookup still misses here.
     assert!(find_cached_workload_kernel(cache, arch).is_none());
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, false),
+        resolve_workload_kernel_bootstrap(cache, arch, false, false),
         WorkloadKernelBootstrap::ReusableBuilder(vmlinux.to_str().unwrap().to_string())
     );
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, true),
+        resolve_workload_kernel_bootstrap(cache, arch, true, false),
         WorkloadKernelBootstrap::Download(format!(
             "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
         ))

@@ -196,19 +196,14 @@ pub(crate) fn build_kernel_via_stage0(
         );
     }
 
+    let host_bins_cache =
+        std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
     let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
-    let stage0_init = crate::host_binaries::embedded::EMBEDDED
-        .iter()
-        .find(|b| b.name == "stage0-init")
-        .ok_or_else(|| anyhow::anyhow!("stage0-init not in the embedded host binaries"))?;
-    if stage0_init.bytes.is_empty() {
-        anyhow::bail!(
-            "embedded stage0-init is a zero-byte stub — this mvmctl was built without \
-             real embedded host binaries and cannot seed Stage 0; rebuild with \
-             MVM_EMBED_BINARIES=1 or use a release build"
-        );
-    }
-    mvm_build::stage0::materialize_root_dir(&root_dir, stage0_init.bytes)
+    let host_bins_dir = crate::host_binaries::extract::ensure_extracted_for_boot(&host_bins_cache)
+        .context("resolving bootable host binaries for Stage 0 init")?;
+    let stage0_init = std::fs::read(host_bins_dir.join("stage0-init"))
+        .context("reading stage0-init from the bootable host-binaries cache")?;
+    mvm_build::stage0::materialize_root_dir(&root_dir, &stage0_init)
         .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
 
     let workspace_root = std::path::Path::new(&builder_flake_dir)
@@ -230,11 +225,8 @@ pub(crate) fn build_kernel_via_stage0(
     std::fs::write(staging_dir.join("stage0-build.conf"), conf)
         .with_context(|| format!("writing stage0-build.conf in {}", staging_dir.display()))?;
 
-    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
-        std::path::Path::new(&host_bins_cache),
-    )
-    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(&host_bins_cache)
+        .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     ui::info(&format!(
         "Compiling {} kernel ({arch}) via Stage 0 — first build is slow \

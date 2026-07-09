@@ -17,12 +17,28 @@ pub(crate) fn ensure_default_microvm_image(
 pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     let cache = mvm_core::config::mvm_cache_dir();
     let arch = builder_vm_host_arch();
-    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, prod);
+    let source_checkout = find_builder_vm_flake_is_source_checkout();
+    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, prod, source_checkout);
     match resolved {
         WorkloadKernelBootstrap::Cached(path) => Ok(path),
         WorkloadKernelBootstrap::ReusableBuilder(path) => {
             ui::info("Reusing builder-image kernel as workload kernel (dev mode).");
             Ok(path)
+        }
+        WorkloadKernelBootstrap::Build(path) => {
+            ui::info("Building workload kernel locally from the source checkout...");
+            #[cfg(feature = "builder-vm")]
+            {
+                build_kernel_via_stage0(KernelVariant::Workload, false)?;
+                Ok(path)
+            }
+            #[cfg(not(feature = "builder-vm"))]
+            {
+                let _ = &path;
+                anyhow::bail!(
+                    "source checkout detected but this mvmctl was built without the `builder-vm` feature"
+                );
+            }
         }
         WorkloadKernelBootstrap::Download(dest) => {
             download_workload_kernel(arch, &dest)?;
@@ -35,6 +51,7 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
 pub(super) enum WorkloadKernelBootstrap {
     Cached(String),
     ReusableBuilder(String),
+    Build(String),
     Download(String),
 }
 
@@ -42,12 +59,18 @@ pub(super) fn resolve_workload_kernel_bootstrap(
     cache_dir: &str,
     arch: &str,
     prod: bool,
+    source_checkout: bool,
 ) -> WorkloadKernelBootstrap {
     if let Some(cached) = find_cached_workload_kernel(cache_dir, arch) {
         return WorkloadKernelBootstrap::Cached(cached);
     }
     if !prod && let Some(builder) = find_reusable_builder_kernel(cache_dir, arch) {
         return WorkloadKernelBootstrap::ReusableBuilder(builder);
+    }
+    if source_checkout {
+        return WorkloadKernelBootstrap::Build(format!(
+            "{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"
+        ));
     }
     WorkloadKernelBootstrap::Download(format!(
         "{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"
@@ -204,9 +227,10 @@ fn build_default_microvm_via_libkrun(
         .to_path_buf();
 
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir =
-        crate::host_binaries::extract::ensure_extracted(std::path::Path::new(&host_bins_cache))
-            .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+        std::path::Path::new(&host_bins_cache),
+    )
+    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating default-microvm dev out dir {out_dir}"))?;
