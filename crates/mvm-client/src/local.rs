@@ -143,8 +143,10 @@ fn materialize_from_dir(dir: &Path, name: &str) -> Result<PathBuf> {
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     // The library carries no embedded guest binaries, so it resolves them from
     // the cache or a source checkout.
+    // `{:#}` keeps the anyhow context chain — the top context alone
+    // ("build guest agent binaries…") hides the actionable root cause.
     mvm_build::run_image::inject_and_materialize(&cache_root, dir, &output, name, None, None)
-        .map_err(backend_err)?;
+        .map_err(|e| backend_err(format!("{e:#}")))?;
     Ok(output)
 }
 
@@ -245,12 +247,30 @@ impl MvmClient for LocalBackend {
         let rootfs = resolve_local_rootfs(&spec.image, &spec.name).await?;
         let (verity_path, roothash) = host_verity_sidecars(&rootfs);
 
+        // libkrun/Vz/mock carry their own kernel; HVF boots an explicit
+        // arm64 kernel Image. Resolve it from the per-arch workload-kernel
+        // cache the CLI's run path populates — the facade stays
+        // cache-hit-or-error; the heavier build/fetch flows are CLI concerns.
+        let kernel_path = if self.backend.name() == "hvf" {
+            let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
+            let arch = mvm_core::arch::GuestArch::host().to_string();
+            let path = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
+            if !path.exists() {
+                return Err(backend_err(format!(
+                    "hvf needs a workload kernel at {} — run a `mvmctl machine run` once \
+                     (or `mvmctl build kernel build`) to populate the cache",
+                    path.display()
+                )));
+            }
+            Some(path)
+        } else {
+            None
+        };
+
         let req = LocalRunRequest {
             name: spec.name.clone(),
             rootfs_path: rootfs,
-            // libkrun/Vz/mock carry their own kernel; a Firecracker local run
-            // that needs an explicit kernel path is a later slice.
-            kernel_path: None,
+            kernel_path,
             verity_path: verity_path.map(PathBuf::from),
             roothash,
             cpus: spec.cpus,
@@ -264,6 +284,8 @@ impl MvmClient for LocalBackend {
         // `~/.mvm/keys/`.
         let ledger = InMemoryNonceLedger::new();
         let clock = SystemClock;
+        // `{:#}` keeps the anyhow context chain — "backend start after
+        // signed-plan admission" alone hides the actionable root cause.
         let started = admit_and_boot_local(
             &self.backend,
             &req,
@@ -273,7 +295,7 @@ impl MvmClient for LocalBackend {
                 host_signer_keys_dir: None,
             },
         )
-        .map_err(backend_err)?;
+        .map_err(|e| backend_err(format!("{e:#}")))?;
 
         Ok(MachineState {
             id: MachineId(started.vm_id.0),

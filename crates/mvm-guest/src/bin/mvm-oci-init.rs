@@ -300,8 +300,10 @@ mod linux {
             );
             return;
         }
-        let get_flags = libc::SIOCGIFFLAGS as libc::c_ulong;
-        let set_flags = libc::SIOCSIFFLAGS as libc::c_ulong;
+        // libc's ioctl request type differs per target (c_ulong on gnu,
+        // c_int on musl) — `as _` defers to whichever this libc declares.
+        let get_flags = libc::SIOCGIFFLAGS as _;
+        let set_flags = libc::SIOCSIFFLAGS as _;
         let mut ifr = IfReq::for_name("lo");
         let get_rc = unsafe { libc::ioctl(sock, get_flags, &mut ifr) };
         if get_rc == 0 {
