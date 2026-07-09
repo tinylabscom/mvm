@@ -218,6 +218,18 @@ plan 25 sequences the work into six independently-shippable workstreams.
       release-profile supervisor floor work, and a measured capacity preflight
       before claiming 250 or 500 VM support.
 - [x] Started
+      [`plans/236-host-authority-runtime-roadmap.md`](plans/236-host-authority-runtime-roadmap.md)
+      to integrate the current host-authority push across transport, vsock-only
+      networking, secret-egress scope, runtime lifecycle, and control-plane
+      work. The plan explicitly reuses already-active lanes instead of opening
+      parallel epics: Plan 202 host services, Plan 204 builder control plane,
+      Plan 216 client facade, Plan 219 verb-grant delivery, Plan 221 rootfs
+      materialization, Plan 227 vsock-only sandboxes, and Plan 230 two-surface
+      consolidation, plus active worktrees for the port-handler registry,
+      agent-verb grant delivery, and vsock-only egress cutover. It also marks
+      the broad transparent-network branch as exploratory input rather than the
+      default architecture line.
+- [x] Started
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream A: `mvm_core::packs` now defines strict typed manifests for
       runtime, builder, and image/project packs, including input/output
