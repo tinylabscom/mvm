@@ -261,26 +261,14 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
         }
     }
     let plat = mvm_core::platform::current();
-    resolve_effective_hypervisor_from_facts(
-        plat.supports_native_runner(),
-        plat.is_vz_default_tier(),
-        plat.has_libkrun(),
-    )
-}
-
-fn resolve_effective_hypervisor_from_facts(
-    supports_native_runner: bool,
-    is_vz_default_tier: bool,
-    has_libkrun: bool,
-) -> String {
-    if supports_native_runner {
+    if plat.has_kvm() {
         "firecracker"
-    } else if is_vz_default_tier {
+    } else if plat.is_vz_default_tier() {
         // macOS 26+ Apple Silicon: the HVF VMM (`hvf`) is the workload
         // default; the hvf path carries claim-10 egress over vsock via its
         // per-VM gating endpoint — no gvproxy sidecar.
         "hvf"
-    } else if has_libkrun {
+    } else if plat.has_libkrun() {
         "libkrun"
     } else {
         "firecracker"
@@ -397,38 +385,6 @@ mod tests {
         assert_eq!(resolve_effective_hypervisor("libkrun"), "libkrun");
         assert_eq!(resolve_effective_hypervisor("hvf"), "hvf");
         assert_eq!(resolve_effective_hypervisor("qemu"), "qemu");
-    }
-
-    #[test]
-    fn auto_detect_hypervisor_prefers_firecracker_on_native_linux() {
-        assert_eq!(
-            resolve_effective_hypervisor_from_facts(true, false, true),
-            "firecracker"
-        );
-    }
-
-    #[test]
-    fn auto_detect_hypervisor_prefers_hvf_on_macos_default_tier() {
-        assert_eq!(
-            resolve_effective_hypervisor_from_facts(false, true, true),
-            "hvf"
-        );
-    }
-
-    #[test]
-    fn auto_detect_hypervisor_picks_libkrun_for_supported_wsl2_shape() {
-        assert_eq!(
-            resolve_effective_hypervisor_from_facts(false, false, true),
-            "libkrun"
-        );
-    }
-
-    #[test]
-    fn auto_detect_hypervisor_fails_closed_when_no_supported_tier_exists() {
-        assert_eq!(
-            resolve_effective_hypervisor_from_facts(false, false, false),
-            "firecracker"
-        );
     }
 
     /// `MVM_HYPERVISOR` overrides auto-detect (and `MVM_BACKEND` is the

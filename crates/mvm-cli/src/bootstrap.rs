@@ -112,18 +112,17 @@ pub fn check_homebrew() -> Result<()> {
 
 /// Print an informational hint about libkrun availability.
 /// libkrun is optional — when it's available, `mvmctl run`
-/// can use it as a Tier 2 backend on supported libkrun hosts: WSL2
-/// with nested KVM, native Linux when selected explicitly, and macOS
-/// Apple Silicon. This function does *not* attempt
+/// can use it as a Tier 2 backend on supported libkrun hosts: Linux
+/// with KVM and macOS Apple Silicon. This function does *not* attempt
 /// to install libkrun automatically since it lives in the host's
 /// package manager (Homebrew on macOS, distro packages on Linux).
 ///
 /// Idempotent and safe to call from any bootstrap path.
 pub fn hint_libkrun_if_useful() {
     let plat = platform::current();
-    // Skip on native Linux+KVM (Firecracker is the right backend) and on
+    // Skip on Linux+KVM (Firecracker is the right backend) and on
     // Windows (libkrun has no Windows port).
-    if plat.supports_native_runner() || plat.is_windows() {
+    if plat.has_kvm() || plat.is_windows() {
         return;
     }
     if libkrun_sys::is_available() {

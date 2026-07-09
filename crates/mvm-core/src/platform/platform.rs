@@ -32,7 +32,7 @@ pub enum Platform {
     LinuxNative,
     /// Linux without /dev/kvm (not WSL) — no supported local microVM path.
     LinuxNoKvm,
-    /// WSL2 — supported for libkrun-backed workloads when `/dev/kvm` is exposed.
+    /// WSL2 — future/experimental local path when nested KVM is present.
     Wsl2,
     /// Native Windows — no local microVM path; Hyper-V builder is future work.
     Windows,
@@ -73,12 +73,6 @@ impl Platform {
     /// Whether the microvm.nix runner can execute natively on this host.
     pub fn supports_native_runner(self) -> bool {
         matches!(self, Platform::LinuxNative)
-    }
-
-    /// Whether this host can run the supported WSL2 workload path:
-    /// libkrun inside the Linux distro with nested `/dev/kvm` exposed.
-    pub fn supports_wsl2_workload_host(self) -> bool {
-        matches!(self, Platform::Wsl2) && self.has_kvm()
     }
 
     /// Whether this host is the macOS tier where Vz is the auto-detect
@@ -122,16 +116,16 @@ impl Platform {
     /// libkrun is a library-style VMM that runs on Linux KVM and
     /// macOS Hypervisor.framework on Apple Silicon.
     /// macOS Intel and native Windows are intentionally unsupported.
-    /// WSL2 is supported only when nested `/dev/kvm` is exposed to the
-    /// distro. Detection is a filesystem probe of standard install
+    /// WSL2 is treated as future/experimental even if nested KVM is
+    /// exposed. Detection is a filesystem probe of standard install
     /// paths (Homebrew on macOS, distro packages on Linux); it does
     /// *not* guarantee the library will load cleanly or that we have
     /// the macOS hypervisor entitlement.
     pub fn has_libkrun(self) -> bool {
-        if matches!(self, Platform::Windows | Platform::LinuxNoKvm) {
-            return false;
-        }
-        if matches!(self, Platform::Wsl2) && !self.supports_wsl2_workload_host() {
+        if matches!(
+            self,
+            Platform::Windows | Platform::Wsl2 | Platform::LinuxNoKvm
+        ) {
             return false;
         }
         #[cfg(all(target_os = "macos", not(target_arch = "aarch64")))]
@@ -278,7 +272,7 @@ impl std::fmt::Display for Platform {
             Platform::LinuxNoKvm => write!(f, "Linux (no KVM)"),
             Platform::Wsl2 => {
                 if self.has_kvm() {
-                    write!(f, "WSL2 (nested KVM present)")
+                    write!(f, "WSL2 (nested KVM present; experimental)")
                 } else {
                     write!(f, "WSL2 (unsupported)")
                 }
@@ -426,14 +420,6 @@ mod tests {
     }
 
     #[test]
-    fn test_supports_wsl2_workload_host_false_on_non_wsl() {
-        assert!(!Platform::MacOS.supports_wsl2_workload_host());
-        assert!(!Platform::LinuxNative.supports_wsl2_workload_host());
-        assert!(!Platform::LinuxNoKvm.supports_wsl2_workload_host());
-        assert!(!Platform::Windows.supports_wsl2_workload_host());
-    }
-
-    #[test]
     fn test_has_vz_false_on_non_macos() {
         assert!(!Platform::LinuxNative.has_vz());
         assert!(!Platform::LinuxNoKvm.has_vz());
@@ -476,17 +462,13 @@ mod tests {
         // Asserts it doesn't panic and returns false on unsupported platforms.
         let plat = current();
         let result = plat.has_libkrun();
-        if matches!(plat, Platform::Windows | Platform::LinuxNoKvm) {
+        if matches!(
+            plat,
+            Platform::Windows | Platform::Wsl2 | Platform::LinuxNoKvm
+        ) {
             assert!(!result, "has_libkrun must be false on {plat:?}");
         }
         // On macOS / LinuxNative: depends on whether libkrun is installed.
-        // On WSL2: false when `/dev/kvm` is absent; otherwise depends on install state.
-        if matches!(plat, Platform::Wsl2) && !plat.has_kvm() {
-            assert!(
-                !result,
-                "has_libkrun must be false on WSL2 without /dev/kvm"
-            );
-        }
     }
 
     #[test]

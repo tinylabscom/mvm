@@ -223,22 +223,9 @@ fn runtime_backend_check(plat: platform::Platform) -> Check {
              here, which is NOT a workload backend: claim-10 egress is deliberately \
              NOT enforced (dev/test only)"
             .to_string(),
-        Platform::Wsl2 => {
-            if plat.has_kvm() {
-                if plat.has_libkrun() {
-                    "WSL2 — nested /dev/kvm present; `libkrun` is the supported workload backend on this host shape. Firecracker stays out of the WSL2 path in this slice."
-                        .to_string()
-                } else {
-                    format!(
-                        "WSL2 — nested /dev/kvm present, but libkrun is not installed ({})",
-                        libkrun_sys::install_hint()
-                    )
-                }
-            } else {
-                "WSL2 — nested /dev/kvm is required for the supported libkrun workload path; without it only `qemu` (dev/test only, no claim-10) runs"
-                    .to_string()
-            }
-        }
+        Platform::Wsl2 => "WSL2 — a workload runtime needs nested /dev/kvm; without it \
+             only `qemu` (dev/test only, no claim-10) runs"
+            .to_string(),
         Platform::MacOS => "macOS — `vz` (macOS 26+) or `libkrun` (macOS 13-25) \
              workload backends, selectable via `--hypervisor`"
             .to_string(),
@@ -578,8 +565,6 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(kvm_check(plat, false));
     checks.push(nested_kvm_check(plat));
     checks.push(libkrun_check(plat));
-    checks.push(libkrun_supervisor_check(plat));
-    checks.push(wsl_runtime_paths_check(plat));
     checks.push(builder_backend_check(plat));
     checks.push(runtime_backend_check(plat));
     checks.push(residency_check());
@@ -1103,7 +1088,7 @@ fn platform_description(plat: Platform) -> String {
         Platform::LinuxNoKvm => "Linux without KVM".to_string(),
         Platform::Wsl2 => {
             if plat.has_kvm() {
-                "WSL2 (nested KVM present)".to_string()
+                "WSL2 (nested KVM present; experimental/unsupported)".to_string()
             } else {
                 "WSL2 (no nested KVM; unsupported)".to_string()
             }
@@ -1126,26 +1111,6 @@ fn platform_description(plat: Platform) -> String {
 ///      nested-KVM missing is now a hard "fix this before the nested
 ///      dispatch ships" error.
 fn nested_kvm_check(plat: Platform) -> Check {
-    if matches!(plat, Platform::Wsl2) {
-        return if plat.has_kvm() {
-            Check {
-                name: "nested-kvm",
-                category: "platform",
-                ok: true,
-                info:
-                    "available — WSL2 exposes /dev/kvm; the supported workload path can use libkrun"
-                        .to_string(),
-            }
-        } else {
-            Check {
-                name: "nested-kvm",
-                category: "platform",
-                ok: false,
-                info: "not available — WSL2 workload support requires nested virtualization so /dev/kvm is exposed inside the distro. Without it, only the qemu dev/test backend is available."
-                    .to_string(),
-            }
-        };
-    }
     if !matches!(plat, Platform::LinuxNative) {
         return Check {
             name: "nested-kvm",
@@ -1366,16 +1331,7 @@ fn libkrun_check(plat: Platform) -> Check {
             name: "libkrun",
             category: "platform",
             ok: true,
-            info: "n/a (no native Windows port; WSL2 is the supported Windows path)".to_string(),
-        };
-    }
-    if matches!(plat, Platform::Wsl2) && !plat.has_kvm() {
-        return Check {
-            name: "libkrun",
-            category: "platform",
-            ok: true,
-            info: "not applicable until /dev/kvm is exposed to WSL2 — nested KVM is a prerequisite for the supported libkrun workload path"
-                .to_string(),
+            info: "n/a (no native Windows port; WSL2 is future/experimental)".to_string(),
         };
     }
     if plat.has_libkrun() {
@@ -1392,42 +1348,6 @@ fn libkrun_check(plat: Platform) -> Check {
             ok: true, // Optional; not a failure.
             info: format!("not available ({})", libkrun_sys::install_hint()),
         }
-    }
-}
-
-/// Host-side `mvm-libkrun-supervisor` helper availability. The libkrun
-/// workload path shells out to this per-VM supervisor binary; surfacing the
-/// exact resolver result in doctor keeps the supported WSL2 story honest.
-fn libkrun_supervisor_check(plat: Platform) -> Check {
-    if plat.is_windows() {
-        return Check {
-            name: "libkrun-supervisor",
-            category: "platform",
-            ok: true,
-            info: "n/a (no native Windows libkrun path)".to_string(),
-        };
-    }
-    if matches!(plat, Platform::Wsl2) && !plat.has_kvm() {
-        return Check {
-            name: "libkrun-supervisor",
-            category: "platform",
-            ok: true,
-            info: "not applicable until /dev/kvm is exposed to WSL2".to_string(),
-        };
-    }
-    match mvm_backend::libkrun::resolve_supervisor_path() {
-        Ok(path) => Check {
-            name: "libkrun-supervisor",
-            category: "platform",
-            ok: true,
-            info: format!("available at {}", path.display()),
-        },
-        Err(err) => Check {
-            name: "libkrun-supervisor",
-            category: "platform",
-            ok: false,
-            info: err.to_string(),
-        },
     }
 }
 
@@ -1507,77 +1427,6 @@ fn builder_backend_check(plat: Platform) -> Check {
         ok: true,
         info: format!("{} — {} — {}", resolved.name(), source, availability),
     }
-}
-
-fn is_wsl_drvfs_path(path: &std::path::Path) -> bool {
-    use std::path::Component;
-
-    let mut components = path.components();
-    matches!(
-        (components.next(), components.next(), components.next()),
-        (
-            Some(Component::RootDir),
-            Some(Component::Normal(mnt)),
-            Some(Component::Normal(_drive))
-        ) if mnt == "mnt"
-    )
-}
-
-fn wsl_runtime_paths_check_from_paths(
-    plat: Platform,
-    cwd: Option<&std::path::Path>,
-    data_dir: &std::path::Path,
-) -> Check {
-    if !matches!(plat, Platform::Wsl2) {
-        return Check {
-            name: "wsl-runtime-paths",
-            category: "platform",
-            ok: true,
-            info: "n/a (WSL2-only)".to_string(),
-        };
-    }
-
-    let cwd_on_drvfs = cwd.is_some_and(is_wsl_drvfs_path);
-    let data_on_drvfs = is_wsl_drvfs_path(data_dir);
-
-    if cwd_on_drvfs || data_on_drvfs {
-        let mut details = Vec::new();
-        if let Some(cwd) = cwd
-            && cwd_on_drvfs
-        {
-            details.push(format!("cwd={}", cwd.display()));
-        }
-        if data_on_drvfs {
-            details.push(format!("data_dir={}", data_dir.display()));
-        }
-        return Check {
-            name: "wsl-runtime-paths",
-            category: "platform",
-            ok: false,
-            info: format!(
-                "unsupported on DrvFs-mounted paths ({}). Move the repo and runtime state onto the WSL ext4 filesystem instead of /mnt/<drive>/...",
-                details.join(", ")
-            ),
-        };
-    }
-
-    Check {
-        name: "wsl-runtime-paths",
-        category: "platform",
-        ok: true,
-        info: format!(
-            "WSL filesystem OK — cwd={} data_dir={}",
-            cwd.map(|p| p.display().to_string())
-                .unwrap_or_else(|| "<unavailable>".to_string()),
-            data_dir.display()
-        ),
-    }
-}
-
-fn wsl_runtime_paths_check(plat: Platform) -> Check {
-    let cwd = std::env::current_dir().ok();
-    let data_dir = std::path::PathBuf::from(mvm_core::config::mvm_data_dir());
-    wsl_runtime_paths_check_from_paths(plat, cwd.as_deref(), &data_dir)
 }
 
 /// Stub when `builder-vm` feature is off (CLI built without the
@@ -2830,39 +2679,6 @@ mod tests {
         assert!(platform_description(Platform::MacOS).contains("macOS"));
         assert!(platform_description(Platform::LinuxNative).contains("KVM"));
         assert!(platform_description(Platform::LinuxNoKvm).contains("without KVM"));
-        assert!(
-            platform_description(Platform::Wsl2).contains("WSL2"),
-            "WSL2 description should stay explicit"
-        );
-        assert_eq!(platform_description(Platform::Windows), "Windows");
-    }
-
-    #[test]
-    fn libkrun_supervisor_check_accepts_env_override() {
-        use mvm_core::util::test_env::TestEnv;
-
-        let temp = tempfile::NamedTempFile::new().expect("tempfile");
-        let mut env = TestEnv::new();
-        env.set("MVM_LIBKRUN_SUPERVISOR_PATH", temp.path());
-
-        let c = libkrun_supervisor_check(Platform::LinuxNative);
-        assert!(c.ok, "expected supervisor override to pass: {}", c.info);
-        assert!(c.info.contains(temp.path().to_string_lossy().as_ref()));
-    }
-
-    #[test]
-    fn libkrun_supervisor_check_reports_wsl2_prereq_gap() {
-        let c = libkrun_supervisor_check(Platform::Wsl2);
-        if Platform::Wsl2.has_kvm() {
-            // On a nested-KVM-capable WSL2 host, the check should now probe the
-            // actual supervisor location rather than returning the old generic
-            // Linux answer.
-            assert_eq!(c.name, "libkrun-supervisor");
-            assert_eq!(c.category, "platform");
-        } else {
-            assert!(c.ok);
-            assert!(c.info.contains("not applicable until /dev/kvm is exposed"));
-        }
     }
 
     // ── signing_check_from_probes unit tests ────────────────────────
@@ -3802,80 +3618,10 @@ mod tests {
     }
 
     #[test]
-    fn nested_kvm_check_wsl2_reports_supported_or_actionable() {
+    fn nested_kvm_check_wsl2_reports_na() {
         let c = nested_kvm_check(Platform::Wsl2);
-        assert_eq!(c.name, "nested-kvm");
-        assert_eq!(c.category, "platform");
-        if c.ok {
-            assert!(
-                c.info.contains("supported workload path") || c.info.contains("can use libkrun"),
-                "expected supported WSL2 nested-KVM guidance, got: {}",
-                c.info
-            );
-        } else {
-            assert!(
-                c.info.contains("/dev/kvm") && c.info.contains("qemu dev/test"),
-                "expected actionable missing-KVM guidance, got: {}",
-                c.info
-            );
-        }
-    }
-
-    #[test]
-    fn wsl_runtime_paths_check_is_na_off_wsl2() {
-        let c = wsl_runtime_paths_check_from_paths(
-            Platform::LinuxNative,
-            Some(std::path::Path::new("/home/alice/work")),
-            std::path::Path::new("/home/alice/.mvm"),
-        );
         assert!(c.ok);
-        assert_eq!(c.name, "wsl-runtime-paths");
-        assert_eq!(c.category, "platform");
-        assert!(c.info.contains("n/a (WSL2-only)"), "{}", c.info);
-    }
-
-    #[test]
-    fn wsl_runtime_paths_check_accepts_ext4_paths() {
-        let c = wsl_runtime_paths_check_from_paths(
-            Platform::Wsl2,
-            Some(std::path::Path::new("/home/alice/work")),
-            std::path::Path::new("/home/alice/.mvm"),
-        );
-        assert!(c.ok, "expected ext4-backed WSL paths to pass: {}", c.info);
-        assert!(c.info.contains("WSL filesystem OK"), "{}", c.info);
-        assert!(c.info.contains("/home/alice/work"), "{}", c.info);
-        assert!(c.info.contains("/home/alice/.mvm"), "{}", c.info);
-    }
-
-    #[test]
-    fn wsl_runtime_paths_check_rejects_drvfs_cwd() {
-        let c = wsl_runtime_paths_check_from_paths(
-            Platform::Wsl2,
-            Some(std::path::Path::new("/mnt/c/Users/alice/work")),
-            std::path::Path::new("/home/alice/.mvm"),
-        );
-        assert!(!c.ok, "DrvFs cwd must fail closed");
-        assert!(
-            c.info.contains("unsupported on DrvFs-mounted paths"),
-            "{}",
-            c.info
-        );
-        assert!(c.info.contains("cwd=/mnt/c/Users/alice/work"), "{}", c.info);
-    }
-
-    #[test]
-    fn wsl_runtime_paths_check_rejects_drvfs_data_dir() {
-        let c = wsl_runtime_paths_check_from_paths(
-            Platform::Wsl2,
-            Some(std::path::Path::new("/home/alice/work")),
-            std::path::Path::new("/mnt/d/mvm-state"),
-        );
-        assert!(!c.ok, "DrvFs state dir must fail closed");
-        assert!(
-            c.info.contains("data_dir=/mnt/d/mvm-state"),
-            "expected the failing state-dir path in the message: {}",
-            c.info
-        );
+        assert!(c.info.contains("n/a"));
     }
 
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]
