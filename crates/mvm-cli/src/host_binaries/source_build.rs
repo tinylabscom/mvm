@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "builder-vm")]
 use crate::host_binaries::embedded::EMBEDDED;
 use crate::host_binaries::manifest::{HOST_BINARIES, SEED_BINARIES};
 
@@ -147,6 +148,7 @@ pub(crate) fn resolve_or_build_host_binaries(
     Ok(layout.dir)
 }
 
+#[cfg(feature = "builder-vm")]
 pub(crate) fn load_stage0_init_bytes(cache_root: &Path) -> Result<Vec<u8>, HostBinaryBuildError> {
     let stage0_init = EMBEDDED
         .iter()
