@@ -148,6 +148,40 @@ Related landed or in-flight plans that should be reused instead of duplicated:
 - Plan 230 — two-surface consolidation
 - Plan 232 / 233 — workload healthcheck lifecycle
 
+## Source lessons reflected here
+
+This roadmap is grounded in a full-codebase analysis of a peer sandbox runtime,
+not only its networking path. The emphasis on transport and egress exists
+because that is where `mvm` still has the largest integration gap, but the
+phases below reflect lessons from the whole system:
+
+- **Runtime and launch model**
+  - Reflected in Phases 4 and 5.
+  - Why: the child-runtime ownership model, launch-config hygiene, and
+    host-only mutable controls were among the strongest ideas in the review.
+- **Protocol and relay structure**
+  - Reflected in Phases 1 and 5.
+  - Why: the review reinforced that `mvm` should keep one explicit guest
+    request surface and avoid smearing host-only controls across the guest
+    protocol.
+- **Guest agent scope**
+  - Reflected in Phases 1 and 2.
+  - Why: the analysis supported a narrower guest role: guest requests host
+    services, but does not become a general network actor with its own
+    upstream authority.
+- **Networking and policy enforcement**
+  - Reflected most strongly in Phases 2 and 3.
+  - Why: this is the area where `mvm` most needs convergence around the
+    no-guest-NIC, vsock-only, host-authority direction.
+- **Filesystem and rootfs model**
+  - Reflected in Phase 6.
+  - Why: the review reinforced the value of a narrow runtime share, explicit
+    rootfs layering semantics, and keeping host/guest file exchange bounded.
+- **Observability, audit, and evidence**
+  - Reflected in Phase 7.
+  - Why: the review confirmed that strong runtime evidence should remain a
+    differentiator, but separated from policy and transport authority.
+
 ## Guardrails
 
 - Host-owned authorities remain the only source of network, secret, audit, and
