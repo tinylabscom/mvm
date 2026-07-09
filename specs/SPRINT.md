@@ -228,6 +228,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
 ## Planning updates
 
 - [x] Started
+      [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md)
+      to turn the post-Plan-221 rootfs follow-up into an execution plan. It
+      keeps the shipped block+ext4+dm-verity posture, but sequences the next
+      concrete improvements at the OCI/ext4 seam: a sparse streamed block
+      emission API in `mvm-ext4`, direct streamed file output in
+      `mvm-build` instead of a dense in-memory image, and stronger Linux-tool
+      oracles (`e2fsck`/`debugfs`) plus dense-vs-streamed differential tests at
+      both the writer and OCI materialization layers.
+
+- [x] Started
       [`plans/237-hvf-density-memory-footprint.md`](plans/237-hvf-density-memory-footprint.md)
       to turn the HVF density investigation into an execution plan. The
       measured 25-VM Alpine sleep wave is recorded at 2.21 GiB counted RSS

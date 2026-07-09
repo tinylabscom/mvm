@@ -1,5 +1,7 @@
 # Refactor status — rollup checklist
 
+**Additional 2026-07-09 — Plan 238 streamed ext4 materialization + OCI/ext4 oracles PROPOSED.** `specs/plans/238-streamed-ext4-materialization-and-oracles.md` records the follow-on to Plan 221 instead of leaving the streamed-materialization idea as an informal note. The scope is intentionally narrow: keep the current block+ext4+dm-verity artifact model, add a sparse streamed block-emission API to `mvm-ext4`, switch the in-process `mvm-build` OCI rootfs path from dense `Vec<u8>` materialization to direct streamed file output, and strengthen the OCI/ext4 seam with Linux-tool oracles (`e2fsck`, `debugfs`) plus dense-vs-streamed differential tests. It is explicitly not a virtiofs-root pivot and does not reopen the Plan 221 architecture decision.
+
 **Additional 2026-07-08 — Plan 213 §C `mvm cache status` + pack cache index + expired-pack prune on branch `feat/plan-213-cC-cache`.** New `mvm_core::pack_cache::list_cached_packs` scans the promoted pack cache (same quarantine/name-mismatch/foreign-content discipline as `resolve_pack`) and returns one `PackCacheEntry` per valid pack — hash, kind, arch, backends, channel, expiry, signing key id, revocation channel, on-disk size, and best-effort last-used mtime — without re-verifying signatures (a cheap listing; `diagnose_pack` remains the trust/eligibility authority). New `mvm cache status [--json]` lists every cached pack (short hash, kind, arch, backends, channel, size, expiry, expired/ok) plus a single instant-launch summary line for the host runtime pack, reusing the already-landed `runtime_pack_diagnosis`/`not_instant_reason` from the `dD-prepare` branch. `mvm cache prune` gained an expired-pack sweep (`prune_expired_packs`, honoring the existing `--dry-run`) — removing an already-expired pack is always safe since it's never instant-launch-eligible; valid-but-unused (LRU/size-budget) reclamation with active-standby/snapshot safety is deferred, tracked in the plan doc's §C. Coverage: `list_cached_packs`/`prune_expired_packs` tests in `mvm-core`'s `pack_cache` module (empty cache, multi-pack listing, dry-run vs real expired-only removal) plus `mvm cache status`/`prune` CLI parse tests.
 
 **Additional 2026-07-09 — Plan 235 native Windows WHP backend PROPOSED / DEFERRED.** `specs/plans/235-native-windows-whp-backend.md` now records the native-Windows follow-up as its own plan instead of leaving it as a vague future note under WSL2. The spec explicitly explores the `WHP` path, including the `whpx`-crate-vs-direct-bindings decision, the portable-VMM seam fit, Windows-specific doctor/bootstrap/install work, and the requirement for a real Windows validation lane. It is intentionally deferred: Plan 234 remains the active shipped Windows path (`WSL2 + libkrun`) until native-Windows work is resourced and proven on a real host.
@@ -1171,6 +1173,11 @@ PLAN 203 — Opt-in forensic network transcript capture   🔴 PROPOSED
   [ ] Add host-boundary capture sink and encrypted transcript payload storage.
   [ ] Add `mvmctl audit transcript` CLI to arm, disarm, list, and export a capture.
   [ ] Add tests for tamper refusal, bounded overflow, and export round-trips.
+
+PLAN 238 — Streamed ext4 materialization and OCI/ext4 oracles   🔴 PROPOSED
+  [ ] Add a sparse streamed block-emission API to `mvm-ext4` with dense-vs-streamed byte identity tests.
+  [ ] Stream the in-process OCI rootfs materialization path directly to the output file instead of building a dense image in memory.
+  [ ] Add Linux-tool OCI/ext4 differential oracles (`e2fsck`, `debugfs`) and dense-vs-streamed boundary tests in `mvm-build`.
 
 PLAN 204 — Builder VM resident control plane   🟢 IN PROGRESS (ADR-089)
   Plan: specs/plans/204-builder-vm-resident-control-plane.md
