@@ -1,6 +1,6 @@
 ---
 title: "Install mvm on Windows"
-description: "Windows is not a supported local microVM host today. WSL2 nested KVM and Hyper-V managed Linux builders are future backend work."
+description: "Native Windows is not a supported local microVM host. WSL2 with nested KVM is the supported libkrun-backed workload path."
 ---
 
 mvm does **not** currently support native Windows as a local microVM host. The supported local hosts are:
@@ -8,7 +8,9 @@ mvm does **not** currently support native Windows as a local microVM host. The s
 - macOS Apple Silicon.
 - Native Linux with `/dev/kvm`.
 
-WSL2 with nested KVM is a future/experimental backend candidate, not a support promise. A managed Linux builder VM on Hyper-V is also future work, tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428).
+The supported Windows-adjacent runtime path is **WSL2 with nested KVM** running
+the libkrun workload backend inside the distro. Native Windows remains future
+work, tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428).
 
 For the full host/backend matrix, see [Platform support](/reference/platform-support/).
 
@@ -16,12 +18,14 @@ For the full host/backend matrix, see [Platform support](/reference/platform-sup
 
 Use one of these paths today:
 
+- Run mvm inside a WSL2 distro that exposes `/dev/kvm`, has libkrun installed,
+  and keeps the repo/runtime state on the WSL ext4 filesystem.
 - Run mvm on a Linux host with `/dev/kvm`.
 - Run mvm on an Apple Silicon Mac.
 
-## Experimental: WSL2 With Nested KVM
+## WSL2 With Nested KVM
 
-Some WSL2 installations expose `/dev/kvm` through nested virtualization. If present, pieces of the Linux path may work, but this is not a supported backend yet. Before treating it as usable, verify inside the WSL2 distro:
+Before treating the WSL2 path as supported, verify inside the distro:
 
 ```bash
 test -c /dev/kvm && test -w /dev/kvm
@@ -51,7 +55,7 @@ Tracking issue: [Future work: Windows host support via Windows Hypervisor Platfo
 
 ## Troubleshooting
 
-- **`/dev/kvm` missing inside WSL2** — this is expected on many hosts. WSL2 nested KVM is experimental for mvm.
+- **`/dev/kvm` missing inside WSL2** — this host shape is unsupported for mvm's WSL2 workload path.
 - **`mvmctl doctor` reports "no KVM available"** — use a supported Linux KVM host or Apple Silicon Mac.
 
 See [Windows troubleshooting](/guides/windows-troubleshooting) for the full Windows-specific FAQ.

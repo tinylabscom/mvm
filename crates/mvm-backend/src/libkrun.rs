@@ -972,7 +972,10 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn is_available(&self) -> Result<bool> {
-        Ok(libkrun_sys::is_available())
+        Ok(libkrun_available_on_platform(
+            mvm_core::platform::current(),
+            libkrun_sys::is_available(),
+        ))
     }
 
     fn install(&self) -> Result<()> {
@@ -1044,7 +1047,7 @@ impl VmBackend for LibkrunBackend {
 /// 3. `PATH` lookup.
 ///
 /// Returns an actionable error if all three fail.
-pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
+pub fn resolve_supervisor_path() -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("MVM_LIBKRUN_SUPERVISOR_PATH") {
         let path = PathBuf::from(p);
         if path.is_file() {
@@ -1083,6 +1086,13 @@ fn pid_alive(pid: libc::pid_t) -> bool {
     // `kill(pid, 0)` returns 0 if the process exists (and the caller
     // has permission to signal it), -1 with errno=ESRCH if not.
     unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn libkrun_available_on_platform(
+    platform: mvm_core::platform::Platform,
+    installed: bool,
+) -> bool {
+    installed && platform.has_libkrun()
 }
 
 fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
@@ -1507,6 +1517,26 @@ mod tests {
             let err = result.expect_err("expected missing-file error");
             assert!(err.to_string().contains("not a file"));
         });
+    }
+
+    #[test]
+    fn libkrun_availability_requires_a_supported_platform_shape() {
+        use mvm_core::platform::Platform;
+
+        assert!(libkrun_available_on_platform(Platform::LinuxNative, true));
+        assert!(!libkrun_available_on_platform(Platform::LinuxNative, false));
+        assert!(!libkrun_available_on_platform(Platform::LinuxNoKvm, true));
+        assert!(!libkrun_available_on_platform(Platform::Windows, true));
+        // WSL2 availability is gated through Platform::has_libkrun(), which
+        // already folds in the nested-/dev/kvm requirement.
+        if Platform::Wsl2.has_kvm() {
+            assert_eq!(
+                libkrun_available_on_platform(Platform::Wsl2, true),
+                Platform::Wsl2.has_libkrun()
+            );
+        } else {
+            assert!(!libkrun_available_on_platform(Platform::Wsl2, true));
+        }
     }
 
     #[test]

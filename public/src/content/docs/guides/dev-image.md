@@ -149,7 +149,7 @@ mvm runs Nix builds inside the project builder VM and copies the finished artifa
 
 - **Linux** (with `/dev/kvm`): the builder VM owns image construction; Firecracker is the default runtime backend.
 - **macOS Apple Silicon**: the host `mvmctl build` command orchestrates the builder VM. The resulting dev image can then boot on the selected macOS runtime backend.
-- **Windows / WSL2**: future work. WSL2 nested KVM and a Hyper-V managed Linux builder are not supported local paths today.
+- **Windows / WSL2**: WSL2 with nested `/dev/kvm` is supported for the libkrun-backed workload runtime path. Native Windows and a Hyper-V managed Linux builder are not supported local paths today.
 
 ## Why this is structured this way
 

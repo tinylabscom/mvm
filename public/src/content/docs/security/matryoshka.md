@@ -77,7 +77,7 @@ mvm has **no Tier 3** and no container/Docker fallback. A shared-kernel containe
 - **Production / untrusted code** → Tier 1. Linux + KVM + Firecracker. No exceptions.
 - **macOS dev or CI on Apple Silicon** → Tier 2 (HVF or libkrun). Verified boot is the open item.
 - **Linux dev/test without `/dev/kvm`** → Tier 2 QEMU (`--hypervisor qemu`, TCG software emulation). A real microVM, slower; dev/test only.
-- **macOS Intel / native Windows** → unsupported for local microVM isolation today (no container fallback). WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
+- **macOS Intel / native Windows** → unsupported for local microVM isolation today (no container fallback). WSL2 with nested `/dev/kvm` is the supported Windows-adjacent libkrun workload path; a Hyper-V managed Linux builder remains future backend work.
 
 `mvmctl doctor` reports your current tier on the running host.
 

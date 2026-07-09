@@ -1,11 +1,15 @@
 ---
 title: "Windows troubleshooting"
-description: "Windows-specific notes for mvm. Windows is not a supported local microVM host today; WSL2 nested KVM is future/experimental."
+description: "Windows-specific notes for mvm. Native Windows is unsupported; WSL2 with nested KVM is the supported libkrun-backed workload path."
 ---
 
 This page is the Windows-specific FAQ and research note. For current Windows guidance see [Install on Windows](/install/windows); for WSL2 caveats see [the WSL2 notes](/guides/windows-wsl2). General mvm troubleshooting lives in [the main troubleshooting page](/guides/troubleshooting).
 
-Windows is not a supported local microVM host today. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428).
+Windows is not a supported **native** local microVM host today. The supported
+Windows-adjacent path is WSL2 with nested `/dev/kvm`, libkrun installed in the
+distro, and repo/runtime state on the WSL ext4 filesystem. Native Windows and a
+Hyper-V managed Linux builder remain future backend work tracked in
+[mvm#428](https://github.com/tinylabscom/mvm/issues/428).
 
 ## Setup
 
@@ -35,7 +39,7 @@ If `wsl --update` returns "no update available" but the error persists, the kern
 
 ### `/dev/kvm` is missing
 
-mvm's future WSL2 backend would need `/dev/kvm` inside the WSL2 distro. If it is missing, use a supported Linux KVM host or Apple Silicon Mac today. For experimentation:
+mvm's supported WSL2 workload path needs `/dev/kvm` inside the WSL2 distro. If it is missing, use a supported Linux KVM host or Apple Silicon Mac today:
 
 1. **Update WSL itself:**
    ```powershell
@@ -51,7 +55,7 @@ mvm's future WSL2 backend would need `/dev/kvm` inside the WSL2 distro. If it is
 
 ### `mvmctl doctor` reports "KVM not available" even though `/dev/kvm` exists
 
-This is still an unsupported configuration, but it is usually a permissions issue. Inside the WSL2 distro:
+This is a supported configuration shape, but it is usually a permissions issue. Inside the WSL2 distro:
 
 ```bash
 ls -la /dev/kvm
@@ -70,7 +74,7 @@ If `kvm` group doesn't exist, `sudo groupadd kvm` then chown.
 
 ### `localhost:<port>` from Windows doesn't reach the mvm guest
 
-If you are experimenting with WSL2, mvm forwards guest port → WSL2-loopback (`127.0.0.1`). Microsoft's automatic localhost forwarding usually picks that up, but several things can break it:
+On WSL2, mvm forwards guest port → WSL2-loopback (`127.0.0.1`). Microsoft's automatic localhost forwarding usually picks that up, but several things can break it:
 
 - **Corporate VPNs** (Cisco AnyConnect, Palo Alto GlobalProtect) frequently kill WSL2's localhost mapping. Workaround: connect to the WSL2 distro's IP directly:
   ```bash
@@ -94,7 +98,7 @@ ss -tlnp | grep :<port>
 
 ### Nix builds are *extremely* slow
 
-You're working from a `/mnt/c/...` path. NTFS-via-9p is many times slower than ext4 inside the WSL2 distro. **Move your project into the WSL2 ext4 filesystem** (e.g. `~/work/...`) and rebuild. Don't keep Nix store on `/mnt/c/`.
+You're working from a `/mnt/c/...` path. NTFS-via-9p is many times slower than ext4 inside the WSL2 distro, and this path shape is outside the supported workload surface. **Move your project into the WSL2 ext4 filesystem** (e.g. `~/work/...`) and rebuild. Don't keep mvm runtime state on `/mnt/c/`.
 
 ### `mvmctl bootstrap` reports "permission denied" creating `~/.mvm`
 

@@ -397,7 +397,10 @@ impl VmBackend for FirecrackerBackend {
     }
 
     fn is_available(&self) -> Result<bool> {
-        firecracker::is_installed()
+        Ok(firecracker_available_on_platform(
+            mvm_core::platform::current(),
+            firecracker::is_installed()?,
+        ))
     }
 
     fn install(&self) -> Result<()> {
@@ -418,6 +421,13 @@ impl VmBackend for FirecrackerBackend {
             ],
         }
     }
+}
+
+fn firecracker_available_on_platform(
+    platform: mvm_core::platform::Platform,
+    installed: bool,
+) -> bool {
+    installed && platform.supports_native_runner()
 }
 
 /// Isolation tier of a `VmBackend`.
@@ -497,6 +507,23 @@ pub enum AnyBackend {
 }
 
 impl AnyBackend {
+    fn auto_select_kind_from_facts(
+        supports_native_runner: bool,
+        is_vz_default_tier: bool,
+        has_libkrun: bool,
+    ) -> catalog::BackendKind {
+        if supports_native_runner {
+            return catalog::BackendKind::Firecracker;
+        }
+        if is_vz_default_tier {
+            return catalog::BackendKind::Hvf;
+        }
+        if has_libkrun {
+            return catalog::BackendKind::Libkrun;
+        }
+        catalog::BackendKind::Firecracker
+    }
+
     /// Create the default backend (Firecracker).
     pub fn default_backend() -> Self {
         Self::Firecracker(FirecrackerBackend)
@@ -547,29 +574,12 @@ impl AnyBackend {
     /// caller didn't ask for.
     pub fn auto_select() -> Self {
         let plat = mvm_core::platform::current();
-
-        // 1. Native Linux KVM → Firecracker directly (fastest — dev & production).
-        //    WSL2 nested KVM is future/experimental and is not auto-selected today.
-        if plat.supports_native_runner() {
-            return Self::Firecracker(FirecrackerBackend);
-        }
-
-        // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`). Vz is sunset
-        //    (opt-in only via `--hypervisor vz`); the hvf path enforces claim-10
-        //    egress via its per-VM gating endpoint over vsock — no gvproxy sidecar.
-        if plat.is_vz_default_tier() {
-            return Self::Hvf(HvfBackend);
-        }
-
-        // 3. libkrun installed → use the raw libkrun shim.
-        if plat.has_libkrun() {
-            return Self::Libkrun(LibkrunBackend);
-        }
-
-        // Final default. Reachable when no tier is available; start()
-        // then fails with the production-path error message rather than
-        // silently picking a backend the caller didn't ask for.
-        Self::Firecracker(FirecrackerBackend)
+        let kind = Self::auto_select_kind_from_facts(
+            plat.supports_native_runner(),
+            plat.is_vz_default_tier(),
+            plat.has_libkrun(),
+        );
+        catalog::descriptor(kind).instantiate()
     }
 
     /// Resolve the backend that owns an already-started VM by its per-VM
@@ -845,6 +855,18 @@ mod tests {
     fn test_firecracker_backend_name() {
         let backend = FirecrackerBackend;
         assert_eq!(backend.name(), "firecracker");
+    }
+
+    #[test]
+    fn firecracker_availability_is_native_linux_only() {
+        use mvm_core::platform::Platform;
+
+        assert!(firecracker_available_on_platform(Platform::LinuxNative, true));
+        assert!(!firecracker_available_on_platform(Platform::LinuxNative, false));
+        assert!(!firecracker_available_on_platform(Platform::Wsl2, true));
+        assert!(!firecracker_available_on_platform(Platform::LinuxNoKvm, true));
+        assert!(!firecracker_available_on_platform(Platform::MacOS, true));
+        assert!(!firecracker_available_on_platform(Platform::Windows, true));
     }
 
     #[test]
@@ -1140,6 +1162,38 @@ mod tests {
             //   (macOS 13-25 / Linux non-KVM fallback).
             matches!(name, "firecracker" | "hvf" | "libkrun"),
             "auto_select returned unexpected backend: {name}"
+        );
+    }
+
+    #[test]
+    fn auto_select_kind_prefers_firecracker_on_native_linux() {
+        assert_eq!(
+            AnyBackend::auto_select_kind_from_facts(true, false, true),
+            catalog::BackendKind::Firecracker
+        );
+    }
+
+    #[test]
+    fn auto_select_kind_picks_hvf_on_macos_default_tier() {
+        assert_eq!(
+            AnyBackend::auto_select_kind_from_facts(false, true, true),
+            catalog::BackendKind::Hvf
+        );
+    }
+
+    #[test]
+    fn auto_select_kind_picks_libkrun_for_supported_wsl2_shape() {
+        assert_eq!(
+            AnyBackend::auto_select_kind_from_facts(false, false, true),
+            catalog::BackendKind::Libkrun
+        );
+    }
+
+    #[test]
+    fn auto_select_kind_fails_closed_to_firecracker_when_no_supported_tier_exists() {
+        assert_eq!(
+            AnyBackend::auto_select_kind_from_facts(false, false, false),
+            catalog::BackendKind::Firecracker
         );
     }
 

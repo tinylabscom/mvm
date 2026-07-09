@@ -83,7 +83,7 @@ template: doc
 ## Platform
 
 - Linux execution and macOS are current local targets.
-- Windows is future work tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428).
+- Native Windows is future work tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428). WSL2 with nested `/dev/kvm` is the supported Windows-adjacent libkrun workload path.
 
 ## Claim Rules
 

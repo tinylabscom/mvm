@@ -54,6 +54,28 @@ pub fn first_capable(
     Err(SelectionError { shortfalls })
 }
 
+/// Like [`first_capable`], but each candidate also carries an availability bit.
+/// Unavailable backends surface an explicit `unavailable` shortfall instead of
+/// silently behaving like a weaker Linux host shape.
+pub fn first_capable_available(
+    candidates: &[(&str, bool, VmCapabilities)],
+    required: &RequiredCapabilities,
+) -> Result<usize, SelectionError> {
+    let mut shortfalls = Vec::new();
+    for (index, (name, available, caps)) in candidates.iter().enumerate() {
+        if !available {
+            shortfalls.push(((*name).to_string(), vec!["unavailable"]));
+            continue;
+        }
+        let missing = caps.shortfall(required);
+        if missing.is_empty() {
+            return Ok(index);
+        }
+        shortfalls.push(((*name).to_string(), missing));
+    }
+    Err(SelectionError { shortfalls })
+}
+
 impl AnyBackend {
     /// The capability-selection preference order of candidate backends.
     ///
@@ -93,19 +115,24 @@ impl AnyBackend {
     pub fn select_capable_available(
         required: &RequiredCapabilities,
     ) -> Result<AnyBackend, SelectionError> {
-        let mut shortfalls = Vec::new();
-        for backend in Self::capability_candidates() {
-            if !backend.is_available().unwrap_or(false) {
-                shortfalls.push((backend.name().to_string(), vec!["unavailable"]));
-                continue;
-            }
-            let missing = backend.capabilities().shortfall(required);
-            if missing.is_empty() {
-                return Ok(backend);
-            }
-            shortfalls.push((backend.name().to_string(), missing));
-        }
-        Err(SelectionError { shortfalls })
+        let candidates = Self::capability_candidates();
+        let index = {
+            let named: Vec<(&str, bool, VmCapabilities)> = candidates
+                .iter()
+                .map(|backend| {
+                    (
+                        backend.name(),
+                        backend.is_available().unwrap_or(false),
+                        backend.capabilities(),
+                    )
+                })
+                .collect();
+            first_capable_available(&named, required)?
+        };
+        Ok(candidates
+            .into_iter()
+            .nth(index)
+            .expect("first_capable_available returns an in-range index"))
     }
 }
 
@@ -143,6 +170,65 @@ mod tests {
         let err = first_capable(&candidates, &required).unwrap_err();
         assert_eq!(err.shortfalls.len(), 2);
         assert!(err.shortfalls.iter().all(|(_, m)| m.contains(&"vsock")));
+    }
+
+    #[test]
+    fn first_capable_available_reports_unavailable_explicitly() {
+        let candidates = [
+            ("firecracker", false, VmCapabilities::default()),
+            (
+                "libkrun",
+                true,
+                VmCapabilities {
+                    vsock: true,
+                    no_guest_nic: true,
+                    host_vsock_proxy: true,
+                    ..VmCapabilities::default()
+                },
+            ),
+        ];
+        let required = RequiredCapabilities {
+            vsock: true,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
+            ..Default::default()
+        };
+
+        assert_eq!(first_capable_available(&candidates, &required).unwrap(), 1);
+    }
+
+    #[test]
+    fn first_capable_available_fails_closed_with_unavailable_shortfall() {
+        let candidates = [
+            ("firecracker", false, VmCapabilities::default()),
+            ("hvf", false, VmCapabilities::default()),
+            (
+                "libkrun",
+                false,
+                VmCapabilities {
+                    vsock: true,
+                    no_guest_nic: true,
+                    host_vsock_proxy: true,
+                    ..VmCapabilities::default()
+                },
+            ),
+        ];
+        let required = RequiredCapabilities {
+            vsock: true,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
+            ..Default::default()
+        };
+
+        let err = first_capable_available(&candidates, &required).unwrap_err();
+        assert_eq!(
+            err.shortfalls,
+            vec![
+                ("firecracker".to_string(), vec!["unavailable"]),
+                ("hvf".to_string(), vec!["unavailable"]),
+                ("libkrun".to_string(), vec!["unavailable"]),
+            ]
+        );
     }
 
     #[test]

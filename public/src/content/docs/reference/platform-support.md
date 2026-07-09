@@ -3,8 +3,11 @@ title: Platform support
 description: Current host, architecture, backend, and support-status matrix for mvm.
 ---
 
-`mvm` supports local microVM workflows on native Linux with KVM and on Apple
-Silicon macOS. Windows is tracked as future host work. Linux hosts without `/dev/kvm` can run the dev/test QEMU/TCG backend (`--hypervisor qemu`); there is no container fallback.
+`mvm` supports local microVM workflows on native Linux with KVM, on Apple
+Silicon macOS, and on **WSL2 with nested KVM** for the libkrun-backed workload
+path. Native Windows is still future host work. Linux hosts without `/dev/kvm`
+can run the dev/test QEMU/TCG backend (`--hypervisor qemu`); there is no
+container fallback.
 
 Use this page to decide where to run `mvmctl`, where Linux image builds happen,
 and which backend limitations apply.
@@ -16,8 +19,8 @@ and which backend limitations apply.
 | Linux with `/dev/kvm` | x86_64, aarch64 | Firecracker | Supported | Strongest local target; direct KVM microVM path. |
 | macOS Apple Silicon | aarch64 | Apple Virtualization / libkrun-backed paths | Supported | Local development and runtime path for M-series Macs. |
 | Linux without `/dev/kvm` | x86_64, aarch64 | QEMU (TCG) | Dev/test | Software-emulated microVM (`--hypervisor qemu`); Tier 2 dev/test — slower, not for production. |
-| Windows native | x86_64, aarch64 | None | Future | Tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428). |
-| WSL2 with nested KVM | x86_64, aarch64 | Experimental Linux path | Future/experimental | May expose `/dev/kvm`; not a supported host path today. |
+| Windows native | x86_64, aarch64 | None | Future | Use WSL2 for the supported Windows-adjacent workload path; native Windows runtime support is still tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428). |
+| WSL2 with nested KVM | x86_64, aarch64 | libkrun | Supported workload path | Requires `/dev/kvm`, libkrun installed in the distro, and both the repo and `MVM_DATA_DIR` on the WSL ext4 filesystem rather than `/mnt/<drive>/...`. |
 | Intel macOS | x86_64 | None | Unsupported | Use Linux KVM or Apple Silicon macOS. |
 
 ## Build boundary by host
@@ -30,7 +33,8 @@ boundary.
 | --- | --- | --- |
 | Linux with KVM | Native Linux path or project builder boundary, depending on command. | `mvmctl build` |
 | macOS Apple Silicon | Project builder VM. | `mvmctl build` |
-| Windows/WSL2 future path | Future Linux backend/builder design. | Not supported today. |
+| WSL2 with nested KVM | Supported workload runtime path inside the distro; builder/dev flows stay separate from this slice. | `mvmctl machine run`, `mvmctl run`, other workload verbs |
+| Windows native | Future Linux backend/builder design. | Not supported today. |
 
 You do not need host-side Nix for normal `mvmctl build` usage. The builder path
 owns Linux evaluation, image assembly, and artifact extraction.
@@ -42,6 +46,7 @@ Build time and runtime are separate. After an image is built:
 - Linux with KVM boots through Firecracker.
 - Apple Silicon macOS uses the supported macOS runtime backend path.
 - Linux without `/dev/kvm` runs QEMU/TCG — a software-emulated microVM for dev/test (Tier 2), not a production isolation target.
+- WSL2 with nested KVM uses the libkrun workload backend inside the distro.
 - Windows native does not have a supported runtime backend today.
 
 When reporting runtime behavior, include host OS, CPU architecture, selected
@@ -67,7 +72,7 @@ The OS segment is `linux` because the workload runs inside a Linux guest.
 | Firecracker on Linux/KVM | Preferred local microVM isolation target. |
 | Apple Virtualization / libkrun-backed macOS path | Supported local microVM path with backend-specific feature differences. |
 | QEMU (TCG, no `/dev/kvm`) | Tier 2 dev/test microVM; do not use for untrusted code or security-sensitive workloads. |
-| WSL2 nested KVM | Research/future path until tested and documented as supported. |
+| WSL2 nested KVM + libkrun | Supported Tier 2 workload path inside the WSL2 distro. Firecracker is intentionally not part of this Windows slice. |
 
 Security-sensitive examples should name the backend when behavior differs.
 
