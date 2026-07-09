@@ -758,8 +758,10 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
         std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
     let root_dir = mvm_build::stage0::stage0_cache_dir().join("root");
     let materialize_started = std::time::Instant::now();
-    let stage0_init = crate::host_binaries::source_build::load_stage0_init_bytes(&host_bins_cache)
-        .map_err(|e| anyhow::anyhow!("load stage0-init bytes: {e}"))?;
+    let host_bins_dir = crate::host_binaries::extract::ensure_extracted_for_boot(&host_bins_cache)
+        .context("resolving bootable host binaries for Stage 0 init")?;
+    let stage0_init = std::fs::read(host_bins_dir.join("stage0-init"))
+        .context("reading stage0-init from the bootable host-binaries cache")?;
     mvm_build::stage0::materialize_root_dir(&root_dir, &stage0_init)
         .with_context(|| format!("materializing Stage 0 root at {}", root_dir.display()))?;
     ui::timed_step(

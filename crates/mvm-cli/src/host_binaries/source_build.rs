@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "builder-vm")]
-use crate::host_binaries::embedded::EMBEDDED;
 use crate::host_binaries::manifest::{HOST_BINARIES, SEED_BINARIES};
 
 const SOURCE_BUILD_SEGMENT: &str = "source-checkout";
@@ -146,19 +144,6 @@ pub(crate) fn resolve_or_build_host_binaries(
         install_one(&output_dir.join(name), &layout.path_for(name))?;
     }
     Ok(layout.dir)
-}
-
-#[cfg(feature = "builder-vm")]
-pub(crate) fn load_stage0_init_bytes(cache_root: &Path) -> Result<Vec<u8>, HostBinaryBuildError> {
-    let stage0_init = EMBEDDED
-        .iter()
-        .find(|bin| bin.name == "stage0-init")
-        .ok_or_else(|| HostBinaryBuildError::OutputMissing(PathBuf::from("stage0-init")))?;
-    if !stage0_init.bytes.is_empty() {
-        return Ok(stage0_init.bytes.to_vec());
-    }
-    let dir = resolve_or_build_host_binaries(cache_root)?;
-    Ok(std::fs::read(dir.join("stage0-init"))?)
 }
 
 fn build_host_binaries(spec: &HostBinaryBuildSpec) -> Result<PathBuf, HostBinaryBuildError> {
