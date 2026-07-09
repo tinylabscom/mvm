@@ -61,6 +61,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `cargo test -p mvm-oci manifest_fetch_accepts_missing_docker_content_digest_header`;
       `cargo test -p mvm-oci manifest_fetch_pinned_digest_still_verifies_without_digest_header`;
       `cargo clippy -p mvm-oci --tests -- -D warnings`.
+- [x] 2026-07-09 Docker Hub OCI manifest endpoint compatibility: `mvm-oci`
+      now keeps `docker.io/...` as the canonical image identity but sends
+      Docker Hub registry API requests to `registry-1.docker.io`, avoiding the
+      HTML response from `https://docker.io/v2/...` that previously surfaced as
+      `parse manifest after digest verify: expected value at line 1 column 1`.
+      Manifest parse failures also include response content type and byte count
+      without echoing arbitrary registry response bodies. Validation:
+      `cargo fmt --all --check`; `cargo test -p mvm-oci`; `cargo clippy -p
+      mvm-oci --tests -- -D warnings`; `MVM_SKIP_EMBED_BINARIES=1 cargo run
+      --release -- machine run --image alpine -it -- /bin/sh` reached the
+      Alpine shell.
 - [x] 2026-07-08 Plan 213 §I builder-pack revocation consumer: the installed
       attested builder-pack path now refreshes a signed
       `pack-revocations.json` from the `revocations` release, caches it under

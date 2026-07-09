@@ -255,7 +255,15 @@ impl RegistryClient {
                 }
             }
         };
-        format!("{scheme}://{}{}", reference.registry, path)
+        format!("{scheme}://{}{}", endpoint_host(reference), path)
+    }
+}
+
+fn endpoint_host(reference: &ImageReference) -> &str {
+    if reference.registry == "docker.io" {
+        "registry-1.docker.io"
+    } else {
+        &reference.registry
     }
 }
 
@@ -340,5 +348,23 @@ mod tests {
             parsed.scope.as_deref(),
             Some("repository:library/alpine:pull")
         );
+    }
+
+    #[test]
+    fn docker_hub_canonical_registry_uses_registry_api_host() {
+        let reference: ImageReference = "docker.io/library/alpine:latest"
+            .parse()
+            .expect("reference parses");
+
+        assert_eq!(endpoint_host(&reference), "registry-1.docker.io");
+    }
+
+    #[test]
+    fn non_docker_registry_uses_reference_host() {
+        let reference: ImageReference = "ghcr.io/example/app:latest"
+            .parse()
+            .expect("reference parses");
+
+        assert_eq!(endpoint_host(&reference), "ghcr.io");
     }
 }
