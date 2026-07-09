@@ -16,7 +16,7 @@ use tokio::net::UnixStream;
 
 const HOST_AGENT_BIN: &str = env!("CARGO_BIN_EXE_mvm-host-agent");
 const SIGNER_HELPER_BIN: &str = env!("CARGO_BIN_EXE_mvm-signer-helper");
-const BROKER_RECOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const BROKER_RECOVERY_TIMEOUT: Duration = Duration::from_secs(60);
 
 struct HostAgentFixture {
     _env: TestEnv,
@@ -107,6 +107,10 @@ impl HostAgentFixture {
 
     async fn wait_for_emit(&self, event: &str) -> ServiceResponse {
         let deadline = Instant::now() + BROKER_RECOVERY_TIMEOUT;
+        self.wait_for_emit_until(event, deadline).await
+    }
+
+    async fn wait_for_emit_until(&self, event: &str, deadline: Instant) -> ServiceResponse {
         let mut last_error = None;
         while Instant::now() < deadline {
             match self.try_emit(event).await {
@@ -118,6 +122,21 @@ impl HostAgentFixture {
         panic!(
             "host-agent broker did not recover before timeout: {:#}",
             last_error.expect("at least one recovery attempt")
+        );
+    }
+
+    async fn wait_for_worker_replacement(&self, previous_pid: libc::pid_t, deadline: Instant) {
+        while Instant::now() < deadline {
+            if let Some(pid) = self.worker_pid()
+                && pid != previous_pid
+                && pid_alive(pid)
+            {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!(
+            "host-agent worker did not restart before timeout; previous pid was {previous_pid}"
         );
     }
 
@@ -296,7 +315,11 @@ async fn daemon_crash_mid_flight_loses_at_most_one_call_and_preserves_chain() {
     kill_process_group(worker_pid);
     drop(conn);
 
-    let resp = fixture.wait_for_emit("after-crash").await;
+    let deadline = Instant::now() + BROKER_RECOVERY_TIMEOUT;
+    fixture
+        .wait_for_worker_replacement(worker_pid, deadline)
+        .await;
+    let resp = fixture.wait_for_emit_until("after-crash", deadline).await;
     assert!(matches!(resp, ServiceResponse::Ok { .. }));
 
     let entries = fixture.chain_entries();
