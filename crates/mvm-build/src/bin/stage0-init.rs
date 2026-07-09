@@ -255,14 +255,29 @@ mod linux {
     /// resolver via `/out/stage0-build.conf` when Stage 0 needs one before the
     /// proxy-driven build takes over.
     fn configure_nix_runtime(qemu: bool, conf: &HashMap<String, String>) -> Result<(), String> {
-        std::fs::create_dir_all("/etc").map_err(|e| format!("create /etc: {e}"))?;
-        if qemu || !Path::new("/etc/resolv.conf").exists() {
+        configure_nix_runtime_at(Path::new("/"), qemu, conf)
+    }
+
+    fn configure_nix_runtime_at(
+        root: &Path,
+        qemu: bool,
+        conf: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let etc_dir = root.join("etc");
+        let resolv_conf = etc_dir.join("resolv.conf");
+        std::fs::create_dir_all(&etc_dir)
+            .map_err(|e| format!("create {}: {e}", etc_dir.display()))?;
+        if qemu || !resolv_conf.exists() {
             let resolver = resolver_seed(qemu, conf)?;
-            std::fs::write("/etc/resolv.conf", resolver)
-                .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
+            std::fs::write(&resolv_conf, resolver)
+                .map_err(|e| format!("write {}: {e}", resolv_conf.display()))?;
         }
-        for d in ["/nix/var", "/nix/var/nix", "/nix/var/log/nix"] {
-            std::fs::create_dir_all(d).map_err(|e| format!("create {d}: {e}"))?;
+        for dir in [
+            root.join("nix/var"),
+            root.join("nix/var/nix"),
+            root.join("nix/var/log/nix"),
+        ] {
+            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
         Ok(())
     }
@@ -1239,16 +1254,17 @@ mod linux {
         #[test]
         fn configure_nix_runtime_libkrun_leaves_existing_resolver_seed_alone() {
             let tmp = tempfile::tempdir().unwrap();
-            let old = std::env::current_dir().unwrap();
-            std::env::set_current_dir(tmp.path()).unwrap();
-            std::fs::create_dir_all("etc").unwrap();
-            std::fs::write("etc/resolv.conf", "nameserver 192.168.127.1\n").unwrap();
-            configure_nix_runtime(false, &HashMap::new()).unwrap();
+            std::fs::create_dir_all(tmp.path().join("etc")).unwrap();
+            std::fs::write(
+                tmp.path().join("etc/resolv.conf"),
+                "nameserver 192.168.127.1\n",
+            )
+            .unwrap();
+            configure_nix_runtime_at(tmp.path(), false, &HashMap::new()).unwrap();
             assert_eq!(
-                std::fs::read_to_string("etc/resolv.conf").unwrap(),
+                std::fs::read_to_string(tmp.path().join("etc/resolv.conf")).unwrap(),
                 "nameserver 192.168.127.1\n"
             );
-            std::env::set_current_dir(old).unwrap();
         }
 
         #[test]

@@ -477,7 +477,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
       are rehomed to the shared Vz live-validation lane, not left as Plan 189
       implementation blockers.
 - [x] Advanced
-      [`plans/234-wsl2-workload-support.md`](plans/234-wsl2-workload-support.md)
+      [`plans/239-wsl2-workload-support.md`](plans/239-wsl2-workload-support.md)
       from docs-only into implementation. `Platform::Wsl2` now exposes a
       dedicated workload-host capability, backend auto-selection and CLI
       hypervisor resolution pick `libkrun` for supported WSL2 + nested-KVM
