@@ -135,9 +135,7 @@ impl HostAgentFixture {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        panic!(
-            "host-agent worker did not restart before timeout; previous pid was {previous_pid}"
-        );
+        panic!("host-agent worker did not restart before timeout; previous pid was {previous_pid}");
     }
 
     fn chain_entries(&self) -> usize {
