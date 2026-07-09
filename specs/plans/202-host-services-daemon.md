@@ -64,6 +64,19 @@ The signer becomes a **supervised helper** of the host-agent daemon, holding **a
 
 **Verify:** 4a is covered by `registration_journal_stores_sorted_snapshot_and_loads_it`, `deregister_updates_registration_journal_snapshot`, and `daemon_restart_restores_journaled_registration`. 4b is covered by `worker_restart_restores_journaled_registration_and_chain`, `wrapper_restart_restores_journaled_registration_and_chain`, and `daemon_crash_mid_flight_loses_at_most_one_call_and_preserves_chain`: every running VM's `host.audit.v1` keeps working after the supervisor restarts the worker, `mvm` can restart a dead wrapper from the same journal, and a crash during dispatch loses at most the in-flight call while the chain stays append-only and verifies clean.
 
+**Post-complete follow-up 2026-07-08:** the restart path now also retries the
+host-side control reconnect itself. `send_control` in
+`crates/mvm-backend/src/host_agent_spawn.rs` uses a bounded exponential backoff
+(100 ms base, 500 ms cap, 4 attempts total) for transient reconnect failures
+(`ENOENT`, `ECONNREFUSED`, `ECONNRESET`, short reply EOF, and similar) while a
+wrapped `mvm-host-agent` worker is restarting. This is intentionally limited to
+the connect / reply boundary: typed daemon refusals still fail immediately, and
+the control client does not replay a request after a successful round-trip.
+Coverage now includes a deterministic restart witness:
+`register_vm_retries_across_control_socket_restart` forces one accepted control
+connection to die before the reply, re-binds the same socket path, and proves
+the second registration attempt succeeds against the restarted worker.
+
 ## Phase 5 — mvmd adoption + tenant boundaries (cross-repo)
 
 mvmd replicates the local unit — **one (host-agent + helper) per active tenant** — and is the cross-tenant arbiter. It does not reimplement the daemon.

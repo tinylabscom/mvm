@@ -27,6 +27,14 @@ The agent communicates using **length-prefixed JSON frames** over vsock (Firecra
 
 Request types: `ping`, `status`, `sleep-prep`, `wake`, and more.
 
+Both sides treat connection establishment as retryable during a short restart
+window. The host's host→guest attach path and the guest's guest→host broker /
+egress dial path use a bounded exponential backoff (100 ms base, 500 ms cap,
+4 attempts total) for transient transport failures such as a missing socket,
+`ECONNREFUSED`, or a reset while the other side is rebinding. Retry stops at
+the **connect** boundary only: once a stream is established and a request body
+has started flowing, mvm does not blindly replay it.
+
 ## Control plane and data plane
 
 Plan 74 / ADR-053 §4 splits the agent's wire surface into a

@@ -38,6 +38,34 @@ const SPAWN_LOCK: &str = "spawn.lock";
 const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// Control-frame cap (replies are tiny).
 const CONTROL_MAX_FRAME_BYTES: usize = 64 * 1024;
+/// Control reconnect attempts when the worker is restarting under the wrapper.
+const CONTROL_RETRIES: u32 = 4;
+/// Base delay for exponential control reconnect backoff.
+const CONTROL_RETRY_BASE_DELAY_MS: u64 = 100;
+/// Cap for exponential control reconnect backoff.
+const CONTROL_RETRY_CAP_DELAY_MS: u64 = 500;
+
+fn control_retry_delay(attempt: u32) -> Duration {
+    let scaled = CONTROL_RETRY_BASE_DELAY_MS.saturating_mul(1u64 << attempt.min(16));
+    Duration::from_millis(scaled.min(CONTROL_RETRY_CAP_DELAY_MS))
+}
+
+fn is_transient_control_error(err: &(dyn std::error::Error + 'static)) -> bool {
+    err.downcast_ref::<std::io::Error>().is_some_and(|io| {
+        matches!(
+            io.kind(),
+            std::io::ErrorKind::WouldBlock
+                | std::io::ErrorKind::TimedOut
+                | std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::ConnectionReset
+                | std::io::ErrorKind::ConnectionAborted
+                | std::io::ErrorKind::NotFound
+                | std::io::ErrorKind::AddrNotAvailable
+                | std::io::ErrorKind::Interrupted
+                | std::io::ErrorKind::UnexpectedEof
+        )
+    })
+}
 
 fn control_socket_is_ready(control_socket: &Path) -> bool {
     UnixStream::connect(control_socket).is_ok()
@@ -324,17 +352,38 @@ fn send_control(
 ) -> Result<()> {
     let signed = SignedControl::sign_with_key_bytes(request, key_bytes)
         .context("sign host-agent control request")?;
-    let mut stream = UnixStream::connect(control_socket).with_context(|| {
-        format!(
-            "connect host-agent control socket {}",
-            control_socket.display()
-        )
-    })?;
-    write_framed(&mut stream, &signed)?;
-    match read_framed::<ControlResponse>(&mut stream)? {
-        ControlResponse::Ok => Ok(()),
-        ControlResponse::Err { message } => bail!("host-agent refused control request: {message}"),
+    let mut last_err = None;
+    for attempt in 0..CONTROL_RETRIES {
+        let result = (|| -> Result<()> {
+            let mut stream = UnixStream::connect(control_socket).with_context(|| {
+                format!(
+                    "connect host-agent control socket {}",
+                    control_socket.display()
+                )
+            })?;
+            write_framed(&mut stream, &signed)?;
+            match read_framed::<ControlResponse>(&mut stream)? {
+                ControlResponse::Ok => Ok(()),
+                ControlResponse::Err { message } => {
+                    bail!("host-agent refused control request: {message}")
+                }
+            }
+        })();
+
+        match result {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if !is_transient_control_error(e.root_cause()) {
+                    return Err(e);
+                }
+                last_err = Some(e);
+                if attempt + 1 < CONTROL_RETRIES {
+                    std::thread::sleep(control_retry_delay(attempt));
+                }
+            }
+        }
     }
+    Err(last_err.expect("control retry loop must record the final error"))
 }
 
 /// 4-byte big-endian length prefix + JSON body — the same wire the daemon's
@@ -375,6 +424,35 @@ mod tests {
 
     fn key() -> [u8; 32] {
         [11u8; 32]
+    }
+
+    #[test]
+    fn control_retry_delay_grows_then_caps() {
+        assert_eq!(control_retry_delay(0), Duration::from_millis(100));
+        assert_eq!(control_retry_delay(1), Duration::from_millis(200));
+        assert_eq!(control_retry_delay(2), Duration::from_millis(400));
+        assert_eq!(control_retry_delay(3), Duration::from_millis(500));
+        assert_eq!(control_retry_delay(32), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn transient_control_errors_cover_restart_races() {
+        assert!(is_transient_control_error(&std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "socket missing during restart"
+        )));
+        assert!(is_transient_control_error(&std::io::Error::new(
+            std::io::ErrorKind::ConnectionRefused,
+            "worker restarting"
+        )));
+        assert!(is_transient_control_error(&std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "worker died mid-reply"
+        )));
+        assert!(!is_transient_control_error(&std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "caller bug"
+        )));
     }
 
     /// A stub control endpoint: bind `socket`, accept one connection, read the
@@ -450,6 +528,47 @@ mod tests {
         let err = deregister_vm(&socket, &key(), "vm-1").expect_err("Err surfaces");
         assert!(err.to_string().contains("unsafe vm_id"));
         handle.join().unwrap();
+    }
+
+    #[test]
+    fn register_vm_retries_across_control_socket_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("control.sock");
+        let worker = std::thread::spawn({
+            let socket = socket.clone();
+            let dir = dir.path().to_path_buf();
+            move || {
+                std::thread::sleep(Duration::from_millis(150));
+
+                let listener = UnixListener::bind(&socket).unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                let signed = read_framed::<SignedControl>(&mut stream).unwrap();
+                match &signed.request {
+                    ControlRequest::Register(r) => assert_eq!(r.vm_id, "vm-1"),
+                    other => panic!("expected Register, got {other:?}"),
+                }
+                drop(stream);
+                drop(listener);
+
+                std::fs::remove_file(&socket).unwrap();
+
+                let listener = UnixListener::bind(&socket).unwrap();
+                let (mut stream, _) = listener.accept().unwrap();
+                let signed = read_framed::<SignedControl>(&mut stream).unwrap();
+                match &signed.request {
+                    ControlRequest::Register(r) => {
+                        assert_eq!(r.vm_id, "vm-1");
+                        assert_eq!(r.broker_listen_socket, dir.join("vsock-5300.sock"));
+                    }
+                    other => panic!("expected Register, got {other:?}"),
+                }
+                write_framed(&mut stream, &ControlResponse::Ok).unwrap();
+            }
+        });
+
+        register_vm(&socket, &key(), sample_register(dir.path()))
+            .expect("register retries across daemon restart");
+        worker.join().unwrap();
     }
 
     #[test]
