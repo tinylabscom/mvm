@@ -236,7 +236,14 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `mvm-build` instead of a dense in-memory image, and stronger Linux-tool
       oracles (`e2fsck`/`debugfs`) plus dense-vs-streamed differential tests at
       both the writer and OCI materialization layers.
-
+- [x] Started
+      [`plans/239-kernel-config-subtraction-pass.md`](plans/239-kernel-config-subtraction-pass.md)
+      to turn the next slim-kernel reduction pass into an execution plan. It
+      focuses on the generated kernel-config recipe already owned by
+      `nix/images/kernel/{base,builder,workload}.nix`: expose the resolved
+      config cleanly, audit workload-first removal candidates, trim unused
+      compression and initramfs support, test a size-optimized workload build,
+      then refresh the kernel budget gate with measured before/after evidence.
 - [x] Started
       [`plans/237-hvf-density-memory-footprint.md`](plans/237-hvf-density-memory-footprint.md)
       to turn the HVF density investigation into an execution plan. The
