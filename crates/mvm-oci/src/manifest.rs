@@ -263,8 +263,13 @@ impl ManifestFetcher for OciManifestFetcher {
         // for the caller's downstream branching (image vs index).
         // This parse is purely diagnostic; the *digest* check
         // above is the load-bearing one.
-        let manifest: OciManifest = serde_json::from_slice(&bytes)
-            .map_err(|e| OciError::Registry(format!("parse manifest after digest verify: {e}")))?;
+        let manifest: OciManifest = serde_json::from_slice(&bytes).map_err(|e| {
+            OciError::Registry(format!(
+                "parse manifest after digest verify: {e}; content_type={:?}; bytes={}",
+                response.content_type,
+                bytes.len()
+            ))
+        })?;
         let media_type = response
             .content_type
             .unwrap_or_else(|| manifest_media_type(&manifest).to_string());
