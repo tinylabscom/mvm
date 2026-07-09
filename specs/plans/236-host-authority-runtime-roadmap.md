@@ -147,6 +147,7 @@ Related landed or in-flight plans that should be reused instead of duplicated:
 - Plan 227 — instant-resume vsock-only sandboxes
 - Plan 230 — two-surface consolidation
 - Plan 232 / 233 — workload healthcheck lifecycle
+- Plan 237 — HVF density memory footprint reduction
 
 ## Source lessons reflected here
 
@@ -181,6 +182,11 @@ phases below reflect lessons from the whole system:
   - Reflected in Phase 7.
   - Why: the review confirmed that strong runtime evidence should remain a
     differentiator, but separated from policy and transport authority.
+- **Runtime density and helper-count discipline**
+  - Reflected in Phases 2, 4, and 7.
+  - Why: the review supported fewer long-lived helpers, tighter host-owned
+    runtime roles, and honest capacity claims rather than invisible process
+    sprawl.
 
 ## Guardrails
 
@@ -263,6 +269,10 @@ no-guest-NIC runtime that is actually true on both workload and builder paths.
   guest NIC, gvproxy, or passt helper.
 - [ ] Keep the port-handler registry and host-vsock proxy as explicit runtime
   infrastructure, not hidden compatibility paths.
+- [ ] Make endpoint spawning an admitted-runtime decision, not a universal per-VM
+  default:
+  - fully deny-all, no-secret workloads should not pay for an unused endpoint
+  - any admitted egress or secret authority keeps the endpoint fail-closed
 - [ ] Add live workload witnesses for:
   - no guest NIC attached
   - no helper process drift into gvproxy-era behavior
@@ -350,6 +360,10 @@ feel simpler without weakening trust boundaries.
   - caller-owned by default
   - explicit detach when requested
   - parent-death cleanup
+- [ ] Make the density path a real detached runtime shape:
+  - no retained foreground CLI parent per long-lived VM
+  - documented create/start/exec/stop or detached-run lifecycle for sustained
+    waves
 - [ ] Move sensitive runtime launch/config state off argv everywhere practical.
 - [ ] Standardize one lifecycle contract across CLI and SDKs:
   - create
@@ -439,12 +453,17 @@ of reality.
   - secret-substitution events
   - snapshot lineage
   - health lifecycle transitions
+- [ ] Publish density and helper-footprint evidence as part of runtime truth:
+  - detached versus foreground process shape
+  - endpoint-on versus endpoint-skipped footprint class
+  - measured host-capacity guardrails before claiming high VM counts
 - [ ] Split admission audit from runtime telemetry so metrics do not become
   pseudo-audit.
 - [ ] Add live benchmark/proof runs for:
   - no-guest-NIC workload boot
   - no-guest-NIC builder path
   - local runtime lifecycle
+  - detached high-density idle waves with honest process/RSS accounting
   - warm/health/reconfigure flows as they land
 - [ ] Refresh docs so the product surface matches reality:
   - two surfaces
@@ -475,6 +494,8 @@ of reality.
   live-proven.
 - [ ] Do not start broad SDK surface expansion until Phase 4 lifecycle routing
   is real on the local path.
+- [ ] Do not make high-density claims from foreground or always-on-endpoint
+  shapes when the product intent is detached host-authority runtime operation.
 - [ ] Do not merge transparent-network experiments as the default runtime
   architecture.
 - [ ] Prefer folding in-flight worktrees into the nearest matching phase over
