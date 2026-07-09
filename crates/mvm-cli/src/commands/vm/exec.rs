@@ -720,11 +720,12 @@ fn build_exec_request(
                 }
                 // An `--image` run boots the materialized OCI rootfs (with its
                 // injected agent), so we need only a workload kernel. Resolve just
-                // the kernel — a cached workload/default-image kernel, the cold-cache
-                // published workload-kernel download, or (for non-prod) an existing
-                // builder kernel already on disk — rather than building/downloading a
-                // whole default image whose rootfs we'd discard. This runtime path
-                // never builds Stage 0 or compiles a workload kernel.
+                // the kernel — a cached workload/default-image kernel, the
+                // cold-cache published workload-kernel download, or (for non-prod)
+                // an existing builder kernel already on disk — rather than
+                // building/downloading a whole default image whose rootfs we'd
+                // discard. Stage 0 kernel compilation is reserved for explicit
+                // kernel source-build requests.
                 let kernel_path = ensure_workload_kernel(prod)?;
                 crate::exec::ImageSource::Prebuilt {
                     kernel_path,

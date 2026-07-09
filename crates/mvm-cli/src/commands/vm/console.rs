@@ -236,6 +236,14 @@ pub(crate) fn run_pty_command_for_exit(
     console_pty_with_argv(name, env, shell_command_argv(command))
 }
 
+pub(crate) fn run_pty_argv_for_exit(
+    name: &str,
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+) -> Result<i32> {
+    console_pty_with_argv(name, env, argv)
+}
+
 fn shell_command_argv(command: String) -> Vec<String> {
     vec!["/bin/sh".to_string(), "-lc".to_string(), command]
 }

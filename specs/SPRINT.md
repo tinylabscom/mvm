@@ -53,6 +53,15 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace` (6987/6987);
       `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D
       warnings` green.
+- [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
+      source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
+      builds the builder VM just to obtain a workload kernel. The resolver now
+      reuses cached/default kernels, reuses an already-built builder kernel for
+      dev runs, and otherwise downloads the release-published,
+      hash-verified workload kernel; Stage 0 workload-kernel compilation is
+      reserved for explicit source-build requests. Validation: focused
+      `mvm-cli` resolver tests, workspace check, clippy, and serialized full
+      workspace tests.
 - [x] 2026-07-08 OCI manifest fetch compatibility: `mvm-oci` no longer
       requires registries to send `Docker-Content-Digest` on manifest GET
       responses. It now always computes the SHA-256 over the returned bytes,

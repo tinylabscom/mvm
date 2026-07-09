@@ -1117,8 +1117,9 @@ fn run_in_guest(
     let wrapper = build_guest_wrapper(req, labels);
 
     if req.pty {
+        let pty = pty_console_request(req, labels, wrapper);
         let exit_code =
-            crate::commands::vm::console::run_pty_command_for_exit(vm_name, wrapper, Vec::new())?;
+            crate::commands::vm::console::run_pty_argv_for_exit(vm_name, pty.argv, pty.env)?;
         return Ok((Either::Left(exit_code), vsock_ready));
     }
 
@@ -1195,6 +1196,32 @@ fn run_in_guest(
         Either::Left(exit_code)
     };
     Ok((either, vsock_ready))
+}
+
+struct PtyConsoleRequest {
+    argv: Vec<String>,
+    env: Vec<(String, String)>,
+}
+
+fn pty_console_request(req: &ExecRequest, labels: &[String], wrapper: String) -> PtyConsoleRequest {
+    match &req.target {
+        ExecTarget::Inline { argv } if direct_pty_inline_argv(argv, req, labels) => {
+            PtyConsoleRequest {
+                argv: argv.clone(),
+                env: req.env.clone(),
+            }
+        }
+        _ => PtyConsoleRequest {
+            argv: vec!["/bin/sh".to_string(), "-lc".to_string(), wrapper],
+            env: Vec::new(),
+        },
+    }
+}
+
+fn direct_pty_inline_argv(req_argv: &[String], req: &ExecRequest, labels: &[String]) -> bool {
+    labels.is_empty()
+        && req.add_dirs.is_empty()
+        && req_argv.first().is_some_and(|argv0| argv0.starts_with('/'))
 }
 
 // ---------------------------------------------------------------------------
@@ -1692,6 +1719,93 @@ mod tests {
             "expected unqualified mount line, got: {script}"
         );
         assert!(!script.contains("-o ro"), "RW mount must not include -o ro");
+    }
+
+    #[test]
+    fn pty_console_request_passes_inline_argv_directly() {
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            add_dirs: Vec::new(),
+            env: vec![("TERM".into(), "xterm-256color".into())],
+            target: ExecTarget::Inline {
+                argv: vec!["/bin/sh".into()],
+            },
+            timeout_secs: None,
+            pty: true,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+        };
+
+        let pty = pty_console_request(&req, &[], "set -e\nexec '/bin/sh'\n".to_string());
+
+        assert_eq!(pty.argv, vec!["/bin/sh"]);
+        assert_eq!(pty.env, vec![("TERM".into(), "xterm-256color".into())]);
+    }
+
+    #[test]
+    fn pty_console_request_uses_wrapper_when_mount_setup_is_required() {
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            add_dirs: vec![AddDir {
+                host_path: "/h".into(),
+                guest_path: "/g".into(),
+                read_only: true,
+            }],
+            env: vec![("FOO".into(), "bar".into())],
+            target: ExecTarget::Inline {
+                argv: vec!["/bin/sh".into()],
+            },
+            timeout_secs: None,
+            pty: true,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+        };
+        let wrapper = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
+
+        let pty = pty_console_request(&req, &["mvm-extra-0".to_string()], wrapper.clone());
+
+        assert_eq!(pty.argv, vec!["/bin/sh", "-lc", wrapper.as_str()]);
+        assert!(pty.env.is_empty());
+    }
+
+    #[test]
+    fn pty_console_request_keeps_relative_commands_on_shell_path_lookup() {
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            add_dirs: Vec::new(),
+            env: Vec::new(),
+            target: ExecTarget::Inline {
+                argv: vec!["htop".into()],
+            },
+            timeout_secs: None,
+            pty: true,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+        };
+        let wrapper = build_guest_wrapper(&req, &[]);
+
+        let pty = pty_console_request(&req, &[], wrapper.clone());
+
+        assert_eq!(pty.argv, vec!["/bin/sh", "-lc", wrapper.as_str()]);
+        assert!(pty.env.is_empty());
     }
 
     #[test]

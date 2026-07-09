@@ -67,8 +67,10 @@ The builder-VM and workload microVM kernels are slim custom Linux
 builds: one shared config in `nix/images/kernel/base.nix` plus a
 per-variant delta (`workload.nix` adds dm-verity; `builder.nix` adds
 the nix-build sandbox + egress-lockdown bits). Because the config is
-custom, `cache.nixos.org` has no substitute, so the first `dev up` on a
-fresh machine compiles the kernel from source (3-10 min, memory-heavy).
+custom, `cache.nixos.org` has no substitute. Normal `machine run --image`
+and other runtime paths prefer the published, hash-verified workload
+kernel on a cold cache; compile locally only when you are changing the
+kernel config or explicitly ask for source-built kernels.
 
 `mvmctl build kernel build` makes that compile explicit and one-time, so
 it stops hijacking your first `dev up`:
@@ -93,6 +95,9 @@ just run -- --kernel-source download dev up
 
 Notes:
 
+- **OCI runs do not implicitly compile kernels.** A source checkout
+  running `machine run --image ...` downloads the release workload kernel
+  on a cold cache unless you explicitly request source compilation.
 - **Host-arch only for `--source compile`.** Stage 0 boots a host-arch
   VM under libkrun, so it builds your host's arch (aarch64 *or* x86_64).
   The other arch is published by the `kernel-build` GitHub workflow,

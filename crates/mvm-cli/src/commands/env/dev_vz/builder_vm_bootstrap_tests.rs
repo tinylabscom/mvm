@@ -50,12 +50,25 @@ fn cold_cache_downloads_instead_of_building_locally() {
 }
 
 #[test]
-fn source_checkout_cold_cache_builds_locally() {
+fn source_checkout_cold_cache_downloads_by_default() {
     let tmp = tempfile::tempdir().unwrap();
     let cache = tmp.path().to_str().unwrap();
     let arch = "aarch64";
     assert_eq!(
-        resolve_workload_kernel_bootstrap(cache, arch, true, true),
+        resolve_workload_kernel_bootstrap(cache, arch, false, false),
+        WorkloadKernelBootstrap::Download(format!(
+            "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
+        ))
+    );
+}
+
+#[test]
+fn explicit_source_build_request_builds_workload_kernel_locally() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().to_str().unwrap();
+    let arch = "aarch64";
+    assert_eq!(
+        resolve_workload_kernel_bootstrap(cache, arch, false, true),
         WorkloadKernelBootstrap::Build(format!(
             "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
         ))
