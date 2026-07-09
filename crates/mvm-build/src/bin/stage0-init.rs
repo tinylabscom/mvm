@@ -1202,7 +1202,7 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use super::configure_nix_runtime;
+        use super::configure_nix_runtime_at;
         use super::nix_filesystem_used_kib;
         use super::resolver_seed;
         use super::run_streaming;
