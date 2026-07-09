@@ -66,6 +66,48 @@ the field.**
 - [ ] Complete lifecycle parity features such as reconfigure/health/warm paths.
 - [ ] Publish stronger operational evidence and benchmark claims.
 
+## Start trigger
+
+This plan starts when leadership makes one explicit call:
+
+- [ ] `mvm` is standardizing on the host-authority, no-guest-NIC, vsock-only
+      runtime line as the default architecture path.
+
+That decision is usually justified by one or more concrete triggers:
+
+- [ ] The active vsock-only transport branches need integration rather than more
+      isolated branch work.
+- [ ] Linux builder smoke is still blocking the claim that the runtime is
+      honestly vsock-only end to end.
+- [ ] Secret-egress work needs a product-scope decision before more
+      implementation lands.
+- [ ] SDK/runtime lifecycle work is expanding again and needs one owning
+      integration roadmap.
+
+## Go / No-go checklist
+
+Start execution on this plan only when the following are true:
+
+- [ ] The current top-level product priority is to finish the host-authority
+      transport line rather than open a competing runtime direction.
+- [ ] We are ready to treat the current no-guest-NIC / vsock-only branches as
+      the mainline architecture path.
+- [ ] We are willing to treat transparent-network work as exploratory unless it
+      proves value inside the host-authority model.
+- [ ] The next integration work will begin with Phase 1 and Phase 2 inputs:
+      `fix/agent-verb-grant-delivery`,
+      `feat/vsock-port-handler-registry`, and
+      `worktree-vsock-only-egress-cutover`.
+
+Do not start execution on this plan when any of the following are true:
+
+- [ ] The team still wants to compare multiple competing transport end states in
+      parallel.
+- [ ] The active no-guest-NIC branches are still too early to integrate and
+      need more isolated prototyping first.
+- [ ] The current quarter's priority is elsewhere and this plan would only add
+      coordination overhead without implementation follow-through.
+
 ## Existing work that already shrinks this plan
 
 These branches and plans should be treated as direct inputs, not parallel
