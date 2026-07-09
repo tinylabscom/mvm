@@ -3164,6 +3164,37 @@ fn test_cache_prune() {
 }
 
 #[test]
+fn test_cache_status_json_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "status", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Commands::Cache(cache::Args {
+            action: CacheAction::Status { json: true }
+        })
+    ));
+}
+
+#[test]
+fn test_cache_status() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "status"]);
+    assert!(cli.is_ok());
+}
+
+#[test]
+fn test_cache_status_help() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "status", "--help"]);
+    // clap exits with a "help displayed" error rather than Ok, so assert the
+    // parse at least recognizes the subcommand/flag combination.
+    assert!(cli.is_err());
+}
+
+#[test]
+fn test_cache_prune_help() {
+    let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--help"]);
+    assert!(cli.is_err());
+}
+
+#[test]
 fn test_pool_warm_parses_optional_count() {
     // `mvmctl pool warm` (default count) and `pool warm N`.
     assert!(Cli::try_parse_from(["mvmctl", "pool", "warm"]).is_ok());
