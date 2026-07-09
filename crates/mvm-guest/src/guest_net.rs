@@ -47,26 +47,73 @@ pub fn encode_iface_name(iface: &str) -> Result<[libc::c_char; libc::IFNAMSIZ], 
     Ok(buf)
 }
 
+#[cfg(target_os = "linux")]
+const SHARED_GATEWAY_ADDR: &str = "192.168.127.1";
+#[cfg(target_os = "linux")]
+const SHARED_GATEWAY_NETMASK: &str = "255.255.255.0";
+const RESOLVER_CMDLINE_PREFIX: &str = "mvm.resolver=";
+
+/// Parse the first usable `nameserver` entry from a resolv.conf body.
+///
+/// Comments, blank lines, and malformed addresses are ignored. Returns the
+/// first valid IPv4 resolver because the Linux passt flow on the host exposes a
+/// single DNS-forward target to the guest.
+pub fn first_nameserver_from_resolv_conf(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let mut parts = line.split_whitespace();
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("nameserver"), Some(ip), None) if parse_ipv4(ip).is_some() => {
+                Some(ip.to_string())
+            }
+            _ => None,
+        }
+    })
+}
+
+/// Render a kernel-cmdline token that tells the guest which resolver IP to
+/// seed when the host's gateway path does not answer DNS at the virtual
+/// gateway address.
+pub fn resolver_cmdline_token_from_resolv_conf(body: &str) -> Option<String> {
+    first_nameserver_from_resolv_conf(body).map(|ip| format!("{RESOLVER_CMDLINE_PREFIX}{ip}"))
+}
+
+/// Parse the host-supplied resolver override out of the kernel cmdline.
+pub fn resolver_override_from_cmdline(cmdline: &str) -> Option<&str> {
+    cmdline
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix(RESOLVER_CMDLINE_PREFIX))
+        .filter(|ip| parse_ipv4(ip).is_some())
+}
+
 /// The gateway-local resolver line for the active VMM's virtual network.
 ///
-/// QEMU user-mode networking serves DNS at 10.0.2.3; the gvproxy backends
-/// (libkrun, Vz) at 192.168.127.1. Host-side resolution through the gateway
-/// works on any network — baked public resolvers only work where the local
-/// network permits direct external UDP/53.
-pub fn resolver_seed(cmdline: &str) -> &'static [u8] {
+/// QEMU user-mode networking serves DNS at 10.0.2.3. The libkrun/Vz path
+/// defaults to the shared virtual gateway at 192.168.127.1, but a host-supplied
+/// `mvm.resolver=` token can override that when the active gateway only answers
+/// DNS for a forwarded upstream address. Host-side resolution through the
+/// gateway works on any network; baked public resolvers only work where the
+/// local network permits direct external UDP/53.
+pub fn resolver_seed(cmdline: &str) -> Vec<u8> {
+    if let Some(resolver) = resolver_override_from_cmdline(cmdline) {
+        return format!("nameserver {resolver}\n").into_bytes();
+    }
     if cmdline.split_whitespace().any(|t| t == "mvm.backend=qemu") {
-        b"nameserver 10.0.2.3\n"
+        b"nameserver 10.0.2.3\n".to_vec()
     } else {
-        b"nameserver 192.168.127.1\n"
+        b"nameserver 192.168.127.1\n".to_vec()
     }
 }
 
-/// True when a DHCP failure should trigger the static gvproxy fallback.
+/// True when a DHCP failure should trigger the static shared-gateway fallback.
 ///
 /// The QEMU/slirp backend uses a different subnet (10.0.2.x) with its own
-/// `ip=` kernel autoconfig, so applying the gvproxy static address there would
-/// be wrong — only fall back to static on the gvproxy backends.
-pub fn dhcp_fallback_applies(cmdline: &str, udhcpc_success: bool) -> bool {
+/// `ip=` kernel autoconfig, so applying the shared-gateway static address there
+/// would be wrong — only fall back to static on the gateway-backed backends.
+pub fn gateway_static_fallback_applies(cmdline: &str, udhcpc_success: bool) -> bool {
     if udhcpc_success {
         return false;
     }
@@ -78,7 +125,7 @@ pub fn dhcp_fallback_applies(cmdline: &str, udhcpc_success: bool) -> bool {
 ///
 /// Applies the standard `SIOCSIFADDR` / `SIOCSIFNETMASK` / `SIOCSIFFLAGS`
 /// (UP|RUNNING) / `SIOCADDRT` ioctl sequence on an `AF_INET/SOCK_DGRAM`
-/// socket. The gvproxy virtual subnet is fixed (`192.168.127.0/24`, gateway
+/// socket. The shared gateway subnet is fixed (`192.168.127.0/24`, gateway
 /// `.1`), and each VM gets its own gateway instance, so a static address
 /// cannot collide across VMs.
 #[cfg(target_os = "linux")]
@@ -250,8 +297,9 @@ pub fn bring_iface_up(iface: &str) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 pub fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
     let seed = resolver_seed(cmdline);
+    std::fs::create_dir_all("/etc").map_err(|e| format!("mkdir /etc: {e}"))?;
     std::fs::create_dir_all("/run/mvm").map_err(|e| format!("mkdir /run/mvm: {e}"))?;
-    std::fs::write("/run/mvm/resolv.conf", seed)
+    std::fs::write("/run/mvm/resolv.conf", &seed)
         .map_err(|e| format!("seed /run/mvm/resolv.conf: {e}"))?;
     // Prefer a bind-mount so the image's own /etc/resolv.conf stays pristine.
     // A minimal OCI rootfs may have no bind target or no /bin/busybox, so on
@@ -272,13 +320,15 @@ pub fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
             return Ok(());
         }
     }
-    std::fs::write("/etc/resolv.conf", seed).map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
+    std::fs::write("/etc/resolv.conf", &seed)
+        .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
     Ok(())
 }
 
 /// Bring `iface` up, seed `/etc/resolv.conf` to the gateway resolver, obtain a
 /// lease via busybox `udhcpc`, and on a failed lease apply the static
-/// `fallback_ip` (gvproxy subnet only — see [`dhcp_fallback_applies`]).
+/// `fallback_ip` (shared gateway subnet only — see
+/// [`gateway_static_fallback_applies`]).
 ///
 /// Shared by the builder VM init and the workload guest netinit so both bring
 /// the guest network up identically. `cmdline` is `/proc/cmdline`; it selects
@@ -319,11 +369,16 @@ pub fn configure_guest_network(
         }
     };
 
-    if dhcp_fallback_applies(cmdline, udhcpc_success) {
+    if gateway_static_fallback_applies(cmdline, udhcpc_success) {
         eprintln!(
-            "guest-net: no DHCP lease — falling back to static gvproxy addressing ({fallback_ip})"
+            "guest-net: no DHCP lease — falling back to static gateway addressing ({fallback_ip})"
         );
-        configure_static(iface, fallback_ip, "255.255.255.0", "192.168.127.1")?;
+        configure_static(
+            iface,
+            fallback_ip,
+            SHARED_GATEWAY_NETMASK,
+            SHARED_GATEWAY_ADDR,
+        )?;
     } else if !udhcpc_success {
         return Err("udhcpc obtained no lease and no static fallback applies".to_string());
     }
@@ -372,21 +427,54 @@ mod tests {
     fn resolver_seed_picks_gateway_per_backend() {
         assert_eq!(
             resolver_seed("console=hvc0 root=/dev/vda"),
-            b"nameserver 192.168.127.1\n"
+            b"nameserver 192.168.127.1\n".to_vec()
         );
         assert_eq!(
             resolver_seed("mvm.backend=qemu ip=dhcp"),
-            b"nameserver 10.0.2.3\n"
+            b"nameserver 10.0.2.3\n".to_vec()
         );
     }
 
     #[test]
-    fn dhcp_fallback_only_on_gvproxy_failure() {
+    fn resolver_seed_prefers_cmdline_override() {
+        assert_eq!(
+            resolver_seed("console=hvc0 mvm.resolver=1.1.1.1"),
+            b"nameserver 1.1.1.1\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn resolver_override_from_cmdline_ignores_malformed_values() {
+        assert_eq!(resolver_override_from_cmdline("mvm.resolver=bad.ip"), None);
+        assert_eq!(resolver_override_from_cmdline("console=hvc0"), None);
+    }
+
+    #[test]
+    fn first_nameserver_from_resolv_conf_ignores_comments_and_invalid_lines() {
+        let body = "\
+# comment
+search example.internal
+nameserver invalid
+nameserver 10.0.0.2
+nameserver 10.0.0.3
+";
+        assert_eq!(
+            first_nameserver_from_resolv_conf(body).as_deref(),
+            Some("10.0.0.2")
+        );
+        assert_eq!(
+            resolver_cmdline_token_from_resolv_conf(body).as_deref(),
+            Some("mvm.resolver=10.0.0.2")
+        );
+    }
+
+    #[test]
+    fn gateway_static_fallback_only_on_gateway_backend_failure() {
         // success → never fall back
-        assert!(!dhcp_fallback_applies("anything", true));
-        // gvproxy failure → fall back
-        assert!(dhcp_fallback_applies("console=hvc0", false));
-        // QEMU failure → do NOT apply the gvproxy static (QEMU uses ip= autoconfig)
-        assert!(!dhcp_fallback_applies("mvm.backend=qemu", false));
+        assert!(!gateway_static_fallback_applies("anything", true));
+        // gateway-backed libkrun/Vz failure → fall back
+        assert!(gateway_static_fallback_applies("console=hvc0", false));
+        // QEMU failure → do NOT apply the shared-gateway static (QEMU uses ip= autoconfig)
+        assert!(!gateway_static_fallback_applies("mvm.backend=qemu", false));
     }
 }

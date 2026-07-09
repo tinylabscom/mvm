@@ -53,6 +53,35 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace` (6987/6987);
       `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D
       warnings` green.
+- [x] 2026-07-08 Plan 234 vsock port-handler registry production-readiness
+      follow-up: the HVF-side vsock host-I/O loop now uses readiness-driven fd
+      registration across the agent, console, egress, and broker bridges rather
+      than the old fixed 5 ms backstop, and the refactor's bridge-fd unit tests
+      plus `mvm-backend`'s existing sustained-MMIO host-I/O regression stay
+      green. Validation includes focused host checks (`cargo test -p
+      mvm-backend vsock --lib`, `cargo clippy -p mvm-backend --lib --tests --
+      -D warnings`), a live libkrun backend boot with a freshly built local
+      `mvm-libkrun-supervisor` (`cargo test -p mvm-backend --test
+      libkrun_lifecycle_e2e -- --ignored --nocapture`, green under
+      `MVM_LIBKRUN_E2E=1`), and the post-fail-closed Hetzner builder proof:
+      after rebuilding `mvmctl`, direct capture showed `run --json --receipt`
+      keeping stdout JSON-only with boot chrome on stderr, and
+      `MVM_LIVE_SMOKE=1 MVM_LIBKRUN_SUPERVISOR_PATH=/tmp/mvm-vsock-port-handler-registry-remote-target/debug/mvm-libkrun-supervisor CARGO_TARGET_DIR=/tmp/mvm-vsock-port-handler-registry-remote-target cargo test --test smoke_run_json_receipt -- --exact run_json_and_receipt_agree_without_raw_output --nocapture`
+      passed in 27.42 s. The final validation refresh on 2026-07-09 also kept
+      the branch green after the native-gateway cleanup fixes: `cargo test
+      --workspace` passed on the macOS host, the synced Hetzner tree passed
+      `cargo clippy --workspace --all-targets -- -D warnings`, a fresh rerun
+      of the same live Linux smoke passed in 33.86 s, and the local signed
+      `cargo run -p mvm-backend --example hvf-smoke` proof reported
+      `HVF boot OK` on `Darwin arm64`. A same-day cleanup then removed the
+      remaining active-path `gvproxy` naming from the shared bridge/bin/docs
+      surface, and the follow-up deletion slice finished the low-level Rust
+      shim rename (`libkrun-sys::native_gateway`, `native-gateway.*`
+      scratch-artifact names, shared bridge tests compiling on the neutral
+      names). Only compatibility-specific fixtures plus the upstream vfkit
+      gateway-compat ABI entrypoint still mention `gvproxy`. The active
+      libkrun/HVF path no longer depends on `gvproxy`, and the required Linux
+      builder smoke is green.
 - [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
       source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
       builds the builder VM just to obtain a workload kernel. The resolver now
@@ -96,6 +125,154 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `crates/deps/libkrun-sys/src/gvproxy.rs`, leaving passt/native-rvproxy
       coverage in place without carrying dead gvproxy-specific fixtures.
       Validation: `cargo fmt --all`; `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-hostd --lib gateway_bridge`; `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo test -p libkrun-sys --lib`; `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo check --workspace`; `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D warnings`; serial `MVM_DATA_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-data CARGO_TARGET_DIR=/tmp/mvm-fix-dev-workload-kernel-bootstrap-target MVM_SKIP_EMBED_BINARIES=1 cargo test --workspace -- --test-threads=1` green.
+- [x] 2026-07-09 builder fail-closed hardening: Linux source-checkout builder
+      dispatch no longer auto-falls back from libkrun to the qemu builder on
+      VMM-level failure. That qemu path is explicitly dev/test-only because it
+      reintroduces user-mode NIC networking and invalidates the vsock-only
+      production story. The fallback removal is covered in
+      `mvm-build::builder_backend_select` unit tests; fresh Hetzner smoke must
+      now prove the libkrun path directly rather than accidentally succeeding
+      through qemu. A follow-up Stage 0 resolver-handoff slice now passes
+      focused host validation (`mvm-cli` tests/clippy plus `stage0-init`
+      clippy), but a fresh Hetzner libkrun smoke still dies in Stage 0 with
+      `Could not resolve host: github.com`; the old guest-hardcoded gvproxy
+      resolver assumption is gone, so the remaining blocker is the broader
+      Linux libkrun Stage 0 egress/bootstrap path rather than that constant.
+      The next Hetzner slice narrowed that further: Stage 0 now consumes
+      host-prefetched locked flake inputs instead of trying to reach GitHub,
+      and a forced fresh-embed smoke (`MVM_EMBED_BINARIES=1`) proves the
+      current `stage0-init` binary is in play, but the live libkrun smoke
+      still fails while materializing those offline inputs from `/out` into a
+      guest-local path (`No file descriptors available` / `Too many open
+      files`). The latest Hetzner reruns clear that offline-input/workspace
+      localization problem too: Stage 0 now builds from `path:/nix/stage0-work`
+      with locked inputs rewritten to `path:/nix/stage0-inputs`, but Nix still
+      reports `you don't have Internet access` and eventually dies trying to
+      fetch `https://ftpmirror.gnu.org/bash/bash-5.3.tar.gz`. A follow-up
+      attempt removed the Linux passt resolver override and moved `stage0-init`
+      onto the shared guest-network bootstrap (`configure_guest_network`) so
+      DHCP/static-fallback handling matches the steady-state builder guest.
+      Focused local tests/clippy stayed green, but the fresh Hetzner smoke is
+      still red and its console still lacks the new Stage 0 network-state
+      lines, so the remaining blocker is now the real passt/libkrun egress path
+      or a stale embedded-host-binary handoff inside the live Linux smoke. The
+      latest clean-rerun evidence on 2026-07-09 tightened that further: after
+      reaping stale remote `cargo test`/supervisor/`passt` processes, a fresh
+      Hetzner Stage 0 run does get online far enough to fetch from
+      `cache.nixos.org` and continue into the real closure build, so the old
+      `github.com`/`ftpmirror` bootstrap diagnosis is no longer current. The
+      remaining live failure is now an intermittent later-build DNS break
+      inside `cargo-vendor-dir.drv` (`Could not resolve host: crates.io` /
+      `tarballs.nixos.org`) while Stage 0 is forcing `MVM_STAGE0_RESOLVER`
+      into `/etc/resolv.conf`. The source tree now removes that host-resolver
+      override so libkrun Stage 0 keeps the shared gateway-seeded resolver path
+      instead, and the guest fallback wording has been made gateway-neutral
+      rather than `gvproxy`-specific. A same-day follow-up also removes
+      gvproxy as a supported macOS libkrun dependency entirely:
+      `MVM_NETWORKING=gvproxy` no longer resolves, the gateway locator no
+      longer probes `which gvproxy`, and `mvmctl doctor` / the networking guide
+      now point only at the native-gateway contract on macOS. Validation for
+      that slice: `cargo test -p mvm-build --lib`, `cargo test -p mvm-cli
+      doctor --lib`, `cargo test -p mvm-backend libkrun --lib`, and clippy
+      for `mvm-build`, `mvm-cli`, and `mvm-backend` with `-D warnings` green.
+      The latest same-day slice removes the libkrun install arm's dependency on
+      the guest NIC-backed `mvm-egress-proxy` subprocess too: install jobs now
+      expose `EGRESS_PORT` as a host-listen port, `mvm-host-vm-init` serves a
+      guest-local CONNECT proxy that tunnels admitted targets over vsock, and
+      the host side gates that path with the same exact 443 allow-list the old
+      proxy baked in. Compile-focused validation is green (`cargo check -p
+      mvm-build --features builder-vm --offline`, `cargo check -p mvm-build -p
+      mvm-vm-host --offline`, `cargo test -p mvm-build --bin
+      mvm-host-vm-init proxy_url_is_http_127_8443 --offline`, `cargo test -p
+      mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
+      --offline --no-run`), but the branch is still not production-ready
+      because the live Linux Stage 0 / flake builder smoke remains red and the
+      full `mvm-build` test suites still hit sandbox-local socket-bind limits
+      plus preexisting `builder_backend_select` inference failures under
+      `--features builder-vm` tests.
+      Another same-day correction removed the still-live libkrun
+      launch-time `mvm.resolver=...` injections from both the builder and
+      workload paths; the earlier status notes were ahead of the code there.
+      Validation for that fix: `cargo test -p mvm-build --lib`, `cargo test -p
+      mvm-backend libkrun --lib`, `cargo clippy -p mvm-build --lib --tests --
+      -D warnings`, and `cargo clippy -p mvm-backend --lib --tests -- -D
+      warnings` green. A fresh isolated Hetzner rerun with the corrected
+      checkout is now in flight under `/tmp/mvm-plan234-smoke6.*`; until it
+      passes, the workstream still remains open because the Hetzner builder
+      smoke is not yet green and libkrun still retains a gateway-backed egress path
+      rather than being universally vsock-only.
+      A follow-up cleanup on 2026-07-09 also removes the remaining
+      `gvproxy`-named API dependency from the active macOS libkrun path:
+      `libkrun-sys` now exposes a neutral `native_gateway` surface,
+      `KrunContext` gained `with_native_gateway` /
+      `with_native_gateway_config`, and the builder/runtime/doctor call sites
+      now use that neutral contract instead of `with_gvproxy` or
+      `libkrun_sys::gvproxy::*`. Focused validation for that slice is green:
+      `cargo test -p mvm-build --lib`, `cargo test -p mvm-backend libkrun
+      --lib`, `cargo test -p mvm-cli doctor --lib`, `cargo test -p
+      libkrun-sys --lib`, and clippy on `mvm-build`, `mvm-backend`, and
+      `mvm-cli` with `-D warnings`. This narrows the stale gvproxy coupling on
+      macOS, but it does not close the broader production-readiness gap because
+      Linux libkrun still uses `passt` and the live Hetzner builder smoke
+      remains red. A same-day follow-up also removes the remaining exported
+      `Gvproxy` spellings from the libkrun Rust surface itself: the checked-in
+      API now uses `native_gateway` / `NetworkingMode::NativeGateway` /
+      `BridgeFds::LibkrunNativeGateway` throughout `libkrun-sys`,
+      `mvm-vm-host`, `mvm-hostd`, and the compatibility matrix. Validation for
+      that rename slice is compile-focused and green: `cargo fmt --all`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo check -p libkrun-sys -p mvm-backend
+      --offline`; `MVM_SKIP_EMBED_BINARIES=1 cargo check -p mvm-vm-host -p
+      mvm-hostd -p mvm-backend --offline`. This still does not make the branch
+      production-ready because the Linux builder smoke is open and libkrun
+      still is not universally vsock-only. The latest Hetzner rerun on
+      2026-07-09 proves Stage 0 itself is now booting with no guest NIC on
+      the active builder path (`stage0-init: no eth0 present; using vsock-only
+      egress path`, `net ifaces=[dummy0,lo]`), so the older
+      guest-DHCP/passt diagnosis is no longer current. The new live blocker is
+      the host raw-egress path behind `EGRESS_PORT`: Stage 0 now times out on
+      `https://cache.nixos.org/nix-cache-info` through the guest-local vsock
+      proxy, and the running VM state dir lacks a bound `vsock-5253.sock`
+      listener while the supervisor is alive. That keeps the branch
+      non-production-ready, but narrows the unresolved Linux gap to host-side
+      vsock egress bring-up/serving rather than guest NIC plumbing.
+      A same-day follow-up removes the last active guest-NIC dependency from
+      the libkrun workload/builder source path too: libkrun workload boots no
+      longer attach native-gateway/passt at all, launch-time state now records
+      whether the guest-local SOCKS5 vsock client is active, and invoke-time
+      entrypoint dispatch injects `socks5h://127.0.0.1:1080` env only for those
+      plain vsock-egress VMs while preserving the existing substitution proxy
+      for secret-bearing workloads. Focused validation on that slice is green:
+      `cargo test -p mvm-backend --lib persist_vsock_egress_marker`,
+      `cargo test -p mvm-cli --lib invoke`, `cargo check -p mvm-build --lib`,
+      and `cargo check -p mvm-backend --lib`. The branch still is not
+      production-ready until the live Linux builder smoke goes green.
+      The next same-day fail-closed cleanup removes the stale "maybe a gateway"
+      contract from the active libkrun path too: `mvm-libkrun-supervisor` now
+      rejects non-`NetworkingMode::Tsi` guest-NIC configs outright, the
+      builder/bootstrap source path no longer carries `MVM_NETWORKING` or the
+      old passt-resolver cmdline injection, `mvmctl doctor` reports the
+      libkrun/HVF tier as vsock-only instead of probing for a host gateway
+      binary, and the compatibility matrix now marks libkrun networking as
+      absent/NIC-less. Focused validation is green (`cargo test -p mvm-build
+      --lib`, `cargo test -p mvm-cli doctor --lib`, `cargo test -p mvm-vm-host
+      --features libkrun-sys --bin mvm-libkrun-supervisor`, plus clippy with
+      `-D warnings` on `mvm-build`, `mvm-cli`, and `mvm-vm-host`). A fresh
+      isolated Hetzner rerun against that exact source tree has now reached
+      `stage0_boot` again with the same no-gateway evidence: no `gvproxy` or
+      `passt` process in the live process tree, a present
+      `vsock-5253.sock` in the Stage 0 state dir, and console lines
+      `stage0-init: no eth0 present; using vsock-only egress path` plus
+      `starting local SOCKS5H egress client at 127.0.0.1:1080`. The branch
+      still is not production-ready until that full live smoke exits green.
+      A same-day helper-contract cleanup also removed the last runtime-facing
+      `gvproxy.pid` assumptions from the active libkrun/Vz workload sweep:
+      `mvmctl` now treats workload dirs as supervisor-only (`libkrun.pid` /
+      `vz.pid`) and discovers any auxiliary helpers via argv scanning instead
+      of explicit `host-gvproxy.pid` sidecars, while the libkrun builder wait
+      path no longer tries to reap a native-gateway child after supervisor
+      exit on the now-vsock-only path. Focused validation for that slice is
+      green: `cargo test -p mvm-cli live_helper_of_live_workload --lib` and
+      `cargo test -p mvm-cli leaked_helper_of_dead_workload --lib`.
 - [x] 2026-07-08 dependency-slimming default-path follow-up: `mvm-cli`
       replaced `clap_complete` with an in-tree shell-completion renderer for
       `shell-init --emit-completions`, and the hidden `ops mcp` path now sits

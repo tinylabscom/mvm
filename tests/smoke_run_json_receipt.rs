@@ -35,9 +35,11 @@ struct SmokeSandbox {
 
 impl SmokeSandbox {
     fn new() -> Self {
-        Self {
+        let sandbox = Self {
             home: tempfile::tempdir().expect("tempdir"),
-        }
+        };
+        sandbox.seed_cached_runtime_caches();
+        sandbox
     }
 
     fn path(&self) -> &Path {
@@ -63,6 +65,67 @@ impl SmokeSandbox {
             .env_remove("XDG_CONFIG_HOME");
         cmd
     }
+
+    fn seed_cached_runtime_caches(&self) {
+        for cache_subdir in ["host-bins", "default-microvm"] {
+            let source_root = PathBuf::from(mvm_core::config::mvm_cache_dir()).join(cache_subdir);
+            let dest_root = self.path().join(".cache/mvm").join(cache_subdir);
+            sync_tree_if_missing(&source_root, &dest_root)
+                .unwrap_or_else(|e| panic!("seed cached {cache_subdir} into scratch cache: {e}"));
+        }
+    }
+
+    fn persist_cached_runtime_caches(&self) {
+        for cache_subdir in ["host-bins", "default-microvm"] {
+            let source_root = self.path().join(".cache/mvm").join(cache_subdir);
+            let dest_root = PathBuf::from(mvm_core::config::mvm_cache_dir()).join(cache_subdir);
+            sync_tree_if_missing(&source_root, &dest_root).unwrap_or_else(|e| {
+                panic!("persist scratch {cache_subdir} back into operator cache: {e}")
+            });
+        }
+    }
+}
+
+impl Drop for SmokeSandbox {
+    fn drop(&mut self) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.persist_cached_runtime_caches();
+        }));
+    }
+}
+
+fn sync_tree_if_missing(source_root: &Path, dest_root: &Path) -> std::io::Result<()> {
+    if !source_root.is_dir() {
+        return Ok(());
+    }
+    for entry in std::fs::read_dir(source_root)? {
+        let entry = entry?;
+        let source = entry.path();
+        let dest = dest_root.join(entry.file_name());
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        copy_tree_if_missing(&source, &dest)?;
+    }
+    Ok(())
+}
+
+fn copy_tree_if_missing(source: &Path, dest: &Path) -> std::io::Result<()> {
+    if dest.exists() {
+        return Ok(());
+    }
+    if source.is_dir() {
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let child_source = entry.path();
+            let child_dest = dest.join(entry.file_name());
+            copy_tree_if_missing(&child_source, &child_dest)?;
+        }
+        return Ok(());
+    }
+    std::fs::copy(source, dest)?;
+    Ok(())
 }
 
 fn smoke_enabled() -> bool {

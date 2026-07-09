@@ -11,12 +11,11 @@
 //! `mio::Poll` (kqueue/epoll) event loop, so it runs on wall-clock time regardless
 //! of what the guest's vCPU is doing. The thread:
 //!
-//! - registers the agent Unix listener for readiness (so a host connection is
-//!   accepted promptly) plus a `Waker` (for a prompt stop),
-//! - wakes on that readiness, on the waker, or on a short backstop timeout, and on
-//!   each wake takes the device lock and runs [`VsockShared::service_host_io`]
-//!   (accept + drain the agent/egress sockets, frame rx packets into the guest's
-//!   rx queue),
+//! - registers the current bridge listeners/streams plus a `Waker` (for prompt
+//!   stop and topology-change resync),
+//! - wakes on readiness or the waker, then takes the device lock and runs
+//!   [`VsockShared::service_host_io`] (accept + drain the agent/console/egress/
+//!   broker sockets, frame rx packets into the guest's rx queue),
 //! - raises the device IRQ via the injected [`IrqLine`] when it delivered — which
 //!   also wakes a guest blocked in WFI to consume the packet — **independent of
 //!   any vCPU exit**.
@@ -25,26 +24,19 @@
 //! the thread is joined (via [`IoHandle::stop`]) before the guest RAM is freed, so
 //! it never races the vCPU thread or dereferences unmapped memory.
 
+use std::collections::HashSet;
+use std::os::fd::RawFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 
 use super::vsock::{IrqLine, VsockShared};
 
-/// The agent listener readiness source.
-const LISTENER: Token = Token(0);
-/// The waker used to break the poll for a prompt stop.
-const WAKER: Token = Token(1);
-/// Backstop poll timeout. The listener wakes us on a new connection; this bounds
-/// the latency of draining already-open agent/egress sockets (whose per-fd
-/// readiness we deliberately don't register — see the module note on fd lifetime)
-/// so a guest→host reply or egress response is delivered within a few ms even
-/// with no new connection event.
-const BACKSTOP: Duration = Duration::from_millis(5);
+/// The waker used to break the poll for a prompt stop or a readiness-set resync.
+const WAKER: Token = Token(0);
 
 /// Handle to a running host-I/O thread. Dropping it (or calling [`Self::stop`])
 /// stops and joins the thread.
@@ -55,11 +47,15 @@ pub(super) struct IoHandle {
 }
 
 impl IoHandle {
+    pub(super) fn wake(&self) {
+        let _ = self.waker.wake();
+    }
+
     /// Signal the thread to stop and join it. Blocks until the thread has exited,
     /// guaranteeing it no longer touches the shared state / guest RAM.
     pub(super) fn stop(mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.waker.wake();
+        self.wake();
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
@@ -71,7 +67,7 @@ impl Drop for IoHandle {
         // If stopped via `stop()` the join already happened; otherwise ensure the
         // thread is torn down here too.
         self.stop.store(true, Ordering::Relaxed);
-        let _ = self.waker.wake();
+        self.wake();
         if let Some(j) = self.join.take() {
             let _ = j.join();
         }
@@ -82,20 +78,6 @@ impl Drop for IoHandle {
 pub(super) fn spawn(shared: Arc<Mutex<VsockShared>>, irq: Arc<dyn IrqLine>, spi: u32) -> IoHandle {
     let poll = Poll::new().expect("mvm-vsock-io: mio::Poll");
     let waker = Arc::new(Waker::new(poll.registry(), WAKER).expect("mvm-vsock-io: mio::Waker"));
-    // Register the agent listener for readiness so a host connection is accepted
-    // promptly. The fd lives inside the lock for the whole run, so it stays valid
-    // while registered (the thread is joined before the device drops). Egress has
-    // no listener; without an agent socket bound we run purely on the backstop.
-    if let Some(fd) = shared
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .agent_listener_fd()
-    {
-        let mut src = SourceFd(&fd);
-        let _ = poll
-            .registry()
-            .register(&mut src, LISTENER, Interest::READABLE);
-    }
     let stop = Arc::new(AtomicBool::new(false));
     let stop_t = Arc::clone(&stop);
     let join = std::thread::Builder::new()
@@ -109,8 +91,9 @@ pub(super) fn spawn(shared: Arc<Mutex<VsockShared>>, irq: Arc<dyn IrqLine>, spi:
     }
 }
 
-/// The event loop: wake on listener readiness / waker / backstop, service host
-/// I/O under the lock, and raise the IRQ on delivery.
+/// The event loop: keep the registered fd set aligned with the bridge topology,
+/// then block on readiness / the resync waker, service host I/O under the lock,
+/// and raise the IRQ on delivery.
 fn io_loop(
     mut poll: Poll,
     shared: Arc<Mutex<VsockShared>>,
@@ -119,17 +102,20 @@ fn io_loop(
     stop: Arc<AtomicBool>,
 ) {
     let mut events = Events::with_capacity(16);
+    let mut registered = HashSet::new();
     while !stop.load(Ordering::Relaxed) {
-        // A backstop timeout bounds latency for already-open sockets; a new host
-        // connection or the stop-waker breaks the wait sooner. `EINTR` surfaces as
-        // `Err` — just loop and re-check `stop`.
-        let _ = poll.poll(&mut events, Some(BACKSTOP));
+        let current = shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .poll_fds()
+            .into_iter()
+            .collect::<HashSet<_>>();
+        sync_ready_fds(&poll, &mut registered, &current);
+        // `EINTR` surfaces as `Err` — just loop and re-check `stop`.
+        let _ = poll.poll(&mut events, None);
         if stop.load(Ordering::Relaxed) {
             break;
         }
-        // On any wake (listener readable, waker, or backstop) do one servicing
-        // pass. `accept_new` drains the listener to `WouldBlock`, so its readiness
-        // clears and we don't spin.
         let delivered = shared
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -138,4 +124,29 @@ fn io_loop(
             irq.signal(spi);
         }
     }
+}
+
+fn sync_ready_fds(poll: &Poll, registered: &mut HashSet<RawFd>, current: &HashSet<RawFd>) {
+    let removed: Vec<_> = registered.difference(current).copied().collect();
+    for fd in removed {
+        let mut src = SourceFd(&fd);
+        let _ = poll.registry().deregister(&mut src);
+        registered.remove(&fd);
+    }
+
+    let added: Vec<_> = current.difference(registered).copied().collect();
+    for fd in added {
+        let mut src = SourceFd(&fd);
+        if poll
+            .registry()
+            .register(&mut src, fd_token(fd), Interest::READABLE)
+            .is_ok()
+        {
+            registered.insert(fd);
+        }
+    }
+}
+
+fn fd_token(fd: RawFd) -> Token {
+    Token(fd as usize + 1)
 }

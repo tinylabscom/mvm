@@ -362,6 +362,7 @@ fn set_exec(_path: &Path) -> Result<(), GuestAgentBuildError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn install_prebuilt_then_cached_round_trips() {
@@ -450,6 +451,8 @@ mod tests {
 
     #[test]
     fn build_argv_targets_musl_with_dev_shell_and_both_bins() {
+        let mut env = TestEnv::new();
+        env.remove("CARGO_TARGET_DIR");
         let spec = GuestAgentBuildSpec::new(PathBuf::from("/ws"), GuestArch::Aarch64);
         let argv = spec.argv();
         assert_eq!(argv[0], "cargo");
@@ -466,6 +469,17 @@ mod tests {
         assert_eq!(
             spec.output_dir(),
             PathBuf::from("/ws/target/aarch64-unknown-linux-musl/release")
+        );
+    }
+
+    #[test]
+    fn output_dir_honors_cargo_target_dir_override() {
+        let mut env = TestEnv::new();
+        env.set("CARGO_TARGET_DIR", "/tmp/custom-target");
+        let spec = GuestAgentBuildSpec::new(PathBuf::from("/ws"), GuestArch::Aarch64);
+        assert_eq!(
+            spec.output_dir(),
+            PathBuf::from("/tmp/custom-target/aarch64-unknown-linux-musl/release")
         );
     }
 

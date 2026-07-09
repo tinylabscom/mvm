@@ -13,6 +13,10 @@
 
 pub mod allowlist;
 pub mod proxy;
+pub mod vsock_proxy;
 
 pub use allowlist::{ALLOWED_PORT, Allowlist, PRODUCTION_HOSTNAMES};
 pub use proxy::{DEFAULT_BIND, ProxyHandle, parse_connect_target, start};
+pub use vsock_proxy::{
+    ConnectPolicy, DEFAULT_VSOCK_PROXY_BIND, VsockProxyHandle, start_vsock_proxy,
+};

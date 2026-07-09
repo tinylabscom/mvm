@@ -3264,7 +3264,7 @@ fn test_cache_prune_orphan_builds_flag() {
 
 #[test]
 fn test_cache_prune_no_reap_orphans_flag() {
-    // `prune` reaps orphaned mvm-libkrun-supervisor / gvproxy / console-tail
+    // `prune` reaps orphaned mvm-libkrun-supervisor / legacy gateway / console-tail
     // processes (and their per-VM cache dirs) by default; `--no-reap-orphans`
     // opts out so a disk-only prune touches no processes.
     let cli = Cli::try_parse_from(["mvmctl", "cache", "prune", "--no-reap-orphans"]).unwrap();

@@ -3,7 +3,7 @@
 //!
 //! This crate is the **low seam**: it owns the trait and the policy/registry
 //! types, nothing that needs the in-VM shell. The concrete TAP / bridge /
-//! gvproxy / passt provider stays in `mvm-backend` (where `run_in_vm` and the
+//! native-gateway / passt provider stays in `mvm-backend` (where `run_in_vm` and the
 //! `VmSlot` substrate live) and implements this trait; mvmd's WireGuard /
 //! Tailscale mesh provider implements it too. Both register against the
 //! [`registry::NetworkProviderRegistry`], so a `NetworkMode::Custom` mesh

@@ -252,6 +252,20 @@ let
       chmod -R u+w .
 
       export ARCH=${kernelArch}
+      # Kbuild's config phase shells out through helper probes that assume a
+      # plain compiler/tool name surface. Relying on the ambient stdenv vars
+      # can leak wrapper-specific values into those probes, which then get
+      # treated as literal commands during `make defconfig`.
+      export HOSTCC=cc
+      export HOSTCXX=c++
+      export CC=cc
+      export CXX=c++
+      export LD=ld
+      export AR=ar
+      export NM=nm
+      export OBJCOPY=objcopy
+      export OBJDUMP=objdump
+      export STRIP=strip
 
       # `scripts/config` ships `#!/usr/bin/env bash`; the Nix sandbox has
       # no `/usr/bin/env`. patchShebangs rewrites to the sandbox bash.

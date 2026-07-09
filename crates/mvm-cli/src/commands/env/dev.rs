@@ -420,7 +420,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             }
             let dev_volumes = resolve_dev_volumes(&volume)?;
 
-            // Reap helpers (gvproxy/supervisor) leaked by a prior killed
+            // Reap helpers (legacy gateway/supervisor) leaked by a prior killed
             // run before booting a fresh builder VM. Kill-only, quiet,
             // non-fatal — see `sweep_orphaned_vm_helpers_on_startup`.
             dev_vz::sweep_orphaned_vm_helpers_on_startup();

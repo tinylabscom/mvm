@@ -129,6 +129,14 @@ pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<st
 /// `root=/dev/vda rw init=/init` matches Apple Container's
 /// boot for the same Nix-built rootfs layout.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
+const VSOCK_ONLY_CMDLINE_TOKEN: &str = "mvm.vsock_only=1";
+
+fn disconnected_guest_mac(name: &str) -> [u8; 6] {
+    use sha2::{Digest, Sha256};
+
+    let digest = Sha256::digest(name.as_bytes());
+    [0x02, digest[0], digest[1], digest[2], digest[3], digest[4]]
+}
 
 /// Build the supervisor config for one VM, lifting
 /// the audit-substrate resolution into the shared `audit_substrate`
@@ -139,9 +147,9 @@ const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
 /// may carry secret bindings, env vars, or policy refs that resolve
 /// to credentials. They're opaque transport bytes; the supervisor
 /// re-verifies the signed envelope before trusting any decoded field.
-/// Workload-**independent** KrunContext: kernel + resources + cmdline + vsock wiring +
-/// the configured virtio-net gateway. **No rootfs** (the cold path sets the workload
-/// rootfs; a prelaunched standby leaves it `None` until claim) and **no user volumes**.
+/// Workload-**independent** KrunContext: kernel + resources + cmdline + vsock wiring.
+/// **No rootfs** (the cold path sets the workload rootfs; a prelaunched standby
+/// leaves it `None` until claim), **no user volumes**, and **no guest NIC**.
 /// Shared verbatim by `build_supervisor_config` (cold) and `standby_base_config` (warm)
 /// so the two launch paths can't drift.
 fn krun_context_base(
@@ -157,6 +165,7 @@ fn krun_context_base(
     let mut krun = KrunContext::new(name, kernel, "")
         .with_resources(vcpus, mem_mib)
         .with_cmdline(cmdline)
+        .with_disconnected_net(disconnected_guest_mac(name))
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
         // Workload exit-code capture (listen=false → host binds).
@@ -175,23 +184,7 @@ fn krun_context_base(
         // the per-machine proxy that connects to SSH_AUTH_SOCK.
         .add_host_listen_port(mvm_guest::vsock::SSH_AGENT_PORT);
     krun.rootfs_path = None;
-    // Select the gateway through the same
-    // `resolve_networking_mode` the builder VM + cold path use (TSI is rejected by the
-    // claim-10 no-bypass bridge). Workload-independent, so it belongs in the base.
-    let scratch = state_dir.to_string_lossy().into_owned();
-    match mvm_build::libkrun_builder::resolve_networking_mode() {
-        mvm_build::libkrun_builder::NetworkingPreference::Gvproxy => {
-            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
-        }
-        mvm_build::libkrun_builder::NetworkingPreference::Passt => {
-            krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
-        }
-        // Native reuses the gvproxy vfkit backend; the binary swap happens
-        // in gvproxy::locate_gvproxy via MVM_GATEWAY_BIN.
-        mvm_build::libkrun_builder::NetworkingPreference::Native => {
-            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
-        }
-    }
+    krun
 }
 
 /// Translate a backend-agnostic [`StandbySpec`] into the `SupervisorBaseConfig`
@@ -282,6 +275,21 @@ fn vsock_egress_cmdline_token(opt_in: bool, has_bound_secrets: bool) -> Option<S
     (opt_in && !has_bound_secrets).then(|| "mvm.vsock_egress=1".to_string())
 }
 
+fn persist_vsock_egress_marker(name: &str, enabled: bool) -> Result<()> {
+    let marker = mvm_core::config::vm_vsock_egress_marker_path(name);
+    if enabled {
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create vsock egress marker dir {}", parent.display()))?;
+        }
+        std::fs::write(&marker, b"1")
+            .with_context(|| format!("write vsock egress marker {}", marker.display()))?;
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+    Ok(())
+}
+
 fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<SupervisorConfig> {
     let kernel = config
         .kernel_path
@@ -301,6 +309,8 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    cmdline.push(' ');
+    cmdline.push_str(VSOCK_ONLY_CMDLINE_TOKEN);
     if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
         cmdline.push(' ');
         cmdline.push_str(&token);
@@ -315,6 +325,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    persist_vsock_egress_marker(&config.name, cmdline.contains("mvm.vsock_egress=1"))?;
     // Workload-independent KrunContext (kernel + resources + vsock + gateway), shared
     // verbatim with the standby spawn so the two paths can't drift. The cold path
     // then sets the workload rootfs + user volumes below.
@@ -1092,6 +1103,7 @@ fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn sample_standby_spec() -> StandbySpec {
         StandbySpec {
@@ -1657,5 +1669,20 @@ mod tests {
         // Any disqualifier → no token (legacy NIC path, byte-identical cmdline).
         assert_eq!(vsock_egress_cmdline_token(false, false), None);
         assert_eq!(vsock_egress_cmdline_token(true, true), None);
+    }
+
+    #[test]
+    fn persist_vsock_egress_marker_writes_and_clears_marker() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+
+        persist_vsock_egress_marker("marker-vm", true).expect("write marker");
+        assert!(mvm_core::config::vm_vsock_egress_marker_path("marker-vm").is_file());
+
+        persist_vsock_egress_marker("marker-vm", false).expect("clear marker");
+        assert!(!mvm_core::config::vm_vsock_egress_marker_path("marker-vm").exists());
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 }

@@ -215,6 +215,73 @@ fn builder_vm_bootstrap_installed_binary_may_download_on_cache_miss() {
     assert_eq!(action, BuilderVmBootstrapAction::DownloadPublished);
 }
 
+#[cfg(feature = "builder-vm")]
+#[test]
+fn first_nameserver_from_resolv_conf_ignores_comments_and_invalid_lines() {
+    let body = "\
+# comment
+search example.internal
+nameserver invalid
+nameserver 10.0.0.2
+nameserver 10.0.0.3
+";
+    assert_eq!(
+        bootstrap::first_nameserver_from_resolv_conf(body).as_deref(),
+        Some("10.0.0.2")
+    );
+}
+
+#[cfg(feature = "builder-vm")]
+#[test]
+fn first_nameserver_from_resolv_conf_none_when_absent() {
+    let body = "search example.internal\noptions timeout:1\n";
+    assert_eq!(bootstrap::first_nameserver_from_resolv_conf(body), None);
+}
+
+#[cfg(feature = "builder-vm")]
+#[test]
+fn stage0_build_conf_contents_emits_workspace_archive_offline_and_overrides() {
+    let with_workspace = bootstrap::stage0_build_conf_contents(
+        "default",
+        "image",
+        Some("1.1.1.1"),
+        Some("/out/stage0-workspace.tar.gz"),
+        true,
+        &[bootstrap::Stage0InputOverride {
+            input_path: "nixpkgs".to_string(),
+            guest_path: "/out/stage0-inputs/nixpkgs.tar.gz".to_string(),
+        }],
+    );
+    assert!(with_workspace.contains("MVM_STAGE0_BUILD_ATTR=default\n"));
+    assert!(with_workspace.contains("MVM_STAGE0_OUTPUT_MODE=image\n"));
+    assert!(with_workspace.contains("MVM_STAGE0_RESOLVER=1.1.1.1\n"));
+    assert!(with_workspace.contains("MVM_STAGE0_WORKSPACE_ARCHIVE=/out/stage0-workspace.tar.gz\n"));
+    assert!(with_workspace.contains("MVM_STAGE0_OFFLINE=1\n"));
+    assert!(
+        with_workspace
+            .contains("MVM_STAGE0_OVERRIDE_INPUT_0=nixpkgs=/out/stage0-inputs/nixpkgs.tar.gz\n")
+    );
+
+    let minimal =
+        bootstrap::stage0_build_conf_contents("stage0-rootfs", "rootfs", None, None, false, &[]);
+    assert!(minimal.contains("MVM_STAGE0_BUILD_ATTR=stage0-rootfs\n"));
+    assert!(minimal.contains("MVM_STAGE0_OUTPUT_MODE=rootfs\n"));
+    assert!(!minimal.contains("MVM_STAGE0_RESOLVER="));
+    assert!(!minimal.contains("MVM_STAGE0_WORKSPACE_ARCHIVE="));
+    assert!(!minimal.contains("MVM_STAGE0_OFFLINE="));
+}
+
+#[cfg(feature = "builder-vm")]
+#[test]
+fn stage0_locked_input_sources_read_builder_flake_lock() {
+    let flake_dir = find_builder_vm_flake().expect("builder flake path");
+    let inputs = bootstrap::stage0_locked_input_sources(&flake_dir).expect("parse flake.lock");
+    assert_eq!(inputs.len(), 3);
+    assert_eq!(inputs[0].0, "nixpkgs");
+    assert_eq!(inputs[1].0, "microvm");
+    assert_eq!(inputs[2].0, "microvm/spectrum");
+}
+
 /// Even when the resolver routes to `DownloadPublished`,
 /// a contributor build (no `release-artifact-bootstrap` feature) must
 /// refuse to invoke the download path and surface a clear structural

@@ -43,13 +43,13 @@ pub use sys::{BundledKernel, LogLevel, extract_bundled_kernel, init_log, set_log
 #[cfg(target_family = "unix")]
 pub mod passt;
 
-// gvproxy-backed virtio-net. The macOS counterpart to passt; both modules share the
-// same shape (spawn child, hand its socket to libkrun, kill on Drop)
-// but gvproxy uses libkrun's `krun_add_net_unixgram` (path-based)
-// where passt uses `krun_add_net_unixstream` (fd-passed). Same unix
-// gate as passt — Windows has neither.
+// Native-gateway-backed virtio-net. The macOS counterpart to passt; both
+// modules share the same shape (spawn child, hand its socket to libkrun, kill
+// on Drop) but the native gateway uses libkrun's `krun_add_net_unixgram`
+// (path-based) where passt uses `krun_add_net_unixstream` (fd-passed). Same
+// unix gate as passt — Windows has neither.
 #[cfg(target_family = "unix")]
-pub mod gvproxy;
+pub mod native_gateway;
 
 // Tie a spawned networking helper to its supervisor's lifetime so a dead
 // supervisor never orphans it (Linux `PR_SET_PDEATHSIG`; no-op elsewhere).
@@ -331,6 +331,14 @@ pub enum NetworkingMode {
     /// libkrun's built-in TSI backend (no virtio-net, no DHCP).
     #[default]
     Tsi,
+    /// virtio-net wired to a local sink socket with no host gateway. This
+    /// disables libkrun's implicit TSI path while providing no guest-usable
+    /// network route; guest AF_INET traffic is dropped unless the guest itself
+    /// routes over a separate channel such as host-bound vsock.
+    Disconnected {
+        /// MAC address for the guest's eth0.
+        mac: [u8; 6],
+    },
     /// virtio-net via passt. The supervisor process (whichever links
     /// `libkrun-sys`) spawns a passt child inside `run_supervisor`,
     /// hands its socket fd to `krun_add_net_unixstream`, and reaps
@@ -348,27 +356,26 @@ pub enum NetworkingMode {
         /// co-located. The supervisor creates it if absent.
         scratch_dir: String,
     },
-    /// virtio-net via gvproxy. The supervisor spawns a
-    /// gvproxy child inside `run_supervisor`, points libkrun's
-    /// `krun_add_net_unixgram` at the listener socket gvproxy
-    /// creates, and reaps gvproxy on guest exit. Same model as
+    /// virtio-net via the native vfkit gateway. The supervisor spawns the
+    /// configured gateway inside `run_supervisor`, points libkrun's
+    /// `krun_add_net_unixgram` at the listener socket it creates,
+    /// and reaps the gateway on guest exit. Same model as
     /// `Passt` but unixgram-flavored: libkrun connects to a path
     /// on disk rather than receiving a pre-opened socket fd. This
     /// is the canonical macOS backend (passt is Linux-only).
-    Gvproxy {
+    NativeGateway {
         /// MAC address for the guest's eth0. Same shape as the
         /// `Passt` variant.
         mac: [u8; 6],
-        /// Host directory where the supervisor stages gvproxy's
-        /// listener socket (`<scratch_dir>/gvproxy.sock`) + log
-        /// file (`<scratch_dir>/gvproxy.log`).
+        /// Host directory where the supervisor stages the gateway's
+        /// listener socket + log file.
         scratch_dir: String,
         /// When set, launch the gateway natively as
         /// `<MVM_GATEWAY_BIN> run --config <path>` instead of the
-        /// gvproxy-compat `-listen-vfkit` arg set. The config's
-        /// `[transport].path` must be `<scratch_dir>/gvproxy.sock` so
+        /// `-listen-vfkit` compatibility arg set. The config's
+        /// `[transport].path` must match the scratch socket path so
         /// libkrun's `add_net_unixgram` connects to the same unixgram
-        /// socket either path creates. Absent → gvproxy-compat (default).
+        /// socket either path creates. Absent → compatibility mode.
         #[serde(default)]
         native_config: Option<String>,
     },
@@ -513,12 +520,13 @@ impl KrunContext {
         self
     }
 
-    /// Switch the guest to gvproxy-backed virtio-net. Same shape as
+    /// Switch the guest to native-gateway-backed virtio-net. Same shape as
     /// [`Self::with_passt`] but uses libkrun's unixgram backend; the
-    /// supervisor spawns gvproxy with `--listen-vfkit <socket>` and
-    /// hands the socket path to `krun_add_net_unixgram`.
-    pub fn with_gvproxy(mut self, mac: [u8; 6], scratch_dir: impl Into<String>) -> Self {
-        self.networking = NetworkingMode::Gvproxy {
+    /// supervisor spawns the configured native gateway with
+    /// `--listen-vfkit <socket>` (or `run --config <path>`) and hands the
+    /// socket path to `krun_add_net_unixgram`.
+    pub fn with_native_gateway(mut self, mac: [u8; 6], scratch_dir: impl Into<String>) -> Self {
+        self.networking = NetworkingMode::NativeGateway {
             mac,
             scratch_dir: scratch_dir.into(),
             native_config: None,
@@ -526,14 +534,22 @@ impl KrunContext {
         self
     }
 
-    /// Point an already-`with_gvproxy`'d context at a pre-rendered native
+    /// Point an already-`with_native_gateway`'d context at a pre-rendered native
     /// gateway config, so the supervisor launches `<MVM_GATEWAY_BIN> run
-    /// --config <path>` rather than the gvproxy-compat arg set. No-op if
-    /// networking isn't `Gvproxy`.
-    pub fn with_gvproxy_native_config(mut self, config_path: impl Into<String>) -> Self {
-        if let NetworkingMode::Gvproxy { native_config, .. } = &mut self.networking {
+    /// --config <path>` rather than the compatibility arg set. No-op if
+    /// networking isn't [`NetworkingMode::NativeGateway`].
+    pub fn with_native_gateway_config(mut self, config_path: impl Into<String>) -> Self {
+        if let NetworkingMode::NativeGateway { native_config, .. } = &mut self.networking {
             *native_config = Some(config_path.into());
         }
+        self
+    }
+
+    /// Switch the guest to a disconnected virtio-net device. This exists only
+    /// to suppress libkrun's implicit TSI bypass while keeping the guest
+    /// fail-closed to vsock-owned egress paths.
+    pub fn with_disconnected_net(mut self, mac: [u8; 6]) -> Self {
+        self.networking = NetworkingMode::Disconnected { mac };
         self
     }
 
@@ -706,22 +722,67 @@ fn configure(ctx: &KrunContext) -> Result<sys::Context, Error> {
 pub enum GatewayHandle {
     /// Not using a virtio-net backend — TSI is enabled implicitly.
     None,
+    /// A sink socket that disables TSI without providing a host gateway.
+    Disconnected(DisconnectedNetHandle),
     /// passt child (Linux).
     Passt(passt::PasstHandle),
-    /// gvproxy child (macOS / cross-platform fallback).
-    Gvproxy(gvproxy::GvproxyHandle),
+    /// Native gateway child (macOS / cross-platform fallback).
+    NativeGateway(native_gateway::NativeGatewayHandle),
+}
+
+#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
+pub struct DisconnectedNetHandle {
+    _libkrun_socket: std::os::unix::net::UnixStream,
+    _drain_thread: std::thread::JoinHandle<()>,
+}
+
+#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
+fn disconnected_net_handle(
+    mac: &[u8; 6],
+    krun: &sys::Context,
+) -> Result<DisconnectedNetHandle, Error> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+
+    let (libkrun_socket, mut sink_socket) =
+        std::os::unix::net::UnixStream::pair().map_err(|e| Error::Io {
+            context: format!("creating disconnected virtio-net socketpair: {e}"),
+        })?;
+    krun.add_net_unixstream_fd(
+        libkrun_socket.as_raw_fd(),
+        mac,
+        sys::PASST_NET_FEATURES,
+        /* flags = */ 0,
+    )?;
+    let drain_thread = std::thread::spawn(move || {
+        let mut buf = [0_u8; 8192];
+        loop {
+            match sink_socket.read(&mut buf) {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+    Ok(DisconnectedNetHandle {
+        _libkrun_socket: libkrun_socket,
+        _drain_thread: drain_thread,
+    })
 }
 
 /// configure() variant that owns the network-gateway child process
 /// for the lifetime of the returned
 /// context. Used by [`run_supervisor`] when
-/// `NetworkingMode::{Passt, Gvproxy}` is set. The handle Drop's after
+/// `NetworkingMode::{Passt, NativeGateway}` is set. The handle Drop's after
 /// libkrun finishes consuming the socket and the guest exits.
 #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
 fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHandle), Error> {
     let krun = configure_pre_net(ctx)?;
     let handle = match &ctx.networking {
         NetworkingMode::Tsi => GatewayHandle::None,
+        NetworkingMode::Disconnected { mac } => {
+            GatewayHandle::Disconnected(disconnected_net_handle(mac, &krun)?)
+        }
         NetworkingMode::Passt { mac, scratch_dir } => {
             let handle =
                 passt::spawn(std::path::Path::new(scratch_dir)).map_err(|e| Error::Io {
@@ -735,34 +796,34 @@ fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHan
             )?;
             GatewayHandle::Passt(handle)
         }
-        NetworkingMode::Gvproxy {
+        NetworkingMode::NativeGateway {
             mac,
             scratch_dir,
             native_config,
         } => {
-            let handle = gvproxy::spawn(
+            let handle = native_gateway::spawn(
                 std::path::Path::new(scratch_dir),
                 native_config.as_deref().map(std::path::Path::new),
             )
             .map_err(|e| Error::Io {
-                context: format!("spawning gvproxy for NetworkingMode::Gvproxy: {e}"),
+                context: format!("spawning native gateway for NetworkingMode::NativeGateway: {e}"),
             })?;
-            // gvproxy speaks libkrun's "vfkit mode" framing on the
+            // The native gateway speaks libkrun's "vfkit mode" framing on the
             // unixgram socket; NET_FLAG_VFKIT (see sys::NET_FLAG_VFKIT)
             // is libkrun's required signal to emit the magic-byte
             // handshake. NET_FLAG_DHCP_CLIENT (libkrun 1.18.0+) tells
             // libkrun's net device to bring the interface up via its
-            // in-guest DHCP client against gvproxy's DHCP server, so
+            // in-guest DHCP client against the gateway's DHCP server, so
             // the guest sees a fully-configured eth0 without needing
             // an in-guest udhcpc race. libkrun's own
-            // `tests/test_cases/src/test_net/gvproxy.rs` uses both.
+            // vfkit gateway tests use both.
             krun.add_net_unixgram_path(
                 handle.socket_path(),
                 mac,
                 sys::PASST_NET_FEATURES,
                 sys::NET_FLAG_VFKIT | sys::NET_FLAG_DHCP_CLIENT,
             )?;
-            GatewayHandle::Gvproxy(handle)
+            GatewayHandle::NativeGateway(handle)
         }
     };
     Ok((krun, handle))
@@ -773,7 +834,7 @@ fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHan
 // ============================================================================
 
 /// Endpoint fds the gateway audit bridge needs to splice between
-/// libkrun and the userspace network gateway (`passt` / `gvproxy`).
+/// libkrun and the userspace network gateway (`passt` / native gateway).
 ///
 /// Constructed by `configure_with_gateway_for_bridge` alongside
 /// the libkrun `sys::Context` and a [`GatewayHandle`] that keeps
@@ -784,7 +845,7 @@ fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHan
 ///
 /// Variants mirror `BridgeEndpoints` one-for-one so the bin can
 /// convert without case analysis: `Passt` → `BridgeEndpoints::Passt`,
-/// `LibkrunGvproxy` → `BridgeEndpoints::LibkrunGvproxy`.
+/// `LibkrunNativeGateway` → `BridgeEndpoints::LibkrunNativeGateway`.
 #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
 pub enum BridgeFds {
     /// Linux libkrun + passt. Both sides are `SOCK_STREAM`:
@@ -803,8 +864,8 @@ pub enum BridgeFds {
         gateway_fd: OwnedFd,
         supervisor_fd: OwnedFd,
     },
-    /// macOS libkrun + gvproxy. `SOCK_DGRAM`:
-    /// - `gvproxy_socket_path` is the path gvproxy bound its
+    /// macOS libkrun + native gateway. `SOCK_DGRAM`:
+    /// - `gateway_socket_path` is the path the gateway bound its
     ///   listener at on spawn.
     /// - `supervisor_listen_path` is where libkrun has been told
     ///   to connect (via `add_net_unixgram_path`); the bridge
@@ -814,16 +875,16 @@ pub enum BridgeFds {
     /// libkrun is an anonymous unixgram client — the bridge caches
     /// its autobind peer address from the first `recv_from`, then
     /// uses `send_to(peer, …)` for the ingress direction.
-    LibkrunGvproxy {
-        gvproxy_socket_path: std::path::PathBuf,
+    LibkrunNativeGateway {
+        gateway_socket_path: std::path::PathBuf,
         supervisor_listen_path: std::path::PathBuf,
     },
 }
 
 /// Bridge-inserting variant of [`configure_with_gateway`]. Spawns
-/// passt / gvproxy, then
+/// passt / native gateway, then
 /// interposes a supervisor-owned socket pair (`Passt`) or listener
-/// path (`LibkrunGvproxy`) between libkrun and the gateway so the
+/// path (`LibkrunNativeGateway`) between libkrun and the gateway so the
 /// gateway audit bridge can splice every byte through itself.
 ///
 /// Refuses [`NetworkingMode::Tsi`] — TSI bypasses virtio-net
@@ -850,6 +911,13 @@ fn configure_with_gateway_for_bridge(
     let krun = configure_pre_net(ctx)?;
     let (handle, bridge_fds) = match &ctx.networking {
         NetworkingMode::Tsi => unreachable!("refused above"),
+        NetworkingMode::Disconnected { .. } => {
+            return Err(Error::Io {
+                context: "configure_with_gateway_for_bridge refuses NetworkingMode::Disconnected: \
+                    the disconnected sink path is vsock-only and has no bridge surface"
+                    .to_string(),
+            });
+        }
         NetworkingMode::Passt { mac, scratch_dir } => {
             let mut handle =
                 passt::spawn(std::path::Path::new(scratch_dir)).map_err(|e| Error::Io {
@@ -887,22 +955,24 @@ fn configure_with_gateway_for_bridge(
                 },
             )
         }
-        NetworkingMode::Gvproxy {
+        NetworkingMode::NativeGateway {
             mac,
             scratch_dir,
             native_config,
         } => {
-            let handle = gvproxy::spawn(
+            let handle = native_gateway::spawn(
                 std::path::Path::new(scratch_dir),
                 native_config.as_deref().map(std::path::Path::new),
             )
             .map_err(|e| Error::Io {
-                context: format!("spawning gvproxy for bridged NetworkingMode::Gvproxy: {e}"),
+                context: format!(
+                    "spawning native gateway for bridged NetworkingMode::NativeGateway: {e}"
+                ),
             })?;
-            // Snapshot gvproxy's bind path before moving the handle
-            // into GatewayHandle::Gvproxy — the bridge needs it to
+            // Snapshot the gateway bind path before moving the handle
+            // into GatewayHandle::NativeGateway — the bridge needs it to
             // connect for the egress direction.
-            let gvproxy_socket_path = handle.socket_path().to_path_buf();
+            let gateway_socket_path = handle.socket_path().to_path_buf();
             // Pick a fresh path inside the per-VM bridge scratch
             // dir for the supervisor-side listener. The bridge
             // thread binds it; libkrun's add_net_unixgram_path
@@ -926,9 +996,9 @@ fn configure_with_gateway_for_bridge(
                 sys::NET_FLAG_VFKIT | sys::NET_FLAG_DHCP_CLIENT,
             )?;
             (
-                GatewayHandle::Gvproxy(handle),
-                BridgeFds::LibkrunGvproxy {
-                    gvproxy_socket_path,
+                GatewayHandle::NativeGateway(handle),
+                BridgeFds::LibkrunNativeGateway {
+                    gateway_socket_path,
                     supervisor_listen_path,
                 },
             )
@@ -975,9 +1045,9 @@ fn bridge_socketpair_stream() -> std::io::Result<(OwnedFd, OwnedFd)> {
 ///                 gateway_fd, supervisor_fd,
 ///             }
 ///         }
-///         BridgeFds::LibkrunGvproxy { gvproxy_socket_path, supervisor_listen_path } => {
-///             mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints::LibkrunGvproxy {
-///                 gvproxy_socket_path, supervisor_listen_path,
+///         BridgeFds::LibkrunNativeGateway { gateway_socket_path, supervisor_listen_path } => {
+///             mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints::LibkrunNativeGateway {
+///                 gateway_socket_path, supervisor_listen_path,
 ///             }
 ///         }
 ///     };
@@ -1107,7 +1177,7 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
         // Defensive: a prior VM run (clean stop or crash) leaves this
         // listener socket behind — the stop path doesn't unlink it —
         // and add_vsock_port2(listen=true) binds here, failing EEXIST
-        // (rc -17) on the stale file. Pre-unlink, mirroring the gvproxy
+        // (rc -17) on the stale file. Pre-unlink, mirroring the native-gateway
         // bridge socket above. Keeps `dev up` idempotent across runs.
         let _ = std::fs::remove_file(&socket);
         krun.add_vsock_port2(port, &socket, /* listen = */ true)?;
@@ -1258,18 +1328,18 @@ pub fn start_enter(ctx: &KrunContext) -> Result<std::convert::Infallible, Error>
 #[cfg(feature = "libkrun-sys")]
 fn install_shutdown_handler(_krun: &sys::Context) -> Result<(), Error> {
     extern "C" fn handle_sigterm(_sig: libc::c_int) {
-        // Reap our gvproxy first, then exit. Without this, `mvmctl stop`
-        // / `kill -TERM` tears down the supervisor but orphans gvproxy
+        // Reap our native gateway first, then exit. Without this, `mvmctl stop`
+        // / `kill -TERM` tears down the supervisor but orphans the gateway
         // (re-parented to init), which keeps holding any inherited fd
         // and accumulates as a leaked daemon. `kill(2)` and the atomic
         // load are async-signal-safe (signal-safety(7)); `_exit` is too.
         // Status 143 = 128 + SIGTERM, the shell convention for "killed
         // by SIGTERM".
-        let gvproxy_pid =
-            crate::gvproxy::RUNNING_GVPROXY_PID.load(std::sync::atomic::Ordering::SeqCst);
+        let gateway_pid = crate::native_gateway::RUNNING_NATIVE_GATEWAY_PID
+            .load(std::sync::atomic::Ordering::SeqCst);
         unsafe {
-            if gvproxy_pid > 0 {
-                libc::kill(gvproxy_pid, libc::SIGTERM);
+            if gateway_pid > 0 {
+                libc::kill(gateway_pid, libc::SIGTERM);
             }
             libc::_exit(143);
         }

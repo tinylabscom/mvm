@@ -35,16 +35,27 @@ impl LinuxEnv for NativeEnv {
             );
         }
 
-        let status = Command::new("bash")
+        let output = Command::new("bash")
             .args(["-c", script])
             .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
+            .stdout(if crate::base::ui::is_chrome_routed_to_stderr() {
+                Stdio::piped()
+            } else {
+                Stdio::inherit()
+            })
             .stderr(Stdio::inherit())
-            .status()
+            .output()
             .with_context(|| "Failed to run command on host")?;
 
-        if !status.success() {
-            anyhow::bail!("Command failed (exit {})", status.code().unwrap_or(-1));
+        if crate::base::ui::is_chrome_routed_to_stderr() && !output.stdout.is_empty() {
+            std::io::stderr().write_all(&output.stdout).ok();
+        }
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "Command failed (exit {})",
+                output.status.code().unwrap_or(-1)
+            );
         }
         Ok(())
     }
@@ -257,7 +268,11 @@ impl LinuxEnv for DevVmEnv {
         let output = self.exec_via_vsock(script, 300)?;
         // Print stdout/stderr to the terminal (visible execution)
         if !output.stdout.is_empty() {
-            std::io::stdout().write_all(&output.stdout).ok();
+            if crate::base::ui::is_chrome_routed_to_stderr() {
+                std::io::stderr().write_all(&output.stdout).ok();
+            } else {
+                std::io::stdout().write_all(&output.stdout).ok();
+            }
         }
         if !output.stderr.is_empty() {
             std::io::stderr().write_all(&output.stderr).ok();
@@ -338,6 +353,14 @@ mod tests {
 
     #[test]
     fn dev_vm_connects_via_libkrun_per_port_socket() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.set("HOME", tmp.path());
+        env.remove("MVM_DATA_DIR");
+
         // The dev env dials the libkrun dev VM's per-port vsock listener at
         // `<vm_state_dir>/vsock-<port>.sock` — the same path
         // `LibkrunTransport::for_vm` resolves, so the flake-build env and the

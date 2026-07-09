@@ -1,42 +1,34 @@
 //! `LibkrunNetworkProvider` — the mvm-build impl of
-//! [`mvm_network::NetworkProvider`] for the libkrun gvproxy/passt path (macOS
-//! libkrun + Linux libkrun).
+//! [`mvm_network::NetworkProvider`] for the libkrun vsock-egress path.
 //!
 //! Unlike the Firecracker `BridgeTapNetworkProvider`, which owns a host bridge
 //! + TAP, this provider owns **no host resource**. A libkrun guest's egress is
-//! the in-process gateway bridge reached via gvproxy (macOS) or passt (Linux),
-//! and that gateway's child process + unix sockets are spawned and reaped
-//! *inside the supervisor process* (`mvm-libkrun-supervisor`), not here. So
-//! `provision` is a pure config *selection* — which gateway — and `teardown`
-//! is a no-op. The actual `krun_add_net_*` wiring happens later, when the
-//! supervisor consumes the resolved `NetworkingPreference`.
+//! the host-bound vsock relay served by `mvm-libkrun-supervisor`, not a guest
+//! NIC plus a host gateway child process. So `provision` is pure config
+//! selection and `teardown` is a no-op.
 //!
-//! claim-10: the provider only chooses among virtio-net gateway paths
-//! (native/gvproxy/passt); there is no no-gateway / TSI bypass to select (TSI
-//! was removed). The native path feeds rvproxy's flow-audit export into the
-//! chain signer, while gvproxy/passt keep the gateway-bridge chokepoint.
+//! claim-10: the provider advertises the default-deny policy while the
+//! supervisor-owned vsock relay remains the single chokepoint.
 //!
 //! Scope: this provider is still a config producer only. Both the builder path
 //! ([`apply_networking_mode`](crate::libkrun_builder)) and the workload base
-//! config resolve the same [`NetworkingPreference`] helper; re-pointing them
-//! through this provider is a cleanup, not a behavior gate.
+//! config are already NIC-less; this provider just exposes that posture to the
+//! registry.
 
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;
 use mvm_network::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 
-use crate::libkrun_builder::{NetworkingPreference, resolve_networking_mode};
-
 /// Host opt-in for the transparent-TCP vsock egress path on libkrun (Phase A).
-/// Unset ⇒ the legacy gvproxy/passt NIC path is used unchanged. Mirrors the
-/// `MVM_NETWORKING` selector convention (present-and-non-empty ⇒ on).
+/// Unset ⇒ the host-side raw egress listener is not started. Mirrors the
+/// present-and-non-empty env-var convention used elsewhere.
 pub fn vsock_egress_opt_in() -> bool {
     std::env::var("MVM_VSOCK_EGRESS")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false)
 }
 
-/// libkrun gvproxy/passt network provider (a config producer; owns no host
+/// libkrun vsock-egress network provider (a config producer; owns no host
 /// state — see the module docs).
 pub struct LibkrunNetworkProvider {
     /// The provider's advertised default — `deny_all()` (claim 10). The
@@ -51,17 +43,9 @@ impl LibkrunNetworkProvider {
         }
     }
 
-    /// Stable kind string for a resolved gateway preference — the `tag`
-    /// `provision` mints and the supervisor's config build keys on.
-    fn gateway_kind(pref: NetworkingPreference) -> &'static str {
-        match pref {
-            NetworkingPreference::Gvproxy => "gvproxy",
-            NetworkingPreference::Passt => "passt",
-            // Native shares the gvproxy vfkit spawn path — it differs only in
-            // the binary (via MVM_GATEWAY_BIN) — so the supervisor config keys
-            // on the same "gvproxy" kind.
-            NetworkingPreference::Native => "gvproxy",
-        }
+    /// Stable kind string for the NIC-less libkrun path.
+    fn transport_kind() -> &'static str {
+        "vsock-egress"
     }
 }
 
@@ -77,12 +61,11 @@ impl NetworkProvider for LibkrunNetworkProvider {
     }
 
     fn provision(&self, vm: &VmId, _spec: &NetworkSpec) -> Result<NetHandle, NetworkError> {
-        // Pure selection: resolve the per-OS / MVM_NETWORKING gateway. No host
-        // syscalls — the gvproxy/passt child + krun_add_net_* run later, inside
-        // the supervisor process, from this preference.
+        // Pure selection: the active libkrun path is always NIC-less and
+        // relies on the supervisor-owned vsock egress relay.
         Ok(NetHandle {
             vm: vm.clone(),
-            tag: Self::gateway_kind(resolve_networking_mode()).to_string(),
+            tag: Self::transport_kind().to_string(),
         })
     }
 
@@ -107,34 +90,21 @@ mod tests {
     use mvm_network::{NetworkProvider, NetworkSpec};
 
     #[test]
-    fn provision_tags_handle_with_a_known_gateway() {
+    fn provision_tags_handle_with_vsock_egress() {
         let provider = LibkrunNetworkProvider::new();
         let handle = provider
             .provision(&VmId("vm".to_string()), &NetworkSpec::default())
             .unwrap();
-        // The tag is the resolved gateway kind; no host resource is provisioned,
+        // The tag is the fixed transport kind; no host resource is provisioned,
         // so teardown is a clean no-op.
-        assert!(["gvproxy", "passt"].contains(&handle.tag.as_str()));
+        assert_eq!(handle.tag, "vsock-egress");
         assert_eq!(handle.vm.0, "vm");
         assert!(provider.teardown(handle).is_ok());
     }
 
     #[test]
-    fn gateway_kind_maps_each_preference() {
-        // Deterministic mapping, independent of host OS / MVM_NETWORKING.
-        assert_eq!(
-            LibkrunNetworkProvider::gateway_kind(NetworkingPreference::Gvproxy),
-            "gvproxy"
-        );
-        assert_eq!(
-            LibkrunNetworkProvider::gateway_kind(NetworkingPreference::Passt),
-            "passt"
-        );
-        // Native reuses the gvproxy vfkit kind; the binary swap is orthogonal.
-        assert_eq!(
-            LibkrunNetworkProvider::gateway_kind(NetworkingPreference::Native),
-            "gvproxy"
-        );
+    fn transport_kind_is_stable() {
+        assert_eq!(LibkrunNetworkProvider::transport_kind(), "vsock-egress");
     }
 
     #[test]
@@ -144,7 +114,7 @@ mod tests {
         // claim-10: advertised default is deny-all, opening egress is opt-in.
         assert_eq!(*provider.policy(), NetworkPolicy::deny_all());
         // libkrun's chokepoint is the supervisor's in-process gateway-bridge
-        // FlowPolicy, not a separate EgressEnforcer object → None (default).
+        // FlowPolicy, not a separate EgressEnforcer object -> None (default).
         assert!(provider.egress_enforcer().is_none());
     }
 

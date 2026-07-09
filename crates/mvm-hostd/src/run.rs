@@ -144,18 +144,15 @@ pub fn admit_and_boot_local(
 mod tests {
     use super::*;
     use crate::plan_admission::SystemClock;
+    use mvm_core::util::test_env::TestEnv;
 
     /// A local run over the mock backend admits a signed plan and boots — no
     /// subprocess, no CLI. Proves the seam the local backend calls is real.
     #[test]
     fn admit_and_boot_local_over_mock_boots_admitted_plan() {
         let data = tempfile::tempdir().unwrap();
-        // Isolate the mock backend's per-VM dirs + keystore under a tempdir so
-        // the test never touches the real ~/.mvm.
-        // SAFETY: single-threaded test; no other thread reads these vars.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", data.path());
         let keys = tempfile::tempdir().unwrap();
 
         let rootfs = data.path().join("rootfs.ext4");

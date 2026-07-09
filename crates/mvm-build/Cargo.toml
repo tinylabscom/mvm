@@ -66,6 +66,7 @@ lzma-rs = "0.3"
 
 mvm-core.workspace = true
 mvm-ext4.workspace = true
+mvm-guest-helpers.workspace = true
 # Read xattrs during the pure walk so a tree carrying attrs the writer can't
 # represent (e.g. `security.capability`) routes to the builder-VM fallback
 # instead of silently dropping them. Already in the mvmctl closure via mvm-oci.
@@ -108,6 +109,7 @@ tempfile.workspace = true
 thiserror = "1"
 toml.workspace = true
 tracing.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }
 # `builder_protocol::{HostVmRequest,HostVmResponse}`
 # carry a `JobId(Uuid)` to disambiguate concurrent dispatches over
 # the persistent VM channel. Existing mvm-core / mvm-cli call sites

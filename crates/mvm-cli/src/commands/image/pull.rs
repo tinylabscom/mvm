@@ -8,7 +8,8 @@ use crate::ui;
 
 pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<()> {
     // Materialization may spawn a builder VM (see `resolve_or_pull_run_image`);
-    // reap any gvproxy a prior run's builder orphaned before adding another.
+    // reap any orphaned per-VM helper a prior run's builder left behind before
+    // adding another.
     crate::commands::env::dev_vz::sweep_orphaned_vm_helpers_on_startup();
 
     let (image, trust, auth_source) = super::pull_image_with_trust(cache_root, &reference, prod)?;

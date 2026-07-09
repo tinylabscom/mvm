@@ -19,7 +19,7 @@
 //!
 //! Unlike the old `mvm-firecracker-bridge` (whole-binary Linux gate), this
 //! binary is cross-platform: the `Passt` endpoint is Linux-only (socketpair +
-//! passt + `mvm-jailer-lite` confinement), while the libkrun-gvproxy endpoint
+//! passt + `mvm-jailer-lite` confinement), while the libkrun native-gateway endpoint
 //! runs on macOS. `confine_self` (Landlock + seccomp) is
 //! **Linux-only** — on macOS it is a hard-erroring stub because the OS has no
 //! kernel LSM — so confinement is applied per-arm where the OS supports it; the
@@ -103,7 +103,8 @@ fn run() -> Result<()> {
     // ── Step 4: apply mvm-jailer-lite confinement where supported ───
     //
     // Linux-only: `confine_self` is Landlock+seccomp. On macOS it is a
-    // hard-erroring stub (no kernel LSM), so the macOS libkrun-gvproxy arm runs
+    // hard-erroring stub (no kernel LSM), so the macOS libkrun native-gateway
+    // arm runs
     // unconfined. Per the partial-confinement contract, any error here is a hard
     // exit.
     #[cfg(target_os = "linux")]
@@ -198,12 +199,12 @@ fn run() -> Result<()> {
     }
 }
 
-/// Observer leaf capabilities by endpoint. Passt and the in-process gvproxy
+/// Observer leaf capabilities by endpoint. Passt and the in-process native gateway
 /// shuffle sit directly on the byte stream (`payload_tap: true`). Pure —
 /// unit-tested.
 fn leaf_caps_for(kind: &BridgeEndpointKind) -> ProviderCapabilities {
     match kind {
-        BridgeEndpointKind::Passt { .. } | BridgeEndpointKind::LibkrunGvproxy { .. } => {
+        BridgeEndpointKind::Passt { .. } | BridgeEndpointKind::LibkrunNativeGateway { .. } => {
             ProviderCapabilities {
                 flow_events: true,
                 payload_tap: true,
@@ -216,12 +217,12 @@ fn leaf_caps_for(kind: &BridgeEndpointKind) -> ProviderCapabilities {
 fn endpoint_label(kind: &BridgeEndpointKind) -> &'static str {
     match kind {
         BridgeEndpointKind::Passt { .. } => "passt",
-        BridgeEndpointKind::LibkrunGvproxy { .. } => "libkrun_gvproxy",
+        BridgeEndpointKind::LibkrunNativeGateway { .. } => "libkrun_native_gateway",
     }
 }
 
 /// Refuse an endpoint the running OS cannot serve. `Passt` requires Linux
-/// (socketpair + passt + jailer-lite); the gvproxy path runs on macOS.
+/// (socketpair + passt + jailer-lite); the native-gateway path runs on macOS.
 /// Pure (cfg-dependent) — unit-tested against the host it compiles on.
 fn check_endpoint_platform(kind: &BridgeEndpointKind) -> Result<()> {
     match kind {
@@ -238,7 +239,7 @@ fn check_endpoint_platform(kind: &BridgeEndpointKind) -> Result<()> {
                 Ok(())
             }
         }
-        BridgeEndpointKind::LibkrunGvproxy { .. } => Ok(()),
+        BridgeEndpointKind::LibkrunNativeGateway { .. } => Ok(()),
     }
 }
 
@@ -255,11 +256,12 @@ fn confine_for_endpoint(cfg: &BridgeConfigJson) -> Result<()> {
             );
             confine_self(&spec).context("apply mvm-jailer-lite confinement (passt)")
         }
-        // libkrun-gvproxy on Linux needs a dedicated (passt-free) confinement
+        // libkrun native-gateway on Linux needs a dedicated (passt-free)
+        // confinement
         // spec; that arm has no producer until libkrun moves onto this sidecar,
         // so refuse rather than ship an unconfined Linux path.
-        BridgeEndpointKind::LibkrunGvproxy { .. } => anyhow::bail!(
-            "libkrun-gvproxy confinement on Linux is not yet wired (no producer emits \
+        BridgeEndpointKind::LibkrunNativeGateway { .. } => anyhow::bail!(
+            "libkrun native-gateway confinement on Linux is not yet wired (no producer emits \
              this endpoint until the libkrun supervisor is split); refusing to run an \
              unconfined Linux bridge"
         ),
@@ -300,11 +302,11 @@ fn build_endpoints(cfg: &BridgeConfigJson) -> Result<BridgeEndpoints> {
                 anyhow::bail!("Passt endpoint is Linux-only")
             }
         }
-        BridgeEndpointKind::LibkrunGvproxy {
-            gvproxy_socket_path,
+        BridgeEndpointKind::LibkrunNativeGateway {
+            gateway_socket_path,
             supervisor_listen_path,
-        } => Ok(BridgeEndpoints::LibkrunGvproxy {
-            gvproxy_socket_path: gvproxy_socket_path.clone(),
+        } => Ok(BridgeEndpoints::LibkrunNativeGateway {
+            gateway_socket_path: gateway_socket_path.clone(),
             supervisor_listen_path: supervisor_listen_path.clone(),
         }),
     }
@@ -323,9 +325,9 @@ mod tests {
             supervisor_fd_raw: 8,
         }
     }
-    fn gvproxy() -> BridgeEndpointKind {
-        BridgeEndpointKind::LibkrunGvproxy {
-            gvproxy_socket_path: PathBuf::from("/tmp/gv.sock"),
+    fn native_gateway() -> BridgeEndpointKind {
+        BridgeEndpointKind::LibkrunNativeGateway {
+            gateway_socket_path: PathBuf::from("/tmp/gv.sock"),
             supervisor_listen_path: PathBuf::from("/tmp/sup.sock"),
         }
     }
@@ -333,25 +335,25 @@ mod tests {
     #[test]
     fn leaf_caps_track_endpoint_payload_visibility() {
         assert!(leaf_caps_for(&passt()).payload_tap);
-        assert!(leaf_caps_for(&gvproxy()).payload_tap);
-        assert!(leaf_caps_for(&gvproxy()).flow_events);
+        assert!(leaf_caps_for(&native_gateway()).payload_tap);
+        assert!(leaf_caps_for(&native_gateway()).flow_events);
     }
 
     #[test]
     fn endpoint_labels_are_stable() {
         assert_eq!(endpoint_label(&passt()), "passt");
-        assert_eq!(endpoint_label(&gvproxy()), "libkrun_gvproxy");
+        assert_eq!(endpoint_label(&native_gateway()), "libkrun_native_gateway");
     }
 
     #[test]
     fn passt_platform_gate_matches_host() {
-        // Passt is admitted only on Linux; the gvproxy path always passes.
+        // Passt is admitted only on Linux; the native-gateway path always passes.
         assert_eq!(
             check_endpoint_platform(&passt()).is_ok(),
             cfg!(target_os = "linux"),
             "Passt must be admitted iff on Linux"
         );
-        assert!(check_endpoint_platform(&gvproxy()).is_ok());
+        assert!(check_endpoint_platform(&native_gateway()).is_ok());
     }
 
     #[test]
@@ -367,11 +369,11 @@ mod tests {
             plan_json: "{}".into(),
             bundle_json: None,
             network_policy_json: None,
-            endpoint: gvproxy(),
+            endpoint: native_gateway(),
         };
         assert!(matches!(
             build_endpoints(&cfg).unwrap(),
-            BridgeEndpoints::LibkrunGvproxy { .. }
+            BridgeEndpoints::LibkrunNativeGateway { .. }
         ));
     }
 }

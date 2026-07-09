@@ -11,7 +11,7 @@
 //! This module is the pure decision; the vsock device calls it before opening any
 //! host socket. The connect/proxy data path is the gateway's separate concern.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 
 use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::policy::projection::{CanonicalEgress, Proto};
@@ -87,37 +87,80 @@ impl EgressGate {
         }
     }
 
+    /// Resolve every admitted socket address for `target`.
+    ///
+    /// Numeric `ip:port` targets yield either that exact address or a refusal.
+    /// Hostname targets yield every pinned/permitted socket address in order so
+    /// callers can retry a later admitted address when an earlier connect stalls
+    /// or fails.
+    pub fn admitted_addrs(&self, target: &str) -> Result<Vec<SocketAddr>, EgressVerdict> {
+        let target = target.trim();
+        if let Ok(addr) = target.parse::<SocketAddr>() {
+            return match self.decide_addr(addr.ip(), addr.port()) {
+                EgressVerdict::Allow { .. } => Ok(vec![addr]),
+                other => Err(other),
+            };
+        }
+
+        let Some((host, port_str)) = target.rsplit_once(':') else {
+            return Err(EgressVerdict::Malformed);
+        };
+        let Ok(port) = port_str.parse::<u16>() else {
+            return Err(EgressVerdict::Malformed);
+        };
+
+        if let Some(pin) = self.pins.lookup(host) {
+            let addrs = pin
+                .ips
+                .iter()
+                .filter_map(|ip| match self.decide_addr(*ip, port) {
+                    EgressVerdict::Allow { ip, port } => Some(SocketAddr::new(ip, port)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            return if addrs.is_empty() {
+                Err(EgressVerdict::Deny)
+            } else {
+                Ok(addrs)
+            };
+        }
+
+        if matches!(self.egress, CanonicalEgress::Unrestricted) {
+            let addrs = (host, port)
+                .to_socket_addrs()
+                .map_err(|_| EgressVerdict::Deny)?
+                .filter(|addr| {
+                    matches!(
+                        self.decide_addr(addr.ip(), addr.port()),
+                        EgressVerdict::Allow { .. }
+                    )
+                })
+                .collect::<Vec<_>>();
+            return if addrs.is_empty() {
+                Err(EgressVerdict::Deny)
+            } else {
+                Ok(addrs)
+            };
+        }
+
+        Err(EgressVerdict::Deny)
+    }
+
     /// Decide a guest connect request — either a numeric `"<ip>:<port>"` or a
     /// `"<hostname>:<port>"` (DNS-over-vsock: the `socks5h` client sends a name and
     /// the host resolves it here against the pin registry, never the guest). A
     /// hostname with no matching pin is refused (`Deny`); an unparseable target is
     /// `Malformed`. Fail-closed throughout.
     pub fn decide_request(&self, target: &str) -> EgressVerdict {
-        let target = target.trim();
-        // Numeric ip:port — decide directly.
-        if let Ok(addr) = target.parse::<SocketAddr>() {
-            return self.decide_addr(addr.ip(), addr.port());
-        }
-        // hostname:port — resolve host-side against the pinned set, then policy-check
-        // each pinned IP. Admit iff some pinned IP is permitted.
-        match target.rsplit_once(':') {
-            Some((host, port_str)) => match port_str.parse::<u16>() {
-                Ok(port) => match self.pins.lookup(host) {
-                    Some(pin) => pin
-                        .ips
-                        .iter()
-                        .find_map(|ip| match self.decide_addr(*ip, port) {
-                            EgressVerdict::Allow { ip, port } => {
-                                Some(EgressVerdict::Allow { ip, port })
-                            }
-                            _ => None,
-                        })
-                        .unwrap_or(EgressVerdict::Deny),
-                    None => EgressVerdict::Deny, // valid host:port, no pin → not admitted
-                },
-                Err(_) => EgressVerdict::Malformed,
-            },
-            None => EgressVerdict::Malformed,
+        match self.admitted_addrs(target) {
+            Ok(mut addrs) => {
+                let addr = addrs.remove(0);
+                EgressVerdict::Allow {
+                    ip: addr.ip(),
+                    port: addr.port(),
+                }
+            }
+            Err(verdict) => verdict,
         }
     }
 }
@@ -182,6 +225,25 @@ mod tests {
                 port: 80
             }
         );
+    }
+
+    #[test]
+    fn unrestricted_resolves_hostnames_without_pins() {
+        let gate = EgressGate::new(CanonicalEgress::Unrestricted);
+        match gate.decide_request("localhost:80") {
+            EgressVerdict::Allow { .. } | EgressVerdict::Deny => {}
+            other => panic!("hostname under unrestricted must not be malformed: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrestricted_returns_every_admitted_resolved_address() {
+        let gate = EgressGate::new(CanonicalEgress::Unrestricted);
+        let addrs = gate
+            .admitted_addrs("cache.nixos.org:443")
+            .expect("cache.nixos.org should resolve on a connected host");
+        assert!(!addrs.is_empty());
+        assert!(addrs.iter().all(|addr| addr.port() == 443));
     }
 
     /// The gate composes with the real `NetworkPolicy` projection — the path the
@@ -332,6 +394,32 @@ mod tests {
                 ip: pinned,
                 port: 443
             }
+        );
+    }
+
+    #[test]
+    fn pinned_hostname_returns_all_permitted_addresses() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let now = "2026-01-01T00:00:00Z";
+        let first: IpAddr = "192.0.2.10".parse().unwrap();
+        let second: IpAddr = "198.51.100.20".parse().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "multi.example.test",
+            vec![first, second],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let policy = NetworkPolicy::allow_list(vec![HostPort {
+            host: "multi.example.test".into(),
+            port: 443,
+        }]);
+        let gate = EgressGate::from_network_policy(&policy, &pins, now);
+        assert_eq!(
+            gate.admitted_addrs("multi.example.test:443").unwrap(),
+            vec![SocketAddr::new(first, 443), SocketAddr::new(second, 443)]
         );
     }
 }

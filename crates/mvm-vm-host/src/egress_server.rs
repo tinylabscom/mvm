@@ -19,7 +19,7 @@
 //! newline and replays them into the proxy, so none are lost.
 
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 
 use mvm_backend::vmm::egress_gate::{EgressGate, EgressVerdict};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
@@ -34,11 +34,16 @@ const MAX_TARGET_LINE: usize = 512;
 /// opened via `connect`. `connect` is injected so the decision + pump are testable
 /// without a real outbound connection. A refused/malformed target closes the
 /// connection without dialing.
-pub async fn serve<S, C, Fut>(client: S, gate: &EgressGate, connect: C) -> std::io::Result<()>
+pub async fn serve<S, C, Fut, U>(
+    client: S,
+    gate: &EgressGate,
+    mut connect: C,
+) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
-    C: FnOnce(IpAddr, u16) -> Fut,
-    Fut: Future<Output = std::io::Result<TcpStream>>,
+    C: FnMut(SocketAddr) -> Fut,
+    Fut: Future<Output = std::io::Result<U>>,
+    U: AsyncRead + AsyncWrite + Unpin,
 {
     let mut reader = BufReader::new(client);
 
@@ -50,18 +55,47 @@ where
     }
     let target = String::from_utf8_lossy(&line).trim().to_string();
 
-    match gate.decide_request(&target) {
-        EgressVerdict::Allow { ip, port } => {
-            let mut upstream = connect(ip, port).await?;
+    match gate.admitted_addrs(&target) {
+        Ok(addrs) => {
+            let mut last_error = None;
+            let mut upstream = None;
+            for addr in addrs {
+                match connect(addr).await {
+                    Ok(stream) => {
+                        upstream = Some(stream);
+                        break;
+                    }
+                    Err(err) => {
+                        tracing::warn!(%target, %addr, error = %err, "egress connect failed");
+                        last_error = Some(err);
+                    }
+                }
+            }
+            let Some(mut upstream) = upstream else {
+                if let Some(err) = last_error {
+                    tracing::warn!(%target, error = %err, "egress connect exhausted admitted addresses");
+                }
+                return Ok(());
+            };
             // BufReader replays any workload bytes buffered after the newline.
-            tokio::io::copy_bidirectional(&mut reader, &mut upstream)
-                .await
-                .map(|_| ())
+            match tokio::io::copy_bidirectional(&mut reader, &mut upstream).await {
+                Ok((guest_to_upstream, upstream_to_guest)) => {
+                    tracing::debug!(
+                        %target,
+                        guest_to_upstream,
+                        upstream_to_guest,
+                        "egress splice completed"
+                    );
+                    Ok(())
+                }
+                Err(err) => Err(err),
+            }
         }
-        EgressVerdict::Deny | EgressVerdict::Malformed => {
+        Err(EgressVerdict::Deny) | Err(EgressVerdict::Malformed) => {
             tracing::warn!(%target, "egress refused (claim-10)");
             Ok(()) // drop the connection; never dial
         }
+        Err(EgressVerdict::Allow { .. }) => Ok(()),
     }
 }
 
@@ -108,9 +142,7 @@ pub async fn run(listener: UnixListener, gate: EgressGate) -> std::io::Result<()
         let (stream, _) = listener.accept().await?;
         let gate = gate.clone();
         tokio::spawn(async move {
-            let connect = |ip: IpAddr, port: u16| async move {
-                TcpStream::connect(SocketAddr::new(ip, port)).await
-            };
+            let connect = |addr: SocketAddr| async move { TcpStream::connect(addr).await };
             if let Err(e) = serve(stream, &gate, connect).await {
                 tracing::warn!(error = %e, "egress server connection failed");
             }
@@ -157,7 +189,7 @@ mod tests {
 
         let gate = allow("93.184.216.34/32", 80);
         let task = tokio::spawn(async move {
-            serve(server, &gate, move |_ip, _port| async move {
+            serve(server, &gate, move |_addr| async move {
                 TcpStream::connect(echo_addr).await
             })
             .await
@@ -180,7 +212,7 @@ mod tests {
         drop(client);
 
         let gate = EgressGate::default_deny();
-        serve(server, &gate, |_ip, _port| async move {
+        serve::<_, _, _, tokio::io::DuplexStream>(server, &gate, |_addr| async move {
             panic!("denied target must not dial");
         })
         .await
@@ -196,7 +228,7 @@ mod tests {
         drop(client);
 
         let gate = allow("93.184.216.34/32", 80); // only:80 admitted
-        serve(server, &gate, |_ip, _port| async move {
+        serve::<_, _, _, tokio::io::DuplexStream>(server, &gate, |_addr| async move {
             panic!("non-admitted port must not dial");
         })
         .await
@@ -209,11 +241,69 @@ mod tests {
         let (client, server) = tokio::io::duplex(8);
         drop(client);
         let gate = EgressGate::default_deny();
-        serve(server, &gate, |_ip, _port| async move {
+        serve::<_, _, _, tokio::io::DuplexStream>(server, &gate, |_addr| async move {
             panic!("no target → no dial");
         })
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn admitted_hostname_retries_later_permitted_address() {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "multi.example.test",
+            vec![
+                "192.0.2.10".parse().unwrap(),
+                "198.51.100.20".parse().unwrap(),
+            ],
+            "2025-01-01T00:00:00Z",
+            "2030-01-01T00:00:00Z",
+        ));
+        let gate = EgressGate::from_network_policy(
+            &NetworkPolicy::allow_list(vec![HostPort {
+                host: "multi.example.test".into(),
+                port: 443,
+            }]),
+            &pins,
+            "2026-01-01T00:00:00Z",
+        );
+
+        let (mut client, server) = tokio::io::duplex(256);
+        client
+            .write_all(b"multi.example.test:443\nping")
+            .await
+            .unwrap();
+
+        let task = tokio::spawn(async move {
+            serve(server, &gate, move |addr| async move {
+                if addr.ip().to_string() == "192.0.2.10" {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "synthetic first-address timeout",
+                    ))
+                } else {
+                    let (mut upstream, remote) = tokio::io::duplex(256);
+                    tokio::spawn(async move {
+                        let (mut r, mut w) = tokio::io::split(remote);
+                        let _ = tokio::io::copy(&mut r, &mut w).await;
+                    });
+                    upstream.write_all(&[]).await?;
+                    Ok(upstream)
+                }
+            })
+            .await
+            .unwrap();
+        });
+
+        let mut got = [0u8; 4];
+        client.read_exact(&mut got).await.unwrap();
+        assert_eq!(&got, b"ping");
+        drop(client);
+        task.await.unwrap();
     }
 
     #[test]

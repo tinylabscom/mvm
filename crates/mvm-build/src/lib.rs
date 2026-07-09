@@ -72,7 +72,7 @@ pub mod template_reuse;
 #[cfg(feature = "builder-vm")]
 pub mod libkrun_builder;
 
-/// The libkrun gvproxy/passt `NetworkProvider` impl.
+/// The libkrun native-gateway/passt `NetworkProvider` impl.
 /// Gated with `libkrun_builder`: it wraps that module's gateway selection.
 #[cfg(feature = "builder-vm")]
 pub mod libkrun_network_provider;

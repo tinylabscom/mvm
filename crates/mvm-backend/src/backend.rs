@@ -485,7 +485,7 @@ pub enum AnyBackend {
     /// `mvm-hvf-supervisor`. Selectable via `--hypervisor hvf` / `MVM_BACKEND=hvf`,
     /// and the macOS-26 auto-detect default (Vz is sunset, opt-in only). Its
     /// `start()` spawns the per-VM gating endpoint that is the sole claim-10 egress
-    /// gate over vsock — no gvproxy sidecar. The destination macOS backend.
+    /// gate over vsock — no guest-NIC helper sidecar. The destination macOS backend.
     Hvf(HvfBackend),
     /// The hvf VMM driven through the unified `WorkloadRunner` over the
     /// driver seam — the role-runner that will replace the per-backend
@@ -537,7 +537,7 @@ impl AnyBackend {
     ///
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
-    /// 2. HVF VMM (macOS 26+ Apple Silicon — vsock-only egress, no Vz/gvproxy)
+    /// 2. HVF VMM (macOS 26+ Apple Silicon — vsock-only egress, no Vz/native-gateway helper)
     /// 3. raw libkrun
     ///
     /// If none of the above match, the function returns Firecracker as
@@ -556,7 +556,7 @@ impl AnyBackend {
 
         // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`). Vz is sunset
         //    (opt-in only via `--hypervisor vz`); the hvf path enforces claim-10
-        //    egress via its per-VM gating endpoint over vsock — no gvproxy sidecar.
+        //    egress via its per-VM gating endpoint over vsock — no guest-NIC helper sidecar.
         if plat.is_vz_default_tier() {
             return Self::Hvf(HvfBackend);
         }

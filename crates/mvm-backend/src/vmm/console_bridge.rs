@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
@@ -124,6 +125,21 @@ impl ConsoleBridge {
     /// it route here, not to the agent / workload-exit / egress / capture paths)?
     pub fn is_console_stream(&self, conn_id: u32) -> bool {
         self.conns.contains_key(&conn_id)
+    }
+
+    /// Fds the host-I/O thread should watch: all bound listeners plus established
+    /// console streams. As with the agent bridge, unestablished streams stay out
+    /// of the readiness set until the guest accepts them.
+    pub fn poll_fds(&self) -> Vec<RawFd> {
+        let mut fds = Vec::new();
+        fds.extend(self.listeners.values().map(AsRawFd::as_raw_fd));
+        fds.extend(
+            self.conns
+                .values()
+                .filter(|conn| conn.established)
+                .map(|conn| conn.stream.as_raw_fd()),
+        );
+        fds
     }
 
     /// Accept any pending host connections across every bound console port,
@@ -324,6 +340,27 @@ mod tests {
         bridge.close(conn_id);
         assert_eq!(active.load(Ordering::Relaxed), 0);
         assert!(!bridge.is_console_stream(conn_id));
+    }
+
+    #[test]
+    fn poll_fds_include_listeners_and_only_established_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let port = 20001u32;
+        let sock = dir.path().join("vsock-20001.sock");
+
+        let mut bridge = ConsoleBridge::new();
+        bridge.bind_ports([(port, sock.as_path())]).unwrap();
+
+        let client = UnixStream::connect(&sock).unwrap();
+        client.set_nonblocking(true).unwrap();
+        let (conn_id, _) = bridge.accept_new()[0];
+
+        let before_established = bridge.poll_fds();
+        assert_eq!(before_established.len(), 1, "listener only before accept");
+
+        bridge.on_established(conn_id);
+        let after_established = bridge.poll_fds();
+        assert_eq!(after_established.len(), 2, "listener plus established conn");
     }
 
     /// Two console ports bound: a connection on each is accepted and each carries

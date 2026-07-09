@@ -2,7 +2,7 @@
 //!
 //! Wraps the lowered `[policy]` table ([`super::rvproxy_policy`]) in the rest of
 //! the rvproxy config the dataplane needs — the same shape rvproxy's own
-//! gvproxy-compat mode builds (`BackendKind::Vfkit` + `TransportKind::Vfkit` over
+//! vfkit-gateway-compat mode builds (`BackendKind::Vfkit` + `TransportKind::Vfkit` over
 //! the unixgram socket libkrun connects to, gateway DNS on), plus the `[audit]`
 //! section pointing rvproxy's flow-event export at the JSONL file mvm tails (the
 //! source for [`super::rvproxy_flow_audit`]).

@@ -45,7 +45,7 @@ pub const PASST_NET_FEATURES: u32 = (1 << 0)   // NET_FEATURE_CSUM
 /// `NET_FLAG_VFKIT` from `libkrun.h`. libkrun rejects
 /// `krun_add_net_unixgram(c_path, ...)` with -EINVAL unless this flag
 /// is set, because the unixgram backend needs to know whether to
-/// emit the vfkit magic-byte handshake gvproxy expects on
+/// emit the vfkit magic-byte handshake the native gateway expects on
 /// `-listen-vfkit`. Without the flag libkrun assumes raw frames and
 /// fails closed at config time (rc -22).
 pub const NET_FLAG_VFKIT: u32 = 1 << 0;
@@ -53,10 +53,9 @@ pub const NET_FLAG_VFKIT: u32 = 1 << 0;
 /// `NET_FLAG_DHCP_CLIENT` from `libkrun.h` (added in libkrun 1.18.0).
 /// Enables libkrun's in-guest DHCP client so the guest doesn't need
 /// to run `udhcpc`/`dhclient` itself — libkrun sees the DHCP-OFFER
-/// from gvproxy's built-in DHCP server, configures the interface,
+/// from the compat gateway's built-in DHCP server, configures the interface,
 /// and the guest kernel hands the application a fully-configured
-/// `eth0`. libkrun's own gvproxy test
-/// (`tests/test_cases/src/test_net/gvproxy.rs`) passes
+/// `eth0`. libkrun's own vfkit-gateway test suite passes
 /// `NET_FLAG_VFKIT | NET_FLAG_DHCP_CLIENT`; mirroring that here is
 /// what makes the macOS smoke succeed end-to-end on libkrun 1.18.0+.
 pub const NET_FLAG_DHCP_CLIENT: u32 = 1 << 1;
@@ -323,24 +322,25 @@ impl Context {
     }
 
     /// Add a virtio-net device backed by a unixgram userspace network
-    /// proxy (gvproxy on macOS replacing passt). Mirror of
+    /// proxy (native gateway on macOS replacing passt). Mirror of
     /// [`Self::add_net_unixstream_fd`] but uses libkrun's
     /// `krun_add_net_unixgram` which takes a *path* to a listening
-    /// unix-domain socket rather than a pre-opened fd — gvproxy
+    /// unix-domain socket rather than a pre-opened fd — the gateway
     /// creates the listener itself when invoked with
     /// `--listen-vfkit <path>`, and libkrun's host-side code
     /// connects to that path.
     ///
     /// `c_path` and `fd` are mutually exclusive in the C API; we
     /// always take the path arm so the caller (typically
-    /// `mvm-libkrun::gvproxy::spawn`) owns the socket lifecycle.
-    /// Pass `socket_path` as the path the gvproxy child listens on.
+    /// `mvm-libkrun::native_gateway::spawn`) owns the socket lifecycle.
+    /// Pass `socket_path` as the path the native gateway child listens on.
     ///
     /// Calling this disables libkrun's TSI backend (same as the
     /// unixstream wrapper). `features` should be
     /// [`super::PASST_NET_FEATURES`] — the macro is named after
     /// passt but `COMPAT_NET_FEATURES` in `libkrun.h:344` applies
-    /// to both passt and gvproxy (`krun_set_gvproxy_path` lists it).
+    /// to both passt and the vfkit-compatible gateway (`krun_set_gvproxy_path`
+    /// lists it at the C ABI layer).
     pub fn add_net_unixgram_path(
         &self,
         socket_path: &Path,

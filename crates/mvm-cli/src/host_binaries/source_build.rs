@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::host_binaries::manifest::{HOST_BINARIES, SEED_BINARIES};
+use sha2::{Digest, Sha256};
 
 const SOURCE_BUILD_SEGMENT: &str = "source-checkout";
 
@@ -11,15 +12,17 @@ pub(crate) struct HostBinaryBuildLayout {
 }
 
 impl HostBinaryBuildLayout {
-    fn under(cache_root: &Path, version: &str, arch: &str) -> Self {
+    fn under(cache_root: &Path, version: &str, arch: &str, fingerprint: &str) -> Self {
         let dir = cache_root
             .join(SOURCE_BUILD_SEGMENT)
             .join(version)
-            .join(arch);
+            .join(arch)
+            .join(fingerprint);
         let target_dir = cache_root
             .join(format!("{SOURCE_BUILD_SEGMENT}-target"))
             .join(version)
-            .join(arch);
+            .join(arch)
+            .join(fingerprint);
         Self { dir, target_dir }
     }
 
@@ -126,12 +129,13 @@ pub(crate) fn resolve_or_build_host_binaries(
 ) -> Result<PathBuf, HostBinaryBuildError> {
     let version = env!("CARGO_PKG_VERSION");
     let arch = host_arch();
-    let layout = HostBinaryBuildLayout::under(cache_root, version, arch);
+    let workspace_root = source_checkout_root().ok_or(HostBinaryBuildError::NoSourceCheckout)?;
+    let fingerprint = source_checkout_fingerprint(&workspace_root)?;
+    let layout = HostBinaryBuildLayout::under(cache_root, version, arch, &fingerprint);
     if layout.is_complete() {
         return Ok(layout.dir);
     }
 
-    let workspace_root = source_checkout_root().ok_or(HostBinaryBuildError::NoSourceCheckout)?;
     let spec = HostBinaryBuildSpec::new(
         workspace_root,
         layout.target_dir.clone(),
@@ -213,6 +217,61 @@ fn source_checkout_root() -> Option<PathBuf> {
         .then_some(workspace_root)
 }
 
+fn source_checkout_fingerprint(workspace_root: &Path) -> Result<String, HostBinaryBuildError> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"mvm-host-binaries-source-checkout-v1\0");
+    for rel in [
+        "Cargo.lock",
+        "Cargo.toml",
+        "crates/mvm-build/Cargo.toml",
+        "crates/mvm-build/src",
+        "crates/mvm-cli/src/host_binaries/manifest.rs",
+    ] {
+        let path = workspace_root.join(rel);
+        if path.is_dir() {
+            hash_dir_recursive(&mut hasher, rel, &path)?;
+        } else if path.is_file() {
+            hash_file(&mut hasher, rel, &path)?;
+        } else {
+            return Err(HostBinaryBuildError::OutputMissing(path));
+        }
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_dir_recursive(
+    hasher: &mut Sha256,
+    prefix: &str,
+    dir: &Path,
+) -> Result<(), HostBinaryBuildError> {
+    let mut entries = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let rel = format!("{prefix}/{name}");
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            hash_dir_recursive(hasher, &rel, &path)?;
+        } else if file_type.is_file() {
+            hash_file(hasher, &rel, &path)?;
+        }
+    }
+    Ok(())
+}
+
+fn hash_file(hasher: &mut Sha256, rel: &str, path: &Path) -> Result<(), HostBinaryBuildError> {
+    let bytes = std::fs::read(path)?;
+    hasher.update(rel.as_bytes());
+    hasher.update(b"\0");
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(b"\0");
+    hasher.update(bytes);
+    hasher.update(b"\0");
+    Ok(())
+}
+
 fn host_arch() -> &'static str {
     if cfg!(target_arch = "aarch64") {
         "aarch64"
@@ -291,19 +350,56 @@ mod tests {
 
     #[test]
     fn layout_is_versioned_and_arch_scoped() {
-        let layout = HostBinaryBuildLayout::under(Path::new("/cache"), "0.17.0", "aarch64");
+        let layout =
+            HostBinaryBuildLayout::under(Path::new("/cache"), "0.17.0", "aarch64", "abc123");
         assert_eq!(
             layout.dir,
-            PathBuf::from("/cache/source-checkout/0.17.0/aarch64")
+            PathBuf::from("/cache/source-checkout/0.17.0/aarch64/abc123")
         );
         assert_eq!(
             layout.target_dir,
-            PathBuf::from("/cache/source-checkout-target/0.17.0/aarch64")
+            PathBuf::from("/cache/source-checkout-target/0.17.0/aarch64/abc123")
         );
         assert_eq!(
             layout.path_for("stage0-init"),
-            PathBuf::from("/cache/source-checkout/0.17.0/aarch64/stage0-init")
+            PathBuf::from("/cache/source-checkout/0.17.0/aarch64/abc123/stage0-init")
         );
+    }
+
+    #[test]
+    fn source_checkout_fingerprint_changes_when_host_binary_source_changes() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("crates/mvm-build/src/bin")).expect("mkdir build src");
+        std::fs::create_dir_all(root.join("crates/mvm-cli/src/host_binaries"))
+            .expect("mkdir host binaries src");
+        std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write cargo toml");
+        std::fs::write(root.join("Cargo.lock"), "version = 3\n").expect("write cargo lock");
+        std::fs::write(
+            root.join("crates/mvm-build/Cargo.toml"),
+            "[package]\nname = \"mvm-build\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("write mvm-build cargo toml");
+        std::fs::write(
+            root.join("crates/mvm-build/src/bin/stage0-init.rs"),
+            "fn main() {}\n",
+        )
+        .expect("write stage0-init");
+        std::fs::write(
+            root.join("crates/mvm-cli/src/host_binaries/manifest.rs"),
+            "pub const SEED_BINARIES: &[&str] = &[\"stage0-init\"];\n",
+        )
+        .expect("write manifest");
+
+        let before = source_checkout_fingerprint(root).expect("fingerprint before");
+        std::fs::write(
+            root.join("crates/mvm-build/src/bin/stage0-init.rs"),
+            "fn main() { println!(\"changed\"); }\n",
+        )
+        .expect("rewrite stage0-init");
+        let after = source_checkout_fingerprint(root).expect("fingerprint after");
+
+        assert_ne!(before, after);
     }
 
     #[test]

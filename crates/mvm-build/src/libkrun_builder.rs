@@ -62,6 +62,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use libkrun_sys::{KrunContext, SupervisorConfig};
+use mvm_core::network_policy::{HostPort, NetworkPolicy};
 use sha2::{Digest, Sha256};
 
 use crate::builder_vm::{
@@ -126,166 +127,36 @@ pub const GUEST_NIX_DIR: &str = "/nix";
 /// host stages `cmd.sh`, `env`, and the eventual `result` file
 /// under this path (read-write virtio-fs).
 pub const GUEST_JOB_DIR: &str = "/job";
+const VSOCK_ONLY_CMDLINE_TOKEN: &str = "mvm.vsock_only=1";
+const VSOCK_ONLY_ENV_VAR: &str = "MVM_VSOCK_ONLY=1";
 
-/// Caller-visible networking-backend preference. Read from
-/// the `MVM_NETWORKING` env var at every VM-launch site.
-///
-/// `Passt` is virtio-net via the userspace passt gateway. `Gvproxy`
-/// is for macOS, where passt does not build (`vmsplice`/namespace
-/// primitives are Linux-only).
-///
-/// There is no `Tsi` variant: TSI bypasses virtio-net entirely,
-/// which violates the claim-10 no-bypass invariant. Every builder VM
-/// gets a real virtio-net device through one of the two gateways.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkingPreference {
-    /// virtio-net via passt. Linux-only. Requires libkrun-sys + the
-    /// `passt` binary on `$PATH`. The supervisor process spawns
-    /// passt as a child and hands its fd to libkrun.
-    Passt,
-    /// virtio-net via gvproxy. Historical macOS fallback; works on Linux too.
-    /// Requires libkrun-sys + the `gvproxy` binary on `$PATH`. The
-    /// supervisor spawns gvproxy with `-listen-vfkit unixgram://…`
-    /// and libkrun connects to the listener path.
-    Gvproxy,
-    /// virtio-net via the hvf native gateway. The native gateway speaks
-    /// the same `-listen-vfkit` unixgram protocol as gvproxy, so it reuses the
-    /// gvproxy vfkit backend wholesale — the only difference is the binary,
-    /// located via `MVM_GATEWAY_BIN`. macOS selects native by default once
-    /// `MVM_GATEWAY_BIN` is configured; callers can still pin gvproxy with
-    /// `MVM_NETWORKING=gvproxy`. An explicit `MVM_NETWORKING=native` falls back
-    /// to the per-OS default when no candidate binary is configured.
-    Native,
+/// Builder libkrun VMs are now NIC-less: Stage 0 and steady-state builders
+/// route egress through the host-bound `EGRESS_PORT` vsock relay instead of a
+/// libkrun networking helper. Keep the helper boundary so the existing builder
+/// constructors do not drift, but leave the context unchanged.
+fn apply_networking_mode(mut krun: KrunContext, _vm_state_dir: &std::path::Path) -> KrunContext {
+    krun.networking = libkrun_sys::NetworkingMode::Disconnected {
+        mac: disconnected_guest_mac(&krun.name),
+    };
+    krun
 }
 
-/// Apply the resolved [`NetworkingPreference`] to a [`KrunContext`].
-/// Dispatches `with_passt` or `with_gvproxy`. Each gateway uses
-/// `<vm_state_dir>` for its log/socket scratch space. There is no
-/// no-gateway path — claim-10 no-bypass.
-fn apply_networking_mode(
-    krun: KrunContext,
-    vm_state_dir: &std::path::Path,
-) -> Result<KrunContext, BuilderVmError> {
-    let scratch = path_to_str(vm_state_dir, "vm_state_dir")?;
-    Ok(match resolve_networking_mode() {
-        NetworkingPreference::Passt => {
-            krun.with_passt(libkrun_sys::passt::DEFAULT_GUEST_MAC, scratch)
-        }
-        NetworkingPreference::Gvproxy => {
-            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
-        }
-        // Drop-in: the native gateway speaks the gvproxy vfkit unixgram
-        // protocol, so reuse `with_gvproxy`. The binary swap happens in
-        // `gvproxy::locate_gvproxy` via `MVM_GATEWAY_BIN`.
-        NetworkingPreference::Native => {
-            krun.with_gvproxy(libkrun_sys::gvproxy::DEFAULT_GUEST_MAC, scratch)
-        }
-    })
+fn disconnected_guest_mac(name: &str) -> [u8; 6] {
+    let digest = Sha256::digest(name.as_bytes());
+    [0x02, digest[0], digest[1], digest[2], digest[3], digest[4]]
 }
 
-fn native_gateway_bin_configured() -> bool {
-    std::env::var_os("MVM_GATEWAY_BIN").is_some_and(|v| !v.is_empty())
+fn builder_install_network_policy() -> NetworkPolicy {
+    NetworkPolicy::allow_list(
+        crate::egress_proxy::PRODUCTION_HOSTNAMES
+            .iter()
+            .map(|host| HostPort::new(*host, crate::egress_proxy::ALLOWED_PORT))
+            .collect(),
+    )
 }
 
-/// Per-host-OS default networking backend.
-///
-/// macOS → [`Native`](NetworkingPreference::Native) once `MVM_GATEWAY_BIN`
-/// points at the candidate rvproxy binary; otherwise it keeps the historical
-/// [`Gvproxy`](NetworkingPreference::Gvproxy) fallback so machines still boot
-/// on hosts without rvproxy installed. Linux stays
-/// [`Passt`](NetworkingPreference::Passt) by default until the Firecracker/passt
-/// replacement is cut over; an explicit `MVM_NETWORKING=native` can still opt a
-/// libkrun caller into the native vfkit-compatible path.
-pub fn default_networking_mode() -> NetworkingPreference {
-    if cfg!(target_os = "macos") {
-        if native_gateway_bin_configured() {
-            NetworkingPreference::Native
-        } else {
-            NetworkingPreference::Gvproxy
-        }
-    } else {
-        NetworkingPreference::Passt
-    }
-}
-
-/// Read `MVM_NETWORKING` from the env. Accepts `passt`, `gvproxy`,
-/// and `native` (case-insensitive); anything else falls back to the
-/// per-OS default and emits a warning so a typo is visible without
-/// aborting. On macOS, no env override means "native when the rvproxy
-/// candidate is configured, otherwise gvproxy." `native` additionally requires
-/// `MVM_GATEWAY_BIN` to name the gateway binary, or it falls back to the per-OS
-/// default too.
-///
-/// Per-OS dispatch is macOS → native-with-candidate or gvproxy fallback, Linux
-/// → passt. TSI was removed entirely — it bypassed virtio-net (no host fd to
-/// splice), which violates the claim-10 no-bypass invariant.
-/// `MVM_NETWORKING=tsi` is no longer accepted; the value is
-/// treated as unknown and falls back to the per-OS gateway
-/// default with a warning. Pin a specific gateway across OS via
-/// `MVM_NETWORKING=passt` or `MVM_NETWORKING=gvproxy`.
-pub fn resolve_networking_mode() -> NetworkingPreference {
-    match std::env::var("MVM_NETWORKING")
-        .ok()
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        // passt is Linux-only — the Homebrew formula refuses to build on macOS.
-        // An explicit `MVM_NETWORKING=passt` on macOS can't be honoured (the
-        // supervisor would fail to spawn the gateway), so fall back to gvproxy
-        // with a warning rather than hand it an unspawnable gateway. On Linux,
-        // passt is honoured. This keeps `resolve_networking_mode` safe to call
-        // from every gateway-selection site, macOS included.
-        Some("passt") => {
-            if cfg!(target_os = "macos") {
-                tracing::warn!(
-                    "MVM_NETWORKING=passt is not supported on macOS \
-                     (passt is Linux-only); falling back to gvproxy"
-                );
-                NetworkingPreference::Gvproxy
-            } else {
-                NetworkingPreference::Passt
-            }
-        }
-        Some("gvproxy") => NetworkingPreference::Gvproxy,
-        // The native gateway is located via `MVM_GATEWAY_BIN`. Without it
-        // there is no binary to spawn, so fall back to the per-OS default
-        // with a warning rather than silently spawning the wrong gateway —
-        // same fail-safe shape as the passt-on-macOS fallback above.
-        Some("native") => {
-            if native_gateway_bin_configured() {
-                NetworkingPreference::Native
-            } else {
-                let fallback = default_networking_mode();
-                tracing::warn!(
-                    fallback = ?fallback,
-                    "MVM_NETWORKING=native requires MVM_GATEWAY_BIN to point at the \
-                     gateway binary; falling back to per-OS default"
-                );
-                fallback
-            }
-        }
-        None | Some("") => default_networking_mode(),
-        Some(other) => {
-            let fallback = default_networking_mode();
-            if other == "tsi" {
-                tracing::warn!(
-                    fallback = ?fallback,
-                    "MVM_NETWORKING=tsi is no longer supported (Plan 102 W6.A: \
-                     TSI bypasses virtio-net, violates claim-10 no-bypass invariant); \
-                     falling back to per-OS default"
-                );
-            } else {
-                tracing::warn!(
-                    value = other,
-                    fallback = ?fallback,
-                    "MVM_NETWORKING unrecognised; falling back to per-OS default (accepted: passt, gvproxy, native)"
-                );
-            }
-            fallback
-        }
-    }
+fn builder_trusted_build_network_policy() -> NetworkPolicy {
+    NetworkPolicy::trusted_build_egress()
 }
 
 /// Libkrun-backed builder VM driver.
@@ -512,8 +383,9 @@ impl LibkrunBuilderVm {
             // /mvm-bins inside the guest — stage0-init sets MVM_HOST_BIN_DIR
             // to it so the flake picks up the pre-built host-vm binaries.
             .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?);
+        krun = apply_networking_mode(krun, &vm_state_dir);
 
-        krun = apply_networking_mode(krun, &vm_state_dir)?;
+        krun = krun.add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
 
         let cfg = SupervisorConfig {
             krun,
@@ -526,11 +398,13 @@ impl LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Builder VMs take the legacy non-bridge path (tenant_id None), so
-            // this is inert today (set explicitly to None — no bare-policy
-            // override). Step 3 flips builder/dev to trusted_build_egress when
-            // they move onto the bridge.
-            network_policy: None,
+            network_policy: Some(
+                serde_json::to_value(builder_trusted_build_network_policy()).map_err(|e| {
+                    BuilderVmError::ExtractionFailed(format!(
+                        "serialize Stage 0 network policy for supervisor: {e}"
+                    ))
+                })?,
+            ),
             transparent_terminator_port: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
@@ -626,7 +500,7 @@ impl LibkrunBuilderVm {
             );
         }
 
-        krun = apply_networking_mode(krun, &vm_state_dir)?;
+        krun = krun.add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
 
         let cfg = SupervisorConfig {
             krun,
@@ -639,11 +513,13 @@ impl LibkrunBuilderVm {
             signing_key_path: None,
             plan: None,
             bundle: None,
-            // Builder VMs take the legacy non-bridge path (tenant_id None), so
-            // this is inert today (set explicitly to None — no bare-policy
-            // override). Step 3 flips builder/dev to trusted_build_egress when
-            // they move onto the bridge.
-            network_policy: None,
+            network_policy: Some(
+                serde_json::to_value(builder_trusted_build_network_policy()).map_err(|e| {
+                    BuilderVmError::ExtractionFailed(format!(
+                        "serialize shell-job network policy for supervisor: {e}"
+                    ))
+                })?,
+            ),
             transparent_terminator_port: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
@@ -940,7 +816,16 @@ impl BuilderVm for LibkrunBuilderVm {
             )
             .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
 
-        krun = apply_networking_mode(krun, &vm_state_dir)?;
+        let network_policy = match job {
+            BuilderJob::Install { .. } => {
+                krun = krun.add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                Some(builder_install_network_policy())
+            }
+            BuilderJob::Flake { .. } => {
+                krun = krun.add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                Some(builder_trusted_build_network_policy())
+            }
+        };
 
         // 8. Drive the supervisor: pipe `SupervisorConfig` to
         //    stdin and **wait** for the child to exit. Unlike
@@ -963,7 +848,14 @@ impl BuilderVm for LibkrunBuilderVm {
             // this is inert today (set explicitly to None — no bare-policy
             // override). Step 3 flips builder/dev to trusted_build_egress when
             // they move onto the bridge.
-            network_policy: None,
+            network_policy: network_policy
+                .map(serde_json::to_value)
+                .transpose()
+                .map_err(|e| {
+                    BuilderVmError::ExtractionFailed(format!(
+                        "serialize builder network policy for supervisor: {e}"
+                    ))
+                })?,
             transparent_terminator_port: None,
             // Builder VMs are always hard-fail; they don't model
             // long-running user workloads where a restart policy would
@@ -1137,7 +1029,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
         for port in &config.vsock_ports {
             krun = krun.add_vsock_port(*port);
         }
-        krun = apply_networking_mode(krun, &config.vm_state_dir)?;
+        krun = apply_networking_mode(krun, &config.vm_state_dir);
 
         let cfg = SupervisorConfig {
             krun,
@@ -1398,21 +1290,27 @@ fn krun_context_for_image(
             cmdline,
         } => {
             let kernel = page_aligned_kernel(kernel_path)?;
-            Ok(KrunContext::new(
+            let cmdline = format!("{cmdline} {VSOCK_ONLY_CMDLINE_TOKEN}");
+            let krun = KrunContext::new(
                 vm_name,
                 path_to_str(&kernel, "kernel_path")?,
                 path_to_str(rootfs_path, "rootfs_path")?,
             )
-            .with_cmdline(cmdline.as_str()))
+            .with_cmdline(cmdline.as_str());
+            Ok(krun)
         }
         BuilderVmImage::RootDir {
             root_dir,
             entry_path,
-        } => Ok(KrunContext::new_root_dir(
-            vm_name,
-            path_to_str(root_dir, "root_dir")?,
-            entry_path.as_str(),
-        )),
+        } => {
+            let krun = KrunContext::new_root_dir(
+                vm_name,
+                path_to_str(root_dir, "root_dir")?,
+                entry_path.as_str(),
+            )
+            .with_guest_envp([VSOCK_ONLY_ENV_VAR]);
+            Ok(krun)
+        }
     }
 }
 
@@ -1694,7 +1592,7 @@ pub(crate) fn unique_job_id() -> String {
 /// Where [`resolve_supervisor_path`] found the supervisor binary. The source
 /// matters because a PATH hit is an installed copy (`cargo install`) that a
 /// source-checkout `cargo build` never refreshes — so it can silently lag the
-/// driver and reintroduce stale-supervisor failures (gvproxy-orphan teardown
+/// driver and reintroduce stale-supervisor failures (orphan-helper teardown
 /// noise, `deny_unknown_fields` rejects of newer `SupervisorConfig` fields).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SupervisorSource {
@@ -1927,23 +1825,6 @@ fn spawn_supervisor_and_wait(
         Some(timeout),
         verbose,
     );
-
-    // The supervisor has now exited on every arm below — clean guest
-    // poweroff (libkrun's internal `exit()`), or panic/timeout where we
-    // SIGKILL'd it above. None of those run `GvproxyHandle::Drop` (no
-    // unwind) or the supervisor's SIGTERM handler (SIGKILL is uncatchable,
-    // exit() skips it), so the per-VM gvproxy is left "waiting for clients"
-    // and reparented to the init process. Reap it here: we (the spawning
-    // host) have observed the supervisor exit, so this is the one place
-    // teardown is guaranteed regardless of how libkrun terminated.
-    //
-    // Two-stage so the guarantee holds across supervisor versions: the pid
-    // sidecar is the cheap path, and the socket-argv scan backstops a
-    // supervisor binary that predates the sidecar (it spawns gvproxy without
-    // writing `gvproxy.pid`, so the pid reap finds nothing). Both idempotent —
-    // whichever runs first, the second is a no-op.
-    libkrun_sys::gvproxy::reap_by_pid_file(vm_state_dir);
-    libkrun_sys::gvproxy::reap_by_socket_path(vm_state_dir);
 
     match outcome {
         Ok(WaitOutcome::Clean(code)) => Ok(code),
@@ -2566,7 +2447,7 @@ impl LibkrunPersistentHostVm {
             // the host reaches it via `<vm_state_dir>/vsock-21473.sock`.
             .add_vsock_port(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT);
 
-        krun = apply_networking_mode(krun, &vm_state_dir)?;
+        krun = apply_networking_mode(krun, &vm_state_dir);
 
         let cfg = SupervisorConfig {
             krun,
@@ -2765,6 +2646,22 @@ mod tests {
         assert!(p.is_power_of_two(), "page size {p} not a power of two");
     }
 
+    #[test]
+    fn builder_install_network_policy_matches_the_baked_proxy_allowlist() {
+        let policy = builder_install_network_policy();
+        let rules = policy
+            .resolve_rules()
+            .expect("builder install policy is an allow-list");
+        let mut got: Vec<(String, u16)> = rules.into_iter().map(|hp| (hp.host, hp.port)).collect();
+        got.sort();
+        let mut want: Vec<(String, u16)> = crate::egress_proxy::PRODUCTION_HOSTNAMES
+            .iter()
+            .map(|host| ((*host).to_string(), crate::egress_proxy::ALLOWED_PORT))
+            .collect();
+        want.sort();
+        assert_eq!(got, want);
+    }
+
     #[cfg(unix)]
     #[test]
     fn write_zero_padded_copy_handles_read_only_source() {
@@ -2857,112 +2754,6 @@ mod tests {
         // fails fast.
         assert_eq!(vm.memory_mib, 16384);
         assert_eq!(vm.nix_store_mib, 65536);
-    }
-
-    #[test]
-    fn resolve_networking_mode_parses_env() {
-        let mut env = TestEnv::new();
-        // Default is per-OS — macOS → native when a candidate is configured,
-        // otherwise gvproxy; others → passt.
-        env.remove("MVM_NETWORKING");
-        env.remove("MVM_GATEWAY_BIN");
-        assert_eq!(resolve_networking_mode(), default_networking_mode());
-
-        env.set("MVM_NETWORKING", " passt ");
-        // passt is Linux-only (the Homebrew formula refuses to build it on
-        // macOS), so an explicit passt pin is macOS-safe: resolve falls back
-        // to gvproxy with a warning rather than handing the supervisor a
-        // gateway it can't spawn.
-        if cfg!(target_os = "macos") {
-            assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
-        } else {
-            assert_eq!(resolve_networking_mode(), NetworkingPreference::Passt);
-        }
-
-        env.set("MVM_NETWORKING", "GVPROXY");
-        assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
-
-        env.set("MVM_NETWORKING", " gvproxy ");
-        assert_eq!(resolve_networking_mode(), NetworkingPreference::Gvproxy);
-
-        env.set("MVM_GATEWAY_BIN", "/path/to/gateway");
-        assert_eq!(
-            resolve_networking_mode(),
-            NetworkingPreference::Gvproxy,
-            "an explicit gvproxy pin must override the macOS native default"
-        );
-        env.remove("MVM_GATEWAY_BIN");
-
-        env.set("MVM_NETWORKING", "");
-        assert_eq!(resolve_networking_mode(), default_networking_mode());
-
-        // Unknown value falls back to the per-OS default without panic.
-        env.set("MVM_NETWORKING", "vmnet-helper");
-        assert_eq!(resolve_networking_mode(), default_networking_mode());
-
-        // `native` requires MVM_GATEWAY_BIN to name the gateway binary;
-        // without it, it falls back (fail-safe, no wrong-gateway spawn).
-        env.set("MVM_NETWORKING", "native");
-        assert_eq!(
-            resolve_networking_mode(),
-            default_networking_mode(),
-            "native without MVM_GATEWAY_BIN must fall back to the per-OS default"
-        );
-        // With MVM_GATEWAY_BIN set, `native` resolves (case- and
-        // whitespace-insensitive like the other accepted values).
-        env.set("MVM_GATEWAY_BIN", "/path/to/gateway");
-        assert_eq!(resolve_networking_mode(), NetworkingPreference::Native);
-        env.set("MVM_NETWORKING", " NATIVE ");
-        assert_eq!(resolve_networking_mode(), NetworkingPreference::Native);
-        env.remove("MVM_GATEWAY_BIN");
-
-        env.remove("MVM_NETWORKING");
-    }
-
-    #[test]
-    fn tsi_no_longer_resolvable() {
-        // TSI was removed. `MVM_NETWORKING=tsi` (any case) must NOT
-        // resolve to a TSI mode — it falls back to the
-        // per-OS gateway default with a warning. This guards the
-        // claim-10 no-bypass invariant at the env-var surface.
-        let mut env = TestEnv::new();
-        for variant in ["tsi", "TSI", "Tsi", " tsi ", "tSi"] {
-            env.set("MVM_NETWORKING", variant);
-            assert_eq!(
-                resolve_networking_mode(),
-                default_networking_mode(),
-                "MVM_NETWORKING={variant} must fall back to per-OS default \
-                 (TSI was removed)"
-            );
-        }
-        env.remove("MVM_NETWORKING");
-    }
-
-    #[test]
-    fn default_networking_mode_matches_host_os() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_GATEWAY_BIN");
-        let expected = if cfg!(target_os = "macos") {
-            NetworkingPreference::Gvproxy
-        } else {
-            NetworkingPreference::Passt
-        };
-        assert_eq!(default_networking_mode(), expected);
-    }
-
-    #[test]
-    fn macos_default_selects_native_when_gateway_binary_is_configured() {
-        let mut env = TestEnv::new();
-        env.remove("MVM_NETWORKING");
-        env.set("MVM_GATEWAY_BIN", "/path/to/rvproxy");
-
-        let expected = if cfg!(target_os = "macos") {
-            NetworkingPreference::Native
-        } else {
-            NetworkingPreference::Passt
-        };
-        assert_eq!(default_networking_mode(), expected);
-        assert_eq!(resolve_networking_mode(), expected);
     }
 
     #[test]
@@ -4003,6 +3794,38 @@ mod tests {
         assert!(!vm.verbose, "default is quiet");
         let vm = LibkrunBuilderVm::default().with_verbose(true);
         assert!(vm.verbose, "with_verbose(true) flips the flag");
+    }
+
+    #[test]
+    fn apply_networking_mode_switches_libkrun_builder_to_disconnected_net() {
+        let vm_state_dir = tempfile::tempdir().expect("tempdir");
+        let krun = KrunContext::new("builder-smoke", "/tmp/kernel", "/tmp/rootfs");
+        let configured = apply_networking_mode(krun, vm_state_dir.path());
+
+        match configured.networking {
+            libkrun_sys::NetworkingMode::Disconnected { mac } => {
+                assert_eq!(mac[0], 0x02, "builder MAC must stay locally administered");
+            }
+            other => panic!("builder networking must be disconnected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn krun_context_for_rootdir_image_marks_vsock_only_env() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let image = BuilderVmImage::RootDir {
+            root_dir: root.path().to_path_buf(),
+            entry_path: "/init".to_string(),
+        };
+
+        let krun = krun_context_for_image("stage0", &image).expect("context");
+        assert_eq!(
+            krun.guest_entrypoint
+                .as_ref()
+                .map(|entry| entry.envp.clone()),
+            Some(vec![VSOCK_ONLY_ENV_VAR.to_string()]),
+            "Stage0 root-dir boots must carry the vsock-only marker via guest env"
+        );
     }
 
     #[test]

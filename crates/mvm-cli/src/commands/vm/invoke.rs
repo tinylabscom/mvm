@@ -4,10 +4,11 @@
 //! Distinct from `mvmctl machine exec` (dev-only, arbitrary shell). This is
 //! the production-safe call surface — it dispatches the `RunEntrypoint` vsock
 //! verb, which the guest agent serves only by spawning the program named in
-//! `/etc/mvm/entrypoint`. There is no shell and no argv override. The only env
-//! injected is the substitution env — `HTTP_PROXY` + the opaque secret
-//! placeholders — and only when the VM's admitted plan carried secrets; never
-//! a raw secret value (those stay in the host substitution endpoint).
+//! `/etc/mvm/entrypoint`. There is no shell and no argv override. Env injection
+//! is limited to host-synthesized egress settings: either the substitution env
+//! (`HTTP_PROXY` + opaque placeholders) for secret-bearing workloads, or the
+//! loopback SOCKS5 vsock proxy env for plain vsock-egress workloads; never a
+//! raw secret value.
 //!
 //! Behaviour:
 //!   - boots a transient microVM from a registered template / manifest slot
@@ -465,11 +466,9 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         &mut stream,
         stdin,
         timeout_secs,
-        // When the VM has a substitution endpoint (the admitted plan
-        // carried secrets), inject HTTP_PROXY + the opaque placeholder vars so
-        // the workload routes secret-bearing egress through the in-guest
-        // forward proxy → host endpoint. Empty when there are no secrets.
-        substitution_env(vm_name),
+        // Secret-bearing workloads route through the in-guest forward proxy;
+        // plain vsock-egress workloads route through the loopback SOCKS5 client.
+        workload_egress_env(vm_name),
         |event| match event {
             mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
                 let _ = std::io::stdout().write_all(chunk);
@@ -512,6 +511,18 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
     Ok(exit_code_for(&terminal))
 }
 
+/// The workload launch env that routes egress through the active vsock path.
+/// Secret-bearing workloads use the substitution endpoint env; plain workloads
+/// use the guest-local SOCKS5 client when the VM booted with vsock egress
+/// enabled. Empty when the VM has neither.
+fn workload_egress_env(vm_name: &str) -> Vec<(String, String)> {
+    let subst = substitution_env(vm_name);
+    if !subst.is_empty() {
+        return subst;
+    }
+    vsock_egress_env(vm_name)
+}
+
 /// The workload launch env that routes secret-bearing egress
 /// through the substitution endpoint. Reads the `(guest var, placeholder)`
 /// pairs the endpoint minted at boot (`vm_substitution_env_path`); when
@@ -529,6 +540,24 @@ fn substitution_env(vm_name: &str) -> Vec<(String, String)> {
         build_substitution_env(placeholders),
         egress_ca_present(vm_name),
     )
+}
+
+fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
+    if !mvm_core::config::vm_vsock_egress_marker_path(vm_name).is_file() {
+        return Vec::new();
+    }
+    let proxy = "socks5h://127.0.0.1:1080".to_string();
+    let no_proxy = "localhost,127.0.0.1,::1".to_string();
+    vec![
+        ("HTTP_PROXY".to_string(), proxy.clone()),
+        ("HTTPS_PROXY".to_string(), proxy.clone()),
+        ("ALL_PROXY".to_string(), proxy.clone()),
+        ("http_proxy".to_string(), proxy.clone()),
+        ("https_proxy".to_string(), proxy.clone()),
+        ("all_proxy".to_string(), proxy),
+        ("NO_PROXY".to_string(), no_proxy.clone()),
+        ("no_proxy".to_string(), no_proxy),
+    ]
 }
 
 /// Whether the per-VM egress CA sidecar exists — i.e. egress substitution
@@ -667,6 +696,8 @@ mod auto_stdin_tests {
 
 #[cfg(test)]
 mod tests {
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use super::*;
 
     #[test]
@@ -776,6 +807,63 @@ mod tests {
             env.iter()
                 .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret-abc123")
         );
+    }
+
+    #[test]
+    fn vsock_egress_env_empty_without_marker() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        assert!(super::vsock_egress_env("plain-vm").is_empty());
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    #[test]
+    fn vsock_egress_env_emits_socks5_proxy_vars_when_marker_present() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let marker = mvm_core::config::vm_vsock_egress_marker_path("plain-vm");
+        std::fs::create_dir_all(marker.parent().expect("marker parent"))
+            .expect("mkdir marker parent");
+        std::fs::write(&marker, b"1").expect("write marker");
+
+        let env = super::vsock_egress_env("plain-vm");
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "ALL_PROXY" && v == "socks5h://127.0.0.1:1080")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "NO_PROXY" && v.contains("127.0.0.1"))
+        );
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    #[test]
+    fn workload_egress_env_prefers_substitution_env_over_plain_vsock_env() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+
+        let marker = mvm_core::config::vm_vsock_egress_marker_path("pref-vm");
+        std::fs::create_dir_all(marker.parent().expect("marker parent"))
+            .expect("mkdir marker parent");
+        std::fs::write(&marker, b"1").expect("write marker");
+        let subst = mvm_core::config::vm_substitution_env_path("pref-vm");
+        std::fs::create_dir_all(subst.parent().expect("subst parent")).expect("mkdir subst parent");
+        std::fs::write(
+            &subst,
+            serde_json::to_vec(&vec![("OPENAI_API_KEY", "mvm-secret-1")]).expect("json"),
+        )
+        .expect("write substitution env");
+
+        let env = super::workload_egress_env("pref-vm");
+        assert!(env.iter().any(|(k, _)| k == "HTTP_PROXY"));
+        assert!(env.iter().all(|(_, v)| !v.starts_with("socks5h://")));
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]
