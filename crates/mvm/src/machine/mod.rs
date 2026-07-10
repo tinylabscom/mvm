@@ -337,9 +337,10 @@ mod tests {
 
         #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
         {
-            let err = machine
-                .select_backend()
-                .expect_err("unsupported hosts must fail closed");
+            let err = match machine.select_backend() {
+                Ok(_) => panic!("unsupported hosts must fail closed"),
+                Err(err) => err,
+            };
             let hvf = err
                 .shortfalls
                 .iter()
