@@ -196,34 +196,63 @@ surface safely.
 
 ## Current measured state
 
-- Builder kernel (`aarch64`): `17,135,624` bytes raw, `7,640,745` bytes gzip,
-  `1373` built-in symbols.
-- Workload kernel (`aarch64`): `15,929,352` bytes raw, `7,077,261` bytes gzip,
-  `1329` built-in symbols.
-- Workload sizeopt experiment (`aarch64`): `13,948,936` bytes raw,
-  `6,008,471` bytes gzip, `1329` built-in symbols.
+- Builder kernel (`aarch64`): `16,998,408` bytes raw, `7,562,916` bytes gzip,
+  `1364` built-in symbols.
+- Workload kernel (`aarch64`): `15,796,232` bytes raw, `7,010,163` bytes gzip,
+  `1320` built-in symbols.
+- Workload sizeopt experiment (`aarch64`): `13,881,352` bytes raw,
+  `5,951,074` bytes gzip, `1320` built-in symbols.
 - The sizeopt config diff is currently limited to
   `CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE` vs
   `CONFIG_CC_OPTIMIZE_FOR_SIZE`; it materially shrinks the image but does not
   reduce the built-in symbol count.
 - Decision: keep `workload-sizeopt` as an explicit comparison output, not the
-  default workload kernel. The size win is real, but the default kernel should
-  not flip modes until the repaired workload boot witness is proven live on a
-  host that can run the throwaway VM check end to end.
+  default workload kernel. The size win is real, but this pass does not flip
+  the default workload mode while the current default kernel remains the
+  better-proven production path.
 - The `mvmctl build kernel build --boot-check` helper now boots the pinned
   workload kernel through the OCI `--image` path and polls the guest agent
   directly instead of relying on full `machine wait` readiness.
-- Live witness: `cargo run -- --builder libkrun build kernel build --which
-  workload --source compile --boot-check` now completes successfully on this
-  host, booting the pinned workload kernel under libkrun and confirming the
-  guest agent over vsock.
+- Live witness: `./target/debug/mvmctl machine run --image
+  docker.io/library/alpine:3.20 --hypervisor hvf --kernel-pin workload --
+  /bin/true` exits `0` on this host, proving the pinned workload kernel still
+  boots the sealed OCI workload path after the accepted cuts. The stronger
+  current-tree witness is now green too: `cargo run -- --builder libkrun build
+  kernel build --which workload --source compile --boot-check` rebuilds on the
+  synced tree and confirms the guest agent over vsock.
 - The resolved builder and workload configs both carry `CONFIG_INITRAMFS_SOURCE=""`
   and `CONFIG_RD_GZIP=y` with every other `CONFIG_RD_*` decompressor disabled;
   the shipped verity path in the repo is consistently `cpio.gz`, so the shared
   kernel keeps gzip support only.
-- `CONFIG_BPF` remains `=y` in the resolved workload config even with the
-  workload-only disable in place, so this pass keeps the syscall-facing
-  `BPF_SYSCALL` interface off but does not claim a safe whole-subsystem BPF cut.
-- No further shared-base removals were proven safe in this pass beyond the
-  landed gzip-only `RD_*` decompressor trim; builder-only needs remain isolated
-  from workload-only cuts.
+- Shared-base follow-up: `CONFIG_AUDIT` is now force-dropped in `base.nix`.
+  Linux 6.12's `AUDITSYSCALL` rides `AUDIT && HAVE_ARCH_AUDITSYSCALL`, and the
+  sealed workload boot/runtime path, guest agent, seccomp path, dm-verity
+  path, and admitted workload behavior do not consume kernel audit or
+  `NETLINK_AUDIT`. The shipped audit posture is the userspace, chain-signed
+  `host.audit.v1` flow (`mvm-hostd`, signer, verifier), so dropping the kernel
+  audit subsystem is safe for both workload and builder kernels. The refreshed
+  builder/workload metrics above include that cut.
+- Shared-base follow-up: `CONFIG_BPF_JIT` is now force-dropped in `base.nix`.
+  Linux 6.12's `kernel/bpf/Kconfig` describes the JIT as an optional speedup
+  for loaded BPF programs; the interpreter remains present with `CONFIG_BPF=y`.
+  Seccomp's cBPF filters still run through the in-kernel interpreter path, and
+  neither the sealed workload nor the builder path ships a BPF loader, touches
+  `/proc/sys/net/core/bpf_jit_*`, or uses xt_bpf/classifier programs. Result:
+  keeping core `CONFIG_BPF=y` while dropping the native-code JIT surface is
+  safe for both kernels, and the refreshed metrics above include that cut.
+- `CONFIG_BPF` remains `=y` in the resolved workload config because Linux
+  6.12's `menuconfig NET` unconditionally `select BPF`. The workload cannot
+  drop `NET`: `VSOCKETS` / `VIRTIO_VSOCKETS` live under the networking menu and
+  the guest agent, exit reporter, console forwarding, and addon bridges all use
+  `AF_VSOCK`; admitted `--net` / `--allow-host` workloads also depend on the
+  in-guest loopback TCP helpers (`mvm-egress-client`, addon DNS/bridges) and
+  `mvm-guest-netinit`'s `AF_NETLINK` route installs. `SECCOMP`,
+  `SECCOMP_FILTER`, and `DM_VERITY` do not keep BPF on. Result: keeping
+  `BPF_SYSCALL` off is safe and landed, but a full workload-side `CONFIG_BPF`
+  removal is not safe without dropping the current workload networking/runtime
+  contract.
+- The post-sync `mvm-kernel-config` `make defconfig` regression is fixed in the
+  kernel recipe now: Linux Kconfig's `$(shell,...)` helper goes through
+  `popen()` and therefore requires a real `/bin/sh` inside the Nix sandbox. The
+  config builder now provides it explicitly before `make defconfig`, so fresh
+  compile + boot-check witnesses are green again on the synced tree.

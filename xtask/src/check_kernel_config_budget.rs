@@ -34,13 +34,14 @@ use std::path::Path;
 /// native aarch64 config build — ratchet it to the count CI reports if it
 /// differs.
 ///
-/// Batch 7 (config subtraction pass): removed workload-only md/loop/BPF users,
-/// perf/ikconfig/checkpoint helpers, and the shared unused initramfs
-/// decompressors (bzip2/lzma/xz/lzo/lz4/zstd), then re-measured the aarch64
-/// workload config at 1329 built-ins. x86_64 was not re-measured in this host
+/// Batch 9 (follow-up subtraction pass): after the shared `AUDIT` cut, the
+/// base now also drops the optional BPF JIT path. `CONFIG_NET` still keeps the
+/// core interpreter via `CONFIG_BPF=y`, but neither the sealed workload nor
+/// the builder path needs native-code BPF compilation. Re-measured aarch64
+/// workload config: 1320 built-ins. x86_64 was not re-measured in this host
 /// session, so its ceiling stays intentionally slack until the Linux/x86_64 CI
 /// config build reports the new count.
-const BUDGET_AARCH64: usize = 1329;
+const BUDGET_AARCH64: usize = 1320;
 const BUDGET_X86_64: usize = 1203;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →

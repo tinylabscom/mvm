@@ -104,6 +104,21 @@ let
     "MODULES"        # everything built-in; no /lib/modules tree
     "MODULE_SIG"     # NOP without MODULES; explicit
     "IPV6"           # no v6 path in any current mvm VM
+    # mvm's audit path is the userspace, chain-signed host-services flow
+    # (`host.audit.v1`, hostd, verifier), not Linux kernel audit or audit
+    # netlink. The guest/runtime path and the builder path do not ship
+    # `auditd`/`auditctl`, and no admitted workload contract consumes
+    # NETLINK_AUDIT or syscall-audit records.
+    "AUDIT"
+    # Linux 6.12 keeps the core `BPF` interpreter built-in once `NET` is on,
+    # and the current workload contract still needs `NET` for AF_VSOCK,
+    # loopback helpers, and netlink route setup. The JIT path is separate:
+    # it is an optional speedup for loaded BPF programs, not a requirement for
+    # seccomp's cBPF filters or the in-kernel interpreter. Neither the sealed
+    # workload nor the builder path ships a BPF loader, touches
+    # `/proc/sys/net/core/bpf_jit_*`, or uses xt_bpf/classifier programs, so
+    # keep the interpreter and drop the native-code JIT surface.
+    "BPF_JIT" "BPF_JIT_DEFAULT_ON"
     # Force-dropped (not merely absent from enables) so `olddefconfig`
     # drops a defconfig default instead of leaving it `=y`.
     "EXT4_USE_FOR_EXT2"  # nothing mounts ext2/ext3; ext4 only
@@ -273,6 +288,16 @@ let
       export OBJCOPY=objcopy
       export OBJDUMP=objdump
       export STRIP=strip
+
+      # Linux Kconfig's `$(shell,...)` helper goes through `popen()`, which
+      # hardwires `/bin/sh -c ...` instead of respecting PATH or Kbuild's
+      # `CONFIG_SHELL`. The Nix build sandbox does not guarantee `/bin/sh`,
+      # so provide one explicitly before the first `make defconfig` shell
+      # probe (compiler/linker presence, cc-version, etc.).
+      if [ ! -x /bin/sh ]; then
+        mkdir -p /bin
+        ln -s ${pkgs.bash}/bin/sh /bin/sh
+      fi
 
       # `scripts/config` ships `#!/usr/bin/env bash`; the Nix sandbox has
       # no `/usr/bin/env`. patchShebangs rewrites to the sandbox bash.
