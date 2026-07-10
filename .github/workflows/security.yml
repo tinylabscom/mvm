@@ -765,3 +765,347 @@ jobs:
           fi
           echo "ok: builder-vm image reproduces byte-identically across two clean builds"
           cat /tmp/bvm-hash-a.txt
+
+  # ── Lane 10: Published builder-pack reproducibility ────────────────
+  # Complements Lane 9 (same-run double build) by rebuilding a builder
+  # pack that was actually published on a release and diffing its
+  # content-addressed output hashes against the published attested
+  # manifest. Lane 9 catches non-determinism the day it's introduced;
+  # this lane catches drift between "what CI built at tag time" and
+  # "what building the same tag from scratch produces today" (toolchain
+  # upgrades, flake input drift, etc). Heavy (Nix build per arch) and
+  # requires a published release to compare against, so it is
+  # PR-skipped like Lane 9 and only runs on release-tag pushes, the
+  # nightly schedule, and workflow_dispatch.
+  #
+  # The target release is discovered independently of the ref that
+  # triggered this run (via `gh release list`/`gh release view`), not
+  # read from `github.ref_name` — this workflow's tag-push trigger fires
+  # in parallel with the release workflow that publishes the pack, so
+  # the just-pushed tag's assets may not exist yet. Looking up the most
+  # recent release that already carries the expected pack manifest and
+  # checking out that tag's commit before rebuilding sidesteps the race
+  # entirely; on a quiet nightly run it simply finds the latest release.
+  #
+  # No untrusted GitHub event input flows into any step — `matrix.arch`
+  # and `github.repository` are workflow-defined, and the release tag
+  # used in later steps is read back out of `GITHUB_ENV` after the
+  # discovery step, not interpolated from any PR-controlled value.
+  pack-reproducibility-builder:
+    name: Published builder-pack reproducibility (${{ matrix.arch }})
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            musl_target: aarch64-unknown-linux-musl
+          - arch: x86_64
+            runner: ubuntu-latest
+            musl_target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # A full history + tags checkout — the target release's tag is
+          # discovered at runtime (see above) and may not be the ref that
+          # triggered this workflow, so an arbitrary tag must be
+          # checkable-out later in the job.
+          fetch-depth: 0
+
+      - name: Determine target release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          TARGET_TAG=""
+          while IFS= read -r TAG; do
+            if gh release view "$TAG" --repo "$REPO" --json assets \
+                --jq '.assets[].name' | grep -qx "builder-vm-${ARCH}.pack-manifest.json"; then
+              TARGET_TAG="$TAG"
+              break
+            fi
+          done < <(gh release list --repo "$REPO" --exclude-drafts --exclude-pre-releases \
+                      --limit 30 --json tagName --jq '.[].tagName')
+          if [ -z "$TARGET_TAG" ]; then
+            echo "::notice::No published release carries a builder-vm-${ARCH} attested pack manifest yet; skipping reproducibility check for this arch."
+          fi
+          echo "TARGET_TAG=${TARGET_TAG}" >> "$GITHUB_ENV"
+
+      - name: Checkout target release commit
+        if: env.TARGET_TAG != ''
+        run: git checkout "$TARGET_TAG"
+
+      - name: Install Nix
+        if: env.TARGET_TAG != ''
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Install Rust toolchain
+        if: env.TARGET_TAG != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: ./.github/actions/install-zigbuild
+        if: env.TARGET_TAG != ''
+
+      - name: Cross-compile host-vm binaries (MVM_HOST_BIN_DIR contract)
+        if: env.TARGET_TAG != ''
+        env:
+          MUSL_TARGET: ${{ matrix.musl_target }}
+        run: |
+          set -euo pipefail
+          cargo zigbuild --release --locked --target "$MUSL_TARGET" \
+            -p mvm-build --bin mvm-host-vm-init --bin mvm-egress-proxy
+          echo "MVM_HOST_BIN_DIR=$PWD/target/${MUSL_TARGET}/release" >> "$GITHUB_ENV"
+
+      - name: Rebuild builder VM image from source at the target tag
+        if: env.TARGET_TAG != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          SYSTEM="${ARCH}-linux"
+          nix build "./nix/images/builder-vm#packages.${SYSTEM}.default" \
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
+
+      - name: Download the published builder pack
+        if: env.TARGET_TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloaded
+          gh release download "$TARGET_TAG" --repo "$REPO" --dir downloaded \
+            --pattern "builder-vm-vmlinux-${ARCH}" \
+            --pattern "builder-vm-rootfs-${ARCH}.ext4" \
+            --pattern "builder-vm-${ARCH}.pack-manifest.json" \
+            --pattern "builder-vm-${ARCH}-checksums-sha256.txt"
+
+      - name: Verify downloaded assets against published checksums
+        if: env.TARGET_TAG != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          cd downloaded
+          sha256sum --ignore-missing -c "builder-vm-${ARCH}-checksums-sha256.txt"
+
+      - name: Produce a manifest from the rebuilt artifacts
+        if: env.TARGET_TAG != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p rebuilt
+          nix-store --query --requisites "$STORE_PATH" > rebuilt/sbom.txt
+          # `--keyless` here is not standing in for a real release signature —
+          # it is the hash-recompute path: the producer copies the rebuilt
+          # vmlinux/rootfs.ext4 into place, hashes them, and assembles a
+          # manifest without touching any signing key. `--identity` only
+          # feeds `trust.signing_key_id`, which this check never compares.
+          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
+            --arch "$ARCH" --channel stable \
+            --keyless --identity "pack-reproducibility-check" \
+            --out-dir rebuilt \
+            --sbom rebuilt/sbom.txt \
+            --revocation-channel "https://example.invalid/unused-in-reproducibility-check.json"
+
+      - name: Compare rebuilt pack hashes against the published manifest
+        if: env.TARGET_TAG != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          PUBLISHED="downloaded/builder-vm-${ARCH}.pack-manifest.json"
+          REBUILT="rebuilt/manifest.json"
+
+          # `outputs.pack_hash` and the provenance/trust fields legitimately
+          # differ between this run and the original release build (build
+          # timestamp, signer identity, SBOM uri) even when the artifacts
+          # reproduce byte-for-byte — the pack_hash folds the whole manifest
+          # minus signatures into one digest. The fields that depend only on
+          # the artifact bytes are `outputs.kernel_hash`,
+          # `outputs.builder_image_hash`, and each `outputs.files[].sha256`;
+          # those are what this check compares.
+          jq '.outputs | {kernel_hash, builder_image_hash, files: (.files | sort_by(.path))}' \
+            "$PUBLISHED" > /tmp/published-outputs.json
+          jq '.outputs | {kernel_hash, builder_image_hash, files: (.files | sort_by(.path))}' \
+            "$REBUILT" > /tmp/rebuilt-outputs.json
+
+          if ! diff -q /tmp/published-outputs.json /tmp/rebuilt-outputs.json > /dev/null; then
+            echo "::error::Rebuilding the builder pack for ${ARCH} at ${TARGET_TAG} from source did not reproduce the published artifact hashes" >&2
+            echo "Published (from release ${TARGET_TAG}):" >&2
+            cat /tmp/published-outputs.json >&2
+            echo >&2
+            echo "Rebuilt (from source at the same tag):" >&2
+            cat /tmp/rebuilt-outputs.json >&2
+            echo >&2
+            echo "Diff:" >&2
+            diff -u /tmp/published-outputs.json /tmp/rebuilt-outputs.json >&2 || true
+            exit 1
+          fi
+          echo "ok: builder pack for ${ARCH} at ${TARGET_TAG} reproduces byte-identically from source"
+
+      - name: Report skip (no eligible release yet)
+        if: env.TARGET_TAG == ''
+        run: echo "::notice::pack-reproducibility-builder (${{ matrix.arch }}) skipped — no published release with an attested builder pack manifest was found."
+
+  # ── Lane 11: Published runtime-pack reproducibility ────────────────
+  # Same shape as Lane 10, applied to the runtime pack the `default-
+  # microvm` release job produces from `nix/images/default-tenant`. A
+  # runtime pack is keyless-only (`mvm-builder-pack-tool --kind
+  # runtime` refuses an ed25519 signing key), so the rebuilt-manifest
+  # step below always uses `--keyless` regardless.
+  pack-reproducibility-runtime:
+    name: Published runtime-pack reproducibility (${{ matrix.arch }})
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            musl_target: aarch64-unknown-linux-musl
+          - arch: x86_64
+            runner: ubuntu-latest
+            musl_target: x86_64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Determine target release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          TARGET_TAG=""
+          while IFS= read -r TAG; do
+            if gh release view "$TAG" --repo "$REPO" --json assets \
+                --jq '.assets[].name' | grep -qx "default-microvm-${ARCH}.pack-manifest.json"; then
+              TARGET_TAG="$TAG"
+              break
+            fi
+          done < <(gh release list --repo "$REPO" --exclude-drafts --exclude-pre-releases \
+                      --limit 30 --json tagName --jq '.[].tagName')
+          if [ -z "$TARGET_TAG" ]; then
+            echo "::notice::No published release carries a default-microvm-${ARCH} attested pack manifest yet; skipping reproducibility check for this arch."
+          fi
+          echo "TARGET_TAG=${TARGET_TAG}" >> "$GITHUB_ENV"
+
+      - name: Checkout target release commit
+        if: env.TARGET_TAG != ''
+        run: git checkout "$TARGET_TAG"
+
+      - name: Install Nix
+        if: env.TARGET_TAG != ''
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Install Rust toolchain
+        if: env.TARGET_TAG != ''
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rebuild the default microVM image from source at the target tag
+        if: env.TARGET_TAG != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          SYSTEM="${ARCH}-linux"
+          nix build "./nix/images/default-tenant#packages.${SYSTEM}.default" \
+            --impure --no-link --print-out-paths > /tmp/store-path.txt
+          STORE_PATH=$(head -1 /tmp/store-path.txt)
+          echo "STORE_PATH=${STORE_PATH}" >> "$GITHUB_ENV"
+
+      - name: Download the published runtime pack
+        if: env.TARGET_TAG != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p downloaded
+          gh release download "$TARGET_TAG" --repo "$REPO" --dir downloaded \
+            --pattern "default-microvm-vmlinux-${ARCH}" \
+            --pattern "default-microvm-rootfs-${ARCH}.ext4" \
+            --pattern "default-microvm-rootfs-${ARCH}.verity" \
+            --pattern "default-microvm-rootfs-${ARCH}.roothash" \
+            --pattern "default-microvm-${ARCH}.pack-manifest.json" \
+            --pattern "default-microvm-${ARCH}-checksums-sha256.txt"
+
+      - name: Verify downloaded assets against published checksums
+        if: env.TARGET_TAG != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          cd downloaded
+          sha256sum --ignore-missing -c "default-microvm-${ARCH}-checksums-sha256.txt"
+
+      - name: Produce a manifest from the rebuilt artifacts
+        if: env.TARGET_TAG != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p rebuilt
+          nix-store --query --requisites "$STORE_PATH" > rebuilt/sbom.txt
+          # Runtime packs have no ed25519 producer path (see the pack tool's
+          # own usage text) — `--keyless` is the only way to invoke this
+          # kind, and it never touches a signing key here either.
+          cargo run --release -p mvm-build --example mvm-builder-pack-tool -- \
+            --kind runtime \
+            --vmlinux "$STORE_PATH/vmlinux" --rootfs "$STORE_PATH/rootfs.ext4" \
+            --verity "$STORE_PATH/rootfs.verity" --roothash "$STORE_PATH/rootfs.roothash" \
+            --arch "$ARCH" --channel stable \
+            --keyless --identity "pack-reproducibility-check" \
+            --out-dir rebuilt \
+            --sbom rebuilt/sbom.txt \
+            --revocation-channel "https://example.invalid/unused-in-reproducibility-check.json"
+
+      - name: Compare rebuilt pack hashes against the published manifest
+        if: env.TARGET_TAG != ''
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          PUBLISHED="downloaded/default-microvm-${ARCH}.pack-manifest.json"
+          REBUILT="rebuilt/manifest.json"
+
+          # Same rationale as the builder-pack lane: compare only the
+          # content-addressed output fields, not `outputs.pack_hash` (which
+          # folds in the build timestamp / signer identity / SBOM uri and so
+          # legitimately differs run to run).
+          jq '.outputs | {kernel_hash, agent_rootfs_hash, files: (.files | sort_by(.path))}' \
+            "$PUBLISHED" > /tmp/published-outputs.json
+          jq '.outputs | {kernel_hash, agent_rootfs_hash, files: (.files | sort_by(.path))}' \
+            "$REBUILT" > /tmp/rebuilt-outputs.json
+
+          if ! diff -q /tmp/published-outputs.json /tmp/rebuilt-outputs.json > /dev/null; then
+            echo "::error::Rebuilding the runtime pack for ${ARCH} at ${TARGET_TAG} from source did not reproduce the published artifact hashes" >&2
+            echo "Published (from release ${TARGET_TAG}):" >&2
+            cat /tmp/published-outputs.json >&2
+            echo >&2
+            echo "Rebuilt (from source at the same tag):" >&2
+            cat /tmp/rebuilt-outputs.json >&2
+            echo >&2
+            echo "Diff:" >&2
+            diff -u /tmp/published-outputs.json /tmp/rebuilt-outputs.json >&2 || true
+            exit 1
+          fi
+          echo "ok: runtime pack for ${ARCH} at ${TARGET_TAG} reproduces byte-identically from source"
+
+      - name: Report skip (no eligible release yet)
+        if: env.TARGET_TAG == ''
+        run: echo "::notice::pack-reproducibility-runtime (${{ matrix.arch }}) skipped — no published release with an attested runtime pack manifest was found."
