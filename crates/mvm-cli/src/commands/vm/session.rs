@@ -1030,10 +1030,12 @@ fn cmd_start(args: StartArgs) -> Result<()> {
         })?;
         let Some(ctx) = ctx else { return Ok(None) };
         let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
-        super::up::attach_host_signer_pubkey_config_for_plan(
+        let guest_profile = super::up::guest_profile_for_boot(is_dev, rootfs);
+        super::up::attach_guest_boot_config_for_plan(
             &mut start_config,
             &ctx.admitted.plan,
             &ctx.host_signer_public_path,
+            guest_profile,
         )?;
         let plan_json = serde_json::to_string(&ctx.admitted.signed)
             .context("serializing admitted plan for session start")?;

@@ -404,6 +404,14 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             super::plan_persist::write_plan(vm_name, &c.admitted.plan)
                 .context("persisting admitted plan for the transient run")?;
         }
+        let guest_profile = super::up::guest_profile_for_boot(admit_is_dev, rootfs);
+        let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
+        super::up::attach_guest_boot_config_for_plan(
+            &mut start_config,
+            &c.admitted.plan,
+            &c.host_signer_public_path,
+            guest_profile,
+        )?;
         let plan_json = serde_json::to_string(&c.admitted.signed)
             .context("serializing admitted plan for the transient run")?;
         let bundle_json = c
@@ -416,7 +424,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             tenant_id: c.admitted.plan.tenant.0.clone(),
             plan_json,
             bundle_json,
-            config_files: vec![],
+            config_files: start_config.config_files,
         };
         // Hand the admission context (with its emitter) to the command layer so
         // it can emit `plan.launched` / `plan.failed` once the boot resolves.

@@ -881,6 +881,7 @@ fn run_inner(
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
         start_config.bundle_json = sub.bundle_json;
+        start_config.config_files.extend(sub.config_files);
         use_snapshot = false;
     }
     let t_admitted = timing.then(std::time::Instant::now);

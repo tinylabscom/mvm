@@ -4272,5 +4272,6 @@ Issue #1381 follow-on now has the unit-testable path wired:
 
 - [x] Core delivery seams: `VerbGrantEnvelope` cmdline encode/decode, `verb-grant.json` sidecar mint from admitted `ExecutionPlan.agent_verbs`, backend `mvm.verb_grant=` append, and chain-signed `verb_denied` audit entry are implemented and targeted-test green.
 - [x] Config-drive trust anchor: grant-eligible starts attach `host-signer.pub` in `VmStartConfig.config_files`; mkGuest and OCI init stage it at `/run/mvm/host-signer.pub`; the guest pins grants against that file and ignores `VerbGrantEnvelope.pubkey_hex` for trust.
-- [ ] Live proof remains: Vz/macOS and Firecracker/Linux boot validation that `/run/mvm/host-signer.pub` + `/run/mvm/verb-grant.json` exist before agent fork, listed verbs pass, unlisted ProdSafe verbs return `VerbNotAuthorized`, `verb_denied` verifies, and `agent_verbs = None` remains no-token/no-grant.
+- [x] Linux/KVM Firecracker proof now covers the load-bearing sealed-boot path: listed `RunEntrypoint` succeeded (`"hello ari"`), unlisted `UpdateIdleTimeout` denied with a live `verb_denied` audit record, `agent_verbs = None` remained grant-less, and sealed `RunCode` still returned `UnsupportedInProfile { profile: SealedProd, .. }`.
+- [ ] Remaining live proof is now macOS HVF/libkrun parity: confirm the signer key + grant arrive before agent service on the supported macOS path, then close ADR-103.
 - [ ] ADR-103 remains Proposed until maintainer acceptance after live proof.

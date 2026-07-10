@@ -205,10 +205,12 @@ fn admit_entrypoint_boot(
     let Some(ctx) = ctx else { return Ok(None) };
 
     let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
-    super::up::attach_host_signer_pubkey_config_for_plan(
+    let guest_profile = super::up::guest_profile_for_boot(params.keep_alive_dev, params.rootfs);
+    super::up::attach_guest_boot_config_for_plan(
         &mut start_config,
         &ctx.admitted.plan,
         &ctx.host_signer_public_path,
+        guest_profile,
     )?;
     if super::up::persists_plan_before_start(params.backend_name) {
         super::plan_persist::write_plan(params.vm_name, &ctx.admitted.plan)
@@ -859,6 +861,15 @@ mod tests {
                 .any(|f| f.name == host_signer::PUBLIC_FILENAME),
             "host signer pubkey must be attached when verb grants are present"
         );
+        let policy_file = admitted
+            .substrate
+            .config_files
+            .iter()
+            .find(|f| f.name == crate::commands::vm::up::SECURITY_POLICY_FILENAME)
+            .expect("security policy must be attached");
+        let policy: mvm_core::security::SecurityPolicy =
+            serde_json::from_str(&policy_file.content).expect("parse security policy");
+        assert_eq!(policy.profile, mvm_core::security::AgentProfile::SealedProd);
     }
 
     #[test]
