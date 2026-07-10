@@ -32,6 +32,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-10 Plan 237 Phase 0 first PR: the shared guest network helper
+      used by OCI guest init now casts ioctl requests through the target musl
+      `libc::Ioctl` type, stale cached OCI image records can re-materialize
+      missing rootfs outputs from existing unpacked layers, and
+      `scripts/measure-hvf-density.sh` provides a checked-in HVF density
+      harness with isolated `/tmp` artifacts, RSS / `vm_stat` /
+      launch-failure / cleanup capture, and configurable wave sizes.
+      Validation is green for the target musl `mvm-oci-init` zigbuild,
+      `mvm-guest` tests, focused `mvm-cli` cache-repair tests, workspace check,
+      workspace clippy, and the live Alpine `ps aux` smoke. Clean 1/5/10/25
+      density publication remains open because the current host has unrelated
+      HVF runtime processes and long-running build work; the harness verified
+      cleanup on the attempted run and left no matching Plan 237 processes.
 - [x] 2026-07-08 Plan 213 §D `mvm prepare` + precise not-instant reasons
       (runtime-pack scope): `mvm_core::pack_cache::diagnose_pack` re-scans the
       promoted-pack cache like `resolve_pack` but surfaces the first captured

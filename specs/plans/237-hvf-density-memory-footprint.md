@@ -1,6 +1,6 @@
 # Plan 237 - HVF density memory footprint reduction
 
-**Status:** PROPOSED
+**Status:** IN PROGRESS (Phase 0 first PR implemented; clean baseline pending)
 **Created:** 2026-07-09
 **Goal:** reduce the resident host footprint of idle HVF OCI microVMs enough
 to make 100 to 500 concurrent lightweight sandboxes a planned operating mode,
@@ -78,23 +78,43 @@ dropping the idle supervisor from a hundreds-of-MiB shape to the current
 
 **Goal:** make the test reproducible before optimizing the process model.
 
-- [ ] Land the guest rootfs rematerialization fix for `mvm-oci-init` by using
+- [x] Land the guest rootfs rematerialization fix for `mvm-oci-init` by using
   the target libc ioctl request type instead of a host-width `c_ulong` request
   value. Keep the regression test that proves the loopback ioctl request values
   are representable for the musl target.
-- [ ] Add a cache repair or cache-only rematerialization path for stale OCI
+- [x] Add a cache repair or cache-only rematerialization path for stale OCI
   image records whose unpacked layers are still present but whose rootfs output
   is missing. The operator should not need to manually delete or reconstruct
   private cache state to run `machine run --image alpine -- ps aux`.
-- [ ] Add a checked-in density measurement harness under `scripts/` that runs
-  1, 5, 10, 25, 50, and 100 VM waves with isolated `MVM_DATA_DIR`,
-  `MVM_CACHE_DIR`, and `CARGO_TARGET_DIR` values.
-- [ ] The harness records process counts, per-component RSS, `vm_stat`, VM
+- [x] Add a checked-in density measurement harness under `scripts/` that runs
+  isolated wave sizes from `MVM_HVF_DENSITY_WAVES`; the first-PR default is
+  1, 5, 10, and 25 VMs, with 50 and 100 supported by override once the host is
+  clean enough for larger waves.
+- [x] The harness records process counts, per-component RSS, `vm_stat`, VM
   names, launch failures, and cleanup results into `/tmp/` or an explicit
   artifact directory outside the repository.
 - [ ] Commit a baseline report under `specs/perf/plan-237/` only after the
   harness itself exists and the run was captured from a clean, documented host
   state.
+
+**2026-07-10 first-PR implementation note**
+
+- The shared guest network helper used by `mvm-oci-init` now casts ioctl
+  request constants through the target `libc::Ioctl` type, with a regression
+  test pinning target representability for `aarch64-unknown-linux-musl`.
+- `machine run --image ...` can repair stale cached OCI image records by
+  re-materializing the ext4 rootfs from the existing unpacked layer tree when
+  the cached rootfs output is missing, without requiring the operator to delete
+  private cache state.
+- `scripts/measure-hvf-density.sh` captures reproducible HVF density artifacts
+  outside the repository and preserves the current foreground process shape for
+  Phase 0 measurement.
+- Clean baseline publication remains open. The live host had unrelated HVF
+  runtime processes and long-running build work, which triggers this plan's
+  density-run stop condition. A warm-cache one-VM harness run completed with
+  cleanup verified, but the full 1/5/10/25 harness run failed at wave 1 with
+  `substitution endpoint closed stdout without a ready handshake` and no
+  matching Plan 237 processes left after cleanup.
 
 **Validation**
 
