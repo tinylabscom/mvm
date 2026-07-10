@@ -201,6 +201,11 @@ fn derive_network_config(runtime_config: &TunnelRuntimeConfig) -> Result<TunnelN
             .expect("static tunnel gateway IPv4 is valid"),
         dns_servers: vec!["10.240.0.1".parse().expect("static tunnel DNS IP is valid")],
         mtu,
+        // Seam: the admission pins aren't threaded into this backend spawn path
+        // yet (it only builds drop_all / host_tun policies, which carry no pin
+        // registry). When this path grows an l3_forward policy, the host worker
+        // fills host_entries from that policy's pins in `HostTunnelWorker::new`.
+        host_entries: Vec::new(),
     };
     config.validate()?;
     Ok(config)

@@ -33,6 +33,12 @@ pub const MAX_DNS_SERVERS: usize = 4;
 pub const MAX_TUNNEL_MTU: u16 = 65_535;
 /// Minimum sensible TUN MTU.
 pub const MIN_TUNNEL_MTU: u16 = 576;
+/// Maximum number of host→IP entries the host may inject into the guest's
+/// `/etc/hosts`. Bounds the config so a hostile or buggy producer can't hand the
+/// guest an unbounded allow-list.
+pub const MAX_HOST_ENTRIES: usize = 64;
+/// Upper bound on a host-entry name, matching the DNS name length limit.
+pub const MAX_HOST_ENTRY_NAME_LEN: usize = 253;
 
 /// Fixed frame type tags for the control/data tunnel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -388,6 +394,20 @@ impl TunnelHelloAck {
     }
 }
 
+/// One admission-time host→IPv4 pin the guest writes into `/etc/hosts`.
+///
+/// The host resolved every allowlisted name once at admission and gates guest
+/// packets by dst IP against that pin set. Handing the guest the same
+/// `name → ip` pairs makes in-guest resolution pin-consistent by construction:
+/// an admitted name resolves to exactly the IP the gate admits, and a
+/// non-allowlisted name has no entry and simply fails to resolve — default-deny.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TunnelHostEntry {
+    pub name: String,
+    pub ip: std::net::Ipv4Addr,
+}
+
 /// Host-provided guest network configuration for the tunnel endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -399,6 +419,9 @@ pub struct TunnelNetworkConfig {
     #[serde(default)]
     pub dns_servers: Vec<std::net::IpAddr>,
     pub mtu: u16,
+    /// Admission pins the guest injects into `/etc/hosts` for name resolution.
+    #[serde(default)]
+    pub host_entries: Vec<TunnelHostEntry>,
 }
 
 impl TunnelNetworkConfig {
@@ -414,6 +437,14 @@ impl TunnelNetworkConfig {
         }
         if !(MIN_TUNNEL_MTU..=MAX_TUNNEL_MTU).contains(&self.mtu) {
             return Err(ControlMessageError::MtuOutOfRange(self.mtu));
+        }
+        if self.host_entries.len() > MAX_HOST_ENTRIES {
+            return Err(ControlMessageError::TooManyHostEntries(
+                self.host_entries.len(),
+            ));
+        }
+        for entry in &self.host_entries {
+            validate_host_entry_name(&entry.name)?;
         }
         Ok(())
     }
@@ -637,6 +668,10 @@ pub enum ControlMessageError {
     InvalidTunnelGuestPort(u32),
     #[error("credit update must grant at least one packet or one byte")]
     EmptyCreditUpdate,
+    #[error("received {0} host entries, maximum is {MAX_HOST_ENTRIES}")]
+    TooManyHostEntries(usize),
+    #[error("host entry name {0:?} is not a valid DNS-ish label")]
+    InvalidHostEntryName(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -666,6 +701,22 @@ fn validate_string(field: &'static str, value: &str) -> Result<(), ControlMessag
         return Err(ControlMessageError::InvalidString(field));
     }
     Ok(())
+}
+
+/// A host-entry name must be a non-empty, bounded DNS-ish label: only ASCII
+/// alphanumerics plus `.` and `-`, so it can never inject a second `/etc/hosts`
+/// token or a newline into the guest hosts file.
+fn validate_host_entry_name(name: &str) -> Result<(), ControlMessageError> {
+    let ok = !name.is_empty()
+        && name.len() <= MAX_HOST_ENTRY_NAME_LEN
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(ControlMessageError::InvalidHostEntryName(name.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -803,9 +854,96 @@ mod tests {
                 "2606:4700:4700::1001".parse().expect("ip"),
             ],
             mtu: 1500,
+            host_entries: Vec::new(),
         };
         let err = cfg.validate().expect_err("dns cap enforced");
         assert_eq!(err, ControlMessageError::TooManyDnsServers(5));
+    }
+
+    fn network_config_with_host_entries(host_entries: Vec<TunnelHostEntry>) -> TunnelNetworkConfig {
+        TunnelNetworkConfig {
+            interface_name: "mvm-net0".to_string(),
+            guest_ipv4: "10.240.0.2".parse().expect("ip"),
+            prefix_len: 30,
+            gateway_ipv4: "10.240.0.1".parse().expect("ip"),
+            dns_servers: Vec::new(),
+            mtu: 1500,
+            host_entries,
+        }
+    }
+
+    #[test]
+    fn tunnel_config_host_entries_serde_roundtrip_and_bounds() {
+        let cfg = network_config_with_host_entries(vec![
+            TunnelHostEntry {
+                name: "api.openai.com".to_string(),
+                ip: "104.18.7.42".parse().expect("ip"),
+            },
+            TunnelHostEntry {
+                name: "example-cdn.net".to_string(),
+                ip: "93.184.216.34".parse().expect("ip"),
+            },
+        ]);
+        cfg.validate().expect("valid host entries");
+
+        let roundtrip: TunnelNetworkConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).expect("serialize"))
+                .expect("deserialize");
+        assert_eq!(roundtrip, cfg);
+
+        // Over-cap vec is rejected.
+        let over_cap: Vec<TunnelHostEntry> = (0..(MAX_HOST_ENTRIES + 1))
+            .map(|i| TunnelHostEntry {
+                name: format!("h{i}.example.com"),
+                ip: "10.0.0.1".parse().expect("ip"),
+            })
+            .collect();
+        let err = network_config_with_host_entries(over_cap)
+            .validate()
+            .expect_err("over-cap rejected");
+        assert_eq!(
+            err,
+            ControlMessageError::TooManyHostEntries(MAX_HOST_ENTRIES + 1)
+        );
+
+        // A name with a disallowed character is rejected.
+        let err = network_config_with_host_entries(vec![TunnelHostEntry {
+            name: "bad name!".to_string(),
+            ip: "10.0.0.1".parse().expect("ip"),
+        }])
+        .validate()
+        .expect_err("bad name rejected");
+        assert_eq!(
+            err,
+            ControlMessageError::InvalidHostEntryName("bad name!".to_string())
+        );
+
+        // An empty name is rejected.
+        let err = network_config_with_host_entries(vec![TunnelHostEntry {
+            name: String::new(),
+            ip: "10.0.0.1".parse().expect("ip"),
+        }])
+        .validate()
+        .expect_err("empty name rejected");
+        assert_eq!(
+            err,
+            ControlMessageError::InvalidHostEntryName(String::new())
+        );
+    }
+
+    #[test]
+    fn tunnel_config_defaults_host_entries_to_empty_when_absent() {
+        // Old configs without the field still parse (default = empty).
+        let json = r#"{
+            "interface_name": "mvm-net0",
+            "guest_ipv4": "10.240.0.2",
+            "prefix_len": 30,
+            "gateway_ipv4": "10.240.0.1",
+            "mtu": 1500
+        }"#;
+        let cfg: TunnelNetworkConfig = serde_json::from_str(json).expect("parse");
+        assert!(cfg.host_entries.is_empty());
+        cfg.validate().expect("valid");
     }
 
     #[test]

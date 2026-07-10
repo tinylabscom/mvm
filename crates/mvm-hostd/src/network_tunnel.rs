@@ -12,15 +12,16 @@ use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 
 use anyhow::{Context, Result, bail};
+use mvm_core::policy::dns_pin::DnsPinRegistry;
 use mvm_core::protocol::network_tunnel::{
-    BorrowedTunnelFrame, DecodeError, FrameType, OwnedTunnelFrame, PACKET_FRAME_HEADER_LEN,
-    PacketFrameHeader, TunnelControlMessage, TunnelCreditUpdate, TunnelErrorCode, TunnelErrorFrame,
-    TunnelFeatures, TunnelHello, TunnelHelloAck, TunnelNetworkConfig, TunnelSessionConfig,
-    TunnelShutdownReason,
+    BorrowedTunnelFrame, DecodeError, FrameType, MAX_HOST_ENTRIES, OwnedTunnelFrame,
+    PACKET_FRAME_HEADER_LEN, PacketFrameHeader, TunnelControlMessage, TunnelCreditUpdate,
+    TunnelErrorCode, TunnelErrorFrame, TunnelFeatures, TunnelHello, TunnelHelloAck,
+    TunnelHostEntry, TunnelNetworkConfig, TunnelSessionConfig, TunnelShutdownReason,
 };
 use serde::{Deserialize, Serialize};
 
-use std::net::Ipv4Addr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use crate::host_tun;
 use crate::net_l3::{L3Decision, L3DropReason, L3ForwardPolicy, parse_ipv4_dst_and_l4};
@@ -495,6 +496,36 @@ where
     }
 }
 
+/// Derive guest `/etc/hosts` entries from the admission DNS pins.
+///
+/// IPv4 pins only (IPv6 pins are skipped — the L3 forward path is IPv4-only),
+/// one `(name, ip)` per pinned IPv4, exact duplicates removed, capped at
+/// [`MAX_HOST_ENTRIES`]. The host already resolved every allowlisted name at
+/// admission and gates guest packets by dst IP against these same pins; handing
+/// the guest the pairs makes in-guest resolution pin-consistent by
+/// construction. A name with no IPv4 pin contributes nothing, so it can't
+/// resolve in the guest — default-deny.
+pub fn host_entries_from_pins(pins: &DnsPinRegistry) -> Vec<TunnelHostEntry> {
+    let mut entries = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for (dest, pin) in pins.iter() {
+        for ip in &pin.ips {
+            let IpAddr::V4(v4) = ip else { continue };
+            if !seen.insert((dest.clone(), *v4)) {
+                continue;
+            }
+            entries.push(TunnelHostEntry {
+                name: dest.clone(),
+                ip: *v4,
+            });
+            if entries.len() >= MAX_HOST_ENTRIES {
+                return entries;
+            }
+        }
+    }
+    entries
+}
+
 pub struct HostTunnelWorker<S, A> {
     session: HostNetworkTunnelSession<S>,
     audit: A,
@@ -507,7 +538,18 @@ where
     S: Read + Write,
     A: TunnelAuditSink,
 {
-    pub fn new(stream: S, audit: A, config: TunnelWorkerConfig) -> Result<Self, TunnelWorkerError> {
+    pub fn new(
+        stream: S,
+        audit: A,
+        mut config: TunnelWorkerConfig,
+    ) -> Result<Self, TunnelWorkerError> {
+        // Populate the guest hosts entries from the admitted gate's pins so the
+        // config the guest receives resolves each allowlisted name to exactly an
+        // IP the gate admits. Done before validate() so a malformed pinned name
+        // fails the whole session closed rather than reaching the guest.
+        if let TunnelPacketPolicy::L3Forward { gate, .. } = &config.packet_policy {
+            config.network_config.host_entries = host_entries_from_pins(gate.pins());
+        }
         config.validate()?;
         Ok(Self {
             session: HostNetworkTunnelSession::new(stream),
@@ -1252,8 +1294,100 @@ impl TunnelWorkerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::net_l3::L3ForwardPolicy;
+    use mvm_core::policy::dns_pin::DnsPin;
+    use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_VERSION;
     use std::os::unix::net::UnixStream;
+
+    fn pin_at(dest: &str, ips: &[&str]) -> DnsPin {
+        DnsPin::at(
+            dest,
+            ips.iter().map(|s| s.parse().expect("ip")).collect(),
+            "2026-05-15T12:00:00Z",
+            "2026-05-15T13:00:00Z",
+        )
+    }
+
+    #[test]
+    fn host_entries_from_pins_maps_ipv4_pins_and_skips_ipv6() {
+        let mut pins = DnsPinRegistry::new();
+        // Mixed v4/v6 pin: only the v4 addresses become entries.
+        pins.add(pin_at(
+            "api.openai.com",
+            &["104.18.7.42", "2606:4700::1111", "104.18.32.1"],
+        ));
+        pins.add(pin_at("example.com", &["93.184.216.34"]));
+        // Pure-IPv6 pin contributes nothing.
+        pins.add(pin_at("dns.google", &["2001:4860:4860::8888"]));
+
+        let entries = host_entries_from_pins(&pins);
+        // Sorted by dest (registry iteration order): api.openai.com (2 v4),
+        // then example.com (1 v4); dns.google skipped entirely.
+        assert_eq!(
+            entries,
+            vec![
+                TunnelHostEntry {
+                    name: "api.openai.com".to_string(),
+                    ip: "104.18.7.42".parse().unwrap(),
+                },
+                TunnelHostEntry {
+                    name: "api.openai.com".to_string(),
+                    ip: "104.18.32.1".parse().unwrap(),
+                },
+                TunnelHostEntry {
+                    name: "example.com".to_string(),
+                    ip: "93.184.216.34".parse().unwrap(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn host_entries_from_pins_dedupes_and_caps() {
+        let mut pins = DnsPinRegistry::new();
+        // Duplicate v4 in one pin's set is collapsed to one entry.
+        pins.add(pin_at("dup.example.com", &["1.2.3.4", "1.2.3.4"]));
+        let deduped = host_entries_from_pins(&pins);
+        assert_eq!(deduped.len(), 1);
+
+        // Cap: many distinct (name, ip) pairs are truncated to MAX_HOST_ENTRIES.
+        let mut big = DnsPinRegistry::new();
+        for i in 0..(MAX_HOST_ENTRIES + 10) {
+            big.add(pin_at(&format!("h{i:04}.example.com"), &["10.0.0.1"]));
+        }
+        let capped = host_entries_from_pins(&big);
+        assert_eq!(capped.len(), MAX_HOST_ENTRIES);
+    }
+
+    #[test]
+    fn worker_new_populates_host_entries_from_l3_gate_pins() {
+        let (_guest, host) = UnixStream::pair().unwrap();
+        let mut pins = DnsPinRegistry::new();
+        pins.add(pin_at("api.example.com", &["93.184.216.34"]));
+        let gate = L3ForwardPolicy::new(
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]),
+            pins,
+        );
+        let config = TunnelWorkerConfig {
+            expected_session: expected(),
+            network_config: network_config(),
+            initial_credit: initial_credit(),
+            packet_policy: TunnelPacketPolicy::L3Forward {
+                gate,
+                interface_name: None,
+            },
+            limits: TunnelWorkerLimits::default(),
+        };
+        let worker = HostTunnelWorker::new(host, NoopTunnelAuditSink, config).unwrap();
+        assert_eq!(
+            worker.config.network_config.host_entries,
+            vec![TunnelHostEntry {
+                name: "api.example.com".to_string(),
+                ip: "93.184.216.34".parse().unwrap(),
+            }]
+        );
+    }
 
     fn expected() -> ExpectedTunnelSession {
         ExpectedTunnelSession {
@@ -1317,6 +1451,7 @@ mod tests {
             gateway_ipv4: "10.240.0.1".parse().expect("ip"),
             dns_servers: vec!["1.1.1.1".parse().expect("ip")],
             mtu: 1500,
+            host_entries: Vec::new(),
         }
     }
 

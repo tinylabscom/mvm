@@ -720,6 +720,7 @@ mod tests {
                 gateway_ipv4: "10.240.0.1".parse().expect("ip"),
                 dns_servers: vec!["1.1.1.1".parse().expect("ip")],
                 mtu: 1500,
+                host_entries: Vec::new(),
             },
             send_credit: SendCreditBudget::from_update(initial_credit()),
             session: GuestNetworkTunnelSession::from_stream(stream),
@@ -754,6 +755,7 @@ mod tests {
             gateway_ipv4: "10.240.0.1".parse().unwrap(),
             dns_servers: vec!["1.1.1.1".parse().unwrap()],
             mtu: 1500,
+            host_entries: Vec::new(),
         };
         let host_config = config.clone();
         let host_thread = std::thread::spawn(move || {
@@ -917,6 +919,7 @@ mod tests {
             gateway_ipv4: "10.240.0.1".parse().expect("ip"),
             dns_servers: vec!["1.1.1.1".parse().expect("ip")],
             mtu: 1500,
+            host_entries: Vec::new(),
         };
         let host_config = network_config.clone();
 

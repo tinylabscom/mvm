@@ -65,6 +65,63 @@ const SIOCSIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFFLAG
 const SIOCADDRT_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCADDRT);
 const RESOLVER_CMDLINE_PREFIX: &str = "mvm.resolver=";
 
+/// Default guest hosts file the admission pins are written into.
+pub const DEFAULT_HOSTS_PATH: &str = "/etc/hosts";
+/// Delimiters bounding the mvm-owned block inside the guest hosts file. The
+/// block is replaced wholesale on every apply so re-running never duplicates
+/// entries and never disturbs lines the image shipped.
+pub const MVM_HOSTS_BLOCK_BEGIN: &str = "# BEGIN mvm-managed hosts";
+pub const MVM_HOSTS_BLOCK_END: &str = "# END mvm-managed hosts";
+
+/// Compose a hosts-file body: preserve every line outside the mvm-managed
+/// block, then append a fresh block of `ip name` lines from `entries`.
+///
+/// Any prior mvm block (delimited, inclusive) is dropped first so re-applying
+/// replaces it rather than stacking duplicates. When `entries` is empty no
+/// block is emitted, so a workload with no admitted names ends up with a plain
+/// hosts file and cannot resolve anything extra — default-deny.
+pub fn render_hosts_with_mvm_block(
+    existing: &str,
+    entries: &[mvm_core::protocol::network_tunnel::TunnelHostEntry],
+) -> String {
+    let mut out = String::new();
+    let mut in_block = false;
+    for line in existing.lines() {
+        match line.trim() {
+            MVM_HOSTS_BLOCK_BEGIN => in_block = true,
+            MVM_HOSTS_BLOCK_END => in_block = false,
+            _ if !in_block => {
+                out.push_str(line);
+                out.push('\n');
+            }
+            _ => {}
+        }
+    }
+    if !entries.is_empty() {
+        out.push_str(MVM_HOSTS_BLOCK_BEGIN);
+        out.push('\n');
+        for entry in entries {
+            out.push_str(&format!("{} {}\n", entry.ip, entry.name));
+        }
+        out.push_str(MVM_HOSTS_BLOCK_END);
+        out.push('\n');
+    }
+    out
+}
+
+/// Replace the mvm-managed block in the hosts file at `path` with `entries`.
+///
+/// Reads the current file (absent file is treated as empty), recomposes the
+/// block, and writes it back. Idempotent: running twice yields one block.
+pub fn write_guest_hosts_entries(
+    path: &std::path::Path,
+    entries: &[mvm_core::protocol::network_tunnel::TunnelHostEntry],
+) -> Result<(), String> {
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+    let rendered = render_hosts_with_mvm_block(&existing, entries);
+    std::fs::write(path, rendered).map_err(|e| format!("write hosts file {}: {e}", path.display()))
+}
+
 #[cfg(target_os = "linux")]
 const fn target_ioctl_request(request: u64) -> libc::Ioctl {
     assert!(request <= target_ioctl_request_max());
@@ -435,6 +492,15 @@ pub fn configure_tunnel_guest_network(
         let seed = render_resolv_conf(&config.dns_servers);
         seed_resolv_conf_bytes(&seed)?;
     }
+
+    // Inject the admission pins so allowlisted names resolve to exactly the IPs
+    // the host gate admits; without a live resolver this is how DNS works here.
+    if !config.host_entries.is_empty() {
+        write_guest_hosts_entries(
+            std::path::Path::new(DEFAULT_HOSTS_PATH),
+            &config.host_entries,
+        )?;
+    }
     Ok(())
 }
 
@@ -628,6 +694,83 @@ nameserver 10.0.0.3
             Some("255.255.255.255".parse().expect("mask"))
         );
         assert_eq!(ipv4_netmask_from_prefix_len(33), None);
+    }
+
+    fn host_entry(name: &str, ip: &str) -> mvm_core::protocol::network_tunnel::TunnelHostEntry {
+        mvm_core::protocol::network_tunnel::TunnelHostEntry {
+            name: name.to_string(),
+            ip: ip.parse().expect("ipv4"),
+        }
+    }
+
+    #[test]
+    fn apply_network_config_writes_hosts_block_from_entries() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("hosts");
+        std::fs::write(&path, "127.0.0.1 localhost\n").expect("seed hosts");
+
+        let entries = [
+            host_entry("api.openai.com", "104.18.7.42"),
+            host_entry("example.com", "93.184.216.34"),
+        ];
+        write_guest_hosts_entries(&path, &entries).expect("write hosts");
+
+        let body = std::fs::read_to_string(&path).expect("read hosts");
+        // Pre-existing unrelated line survives.
+        assert!(body.contains("127.0.0.1 localhost"));
+        // The mvm block is present with `ip name` lines.
+        assert!(body.contains(MVM_HOSTS_BLOCK_BEGIN));
+        assert!(body.contains(MVM_HOSTS_BLOCK_END));
+        assert!(body.contains("104.18.7.42 api.openai.com"));
+        assert!(body.contains("93.184.216.34 example.com"));
+    }
+
+    #[test]
+    fn apply_network_config_hosts_block_is_idempotent() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("hosts");
+        std::fs::write(&path, "127.0.0.1 localhost\n").expect("seed hosts");
+
+        let first = [host_entry("api.openai.com", "104.18.7.42")];
+        write_guest_hosts_entries(&path, &first).expect("first apply");
+        // Re-apply with a different IP for the same name: the block is replaced,
+        // not duplicated, and the unrelated line is still preserved once.
+        let second = [host_entry("api.openai.com", "1.2.3.4")];
+        write_guest_hosts_entries(&path, &second).expect("second apply");
+
+        let body = std::fs::read_to_string(&path).expect("read hosts");
+        assert_eq!(
+            body.matches(MVM_HOSTS_BLOCK_BEGIN).count(),
+            1,
+            "exactly one begin marker"
+        );
+        assert_eq!(
+            body.matches(MVM_HOSTS_BLOCK_END).count(),
+            1,
+            "exactly one end marker"
+        );
+        assert_eq!(
+            body.matches("127.0.0.1 localhost").count(),
+            1,
+            "unrelated line preserved once"
+        );
+        assert!(
+            body.contains("1.2.3.4 api.openai.com"),
+            "updated IP present"
+        );
+        assert!(
+            !body.contains("104.18.7.42"),
+            "stale IP removed on re-apply"
+        );
+    }
+
+    #[test]
+    fn render_hosts_with_mvm_block_drops_block_when_entries_empty() {
+        let existing = format!(
+            "127.0.0.1 localhost\n{MVM_HOSTS_BLOCK_BEGIN}\n9.9.9.9 stale.example\n{MVM_HOSTS_BLOCK_END}\n"
+        );
+        let rendered = render_hosts_with_mvm_block(&existing, &[]);
+        assert_eq!(rendered, "127.0.0.1 localhost\n");
     }
 
     #[cfg(target_os = "linux")]
