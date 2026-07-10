@@ -1,12 +1,23 @@
 # Plan 236 — Host-authority runtime roadmap
 
-**Status:** PROPOSED  
+**Status:** IN PROGRESS (Phase 2A refresh active; broad prerequisite line still NO-GO)  
 **Created:** 2026-07-09  
 **Goal:** turn `mvm`'s current security and architecture lead into a simpler,
 more competitive product by finishing the host-authority model, removing
 remaining guest-NIC and guest-directed escape hatches, narrowing the secrets
 story to explicit host-owned authorities, and shipping a developer-grade
 lifecycle on top of that runtime.
+
+**Execution note (2026-07-09):** `scripts/check-plan-236-go.sh` against synced
+`main` is still `NO-GO`: `fix/agent-verb-grant-delivery`,
+`feat/plan-202-native-host-services`, `worktree-vsock-only-egress-cutover`,
+and `feat/plan-216-s0-mvm-client` remain dirty and/or behind `main`. The first
+execution slice therefore starts with the cleanest reusable Phase 2A input:
+`feat/vsock-port-handler-registry` / PR `#1599`. That branch is now rebased
+onto current `main`, its invoke-path env tests use the shared `TestEnv` guard,
+and host-side `cargo check --workspace`, `cargo test --workspace`, and
+`cargo clippy --workspace --all-targets -- -D warnings` are green on the
+refreshed branch.
 
 ## Thesis
 

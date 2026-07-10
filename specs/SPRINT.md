@@ -82,6 +82,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
       gateway-compat ABI entrypoint still mention `gvproxy`. The active
       libkrun/HVF path no longer depends on `gvproxy`, and the required Linux
       builder smoke is green.
+- [x] 2026-07-09 Plan 236 kickoff / Phase 2A refresh: the synced
+      `scripts/check-plan-236-go.sh` result is still `NO-GO` because the
+      prerequisite `fix/agent-verb-grant-delivery`,
+      `feat/plan-202-native-host-services`,
+      `worktree-vsock-only-egress-cutover`, and
+      `feat/plan-216-s0-mvm-client` worktrees are dirty and/or behind `main`.
+      Execution therefore starts by reusing the cleanest Phase 2A slice:
+      `feat/vsock-port-handler-registry` / PR `#1599`. That branch is now
+      rebased onto current `main`, the rebased invoke-path env tests moved to
+      the shared `mvm_core::util::test_env::TestEnv` guard, and host-side
+      validation is green again on the refreshed branch:
+      `cargo check --workspace`, `cargo test --workspace`, and
+      `cargo clippy --workspace --all-targets -- -D warnings`.
 - [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
       source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
       builds the builder VM just to obtain a workload kernel. The resolver now

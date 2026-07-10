@@ -696,7 +696,7 @@ mod auto_stdin_tests {
 
 #[cfg(test)]
 mod tests {
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use mvm_core::util::test_env::TestEnv;
 
     use super::*;
 
@@ -811,18 +811,17 @@ mod tests {
 
     #[test]
     fn vsock_egress_env_empty_without_marker() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        env.set("MVM_DATA_DIR", dir.path());
         assert!(super::vsock_egress_env("plain-vm").is_empty());
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]
     fn vsock_egress_env_emits_socks5_proxy_vars_when_marker_present() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        env.set("MVM_DATA_DIR", dir.path());
         let marker = mvm_core::config::vm_vsock_egress_marker_path("plain-vm");
         std::fs::create_dir_all(marker.parent().expect("marker parent"))
             .expect("mkdir marker parent");
@@ -837,15 +836,13 @@ mod tests {
             env.iter()
                 .any(|(k, v)| k == "NO_PROXY" && v.contains("127.0.0.1"))
         );
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]
     fn workload_egress_env_prefers_substitution_env_over_plain_vsock_env() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let mut env_guard = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        env_guard.set("MVM_DATA_DIR", dir.path());
 
         let marker = mvm_core::config::vm_vsock_egress_marker_path("pref-vm");
         std::fs::create_dir_all(marker.parent().expect("marker parent"))
@@ -862,8 +859,6 @@ mod tests {
         let env = super::workload_egress_env("pref-vm");
         assert!(env.iter().any(|(k, _)| k == "HTTP_PROXY"));
         assert!(env.iter().all(|(_, v)| !v.starts_with("socks5h://")));
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]
