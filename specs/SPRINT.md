@@ -45,6 +45,21 @@ plan 25 sequences the work into six independently-shippable workstreams.
       density publication remains open because the current host has unrelated
       HVF runtime processes and long-running build work; the harness verified
       cleanup on the attempted run and left no matching Plan 237 processes.
+- [x] 2026-07-10 Plan 226 WS-B HVF dev default on macOS 26: `mvmctl dev`
+      now prefers HVF when the detached `mvm-hvf-supervisor` path is launchable,
+      with libkrun retained as the fallback. Backend follow-up verbs
+      (`dev shell`, `dev status`, `dev down`, `dev rebuild`) now route through
+      the backend that actually owns the running dev VM, and the HVF path waits
+      for guest-agent readiness before reporting success. The closeout also
+      fixed the remaining workspace-gate flake cluster around this path:
+      `invoke` sealed-image admission now uses an isolated temp data dir,
+      transcript-capture tests inject explicit temp transcript/key roots
+      instead of mutating `MVM_DATA_DIR`, the Stage 0 in-flight lock probe
+      retries briefly before declaring bootstrap active, and `libkrun-sys`
+      doctests are disabled so `cargo test --workspace` no longer fails in the
+      bindings crate. Validation: `cargo fmt --all`; `cargo check --workspace`;
+      `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test
+      --workspace`.
 - [x] 2026-07-10 libkrun supervisor source-checkout stale-helper guard:
       source-checkout `target/<profile>/mvmctl` now refuses to fall through to
       an arbitrary `mvm-libkrun-supervisor` on `$PATH` when no same-checkout

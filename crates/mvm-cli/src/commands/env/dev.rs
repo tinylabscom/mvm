@@ -2,11 +2,12 @@
 //!
 //! Supported local development hosts:
 //!
-//! - **macOS Apple Silicon with libkrun** → boots the dev VM via
+//! - **macOS Apple Silicon on macOS 26+** → boots the dev VM via the
+//!   in-house HVF backend when its detached supervisor path is launchable,
+//!   otherwise falls back to libkrun on Hypervisor.framework.
+//! - **macOS Apple Silicon on macOS 13-25** → boots the dev VM via
 //!   libkrun on Hypervisor.framework and exposes a PTY-over-vsock
-//!   console. This is the macOS dev path on every tier, including
-//!   macOS 26+ Apple Silicon (the in-house HVF dev VM boot is not wired
-//!   yet, so macOS 26 falls back to libkrun here).
+//!   console.
 //! - **native Linux + KVM** → `super::linux_native` treats the host shell as
 //!   the dev environment, installs Firecracker + downloads kernel/
 //!   rootfs assets, and optionally spawns an interactive subshell.
@@ -16,7 +17,10 @@
 //! nested KVM and a Hyper-V managed Linux builder are future backend
 //! projects, not supported local paths today.
 
-use anyhow::Result;
+use std::os::unix::net::UnixStream;
+use std::time::{Duration, Instant};
+
+use anyhow::{Result, anyhow, bail};
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::ui;
@@ -25,7 +29,8 @@ use crate::commands::shared::{
     clap_volume_spec, materialize_disk_volumes, merge_volume_specs, parse_volume_spec,
     vm_volume_from_spec_validated,
 };
-use mvm_backend::LibkrunBackend;
+use mvm_backend::hvf_backend::HvfBackend;
+use mvm_backend::{AnyBackend, LibkrunBackend};
 use mvm_core::platform::{self, Platform};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{VmBackend, VmId, VmStartConfig, VmStatus, VmVolume};
@@ -38,9 +43,13 @@ use super::linux_native;
 /// Which `mvmctl dev` backend the current host uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DevBackend {
-    /// macOS with libkrun — Hypervisor.framework-backed dev VM. The macOS
-    /// dev path on every tier: macOS 13-25 and, until the in-house HVF dev
-    /// VM boot is wired, macOS 26+ Apple Silicon fall back here too.
+    /// macOS 26+ Apple Silicon — the in-house HVF dev VM. This is the
+    /// preferred macOS dev path when the detached supervisor helper is
+    /// launchable on the current host.
+    Hvf,
+    /// macOS with libkrun — Hypervisor.framework-backed dev VM. The
+    /// fallback macOS dev path when HVF is unavailable, and the default
+    /// path on macOS 13-25.
     Libkrun,
     /// Native Linux with `/dev/kvm` — host shell is the dev environment;
     /// Firecracker runs natively.
@@ -57,13 +66,20 @@ enum DevBackend {
 /// source of truth.
 ///
 /// Selection order:
-///   1. macOS with libkrun → Libkrun (every macOS tier — the in-house
-///      HVF dev VM boot is not wired yet, so macOS 26+ Apple Silicon
-///      falls back to libkrun here).
-///   2. Linux with KVM → LinuxKvm.
-///   3. Otherwise → Unsupported.
-fn select_dev_backend(plat: Platform, has_libkrun: bool, has_kvm: bool) -> DevBackend {
-    if matches!(plat, Platform::MacOS) && has_libkrun {
+///   1. macOS 26+ Apple Silicon with a launchable detached HVF helper → Hvf.
+///   2. macOS with libkrun → Libkrun.
+///   3. Linux with KVM → LinuxKvm.
+///   4. Otherwise → Unsupported.
+fn select_dev_backend(
+    plat: Platform,
+    prefers_hvf: bool,
+    hvf_available: bool,
+    has_libkrun: bool,
+    has_kvm: bool,
+) -> DevBackend {
+    if prefers_hvf && hvf_available {
+        DevBackend::Hvf
+    } else if matches!(plat, Platform::MacOS) && has_libkrun {
         DevBackend::Libkrun
     } else if has_kvm && matches!(plat, Platform::LinuxNative) {
         DevBackend::LinuxKvm
@@ -74,7 +90,25 @@ fn select_dev_backend(plat: Platform, has_libkrun: bool, has_kvm: bool) -> DevBa
 
 fn current_backend() -> DevBackend {
     let plat = platform::current();
-    select_dev_backend(plat, plat.has_libkrun(), plat.has_kvm())
+    select_dev_backend(
+        plat,
+        plat.is_vz_default_tier(),
+        HvfBackend.is_available().unwrap_or(false),
+        plat.has_libkrun(),
+        plat.has_kvm(),
+    )
+}
+
+fn started_backend() -> Option<DevBackend> {
+    match AnyBackend::for_started_vm(dev_vz::DEV_VM_NAME) {
+        Some(AnyBackend::Hvf(_)) => Some(DevBackend::Hvf),
+        Some(AnyBackend::Libkrun(_)) => Some(DevBackend::Libkrun),
+        _ => None,
+    }
+}
+
+fn backend_for_dev_vm() -> DevBackend {
+    started_backend().unwrap_or_else(current_backend)
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -255,6 +289,94 @@ fn warn_dev_volumes_unsupported(volumes: &[VmVolume], backend: &str) {
     }
 }
 
+const HVF_AGENT_READY_TIMEOUT: Duration = Duration::from_secs(60);
+const HVF_AGENT_STATUS_TIMEOUT: Duration = Duration::from_millis(750);
+
+fn hvf_agent_ready(timeout: Duration) -> Result<bool> {
+    let socket = mvm_core::config::vm_hvf_agent_socket(dev_vz::DEV_VM_NAME);
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        match UnixStream::connect(&socket) {
+            Ok(mut stream) => {
+                return match mvm_guest::vsock::negotiate_protocol(&mut stream, Vec::new()) {
+                    Ok(_) => Ok(true),
+                    Err(_) => Ok(false),
+                };
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+    Ok(false)
+}
+
+fn wait_for_hvf_agent_ready() -> Result<()> {
+    let socket = mvm_core::config::vm_hvf_agent_socket(dev_vz::DEV_VM_NAME);
+    let deadline = Instant::now() + HVF_AGENT_READY_TIMEOUT;
+    while Instant::now() < deadline {
+        if hvf_agent_ready(Duration::from_millis(250))? {
+            return Ok(());
+        }
+        if !matches!(
+            HvfBackend.status(&VmId(dev_vz::DEV_VM_NAME.to_string()))?,
+            VmStatus::Running
+        ) {
+            bail!(
+                "HVF dev VM stopped before the guest agent became reachable; check {}",
+                mvm_core::config::vm_state_dir(dev_vz::DEV_VM_NAME)
+                    .join("console.log")
+                    .display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(anyhow!(
+        "timed out waiting for the HVF dev VM guest agent at {}",
+        socket.display()
+    ))
+}
+
+fn cmd_dev_hvf(
+    cpus: u32,
+    memory_gib: u32,
+    open_shell: bool,
+    volumes: &[VmVolume],
+) -> Result<&'static str> {
+    let backend = HvfBackend;
+    let id = VmId(dev_vz::DEV_VM_NAME.to_string());
+
+    if matches!(backend.status(&id)?, VmStatus::Running) {
+        wait_for_hvf_agent_ready()?;
+        ui::success("HVF dev VM already running.");
+        if open_shell {
+            console::console_interactive(dev_vz::DEV_VM_NAME)?;
+        }
+        return Ok("already-running");
+    }
+
+    warn_dev_volumes_unsupported(volumes, "HVF");
+    ui::progress("Starting dev environment via HVF...");
+    let (kernel, rootfs) = dev_vz::ensure_dev_image()?;
+    let memory_mib = memory_gib.saturating_mul(1024);
+    let config = VmStartConfig {
+        name: dev_vz::DEV_VM_NAME.to_string(),
+        rootfs_path: rootfs,
+        kernel_path: Some(kernel),
+        cpus,
+        memory_mib,
+        flake_ref: "mvm-dev".into(),
+        profile: Some("dev".into()),
+        dev_console: true,
+        ..Default::default()
+    };
+    backend.start(&config)?;
+    wait_for_hvf_agent_ready()?;
+    ui::success("Dev environment ready (HVF).");
+    if open_shell {
+        console::console_interactive(dev_vz::DEV_VM_NAME)?;
+    }
+    Ok("started")
+}
+
 fn cmd_dev_libkrun(
     cpus: u32,
     memory_gib: u32,
@@ -284,6 +406,7 @@ fn cmd_dev_libkrun(
         flake_ref: "mvm-dev".into(),
         profile: Some("dev".into()),
         volumes: volumes.to_vec(),
+        dev_console: true,
         ..Default::default()
     };
     backend.start(&config)?;
@@ -292,6 +415,19 @@ fn cmd_dev_libkrun(
         console::console_interactive(dev_vz::DEV_VM_NAME)?;
     }
     Ok("started")
+}
+
+fn cmd_dev_hvf_down(json: bool) -> Result<bool> {
+    let id = VmId(dev_vz::DEV_VM_NAME.to_string());
+    let was_running = matches!(
+        HvfBackend.status(&id),
+        Ok(VmStatus::Running | VmStatus::Starting | VmStatus::Paused)
+    );
+    HvfBackend.stop(&id)?;
+    if !json && was_running {
+        ui::success("Dev VM stopped.");
+    }
+    Ok(was_running)
 }
 
 /// `dev down` stops the libkrun dev VM.
@@ -311,6 +447,7 @@ fn cmd_dev_libkrun_down(json: bool) -> Result<bool> {
 /// Stable backend identifier for the JSON lifecycle reports.
 fn dev_backend_report_name(backend: DevBackend) -> &'static str {
     match backend {
+        DevBackend::Hvf => "hvf",
         DevBackend::Libkrun => "libkrun",
         DevBackend::LinuxKvm => "linux-native",
         DevBackend::Unsupported => "unsupported",
@@ -337,6 +474,31 @@ fn reset_nix_store_overlay(json: bool) -> bool {
             false
         }
     }
+}
+
+fn cmd_dev_hvf_status(json: bool) -> Result<()> {
+    let id = VmId(dev_vz::DEV_VM_NAME.to_string());
+    let status = HvfBackend.status(&id)?;
+    let state = match status {
+        VmStatus::Running => {
+            if hvf_agent_ready(HVF_AGENT_STATUS_TIMEOUT)? {
+                "running"
+            } else {
+                "starting"
+            }
+        }
+        VmStatus::Starting => "starting",
+        VmStatus::Stopped => "stopped",
+        VmStatus::Paused => "paused",
+        VmStatus::Failed { .. } => "failed",
+    };
+    if json {
+        return crate::json_out::emit_json(&dev_vz::build_dev_status_json("hvf", state, None));
+    }
+    ui::info("Backend:  hvf (Hypervisor.framework)");
+    ui::info(&format!("VM:       {}", dev_vz::DEV_VM_NAME));
+    ui::info(&format!("Status:   {state}"));
+    Ok(())
 }
 
 fn cmd_dev_libkrun_status(json: bool) -> Result<()> {
@@ -377,7 +539,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         json: false,
     });
 
-    let backend = current_backend();
+    let backend = backend_for_dev_vm();
     match action {
         DevAction::Up {
             cpus,
@@ -426,6 +588,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             dev_vz::sweep_orphaned_vm_helpers_on_startup();
 
             let outcome = match backend {
+                DevBackend::Hvf => {
+                    cmd_dev_hvf(effective_cpus, effective_mem, open_shell, &dev_volumes)
+                }
                 DevBackend::Libkrun => {
                     cmd_dev_libkrun(effective_cpus, effective_mem, open_shell, &dev_volumes)
                 }
@@ -445,6 +610,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
         }
         DevAction::Down { reset, json } => {
             let was_running = match backend {
+                DevBackend::Hvf => cmd_dev_hvf_down(json),
                 DevBackend::Libkrun => cmd_dev_libkrun_down(json),
                 DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(json),
                 // Nothing to stop on unsupported hosts. The gc-root
@@ -465,7 +631,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             }
             Ok(())
         }
-        DevAction::Shell { project: _project } => match backend {
+        DevAction::Shell { project: _project } => match backend_for_dev_vm() {
+            DevBackend::Hvf => {
+                if !matches!(
+                    HvfBackend.status(&VmId(dev_vz::DEV_VM_NAME.to_string()))?,
+                    VmStatus::Running
+                ) {
+                    anyhow::bail!("Dev VM is not running. Start it with: mvmctl dev up");
+                }
+                wait_for_hvf_agent_ready()?;
+                console::console_interactive(dev_vz::DEV_VM_NAME)
+            }
             DevBackend::Libkrun => {
                 if !matches!(
                     LibkrunBackend.status(&VmId(dev_vz::DEV_VM_NAME.to_string()))?,
@@ -479,6 +655,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             DevBackend::Unsupported => bail_no_dev_backend(),
         },
         DevAction::Status { json } => match backend {
+            DevBackend::Hvf => cmd_dev_hvf_status(json),
             DevBackend::Libkrun => cmd_dev_libkrun_status(json),
             DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_status(json),
             DevBackend::Unsupported => {
@@ -515,6 +692,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             // start over," so a stop failure here shouldn't block the
             // re-up).
             let _ = match backend {
+                DevBackend::Hvf => cmd_dev_hvf_down(false),
                 DevBackend::Libkrun => cmd_dev_libkrun_down(false),
                 DevBackend::LinuxKvm => linux_native::cmd_dev_linux_native_down(false),
                 DevBackend::Unsupported => Ok(false),
@@ -533,6 +711,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, cfg: &MvmConfig) -> Resul
             };
             let dev_volumes = resolve_dev_volumes(&volume)?;
             match backend {
+                DevBackend::Hvf => {
+                    cmd_dev_hvf(effective_cpus, effective_mem, shell, &dev_volumes).map(|_| ())
+                }
                 DevBackend::Libkrun => {
                     cmd_dev_libkrun(effective_cpus, effective_mem, shell, &dev_volumes).map(|_| ())
                 }
@@ -569,12 +750,26 @@ mod tests {
     // ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn macos_with_libkrun_picks_libkrun_dev_backend() {
-        // Every macOS tier — including macOS 26+ Apple Silicon, which
-        // falls back to libkrun until the in-house HVF dev VM boot lands.
+    fn macos_26_with_launchable_hvf_picks_hvf_dev_backend() {
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
+                /* prefers_hvf */ true,
+                /* hvf_available */ true,
+                /* has_libkrun */ true,
+                /* has_kvm */ false
+            ),
+            DevBackend::Hvf,
+        );
+    }
+
+    #[test]
+    fn macos_26_falls_back_to_libkrun_when_hvf_unavailable() {
+        assert_eq!(
+            select_dev_backend(
+                Platform::MacOS,
+                /* prefers_hvf */ true,
+                /* hvf_available */ false,
                 /* has_libkrun */ true,
                 /* has_kvm */ false
             ),
@@ -587,6 +782,8 @@ mod tests {
         assert_eq!(
             select_dev_backend(
                 Platform::MacOS,
+                /* prefers_hvf */ false,
+                /* hvf_available */ false,
                 /* has_libkrun */ false,
                 /* has_kvm */ false
             ),
@@ -599,6 +796,8 @@ mod tests {
         assert_eq!(
             select_dev_backend(
                 Platform::LinuxNative,
+                /* prefers_hvf */ false,
+                /* hvf_available */ false,
                 /* has_libkrun */ false,
                 /* has_kvm */ true
             ),
@@ -612,6 +811,8 @@ mod tests {
         assert_eq!(
             select_dev_backend(
                 Platform::LinuxNative,
+                /* prefers_hvf */ false,
+                /* hvf_available */ false,
                 /* has_libkrun */ false,
                 /* has_kvm */ false
             ),

@@ -351,6 +351,15 @@ snapshot) is gated on §C (the content-addressed pack download cache) and §F
       on-disk config, and the resolver's full mode × mirror-set/unset
       matrix (8 cases).
 
+#### §I progress — protected signing environments extended (2026-07-10)
+
+- [x] `405858c9` extends the `release-signing` GitHub environment (already
+  gating `builder-vm-image`, `ae3fa0c15`) to the `default-microvm` runtime-pack
+  job, and adds a dedicated `revocations-signing` environment to
+  `revocations.yml`, so both keyless-signing jobs — not just the builder-pack
+  one — require the same protected-ref approval before a signing identity can
+  be minted. Runbook: `specs/runbooks/release-signing-environments.md`.
+
 **Deferred, named here rather than implemented:**
 
 - Item 3 (key rotation window — overlapping signing keys valid only within
@@ -755,8 +764,10 @@ The design decisions (settled before this slice; see ADR-097 §9):
       action; `id-token: write`), and publishes the sidecar bundle + SBOM +
       checksums + manifest alongside the existing `vmlinux`/`rootfs.ext4` assets.
       (Runtime pack producer/publish deferred — builder pack first.)
-- [ ] Restrict the signing job to protected tag refs / a protected environment so
+- [x] Restrict the signing job to protected tag refs / a protected environment so
       the pinned subject identity cannot be minted from an arbitrary ref.
+      (landed `ae3fa0c15` for `builder-vm-image`, extended to `default-microvm`
+      + `revocations.yml` by `405858c9`.)
 - [x] Add the release verification gate (plan §B) that fails closed when any pack
       lacks a manifest, bundle, checksum, SBOM, or expected version metadata.
       (`verify-release-assets.sh` builder-pack gate: complete-or-absent, checksum-
@@ -863,12 +874,24 @@ release job's dry-run guards partially exercise).
   `cosign sign-blob --bundle` output; every Rust-verified signing step (builder
   pack + dev-image manifest) now signs `--new-bundle-format`, proven live by the
   pack-signing smoke round-tripping both paths.
-- **Protected environment for the signing job** so the pinned SAN can't be minted
-  from an arbitrary ref (beyond the existing tag-push gate).
-- **Producer SBOM URI is `file://<local path>`** (unverified provenance metadata,
-  harmless) — add a `--sbom-uri` so the published manifest records the release URL.
-- **`PackBuilder::build()` panics on a keyless-constructed builder** — a
-  programmer-error `.expect`, unreachable from current callers; make illegal states
-  unrepresentable (typed authority) when the producer is next touched.
-- **Runtime-pack producer/publish** (only the builder pack is wired).
-- **gh workflow run validation** on the branch before the first real tag.
+- ✅ **Protected environment for the signing job** so the pinned SAN can't be
+  minted from an arbitrary ref (beyond the existing tag-push gate) — landed
+  `ae3fa0c15` for `builder-vm-image`; `405858c9` extends the same
+  `release-signing` environment to `default-microvm` and adds a
+  `revocations-signing` environment to `revocations.yml`. Runbook:
+  `specs/runbooks/release-signing-environments.md`.
+- ✅ **Producer SBOM URI is `file://<local path>`** (unverified provenance
+  metadata, harmless) — `ae3fa0c15` adds `--sbom-uri` so the published manifest
+  records the release URL instead.
+- ✅ **`PackBuilder::build()` panics on a keyless-constructed builder** — a
+  programmer-error `.expect`, unreachable from current callers — `ae3fa0c15`
+  replaces the `Option<&SigningKey>` field with a `PackSigner` enum chosen at
+  construction and collapses `build()`/`build_sigstore()` into a single
+  `build()`, making the illegal state unrepresentable at compile time.
+- ✅ **Runtime-pack producer/publish** (previously only the builder pack was
+  wired) — `ae3fa0c15` adds `build_keyless_runtime_pack` + tool `--kind
+  runtime`; `10c74c52c` wires the `default-microvm` release job to produce,
+  keyless-sign, and publish the attested runtime pack alongside the plain
+  `vmlinux`/`rootfs.ext4` assets.
+- **gh workflow run validation** on the branch before the first real tag —
+  not yet run; still open.

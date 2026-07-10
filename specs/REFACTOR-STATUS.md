@@ -1,5 +1,7 @@
 # Refactor status — rollup checklist
 
+**Additional 2026-07-10 — Plan 226 WS-B HVF dev default is now back in place.** The macOS-26 `mvmctl dev` path no longer stays libkrun-first after the Vz deletion slice: `dev up` now prefers HVF when the detached `mvm-hvf-supervisor` helper is actually launchable, libkrun remains the fallback, and the follow-up verbs (`dev shell`, `dev status`, `dev down`, `dev rebuild`) route through the backend that owns the running dev VM instead of assuming one backend. The HVF path now also waits for guest-agent readiness before declaring success. Closing this left a small reliability tail in the workspace gates, all fixed in the same branch: the sealed-image `invoke` admission test now uses an isolated temp data dir, transcript-capture bridge tests inject explicit transcript/key roots instead of mutating `MVM_DATA_DIR`, the Stage 0 bootstrap in-flight probe retries briefly before failing safe to "busy", and `libkrun-sys` disables doctests so the full workspace test gate no longer trips in the bindings crate. Validation is green with `cargo fmt --all`, `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace` on the worktree.
+
 **Additional 2026-07-10 — Plan 237 Phase 0 first PR implemented, clean density baseline pending.** The first slice stays deliberately pre-optimization: the shared guest network helper used by `mvm-oci-init` uses the target musl ioctl request type for loopback bring-up, stale OCI cache records can repair a missing rootfs output from the still-present unpacked layer tree, and `scripts/measure-hvf-density.sh` captures isolated HVF density artifacts outside the repository while preserving the current foreground `mvmctl`/endpoint/supervisor shape. Host validation is green for the target `mvm-oci-init` zigbuild, `mvm-guest` tests, focused stale-cache `mvm-cli` tests, workspace check/clippy, and a live Alpine `ps aux` smoke. The checked baseline report remains open because the current host had unrelated HVF runtime processes and active build work; the attempted full density run failed at wave 1 with the substitution endpoint closing before ready, and cleanup left no matching Plan 237 processes behind.
 
 **Additional 2026-07-09 — HVF OCI `--allow-host` availability gate fixed.** The macOS HVF OCI egress selector no longer treats the parent `mvmctl` process's hypervisor entitlement probe as the deciding signal for `{ no_guest_nic, host_vsock_proxy }`. The backend now advertises those capabilities only when the detached `mvm-hvf-supervisor` path is actually launchable on this host, and explicit `--hypervisor hvf` validation now refuses early when that helper path is unavailable. Result: a launchable supervisor is accepted for OCI `--allow-host` on macOS with no guest NIC, while unavailable helper paths still fail closed before OCI pull/boot work. Focused backend/CLI tests, macOS docs, and a packaged live proof script (`scripts/check-hvf-oci-allow-host-smoke.sh` / `just hvf-oci-allow-host-smoke`) were updated in the same change.
@@ -1212,8 +1214,16 @@ PLAN 236 — Host-authority runtime roadmap   🟡 IN PROGRESS
   [x] Start execution from an existing prerequisite branch instead of opening a duplicate lane.
   [x] Refresh the cleanest Phase 2A slice (`feat/vsock-port-handler-registry` / PR `#1599`) onto current `main`.
   [x] Re-run host-side validation on the refreshed slice (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`).
-  [ ] Fold the refreshed Phase 2A slice into `main`.
-  [x] Reconcile the remaining dirty/behind prerequisite worktrees onto `origin/main`; the temporary Plan 236 readiness helper is no longer kept in-tree.
+  [x] Fold the refreshed Phase 2A slice into `main` (port-handler registry closeout landed as `#1599`).
+  [x] Reconcile the prerequisite worktrees so the Plan 236 readiness check turned `GO` (refresh lanes fast-forwarded; merged slices recognized on `main`); the temporary readiness helper is no longer kept in-tree.
+  [x] Phase 1 §1 — deliver the host-signer verb-grant anchor over the kernel cmdline to the vsock-only backends (libkrun/HVF); sealed guests pin + selectively enforce plan-bound grants (`#1615`).
+  [x] Phase 1 §3.1 — rename `no_guest_nic` → `no_routable_guest_nic` with honest reachability semantics (`#1616`).
+  [x] Phase 2A workload delta — gate the HVF egress endpoint on admitted policy; deny-all spawns none and fails closed, matching libkrun (`#1619`).
+  [x] Phase 1 §2.3.1 — remove the dead `HostBoundRequest` protocol surface.
+  [x] Phase 1 §4 — verb-grant negative-path matrix + `re_pin_verb_grant` self-forgery bypass fix (`#1624`, closes `#1621`).
+  [ ] Phase 1 §1.4 — bake the sealed-image verb-trust policy: blocked on a production/verity OCI seal path (dev-only today; Slice 1 foundation in `#1628`).
+  [ ] Phase 1 §1.6 — macOS live proof of vsock-only verb-grant enforcement (blocked on the workload-kernel checksum manifest).
+  [ ] Bind restore-time authority to per-VM identity — cross-VM replay residual (`#1623`).
 
 PLAN 240 — Vsock port-handler registry production-readiness   ✅ COMPLETE
   [x] Replace the host-I/O thread's fixed 5 ms backstop with readiness-driven fd registration for agent, console, egress, and broker traffic.

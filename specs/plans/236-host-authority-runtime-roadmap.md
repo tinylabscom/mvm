@@ -24,6 +24,25 @@ delta. That means the broad branch-staleness blocker is cleared; the remaining
 honest production-readiness blockers for Plan 236 are live-proof and closeout
 evidence, not stale prerequisite worktrees.
 
+**Execution progress (2026-07-10):** the gate turned `GO` and the Phase 1 →
+Phase 2A pivot largely landed on `main`. Shipped: §1 delivers the host-signer
+verb-grant anchor over the kernel cmdline to the vsock-only backends
+(libkrun/HVF), so sealed guests pin and *selectively* enforce plan-bound grants
+instead of failing to deny-all (PR `#1615`); §3.1 renames `no_guest_nic` →
+`no_routable_guest_nic` with honest reachability semantics (PR `#1616`); the
+Phase 2A workload delta gates the HVF egress endpoint on admitted policy so a
+deny-all workload spawns no endpoint and fails closed, matching libkrun
+(PR `#1619`); and the dead `HostBoundRequest` surface is removed. The §4
+negative-path matrix surfaced a real bypass — `re_pin_verb_grant` verified the
+resume envelope against its own embedded key — fixed by verifying against the
+boot-pinned host-signer anchor with a shared verification core (closes the
+self-forgery bypass). Remaining honest blockers: baking the sealed-image
+verb-trust policy needs a production/verity OCI seal path that does not exist
+yet (dev-only today); the macOS live-proof of vsock-only enforcement awaits the
+workload-kernel checksum manifest; and binding restore-time authority to a
+per-VM identity (cross-VM replay of a genuinely host-signed grant) is a tracked
+follow-up.
+
 ## Thesis
 
 `mvm` already has the right base posture:

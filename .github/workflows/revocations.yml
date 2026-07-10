@@ -26,6 +26,12 @@ env:
 
 jobs:
   publish:
+    # This job mints a keyless (OIDC/Fulcio) signature over the revocation
+    # list under the revocations.yml@refs/tags/revocations identity. A
+    # dedicated protected environment (separate from release-signing, whose
+    # tag rule is scoped to v* and would otherwise block this job) constrains
+    # which ref can mint a valid signing identity.
+    environment: revocations-signing
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

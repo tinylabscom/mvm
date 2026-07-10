@@ -228,7 +228,7 @@ building. The shim removal is an explicit R2 step coordinated with the mvmd repo
 - [ ] No `vz` references remain in the workload/builder/dev selection paths; `--hypervisor vz` is gone or errors clearly.
 - [ ] `vz.rs`/`vz_control.rs`/`vz_objc.rs`/`mvm-vz-supervisor`/`mvm-build/src/vz.rs`/`vz_builder.rs` deleted.
 - [ ] gvproxy deleted; macOS egress is vsock-only; `just check-linux` + macOS build green.
-- [ ] `dev up/shell/status` run on HVF by default on macOS-26; libkrun still the fallback.
+- [x] `dev up/shell/status` run on HVF by default on macOS-26; libkrun still the fallback.
 - [ ] `machine checkpoint/fork` either works on HVF (WS-E) or returns a clear tracked-unsupported error (WS-D).
 - [ ] `xtask check-claim-catalog` green with Vz witnesses migrated; libkrun/passt witnesses intact.
 - [ ] ADR-098 Accepted; `CLAUDE.md`/docs/`CHANGELOG` updated; #1403 closed; version bumped.
