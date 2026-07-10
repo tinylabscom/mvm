@@ -10,9 +10,38 @@
 
 **Tech stack:** Rust, `ed25519-dalek`, `serde`/`serde_json`, `chrono`. Nix (`nix/lib/mk-guest.nix` `/init`). Tests via `cargo nextest`; the mount + end-to-end delivery are **live-boot-validated** (marked per step).
 
-**Status 2026-07-04:** the unit-testable delivery path is implemented. Current code mints `verb-grant.json` from admitted `ExecutionPlan.agent_verbs`, appends `mvm.verb_grant=` on the workload backend cmdlines, attaches `host-signer.pub` to the config drive for grant-eligible starts, copies it to `/run/mvm/host-signer.pub` in both mkGuest and OCI init, and verifies grants against that file instead of trusting `VerbGrantEnvelope.pubkey_hex`. Live Firecracker proof now covers restricted-grant refusal and true grant-less behavior; `RunEntrypoint` success, caller-side live `verb_denied` emission, macOS HVF/Vz proof, and ADR-103 acceptance remain open.
+**Status 2026-07-10:** the unit-testable delivery path is implemented and the
+remaining Firecracker live proof moved materially closer to closeout. The code
+now mints `verb-grant.json` from admitted `ExecutionPlan.agent_verbs`, appends
+`mvm.verb_grant=` on the workload backend cmdlines, attaches `host-signer.pub`
+to the config drive for grant-eligible starts, copies it to
+`/run/mvm/host-signer.pub` in both mkGuest and OCI init, verifies grants
+against that file instead of trusting `VerbGrantEnvelope.pubkey_hex`, and bakes
+sealed images fail-closed with
+`{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}`.
+The caller-side `session set-timeout` path now audits real
+`VerbNotAuthorized` refusals before surfacing them, so the live
+`verb_denied` witness is no longer just unit coverage. Remaining honest gaps:
+macOS HVF/libkrun live proof, final listed-verb `RunEntrypoint` witness on a
+sealed image, and ADR-103 acceptance.
 
-**Live Firecracker proof 2026-07-05:** on Linux/KVM host `88.99.197.234`, branch-local validation booted `mvm219-fc-grant` with `--agent-verb ping --agent-verb run-entrypoint`; direct agent RPC over `/root/microvm/vms/mvm219-fc-grant/runtime/v.sock` returned `ProtocolHelloAck`, `Ping -> Pong`, and `UpdateIdleTimeout -> VerbNotAuthorized { verb: "update-idle-timeout" }`. A dev-profile true no-grant boot (`mvm219-fc-devnone`) had no serialized `agent_verbs`, no `verb-grant.json`, and returned `UpdateIdleTimeoutAck`. `mvmctl trust audit verify --tenant local` passed for the chain containing admission/launch events. Caveat: the denial was produced by a direct RPC probe, so it does not exercise a `mvmctl` caller path that emits live `verb_denied`; that remains open.
+**Live Firecracker proof 2026-07-10:** on Linux/KVM host `88.99.197.234`, the
+rebuilt sealed artifact `w6xigclqfmqrwpzfll5rdw7z68mb3z1g` now carries
+`{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}`
+inside `/etc/mvm/verb-trust.json`. A restricted session
+(`session-calm-stoat-1193`) logged `mvm-init: provisioned verb-grant` before
+`mvm-guest-agent: control plane ready`, proving the grant staged before agent
+service. Direct host probes then showed the subtractive behavior live:
+`RESPONSE: Err(VerbNotAuthorized { verb: "update-idle-timeout" })` for the
+restricted boot and `RESPONSE: Ok(UpdateIdleTimeoutAck { previous_secs: 0,
+applied_secs: 0 })` for an allow-listed boot (`session-lively-quokka-64de`).
+The official CLI caller path now witnesses the same refusal: `mvmctl machine
+session set-timeout skldaqisk5gnlmxsw56mzugoau 349` logged
+`err=verb update-idle-timeout not authorized by the session's verb grant`, the
+chain-signed audit log gained a real `verb_denied` entry, and
+`mvmctl trust audit verify --tenant local` still passed. The remaining live
+gap is macOS proof plus a listed `RunEntrypoint` success witness on a sealed
+image.
 
 ---
 
@@ -86,7 +115,7 @@ Because delivery is the cmdline (Fork 2), the grant is minted where the *other* 
 - [x] **Step 2: Run** `cargo nextest run -p mvm-guest load_pinned_verb_grant` — expect FAIL. **Done equivalent 2026-07-04:** `cargo test -p mvm-guest load_pinned_verb_grant`.
 - [x] **Step 3: Implement** `load_pinned_verb_grant` (read files → `decode` → `load_host_signer_verifying_key` → `pin_verb_grant` → `Ok(Some)`/log+`None`) and call it into `boot_state.verb_grant`. Repoint the const. **Done 2026-07-04:** verifier loads `HOST_SIGNER_PUBKEY_PATH` and no longer trusts the envelope key.
 - [x] **Step 4: Run** `cargo nextest run -p mvm-guest load_pinned_verb_grant verb_grant` — expect PASS. **Done equivalent 2026-07-04:** `cargo test -p mvm-guest load_pinned_verb_grant`.
-- [ ] **Step 5 (live-boot validation — NOT unit-tested):** the `/init` cmdline-decode stage and the ordering guarantee (files present in `/run/mvm/` *before* the agent forks and *before* `wait_for_guest_agent` probes) can only be confirmed on a real boot. Add a note: validate on macOS Vz/HVF + Linux Firecracker that a booted guest has `/run/mvm/host-signer.pub` + `/run/mvm/verb-grant.json` (inspect via `machine run … --attach` / console on a dev image, or a `ReadinessStatus` field echo). The Nix `/init` shell is not exercised by `cargo nextest`. **Partial live proof 2026-07-05:** Firecracker refusal (`Ping -> Pong`, unlisted `UpdateIdleTimeout -> VerbNotAuthorized`) proves the OCI `/init` staged and the agent pinned the grant before serving RPCs; direct in-guest file inspection remains desirable.
+- [ ] **Step 5 (live-boot validation — NOT unit-tested):** the `/init` cmdline-decode stage and the ordering guarantee (files present in `/run/mvm/` *before* the agent forks and *before* `wait_for_guest_agent` probes) can only be confirmed on a real boot. Add a note: validate on macOS Vz/HVF + Linux Firecracker that a booted guest has `/run/mvm/host-signer.pub` + `/run/mvm/verb-grant.json` (inspect via `machine run … --attach` / console on a dev image, or a `ReadinessStatus` field echo). The Nix `/init` shell is not exercised by `cargo nextest`. **Stronger Firecracker proof 2026-07-10:** console ordering now shows `mvm-init: provisioned verb-grant` before `mvm-guest-agent: control plane ready`, and the rebuilt sealed artifact fail-closes on `require_grant:true`; direct in-guest file inspection and the macOS witness remain open.
 - [x] **Step 6: Commit** `feat(guest): decode verb-grant cmdline token in /init and pin it in the agent`. **Done 2026-07-04:** included in branch commit for issue #1381.
 
 ---
@@ -107,7 +136,7 @@ Because delivery is the cmdline (Fork 2), the grant is minted where the *other* 
 - [x] **Step 3: Run both** — expect FAIL.
 - [x] **Step 4: Implement** the mint-at-stash and the backend token builder + the four append sites.
 - [x] **Step 5: Run** `cargo nextest run -p mvm-cli stash_plan verb_grant && cargo nextest run -p mvm-backend verb_grant_cmdline_token && cargo build -p mvm-cli -p mvm-backend` — expect PASS + builds. **Verified 2026-07-04:** `cargo test -p mvm-hostd verb_grant`, `cargo test -p mvm-backend verb_grant_cmdline_token`, `cargo test -p mvm-cli host_signer_pubkey_config_tests`, and `cargo check -p mvm-cli -p mvm-guest -p mvm-build`.
-- [ ] **Step 6 (live-boot validation — NOT unit-tested):** that the appended token actually rides each backend's real cmdline and is decoded by the guest (5c) end-to-end — i.e. a plan with `agent_verbs` produces a booted agent whose `boot_state.verb_grant` is `Some` and which returns `VerbNotAuthorized` for an unlisted `ProdSafe` verb — is a **full end-to-end boot** check. Unit tests cover encode+mint+read in isolation; only a live boot exercises cmdline-assembly → kernel → `/proc/cmdline` → `/init` decode → agent pin → refusal. Validate on Vz/HVF (macOS) and Firecracker (Linux). **Partial live proof 2026-07-05:** Linux Firecracker passed restricted-grant refusal and true no-grant regression; macOS HVF start returned `up-json` but the supervisor exited before agent readiness on this host, so macOS proof remains open.
+- [ ] **Step 6 (live-boot validation — NOT unit-tested):** that the appended token actually rides each backend's real cmdline and is decoded by the guest (5c) end-to-end — i.e. a plan with `agent_verbs` produces a booted agent whose `boot_state.verb_grant` is `Some` and which returns `VerbNotAuthorized` for an unlisted `ProdSafe` verb — is a **full end-to-end boot** check. Unit tests cover encode+mint+read in isolation; only a live boot exercises cmdline-assembly → kernel → `/proc/cmdline` → `/init` decode → agent pin → refusal. Validate on Vz/HVF (macOS) and Firecracker (Linux). **Stronger Firecracker proof 2026-07-10:** Linux Firecracker now covers the rebuilt sealed `require_grant:true` image, pre-service grant staging, restricted refusal, allow-listed `UpdateIdleTimeoutAck`, the grant-less regression, and a sealed function-workload `RunEntrypoint` success witness (`examples/python/hello-app` compiled to `/tmp/plan219-hello-app`, admitted with `ping` + `run-entrypoint`, returned `"hello ari"` on host `88.99.197.234`). macOS HVF/libkrun proof and a live sealed-image `DevOnly` witness remain open.
 - [x] **Step 7: Commit** `feat: mint verb-grant sidecar and carry it on every workload backend's cmdline`.
 
 ---
@@ -127,7 +156,7 @@ Because delivery is the cmdline (Fork 2), the grant is minted where the *other* 
 - [x] **Step 3: Run** — expect FAIL.
 - [x] **Step 4: Implement** `emit_verb_denied` + wire the caller.
 - [x] **Step 5: Run** `cargo nextest run -p <emitter-crate> verb_denied verify_audit_chain` — expect PASS. **Verified 2026-07-04:** `cargo test -p mvm-hostd verb_denied`.
-- [ ] **Step 6 (partial live-boot note):** the *emitter + chain* is unit-tested; that a **real** refusal from a booted sealed agent triggers the caller's `emit_verb_denied` is covered by the Task 5d end-to-end boot check (the caller wiring itself is unit-testable with a mocked `VerbNotAuthorized` response). **Partial live proof 2026-07-05:** direct Firecracker RPC produced the real guest `VerbNotAuthorized` response and `mvmctl trust audit verify --tenant local` passed, but the direct probe bypassed the `mvmctl` caller-side audit emitter; a CLI-surfaced denied verb is still required for live `verb_denied`.
+- [x] **Step 6 (partial live-boot note):** the *emitter + chain* is unit-tested; that a **real** refusal from a booted sealed agent triggers the caller's `emit_verb_denied` is covered by the Task 5d end-to-end boot check (the caller wiring itself is unit-testable with a mocked `VerbNotAuthorized` response). **Verified 2026-07-10:** on Linux/KVM host `88.99.197.234`, `mvmctl machine session set-timeout skldaqisk5gnlmxsw56mzugoau 349` hit the real sealed guest refusal path, logged the grant-denied warning, appended a live `verb_denied` entry to `/tmp/plan219-proof-data12/audit/local.jsonl`, and `mvmctl trust audit verify --tenant local` still passed.
 - [x] **Step 7: Commit** `feat(audit): chain-signed verb_denied entries on grant refusal`.
 
 ---
@@ -138,8 +167,8 @@ The unit tests prove every seam in isolation; this is the one thing they cannot:
 
 1. Synthesize + admit a plan with `agent_verbs = Some(["run-entrypoint","ping"])` (a `machine run`/`up` path that populates `SynthesisInput.agent_verbs`).
 2. Boot; confirm `/run/mvm/host-signer.pub` + `/run/mvm/verb-grant.json` exist in the guest and that the agent logged a pinned grant (add a one-line `eprintln!` on pin for the validation build). **Firecracker indirect proof passed 2026-07-05**: restricted denial proves the files were decoded and pinned before RPC service.
-3. Invoke a *listed* verb (`RunEntrypoint`) ⇒ succeeds. Invoke an *unlisted* `ProdSafe` verb (`UpdateIdleTimeout`) ⇒ `VerbNotAuthorized`; a `DevOnly` verb on a sealed agent ⇒ still `UnsupportedInProfile` (class gate wins — subtractive invariant holds live). **Firecracker partial passed 2026-07-05**: `Ping -> Pong`; unlisted `UpdateIdleTimeout -> VerbNotAuthorized`. `RunEntrypoint` and live `DevOnly` witness remain.
-4. Confirm an `agent.verb_denied` / `verb_denied` entry landed in `~/.mvm/audit/<tenant>.jsonl` and `mvmctl trust audit verify` passes. **Partial 2026-07-05**: audit chain verification passed; `verb_denied` emission was not exercised because the direct RPC probe bypassed `mvmctl` caller audit.
+3. Invoke a *listed* verb (`RunEntrypoint`) ⇒ succeeds. Invoke an *unlisted* `ProdSafe` verb (`UpdateIdleTimeout`) ⇒ `VerbNotAuthorized`; a `DevOnly` verb on a sealed agent ⇒ still `UnsupportedInProfile` (class gate wins — subtractive invariant holds live). **Firecracker advanced 2026-07-10**: the rebuilt sealed artifact now proves unlisted `UpdateIdleTimeout -> VerbNotAuthorized`, allow-listed `UpdateIdleTimeoutAck`, the grant-less regression, and listed `RunEntrypoint` success on the sealed `hello-app` function workload (`"hello ari"` on host `88.99.197.234`). The remaining live witness is the sealed-image `DevOnly` refusal plus macOS HVF/libkrun parity.
+4. Confirm an `agent.verb_denied` / `verb_denied` entry landed in `~/.mvm/audit/<tenant>.jsonl` and `mvmctl trust audit verify` passes. **Verified 2026-07-10**: the CLI `session set-timeout` denial path appended a live `verb_denied` entry, and `mvmctl trust audit verify --tenant local` passed afterward.
 5. Boot a plan with `agent_verbs = None` ⇒ no token, no sidecar, `boot_state.verb_grant == None`, behavior byte-identical to today (grant-less regression guard). **Firecracker passed 2026-07-05**: dev-profile `mvm219-fc-devnone` serialized no `agent_verbs`, wrote no `verb-grant.json`, returned `Ping -> Pong`, and allowed `UpdateIdleTimeoutAck`.
 
 > Echo log paths up front when running: driver, per-step, and the guest console (`console.log` / firecracker.log) so the operator can `tail -f`.

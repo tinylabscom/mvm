@@ -3261,6 +3261,15 @@ mod tests {
         assert!(cmd.contains("cores = 0"));
         assert!(cmd.contains("auto-optimise-store = true"));
         assert!(cmd.contains("XDG_CACHE_HOME=/nix-store/.cache"));
+        assert!(
+            cmd.contains(
+                "export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin"
+            )
+        );
+        assert!(cmd.contains("NIX_BIN=/sbin/nix"));
+        assert!(cmd.contains("NIX_STORE_BIN=/sbin/nix-store"));
+        assert!(cmd.contains("\"$NIX_BIN\" build"));
+        assert!(cmd.contains("\"$NIX_STORE_BIN\" --add-root"));
         assert!(cmd.contains("printf '%s\\n' \"$NIX_OUT\" > /job/store-path"));
         // Legacy (no-override) mode never injects an mvm override.
         assert!(!cmd.contains("--override-input mvm"));

@@ -671,6 +671,50 @@ fn mk_guest_installs_netinit_at_boot() {
     );
 }
 
+#[test]
+fn mk_guest_deindents_pid1_script_before_writing_init() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+
+    assert!(
+        content.contains("${pkgs.gnused}/bin/sed -i '1s/^ *//' \"$out/init\""),
+        "mk-guest.nix must normalize the generated /init shebang to byte zero before \
+         sealing the rootfs. \
+         Without this, the rendered rootfs can carry a leading space before `#!`, \
+         and the kernel rejects PID 1 with exec format error."
+    );
+}
+
+#[test]
+fn mk_guest_mounts_config_drive_before_reading_host_signer_pubkey() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+
+    assert!(
+        content.contains(
+            "/bin/busybox mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdb /mnt/config || true"
+        ),
+        "mk-guest.nix must mount the config drive at /mnt/config before any boot-time code \
+         reads host-signer.pub or security-policy.json from that path."
+    );
+}
+
+#[test]
+fn mk_guest_sealed_images_require_launch_provisioned_grants() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+
+    assert!(
+        content.contains("\"require_grant\":true,\"grant_key_source\":\"launch_provisioned\""),
+        "mk-guest.nix must bake sealed images with require_grant=true so \
+         launch-provisioned agent verb grants are enforced fail-closed on \
+         the live boot path."
+    );
+}
+
 /// Plan 74 W2 (deferred-list item) — the runtime overlay flake
 /// must stage `mvm-guest-netinit` at the canonical `/netinit`
 /// path inside the overlay so OCI-imported workloads get

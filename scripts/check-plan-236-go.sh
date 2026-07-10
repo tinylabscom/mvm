@@ -4,23 +4,29 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 MAIN_REPO="${REPO_ROOT}"
-MAIN_REF="${PLAN236_MAIN_REF:-main}"
+DEFAULT_MAIN_REF="main"
+if git -C "${MAIN_REPO}" rev-parse --verify origin/main >/dev/null 2>&1; then
+  DEFAULT_MAIN_REF="origin/main"
+fi
+MAIN_REF="${PLAN236_MAIN_REF:-${DEFAULT_MAIN_REF}}"
 WATCH_INTERVAL="${PLAN236_WATCH_INTERVAL:-10}"
 
 usage() {
   cat <<'EOF'
 Usage: scripts/check-plan-236-go.sh [--watch] [--json]
 
-Checks whether the prerequisite worktrees for Plan 236 are in a conservative
+Checks whether the prerequisite inputs for Plan 236 are in a conservative
 "ready to integrate" state.
 
-Current GO criteria for each required worktree:
-  - worktree path exists
-  - current branch matches the expected branch
-  - worktree is not detached
-  - no local tracked or untracked changes
-  - branch is not behind the chosen main ref
-  - branch has at least one commit ahead of the chosen main ref
+Current GO criteria:
+  - merged prerequisite slices stay reachable from the chosen main ref
+  - active prerequisite worktrees exist
+  - active worktree branches match the expected branch
+  - active worktrees are not detached
+  - active worktrees have no local tracked or untracked changes
+  - active worktree branches are not behind the chosen main ref
+  - active worktree branches are either ahead of the chosen main ref or exactly
+    aligned with it after refresh
 
 Environment overrides:
   PLAN236_MAIN_REF=origin/main   Compare against a different main ref
@@ -53,26 +59,40 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-WORKTREE_LABELS=(
+INPUT_LABELS=(
   "agent-verb-grant-delivery"
-  "host-services-cleanup"
   "vsock-port-handler-registry"
+  "host-services-cleanup"
   "vsock-only-egress-cutover"
   "mvm-client-facade"
 )
-WORKTREE_PATHS=(
-  "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-agent-verb-grant-delivery"
-  "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan-202-native-host-services"
-  "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-vsock-port-handler-registry"
-  "/Users/auser/work/tinylabs/mvmco/mvm/.claude/worktrees/vsock-only-egress-cutover"
-  "/Users/auser/work/tinylabs/mvmco/mvm-wt-216-s0"
+INPUT_KINDS=(
+  "merged"
+  "merged"
+  "worktree"
+  "worktree"
+  "worktree"
+)
+INPUT_PATHS=(
+  "-"
+  "-"
+  "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan-202-refresh"
+  "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-vsock-egress-refresh"
+  "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-plan-216-refresh"
 )
 EXPECTED_BRANCHES=(
-  "fix/agent-verb-grant-delivery"
-  "feat/plan-202-native-host-services"
-  "feat/vsock-port-handler-registry"
-  "worktree-vsock-only-egress-cutover"
-  "feat/plan-216-s0-mvm-client"
+  "merged-on-main"
+  "merged-on-main"
+  "codex/plan-236-plan202-refresh"
+  "codex/plan-236-vsock-egress-refresh"
+  "codex/plan-236-plan216-refresh"
+)
+MERGED_REFS=(
+  "7ba5df7c3dcba134249da2fc779b91f5558304f3"
+  "6a9b94397048cc2b9d452c30cd34fdf9ff30c025"
+  ""
+  ""
+  ""
 )
 
 git_cmd() {
@@ -89,8 +109,10 @@ json_escape() {
 
 collect_status() {
   local label="$1"
-  local path="$2"
-  local expected_branch="$3"
+  local kind="$2"
+  local path="$3"
+  local expected_branch="$4"
+  local merged_ref="$5"
 
   local exists="false"
   local detached="false"
@@ -100,6 +122,30 @@ collect_status() {
   local behind=0
   local status="GO"
   local reasons=()
+
+  if [[ "${kind}" == "merged" ]]; then
+    exists="true"
+    branch="merged@${MAIN_REF}"
+    if ! git -C "${MAIN_REPO}" rev-parse --verify "${MAIN_REF}" >/dev/null 2>&1; then
+      status="NO-GO"
+      reasons+=("missing comparison ref ${MAIN_REF}")
+    elif [[ -z "${merged_ref}" ]] || ! git -C "${MAIN_REPO}" rev-parse --verify "${merged_ref}" >/dev/null 2>&1; then
+      status="NO-GO"
+      reasons+=("missing merged prerequisite ref ${merged_ref:-<unset>}")
+    elif ! git -C "${MAIN_REPO}" merge-base --is-ancestor "${merged_ref}" "${MAIN_REF}" >/dev/null 2>&1; then
+      status="NO-GO"
+      reasons+=("merged prerequisite ${merged_ref:0:12} not reachable from ${MAIN_REF}")
+    fi
+
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "${label}" "${path}" "${expected_branch}" "${exists}" "${status}" "${branch}" "${dirty_count}" "${ahead}|${behind}"
+    if [[ ${#reasons[@]} -eq 0 ]]; then
+      printf '\n'
+    else
+      printf '%s\n' "$(IFS='; '; printf '%s' "${reasons[*]}")"
+    fi
+    return
+  fi
 
   if [[ ! -d "${path}" ]]; then
     exists="false"
@@ -139,9 +185,8 @@ collect_status() {
       status="NO-GO"
       reasons+=("behind ${MAIN_REF} by ${behind}")
     fi
-    if [[ "${ahead}" == "0" ]]; then
-      status="NO-GO"
-      reasons+=("no commits ahead of ${MAIN_REF}")
+    if [[ "${ahead}" == "0" && "${behind}" == "0" ]]; then
+      branch="${branch}@aligned"
     fi
   else
     status="NO-GO"
@@ -150,7 +195,11 @@ collect_status() {
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${label}" "${path}" "${expected_branch}" "${exists}" "${status}" "${branch}" "${dirty_count}" "${ahead}|${behind}"
-  printf '%s\n' "$(IFS='; '; printf '%s' "${reasons[*]}")"
+  if [[ ${#reasons[@]} -eq 0 ]]; then
+    printf '\n'
+  else
+    printf '%s\n' "$(IFS='; '; printf '%s' "${reasons[*]}")"
+  fi
 }
 
 render_once() {
@@ -159,13 +208,15 @@ render_once() {
   local reasons=()
   local idx
 
-  for idx in "${!WORKTREE_LABELS[@]}"; do
+  for idx in "${!INPUT_LABELS[@]}"; do
     local output
     output="$(
       collect_status \
-        "${WORKTREE_LABELS[$idx]}" \
-        "${WORKTREE_PATHS[$idx]}" \
-        "${EXPECTED_BRANCHES[$idx]}"
+        "${INPUT_LABELS[$idx]}" \
+        "${INPUT_KINDS[$idx]}" \
+        "${INPUT_PATHS[$idx]}" \
+        "${EXPECTED_BRANCHES[$idx]}" \
+        "${MERGED_REFS[$idx]}"
     )"
     local header
     header="$(printf '%s' "${output}" | sed -n '1p')"
@@ -228,7 +279,7 @@ render_once() {
 
   printf 'Plan 236 readiness against %s: %s\n' "${MAIN_REF}" "${overall}"
   printf '\n'
-  printf '%-30s %-5s %-8s %-8s %-9s %s\n' "worktree" "go" "ahead" "behind" "dirty" "branch"
+  printf '%-30s %-5s %-8s %-8s %-9s %s\n' "input" "go" "ahead" "behind" "dirty" "branch"
   printf '%-30s %-5s %-8s %-8s %-9s %s\n' "--------" "--" "-----" "------" "-----" "------"
   for idx in "${!rows[@]}"; do
     IFS=$'\t' read -r label path expected exists status branch dirty counts <<<"${rows[$idx]}"
@@ -243,9 +294,9 @@ render_once() {
   done
   printf '\n'
   if [[ "${overall}" == "GO" ]]; then
-    printf 'GO: the five prerequisite worktrees look integration-ready for Plan 236.\n'
+    printf 'GO: the tracked prerequisite inputs look integration-ready for Plan 236.\n'
   else
-    printf 'NO-GO: at least one prerequisite worktree is missing, dirty, detached, mismatched, or behind %s.\n' "${MAIN_REF}"
+    printf 'NO-GO: at least one tracked prerequisite input is stale, dirty, detached, mismatched, or not yet reachable from %s.\n' "${MAIN_REF}"
   fi
 }
 

@@ -825,6 +825,16 @@ mod linux {
         unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 }
     }
 
+    /// Builder jobs need the Nix client from the mounted `/nix` view, not just
+    /// from the read-only seed rootfs. When the overlay path loses these
+    /// executables, the VM must fall back to a seeded bind-mount instead of
+    /// reaching the job and failing with `exit 127`.
+    fn builder_nix_tools_visible() -> bool {
+        [Path::new("/sbin/nix"), Path::new("/sbin/nix-store")]
+            .into_iter()
+            .all(is_executable)
+    }
+
     pub fn run() -> ExitCode {
         eprintln!("mvm-host-vm-init: pid 1 starting");
 
@@ -2090,6 +2100,20 @@ mod linux {
                 std::fs::create_dir_all(NIX_TARGET)
                     .map_err(|e| format!("create {NIX_TARGET}: {e}"))?;
                 bind_mount(NIX_STORE_MOUNT, NIX_TARGET)?;
+            }
+        }
+        if !builder_nix_tools_visible() {
+            eprintln!(
+                "mvm-host-vm-init: overlay-mounted /nix hides builder Nix tools; \
+                 falling back to seeded bind mount"
+            );
+            use nix::mount::umount;
+            umount(NIX_TARGET).map_err(|e| format!("umount {NIX_TARGET}: {e}"))?;
+            umount(NIX_OVERLAY_MERGED).map_err(|e| format!("umount {NIX_OVERLAY_MERGED}: {e}"))?;
+            seed_nix_store(timings, anchor)?;
+            bind_mount(NIX_STORE_MOUNT, NIX_TARGET)?;
+            if !builder_nix_tools_visible() {
+                return Err("seeded /nix bind mount still hides /sbin/nix".into());
             }
         }
         stamp(timings, |t| {

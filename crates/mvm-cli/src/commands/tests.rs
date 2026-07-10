@@ -809,6 +809,22 @@ fn machine_run_entrypoint_from_workload_ir_parses() {
 }
 
 #[test]
+fn machine_run_entrypoint_agent_verbs_parse() {
+    let args = parse_machine_run(&[
+        "--manifest",
+        "tmpl",
+        "--entrypoint",
+        "--agent-verb",
+        "run-entrypoint",
+        "--agent-verb",
+        "ping",
+    ])
+    .unwrap();
+    assert!(args.entrypoint);
+    assert_eq!(args.agent_verb, vec!["run-entrypoint", "ping"]);
+}
+
+#[test]
 fn machine_run_entrypoint_attach_parses_and_requires_name() {
     // `--attach` dispatches into a running machine named by `--name`; it
     // reinterprets the target and so conflicts with a fresh source + boot flags.

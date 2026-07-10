@@ -565,7 +565,11 @@ fn dispatch_update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> 
     let req = mvm_guest::vsock::GuestRequest::UpdateIdleTimeout { secs };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    match classify_update_idle_response(mvm_guest::vsock::call_unary(&mut stream, &req)?) {
+    let resp = mvm_guest::vsock::call_unary(&mut stream, &req).map_err(anyhow::Error::from);
+    if let Err(err) = &resp {
+        super::verb_audit::audit_verb_refusal(vm_name, err);
+    }
+    match classify_update_idle_response(resp?) {
         UpdateIdleOutcome::Applied {
             previous_secs,
             applied_secs,
@@ -992,8 +996,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     let mem_mib = u64::from(args.memory_mib);
     let agent_verb_override = args.agent_verb.clone();
     let is_dev = args.dev;
-    let admit_ctx: Rc<RefCell<Option<super::up::AdmissionContext>>> =
-        Rc::new(RefCell::new(None));
+    let admit_ctx: Rc<RefCell<Option<super::up::AdmissionContext>>> = Rc::new(RefCell::new(None));
     let ctx_sink = Rc::clone(&admit_ctx);
     let admit = move |rootfs: &std::path::Path,
                       vm_name: &str|
@@ -1286,7 +1289,8 @@ mod tests {
         })
         .unwrap_err();
         assert!(
-            err.to_string().contains("--agent-verb is refused with --dev"),
+            err.to_string()
+                .contains("--agent-verb is refused with --dev"),
             "expected explicit dev conflict error, got: {err}"
         );
     }

@@ -372,6 +372,22 @@ export HOME=/tmp
 export XDG_CACHE_HOME=/nix-store/.cache
 export XDG_STATE_HOME=/tmp/.local/state
 mkdir -p /nix-store/.cache /tmp/.local/state
+# Do not rely on PID 1's inherited PATH here. The build script may run
+# under shells / wrappers that sanitize env, but mkGuest guarantees the
+# builder tools are symlinked into these prefixes.
+export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin
+NIX_BIN=/sbin/nix
+NIX_STORE_BIN=/sbin/nix-store
+if [ ! -x "$NIX_BIN" ]; then
+    echo "builder VM missing executable $NIX_BIN" >&2
+    ls -l /usr/local/bin/nix /sbin/nix 2>/dev/null >&2 || true
+    exit 127
+fi
+if [ ! -x "$NIX_STORE_BIN" ]; then
+    echo "builder VM missing executable $NIX_STORE_BIN" >&2
+    ls -l /usr/local/bin/nix-store /sbin/nix-store 2>/dev/null >&2 || true
+    exit 127
+fi
 
 # CA certs for TLS to cache.nixos.org / api.github.com.
 export CURL_CA_BUNDLE=/etc/ssl/certs/ca-bundle.crt
@@ -415,7 +431,7 @@ df -h /nix /tmp >&2 || true
 # cascades up). We tee stderr to /job/nix-build.log so the host
 # can read the actual root cause when a deep dependency fails.
 set +e
-nix build "${{FLAKE_REF}}#${{ATTR_PATH}}"{override_flag} \
+"$NIX_BIN" build "${{FLAKE_REF}}#${{ATTR_PATH}}"{override_flag} \
     --no-link --print-out-paths --no-write-lock-file --impure \
     --print-build-logs --keep-going \
     > /job/nix-stdout.log 2> /job/nix-stderr.log
@@ -455,7 +471,7 @@ case "$(basename "$NIX_OUT")" in
   *)                  warm=workload ;;
 esac
 mkdir -p /nix/var/nix/gcroots 2>/dev/null || true
-nix-store --add-root "/nix/var/nix/gcroots/mvm-warm-$warm" --indirect -r "$NIX_OUT" >/dev/null 2>&1 \
+"$NIX_STORE_BIN" --add-root "/nix/var/nix/gcroots/mvm-warm-$warm" --indirect -r "$NIX_OUT" >/dev/null 2>&1 \
   || ln -sfn "$NIX_OUT" "/nix/var/nix/gcroots/mvm-warm-$warm" 2>/dev/null || true
 # Retire the pre-fix single root so it stops protecting a stale closure.
 rm -f /nix/var/nix/gcroots/mvm-warm-latest 2>/dev/null || true

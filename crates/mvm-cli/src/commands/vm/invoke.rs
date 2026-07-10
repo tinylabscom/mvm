@@ -55,6 +55,9 @@ pub(in crate::commands) struct EntrypointCall {
     /// ephemeral VM is admitted so the host spawns the substitution endpoint;
     /// the guest only ever holds the opaque `mvm-secret-<hex>` placeholder.
     pub from_workload_ir: Option<PathBuf>,
+    /// Explicit ProdSafe agent-verb override to mint into the admitted grant
+    /// for the transient entrypoint boot. Empty => use the computed default.
+    pub agent_verb_override: Vec<String>,
     /// Restore the session VM from its post-boot snapshot before the call.
     /// Wired but no-op in this build (session-pool plan).
     pub reset: bool,
@@ -76,6 +79,158 @@ pub(in crate::commands) struct EntrypointCall {
     /// is the running VM's name. Its substitution endpoint + boot-minted
     /// placeholders are reused; the VM is left running (no teardown).
     pub attach: bool,
+}
+
+struct EntrypointAdmission {
+    context: super::up::AdmissionContext,
+    substrate: crate::exec::SessionAuditSubstrate,
+}
+
+struct EntrypointAdmissionParams<'a> {
+    rootfs: &'a std::path::Path,
+    vm_name: &'a str,
+    backend_name: &'a str,
+    cpus: u32,
+    mem_mib: u64,
+    lowered_secrets: &'a super::managed_secrets::LoweredPlanSecrets,
+    agent_verb_override: &'a [String],
+    keep_alive_dev: bool,
+}
+
+impl<'a> EntrypointAdmissionParams<'a> {
+    fn builder(
+        rootfs: &'a std::path::Path,
+        vm_name: &'a str,
+        backend_name: &'a str,
+    ) -> EntrypointAdmissionParamsBuilder<'a> {
+        EntrypointAdmissionParamsBuilder {
+            rootfs,
+            vm_name,
+            backend_name,
+            cpus: 1,
+            mem_mib: 256,
+            lowered_secrets: None,
+            agent_verb_override: &[],
+            keep_alive_dev: false,
+        }
+    }
+}
+
+struct EntrypointAdmissionParamsBuilder<'a> {
+    rootfs: &'a std::path::Path,
+    vm_name: &'a str,
+    backend_name: &'a str,
+    cpus: u32,
+    mem_mib: u64,
+    lowered_secrets: Option<&'a super::managed_secrets::LoweredPlanSecrets>,
+    agent_verb_override: &'a [String],
+    keep_alive_dev: bool,
+}
+
+impl<'a> EntrypointAdmissionParamsBuilder<'a> {
+    fn cpus(mut self, cpus: u32) -> Self {
+        self.cpus = cpus;
+        self
+    }
+
+    fn mem_mib(mut self, mem_mib: u64) -> Self {
+        self.mem_mib = mem_mib;
+        self
+    }
+
+    fn lowered_secrets(
+        mut self,
+        lowered_secrets: &'a super::managed_secrets::LoweredPlanSecrets,
+    ) -> Self {
+        self.lowered_secrets = Some(lowered_secrets);
+        self
+    }
+
+    fn agent_verb_override(mut self, agent_verb_override: &'a [String]) -> Self {
+        self.agent_verb_override = agent_verb_override;
+        self
+    }
+
+    fn keep_alive_dev(mut self, keep_alive_dev: bool) -> Self {
+        self.keep_alive_dev = keep_alive_dev;
+        self
+    }
+
+    fn build(self) -> EntrypointAdmissionParams<'a> {
+        EntrypointAdmissionParams {
+            rootfs: self.rootfs,
+            vm_name: self.vm_name,
+            backend_name: self.backend_name,
+            cpus: self.cpus,
+            mem_mib: self.mem_mib,
+            lowered_secrets: self
+                .lowered_secrets
+                .expect("entrypoint admission params require lowered secrets"),
+            agent_verb_override: self.agent_verb_override,
+            keep_alive_dev: self.keep_alive_dev,
+        }
+    }
+}
+
+fn admit_entrypoint_boot(
+    params: EntrypointAdmissionParams<'_>,
+) -> Result<Option<EntrypointAdmission>> {
+    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+    let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        tenant: "local",
+        vm_name: params.vm_name,
+        backend_name: params.backend_name,
+        rootfs_path: params.rootfs,
+        precomputed_image_sha256: None,
+        cpus: params.cpus,
+        mem_mib: params.mem_mib,
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+        secret_release: params.lowered_secrets.secret_release,
+        secrets: params.lowered_secrets.secrets.clone(),
+        auth: mvm_core::plan::AuthPolicy::none(),
+        no_supervisor: false,
+        ledger: &ledger,
+        keys_dir: None,
+        audit_dir: None,
+        policy_dir: None,
+        bundle_pin: None,
+        deps_volume: None,
+        shares: vec![],
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        agent_verb_override: params.agent_verb_override.to_vec(),
+        restrict_agent_verbs: !params.keep_alive_dev
+            && super::agent_verbs::image_is_sealed(params.rootfs),
+    })?;
+    let Some(ctx) = ctx else { return Ok(None) };
+
+    let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
+    super::up::attach_host_signer_pubkey_config_for_plan(
+        &mut start_config,
+        &ctx.admitted.plan,
+        &ctx.host_signer_public_path,
+    )?;
+    if super::up::persists_plan_before_start(params.backend_name) {
+        super::plan_persist::write_plan(params.vm_name, &ctx.admitted.plan)
+            .context("persisting admitted plan for the pre-start egress moat")?;
+    }
+    let plan_json = serde_json::to_string(&ctx.admitted.signed)
+        .context("serializing admitted plan for the session VM")?;
+    let bundle_json = ctx
+        .policy_bundle
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .context("serializing admitted policy bundle for the session VM")?;
+    Ok(Some(EntrypointAdmission {
+        substrate: crate::exec::SessionAuditSubstrate {
+            tenant_id: ctx.admitted.plan.tenant.0.clone(),
+            plan_json,
+            bundle_json,
+            config_files: start_config.config_files,
+        },
+        context: ctx,
+    }))
 }
 
 pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
@@ -145,91 +300,61 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     ui::info(&format!(
         "entrypoint: booting {lifecycle_label} for template '{template_id}'"
     ));
-    // If the workload declares secrets (its IR was passed via
-    // `--from-workload-ir`), admit the lowered plan so the ephemeral VM spawns
-    // the substitution endpoint. The closure runs admission inside
-    // `boot_session_vm` (the rootfs + vm_name it needs are generated there). No
-    // IR / no secrets ⇒ `None`, the unchanged plain-invoke path.
-    let admit_closure: Option<Box<crate::exec::SessionAdmit>> =
-        super::up::load_workload_ir(call.from_workload_ir.as_deref())?
-            .map(|w| super::managed_secrets::lower_workload_secrets(&w))
-            .filter(|lowered| !lowered.secrets.is_empty())
-            .map(|lowered| {
-                let secrets = lowered.secrets;
-                let secret_release = lowered.secret_release;
-                let backend_name = mvm_backend::backend::AnyBackend::auto_select()
-                    .name()
-                    .to_string();
-                let cpus = call.cpus;
-                let mem = call.memory_mib as u64;
-                Box::new(
-                    move |rootfs: &std::path::Path,
-                          vm_name: &str|
-                          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
-                        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
-                        let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-                            tenant: "local",
-                            vm_name,
-                            backend_name: &backend_name,
-                            rootfs_path: rootfs,
-                            precomputed_image_sha256: None,
-                            cpus,
-                            mem_mib: mem,
-                            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-                            secret_release,
-                            secrets: secrets.clone(),
-                            auth: mvm_core::plan::AuthPolicy::none(),
-                            no_supervisor: false,
-                            ledger: &ledger,
-                            keys_dir: None,
-                            audit_dir: None,
-                            policy_dir: None,
-                            bundle_pin: None,
-                            deps_volume: None,
-                            shares: vec![],
-                            redaction: mvm_core::policy::RedactionPolicy::default(),
-                            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-                            agent_verb_override: vec![],
-                            // --keep-alive-dev marks the session for subsequent session exec /
-                            // run-code (DevOnly verbs); those must not be blocked by an
-                            // attenuated ProdSafe grant. Additionally, the default grant is
-                            // only minted for a sealed image (mvm-meta.json `sealed: true`);
-                            // unsealed dev-shell or OCI images are not restricted.
-                            restrict_agent_verbs: !call.keep_alive_dev
-                                && super::agent_verbs::image_is_sealed(rootfs),
-                        })?;
-                        let Some(c) = ctx else { return Ok(None) };
-                        // Persist the bare admitted plan to the per-VM state dir
-                        // before boot. The macOS substitution endpoint decodes
-                        // its secret bindings from `<state_dir>/plan.json` inside
-                        // `backend.start()`; `boot_session_vm` only threads the
-                        // plan in-memory, so without this on-disk copy the
-                        // endpoint silently no-ops on vz/libkrun (the in-memory
-                        // thread alone never reaches the disk-reading decode).
-                        if super::up::persists_plan_before_start(&backend_name) {
-                            super::plan_persist::write_plan(vm_name, &c.admitted.plan)
-                                .context("persisting admitted plan for the pre-start egress moat")?;
-                        }
-                        let plan_json = serde_json::to_string(&c.admitted.signed)
-                            .context("serializing admitted plan for the session VM")?;
-                        Ok(Some(crate::exec::SessionAuditSubstrate {
-                            tenant_id: c.admitted.plan.tenant.0.clone(),
-                            plan_json,
-                            bundle_json: None,
-                            config_files: vec![],
-                        }))
-                    },
-                ) as Box<crate::exec::SessionAdmit>
-            });
+    let lowered_secrets = super::up::load_workload_ir(call.from_workload_ir.as_deref())?
+        .map(|w| super::managed_secrets::lower_workload_secrets(&w))
+        .filter(|lowered| !lowered.secrets.is_empty())
+        .unwrap_or_default();
+    let backend_name = mvm_backend::backend::AnyBackend::auto_select()
+        .name()
+        .to_string();
+    let admit_backend = backend_name.clone();
+    let cpus = call.cpus;
+    let mem = call.memory_mib as u64;
+    let agent_verb_override = call.agent_verb_override.clone();
+    let keep_alive_dev = call.keep_alive_dev;
+    let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<super::up::AdmissionContext>>> =
+        std::rc::Rc::new(std::cell::RefCell::new(None));
+    let ctx_sink = std::rc::Rc::clone(&admit_ctx);
+    let admit = move |rootfs: &std::path::Path,
+                      vm_name: &str|
+          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+        let admitted = admit_entrypoint_boot(
+            EntrypointAdmissionParams::builder(rootfs, vm_name, &admit_backend)
+                .cpus(cpus)
+                .mem_mib(mem)
+                .lowered_secrets(&lowered_secrets)
+                .agent_verb_override(&agent_verb_override)
+                .keep_alive_dev(keep_alive_dev)
+                .build(),
+        )?;
+        let Some(admitted) = admitted else {
+            return Ok(None);
+        };
+        *ctx_sink.borrow_mut() = Some(admitted.context);
+        Ok(Some(admitted.substrate))
+    };
 
-    let vm = crate::exec::boot_session_vm(
+    let vm = match crate::exec::boot_session_vm(
         &template_id,
         "invoke",
         call.cpus,
         call.memory_mib,
-        admit_closure.as_deref(),
-    )
-    .context("Booting VM for the entrypoint call")?;
+        Some(&admit),
+    ) {
+        Ok(vm) => {
+            let ctx = admit_ctx.borrow_mut().take();
+            super::up::emit_launched_if(&ctx, &backend_name);
+            if let Some(ctx) = ctx {
+                *admit_ctx.borrow_mut() = Some(ctx);
+            }
+            vm
+        }
+        Err(e) => {
+            let ctx = admit_ctx.borrow_mut().take();
+            super::up::emit_failed_if(&ctx, "backend-start", &e);
+            return Err(e).context("Booting VM for the entrypoint call");
+        }
+    };
 
     // Register a session record so `mvmctl session ls`
     // sees the call (whether transient or warm). With `--keep-alive`
@@ -686,9 +811,55 @@ mod auto_stdin_tests {
 
 #[cfg(test)]
 mod tests {
+    use crate::commands::vm::host_signer;
+    use crate::commands::vm::managed_secrets::LoweredPlanSecrets;
     use mvm_core::util::test_env::TestEnv;
 
     use super::*;
+
+    #[test]
+    fn admit_entrypoint_boot_admits_sealed_images_even_without_secrets() {
+        use mvm_build::builder_vm::GuestSidecar;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        let mut sidecar = GuestSidecar::for_oci_run("audit-probe");
+        sidecar.accessible = false;
+        sidecar.sealed = true;
+        sidecar.write_to_dir(dir.path()).expect("write sidecar");
+
+        let lowered_secrets = LoweredPlanSecrets::default();
+        let admitted = admit_entrypoint_boot(
+            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof", "firecracker")
+                .cpus(1)
+                .mem_mib(256)
+                .lowered_secrets(&lowered_secrets)
+                .agent_verb_override(&["run-entrypoint".into(), "ping".into()])
+                .keep_alive_dev(false)
+                .build(),
+        )
+        .expect("admit entrypoint boot")
+        .expect("sealed entrypoint boot admitted");
+
+        let verbs = admitted
+            .context
+            .admitted
+            .plan
+            .agent_verbs
+            .as_ref()
+            .expect("sealed entrypoint plan should carry agent verbs");
+        assert!(verbs.iter().any(|v| v.as_str() == "run-entrypoint"));
+        assert!(verbs.iter().any(|v| v.as_str() == "ping"));
+        assert!(
+            admitted
+                .substrate
+                .config_files
+                .iter()
+                .any(|f| f.name == host_signer::PUBLIC_FILENAME),
+            "host signer pubkey must be attached when verb grants are present"
+        );
+    }
 
     #[test]
     fn test_exit_code_normal_exit_zero() {
