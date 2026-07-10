@@ -1561,21 +1561,19 @@ pub fn pin_verb_grant(
     }
 }
 
-/// Verify a `VerbGrantEnvelope` and return the pinned grant, or `None` on
-/// any failure.
+/// Verify a `VerbGrantEnvelope` against a caller-supplied host-signer trust
+/// anchor and return the pinned grant, or `None` on any failure.
 ///
 /// Shared verification core used by both boot-time `load_pinned_verb_grant`
-/// (reads from disk) and restore-time `re_pin_verb_grant` (receives the
-/// envelope over vsock). Logs a warning and returns `None` on any error so
-/// callers never crash on a bad envelope.
-///
-/// # Trust note
-/// The verifying key rides in the same launcher-provisioned envelope as the
-/// grant, so this is an integrity check over a launcher-controlled blob — not
-/// proof of an independent issuer. Trust derives from the delivery channel
-/// (kernel-cmdline for boot, vsock for restore).
-pub fn re_pin_verb_grant(
+/// (resolves the anchor from disk) and restore-time `re_pin_verb_grant`
+/// (receives the anchor already resolved). Neither caller reads the verifying
+/// key from the envelope: the key that rides inside the envelope
+/// (`envelope.pubkey_hex`) is self-attested and is never trusted for
+/// verification. Logs a warning and returns `None` on any error so callers
+/// never crash on a bad envelope.
+fn verify_envelope_with_anchor(
     envelope: &mvm_core::protocol::vm_backend::VerbGrantEnvelope,
+    host_signer_key: &ed25519_dalek::VerifyingKey,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<mvm_core::plan::VerbGrant> {
     let plan_nonce = match mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex) {
@@ -1585,16 +1583,9 @@ pub fn re_pin_verb_grant(
             return None;
         }
     };
-    let host_key = match verifying_key_from_hex(&envelope.pubkey_hex) {
-        Ok(k) => k,
-        Err(e) => {
-            eprintln!("mvm-guest-agent: verb-grant pubkey_hex malformed, skipping grant: {e}");
-            return None;
-        }
-    };
     match pin_verb_grant(
         Some(&envelope.grant),
-        Some(&host_key),
+        Some(host_signer_key),
         &envelope.grant.session_id,
         &plan_nonce,
         now,
@@ -1605,6 +1596,32 @@ pub fn re_pin_verb_grant(
             None
         }
     }
+}
+
+/// Re-pin a verb grant delivered over vsock at restore time (plain resume sends
+/// no envelope; a fork sends a fresh host-signed one).
+///
+/// Trust derives from the boot-pinned host-signer anchor the guest holds at
+/// `HOST_SIGNER_PUBKEY_PATH`, passed in as `host_signer_key` — NOT from the key
+/// embedded in the envelope. A prior version verified against
+/// `envelope.pubkey_hex`, which is self-attested: any party able to deliver a
+/// `PostRestore` envelope could forge its own keypair and mint an arbitrary
+/// grant. Binding to the boot anchor closes that bypass.
+///
+/// A fork legitimately mints a fresh host-signed envelope carrying the child's
+/// new `session_id`/`plan_nonce` and MAY widen the verb set (it runs a newly
+/// admitted plan), so re-pin does NOT require the boot session/nonce to match;
+/// the sole invariant is that the grant is signed by the host-signer anchor.
+pub fn re_pin_verb_grant(
+    envelope: &mvm_core::protocol::vm_backend::VerbGrantEnvelope,
+    host_signer_key: &ed25519_dalek::VerifyingKey,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<mvm_core::plan::VerbGrant> {
+    // Residual limitation: the host-signer anchor is host-global, so this proves
+    // host authorship but does not by itself bind the grant to THIS VM's
+    // identity — a genuinely host-signed grant issued for another VM would still
+    // pass signature verification here. Cross-VM replay is a separate follow-up.
+    verify_envelope_with_anchor(envelope, host_signer_key, now)
 }
 
 /// Read the pinned verb grant written by `/init` and verify it before use.
@@ -1640,15 +1657,6 @@ pub fn load_pinned_verb_grant(
                 return None;
             }
         };
-    let plan_nonce = match mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex) {
-        Ok(n) => n,
-        Err(e) => {
-            eprintln!(
-                "mvm-guest-agent: verb-grant plan_nonce_hex invalid, booting without grant: {e}"
-            );
-            return None;
-        }
-    };
     let host_key = match load_host_signer_verifying_key(host_signer_pubkey_path) {
         Ok(Some(key)) => key,
         Ok(None) => {
@@ -1662,21 +1670,7 @@ pub fn load_pinned_verb_grant(
             return None;
         }
     };
-    match pin_verb_grant(
-        Some(&envelope.grant),
-        Some(&host_key),
-        &envelope.grant.session_id,
-        &plan_nonce,
-        now,
-    ) {
-        Ok(pinned) => pinned,
-        Err(e) => {
-            eprintln!(
-                "mvm-guest-agent: verb-grant verification failed, booting without grant: {e}"
-            );
-            None
-        }
-    }
+    verify_envelope_with_anchor(&envelope, &host_key, now)
 }
 
 /// Well-known guest path for the dm-verity-measured verb-trust policy baked
@@ -7746,59 +7740,49 @@ mod rpc_client_tests {
 
     #[test]
     fn re_pin_verb_grant_valid_returns_some() {
-        let dir = tempfile::tempdir().unwrap();
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[20u8; 32]);
+        // Grant signed by the host anchor, envelope pubkey = anchor, called with
+        // the anchor: verifies and re-pins. A host-signed re-pin MAY widen the
+        // served verb set (a fork runs a newly admitted plan), so we assert the
+        // full listed set comes back.
+        let host = ed25519_dalek::SigningKey::from_bytes(&[20u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([21u8; 16]);
-        let (grant_path, _pubkey_path) =
-            write_grant_fixture(dir.path(), &signer, "sess-repin", &nonce, &["ping"], 10);
         let now = chrono::Utc::now();
-        // Load the envelope from the fixture file and call re_pin_verb_grant directly.
-        let raw = std::fs::read(&grant_path).unwrap();
-        let envelope: mvm_core::protocol::vm_backend::VerbGrantEnvelope =
-            serde_json::from_slice(&raw).unwrap();
-        let result = re_pin_verb_grant(&envelope, now);
-        assert!(
-            result.is_some(),
-            "valid envelope must yield Some from re_pin_verb_grant"
+        let envelope = self_signed_envelope(
+            &host,
+            "sess-repin",
+            &nonce,
+            &["run-entrypoint", "update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
         );
-        assert_eq!(result.unwrap().session_id, "sess-repin");
+        let result = re_pin_verb_grant(&envelope, &host.verifying_key(), now);
+        let grant = result.expect("valid host-signed envelope must yield Some from re_pin");
+        assert_eq!(grant.session_id, "sess-repin");
+        assert!(grant.permits("run-entrypoint"));
+        assert!(grant.permits("update-idle-timeout"));
     }
 
     #[test]
     fn re_pin_verb_grant_wrong_key_returns_none() {
-        use mvm_core::plan::{VerbGrant, VerbId};
-        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        // Envelope is self-consistent (grant signed by `signer`, pubkey_hex =
+        // signer), but the boot-pinned anchor is a DIFFERENT key. Because re-pin
+        // verifies against the anchor and ignores the embedded pubkey, an
+        // envelope not signed by the anchor is rejected — this is exactly the
+        // property the old embedded-pubkey path lacked.
         let signer = ed25519_dalek::SigningKey::from_bytes(&[22u8; 32]);
-        let attacker = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+        let anchor = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([24u8; 16]);
         let now = chrono::Utc::now();
-        let mut grant = VerbGrant {
-            session_id: "sess-wrong".into(),
-            plan_nonce: nonce.clone(),
-            not_after: now + chrono::Duration::minutes(10),
-            verbs: vec![VerbId::new("ping").unwrap()],
-            sig: vec![],
-        };
-        grant.sig = {
-            use ed25519_dalek::Signer;
-            signer.sign(&grant.signing_bytes()).to_bytes().to_vec()
-        };
-        // Envelope carries the attacker's pubkey but the grant is signed by `signer`.
-        let attacker_pubkey_hex: String = attacker
-            .verifying_key()
-            .to_bytes()
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect();
-        let envelope = VerbGrantEnvelope {
-            pubkey_hex: attacker_pubkey_hex,
-            plan_nonce_hex: nonce.as_hex().to_string(),
-            grant,
-        };
-        let result = re_pin_verb_grant(&envelope, now);
+        let envelope = self_signed_envelope(
+            &signer,
+            "sess-wrong",
+            &nonce,
+            &["ping"],
+            now + chrono::Duration::minutes(10),
+        );
+        let result = re_pin_verb_grant(&envelope, &anchor.verifying_key(), now);
         assert!(
             result.is_none(),
-            "grant signed by different key than envelope.pubkey_hex must return None"
+            "grant not signed by the boot-pinned anchor must return None"
         );
     }
 
@@ -7929,5 +7913,172 @@ mod rpc_client_tests {
         assert!(load_verb_trust_policy(&p).is_none()); // absent
         std::fs::write(&p, b"{ not json").unwrap();
         assert!(load_verb_trust_policy(&p).is_none()); // malformed => None (dev-default)
+    }
+
+    // ---- PostRestore re-pin adversarial (resume-path authority) ----
+
+    /// Build a `VerbGrantEnvelope` self-signed by `signer`, carrying `signer`'s
+    /// own pubkey. Mirrors what the launcher would ship, but usable with any key
+    /// so an adversarial (non-host) signer can be substituted.
+    fn self_signed_envelope(
+        signer: &ed25519_dalek::SigningKey,
+        session: &str,
+        nonce: &mvm_core::plan::Nonce,
+        verbs: &[&str],
+        not_after: chrono::DateTime<chrono::Utc>,
+    ) -> mvm_core::protocol::vm_backend::VerbGrantEnvelope {
+        use ed25519_dalek::Signer;
+        use mvm_core::plan::{VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+        let mut grant = VerbGrant {
+            session_id: session.into(),
+            plan_nonce: nonce.clone(),
+            not_after,
+            verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
+            sig: vec![],
+        };
+        grant.sig = signer.sign(&grant.signing_bytes()).to_bytes().to_vec();
+        let pubkey_hex: String = signer
+            .verifying_key()
+            .to_bytes()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        VerbGrantEnvelope {
+            pubkey_hex,
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            grant,
+        }
+    }
+
+    /// A stale (expired) envelope delivered at restore must not re-pin: replaying
+    /// an old-but-once-valid grant cannot revive authority past its expiry.
+    #[test]
+    fn re_pin_verb_grant_expired_envelope_returns_none() {
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[30u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([31u8; 16]);
+        let issued = chrono::Utc::now();
+        let envelope = self_signed_envelope(
+            &signer,
+            "sess-stale",
+            &nonce,
+            &["run-entrypoint"],
+            issued + chrono::Duration::minutes(5),
+        );
+        // Restore happens one minute after expiry. Anchor matches the signer, so
+        // the ONLY reason to reject is the elapsed validity window.
+        let later = issued + chrono::Duration::minutes(6);
+        assert!(
+            re_pin_verb_grant(&envelope, &signer.verifying_key(), later).is_none(),
+            "an expired envelope must not re-pin at restore"
+        );
+    }
+
+    /// Verbs appended to the grant AFTER signing (a widened set the signer never
+    /// authorized) break the Ed25519 signature and must not re-pin.
+    #[test]
+    fn re_pin_verb_grant_verbs_widened_after_signing_returns_none() {
+        use mvm_core::plan::VerbId;
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[32u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([33u8; 16]);
+        let now = chrono::Utc::now();
+        let mut envelope = self_signed_envelope(
+            &signer,
+            "sess-widen",
+            &nonce,
+            &["update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        );
+        // Tamper: append a broader verb after the signature was computed.
+        envelope
+            .grant
+            .verbs
+            .push(VerbId::new("run-entrypoint").unwrap());
+        // Anchor matches the signer, so rejection is purely the broken signature
+        // over the tampered (widened) verb set.
+        assert!(
+            re_pin_verb_grant(&envelope, &signer.verifying_key(), now).is_none(),
+            "verbs appended after signing must fail signature verification and not re-pin"
+        );
+    }
+
+    /// ADVERSARIAL (resume path). A `PostRestore` envelope self-signed by a key
+    /// that is NOT the boot-pinned host signer must not install a grant. Re-pin
+    /// verifies against the host-signer trust anchor pinned at boot — the same
+    /// anchor `load_pinned_verb_grant` uses and
+    /// `load_pinned_verb_grant_ignores_envelope_pubkey` proves the boot path
+    /// binds to (rather than trusting `envelope.pubkey_hex`). A self-attested
+    /// envelope key carries no authority.
+    #[test]
+    fn post_restore_self_signed_envelope_must_not_widen_authority() {
+        // Boot pins a host-signed grant limited to a single non-baseline verb.
+        let dir = tempfile::tempdir().unwrap();
+        let host = ed25519_dalek::SigningKey::from_bytes(&[40u8; 32]);
+        let boot_nonce = mvm_core::plan::Nonce::from_bytes([41u8; 16]);
+        let now = chrono::Utc::now();
+        let (grant_path, pubkey_path) = write_grant_fixture(
+            dir.path(),
+            &host,
+            "sess-boot",
+            &boot_nonce,
+            &["update-idle-timeout"],
+            10,
+        );
+        let pinned = load_pinned_verb_grant(&grant_path, &pubkey_path, now)
+            .expect("boot grant must pin under the host anchor");
+        assert!(
+            !pinned.permits("run-entrypoint"),
+            "run-entrypoint is forbidden at boot"
+        );
+
+        // Adversary crafts a restore envelope self-signed by a NON-host key,
+        // listing a broadened verb set, carrying its own pubkey.
+        let attacker = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let evil_nonce = mvm_core::plan::Nonce::from_bytes([43u8; 16]);
+        let evil_env = self_signed_envelope(
+            &attacker,
+            "attacker",
+            &evil_nonce,
+            &["run-entrypoint", "update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        );
+
+        // Verified against the boot-pinned HOST anchor (not the envelope's
+        // self-attested pubkey), the non-host-signed envelope is rejected
+        // outright — no grant, and certainly no widening to the boot-forbidden
+        // verb.
+        let result = re_pin_verb_grant(&evil_env, &host.verifying_key(), now);
+        assert!(
+            result.is_none(),
+            "SECURITY: a PostRestore envelope self-signed by a non-host key must \
+             not re-pin any grant — it is not signed by the boot host-signer anchor"
+        );
+    }
+
+    /// KNOWN RESIDUAL (documenting). The host-signer anchor is host-global, so a
+    /// grant genuinely signed by the host but issued for a DIFFERENT VM's
+    /// session/nonce still passes signature verification at re-pin: re-pin binds
+    /// to host authorship, not to this VM's identity. This test pins that
+    /// behaviour so the residual is explicit rather than hidden; binding a grant
+    /// to a specific VM identity is a separate follow-up.
+    #[test]
+    fn re_pin_verb_grant_cross_vm_host_signed_currently_passes() {
+        let host = ed25519_dalek::SigningKey::from_bytes(&[44u8; 32]);
+        let other_vm_nonce = mvm_core::plan::Nonce::from_bytes([45u8; 16]);
+        let now = chrono::Utc::now();
+        // Host-signed, but for some other VM's session/nonce.
+        let envelope = self_signed_envelope(
+            &host,
+            "some-other-vm-session",
+            &other_vm_nonce,
+            &["run-entrypoint"],
+            now + chrono::Duration::minutes(10),
+        );
+        let result = re_pin_verb_grant(&envelope, &host.verifying_key(), now);
+        assert!(
+            result.is_some(),
+            "residual: a host-signed grant for another VM currently re-pins — \
+             signature verification is host-global, not VM-bound"
+        );
     }
 }
