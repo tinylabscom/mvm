@@ -723,7 +723,7 @@ pub(in crate::commands) mod attested_builder_pack {
     use mvm_core::arch::GuestArch;
     use mvm_core::config::mvm_keys_dir;
     #[cfg(feature = "manifest-verify")]
-    use mvm_core::pack_cache::promote;
+    use mvm_core::pack_cache::{PackProvenanceInput, promote_and_record};
     use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, resolve_pack};
     #[cfg(feature = "manifest-verify")]
     use mvm_core::pack_trust::resolve_pack_download_base;
@@ -854,7 +854,16 @@ pub(in crate::commands) mod attested_builder_pack {
                     manifest_path.display()
                 )
             })?;
-        match promote(staging, &manifest, ctx) {
+        // `v{version}` matches the release tag `fetch_release_builder_pack_staging`
+        // builds its download base URL from, so the recorded version always
+        // names the exact release this pack came from.
+        let release_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let prov = PackProvenanceInput {
+            channel: manifest.trust.channel_identity.clone(),
+            release_version,
+            promoted_at_unix: chrono::Utc::now().timestamp() as u64,
+        };
+        match promote_and_record(staging, &manifest, &prov, ctx) {
             Ok(dir) => Ok(Some(dir)),
             Err(error) => {
                 ui::warn(&format!(
