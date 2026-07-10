@@ -96,7 +96,11 @@ mod tests {
         let tokens = grant_tokens(vm_name);
         assert_eq!(tokens.len(), 3, "must emit all three grant tokens");
         assert!(tokens[0].starts_with("mvm.verb_grant="), "verb grant first");
-        assert_eq!(tokens[1], "mvm.require_grant=1", "enforcement assertion");
+        assert_eq!(
+            tokens[1],
+            crate::microvm::require_grant_cmdline_token(vm_name).unwrap(),
+            "enforcement token matches the canonical emitter"
+        );
         assert!(
             tokens[2].starts_with("mvm.host_signer_pub="),
             "trust anchor last"
