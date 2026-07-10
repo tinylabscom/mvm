@@ -255,6 +255,7 @@ fn stage0_fetch_github_input(
     std::fs::write(dest, bytes.as_ref()).with_context(|| format!("writing {}", dest.display()))
 }
 
+#[cfg(feature = "builder-vm")]
 fn stage0_fetch_git_input(url: &str, rev: &str, dest: &std::path::Path) -> Result<()> {
     let parent = dest
         .parent()
