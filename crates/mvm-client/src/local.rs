@@ -145,8 +145,18 @@ fn materialize_from_dir(dir: &Path, name: &str) -> Result<PathBuf> {
     // the cache or a source checkout.
     // `{:#}` keeps the anyhow context chain — the top context alone
     // ("build guest agent binaries…") hides the actionable root cause.
-    mvm_build::run_image::inject_and_materialize(&cache_root, dir, &output, name, None, None)
-        .map_err(|e| backend_err(format!("{e:#}")))?;
+    // The in-process local backend materializes dev run rootfs only; the sealed
+    // `--prod` path is driven by the CLI's `run --image --prod`.
+    mvm_build::run_image::inject_and_materialize(
+        &cache_root,
+        dir,
+        &output,
+        name,
+        None,
+        None,
+        false,
+    )
+    .map_err(|e| backend_err(format!("{e:#}")))?;
     Ok(output)
 }
 

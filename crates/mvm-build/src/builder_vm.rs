@@ -274,20 +274,21 @@ impl GuestSidecar {
     /// honest claim, not a gate bypass — only emit this sidecar once
     /// the injection has actually run.
     ///
-    /// Posture: a `run --image` guest is a dev/interactive surface, so
-    /// it is `accessible` (console may attach) and not `sealed`; the
-    /// `--prod` path refuses mutable OCI references upstream and never
-    /// reaches this constructor. The baked agent is the real
+    /// Posture: `sealed` selects the tier. A plain `run --image` guest is
+    /// a dev/interactive surface, so it is `accessible` (console may attach)
+    /// and not `sealed`. A `--prod` run boots a dm-verity-sealed rootfs, so
+    /// it is `sealed` and **not** `accessible` — the console/exec gate and
+    /// the agent-verb grant both read these fields and must see a sealed
+    /// image refuse interactive access. The baked agent is the real
     /// cross-compiled binary, not the stub. `hypervisor` is left
     /// backend-neutral ("oci"): the materialized rootfs is cached and
     /// boots on any backend, so it can't honestly name one — and no
-    /// gate reads this field (it is informational; only `accessible`
-    /// drives a runtime decision).
-    pub fn for_oci_run(name: &str) -> Self {
+    /// gate reads that field (it is informational).
+    pub fn for_oci_run(name: &str, sealed: bool) -> Self {
         Self {
             name: name.to_string(),
-            accessible: true,
-            sealed: false,
+            accessible: !sealed,
+            sealed,
             entrypoint_kind: "command".to_string(),
             init_system: "busybox".to_string(),
             // Unknown for an arbitrary OCI image; not load-bearing
@@ -1243,11 +1244,28 @@ mod tests {
         // the `for_oci_run` sidecar next to the rootfs must satisfy
         // `admit_overlay_aware` — without it, `run --image` never boots.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef");
+        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef", false);
         assert!(sidecar.is_overlay_aware());
         assert_eq!(sidecar.agent_binary, "real");
         sidecar.write_to_dir(tmp.path()).expect("write");
         admit_overlay_aware(tmp.path()).expect("OCI-run rootfs must admit");
+    }
+
+    #[test]
+    fn oci_run_sidecar_sealed_flag_flips_posture() {
+        // A dev OCI run is accessible + unsealed; a `--prod` OCI run is
+        // sealed + not accessible so the console/exec gate refuses it.
+        let dev = GuestSidecar::for_oci_run("oci:dev", false);
+        assert!(!dev.sealed);
+        assert!(dev.accessible);
+        assert!(dev.is_overlay_aware());
+
+        let prod = GuestSidecar::for_oci_run("oci:prod", true);
+        assert!(prod.sealed);
+        assert!(!prod.accessible);
+        // Sealing does not change the honest overlay-aware claim.
+        assert!(prod.is_overlay_aware());
+        assert_eq!(prod.agent_binary, "real");
     }
 
     #[test]
