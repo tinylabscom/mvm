@@ -91,6 +91,180 @@ pub fn validate_interface_name(interface_name: &str) -> Result<(), String> {
     encode_iface_name(interface_name).map(|_| ())
 }
 
+/// Address assigned to the host TUN gateway endpoint. The guest's admitted
+/// packets egress via this link, then get source-NATed onto the real network.
+pub const HOST_TUN_GATEWAY_CIDR: &str = "10.240.0.1/30";
+/// Source subnet masqueraded out the host's egress interface. Matches the
+/// `/30` the gateway address lives in, so only tunnel-originated traffic is
+/// rewritten.
+pub const HOST_TUN_LINK_CIDR: &str = "10.240.0.0/30";
+
+/// Errors composing or applying the host TUN egress link + NAT.
+#[derive(Debug, thiserror::Error)]
+pub enum TunnelNatError {
+    #[error("invalid interface name {value:?}: only [A-Za-z0-9_.-] permitted, under IFNAMSIZ")]
+    InvalidInterface { value: String },
+    #[error("egress interface discovery failed: {0}")]
+    EgressDiscovery(String),
+    #[error("host TUN egress link + NAT is only supported on Linux")]
+    LinuxOnly,
+    #[error("{context}: {detail}")]
+    Command { context: String, detail: String },
+}
+
+/// Reject anything that isn't a safe interface slug before it reaches an `nft`
+/// or `ip` invocation, so a crafted name can't inject a second command.
+fn validate_nat_interface(interface_name: &str) -> Result<(), TunnelNatError> {
+    let ok = !interface_name.is_empty()
+        && interface_name.len() < libc::IFNAMSIZ
+        && interface_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(TunnelNatError::InvalidInterface {
+            value: interface_name.to_string(),
+        })
+    }
+}
+
+/// Compose the nftables masquerade ruleset that source-NATs tunnel-link
+/// traffic out `egress_iface`. Pure: returns the script text so callers can
+/// assert the rule shape without touching the kernel. The table is scoped to
+/// `link_iface` so teardown removes exactly what setup added.
+pub fn build_tunnel_masquerade_rules(
+    link_iface: &str,
+    egress_iface: &str,
+) -> Result<String, TunnelNatError> {
+    validate_nat_interface(link_iface)?;
+    validate_nat_interface(egress_iface)?;
+    Ok(format!(
+        "table ip mvm_tun_nat_{link_iface} {{\n\
+         \tchain postrouting {{\n\
+         \t\ttype nat hook postrouting priority srcnat; policy accept;\n\
+         \t\tip saddr {HOST_TUN_LINK_CIDR} oifname \"{egress_iface}\" masquerade\n\
+         \t}}\n\
+         }}\n"
+    ))
+}
+
+/// Compose the teardown script removing the per-link NAT table. Idempotent on
+/// the `nft` side only if the table exists; callers tolerate the not-found
+/// error on a double teardown.
+pub fn build_tunnel_masquerade_teardown(link_iface: &str) -> Result<String, TunnelNatError> {
+    validate_nat_interface(link_iface)?;
+    Ok(format!("delete table ip mvm_tun_nat_{link_iface}\n"))
+}
+
+/// Parse the default-route interface out of `/proc/net/route` contents. The
+/// default route is the row whose destination and mask are both `00000000`;
+/// its first column is the interface name. Pure so it can be unit-tested
+/// without `/proc`.
+pub fn parse_default_route_iface(proc_net_route: &str) -> Option<String> {
+    for line in proc_net_route.lines().skip(1) {
+        let mut cols = line.split_whitespace();
+        let iface = cols.next()?;
+        let destination = cols.next()?;
+        if destination.eq_ignore_ascii_case("00000000") {
+            return Some(iface.to_string());
+        }
+    }
+    None
+}
+
+/// Discover the host's default egress interface. Linux-only: reads
+/// `/proc/net/route`.
+#[cfg(target_os = "linux")]
+pub fn default_egress_interface() -> Result<String, TunnelNatError> {
+    let contents = std::fs::read_to_string("/proc/net/route")
+        .map_err(|e| TunnelNatError::EgressDiscovery(format!("read /proc/net/route: {e}")))?;
+    parse_default_route_iface(&contents).ok_or_else(|| {
+        TunnelNatError::EgressDiscovery("no default route in /proc/net/route".into())
+    })
+}
+
+/// Bring the host TUN up with the gateway address and install the masquerade
+/// NAT rule out the discovered default egress interface. Linux-only; the guest
+/// TUN must already be open (the worker owns its fd) before the address is
+/// assigned.
+#[cfg(target_os = "linux")]
+pub fn setup_host_tun_egress(link_iface: &str) -> Result<(), TunnelNatError> {
+    validate_nat_interface(link_iface)?;
+    let egress = default_egress_interface()?;
+    run_ip(
+        &["addr", "add", HOST_TUN_GATEWAY_CIDR, "dev", link_iface],
+        true,
+    )?;
+    run_ip(&["link", "set", "dev", link_iface, "up"], false)?;
+    let rules = build_tunnel_masquerade_rules(link_iface, &egress)?;
+    apply_nft_rules(&rules)?;
+    Ok(())
+}
+
+/// Non-Linux hosts compile but cannot install the egress link + NAT.
+#[cfg(not(target_os = "linux"))]
+pub fn setup_host_tun_egress(link_iface: &str) -> Result<(), TunnelNatError> {
+    validate_nat_interface(link_iface)?;
+    Err(TunnelNatError::LinuxOnly)
+}
+
+/// Remove the masquerade NAT table and gateway address for `link_iface`.
+/// Best-effort: a missing table or address is not an error.
+#[cfg(target_os = "linux")]
+pub fn teardown_host_tun_egress(link_iface: &str) -> Result<(), TunnelNatError> {
+    validate_nat_interface(link_iface)?;
+    let rules = build_tunnel_masquerade_teardown(link_iface)?;
+    // Tolerate a missing table (already torn down) but surface other failures.
+    if let Err(err) = apply_nft_rules(&rules) {
+        tracing::debug!(%link_iface, error = %err, "host TUN NAT teardown: nft delete tolerated");
+    }
+    let _ = run_ip(
+        &["addr", "del", HOST_TUN_GATEWAY_CIDR, "dev", link_iface],
+        true,
+    );
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn teardown_host_tun_egress(link_iface: &str) -> Result<(), TunnelNatError> {
+    validate_nat_interface(link_iface)?;
+    Err(TunnelNatError::LinuxOnly)
+}
+
+/// Run `ip <args>`. When `tolerate_exists` is set, an `EEXIST`-style failure
+/// (address already present) is treated as success so setup stays idempotent.
+#[cfg(target_os = "linux")]
+fn run_ip(args: &[&str], tolerate_exists: bool) -> Result<(), TunnelNatError> {
+    let output = std::process::Command::new("ip")
+        .args(args)
+        .output()
+        .map_err(|e| TunnelNatError::Command {
+            context: format!("spawn ip {}", args.join(" ")),
+            detail: e.to_string(),
+        })?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if tolerate_exists && stderr.to_ascii_lowercase().contains("exists") {
+        return Ok(());
+    }
+    Err(TunnelNatError::Command {
+        context: format!("ip {}", args.join(" ")),
+        detail: stderr.trim().to_string(),
+    })
+}
+
+/// Apply an nftables script, reusing the host firewall's `nft -f -` boundary.
+#[cfg(target_os = "linux")]
+fn apply_nft_rules(rules: &str) -> Result<(), TunnelNatError> {
+    crate::supervisor::firewall::linux_nft::apply(rules).map_err(|e| TunnelNatError::Command {
+        context: "apply host TUN NAT rules".to_string(),
+        detail: e.to_string(),
+    })
+}
+
 fn encode_iface_name(iface: &str) -> Result<[libc::c_char; libc::IFNAMSIZ], String> {
     let bytes = iface.as_bytes();
     if bytes.len() >= libc::IFNAMSIZ {
@@ -157,5 +331,74 @@ mod tests {
     #[test]
     fn tun_ioctl_request_fits_target_request_type() {
         assert_eq!(TUNSETIFF_REQUEST as u64, libc::TUNSETIFF as u64);
+    }
+
+    #[test]
+    fn nat_rule_shape_masquerades_tunnel_link() {
+        let rules = build_tunnel_masquerade_rules("mvmht0", "eth0").expect("compose rules");
+        assert!(
+            rules.contains("table ip mvm_tun_nat_mvmht0"),
+            "missing scoped table: {rules}"
+        );
+        assert!(
+            rules.contains("type nat hook postrouting priority srcnat"),
+            "missing srcnat hook: {rules}"
+        );
+        assert!(
+            rules.contains("ip saddr 10.240.0.0/30 oifname \"eth0\" masquerade"),
+            "missing masquerade rule: {rules}"
+        );
+    }
+
+    #[test]
+    fn nat_teardown_scopes_to_the_link_table() {
+        let rules = build_tunnel_masquerade_teardown("mvmht0").expect("compose teardown");
+        assert_eq!(rules, "delete table ip mvm_tun_nat_mvmht0\n");
+    }
+
+    #[test]
+    fn nat_rules_reject_unsafe_interface_names() {
+        assert!(matches!(
+            build_tunnel_masquerade_rules("mvmht0; rm -rf /", "eth0"),
+            Err(TunnelNatError::InvalidInterface { .. })
+        ));
+        assert!(matches!(
+            build_tunnel_masquerade_rules("mvmht0", "eth0\"drop"),
+            Err(TunnelNatError::InvalidInterface { .. })
+        ));
+        assert!(matches!(
+            build_tunnel_masquerade_rules("", "eth0"),
+            Err(TunnelNatError::InvalidInterface { .. })
+        ));
+    }
+
+    #[test]
+    fn parse_default_route_iface_picks_the_zero_destination_row() {
+        let route = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+eth0\t00000000\t0102000A\t0003\t0\t0\t100\t00000000\n\
+eth0\t0002000A\t00000000\t0001\t0\t0\t100\t00FFFFFF\n";
+        assert_eq!(parse_default_route_iface(route).as_deref(), Some("eth0"));
+    }
+
+    #[test]
+    fn parse_default_route_iface_returns_none_without_default() {
+        let route = "\
+Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\n\
+eth0\t0002000A\t00000000\t0001\t0\t0\t100\t00FFFFFF\n";
+        assert!(parse_default_route_iface(route).is_none());
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn setup_and_teardown_egress_are_linux_only_off_linux() {
+        assert!(matches!(
+            setup_host_tun_egress("mvmht0"),
+            Err(TunnelNatError::LinuxOnly)
+        ));
+        assert!(matches!(
+            teardown_host_tun_egress("mvmht0"),
+            Err(TunnelNatError::LinuxOnly)
+        ));
     }
 }

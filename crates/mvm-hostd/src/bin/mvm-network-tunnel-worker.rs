@@ -170,7 +170,38 @@ fn main() -> Result<()> {
                 .run_until_shutdown()
                 .context("run host network tunnel worker")?;
         }
-        TunnelPacketPolicy::L3Forward { .. } => {
+        TunnelPacketPolicy::L3Forward {
+            interface_name: Some(interface_name),
+            ..
+        } => {
+            #[cfg(target_os = "linux")]
+            {
+                let device = mvm_hostd::host_tun::HostTunDevice::open_named(&interface_name)
+                    .with_context(|| {
+                        format!("open host tunnel device for interface {interface_name}")
+                    })?;
+                mvm_hostd::host_tun::setup_host_tun_egress(&interface_name).with_context(|| {
+                    format!("set up host TUN egress + NAT for {interface_name}")
+                })?;
+                let mut packet_path = HostTunPacketPath::new(device);
+                let result =
+                    worker.run_until_shutdown_l3_forward_with_packet_path(&mut packet_path);
+                // Tear down NAT + the gateway address regardless of loop outcome.
+                if let Err(err) = mvm_hostd::host_tun::teardown_host_tun_egress(&interface_name) {
+                    tracing::warn!(%interface_name, error = %err, "host TUN egress teardown failed");
+                }
+                result.context("run host network tunnel L3 forward")?;
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = interface_name;
+                anyhow::bail!("l3_forward host TUN egress is only supported on Linux");
+            }
+        }
+        TunnelPacketPolicy::L3Forward {
+            interface_name: None,
+            ..
+        } => {
             worker
                 .run_until_shutdown_l3_gate()
                 .context("run host network tunnel L3 gate")?;

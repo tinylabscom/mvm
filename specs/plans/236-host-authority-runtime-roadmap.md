@@ -593,7 +593,8 @@ the semantic protocol).**
     (`worker_can_forward_guest_packets_into_host_packet_path` uses a fake device).
     Swap the fake for a real `HostTunDevice::open_named`, and stand up the
     host-side plumbing so injected packets actually egress: assign the gateway
-    address (`198.18.0.1/30`) to the host TUN, bring it up, and install a
+    address (`10.240.0.1/30`, matching the guest-config gateway) to the host
+    TUN, bring it up, and install a
     masquerade NAT rule from the tunnel link to the host's default egress
     interface (nftables — salvage the rule shape from the Firecracker egress
     setup). Gate on T1's `decide()` **before** injection so no unpinned packet
