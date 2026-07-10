@@ -422,7 +422,23 @@ impl LibkrunBuilderVm {
                 console_log.display()
             )));
         }
-        Ok(())
+        // A clean supervisor exit only means the guest powered off; stage0-init
+        // powers off on a failed build too. Read the guest's terminal marker
+        // from the console so a nix failure surfaces here with its own log
+        // instead of as a downstream "rootfs.ext4 missing" error.
+        let console_str = console_log.to_string_lossy();
+        let console = std::fs::read_to_string(&console_log).unwrap_or_default();
+        match stage0_console_halt_outcome(&console) {
+            Stage0HaltOutcome::CleanHalt => Ok(()),
+            Stage0HaltOutcome::BuildFailed => Err(BuilderVmError::NixBuildFailed(format!(
+                "nix build failed inside the Stage 0 guest; console log at {console_str}\n{}",
+                read_console_tail(&console_str, 20)
+            ))),
+            Stage0HaltOutcome::NoCleanHalt => Err(BuilderVmError::ExtractionFailed(format!(
+                "Stage 0 guest did not reach a clean halt; console log at {console_str}\n{}",
+                read_console_tail(&console_str, 20)
+            ))),
+        }
     }
 
     /// Run an in-tree shell script inside the existing builder VM
@@ -2493,6 +2509,34 @@ fn read_console_tail(console_log_path: &str, max_lines: usize) -> String {
     lines[start..].join("\n")
 }
 
+/// What the Stage 0 guest's console says about how it terminated.
+#[derive(Debug, PartialEq, Eq)]
+enum Stage0HaltOutcome {
+    /// `stage0-init` finished the build and copied artifacts to `/out`.
+    CleanHalt,
+    /// `nix build` (or a copy step) failed; the guest powered off anyway.
+    BuildFailed,
+    /// No terminal marker at all — a panic, kill, or truncated console.
+    NoCleanHalt,
+}
+
+/// Decide Stage 0 success from the guest console, not the VMM exit code. A
+/// libkrun supervisor that exits 0 only means the guest powered off — and
+/// `stage0-init` powers off cleanly on build failure too (its own error is
+/// printed, then `reboot`). Absent this check the caller would trip on a
+/// downstream "rootfs.ext4 missing" error that hides the real nix failure.
+/// `stage0-init` prints one stable terminal line, so match on it (the QEMU
+/// Stage 0 path keys on the same markers).
+fn stage0_console_halt_outcome(log: &str) -> Stage0HaltOutcome {
+    if log.contains("stage0-init: build failed") {
+        Stage0HaltOutcome::BuildFailed
+    } else if log.contains("stage0-init: done; halting") {
+        Stage0HaltOutcome::CleanHalt
+    } else {
+        Stage0HaltOutcome::NoCleanHalt
+    }
+}
+
 /// Render a Path as a `&str` or surface a clear error if it
 /// contains non-UTF-8 bytes. libkrun's C API takes
 /// `*const c_char`; rejecting non-UTF-8 here pins the failure
@@ -3625,6 +3669,36 @@ mod tests {
         assert_eq!(tail, "c\nd");
         // Missing file → empty, never panics.
         assert_eq!(read_console_tail("/nonexistent/console.log", 5), "");
+    }
+
+    #[test]
+    fn stage0_console_halt_outcome_distinguishes_success_failure_and_silence() {
+        // Clean build: the terminal success marker is present.
+        assert_eq!(
+            stage0_console_halt_outcome("nix log…\nstage0-init: done; halting\n"),
+            Stage0HaltOutcome::CleanHalt
+        );
+        // Failed build: the guest powers off cleanly but reports the failure —
+        // this must NOT read as success just because the VMM exited 0.
+        assert_eq!(
+            stage0_console_halt_outcome(
+                "error: home directory \"/homeless-shelter\" exists\n\
+                 stage0-init: build failed: nix build exit 1\n"
+            ),
+            Stage0HaltOutcome::BuildFailed
+        );
+        // Failure marker wins even if a stray success-looking line precedes it.
+        assert_eq!(
+            stage0_console_halt_outcome(
+                "stage0-init: done; halting\nstage0-init: build failed: x\n"
+            ),
+            Stage0HaltOutcome::BuildFailed
+        );
+        // Panic / kill / truncation: no terminal marker at all.
+        assert_eq!(
+            stage0_console_halt_outcome("kernel panic - not syncing\n"),
+            Stage0HaltOutcome::NoCleanHalt
+        );
     }
 
     #[cfg(unix)]
