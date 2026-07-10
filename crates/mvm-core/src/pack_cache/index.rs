@@ -93,6 +93,13 @@ impl PackIndex {
             .map(|(_, hash)| hash)
     }
 
+    /// Every recorded entry, across every key, in insertion order. Used by
+    /// callers that enumerate the whole index (e.g. an unfiltered version
+    /// listing) rather than one key's versions.
+    pub fn entries(&self) -> &[PackEntry] {
+        &self.entries
+    }
+
     /// Every recorded version for `key`, newest `promoted_at_unix` first.
     pub fn versions_for(&self, key: &PackKey) -> Vec<&PackEntry> {
         let mut versions: Vec<&PackEntry> = self
