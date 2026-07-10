@@ -37,10 +37,9 @@ use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
 use mvm_guest::runtime_config::{self, ConcurrencyConfig};
 use mvm_guest::vsock::{
     BootTimingReport, ComponentState, EntrypointEvent, FsChange, FsChangeKind, GUEST_AGENT_PORT,
-    GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, ReadinessReport,
-    RunEntrypointError, TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant,
-    is_verb_trust_baseline, launch_requires_grant, load_pinned_verb_grant,
-    load_verb_trust_policy, trust_decision,
+    GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, ReadinessReport, RunEntrypointError,
+    TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant, is_verb_trust_baseline,
+    launch_requires_grant, load_pinned_verb_grant, load_verb_trust_policy, trust_decision,
 };
 use mvm_guest::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_guest::worker_protocol::WorkerOutcome;

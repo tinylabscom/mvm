@@ -1643,7 +1643,9 @@ pub fn load_pinned_verb_grant(
     let plan_nonce = match mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex) {
         Ok(n) => n,
         Err(e) => {
-            eprintln!("mvm-guest-agent: verb-grant plan_nonce_hex invalid, booting without grant: {e}");
+            eprintln!(
+                "mvm-guest-agent: verb-grant plan_nonce_hex invalid, booting without grant: {e}"
+            );
             return None;
         }
     };
@@ -1669,7 +1671,9 @@ pub fn load_pinned_verb_grant(
     ) {
         Ok(pinned) => pinned,
         Err(e) => {
-            eprintln!("mvm-guest-agent: verb-grant verification failed, booting without grant: {e}");
+            eprintln!(
+                "mvm-guest-agent: verb-grant verification failed, booting without grant: {e}"
+            );
             None
         }
     }
