@@ -37,6 +37,10 @@ pub mod jailer;
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+/// Raw-L3 egress decision gate for the host-forwarded packet tunnel: parse a
+/// guest IPv4 packet and decide allow/drop against the admitted policy + DNS
+/// pins. Decision-only today; forwarding lands in a later slice.
+pub mod net_l3;
 /// Host-side session validation helpers for the shared network tunnel contract.
 pub mod network_tunnel;
 /// Child-side parent-death watchdog: each subprocess-moat bin exits the

@@ -15,9 +15,10 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+#[cfg(target_os = "linux")]
+use mvm_hostd::network_tunnel::HostTunPacketPath;
 use mvm_hostd::network_tunnel::{
-    HostTunPacketPath, HostTunnelWorker, TunnelAuditEvent, TunnelAuditSink, TunnelPacketPolicy,
-    TunnelWorkerConfig,
+    HostTunnelWorker, TunnelAuditEvent, TunnelAuditSink, TunnelPacketPolicy, TunnelWorkerConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -168,6 +169,11 @@ fn main() -> Result<()> {
             worker
                 .run_until_shutdown()
                 .context("run host network tunnel worker")?;
+        }
+        TunnelPacketPolicy::L3Forward { .. } => {
+            worker
+                .run_until_shutdown_l3_gate()
+                .context("run host network tunnel L3 gate")?;
         }
         TunnelPacketPolicy::HostTun { interface_name } => {
             #[cfg(target_os = "linux")]

@@ -20,7 +20,10 @@ use mvm_core::protocol::network_tunnel::{
 };
 use serde::{Deserialize, Serialize};
 
+use std::net::Ipv4Addr;
+
 use crate::host_tun;
+use crate::net_l3::{L3Decision, L3DropReason, L3ForwardPolicy, parse_ipv4_dst_and_l4};
 
 /// Host-owned expected session identity for one VM boot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -236,6 +239,10 @@ where
 pub enum TunnelPacketPolicy {
     /// Production default-deny until a later slice wires an admitted forwarder.
     DropAll,
+    /// Inspect each guest IPv4 packet, decide allow/drop against the admitted
+    /// policy + DNS pins, audit the outcome — but still drop (raw-L3 egress
+    /// forwarding lands in a later slice).
+    L3Forward { gate: L3ForwardPolicy },
     /// Relay packets through a host-owned Linux TUN device.
     HostTun { interface_name: String },
 }
@@ -292,7 +299,7 @@ impl TunnelWorkerConfig {
             .validate()
             .map_err(TunnelWorkerError::InvalidInitialCredit)?;
         match &self.packet_policy {
-            TunnelPacketPolicy::DropAll => {}
+            TunnelPacketPolicy::DropAll | TunnelPacketPolicy::L3Forward { .. } => {}
             TunnelPacketPolicy::HostTun { interface_name } => {
                 crate::host_tun::validate_interface_name(interface_name)
                     .map_err(TunnelWorkerError::InvalidPacketPolicy)?;
@@ -314,6 +321,22 @@ pub enum TunnelAuditEvent {
         flow_id: u32,
         sequence: u64,
         bytes: usize,
+    },
+    /// The L3 gate admitted this packet's destination. Egress isn't wired yet,
+    /// so the packet is still dropped — this records the allow decision.
+    PacketL3Allowed {
+        flow_id: u32,
+        sequence: u64,
+        bytes: usize,
+        dst: Ipv4Addr,
+        dst_port: Option<u16>,
+    },
+    /// The L3 gate denied this packet's destination.
+    PacketL3Dropped {
+        flow_id: u32,
+        sequence: u64,
+        bytes: usize,
+        reason: L3DropReason,
     },
     PacketForwarded {
         flow_id: u32,
@@ -357,6 +380,10 @@ pub struct TunnelWorkerStats {
     pub guest_bytes_seen: u64,
     pub guest_packets_dropped: u64,
     pub guest_bytes_dropped: u64,
+    /// Packets the L3 gate admitted. Still counted under
+    /// `guest_packets_dropped` too until egress forwarding is wired.
+    pub guest_packets_l3_allowed: u64,
+    pub guest_bytes_l3_allowed: u64,
     pub guest_packets_forwarded: u64,
     pub guest_bytes_forwarded: u64,
     pub host_packets_delivered: u64,
@@ -553,6 +580,47 @@ where
         }
     }
 
+    /// Run the raw-L3 decision gate: inspect each guest IPv4 packet, decide
+    /// allow/drop against the admitted policy + DNS pins, audit the outcome,
+    /// and still drop every packet (egress forwarding lands in a later slice).
+    /// Requires the worker's `packet_policy` to be [`TunnelPacketPolicy::L3Forward`].
+    pub fn run_until_shutdown_l3_gate(&mut self) -> Result<TunnelWorkerOutcome, TunnelWorkerError> {
+        let gate = match &self.config.packet_policy {
+            TunnelPacketPolicy::L3Forward { gate } => gate.clone(),
+            _ => {
+                return Err(TunnelWorkerError::InvalidConfig(
+                    "run_until_shutdown_l3_gate requires an l3_forward packet policy",
+                ));
+            }
+        };
+        loop {
+            let frame = self
+                .session
+                .read_frame()
+                .map_err(TunnelWorkerError::transport)?;
+            match frame.header.frame_type {
+                FrameType::Packet => {
+                    if let Some(outcome) = self.handle_l3_gate_packet(frame, &gate)? {
+                        self.record_audit(TunnelAuditEvent::SessionClosed {
+                            outcome: outcome.clone(),
+                            stats: self.stats,
+                        })?;
+                        return Ok(outcome);
+                    }
+                }
+                other => {
+                    if let Some(outcome) = self.handle_control(other, &frame.payload)? {
+                        self.record_audit(TunnelAuditEvent::SessionClosed {
+                            outcome: outcome.clone(),
+                            stats: self.stats,
+                        })?;
+                        return Ok(outcome);
+                    }
+                }
+            }
+        }
+    }
+
     fn handle_packet(
         &mut self,
         frame: OwnedTunnelFrame,
@@ -625,6 +693,79 @@ where
                 Ok(Some(TunnelWorkerOutcome::PacketPathFailed))
             }
         }
+    }
+
+    fn handle_l3_gate_packet(
+        &mut self,
+        frame: OwnedTunnelFrame,
+        gate: &L3ForwardPolicy,
+    ) -> Result<Option<TunnelWorkerOutcome>, TunnelWorkerError> {
+        let payload_len =
+            u64::try_from(frame.payload.len()).expect("packet length always fits u64");
+        self.stats.guest_packets_seen = self.stats.guest_packets_seen.saturating_add(1);
+        self.stats.guest_bytes_seen = self.stats.guest_bytes_seen.saturating_add(payload_len);
+
+        if self.stats.guest_packets_seen > self.config.limits.max_packets
+            || self.stats.guest_bytes_seen > self.config.limits.max_bytes
+        {
+            self.send_control(
+                TunnelControlMessage::Error(TunnelErrorFrame {
+                    code: TunnelErrorCode::QuotaExceeded,
+                    detail: "network tunnel packet quota exceeded".to_string(),
+                }),
+                frame.header.sequence.saturating_add(1),
+            )?;
+            self.send_control(
+                TunnelControlMessage::Shutdown(TunnelShutdownReason::PolicyDenied),
+                frame.header.sequence.saturating_add(2),
+            )?;
+            return Ok(Some(TunnelWorkerOutcome::QuotaExceeded));
+        }
+
+        // Every packet is still dropped until egress forwarding is wired; the
+        // gate decision only distinguishes allow (audited + counted) from drop.
+        self.stats.guest_packets_dropped = self.stats.guest_packets_dropped.saturating_add(1);
+        self.stats.guest_bytes_dropped = self.stats.guest_bytes_dropped.saturating_add(payload_len);
+
+        let flow_id = frame.header.flow_id;
+        let sequence = frame.header.sequence;
+        let bytes = frame.payload.len();
+        match parse_ipv4_dst_and_l4(&frame.payload) {
+            Some((dst, proto, dst_port)) => match gate.decide(dst, proto, dst_port) {
+                L3Decision::Allow => {
+                    self.stats.guest_packets_l3_allowed =
+                        self.stats.guest_packets_l3_allowed.saturating_add(1);
+                    self.stats.guest_bytes_l3_allowed = self
+                        .stats
+                        .guest_bytes_l3_allowed
+                        .saturating_add(payload_len);
+                    self.record_audit(TunnelAuditEvent::PacketL3Allowed {
+                        flow_id,
+                        sequence,
+                        bytes,
+                        dst,
+                        dst_port,
+                    })?;
+                }
+                L3Decision::Drop(reason) => {
+                    self.record_audit(TunnelAuditEvent::PacketL3Dropped {
+                        flow_id,
+                        sequence,
+                        bytes,
+                        reason,
+                    })?;
+                }
+            },
+            None => {
+                self.record_audit(TunnelAuditEvent::PacketL3Dropped {
+                    flow_id,
+                    sequence,
+                    bytes,
+                    reason: L3DropReason::Unparseable,
+                })?;
+            }
+        }
+        Ok(None)
     }
 
     fn handle_control(
@@ -1222,6 +1363,8 @@ mod tests {
                     guest_bytes_seen: 3,
                     guest_packets_dropped: 1,
                     guest_bytes_dropped: 3,
+                    guest_packets_l3_allowed: 0,
+                    guest_bytes_l3_allowed: 0,
                     guest_packets_forwarded: 0,
                     guest_bytes_forwarded: 0,
                     host_packets_delivered: 0,
@@ -1428,6 +1571,140 @@ mod tests {
             shutdown,
             TunnelControlMessage::Shutdown(TunnelShutdownReason::HostError)
         );
+        host_thread.join().unwrap();
+    }
+
+    fn l3_gate(host: &str, port: u16, pinned_ips: &[&str]) -> crate::net_l3::L3ForwardPolicy {
+        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new(host, port)]);
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            host,
+            pinned_ips.iter().map(|s| s.parse().expect("ip")).collect(),
+            "2026-05-15T12:00:00Z",
+            "2026-05-15T13:00:00Z",
+        ));
+        crate::net_l3::L3ForwardPolicy::new(policy, pins)
+    }
+
+    /// A minimal IPv4/TCP packet targeting `dst:dst_port`.
+    fn ipv4_tcp_packet(dst: &str, dst_port: u16) -> Vec<u8> {
+        let octets: std::net::Ipv4Addr = dst.parse().expect("ipv4");
+        let mut p = vec![0_u8; 24];
+        p[0] = 0x45; // version 4, IHL 5
+        p[9] = 6; // TCP
+        p[16..20].copy_from_slice(&octets.octets());
+        p[22..24].copy_from_slice(&dst_port.to_be_bytes());
+        p
+    }
+
+    #[test]
+    fn l3_gate_drops_unparseable_packet_and_audits() {
+        let (guest, host) = UnixStream::pair().unwrap();
+        let host_thread = std::thread::spawn(move || {
+            let mut worker = HostTunnelWorker::new(
+                host,
+                RecordingAuditSink::default(),
+                TunnelWorkerConfig {
+                    expected_session: expected(),
+                    network_config: network_config(),
+                    initial_credit: initial_credit(),
+                    packet_policy: TunnelPacketPolicy::L3Forward {
+                        gate: l3_gate("api.example.com", 443, &["93.184.216.34"]),
+                    },
+                    limits: TunnelWorkerLimits::default(),
+                },
+            )
+            .unwrap();
+            worker.bootstrap(7, 8, 9).unwrap();
+            let outcome = worker.run_until_shutdown_l3_gate().unwrap();
+            assert_eq!(
+                outcome,
+                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
+            );
+            // Everything is still dropped until egress is wired.
+            assert_eq!(worker.stats().guest_packets_dropped, 1);
+            assert_eq!(worker.stats().guest_packets_l3_allowed, 0);
+            assert!(worker.audit().events.iter().any(|event| matches!(
+                event,
+                TunnelAuditEvent::PacketL3Dropped {
+                    reason: crate::net_l3::L3DropReason::Unparseable,
+                    ..
+                }
+            )));
+        });
+
+        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let _ack = guest.negotiate(hello(), 1).unwrap();
+        let _config = guest.recv_network_config().unwrap();
+        let _credit = guest.recv_control().unwrap();
+        // Too short to be an IPv4 header → Unparseable.
+        guest.send_packet(0, 55, 2, vec![1, 2, 3]).unwrap();
+        guest
+            .send_control(
+                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
+                0,
+                0,
+                3,
+            )
+            .unwrap();
+        host_thread.join().unwrap();
+    }
+
+    #[test]
+    fn l3_gate_allows_pinned_packet_and_audits_but_still_drops() {
+        let (guest, host) = UnixStream::pair().unwrap();
+        let host_thread = std::thread::spawn(move || {
+            let mut worker = HostTunnelWorker::new(
+                host,
+                RecordingAuditSink::default(),
+                TunnelWorkerConfig {
+                    expected_session: expected(),
+                    network_config: network_config(),
+                    initial_credit: initial_credit(),
+                    packet_policy: TunnelPacketPolicy::L3Forward {
+                        gate: l3_gate("api.example.com", 443, &["93.184.216.34"]),
+                    },
+                    limits: TunnelWorkerLimits::default(),
+                },
+            )
+            .unwrap();
+            worker.bootstrap(7, 8, 9).unwrap();
+            let outcome = worker.run_until_shutdown_l3_gate().unwrap();
+            assert_eq!(
+                outcome,
+                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
+            );
+            assert_eq!(worker.stats().guest_packets_l3_allowed, 1);
+            // Allowed, but egress isn't wired yet — nothing is forwarded.
+            assert_eq!(worker.stats().guest_packets_forwarded, 0);
+            assert_eq!(worker.stats().guest_packets_dropped, 1);
+            assert!(worker.audit().events.iter().any(|event| matches!(
+                event,
+                TunnelAuditEvent::PacketL3Allowed {
+                    flow_id: 55,
+                    dst_port: Some(443),
+                    ..
+                }
+            )));
+        });
+
+        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let _ack = guest.negotiate(hello(), 1).unwrap();
+        let _config = guest.recv_network_config().unwrap();
+        let _credit = guest.recv_control().unwrap();
+        guest
+            .send_packet(0, 55, 2, ipv4_tcp_packet("93.184.216.34", 443))
+            .unwrap();
+        guest
+            .send_control(
+                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
+                0,
+                0,
+                3,
+            )
+            .unwrap();
         host_thread.join().unwrap();
     }
 

@@ -69,13 +69,12 @@ pub(crate) fn spawn_network_tunnel_worker_if_configured(
             .map_err(|e| anyhow!("create tunnel worker audit dir {}: {e}", parent.display()))?;
     }
 
-    let config_json =
-        build_network_tunnel_worker_config_json(
-            &listener,
-            &audit_jsonl_path,
-            runtime_config,
-            params.host_tun_interface_name,
-        )?;
+    let config_json = build_network_tunnel_worker_config_json(
+        &listener,
+        &audit_jsonl_path,
+        runtime_config,
+        params.host_tun_interface_name,
+    )?;
     let worker_bin = aux_bin::resolve(&AuxBin {
         bin: "mvm-network-tunnel-worker",
         env_var: "MVM_NETWORK_TUNNEL_WORKER_PATH",
