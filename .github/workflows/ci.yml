@@ -185,7 +185,7 @@ jobs:
         # default workspace run skips its tests. Exercise the man-page path.
         run: cargo nextest run -p xtask --features man
 
-      - name: Assert auto-detect on Linux picks libkrun
+      - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
           cargo test -p mvm-build --features builder-vm --lib \
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun
