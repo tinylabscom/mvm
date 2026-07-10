@@ -40,8 +40,8 @@
           # vmlinux size + built-in symbol count. Pure measurement; the
           # number is what the "tiny kernel" claim is anchored to.
           metricsFor =
-            kpkg: cfg:
-            pkgs.runCommand "mvm-kernel-metrics-${arch}" { nativeBuildInputs = [ pkgs.gzip ]; } ''
+            name: kpkg: cfg:
+            pkgs.runCommand "mvm-kernel-metrics-${name}-${arch}" { nativeBuildInputs = [ pkgs.gzip ]; } ''
               mkdir -p $out
               img=$(ls ${kpkg}/Image ${kpkg}/bzImage ${kpkg}/vmlinux 2>/dev/null | head -1)
               y=$(grep -c '=y$' ${cfg})
@@ -49,7 +49,20 @@
               comp=$(gzip -c "$img" | wc -c)
               printf '{"vmlinux_bytes":%d,"vmlinux_compressed_bytes":%d,"y_symbol_count":%d}\n' \
                 "$raw" "$comp" "$y" > $out/metrics.json
+              ln -s ${cfg} $out/config
             '';
+
+          resolvedConfigs =
+            pkgs.runCommand "mvm-kernel-resolved-configs-${arch}" { } ''
+              mkdir -p $out
+              ln -s ${builder.passthru.configfile} $out/builder.config
+              ln -s ${workload.passthru.configfile} $out/workload.config
+            '';
+
+          workloadSizeopt = import ./workload.nix {
+            inherit pkgs base;
+            optimizeForSize = true;
+          };
 
           # Content-addressed identity: (kernel_version, config_hash,
           # artifact_hash). Field names mirror the KernelArtifactId type
@@ -72,7 +85,14 @@
           builder-vmlinux = builder;
           workload-configfile = workload.passthru.configfile;
           builder-configfile = builder.passthru.configfile;
-          metrics = metricsFor workload workload.passthru.configfile;
+          resolved-configs = resolvedConfigs;
+          builder-metrics = metricsFor "builder" builder builder.passthru.configfile;
+          workload-metrics = metricsFor "workload" workload workload.passthru.configfile;
+          metrics = metricsFor "workload" workload workload.passthru.configfile;
+          workload-sizeopt-vmlinux = workloadSizeopt;
+          workload-sizeopt-configfile = workloadSizeopt.passthru.configfile;
+          workload-sizeopt-metrics =
+            metricsFor "workload-sizeopt" workloadSizeopt workloadSizeopt.passthru.configfile;
           artifact-manifest = manifestFor workload workload.passthru.configfile;
         }
       );

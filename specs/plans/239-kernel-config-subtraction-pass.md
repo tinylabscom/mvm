@@ -1,6 +1,6 @@
 # Plan 239 - Next kernel-config subtraction pass
 
-**Status:** PROPOSED
+**Status:** COMPLETE
 **Created:** 2026-07-09
 **Goal:** make the shared microVM kernel materially smaller by removing unused
 kernel features from the generated config in a measured, boot-safe way.
@@ -56,11 +56,11 @@ only against the source enable/disable lists.
 
 **Goal:** ensure every subtraction pass starts from the actual resolved config.
 
-- [ ] Confirm there is a first-class way to build and inspect the resolved
+- [x] Confirm there is a first-class way to build and inspect the resolved
       configfile for both builder and workload kernels.
-- [ ] If needed, add or document dedicated outputs or commands so a reviewer can
+- [x] If needed, add or document dedicated outputs or commands so a reviewer can
       diff the resolved config before and after a subtraction pass.
-- [ ] Record the current baseline for:
+- [x] Record the current baseline for:
       `vmlinux` size,
       compressed kernel size,
       `=y` symbol count.
@@ -78,22 +78,22 @@ shared base.
 Audit these candidates first, because they are common distro defaults but may be
 unnecessary in a sealed workload guest:
 
-- [ ] `BPF`
-- [ ] `BPF_SYSCALL`
-- [ ] `PERF_EVENTS`
-- [ ] `PROFILING`
-- [ ] `IKCONFIG`
-- [ ] `IKCONFIG_PROC`
-- [ ] `CHECKPOINT_RESTORE`
-- [ ] `POSIX_MQUEUE`
+- [x] `BPF`
+- [x] `BPF_SYSCALL`
+- [x] `PERF_EVENTS`
+- [x] `PROFILING`
+- [x] `IKCONFIG`
+- [x] `IKCONFIG_PROC`
+- [x] `CHECKPOINT_RESTORE`
+- [x] `POSIX_MQUEUE`
 
 For each candidate:
 
-- [ ] Trace whether the workload boot path, guest agent, runtime helpers, or
+- [x] Trace whether the workload boot path, guest agent, runtime helpers, or
       admitted workload behavior actually uses it.
-- [ ] If workload-only dead, disable it in `workload.nix`; only move a cut into
+- [x] If workload-only dead, disable it in `workload.nix`; only move a cut into
       `base.nix` if the builder kernel also provably does not need it.
-- [ ] Keep a short rationale next to the disable in the Nix file explaining the
+- [x] Keep a short rationale next to the disable in the Nix file explaining the
       invariant, not any plan reference.
 
 **Validation**
@@ -107,12 +107,12 @@ For each candidate:
 **Goal:** keep only the compression and initramfs support the project actually
 ships.
 
-- [ ] Audit the enabled kernel compression formats and keep only the ones the
+- [x] Audit the enabled kernel compression formats and keep only the ones the
       built artifacts use.
-- [ ] Audit the `RD_*` decompressor symbols and keep only the formats the boot
+- [x] Audit the `RD_*` decompressor symbols and keep only the formats the boot
       path actually accepts.
-- [ ] Audit initramfs compression choices in the same way.
-- [ ] Land cuts one class at a time so failures are attributable.
+- [x] Audit initramfs compression choices in the same way.
+- [x] Land cuts one class at a time so failures are attributable.
 
 **Validation**
 
@@ -125,13 +125,13 @@ ships.
 **Goal:** test whether the workload kernel should optimize for size instead of
 performance.
 
-- [ ] Build the workload kernel with `CONFIG_CC_OPTIMIZE_FOR_SIZE`.
-- [ ] Compare against the current workload kernel on:
+- [x] Build the workload kernel with `CONFIG_CC_OPTIMIZE_FOR_SIZE`.
+- [x] Compare against the current workload kernel on:
       `vmlinux` bytes,
       compressed image bytes,
       boot success,
       any obvious runtime regressions.
-- [ ] Keep the size-oriented mode only if the measured win is meaningful and the
+- [x] Keep the size-oriented mode only if the measured win is meaningful and the
       operational behavior remains acceptable.
 
 **Validation**
@@ -145,13 +145,13 @@ performance.
 **Goal:** after the workload-only cuts are exhausted, reduce the common kernel
 surface safely.
 
-- [ ] Re-read the resolved builder and workload configs after Phases 1 to 3.
-- [ ] Enumerate surviving `=y` subsystems that are still unjustified in
+- [x] Re-read the resolved builder and workload configs after Phases 1 to 3.
+- [x] Enumerate surviving `=y` subsystems that are still unjustified in
       `base.nix`.
-- [ ] For each candidate, prove neither the builder path nor the workload path
+- [x] For each candidate, prove neither the builder path nor the workload path
       needs it before moving the cut into `base.nix`.
-- [ ] Prefer disabling whole dead subsystem menus over individual leaf drivers.
-- [ ] Keep builder-specific needs in `builder.nix` and workload-specific needs in
+- [x] Prefer disabling whole dead subsystem menus over individual leaf drivers.
+- [x] Keep builder-specific needs in `builder.nix` and workload-specific needs in
       `workload.nix`; use `base.nix` only for truly shared removals.
 
 **Validation**
@@ -164,10 +164,10 @@ surface safely.
 
 **Goal:** make successful shrinkage sticky.
 
-- [ ] Update the recorded kernel budget after accepted cuts.
-- [ ] Ensure the config-budget gate reflects the new baseline instead of the old
+- [x] Update the recorded kernel budget after accepted cuts.
+- [x] Ensure the config-budget gate reflects the new baseline instead of the old
       larger one.
-- [ ] If the current metrics output is too weak to justify future reviews, expand
+- [x] If the current metrics output is too weak to justify future reviews, expand
       it enough to capture the kernel-size shape that this plan changes.
 
 **Validation**
@@ -193,3 +193,37 @@ surface safely.
 - The accepted cuts are recorded in the kernel recipe, not in an ad hoc local
   config file.
 - The config-budget gate is updated so the smaller shape becomes the new floor.
+
+## Current measured state
+
+- Builder kernel (`aarch64`): `17,135,624` bytes raw, `7,640,745` bytes gzip,
+  `1373` built-in symbols.
+- Workload kernel (`aarch64`): `15,929,352` bytes raw, `7,077,261` bytes gzip,
+  `1329` built-in symbols.
+- Workload sizeopt experiment (`aarch64`): `13,948,936` bytes raw,
+  `6,008,471` bytes gzip, `1329` built-in symbols.
+- The sizeopt config diff is currently limited to
+  `CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE` vs
+  `CONFIG_CC_OPTIMIZE_FOR_SIZE`; it materially shrinks the image but does not
+  reduce the built-in symbol count.
+- Decision: keep `workload-sizeopt` as an explicit comparison output, not the
+  default workload kernel. The size win is real, but the default kernel should
+  not flip modes until the repaired workload boot witness is proven live on a
+  host that can run the throwaway VM check end to end.
+- The `mvmctl build kernel build --boot-check` helper now boots the pinned
+  workload kernel through the OCI `--image` path and polls the guest agent
+  directly instead of relying on full `machine wait` readiness.
+- Live witness: `cargo run -- --builder libkrun build kernel build --which
+  workload --source compile --boot-check` now completes successfully on this
+  host, booting the pinned workload kernel under libkrun and confirming the
+  guest agent over vsock.
+- The resolved builder and workload configs both carry `CONFIG_INITRAMFS_SOURCE=""`
+  and `CONFIG_RD_GZIP=y` with every other `CONFIG_RD_*` decompressor disabled;
+  the shipped verity path in the repo is consistently `cpio.gz`, so the shared
+  kernel keeps gzip support only.
+- `CONFIG_BPF` remains `=y` in the resolved workload config even with the
+  workload-only disable in place, so this pass keeps the syscall-facing
+  `BPF_SYSCALL` interface off but does not claim a safe whole-subsystem BPF cut.
+- No further shared-base removals were proven safe in this pass beyond the
+  landed gzip-only `RD_*` decompressor trim; builder-only needs remain isolated
+  from workload-only cuts.

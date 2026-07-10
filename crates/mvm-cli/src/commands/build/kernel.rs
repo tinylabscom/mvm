@@ -60,8 +60,8 @@ struct BuildArgs {
 
     /// After building, boot a throwaway microVM on the new kernel and confirm
     /// the in-guest agent answers over vsock — a build that links isn't proof
-    /// it boots. Workload kernel only; needs a source checkout (uses
-    /// `examples/sleeper`) + a working local backend.
+    /// it boots. Workload kernel only; boots an OCI image under libkrun and
+    /// needs a working local backend.
     #[arg(long)]
     boot_check: bool,
 }
@@ -70,6 +70,7 @@ struct BuildArgs {
 enum Which {
     Builder,
     Workload,
+    WorkloadSizeopt,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,6 +118,9 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
         match args.which {
             Which::Builder => vec![(KernelVariant::Builder, "builder")],
             Which::Workload => vec![(KernelVariant::Workload, "workload")],
+            Which::WorkloadSizeopt => {
+                vec![(KernelVariant::WorkloadSizeopt, "workload-sizeopt")]
+            }
         }
     };
 
@@ -197,7 +201,7 @@ fn emit_local_metrics(
 }
 
 /// Boot a throwaway microVM on the freshly-built workload kernel and confirm
-/// the agent answers. Re-execs `mvmctl` (the real `up` / `machine` paths)
+/// the agent answers. Re-execs `mvmctl` (the real machine lifecycle paths)
 /// rather than reconstructing their argument plumbing here.
 #[cfg(feature = "builder-vm")]
 fn run_boot_check(
@@ -205,22 +209,18 @@ fn run_boot_check(
     arch: &str,
 ) -> Result<()> {
     use crate::commands::env::dev_vz::KernelVariant;
+    use crate::commands::shared::wait_for_guest_agent;
     use crate::ui;
 
     if !variants.iter().any(|(v, _)| *v == KernelVariant::Workload) {
         ui::warn(
-            "--boot-check applies to the workload kernel; nothing to boot for --which builder",
+            "--boot-check applies to the default workload kernel; nothing to boot for this selection",
         );
         return Ok(());
     }
-    if !std::path::Path::new("examples/sleeper").is_dir() {
-        anyhow::bail!(
-            "--boot-check needs a source checkout (examples/sleeper not found in the cwd)"
-        );
-    }
-    // Precondition: `up` builds the sleeper image, which needs the full builder
-    // VM image (kernel just built into the cache isn't enough). Fail early with
-    // a fixable message rather than a deep `up` error 20 min into a build.
+    // Precondition: the OCI-image boot path still depends on the builder VM
+    // cache being populated; fail early with a fixable message rather than a
+    // deep machine-run error later.
     let builder_rootfs = mvm_build::builder_vm::builder_vm_cache_dir()
         .join(arch)
         .join("rootfs.ext4");
@@ -232,34 +232,41 @@ fn run_boot_check(
         );
     }
     let exe = std::env::current_exe().context("locating mvmctl for --boot-check")?;
-    let name = "kernel-bootcheck";
-    let _ = run_self(&exe, &["machine", "stop", name, "--yes"]); // clear any stale VM
+    let name = format!("kernel-bootcheck-{}", std::process::id());
+    let _ = run_self(&exe, &["machine", "stop", name.as_str(), "--yes"]); // clear any stale VM
 
     // Force libkrun: it's available wherever `--source compile` ran (it drives
     // Stage 0), so the check is deterministic and doesn't depend on the host's
-    // default workload backend (Vz on macOS 26) or its separate supervisor. The
-    // kernel is backend-agnostic, so a libkrun boot proves it boots.
+    // default workload backend. The kernel is backend-agnostic, so a libkrun
+    // boot plus a successful guest-agent hello proves it boots.
     ui::info("boot-check: booting a throwaway VM on the new workload kernel (libkrun)…");
-    run_self(
-        &exe,
-        &[
-            "up",
-            "--flake",
-            "examples/sleeper",
-            "--hypervisor",
-            "libkrun",
-            "--name",
-            name,
-            "-d",
-        ],
-    )
-    .context("boot-check: `up` failed to launch the VM")?;
+    let run_args = boot_check_run_args(name.as_str());
+    run_self(&exe, &run_args).context("boot-check: `machine run` failed to launch the VM")?;
 
-    let booted = run_self(&exe, &["machine", "wait", name]);
-    let _ = run_self(&exe, &["machine", "stop", name, "--yes"]);
-    booted.context("boot-check: the guest agent never became ready")?;
+    if !wait_for_guest_agent(&name, 60) {
+        let _ = run_self(&exe, &["machine", "stop", &name, "--yes"]);
+        anyhow::bail!("boot-check: the guest agent never became ready");
+    }
+    let _ = run_self(&exe, &["machine", "stop", name.as_str(), "--yes"]);
     ui::success("boot-check: the new kernel boots and the agent answered over vsock");
     Ok(())
+}
+
+#[cfg(feature = "builder-vm")]
+fn boot_check_run_args(name: &str) -> Vec<&str> {
+    vec![
+        "machine",
+        "run",
+        "--image",
+        "docker.io/library/alpine:3.20",
+        "--hypervisor",
+        "libkrun",
+        "--name",
+        name,
+        "--kernel-pin",
+        "workload",
+        "-d",
+    ]
 }
 
 /// Run `mvmctl <args>` inheriting stdio; error on non-zero exit.
@@ -339,7 +346,7 @@ fn run_build(_args: BuildArgs, _verbose: bool) -> Result<()> {
 
 #[cfg(all(test, feature = "builder-vm"))]
 mod tests {
-    use super::count_builtin_symbols;
+    use super::{boot_check_run_args, count_builtin_symbols};
 
     #[test]
     fn counts_only_lines_ending_in_y() {
@@ -364,5 +371,25 @@ CONFIG_G=y
     #[test]
     fn tolerates_trailing_whitespace() {
         assert_eq!(count_builtin_symbols("CONFIG_A=y \nCONFIG_B=y\t\n"), 2);
+    }
+
+    #[test]
+    fn boot_check_uses_the_pinned_workload_oci_path() {
+        assert_eq!(
+            boot_check_run_args("kernel-bootcheck-123"),
+            vec![
+                "machine",
+                "run",
+                "--image",
+                "docker.io/library/alpine:3.20",
+                "--hypervisor",
+                "libkrun",
+                "--name",
+                "kernel-bootcheck-123",
+                "--kernel-pin",
+                "workload",
+                "-d",
+            ]
+        );
     }
 }

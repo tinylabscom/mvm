@@ -486,9 +486,23 @@
       mkWorkloadKernel = system:
         let pkgs = import nixpkgs { inherit system; };
         in import (workspaceRoot + "/nix/images/kernel/workload.nix") { inherit pkgs; base = kernelBaseFor pkgs; };
+      mkWorkloadKernelSizeopt = system:
+        let pkgs = import nixpkgs { inherit system; };
+        in import (workspaceRoot + "/nix/images/kernel/workload.nix") {
+          inherit pkgs;
+          base = kernelBaseFor pkgs;
+          optimizeForSize = true;
+        };
       mkWorkloadKernelConfigfile = system:
         let pkgs = import nixpkgs { inherit system; };
         in (import (workspaceRoot + "/nix/images/kernel/workload.nix") { inherit pkgs; base = kernelBaseFor pkgs; }).passthru.configfile;
+      mkWorkloadKernelSizeoptConfigfile = system:
+        let pkgs = import nixpkgs { inherit system; };
+        in (import (workspaceRoot + "/nix/images/kernel/workload.nix") {
+          inherit pkgs;
+          base = kernelBaseFor pkgs;
+          optimizeForSize = true;
+        }).passthru.configfile;
     in
     {
       packages = forAllSystems (system: {
@@ -507,6 +521,8 @@
         builder-kernel = mkBuilderKernel system;
         workload-kernel = mkWorkloadKernel system;
         workload-kernel-configfile = mkWorkloadKernelConfigfile system;
+        workload-sizeopt-kernel = mkWorkloadKernelSizeopt system;
+        workload-sizeopt-kernel-configfile = mkWorkloadKernelSizeoptConfigfile system;
       });
     };
 }

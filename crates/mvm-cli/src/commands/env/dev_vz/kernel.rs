@@ -11,6 +11,9 @@ pub(crate) enum KernelVariant {
     Builder,
     /// Workload-microVM kernel — the shared base alone (`workload-kernel`).
     Workload,
+    /// Workload-microVM kernel with `CONFIG_CC_OPTIMIZE_FOR_SIZE=y` enabled
+    /// for measured comparison against the default workload kernel.
+    WorkloadSizeopt,
 }
 
 #[cfg(feature = "builder-vm")]
@@ -20,6 +23,7 @@ impl KernelVariant {
         match self {
             Self::Builder => "builder-kernel",
             Self::Workload => "workload-kernel",
+            Self::WorkloadSizeopt => "workload-sizeopt-kernel",
         }
     }
 
@@ -32,6 +36,7 @@ impl KernelVariant {
         match self {
             Self::Builder => "kernel-configfile",
             Self::Workload => "workload-kernel-configfile",
+            Self::WorkloadSizeopt => "workload-sizeopt-kernel-configfile",
         }
     }
 
@@ -39,6 +44,7 @@ impl KernelVariant {
         match self {
             Self::Builder => "builder",
             Self::Workload => "workload",
+            Self::WorkloadSizeopt => "workload-sizeopt",
         }
     }
 }

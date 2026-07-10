@@ -22,10 +22,10 @@ Two ways the same files are consumed:
   it, but the libkrun builder VM fails at eval). Verified live under
   libkrun.
 - [`flake.nix`](./flake.nix) — a standalone, additive publish surface
-  exposing per-arch `vmlinux` / `configfile` / `metrics` / an
-  `artifact-manifest` (`kernel_version`, `config_hash`,
-  `artifact_hash`). The kernel-build CI workflow uploads these
-  hash-verified artifacts on a release tag.
+  exposing per-arch `vmlinux`, per-variant `configfile` + `metrics`,
+  a `resolved-configs` directory output, and an `artifact-manifest`
+  (`kernel_version`, `config_hash`, `artifact_hash`). The kernel-build
+  CI workflow uploads these hash-verified artifacts on a release tag.
 
 Nothing is vendored under this directory. The source of truth is the
 enable/disable lists in `base.nix` + the two deltas.
@@ -71,12 +71,25 @@ re-enables it because another `=y` symbol depends on it, that
 parent symbol needs to come off too — disabling a leaf doesn't
 override a hard dependency.
 
-To introspect what `olddefconfig` produced, build the
-`kernel-configfile` flake output (added in Plan 95 §W2):
+To introspect what `olddefconfig` produced, build the variant-specific
+config outputs or the paired `resolved-configs` output:
 
 ```sh
-nix build .#kernel-configfile -o /tmp/kconfig
-grep '=y$' /tmp/kconfig | sort > /tmp/kconfig.y.txt
+nix build .#builder-configfile -o /tmp/builder.config
+nix build .#workload-configfile -o /tmp/workload.config
+diff -u /tmp/builder.config /tmp/workload.config || true
+
+nix build .#resolved-configs -o /tmp/kernel-configs
+grep '=y$' /tmp/kernel-configs/workload.config | sort > /tmp/workload.y.txt
+grep '=y$' /tmp/kernel-configs/builder.config | sort > /tmp/builder.y.txt
+```
+
+Per-variant metrics are first-class too:
+
+```sh
+nix build .#builder-metrics -o /tmp/builder-metrics
+nix build .#workload-metrics -o /tmp/workload-metrics
+cat /tmp/workload-metrics/metrics.json
 ```
 
 The output is a regular `.config` text file — diffable across

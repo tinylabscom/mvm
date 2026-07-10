@@ -112,13 +112,16 @@ effect? The loop is build → boot-smoke → measure:
 
 ```bash
 # 1. Build the variant you touched (compiles your edited config in Stage 0).
-just run -- build kernel build --which workload
+#    This writes the resolved `config` sidecar next to the cached kernel and a
+#    `kernel-metrics-<arch>.json` file beside it.
+just run -- build kernel build --which workload --boot-check
 
-# 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
-#    throwaway VM and confirm the in-guest agent answers over vsock.
-just run -- up --flake examples/sleeper --hypervisor libkrun --name smoke -d
-just run -- machine boot-report smoke   # "control plane  ready" == good
-just run -- machine stop smoke
+# 2. Or inspect the resolved configs + metrics directly from the kernel flake:
+nix build ./nix/images/kernel#resolved-configs -o /tmp/kernel-configs
+nix build ./nix/images/kernel#workload-metrics -o /tmp/workload-metrics
+nix build ./nix/images/kernel#builder-metrics -o /tmp/builder-metrics
+diff -u /tmp/kernel-configs/builder.config /tmp/kernel-configs/workload.config || true
+cat /tmp/workload-metrics/metrics.json
 ```
 
 Two sharp edges worth knowing:
@@ -134,13 +137,13 @@ Two sharp edges worth knowing:
   symbol (or only the builder needs one), put it in that variant's
   delta. (The builder kernel, for example, keeps netfilter for its
   egress lockdown while the workload drops it.)
-- **You can't read the resolved `.config` locally** — Stage 0 hands the
-  host a `vmlinux`, not the config. The `=y` symbol count + byte size
-  come from the `kernel-build` CI lane, which uploads
-  `workload-config-<arch>` and `kernel-metrics-<arch>.json`. Trigger it
-  without a release via `gh workflow run kernel-build.yml`. The
-  `check-kernel-config-budget` xtask gate fails CI if the `=y` count
-  regresses past `KERNEL_Y_BUDGET`.
+- **You can read the resolved `.config` locally.** Stage 0 now leaves a
+  `config` sidecar next to the cached kernel, `build kernel build`
+  writes `kernel-metrics-<arch>.json` beside it, and the kernel flake
+  exposes `builder-configfile`, `workload-configfile`, `resolved-configs`,
+  `builder-metrics`, and `workload-metrics` for direct diff/measurement.
+  CI still uploads the same artifacts in the `kernel-build` lane, and
+  `check-kernel-config-budget` still ratchets on the resolved `=y` count.
 
 ## Testing
 

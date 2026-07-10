@@ -34,16 +34,13 @@ use std::path::Path;
 /// native aarch64 config build — ratchet it to the count CI reports if it
 /// differs.
 ///
-/// Batch 6 (block-device clients): dropped BLK_DEV_NBD + BLK_DEV_NVME/NVME_CORE
-/// (base.nix) and BLK_DEV_LOOP + BLK_DEV_MD (workload.nix) — no mvm backend
-/// presents an NBD server / NVMe controller, no mvm path loop-mounts in-guest,
-/// and the guest assembles no RAID array (dm-verity keeps only CONFIG_MD +
-/// BLK_DEV_DM + DM_VERITY). aarch64 measured 1374 from the built workload
-/// kernel's embedded ikconfig; ratcheted below. x86_64 drops by a comparable
-/// (arch-independent block-driver) delta but was NOT re-measured here — macOS
-/// cannot cross-compile the kernel — so BUDGET_X86_64 stays a valid (slightly
-/// slack) ceiling; ratchet it to the count CI's x86_64 config build reports.
-const BUDGET_AARCH64: usize = 1374;
+/// Batch 7 (config subtraction pass): removed workload-only md/loop/BPF users,
+/// perf/ikconfig/checkpoint helpers, and the shared unused initramfs
+/// decompressors (bzip2/lzma/xz/lzo/lz4/zstd), then re-measured the aarch64
+/// workload config at 1329 built-ins. x86_64 was not re-measured in this host
+/// session, so its ceiling stays intentionally slack until the Linux/x86_64 CI
+/// config build reports the new count.
+const BUDGET_AARCH64: usize = 1329;
 const BUDGET_X86_64: usize = 1203;
 
 /// Resolve the budget for a config path by the arch in its name. Unknown →
