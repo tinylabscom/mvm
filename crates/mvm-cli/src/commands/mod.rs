@@ -103,7 +103,7 @@ pub(in crate::commands) enum Commands {
     /// Explain a run after the fact from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
-    /// Manage the versioned attested-pack cache (list/rollback/prune/download/update)
+    /// Manage the versioned pack cache (list/rollback/prune/download/update)
     #[command(display_order = 8)]
     Pack(pack::Args),
     /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing
