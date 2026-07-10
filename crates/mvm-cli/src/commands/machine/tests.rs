@@ -1705,8 +1705,14 @@ fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
 
     let summary = machine_start_preflight_summary(&spec, Some("libkrun"), None)
         .expect("libkrun OCI allow-host preflight should summarize the active vsock/L4 contract");
-    assert_eq!(summary.invocation.network_posture, "allow-list:api.example.com:443");
-    assert_eq!(summary.invocation.egress_enforcement, "libkrun:l4-host-port");
+    assert_eq!(
+        summary.invocation.network_posture,
+        "allow-list:api.example.com:443"
+    );
+    assert_eq!(
+        summary.invocation.egress_enforcement,
+        "libkrun:l4-host-port"
+    );
 }
 
 #[test]

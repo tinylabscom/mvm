@@ -84,7 +84,9 @@ where
         return http_forward::serve_http_forward(guest, gate, timeout).await;
     }
     match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
-        EgressVerdict::Allow { ip, port } => splice(guest, &target, ip, port, leftover, timeout).await,
+        EgressVerdict::Allow { ip, port } => {
+            splice(guest, &target, ip, port, leftover, timeout).await
+        }
         EgressVerdict::Deny | EgressVerdict::Malformed => {
             eprintln!("raw-egress: refusing target {target}");
             // Refused: close without ever opening a host socket.
