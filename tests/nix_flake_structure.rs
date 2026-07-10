@@ -652,10 +652,11 @@ fn mk_guest_carries_overlay_aware_contract() {
          busybox /init path before entering mvm-host-vm-init."
     );
     assert!(
-        content.contains("initScript = pkgs.writeScript \"mvm-init\" ''\n#!/bin/sh"),
-        "mk-guest.nix must emit /init with the shebang at byte 0. A leading \
-         space before `#!/bin/sh` turns the built rootfs /init into an \
-         ENOEXEC script that panics the guest before chained init can run."
+        content.contains("initScript = pkgs.writeScript \"mvm-init\" (deindent ''\n    #!/bin/sh"),
+        "mk-guest.nix must still emit /init with the shebang at byte 0 after \
+         deindent strips the Nix-source indentation. A leading space before \
+         `#!/bin/sh` in the emitted script turns the built rootfs /init into \
+         an ENOEXEC script that panics the guest before chained init can run."
     );
 
     assert!(

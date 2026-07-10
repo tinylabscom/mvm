@@ -1,22 +1,18 @@
-**Additional 2026-07-10 — Plan 242 is complete and PR-ready.** The final
-contract is now stable across code, tests, and docs: guest-executed runtime
-binaries are centralized into the shared read-only cache artifact under
+**Additional 2026-07-10 — Plan 242 is implemented locally, but the current
+head still needs refreshed PR/ship validation.** The code/docs contract is
+stable: guest-executed runtime binaries are centralized into the shared
+read-only cache artifact under
 `~/.cache/mvm/runtime-overlay/<version>/<arch>/`; every admitted backend/tier
 either mounts that artifact read-only with real proof or refuses the
 unsupported path fail-closed; stopped VMs pick up newer version-matched
 overlays on restart, while running VMs keep the runtime they booted with. The
-closeout slice also fixed the last source-checkout OCI initrd drift by making
-required-overlay source-checkout boots prefer the current
-`ensure_workload_verity_initrd()` result over a stale sibling `rootfs.initrd`,
-with focused regressions for the source-build, sibling-initrd, and cached
-fallback paths plus isolated `MVM_DATA_DIR` coverage for the transient admit
-test. Final evidence includes green host workspace gates (`cargo check
---workspace --offline`, `cargo clippy --workspace --all-targets --offline --
--D warnings`, and `cargo test --workspace --offline`) and the Linux-native
-builder confirmations rerun on `88.99.197.234` for
-`builder_backend_select::tests::auto_detect_default_for_linux_native_picks_qemu`
-and
-`libkrun_builder::tests::linux_native_rootfs_builder_support_guard_matches_platforms`.
+current closeout slice also fixes the exact-current candidate witnesses by
+restoring fake verity sidecars in the OCI cache-rematerialization test
+fixtures, seeding the minimal config that path expects, and making the
+gateway-bridge capture/export test fail on bridge-task errors instead of
+ignoring them. The rollout/runbook surface is now explicit in the docs and
+release note, but the branch should be treated as a local ship candidate until
+the refreshed head is pushed and rerun through PR checks.
 
 Older entries below are retained as the execution log. Where they describe
 earlier intermediate gaps or proofs-in-progress, this top entry is the

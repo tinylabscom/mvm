@@ -1916,8 +1916,11 @@ mod tests {
         _sealed: bool,
     ) -> Result<()> {
         assert!(unpacked_root.is_dir(), "unpacked root must exist");
-        fs::create_dir_all(rootfs_abs.parent().expect("rootfs has parent"))?;
+        let parent = rootfs_abs.parent().expect("rootfs has parent");
+        fs::create_dir_all(parent)?;
         fs::write(rootfs_abs, format!("materialized:{image_label}"))?;
+        fs::write(parent.join("rootfs.verity"), b"fake-verity")?;
+        fs::write(parent.join("rootfs.roothash"), b"abc\n")?;
         Ok(())
     }
 
@@ -2380,6 +2383,7 @@ mod tests {
                 images: vec![image],
             },
         );
+        write_minimal_config(tmp.path());
         write_file(tmp.path(), "rootfs/alpine/rootfs.ext4", b"stale-rootfs");
         let unpacked = tmp
             .path()
