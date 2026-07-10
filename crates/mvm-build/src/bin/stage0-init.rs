@@ -548,6 +548,32 @@ mod linux {
         Ok(())
     }
 
+    /// Nix builds unsandboxed inside the Stage 0 guest (no user namespaces
+    /// available), so it uses `/homeless-shelter` as the builder's HOME and
+    /// **refuses to run** if that directory already exists — its no-sandbox
+    /// purity check. A build that was interrupted mid-flight (power-off, OOM, a
+    /// store fault) leaves the dir behind on the persistent guest root, and
+    /// because the root is reused across boots whenever its seed marker matches,
+    /// every later `dev up` then fails with
+    /// `error: home directory "/homeless-shelter" exists`. Remove a stale one
+    /// before invoking nix so a crashed prior run self-heals instead of wedging
+    /// the bootstrap. `root` is the filesystem root (`/` in the guest; a tempdir
+    /// under test). A `NotFound` is the normal clean-boot case, not an error.
+    fn purge_stale_nix_builder_home(root: &Path) -> std::io::Result<()> {
+        let home = root.join("homeless-shelter");
+        match std::fs::remove_dir_all(&home) {
+            Ok(()) => {
+                eprintln!(
+                    "stage0-init: removed stale nix builder home {}",
+                    home.display()
+                );
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
     /// Recursively copy `src` -> `dst` preserving symlinks + file modes
     /// (the seed has no `cp`). Iterative to avoid deep-tree recursion limits.
     /// Hardlinks degrade to copies — fine for a one-shot bootstrap store.
@@ -641,6 +667,11 @@ mod linux {
             workspace_root.display()
         );
         let extra_build_flags = stage0_nix_extra_flags(&conf)?;
+
+        // Clear a `/homeless-shelter` left by a crashed prior build before nix's
+        // unsandboxed purity check trips on it and wedges the bootstrap.
+        purge_stale_nix_builder_home(Path::new("/"))
+            .map_err(|e| format!("clearing stale nix builder home: {e}"))?;
 
         eprintln!("stage0-init: building {flake_ref} (output_mode={mode})");
         let proxy = if is_qemu() {
@@ -1213,6 +1244,20 @@ mod linux {
         use std::collections::HashMap;
         use std::path::Path;
         use std::process::Command;
+
+        #[test]
+        fn purge_stale_nix_builder_home_removes_leftover_and_tolerates_absence() {
+            let root = tempfile::tempdir().expect("tempdir");
+            // Clean boot: no `/homeless-shelter` present — a no-op, never an error.
+            super::purge_stale_nix_builder_home(root.path()).expect("absent home is ok");
+            // Crashed prior build: a populated leftover must be removed wholesale
+            // so nix's unsandboxed purity check doesn't wedge the next build.
+            let home = root.path().join("homeless-shelter");
+            std::fs::create_dir_all(home.join(".cargo")).expect("seed leftover tree");
+            std::fs::write(home.join(".cargo/config"), b"stale").expect("seed leftover file");
+            super::purge_stale_nix_builder_home(root.path()).expect("removes leftover");
+            assert!(!home.exists(), "stale nix builder home must be gone");
+        }
 
         #[test]
         fn streams_stderr_live_keeps_full_log_and_captures_stdout() {
