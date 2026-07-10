@@ -54,6 +54,7 @@ pub mod gateway_audit;
 pub mod gateway_bridge;
 #[cfg(feature = "custom-dns")]
 pub mod hickory_dns;
+pub mod http_forward;
 pub mod injection_guard;
 pub mod inspector;
 pub mod instance_sampler;

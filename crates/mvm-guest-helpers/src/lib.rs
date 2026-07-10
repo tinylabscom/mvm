@@ -16,3 +16,4 @@
 pub mod addon_dns;
 pub mod addon_vsock_bridge;
 pub mod egress_client;
+mod guest_vsock_session;

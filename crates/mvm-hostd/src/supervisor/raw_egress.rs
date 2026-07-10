@@ -11,11 +11,13 @@
 //! loopback echo server (the gate mandatory-denies loopback, so an admitted-target
 //! splice test cannot route through the real gate).
 
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::supervisor::http_forward;
 use mvm_backend::vmm::egress_gate::{EgressGate, EgressVerdict};
 
 /// Cap on the first `host:port` line. A guest that never sends a `\n` inside this
@@ -62,13 +64,15 @@ where
         // No `\n` within the cap → fail closed, close without connecting.
         return Ok(());
     };
-    match gate.admitted_addrs(&target) {
-        Ok(addrs) => splice(guest, addrs, leftover, timeout).await,
-        Err(EgressVerdict::Deny) | Err(EgressVerdict::Malformed) => {
+    if target == http_forward::FRAME_LINE {
+        return http_forward::serve_http_forward(guest, gate, timeout).await;
+    }
+    match gate.decide_request(&target) {
+        EgressVerdict::Allow { ip, port } => splice(guest, ip, port, leftover, timeout).await,
+        EgressVerdict::Deny | EgressVerdict::Malformed => {
             // Refused: close without ever opening a host socket.
             Ok(())
         }
-        Err(EgressVerdict::Allow { .. }) => Ok(()),
     }
 }
 
@@ -108,31 +112,18 @@ where
 /// server without routing through the real gate (which mandatory-denies loopback).
 async fn splice<S>(
     mut guest: S,
-    addrs: Vec<std::net::SocketAddr>,
+    ip: IpAddr,
+    port: u16,
     leftover: Vec<u8>,
     timeout: Duration,
 ) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
-    let mut upstream = None;
-    for addr in addrs {
-        let connect = tokio::net::TcpStream::connect(addr);
-        match tokio::time::timeout(timeout, connect).await {
-            Ok(Ok(stream)) => {
-                upstream = Some(stream);
-                break;
-            }
-            Ok(Err(err)) => {
-                tracing::warn!(%addr, error = %err, "raw egress connect failed");
-            }
-            Err(_) => {
-                tracing::warn!(%addr, "raw egress connect timed out");
-            }
-        }
-    }
-    let Some(mut upstream) = upstream else {
-        return Ok(());
+    let connect = tokio::net::TcpStream::connect((ip, port));
+    let mut upstream = match tokio::time::timeout(timeout, connect).await {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(_)) | Err(_) => return Ok(()),
     };
     if !leftover.is_empty() {
         upstream.write_all(&leftover).await?;
@@ -200,26 +191,18 @@ fn handle_raw_conn_blocking(
     let Some(target) = read_target_line_blocking(&mut guest)? else {
         return Ok(()); // no newline within the cap → fail closed
     };
-    let addrs = match gate.admitted_addrs(&target) {
-        Ok(addrs) => addrs,
-        Err(EgressVerdict::Deny) | Err(EgressVerdict::Malformed) => return Ok(()), // fail closed
-        Err(EgressVerdict::Allow { .. }) => return Ok(()),
-    };
-    let mut upstream = None;
-    for addr in addrs {
-        match std::net::TcpStream::connect_timeout(&addr, timeout) {
-            Ok(stream) => {
-                upstream = Some(stream);
-                break;
-            }
-            Err(err) => {
-                tracing::warn!(%addr, error = %err, "raw egress vsock connect failed");
-            }
-        }
+    if target == http_forward::FRAME_LINE {
+        return http_forward::serve_http_forward_blocking(guest, gate, timeout);
     }
-    let Some(mut upstream) = upstream else {
-        return Ok(());
+    let (ip, port) = match gate.decide_request(&target) {
+        EgressVerdict::Allow { ip, port } => (ip, port),
+        EgressVerdict::Deny | EgressVerdict::Malformed => return Ok(()), // fail closed
     };
+    let mut upstream =
+        match std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(ip, port), timeout) {
+            Ok(stream) => stream,
+            Err(_) => return Ok(()),
+        };
     // Bidirectional blocking pump: guest→upstream on this thread, upstream→guest
     // on a helper thread, each ending on the peer's EOF.
     let mut up_read = upstream.try_clone()?;
@@ -348,7 +331,14 @@ mod tests {
         let (mut client, guest) = tokio::io::duplex(1024);
         // `leftover` = bytes pipelined after the `\n`; they must reach upstream first.
         let splicer = tokio::spawn(async move {
-            splice(guest, vec![addr], b"lead".to_vec(), Duration::from_secs(2)).await
+            splice(
+                guest,
+                addr.ip(),
+                addr.port(),
+                b"lead".to_vec(),
+                Duration::from_secs(2),
+            )
+            .await
         });
 
         // The leftover "lead" is echoed back first, then our live "ping".
