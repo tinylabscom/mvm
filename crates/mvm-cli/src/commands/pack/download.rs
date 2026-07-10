@@ -1,5 +1,6 @@
 //! `mvmctl pack download` — fetch a pack version into the cache without
-//! touching the active pointer.
+//! changing which version is active (the one exception: the first version
+//! recorded for a key becomes active, since none existed to preserve).
 //!
 //! Only the builder pack class has a release-fetch wired today (via the
 //! `dev up` bootstrap path's published-pack machinery); runtime/dev-image

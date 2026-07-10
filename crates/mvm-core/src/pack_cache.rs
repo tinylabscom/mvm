@@ -1481,6 +1481,27 @@ mod tests {
     }
 
     #[test]
+    fn resolve_falls_back_to_scan_when_index_is_corrupt() {
+        let (cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let (staged, manifest) = staged_builder_pack();
+        promote(staged.path(), &manifest, &ctx).expect("promote");
+
+        // A truncated / garbage `index.json` must not break resolution:
+        // `load_index` fails open and resolve re-verifies via the scan.
+        std::fs::write(index_path(cache.path()), b"{ not json").expect("write corrupt index");
+
+        let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("compatible pack found despite corrupt index");
+        assert_eq!(found.root, pack_dir(manifest.outputs.pack_hash.as_str()));
+    }
+
+    #[test]
     fn resolve_falls_back_when_active_pack_is_corrupt() {
         let (cache, _env) = isolated_cache();
         let trust = trust_store();
