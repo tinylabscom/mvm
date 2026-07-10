@@ -27,6 +27,7 @@ pub struct PrebuiltGuestBinaries<'a> {
     pub netinit: &'a [u8],
     pub egress_client: &'a [u8],
     pub entrypoint_runner: &'a [u8],
+    pub verity_init: &'a [u8],
 }
 
 /// Inject the mvm runtime into `unpacked_root`, materialize it into `output` (a
@@ -109,6 +110,7 @@ fn resolve_guest_binaries(
                 netinit: p.netinit,
                 egress_client: p.egress_client,
                 entrypoint_runner: p.entrypoint_runner,
+                verity_init: p.verity_init,
             },
             cache_root,
             version,

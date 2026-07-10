@@ -46,6 +46,7 @@ pub struct GuestAgentLayout {
     pub netinit: PathBuf,
     pub egress_client: PathBuf,
     pub entrypoint_runner: PathBuf,
+    pub verity_init: PathBuf,
 }
 
 /// Built guest runtime binary paths ready to install into the cache.
@@ -56,6 +57,7 @@ pub struct GuestRuntimeBinaryPaths<'a> {
     pub netinit: &'a Path,
     pub egress_client: &'a Path,
     pub entrypoint_runner: &'a Path,
+    pub verity_init: &'a Path,
 }
 
 /// Embedded guest runtime binary bytes ready to install into the cache.
@@ -66,6 +68,7 @@ pub struct GuestRuntimeBinaryBytes<'a> {
     pub netinit: &'a [u8],
     pub egress_client: &'a [u8],
     pub entrypoint_runner: &'a [u8],
+    pub verity_init: &'a [u8],
 }
 
 /// Cache segment keying the agent build variant. The `run --image` path needs
@@ -89,6 +92,7 @@ impl GuestAgentLayout {
             netinit: dir.join("mvm-guest-netinit"),
             egress_client: dir.join("mvm-egress-client"),
             entrypoint_runner: dir.join("mvm-oci-entrypoint"),
+            verity_init: dir.join("mvm-verity-init"),
             dir,
         }
     }
@@ -99,6 +103,7 @@ impl GuestAgentLayout {
             && self.netinit.is_file()
             && self.egress_client.is_file()
             && self.entrypoint_runner.is_file()
+            && self.verity_init.is_file()
     }
 
     fn binaries(&self) -> MvmRuntimeBinaries {
@@ -108,6 +113,7 @@ impl GuestAgentLayout {
             netinit: self.netinit.clone(),
             egress_client: self.egress_client.clone(),
             entrypoint_runner: self.entrypoint_runner.clone(),
+            verity_init: self.verity_init.clone(),
         }
     }
 }
@@ -170,6 +176,8 @@ impl GuestAgentBuildSpec {
             "mvm-oci-init".to_string(),
             "--bin".to_string(),
             "mvm-oci-entrypoint".to_string(),
+            "--bin".to_string(),
+            "mvm-verity-init".to_string(),
             "-p".to_string(),
             "mvm-guest-helpers".to_string(),
             "--bin".to_string(),
@@ -211,6 +219,7 @@ pub fn resolve_or_build_guest_binaries(
             netinit: &built.2,
             egress_client: &built.3,
             entrypoint_runner: &built.4,
+            verity_init: &built.5,
         },
         cache_root,
         version,
@@ -234,6 +243,7 @@ pub fn install_into_cache(
     install_one(src.netinit, &layout.netinit)?;
     install_one(src.egress_client, &layout.egress_client)?;
     install_one(src.entrypoint_runner, &layout.entrypoint_runner)?;
+    install_one(src.verity_init, &layout.verity_init)?;
     Ok(layout.binaries())
 }
 
@@ -264,6 +274,7 @@ pub fn install_prebuilt_guest_binaries(
     write_exec(&layout.netinit, bytes.netinit)?;
     write_exec(&layout.egress_client, bytes.egress_client)?;
     write_exec(&layout.entrypoint_runner, bytes.entrypoint_runner)?;
+    write_exec(&layout.verity_init, bytes.verity_init)?;
     Ok(layout.binaries())
 }
 
@@ -286,7 +297,7 @@ fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
 /// Run `cargo zigbuild` for the spec, returning the built binary paths.
 pub fn build_guest_binaries(
     spec: &GuestAgentBuildSpec,
-) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf), GuestAgentBuildError> {
+) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf), GuestAgentBuildError> {
     let argv = spec.argv();
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
@@ -316,18 +327,27 @@ pub fn build_guest_binaries(
     let netinit = dir.join("mvm-guest-netinit");
     let egress_client = dir.join("mvm-egress-client");
     let entrypoint_runner = dir.join("mvm-oci-entrypoint");
+    let verity_init = dir.join("mvm-verity-init");
     for p in [
         &oci_init,
         &agent,
         &netinit,
         &egress_client,
         &entrypoint_runner,
+        &verity_init,
     ] {
         if !p.is_file() {
             return Err(GuestAgentBuildError::OutputMissing(p.clone()));
         }
     }
-    Ok((oci_init, agent, netinit, egress_client, entrypoint_runner))
+    Ok((
+        oci_init,
+        agent,
+        netinit,
+        egress_client,
+        entrypoint_runner,
+        verity_init,
+    ))
 }
 
 /// `rustup which rustc` path, or `None` if rustup isn't installed.
@@ -381,6 +401,7 @@ mod tests {
                 netinit: b"fake-netinit-elf",
                 egress_client: b"fake-egress-client-elf",
                 entrypoint_runner: b"fake-entrypoint-runner-elf",
+                verity_init: b"fake-verity-init-elf",
             },
             cache.path(),
             version,
@@ -392,6 +413,11 @@ mod tests {
         assert!(bins.netinit.is_file());
         assert!(bins.egress_client.is_file());
         assert!(bins.entrypoint_runner.is_file());
+        assert!(bins.verity_init.is_file());
+        assert_eq!(
+            std::fs::read(&bins.verity_init).unwrap(),
+            b"fake-verity-init-elf"
+        );
         assert_eq!(std::fs::read(&bins.oci_init).unwrap(), b"fake-oci-init-elf");
         assert_eq!(std::fs::read(&bins.agent).unwrap(), b"fake-agent-elf");
         assert_eq!(
@@ -447,6 +473,7 @@ mod tests {
         assert_eq!(l.netinit, l.dir.join("mvm-guest-netinit"));
         assert_eq!(l.egress_client, l.dir.join("mvm-egress-client"));
         assert_eq!(l.entrypoint_runner, l.dir.join("mvm-oci-entrypoint"));
+        assert_eq!(l.verity_init, l.dir.join("mvm-verity-init"));
     }
 
     #[test]
@@ -462,6 +489,7 @@ mod tests {
         assert!(argv.contains(&"mvm-guest-netinit".to_string()));
         assert!(argv.contains(&"mvm-oci-init".to_string()));
         assert!(argv.contains(&"mvm-oci-entrypoint".to_string()));
+        assert!(argv.contains(&"mvm-verity-init".to_string()));
         assert!(argv.contains(&"mvm-egress-client".to_string()));
         assert!(argv.contains(&"mvm-guest-helpers".to_string()));
         assert!(argv.contains(&"mvm-guest/dev-shell".to_string()));
@@ -492,11 +520,13 @@ mod tests {
         let netinit_src = tmp.path().join("n");
         let egress_client_src = tmp.path().join("e");
         let entrypoint_runner_src = tmp.path().join("r");
+        let verity_init_src = tmp.path().join("v");
         std::fs::write(&oci_init_src, b"INIT").unwrap();
         std::fs::write(&agent_src, b"AGENT").unwrap();
         std::fs::write(&netinit_src, b"NETINIT").unwrap();
         std::fs::write(&egress_client_src, b"EGRESS").unwrap();
         std::fs::write(&entrypoint_runner_src, b"RUNNER").unwrap();
+        std::fs::write(&verity_init_src, b"VERITY").unwrap();
         let cache = tmp.path().join("cache");
 
         let installed = install_into_cache(
@@ -506,6 +536,7 @@ mod tests {
                 netinit: &netinit_src,
                 egress_client: &egress_client_src,
                 entrypoint_runner: &entrypoint_runner_src,
+                verity_init: &verity_init_src,
             },
             &cache,
             version,
@@ -519,6 +550,7 @@ mod tests {
             std::fs::read(&installed.entrypoint_runner).unwrap(),
             b"RUNNER"
         );
+        assert_eq!(std::fs::read(&installed.verity_init).unwrap(), b"VERITY");
 
         // A subsequent resolve hits the cache and never builds (the
         // workspace path is bogus; if it built it would fail).
@@ -543,6 +575,7 @@ mod tests {
                 netinit: &tmp.path().join("missing-netinit"),
                 egress_client: &tmp.path().join("missing-egress-client"),
                 entrypoint_runner: &tmp.path().join("missing-entrypoint-runner"),
+                verity_init: &tmp.path().join("missing-verity-init"),
             },
             &tmp.path().join("cache"),
             version,

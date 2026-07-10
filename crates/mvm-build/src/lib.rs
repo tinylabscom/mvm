@@ -119,6 +119,10 @@ pub mod pipeline;
 /// ext4 + verity sidecar + roothash for the running mvmctl version and
 /// host arch from `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
+/// In-process assembler for the `mvm-verity-init` verity initramfs
+/// (`rootfs.initrd`): a deterministic gzip'd newc cpio carrying the init
+/// binary, device nodes, and pivot mount points.
+pub mod verity_initrd;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.
 pub use nix::manifest as nix_manifest;

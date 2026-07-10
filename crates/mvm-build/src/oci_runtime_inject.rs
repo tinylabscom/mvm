@@ -52,6 +52,12 @@ pub struct MvmRuntimeBinaries {
     pub egress_client: PathBuf,
     /// Static OCI entrypoint runner (`mvm-oci-entrypoint`).
     pub entrypoint_runner: PathBuf,
+    /// Static verity initramfs PID 1 (`mvm-verity-init`). NOT baked into the
+    /// rootfs — it goes into the separate `rootfs.initrd` cpio via
+    /// [`crate::verity_initrd`]. Carried here so the guest-binary resolver
+    /// (cache / source-checkout / embedded) produces it alongside the rootfs
+    /// set; `inject_mvm_runtime` deliberately ignores it.
+    pub verity_init: PathBuf,
 }
 
 /// Shell-free runtime config for an OCI image's declared Entrypoint/Cmd.
@@ -221,17 +227,20 @@ mod tests {
         let netinit = dir.join("netinit.bin");
         let egress_client = dir.join("egress-client.bin");
         let entrypoint_runner = dir.join("entrypoint-runner.bin");
+        let verity_init = dir.join("verity-init.bin");
         std::fs::write(&oci_init, b"\x7fELF-oci-init").unwrap();
         std::fs::write(&agent, b"\x7fELF-agent").unwrap();
         std::fs::write(&netinit, b"\x7fELF-netinit").unwrap();
         std::fs::write(&egress_client, b"\x7fELF-egress-client").unwrap();
         std::fs::write(&entrypoint_runner, b"\x7fELF-entrypoint-runner").unwrap();
+        std::fs::write(&verity_init, b"\x7fELF-verity-init").unwrap();
         MvmRuntimeBinaries {
             oci_init,
             agent,
             netinit,
             egress_client,
             entrypoint_runner,
+            verity_init,
         }
     }
 

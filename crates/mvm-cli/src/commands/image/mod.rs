@@ -593,6 +593,7 @@ fn embedded_guest_binaries() -> Option<mvm_build::run_image::PrebuiltGuestBinari
         netinit: find("mvm-guest-netinit")?,
         egress_client: find("mvm-egress-client")?,
         entrypoint_runner: find("mvm-oci-entrypoint")?,
+        verity_init: find("mvm-verity-init")?,
     })
 }
 

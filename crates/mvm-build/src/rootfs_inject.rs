@@ -13,30 +13,62 @@
 //!
 //! The cpio writer is pure + host-side (no ext4, no VM), so it is unit-testable.
 
-/// One file or directory in the initramfs.
+/// One file, directory, or device node in the initramfs.
 pub struct CpioEntry {
     /// Archive path, no leading slash (e.g. `init`, `payload/manifest`).
     pub path: String,
     /// Full mode incl. type bits (e.g. `0o100755` for an executable file,
-    /// `0o040755` for a directory).
+    /// `0o040755` for a directory, `0o020600` for a char device).
     pub mode: u32,
-    /// File contents (empty for a directory).
+    /// File contents (empty for a directory or device node).
     pub data: Vec<u8>,
+    /// `(major, minor)` for a device node; `None` for files and directories.
+    /// Written into the newc `rdevmajor`/`rdevminor` header fields so the
+    /// kernel materializes the node with the right backing device.
+    pub rdev: Option<(u32, u32)>,
 }
+
+// newc type bits (subset of S_IFMT). Kept local so the cpio writer has no
+// libc dependency and stays host-buildable on every target.
+const S_IFDIR: u32 = 0o040000;
+const S_IFREG: u32 = 0o100000;
+const S_IFCHR: u32 = 0o020000;
+const S_IFBLK: u32 = 0o060000;
+const S_IFMT: u32 = 0o170000;
 
 impl CpioEntry {
     pub fn file(path: &str, mode: u32, data: Vec<u8>) -> Self {
         Self {
             path: path.to_string(),
-            mode: 0o100000 | (mode & 0o7777),
+            mode: S_IFREG | (mode & 0o7777),
             data,
+            rdev: None,
         }
     }
     pub fn dir(path: &str) -> Self {
         Self {
             path: path.to_string(),
-            mode: 0o040000 | 0o755,
+            mode: S_IFDIR | 0o755,
             data: Vec::new(),
+            rdev: None,
+        }
+    }
+    /// A character-special device node (e.g. `/dev/console` = `c 5 1`).
+    pub fn char_dev(path: &str, mode: u32, major: u32, minor: u32) -> Self {
+        Self {
+            path: path.to_string(),
+            mode: S_IFCHR | (mode & 0o7777),
+            data: Vec::new(),
+            rdev: Some((major, minor)),
+        }
+    }
+    /// A block-special device node (e.g. `/dev/vda` = `b 254 0`).
+    pub fn block_dev(path: &str, mode: u32, major: u32, minor: u32) -> Self {
+        Self {
+            path: path.to_string(),
+            mode: S_IFBLK | (mode & 0o7777),
+            data: Vec::new(),
+            rdev: Some((major, minor)),
         }
     }
 }
@@ -55,18 +87,30 @@ pub fn build_newc_cpio(entries: &[CpioEntry]) -> Vec<u8> {
     // A unique inode per entry keeps them distinct (the kernel uses it for
     // hardlink detection; unique inodes mean no accidental links).
     for (i, e) in entries.iter().enumerate() {
-        write_entry(&mut out, i as u32 + 1, e.mode, e.path.as_bytes(), &e.data);
+        write_entry(
+            &mut out,
+            i as u32 + 1,
+            e.mode,
+            e.path.as_bytes(),
+            &e.data,
+            e.rdev.unwrap_or((0, 0)),
+        );
     }
     // Trailer: an entry named TRAILER!!! with nlink 1 and no data.
-    write_entry(&mut out, 0, 0, b"TRAILER!!!", &[]);
+    write_entry(&mut out, 0, 0, b"TRAILER!!!", &[], (0, 0));
     out
 }
 
 /// Write one newc record: a 110-byte ASCII header, the NUL-terminated name
-/// (padded to 4), then the data (padded to 4).
-fn write_entry(out: &mut Vec<u8>, ino: u32, mode: u32, name: &[u8], data: &[u8]) {
+/// (padded to 4), then the data (padded to 4). `rdev` is `(major, minor)` for
+/// device nodes and `(0, 0)` otherwise.
+fn write_entry(out: &mut Vec<u8>, ino: u32, mode: u32, name: &[u8], data: &[u8], rdev: (u32, u32)) {
     let namesize = name.len() as u32 + 1; // includes the trailing NUL
-    let nlink: u32 = if mode & 0o040000 != 0 { 2 } else { 1 };
+    // Directories get nlink 2 (`.` + `..`); everything else (files AND device
+    // nodes) gets 1. The check must mask the full type field — S_IFBLK
+    // (0o060000) shares the 0o040000 bit with S_IFDIR, so a bare bit test
+    // would misclassify block devices as directories.
+    let nlink: u32 = if mode & S_IFMT == S_IFDIR { 2 } else { 1 };
     let f = |v: u32| format!("{v:08x}");
     out.extend_from_slice(b"070701"); // newc magic
     out.extend_from_slice(f(ino).as_bytes());
@@ -78,8 +122,8 @@ fn write_entry(out: &mut Vec<u8>, ino: u32, mode: u32, name: &[u8], data: &[u8])
     out.extend_from_slice(f(data.len() as u32).as_bytes()); // filesize
     out.extend_from_slice(f(0).as_bytes()); // devmajor
     out.extend_from_slice(f(0).as_bytes()); // devminor
-    out.extend_from_slice(f(0).as_bytes()); // rdevmajor
-    out.extend_from_slice(f(0).as_bytes()); // rdevminor
+    out.extend_from_slice(f(rdev.0).as_bytes()); // rdevmajor
+    out.extend_from_slice(f(rdev.1).as_bytes()); // rdevminor
     out.extend_from_slice(f(namesize).as_bytes());
     out.extend_from_slice(f(0).as_bytes()); // check (0 for newc)
     out.extend_from_slice(name);
