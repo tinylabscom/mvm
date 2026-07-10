@@ -1,5 +1,5 @@
 **Additional 2026-07-10 — Plan 242's refreshed ship candidate is now pushed
-and revalidated at exact head `5cb977a69e4b45e5cb40ab1d66cfc61308c80e0a`.**
+and revalidated at exact head `f5c326051f84aacedb6f05520657480e7c539d25`.**
 The code/docs contract is stable: guest-executed runtime binaries are
 centralized into the shared read-only cache artifact under
 `~/.cache/mvm/runtime-overlay/<version>/<arch>/`; every admitted backend/tier

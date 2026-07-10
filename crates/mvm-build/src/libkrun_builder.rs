@@ -5179,8 +5179,7 @@ mod tests {
         env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &script);
 
         let arch_dir = cache_root.join("builder-vm").join(&arch);
-        let expected_cmdline =
-            "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init";
+        let expected_cmdline = "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init";
 
         #[cfg(target_os = "linux")]
         {
@@ -5197,7 +5196,10 @@ mod tests {
                 other => panic!("expected LibkrunUnavailable, got {other:?}"),
             }
             assert_eq!(std::fs::read(arch_dir.join("vmlinux")).unwrap(), b"kernel");
-            assert_eq!(std::fs::read(arch_dir.join("rootfs.ext4")).unwrap(), b"rootfs");
+            assert_eq!(
+                std::fs::read(arch_dir.join("rootfs.ext4")).unwrap(),
+                b"rootfs"
+            );
             assert_eq!(
                 std::fs::read_to_string(arch_dir.join("cmdline.txt")).unwrap(),
                 format!("{expected_cmdline}\n")
@@ -5206,8 +5208,7 @@ mod tests {
 
         #[cfg(not(target_os = "linux"))]
         {
-            let image =
-                ensure_builder_vm_image().expect("auto-bootstrap should populate cache");
+            let image = ensure_builder_vm_image().expect("auto-bootstrap should populate cache");
             match image {
                 BuilderVmImage::Rootfs {
                     kernel_path,
