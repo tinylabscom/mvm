@@ -211,13 +211,9 @@ pub(in crate::commands) struct ConsoleArgs {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct ReapArgs {
-    /// Print the IDs of reaped sessions on stdout (one per line).
-    #[arg(long)]
-    pub verbose: bool,
-}
+pub(in crate::commands) struct ReapArgs {}
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     // Opportunistic lazy reap: every session verb sweeps idle records
     // before its own work. Failures are logged, not propagated —
     // reaping is best-effort cleanup, not load-bearing for the verb.
@@ -236,7 +232,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         Cmd::Exec(a) => cmd_exec(a),
         Cmd::RunCode(a) => cmd_run_code(a),
         Cmd::Console(a) => cmd_console(a),
-        Cmd::Reap(a) => cmd_reap(a),
+        Cmd::Reap(a) => cmd_reap(cli, a),
     }
 }
 
@@ -1021,8 +1017,8 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     Ok(())
 }
 
-fn cmd_reap(args: ReapArgs) -> Result<()> {
-    let reaped = reap_expired_sessions(args.verbose);
+fn cmd_reap(cli: &Cli, _args: ReapArgs) -> Result<()> {
+    let reaped = reap_expired_sessions(cli.verbose > 0);
     ui::info(&format!("Reaped {} idle session(s).", reaped.len()));
     Ok(())
 }

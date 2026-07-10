@@ -204,11 +204,10 @@ pub(in crate::commands) struct MachineRunArgs {
     /// the computed sealed-prod default. Values must be production-safe verbs.
     #[arg(long = "agent-verb", value_name = "VERB")]
     pub agent_verb: Vec<String>,
-    /// Share a host directory into the guest: `HOST_PATH:/GUEST_PATH[:MODE]`.
+    /// Mount a host directory into the guest: `HOST_PATH:/GUEST_PATH[:MODE]`.
     /// MODE defaults to `ro`; `rw` needs `--profile dev` or `permissive`.
-    /// (No short flag: `-v` is the global verbosity counter and `-d` is
-    /// `--detach`.)
-    #[arg(long = "volume")]
+    /// `--volume` remains as a compatibility alias; `-v` is global verbosity.
+    #[arg(long = "mount", visible_alias = "volume")]
     pub volume: Vec<String>,
     /// Explicit environment variable to inject (KEY=VALUE). Repeatable.
     #[arg(short, long)]
@@ -497,7 +496,7 @@ fn profile_allows_writable_volume(profile: &str) -> bool {
     matches!(profile, "dev" | "permissive")
 }
 
-/// Validate `--volume` specs and normalise them for storage in a managed
+/// Validate `--mount`/`--volume` specs and normalise them for storage in a managed
 /// `MachineSpec`. Each spec is run through the shared
 /// `vm_volume_from_spec_validated` choke point (protected-dir deny-list +
 /// guest-mount validation, claim 1) and its host path is canonicalised to an

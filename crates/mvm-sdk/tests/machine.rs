@@ -92,7 +92,7 @@ fn machine_run_builder_emits_machine_cli_argv() {
             "1G",
             "--profile",
             "dev",
-            "--volume",
+            "--mount",
             "/src:/workspace:ro",
             "--env",
             "RUST_LOG=info",

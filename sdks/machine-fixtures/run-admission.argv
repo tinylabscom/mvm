@@ -9,7 +9,7 @@ api.example.com
 1G
 --profile
 dev
---volume
+--mount
 /tmp/mvm-sdk-src:/workspace:ro
 --env
 TOKEN=secret

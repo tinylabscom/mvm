@@ -61,8 +61,8 @@ pub fn parse_port_spec(spec: &str) -> Result<(u16, u16)> {
     }
 }
 
-/// Parsed volume specification from the `--volume/-v` CLI flag (or the
-/// `MVM_VOLUMES` env var).
+/// Parsed mount specification from the `--mount` CLI flag, its compatibility
+/// `--volume` alias, or the `MVM_VOLUMES` env var.
 ///
 /// Grammar (split on `:`):
 /// - `host:/guest`             — live host-directory share (virtio-fs)
@@ -196,7 +196,7 @@ pub fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
     }
 }
 
-/// Merge the `MVM_VOLUMES` env baseline with `--volume` flag values.
+/// Merge the `MVM_VOLUMES` env baseline with `--mount`/`--volume` flag values.
 /// Env entries come first; flag values are appended (the flag adds to
 /// the env, it does not replace it). See `mvm_core::config::mvm_volumes_env`.
 pub fn merge_volume_specs(flag_specs: &[String]) -> Vec<String> {

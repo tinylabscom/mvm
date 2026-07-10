@@ -76,6 +76,12 @@ mvmctl machine run --image alpine --cpus 2 --memory 512M \
 
 # Build a Nix flake and run it transiently in one step
 mvmctl machine run --flake . -- ./app
+
+# Share a host directory read-only; use :rw only with --profile dev/permissive
+mvmctl machine run --image alpine --mount .:/work -- ls /work
+
+# Increase logging globally; RUST_LOG still overrides the generated filter
+mvmctl machine run --image alpine -vvv --allow-host api.example.com -- ps aux
 ```
 
 ### Persistent machines

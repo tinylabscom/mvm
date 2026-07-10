@@ -344,7 +344,7 @@ fn run_accepts_passthrough_flags() {
         "1G",
         "--profile",
         "dev",
-        "--volume",
+        "--mount",
         "/host:/work:rw",
         "-e",
         "FOO=bar",
@@ -369,12 +369,12 @@ fn run_accepts_passthrough_flags() {
 }
 
 #[test]
-fn volume_flag_carries_dir_share_and_d_is_no_longer_a_share() {
+fn mount_flag_carries_dir_share_and_d_is_no_longer_a_share() {
     let args = parse_run(&[
         "run",
         "--image",
         "alpine",
-        "--volume",
+        "--mount",
         "/host:/work:rw",
         "--",
         "true",
@@ -651,7 +651,7 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
         "x",
         "--name",
         "web",
-        "--volume",
+        "--mount",
         &format!("{host}:/work:ro"),
     ])
     .expect("parse");
@@ -679,7 +679,7 @@ fn run_rw_volume_requires_dev_profile() {
         "x",
         "--name",
         "web",
-        "--volume",
+        "--mount",
         &format!("{host}:/work:rw"),
     ])
     .expect("parse");
@@ -696,7 +696,7 @@ fn run_rw_volume_requires_dev_profile() {
         "web",
         "--profile",
         "dev",
-        "--volume",
+        "--mount",
         &format!("{host}:/work:rw"),
     ])
     .expect("parse");

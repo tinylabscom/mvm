@@ -301,9 +301,9 @@ Volumes let you pass files from your host into the microVM at boot — config fi
 ```bash
 # Mount host directories into the VM
 mvmctl machine run --flake . --name hello -d \
-    --volume ./config:/mnt/config \
-    --volume ./secrets:/mnt/secrets \
-    --volume ./data:/mnt/data:1024
+    --mount ./config:/mnt/config \
+    --mount ./secrets:/mnt/secrets \
+    --mount ./data:/mnt/data:1024
 mvmctl machine forward hello -p 8080:8080
 ```
 
@@ -320,8 +320,8 @@ Config and secrets are read-only by design — you don't want your app accidenta
 ```bash
 # Read-only config + read-write 1GB data volume
 mvmctl machine run --flake . --name hello -d \
-    --volume ./config:/mnt/config \
-    --volume ./data:/mnt/data:1024
+    --mount ./config:/mnt/config \
+    --mount ./data:/mnt/data:1024
 mvmctl machine forward hello -p 8080:8080
 ```
 

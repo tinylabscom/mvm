@@ -135,7 +135,7 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     /// the on-disk sealed volume before launch — claim 9.
     /// `None` preserves the claim-8 baseline (no deps gate).
     pub deps_volume: Option<mvm_core::plan::DepsVolumeBinding>,
-    /// User-supplied host-fs grants (`--volume` / `MVM_VOLUMES`) baked
+    /// User-supplied host-fs grants (`--mount` / `MVM_VOLUMES`) baked
     /// into the signed plan + emitted to the chain-signed audit log
     /// (claim 1 / claim 8). Empty for the common no-volume case.
     pub shares: Vec<mvm_core::plan::HostShareGrant>,

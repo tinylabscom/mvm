@@ -63,10 +63,10 @@ The data drive (`/dev/vdd`, mounted at `/mnt/data/`) is a persistent ext4 volume
 - Survives restarts and snapshots
 - Use for application state, databases, logs
 
-Specify size with `--volume`:
+Specify size with `--mount`:
 
 ```bash
-mvmctl machine run --flake . --volume ./data:/data:1024
+mvmctl machine run --flake . --mount ./data:/data:1024
 ```
 
 For managed encrypted local volumes and workspace cleanup policy, see

@@ -13,7 +13,7 @@ Think `docker run --rm`, but with a microVM as the isolation boundary.
 
 ```bash
 mvmctl machine run --image alpine -- uname -a
-mvmctl machine run --flake . --volume .:/work -- ls /work
+mvmctl machine run --flake . --mount .:/work -- ls /work
 mvmctl machine run --manifest my-tpl -- /bin/true
 ```
 
@@ -48,23 +48,24 @@ default image:
 - `--manifest <name>` — a pre-built manifest slot or registered template, which
   skips the build step entirely.
 
-## Sharing host directories: `--volume`
+## Sharing host directories: `--mount`
 
-`--volume HOST:GUEST[:MODE]` shares a host directory into the guest at
+`--mount HOST:GUEST[:MODE]` shares a host directory into the guest at
 `GUEST`. `MODE` is `ro` (default) or `rw`; a writable share requires
-`--profile dev` or `--profile permissive`. The flag is repeatable.
+`--profile dev` or `--profile permissive`. The flag is repeatable. `--volume`
+remains accepted as a compatibility alias, but `-v` is global verbosity.
 
 ### Read-only (default)
 
 ```bash
 echo "hello" > /tmp/foo
-mvmctl machine run --image alpine --volume /tmp:/host -- cat /host/foo     # prints "hello"
+mvmctl machine run --image alpine --mount /tmp:/host -- cat /host/foo     # prints "hello"
 ```
 
 ### Writable: `:rw`
 
 ```bash
-mvmctl machine run --flake . --profile dev --volume .:/work:rw -- sh -c 'echo result > /work/output.txt'
+mvmctl machine run --flake . --profile dev --mount .:/work:rw -- sh -c 'echo result > /work/output.txt'
 cat ./output.txt       # "result" — written by the guest
 ```
 
@@ -79,8 +80,8 @@ Modes are independent per directory:
 
 ```bash
 mvmctl machine run --flake . --profile dev \
-  --volume ./src:/work:rw \
-  --volume ~/.cargo:/root/.cargo:ro \
+  --mount ./src:/work:rw \
+  --mount ~/.cargo:/root/.cargo:ro \
   -- cargo build --manifest-path /work/Cargo.toml
 ```
 
@@ -104,14 +105,14 @@ The snapshot path activates only when:
 
 - the image source is a registered template (an OCI image or ad-hoc flake has no
   template snapshot to restore from), AND
-- the request has **no** `--volume` extras (extra drives would mismatch
+- the request has **no** `--mount` extras (extra drives would mismatch
   the snapshot's recorded layout), AND
 - the active backend reports snapshot support.
 
 On macOS backends without Firecracker (HVF, libkrun), vsock snapshots return `os error 95` (EOPNOTSUPP);
 restore failures fall back to cold boot with a warning rather than
 aborting. The harder branch -- parameterized snapshots that allow
-`--volume` -- is tracked in [issue #7](https://github.com/tinylabscom/mvm/issues/7).
+`--mount` -- is tracked in [issue #7](https://github.com/tinylabscom/mvm/issues/7).
 
 ## Resource controls
 
@@ -190,7 +191,7 @@ highest):
 
 ## Teardown semantics
 
-- **Normal exit**: VM is stopped and the staging dir for `--volume`
+- **Normal exit**: VM is stopped and the staging dir for `--mount`
   images is cleaned up.
 - **Non-zero exit**: same as normal exit; `mvmctl machine run` propagates the
   guest's exit code.
@@ -211,10 +212,10 @@ highest):
   any other transient VM gets -- if your `--manifest` exposes outbound
   internet, so does `mvmctl machine run` from that template.
 - **Stdin** is currently *not* forwarded to the guest. Pipe data via a
-  `--volume`-shared file instead. Streaming stdin is a future
+  `--mount`-shared file instead. Streaming stdin is a future
   improvement.
 - **Persistent state** doesn't survive teardown beyond what `:rw`
-  `--volume` rsyncs back. For larger or longer-lived state, use
+  `--mount` rsyncs back. For larger or longer-lived state, use
   `mvmctl machine run` with a persistent volume.
 
 ## See also
