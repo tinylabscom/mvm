@@ -5,9 +5,9 @@
 //! build script compiles them during the build phase instead.
 //!
 //! Resolution order (first existing file wins): `$<ENV_VAR>` override →
-//! alongside the current exe (a downloaded release ships them there) →
 //! `$MVM_AUX_BIN_DIR` (the build script's dir, bridged into the env at startup)
-//! → workspace `target/{release,debug}` (an explicit `just build-supervisors`).
+//! → alongside the current exe (a downloaded release ships them there) →
+//! workspace `target/{release,debug}` (an explicit `just build-supervisors`).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -53,16 +53,20 @@ pub(crate) fn resolve(spec: &AuxBin) -> Result<PathBuf> {
     )
 }
 
-/// Ordered directories to search for a helper: exe dir, then the build script's
-/// dir, then the workspace target dirs. Absent optional dirs are dropped.
+/// Ordered directories to search for a helper: the build script's dir, then
+/// the exe dir, then the workspace target dirs. Absent optional dirs are
+/// dropped. The build script's dir comes first so a freshly built helper
+/// there isn't shadowed by a stale copy sitting next to a dev `cargo run`
+/// exe (`target/debug/mvmctl`, which cargo never refreshes for a `[[bin]]`
+/// it didn't just build).
 fn assemble_candidate_dirs(
     exe_dir: Option<PathBuf>,
     aux_dir: Option<PathBuf>,
     target_dirs: Vec<PathBuf>,
 ) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    dirs.extend(exe_dir);
     dirs.extend(aux_dir);
+    dirs.extend(exe_dir);
     dirs.extend(target_dirs);
     dirs
 }
@@ -147,7 +151,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn candidate_order_is_exe_then_aux_then_targets() {
+    fn candidate_order_is_aux_then_exe_then_targets() {
         let dirs = assemble_candidate_dirs(
             Some(PathBuf::from("/exe")),
             Some(PathBuf::from("/aux/debug")),
@@ -159,8 +163,8 @@ mod tests {
         assert_eq!(
             dirs,
             vec![
-                PathBuf::from("/exe"),
                 PathBuf::from("/aux/debug"),
+                PathBuf::from("/exe"),
                 PathBuf::from("/repo/target/release"),
                 PathBuf::from("/repo/target/debug"),
             ]

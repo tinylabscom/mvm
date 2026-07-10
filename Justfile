@@ -137,7 +137,6 @@ e2e-core-demo:
 build-supervisors:
     cargo build -p mvm-hostd --bin mvm-substitution-endpoint
     cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
-    cargo build -p mvm-vm-host --bin mvm-vz-supervisor
     cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
 
 # Live macOS Apple-Silicon HVF proof for OCI --allow-host:

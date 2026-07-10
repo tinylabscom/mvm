@@ -198,6 +198,18 @@ fn build_native_aux_helpers(workspace_root: &Path, out_dir: &Path) {
         "cargo:rerun-if-changed={}",
         workspace_root.join("crates/mvm-hostd/src").display()
     );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("Cargo.lock").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("crates/mvm-core/src").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("crates/deps/libkrun-sys/src").display()
+    );
 
     let skip = build_aux_helpers::should_skip_aux_helpers(
         std::env::var("MVM_SKIP_EMBED_BINARIES").ok().as_deref(),
