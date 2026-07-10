@@ -1,3 +1,5 @@
+#[path = "build_aux_helpers.rs"]
+mod build_aux_helpers;
 #[path = "build_embed_mode.rs"]
 mod build_embed_mode;
 
@@ -129,6 +131,8 @@ fn main() {
         workspace_root.join("crates/mvm-guest/src").display()
     );
 
+    build_native_aux_helpers(&workspace_root, &out_dir);
+
     let embedded_rs = render_embedded_rs(&entries);
     std::fs::write(out_dir.join("embedded.rs"), embedded_rs).unwrap();
     println!(
@@ -167,6 +171,95 @@ fn should_skip_embed_binaries() -> bool {
         std::env::var("MVM_SKIP_EMBED_BINARIES").ok().as_deref(),
         std::env::var("MVM_EMBED_BINARIES").ok().as_deref(),
     )
+}
+
+/// Compile the native per-VM host helpers into a dedicated target dir under
+/// OUT_DIR and export that dir as `MVM_AUX_BIN_DIR`, so `cargo run` produces
+/// them during its build phase rather than mvmctl shelling out to `cargo` at
+/// run time. The dedicated target dir avoids the outer build-lock deadlock the
+/// same way the embedded-bins path does (see the note in `main`).
+fn build_native_aux_helpers(workspace_root: &Path, out_dir: &Path) {
+    let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let target_arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
+    let aux_target = out_dir.join("aux-helper-target");
+    let bin_dir = aux_target.join(&profile);
+
+    // Always export the dir — even on skip or an unbuildable helper — so
+    // `env!("MVM_AUX_BIN_DIR")` compiles in mvm-cli; resolution `is_file`-checks
+    // each candidate, so a dir with missing bins is harmless.
+    println!("cargo:rustc-env=MVM_AUX_BIN_DIR={}", bin_dir.display());
+    println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("crates/mvm-vm-host/src").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        workspace_root.join("crates/mvm-hostd/src").display()
+    );
+
+    let skip = build_aux_helpers::should_skip_aux_helpers(
+        std::env::var("MVM_SKIP_EMBED_BINARIES").ok().as_deref(),
+    );
+    let libkrun_present = libkrun_header_present();
+    for spec in build_aux_helpers::aux_helper_specs(&target_os, &target_arch, libkrun_present, skip)
+    {
+        run_cargo_native_build(workspace_root, &aux_target, &profile, &spec);
+    }
+}
+
+/// Nested native `cargo build` for one helper into `target_dir`. Fail-open: a
+/// helper this host can't build must not break the outer compile — aux_bin
+/// surfaces a precise error only if the helper is actually needed at run time.
+fn run_cargo_native_build(
+    root: &Path,
+    target_dir: &Path,
+    profile: &str,
+    spec: &build_aux_helpers::AuxHelperSpec,
+) {
+    eprintln!(
+        "[build.rs] building per-VM host helper: {} (-p {})",
+        spec.bin, spec.package
+    );
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut cmd = Command::new(cargo);
+    cmd.args(["build", "-p", spec.package, "--bin", spec.bin]);
+    if profile == "release" {
+        cmd.arg("--release");
+    }
+    if !spec.features.is_empty() {
+        cmd.arg("--features").arg(spec.features.join(","));
+    }
+    // Dedicated target dir — the outer `cargo` holds the workspace `target/`
+    // lock for the whole build-script run; a nested cargo aimed at it deadlocks.
+    cmd.env("CARGO_TARGET_DIR", target_dir).current_dir(root);
+    match cmd.status() {
+        Ok(status) if status.success() => {}
+        other => eprintln!(
+            "[build.rs] per-VM helper {} not built ({other:?}); it will be \
+             resolved at run time only if needed",
+            spec.bin
+        ),
+    }
+}
+
+/// Whether `libkrun.h` is installed, mirroring the probe `libkrun-sys`'s build
+/// script uses to decide the `-lkrun` link. Gate for building the libkrun
+/// supervisor so an HVF-only / CI host does not attempt (and noisily fail) it.
+fn libkrun_header_present() -> bool {
+    if let Some(p) = std::env::var_os("MVM_LIBKRUN_HEADER") {
+        if Path::new(&p).is_file() {
+            return true;
+        }
+    }
+    [
+        "/opt/homebrew/include/libkrun.h",
+        "/usr/local/include/libkrun.h",
+        "/usr/include/libkrun.h",
+    ]
+    .iter()
+    .any(|p| Path::new(p).is_file())
 }
 
 fn read_pinned_toolchain(root: &Path) -> Pin {
