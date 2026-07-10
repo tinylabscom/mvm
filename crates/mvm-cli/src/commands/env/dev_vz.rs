@@ -24,6 +24,12 @@ use crate::ui;
 // ============================================================================
 
 pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
+#[cfg(feature = "builder-vm")]
+const DEV_GUEST_AGENT_READY_LINE: &str = "mvm-guest-agent: listening";
+#[cfg(feature = "builder-vm")]
+const DEV_VM_KERNEL_PANIC_BANNER: &str = "Kernel panic - not syncing:";
+#[cfg(feature = "builder-vm")]
+const DEV_VM_GUEST_HALT_BANNER: &str = "System halted";
 
 /// Stable session id for the long-lived dev builder VM. Fixed (not the
 /// random per-build id the warm pool uses) so a separate `dev down`
@@ -313,7 +319,10 @@ pub(in crate::commands) fn is_vz_dev_running() -> bool {
         if !mvm_build::vz_builder::persistent_vz_supervisor_alive(&state_dir) {
             return false;
         }
-        dev_vm_guest_agent_connect().is_ok()
+        let console_log = state_dir.join("console.log");
+        dev_vm_console_signals_agent_ready(&console_log)
+            && probe_dev_vm_kernel_with_timeout(std::time::Duration::from_millis(500), Some(1))
+                .is_some()
     }
     #[cfg(not(feature = "builder-vm"))]
     {
@@ -359,20 +368,110 @@ fn dev_vz_snapshot_exists() -> bool {
 
 #[cfg(feature = "builder-vm")]
 fn wait_for_dev_vm_ready(console_log: &std::path::Path) -> Result<()> {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let state_dir = console_log.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Dev VM console log path has no parent directory: {}",
+            console_log.display()
+        )
+    })?;
+    wait_for_dev_vm_ready_with(
+        console_log,
+        || mvm_build::vz_builder::persistent_vz_supervisor_alive(state_dir),
+        || {
+            dev_vm_console_signals_agent_ready(console_log)
+                && probe_dev_vm_kernel_with_timeout(std::time::Duration::from_millis(500), Some(1))
+                    .is_some()
+        },
+        || dev_vm_console_failure(console_log),
+        std::time::Duration::from_secs(60),
+        std::time::Duration::from_millis(500),
+        2,
+    )
+}
+
+#[cfg(feature = "builder-vm")]
+fn wait_for_dev_vm_ready_with<FSupervisorAlive, FGuestReady, FFailure>(
+    console_log: &std::path::Path,
+    mut supervisor_alive: FSupervisorAlive,
+    mut guest_ready: FGuestReady,
+    mut failure_reason: FFailure,
+    timeout: std::time::Duration,
+    poll_interval: std::time::Duration,
+    required_ready_polls: usize,
+) -> Result<()>
+where
+    FSupervisorAlive: FnMut() -> bool,
+    FGuestReady: FnMut() -> bool,
+    FFailure: FnMut() -> Option<String>,
+{
+    let required_ready_polls = required_ready_polls.max(1);
+    let deadline = std::time::Instant::now() + timeout;
+    let mut saw_supervisor_alive = false;
+    let mut consecutive_ready_polls = 0usize;
+
     loop {
         if std::time::Instant::now() > deadline {
             anyhow::bail!(
-                "Dev VM did not become ready within 60 seconds.\n\
+                "Dev VM did not become ready within {} seconds.\n\
+                 Check the console log: {}",
+                timeout.as_secs(),
+                console_log.display()
+            );
+        }
+
+        if let Some(reason) = failure_reason() {
+            anyhow::bail!(
+                "Dev VM failed during startup: {reason}\n\
                  Check the console log: {}",
                 console_log.display()
             );
         }
-        if dev_vm_guest_agent_connect().is_ok() {
-            return Ok(());
+
+        let alive = supervisor_alive();
+        if alive {
+            saw_supervisor_alive = true;
+        } else {
+            consecutive_ready_polls = 0;
+            if saw_supervisor_alive {
+                anyhow::bail!(
+                    "Dev VM supervisor exited during startup before the guest stayed ready.\n\
+                     Check the console log: {}",
+                    console_log.display()
+                );
+            }
         }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        if alive && guest_ready() {
+            consecutive_ready_polls += 1;
+            if consecutive_ready_polls >= required_ready_polls {
+                return Ok(());
+            }
+        } else {
+            consecutive_ready_polls = 0;
+        }
+
+        std::thread::sleep(poll_interval);
     }
+}
+
+#[cfg(feature = "builder-vm")]
+fn dev_vm_console_signals_agent_ready(console_log: &std::path::Path) -> bool {
+    std::fs::read_to_string(console_log)
+        .map(|log| log.contains(DEV_GUEST_AGENT_READY_LINE))
+        .unwrap_or(false)
+}
+
+#[cfg(feature = "builder-vm")]
+fn dev_vm_console_failure(console_log: &std::path::Path) -> Option<String> {
+    let log = std::fs::read_to_string(console_log).ok()?;
+    find_dev_vm_console_failure_in(&log).map(ToOwned::to_owned)
+}
+
+#[cfg(feature = "builder-vm")]
+fn find_dev_vm_console_failure_in(log: &str) -> Option<&str> {
+    log.lines().find(|line| {
+        line.contains(DEV_VM_KERNEL_PANIC_BANNER) || line.contains(DEV_VM_GUEST_HALT_BANNER)
+    })
 }
 
 #[cfg(feature = "builder-vm")]
@@ -834,22 +933,38 @@ pub(super) fn cmd_dev_vz_status(json: bool) -> Result<()> {
 /// (which carries the guest-agent transport) is off.
 #[cfg(feature = "builder-vm")]
 fn probe_dev_vm_kernel() -> Option<String> {
+    probe_dev_vm_kernel_with_timeout(std::time::Duration::from_secs(1), Some(5))
+}
+
+#[cfg(feature = "builder-vm")]
+fn probe_dev_vm_kernel_with_timeout(
+    io_timeout: std::time::Duration,
+    guest_timeout_secs: Option<u64>,
+) -> Option<String> {
     let mut stream = dev_vm_guest_agent_connect().ok()?;
+    stream.set_read_timeout(Some(io_timeout)).ok()?;
+    stream.set_write_timeout(Some(io_timeout)).ok()?;
     // Inbound vsock RPC audit.
     super::super::shared::emit_vsock_rpc_audit(
         DEV_VM_NAME,
         &mvm_guest::vsock::GuestRequest::Exec {
             command: "uname -r".to_string(),
             stdin: None,
-            timeout_secs: Some(5),
+            timeout_secs: guest_timeout_secs,
         },
     );
     let mut out_buf: Vec<u8> = Vec::new();
-    mvm_guest::vsock::send_exec_streaming(&mut stream, "uname -r", None, Some(5), |event| {
-        if let mvm_guest::vsock::ExecEvent::Stdout { chunk } = event {
-            out_buf.extend_from_slice(chunk);
-        }
-    })
+    mvm_guest::vsock::send_exec_streaming(
+        &mut stream,
+        "uname -r",
+        None,
+        guest_timeout_secs,
+        |event| {
+            if let mvm_guest::vsock::ExecEvent::Stdout { chunk } = event {
+                out_buf.extend_from_slice(chunk);
+            }
+        },
+    )
     .ok()?;
     let kernel = String::from_utf8_lossy(&out_buf).trim().to_string();
     (!kernel.is_empty()).then_some(kernel)
@@ -8406,5 +8521,122 @@ mod vz_residency_keeper_tests {
         touch_dev_vz_activity_at(tmp.path(), 55).expect("write dev vz activity timestamp");
 
         assert_eq!(read_dev_vz_last_activity(tmp.path()), Some(55));
+    }
+}
+
+#[cfg(all(test, feature = "builder-vm"))]
+mod vz_readiness_tests {
+    use super::{
+        dev_vm_console_failure, find_dev_vm_console_failure_in, wait_for_dev_vm_ready_with,
+    };
+
+    #[test]
+    fn readiness_requires_consecutive_supervisor_and_guest_success() {
+        let tmp = tempfile::tempdir().expect("create temporary console dir");
+        let console_log = tmp.path().join("console.log");
+        let mut supervisor_polls = [false, true, true].into_iter();
+        let mut guest_polls = [false, true, true].into_iter();
+
+        let result = wait_for_dev_vm_ready_with(
+            &console_log,
+            || supervisor_polls.next().unwrap_or(true),
+            || guest_polls.next().unwrap_or(true),
+            || None,
+            std::time::Duration::from_millis(10),
+            std::time::Duration::ZERO,
+            2,
+        );
+
+        assert!(
+            result.is_ok(),
+            "two consecutive ready polls with a live supervisor should succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn readiness_rejects_supervisor_exit_after_first_ready_probe() {
+        let tmp = tempfile::tempdir().expect("create temporary console dir");
+        let console_log = tmp.path().join("console.log");
+        let mut supervisor_polls = [true, false].into_iter();
+        let mut guest_polls = [true, true].into_iter();
+
+        let err = wait_for_dev_vm_ready_with(
+            &console_log,
+            || supervisor_polls.next().unwrap_or(false),
+            || guest_polls.next().unwrap_or(true),
+            || None,
+            std::time::Duration::from_millis(10),
+            std::time::Duration::ZERO,
+            2,
+        )
+        .expect_err("supervisor exit after the first ready probe must fail startup");
+
+        assert!(
+            err.to_string().contains("supervisor exited during startup"),
+            "error must explain the early supervisor exit: {err}"
+        );
+    }
+
+    #[test]
+    fn readiness_resets_after_guest_probe_regression() {
+        let tmp = tempfile::tempdir().expect("create temporary console dir");
+        let console_log = tmp.path().join("console.log");
+        let mut supervisor_polls = [true, true, true, true].into_iter();
+        let mut guest_polls = [true, false, true, true].into_iter();
+
+        let result = wait_for_dev_vm_ready_with(
+            &console_log,
+            || supervisor_polls.next().unwrap_or(true),
+            || guest_polls.next().unwrap_or(true),
+            || None,
+            std::time::Duration::from_millis(10),
+            std::time::Duration::ZERO,
+            2,
+        );
+
+        assert!(
+            result.is_ok(),
+            "a guest-probe regression must reset readiness and require two fresh ready polls: {result:?}"
+        );
+    }
+
+    #[test]
+    fn readiness_fails_fast_on_console_panic() {
+        let tmp = tempfile::tempdir().expect("create temporary console dir");
+        let console_log = tmp.path().join("console.log");
+        std::fs::write(
+            &console_log,
+            "[    0.710663] Kernel panic - not syncing: VFS: Unable to mount root fs\n",
+        )
+        .expect("write panic console log");
+
+        let err = wait_for_dev_vm_ready_with(
+            &console_log,
+            || true,
+            || false,
+            || dev_vm_console_failure(&console_log),
+            std::time::Duration::from_millis(10),
+            std::time::Duration::ZERO,
+            2,
+        )
+        .expect_err("console panic must fail startup immediately");
+
+        assert!(
+            err.to_string().contains("Kernel panic - not syncing"),
+            "error must surface the console panic: {err}"
+        );
+    }
+
+    #[test]
+    fn console_failure_detector_finds_kernel_panic_and_halt() {
+        assert_eq!(
+            find_dev_vm_console_failure_in("hello\nKernel panic - not syncing: boom\nworld"),
+            Some("Kernel panic - not syncing: boom")
+        );
+        assert_eq!(
+            find_dev_vm_console_failure_in("a\nreboot: Power off not available: System halted\nb"),
+            Some("reboot: Power off not available: System halted")
+        );
+        assert_eq!(find_dev_vm_console_failure_in("hello\nworld"), None);
     }
 }

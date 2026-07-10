@@ -2009,34 +2009,69 @@ fn spawn_vz_supervisor_in_background(
     let cfg_json = serde_json::to_string(cfg).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!("serialising Vz SupervisorConfig: {e}"))
     })?;
+    let stdio_log_path = Path::new(&cfg.vm_state_dir).join("supervisor-stdio.log");
 
-    let mut child = Command::new(supervisor_path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!(
-                "spawning mvm-vz-supervisor at {}: {e}",
-                supervisor_path.display()
-            ))
-        })?;
+    spawn_detached_with_stdin(supervisor_path, &[], &cfg_json, Some(&stdio_log_path)).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "spawning mvm-vz-supervisor at {}: {e}",
+            supervisor_path.display()
+        ))
+    })
+}
 
-    {
-        let stdin = child.stdin.as_mut().ok_or_else(|| {
-            BuilderVmError::ExtractionFailed(
-                "mvm-vz-supervisor child had no stdin handle".to_string(),
-            )
-        })?;
-        stdin.write_all(cfg_json.as_bytes()).map_err(|e| {
-            BuilderVmError::ExtractionFailed(format!(
-                "writing SupervisorConfig JSON to mvm-vz-supervisor stdin: {e}"
-            ))
-        })?;
+fn spawn_detached_with_stdin(
+    program: &Path,
+    args: &[&str],
+    stdin_payload: &str,
+    stdio_log_path: Option<&Path>,
+) -> std::io::Result<Child> {
+    let stdio_target = stdio_log_path
+        .map(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+        })
+        .transpose()?;
+    let stderr_target = match &stdio_target {
+        Some(file) => Some(file.try_clone()?),
+        None => None,
+    };
+
+    let mut command = Command::new(program);
+    command.args(args);
+    command.stdin(Stdio::piped());
+    match stdio_target {
+        Some(file) => {
+            command.stdout(Stdio::from(file));
+        }
+        None => {
+            command.stdout(Stdio::null());
+        }
     }
-    // Close stdin so the supervisor knows the config is complete.
-    drop(child.stdin.take());
+    match stderr_target {
+        Some(file) => {
+            command.stderr(Stdio::from(file));
+        }
+        None => {
+            command.stderr(Stdio::null());
+        }
+    }
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
 
+    let mut child = command.spawn()?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| std::io::Error::other("child stdin was not piped"))?;
+    stdin.write_all(stdin_payload.as_bytes())?;
+    drop(stdin);
     Ok(child)
 }
 
@@ -3468,6 +3503,41 @@ mod tests {
         assert!(!stop_persistent_vz_by_pid_file(scratch.path()));
         // The stale file is unlinked on the dead-pid path.
         assert!(!scratch.path().join(PERSISTENT_VZ_PID_FILE).exists());
+    }
+
+    #[test]
+    fn detached_spawn_moves_child_into_its_own_session() {
+        let scratch = tempfile::tempdir().unwrap();
+        let sid_file = scratch.path().join("sid");
+        let mut child = spawn_detached_with_stdin(
+            Path::new("/bin/sh"),
+            &[
+                "-c",
+                "cat >/dev/null; ps -o sid= -p $$ | tr -d ' '; sleep 1",
+            ],
+            "{}",
+            Some(&sid_file),
+        )
+        .expect("spawn detached shell");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !sid_file.exists() && std::time::Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let child_sid = std::fs::read_to_string(&sid_file)
+            .expect("read detached child session id")
+            .trim()
+            .parse::<i32>()
+            .expect("parse detached child session id");
+        let parent_sid = unsafe { libc::getsid(0) };
+        assert_ne!(
+            child_sid, parent_sid,
+            "detached child must run in a different session than the CLI process"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]
