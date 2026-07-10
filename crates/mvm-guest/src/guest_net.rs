@@ -51,7 +51,33 @@ pub fn encode_iface_name(iface: &str) -> Result<[libc::c_char; libc::IFNAMSIZ], 
 const SHARED_GATEWAY_ADDR: &str = "192.168.127.1";
 #[cfg(target_os = "linux")]
 const SHARED_GATEWAY_NETMASK: &str = "255.255.255.0";
+#[cfg(target_os = "linux")]
+const SIOCSIFADDR_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFADDR);
+#[cfg(target_os = "linux")]
+const SIOCSIFNETMASK_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFNETMASK);
+#[cfg(target_os = "linux")]
+const SIOCGIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCGIFFLAGS);
+#[cfg(target_os = "linux")]
+const SIOCSIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFFLAGS);
+#[cfg(target_os = "linux")]
+const SIOCADDRT_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCADDRT);
 const RESOLVER_CMDLINE_PREFIX: &str = "mvm.resolver=";
+
+#[cfg(target_os = "linux")]
+const fn target_ioctl_request(request: u64) -> libc::Ioctl {
+    assert!(request <= target_ioctl_request_max());
+    request as libc::Ioctl
+}
+
+#[cfg(all(target_os = "linux", target_env = "musl"))]
+const fn target_ioctl_request_max() -> u64 {
+    libc::Ioctl::MAX as u64
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "musl")))]
+const fn target_ioctl_request_max() -> u64 {
+    libc::Ioctl::MAX
+}
 
 /// Parse the first usable `nameserver` entry from a resolv.conf body.
 ///
@@ -167,7 +193,7 @@ fn apply_ioctls(
         // address
         let mut ifr = ifreq_for(iface);
         set_sockaddr_in(&mut ifr.ifr_ifru.ifru_addr, addr);
-        if libc::ioctl(sock, libc::SIOCSIFADDR as _, &ifr) < 0 {
+        if libc::ioctl(sock, SIOCSIFADDR_REQUEST, &ifr) < 0 {
             return Err(format!(
                 "SIOCSIFADDR {iface}: {}",
                 std::io::Error::last_os_error()
@@ -176,7 +202,7 @@ fn apply_ioctls(
         // netmask
         let mut ifr = ifreq_for(iface);
         set_sockaddr_in(&mut ifr.ifr_ifru.ifru_netmask, netmask);
-        if libc::ioctl(sock, libc::SIOCSIFNETMASK as _, &ifr) < 0 {
+        if libc::ioctl(sock, SIOCSIFNETMASK_REQUEST, &ifr) < 0 {
             return Err(format!(
                 "SIOCSIFNETMASK {iface}: {}",
                 std::io::Error::last_os_error()
@@ -184,14 +210,14 @@ fn apply_ioctls(
         }
         // flags: read current then OR in UP|RUNNING
         let mut ifr = ifreq_for(iface);
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) < 0 {
+        if libc::ioctl(sock, SIOCGIFFLAGS_REQUEST, &mut ifr) < 0 {
             return Err(format!(
                 "SIOCGIFFLAGS {iface}: {}",
                 std::io::Error::last_os_error()
             ));
         }
         ifr.ifr_ifru.ifru_flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
-        if libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) < 0 {
+        if libc::ioctl(sock, SIOCSIFFLAGS_REQUEST, &ifr) < 0 {
             return Err(format!(
                 "SIOCSIFFLAGS {iface}: {}",
                 std::io::Error::last_os_error()
@@ -203,7 +229,7 @@ fn apply_ioctls(
         set_sockaddr_in(&mut rt.rt_genmask, [0, 0, 0, 0]);
         set_sockaddr_in(&mut rt.rt_gateway, gateway);
         rt.rt_flags = (libc::RTF_UP | libc::RTF_GATEWAY) as libc::c_ushort;
-        if libc::ioctl(sock, libc::SIOCADDRT as _, &rt) < 0 {
+        if libc::ioctl(sock, SIOCADDRT_REQUEST, &rt) < 0 {
             return Err(format!("SIOCADDRT: {}", std::io::Error::last_os_error()));
         }
         Ok(())
@@ -266,7 +292,7 @@ pub fn bring_iface_up(iface: &str) -> Result<(), String> {
         // is the standard pattern. `ifru_flags` is read only after SIOCGIFFLAGS.
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         ifr.ifr_name = name;
-        if unsafe { libc::ioctl(sock, libc::SIOCGIFFLAGS as libc::Ioctl, &mut ifr) } < 0 {
+        if unsafe { libc::ioctl(sock, SIOCGIFFLAGS_REQUEST, &mut ifr) } < 0 {
             return Err(format!(
                 "SIOCGIFFLAGS {iface}: {}",
                 std::io::Error::last_os_error()
@@ -278,7 +304,7 @@ pub fn bring_iface_up(iface: &str) -> Result<(), String> {
             let flags = ifr.ifr_ifru.ifru_flags;
             ifr.ifr_ifru.ifru_flags = flags | (libc::IFF_UP as libc::c_short);
         }
-        if unsafe { libc::ioctl(sock, libc::SIOCSIFFLAGS as libc::Ioctl, &ifr) } < 0 {
+        if unsafe { libc::ioctl(sock, SIOCSIFFLAGS_REQUEST, &ifr) } < 0 {
             return Err(format!(
                 "SIOCSIFFLAGS {iface} IFF_UP: {}",
                 std::io::Error::last_os_error()
@@ -476,5 +502,15 @@ nameserver 10.0.0.3
         assert!(gateway_static_fallback_applies("console=hvc0", false));
         // QEMU failure → do NOT apply the shared-gateway static (QEMU uses ip= autoconfig)
         assert!(!gateway_static_fallback_applies("mvm.backend=qemu", false));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn network_ioctl_requests_fit_target_request_type() {
+        assert_eq!(SIOCSIFADDR_REQUEST as u64, libc::SIOCSIFADDR as u64);
+        assert_eq!(SIOCSIFNETMASK_REQUEST as u64, libc::SIOCSIFNETMASK as u64);
+        assert_eq!(SIOCGIFFLAGS_REQUEST as u64, libc::SIOCGIFFLAGS as u64);
+        assert_eq!(SIOCSIFFLAGS_REQUEST as u64, libc::SIOCSIFFLAGS as u64);
+        assert_eq!(SIOCADDRT_REQUEST as u64, libc::SIOCADDRT as u64);
     }
 }

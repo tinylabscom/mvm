@@ -375,6 +375,18 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
     reference: &str,
     prod: bool,
 ) -> Result<ResolvedOciRunImage> {
+    resolve_or_pull_run_image_with(cache_root, reference, prod, inject_runtime_and_materialize)
+}
+
+type RuntimeMaterializer =
+    fn(&Path, &Path, &Path, &str, Option<&OciEntrypointConfig>) -> Result<()>;
+
+fn resolve_or_pull_run_image_with(
+    cache_root: &Path,
+    reference: &str,
+    prod: bool,
+    materialize: RuntimeMaterializer,
+) -> Result<ResolvedOciRunImage> {
     // Rootfs materialization can fall back to a builder VM when the in-process
     // ext4 writer cannot faithfully emit a tree. `up` / `dev up` reap previous
     // helper processes at startup; the run-image path is the other place a
@@ -408,6 +420,16 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
         Some(cached) if cached_rootfs_is_current(&cached, &runtime_tag) => {
             (cached, false, None, None)
         }
+        Some(cached) => {
+            match rematerialize_cached_image(cache_root, cached, &runtime_tag, materialize)? {
+                Some(repaired) => (repaired, false, None, None),
+                None => {
+                    let (cached, trust, auth_source) =
+                        pull_image_ref(cache_root, image_ref.clone(), reference, prod)?;
+                    (cached, true, Some(trust), Some(auth_source))
+                }
+            }
+        }
         _ => {
             let (cached, trust, auth_source) =
                 pull_image_ref(cache_root, image_ref.clone(), reference, prod)?;
@@ -431,7 +453,7 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
         // tree is gone too is this a genuine cache loss the user must re-pull.
         match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
             Some(unpacked_root) => {
-                inject_runtime_and_materialize(
+                materialize(
                     cache_root,
                     &unpacked_root,
                     &rootfs_path,
@@ -470,6 +492,50 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
         pulled,
         auth_source: auth_source_from_pull,
     })
+}
+
+fn rematerialize_cached_image(
+    cache_root: &Path,
+    mut image: CachedOciImage,
+    runtime_tag: &str,
+    materialize: RuntimeMaterializer,
+) -> Result<Option<CachedOciImage>> {
+    let Some(unpacked_root) = unpacked_dir_if_present(cache_root, &image.resolved_digest) else {
+        return Ok(None);
+    };
+    let rootfs_path = match (
+        image.rootfs_path.as_deref(),
+        image.runtime_tag.as_deref() == Some(runtime_tag),
+    ) {
+        (Some(path), true) => path.to_string(),
+        _ => format!(
+            "rootfs/{}-{runtime_tag}/rootfs.ext4",
+            sha256_hex(&image.resolved_digest)?
+        ),
+    };
+    let rootfs_abs = safe_cache_path(cache_root, &rootfs_path)?;
+    if !rootfs_abs.is_file() {
+        materialize(
+            cache_root,
+            &unpacked_root,
+            &rootfs_abs,
+            &image.reference,
+            oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?.as_ref(),
+        )
+        .with_context(|| {
+            format!(
+                "re-materializing cached OCI image {} from {}",
+                image.reference,
+                unpacked_root.display()
+            )
+        })?;
+    }
+    image.rootfs_path = Some(rootfs_path);
+    image.runtime_tag = Some(runtime_tag.to_string());
+    let mut index = load_index(cache_root)?;
+    upsert_image(&mut index, image.clone());
+    save_index(cache_root, &index)?;
+    Ok(Some(image))
 }
 
 /// Inject the mvm guest runtime into `unpacked_root`, seal it into
@@ -1653,6 +1719,32 @@ mod tests {
         fs::write(path, body).expect("write cache file");
     }
 
+    fn write_minimal_config(cache_root: &Path) {
+        write_file(cache_root, "configs/alpine.json", br#"{"config":{}}"#);
+    }
+
+    fn create_unpacked_root(cache_root: &Path, digest: &str) -> PathBuf {
+        let unpacked = cache_root
+            .join("unpacked")
+            .join(sha256_hex(digest).unwrap());
+        fs::create_dir_all(&unpacked).expect("create unpacked root");
+        fs::write(unpacked.join("layer-file"), b"from-layer").expect("write unpacked file");
+        unpacked
+    }
+
+    fn fake_runtime_materialize(
+        _cache_root: &Path,
+        unpacked_root: &Path,
+        rootfs_abs: &Path,
+        image_label: &str,
+        _entrypoint: Option<&OciEntrypointConfig>,
+    ) -> Result<()> {
+        assert!(unpacked_root.is_dir(), "unpacked root must exist");
+        fs::create_dir_all(rootfs_abs.parent().expect("rootfs has parent"))?;
+        fs::write(rootfs_abs, format!("materialized:{image_label}"))?;
+        Ok(())
+    }
+
     fn digest_of(bytes: &[u8]) -> String {
         format!("sha256:{}", hex::encode(Sha256::digest(bytes)))
     }
@@ -1943,14 +2035,88 @@ mod tests {
     }
 
     #[test]
+    fn resolve_run_image_rematerializes_stale_record_without_rootfs_path() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+
+        let resolved = resolve_or_pull_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+        )
+        .expect("stale cached image should be repaired from unpacked layers");
+
+        let runtime_tag = oci_runtime_tag();
+        let expected = format!(
+            "rootfs/{}-{runtime_tag}/rootfs.ext4",
+            sha256_hex(digest).unwrap()
+        );
+        assert_eq!(resolved.rootfs_path, tmp.path().join(&expected));
+        assert!(!resolved.pulled);
+        assert_eq!(
+            fs::read_to_string(&resolved.rootfs_path).expect("read repaired rootfs"),
+            "materialized:docker.io/library/alpine:3.20"
+        );
+        let index = load_index(tmp.path()).expect("load repaired index");
+        let repaired = find_image(&index, "docker.io/library/alpine:3.20")
+            .expect("repaired image still indexed");
+        assert_eq!(repaired.rootfs_path.as_deref(), Some(expected.as_str()));
+        assert_eq!(repaired.runtime_tag.as_deref(), Some(runtime_tag.as_str()));
+    }
+
+    #[test]
+    fn resolve_run_image_rematerializes_missing_current_rootfs() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        image.runtime_tag = Some(oci_runtime_tag());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_minimal_config(tmp.path());
+        create_unpacked_root(tmp.path(), digest);
+
+        let resolved = resolve_or_pull_run_image_with(
+            tmp.path(),
+            "docker.io/library/alpine:3.20",
+            false,
+            fake_runtime_materialize,
+        )
+        .expect("missing current rootfs should be repaired from unpacked layers");
+
+        assert_eq!(
+            resolved.rootfs_path,
+            tmp.path().join("rootfs/alpine/rootfs.ext4")
+        );
+        assert!(!resolved.pulled);
+        assert_eq!(
+            fs::read_to_string(&resolved.rootfs_path).expect("read repaired rootfs"),
+            "materialized:docker.io/library/alpine:3.20"
+        );
+    }
+
+    #[test]
     fn resolve_run_image_missing_rootfs_without_unpacked_layers_asks_for_repull() {
         // The index records a materialized rootfs whose ext4 has vanished AND
         // whose unpacked layer tree is also gone — genuine cache loss. The run
         // fails with an actionable re-pull instruction, not the old bare
-        // "rootfs is missing" bail. (The self-heal path, where the unpacked
-        // tree survives and the rootfs is re-materialized network-free, is
-        // covered by a live HVF boot; re-materialization runs the real ext4
-        // writer, which a unit test cannot cheaply stage.)
+        // "rootfs is missing" bail.
         let tmp = tempfile::tempdir().expect("tempdir");
         let digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
