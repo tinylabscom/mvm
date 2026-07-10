@@ -4681,7 +4681,10 @@ mod tests {
                 continue;
             }
             let path = entry.path();
-            let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            let file_name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
             if file_name.starts_with('.') {
                 continue;
             }

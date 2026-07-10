@@ -3946,9 +3946,7 @@ mod tests {
         f.write_all(body.as_bytes()).expect("write hook body");
         f.sync_all().expect("sync hook body");
         drop(f);
-        let mut perms = fs::metadata(&staging)
-            .expect("hook metadata")
-            .permissions();
+        let mut perms = fs::metadata(&staging).expect("hook metadata").permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&staging, perms).expect("chmod hook");
         fs::rename(&staging, &p).expect("publish hook");
