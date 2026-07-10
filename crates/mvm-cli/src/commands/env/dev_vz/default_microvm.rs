@@ -1,3 +1,5 @@
+#[cfg(feature = "builder-vm")]
+use super::kernel::{KernelSource, resolve_kernel_source};
 use super::*;
 
 pub(crate) fn ensure_default_microvm_image(
@@ -18,7 +20,8 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     let cache = mvm_core::config::mvm_cache_dir();
     let arch = builder_vm_host_arch();
     let source_checkout = find_builder_vm_flake_is_source_checkout();
-    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, prod, source_checkout);
+    let source_build_requested = workload_kernel_source_build_requested(source_checkout);
+    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, prod, source_build_requested);
     match resolved {
         WorkloadKernelBootstrap::Cached(path) => Ok(path),
         WorkloadKernelBootstrap::ReusableBuilder(path) => {
@@ -59,7 +62,7 @@ pub(super) fn resolve_workload_kernel_bootstrap(
     cache_dir: &str,
     arch: &str,
     prod: bool,
-    source_checkout: bool,
+    source_build_requested: bool,
 ) -> WorkloadKernelBootstrap {
     if let Some(cached) = find_cached_workload_kernel(cache_dir, arch) {
         return WorkloadKernelBootstrap::Cached(cached);
@@ -67,7 +70,7 @@ pub(super) fn resolve_workload_kernel_bootstrap(
     if !prod && let Some(builder) = find_reusable_builder_kernel(cache_dir, arch) {
         return WorkloadKernelBootstrap::ReusableBuilder(builder);
     }
-    if source_checkout {
+    if source_build_requested {
         return WorkloadKernelBootstrap::Build(format!(
             "{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"
         ));
@@ -75,6 +78,18 @@ pub(super) fn resolve_workload_kernel_bootstrap(
     WorkloadKernelBootstrap::Download(format!(
         "{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"
     ))
+}
+
+fn workload_kernel_source_build_requested(source_checkout: bool) -> bool {
+    #[cfg(feature = "builder-vm")]
+    {
+        source_checkout && matches!(resolve_kernel_source(), Some(KernelSource::Compile))
+    }
+    #[cfg(not(feature = "builder-vm"))]
+    {
+        let _ = source_checkout;
+        false
+    }
 }
 
 pub(super) fn find_reusable_builder_kernel(cache_dir: &str, arch: &str) -> Option<String> {

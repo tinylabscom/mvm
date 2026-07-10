@@ -5,8 +5,9 @@ description: "Build or download the slim builder/workload kernels mvm boots, wit
 
 mvm boots slim, custom-configured Linux kernels for the builder VM and for
 workload microVMs. Because the config is custom, the public Nix cache has no
-substitute for them — a fresh machine compiles from source, which is the slow,
-memory-heavy step a first `mvmctl dev up` otherwise hits implicitly.
+substitute for them. Normal runtime paths prefer the published, hash-verified
+workload kernel on a cold cache; local compilation is reserved for explicit
+kernel-build commands and builder/dev image work.
 `mvmctl build kernel build` makes that step explicit and one-time.
 
 ## Build a kernel
@@ -43,8 +44,9 @@ later `dev up`.
 - **download** fetches a prebuilt `vmlinux-<arch>-<variant>` from the GitHub
   release whose tag matches **this mvmctl's own version**. A given mvmctl can
   only ever fetch the kernel that shipped with it — never a substitute for an
-  in-tree kernel-config edit (a source checkout compiles instead). This is the
-  only way to obtain the **other** architecture's kernel.
+  in-tree kernel-config edit. Use `--source compile` when you need to exercise
+  local kernel changes. This is the only way to obtain the **other**
+  architecture's kernel.
 
 ## Integrity
 
