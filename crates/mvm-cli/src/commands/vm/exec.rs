@@ -1266,7 +1266,7 @@ fn oci_vsock_proxy_env_for_capabilities(
     if !image_requested || !network_policy.allows_egress() {
         return Vec::new();
     }
-    if !(caps.vsock && caps.no_guest_nic && caps.host_vsock_proxy) {
+    if !(caps.vsock && caps.no_routable_guest_nic && caps.host_vsock_proxy) {
         return Vec::new();
     }
     mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
@@ -1540,7 +1540,7 @@ mod tests {
     fn oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend() {
         let hvf_proxy_caps = mvm_core::vm_backend::VmCapabilities {
             vsock: true,
-            no_guest_nic: true,
+            no_routable_guest_nic: true,
             host_vsock_proxy: true,
             ..mvm_core::vm_backend::VmCapabilities::default()
         };
@@ -1603,7 +1603,7 @@ mod tests {
             oci_vsock_proxy_env_for_capabilities(
                 &mvm_core::vm_backend::VmCapabilities {
                     vsock: true,
-                    no_guest_nic: true,
+                    no_routable_guest_nic: true,
                     host_vsock_proxy: true,
                     ..mvm_core::vm_backend::VmCapabilities::default()
                 },

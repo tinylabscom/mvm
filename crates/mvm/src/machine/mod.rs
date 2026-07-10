@@ -171,7 +171,7 @@ impl Machine {
             NetworkMode::None => {}
             NetworkMode::HostVsockProxy => {
                 req.host_vsock_proxy = true;
-                req.no_guest_nic = true;
+                req.no_routable_guest_nic = true;
             }
         }
         req
@@ -264,7 +264,7 @@ mod tests {
             .unwrap();
         let req = machine.required_capabilities();
         assert!(req.host_vsock_proxy);
-        assert!(req.no_guest_nic);
+        assert!(req.no_routable_guest_nic);
     }
 
     #[test]
@@ -315,7 +315,7 @@ mod tests {
         let backend = machine.select_backend().expect("select backend");
         let caps = backend.capabilities();
         assert!(caps.host_vsock_proxy);
-        assert!(caps.no_guest_nic);
+        assert!(caps.no_routable_guest_nic);
     }
 
     #[test]

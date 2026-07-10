@@ -480,7 +480,9 @@ impl VmBackend for LibkrunBackend {
             snapshots: false,
             vsock: true,
             tap_networking: false,
-            no_guest_nic: true,
+            // The virtio-net device is attached but drained into a disconnected
+            // sink with no upstream route, so the guest still has no routable NIC.
+            no_routable_guest_nic: true,
             host_vsock_proxy: true,
             // libkrun's C API doesn't expose virtio-balloon control
             // today; the upstream crate carries no `.balloon(...)`
@@ -1195,7 +1197,7 @@ mod tests {
     fn libkrun_capabilities() {
         let caps = LibkrunBackend.capabilities();
         assert!(caps.vsock);
-        assert!(caps.no_guest_nic);
+        assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(!caps.snapshots);
         assert!(!caps.pause_resume);
