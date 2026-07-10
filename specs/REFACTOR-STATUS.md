@@ -1,5 +1,5 @@
 **Additional 2026-07-10 — Plan 242's refreshed ship candidate is now pushed
-and revalidated at exact head `29fb2c2466316201bc34f81567921a4b8856eb38`.**
+and revalidated at exact head `5cb977a69e4b45e5cb40ab1d66cfc61308c80e0a`.**
 The code/docs contract is stable: guest-executed runtime binaries are
 centralized into the shared read-only cache artifact under
 `~/.cache/mvm/runtime-overlay/<version>/<arch>/`; every admitted backend/tier
@@ -7,15 +7,14 @@ either mounts that artifact read-only with real proof or refuses the
 unsupported path fail-closed; stopped VMs pick up newer version-matched
 overlays on restart, while running VMs keep the runtime they booted with. The
 current closeout slice also fixes the exact-current candidate witnesses by
-restoring fake verity sidecars in the OCI cache-rematerialization test
-fixtures, seeding the minimal config that path expects, and making the
-gateway-bridge capture/export test fail on bridge-task errors instead of
-ignoring them. Fresh host gates are green on that merged head, and the exact
-Linux-native builder witnesses are green on `88.99.197.234` from an exact
-source snapshot. The rollout/runbook surface is explicit in the docs and
-release note; the remaining blocker is external only: PR `#1613` is mergeable
-but still waiting on the fresh required GitHub checks before it can merge
-through the normal review path.
+making the Linux-only builder diagnostics regression hermetic instead of
+depending on ambient `/tmp/nix-store.img` host state. Fresh host gates are
+green on that merged head, and the exact Linux-native `cargo test -p mvm-build
+--lib` witness is green on `88.99.197.234` from an exact source snapshot. The
+rollout/runbook surface is explicit in the docs and release note; the
+remaining blocker is external only: PR `#1613` is mergeable but still waiting
+on the fresh required GitHub checks before it can merge through the normal
+review path.
 
 Older entries below are retained as the execution log. Where they describe
 earlier intermediate gaps or proofs-in-progress, this top entry is the
