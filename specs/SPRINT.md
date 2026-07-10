@@ -461,38 +461,50 @@ plan 25 sequences the work into six independently-shippable workstreams.
 - [x] 2026-07-09 Plan 239 measurement update: resolved-config inspection is now
       documented through the kernel flake, builder-vm flake, and CLI docs; the
       Stage 0 kernel-build path now also realizes a `workload-sizeopt`
-      comparison variant. Measured on `aarch64`: builder `1373` built-ins /
-      `17,135,624` raw / `7,640,745` gzip; workload `1329` /
-      `15,929,352` raw / `7,077,261` gzip; workload-sizeopt `1329` /
-      `13,948,936` raw / `6,008,471` gzip. Shared `RD_*` decompressor support
+      comparison variant. The follow-up shared-base audit also proved
+      `CONFIG_AUDIT` removable for both kernels: the shipped audit posture is
+      the userspace `host.audit.v1` signer/verifier flow, not Linux kernel
+      audit or `NETLINK_AUDIT`. A further shared-base audit also proved
+      `CONFIG_BPF_JIT` removable: Linux 6.12 keeps the core interpreter with
+      `CONFIG_BPF=y`, but the JIT is only an optional speedup for loaded BPF
+      programs and neither the sealed workload nor the builder path ships a
+      loader or JIT sysctl policy. Refreshed measured on `aarch64`: builder
+      `1364` built-ins / `16,998,408` raw / `7,562,916` gzip; workload `1320`
+      / `15,796,232` raw / `7,010,163` gzip; workload-sizeopt `1320` /
+      `13,881,352` raw / `5,951,074` gzip. Shared `RD_*` decompressor support
       is reduced to gzip-only, the resolved builder/workload configs both keep
       `CONFIG_INITRAMFS_SOURCE=""` with gzip-only initramfs support, workload-only
       `BPF_SYSCALL` / perf / profiling / ikconfig / checkpoint-restore removals
-      are landed, and the size-mode decision is explicit: `workload-sizeopt`
-      stays a comparison-only output rather than the default workload kernel
-      until the repaired live boot witness is proven on-host.
+      are landed. The follow-up BPF audit is now conclusive: Linux 6.12's
+      `CONFIG_NET` unconditionally selects `CONFIG_BPF`, and the workload
+      cannot drop `NET` without breaking the current `AF_VSOCK` guest-agent /
+      control-plane contract plus admitted `--net` / `--allow-host` loopback
+      TCP helpers and `mvm-guest-netinit` route installs. `SECCOMP`,
+      `SECCOMP_FILTER`, and `DM_VERITY` are not the reason `BPF` stays on.
+      The size-mode decision is explicit: `workload-sizeopt`
+      stays a comparison-only output rather than the default workload kernel.
       The workload budget gate
       `xtask check-kernel-config-budget` is ratcheted to the measured
-      `aarch64` workload count (`1329`). Validation: `cargo fmt --all`; `cargo
+      `aarch64` workload count (`1320`). Validation: `cargo fmt --all`; `cargo
       fmt --all --check`; `cargo test -p xtask
       check_kernel_config_budget::tests::budget_resolves_per_arch_from_path
       -- --exact`; `cargo run -p xtask -- check-kernel-config-budget
-      /tmp/mvm-plan239-cache/builder-vm/aarch64/kernels/workload/config`;
+      /Users/auser/.cache/mvm/builder-vm/aarch64/kernels/workload/config`;
       `cargo test -p mvm-cli --features builder-vm
       commands::build::kernel::tests::boot_check_uses_the_pinned_workload_oci_path
-      --lib -- --exact`; `HOME=/tmp/mvm-plan239-home
-      XDG_CACHE_HOME=/tmp/mvm-plan239-xdg XDG_STATE_HOME=/tmp/mvm-plan239-state
-      MVM_DATA_DIR=/tmp/mvm-plan239-data MVM_CACHE_DIR=/tmp/mvm-plan239-cache
-      CARGO_TARGET_DIR=$PWD/.mvm-target CARGO_HOME=/Users/auser/.cargo
-      RUSTUP_HOME=/Users/auser/.rustup PATH=$PWD/target/debug:$PWD/.mvm-target/debug:/opt/homebrew/bin:/Users/auser/.cargo/bin:$PATH
-      cargo run -- --builder libkrun build kernel build --which workload
-      --source compile --boot-check`;
+      --lib -- --exact`; `./target/debug/mvmctl machine run --image
+      docker.io/library/alpine:3.20 --hypervisor hvf --kernel-pin workload --
+      /bin/true`; `cargo run -- --builder libkrun build kernel build --which
+      workload --source compile --boot-check`;
       `cargo check --workspace`; `cargo clippy --workspace
       --all-targets -- -D warnings`. The `--boot-check` helper now boots the
-      pinned workload kernel through the OCI `--image` path, polls guest-agent
-      readiness directly, and is live-proven on this host. `workload-sizeopt`
-      remains a comparison-only output for now: the size win is real, but this
-      slice does not flip the default workload kernel mode.
+      pinned workload kernel through the OCI `--image` path and polls
+      guest-agent readiness directly. The synced tree's `make defconfig`
+      regression is fixed too: Linux Kconfig's `$(shell,...)` helper needed a
+      real `/bin/sh` inside the Nix sandbox, so the kernel recipe now provides
+      it explicitly before `make defconfig`. `workload-sizeopt` remains a
+      comparison-only output for now: the size win is real, but this slice does
+      not flip the default workload kernel mode.
 - [x] Started
       [`plans/237-hvf-density-memory-footprint.md`](plans/237-hvf-density-memory-footprint.md)
       to turn the HVF density investigation into an execution plan. The

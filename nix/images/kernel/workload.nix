@@ -53,11 +53,15 @@ base.mkKernel {
   #                 squashfs / disk image in-guest would need this re-enabled;
   #                 unlike NBD/NVMe (no host-side device exists) loop is
   #                 guest-internal, so this is a policy choice, not a free cut.
-  #   BPF / PERF / IKCONFIG / CHECKPOINT_RESTORE — the sealed workload path has
-  #                 no eBPF loader, no perf tooling, no `/proc/config.gz`
-  #                 consumer, and no CRIU-style checkpoint/restore contract.
-  #                 Workload checkpoints are a host-level lifecycle feature, not
-  #                 an in-guest process checkpoint feature.
+  #   BPF_SYSCALL / PERF / IKCONFIG / CHECKPOINT_RESTORE — the sealed workload
+  #                 path has no eBPF loader, no perf tooling, no
+  #                 `/proc/config.gz` consumer, and no CRIU-style
+  #                 checkpoint/restore contract. Workload checkpoints are a
+  #                 host-level lifecycle feature, not an in-guest process
+  #                 checkpoint feature. `NET` still selects the core `BPF`
+  #                 symbol in Linux 6.12, so the syscall-facing interface goes
+  #                 away here but the interpreter stays built-in until the
+  #                 workload networking contract changes.
   #   CC_OPTIMIZE_FOR_PERFORMANCE — flipped off only for the size experiment
   #                 output; the default workload kernel keeps the current mode
   #                 until measured results prove the size-oriented mode is worth
@@ -67,7 +71,6 @@ base.mkKernel {
       "NETFILTER"
       "BLK_DEV_MD"
       "BLK_DEV_LOOP"
-      "BPF"
       "BPF_SYSCALL"
       "PERF_EVENTS"
       "PROFILING"
