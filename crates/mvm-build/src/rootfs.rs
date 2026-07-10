@@ -8,6 +8,8 @@
 //! This keeps ext4 creation inside the Linux builder boundary instead
 //! of depending on host tools.
 
+#[cfg(feature = "pure-mkfs")]
+use std::io::{Seek, SeekFrom, Write};
 #[cfg(feature = "builder-vm")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -374,8 +376,6 @@ pub fn materialize_ext4_pure(
         ));
     }
     let nodes = collect_nodes(&input.unpacked_root)?;
-    let image = mvm_ext4::build_image(&nodes).map_err(RootfsError::PureBuild)?;
-    let size_bytes = image.len() as u64;
     // The run path's cache dir (`.../rootfs/<key>/`) may not exist yet — the
     // builder-VM path created it via `allocate_sparse_image`, so the pure path
     // must create it too before writing the image + its sidecars.
@@ -385,10 +385,7 @@ pub fn materialize_ext4_pure(
             source,
         })?;
     }
-    std::fs::write(&input.output, &image).map_err(|source| RootfsError::WriteOutput {
-        path: input.output.clone(),
-        source,
-    })?;
+    let size_bytes = stream_pure_ext4_output(&nodes, &input.output)?;
 
     if !input.emit_verity {
         return Ok(MaterializedExt4 {
@@ -402,6 +399,10 @@ pub fn materialize_ext4_pure(
     // data+hash blocks, zero salt — the params the boot path expects. Write the
     // hash tree + 64-hex root hash beside the image under the fixed names
     // `probe_verity_sidecar` reads (`rootfs.verity` / `rootfs.roothash`).
+    let image = std::fs::read(&input.output).map_err(|source| RootfsError::WriteOutput {
+        path: input.output.clone(),
+        source,
+    })?;
     let salt = [0u8; 32];
     let verity = mvm_ext4::verity::format(&image, &salt, 4096, 4096);
     let dir = input
@@ -421,6 +422,36 @@ pub fn materialize_ext4_pure(
         size_bytes,
         verity_root_hash: Some(root_hex),
     })
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn stream_pure_ext4_output(
+    nodes: &[mvm_ext4::Node],
+    output: &std::path::Path,
+) -> Result<u64, RootfsError> {
+    let mut file = std::fs::File::create(output).map_err(|source| RootfsError::WriteOutput {
+        path: output.to_path_buf(),
+        source,
+    })?;
+    let size_bytes = match mvm_ext4::emit_image(nodes, |offset, bytes| {
+        file.seek(SeekFrom::Start(offset))
+            .and_then(|_| file.write_all(bytes))
+    }) {
+        Ok(size_bytes) => size_bytes,
+        Err(mvm_ext4::EmitImageError::Build(err)) => return Err(RootfsError::PureBuild(err)),
+        Err(mvm_ext4::EmitImageError::Emit(source)) => {
+            return Err(RootfsError::WriteOutput {
+                path: output.to_path_buf(),
+                source,
+            });
+        }
+    };
+    file.set_len(size_bytes)
+        .map_err(|source| RootfsError::WriteOutput {
+            path: output.to_path_buf(),
+            source,
+        })?;
+    Ok(size_bytes)
 }
 
 #[cfg(feature = "pure-mkfs")]
@@ -696,6 +727,26 @@ mod tests {
         assert!(mat.verity_root_hash.is_none());
         assert!(!out.path().join("rootfs.verity").exists());
         assert!(!out.path().join("rootfs.roothash").exists());
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn pure_materialize_matches_dense_writer_bytes() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("etc")).unwrap();
+        std::fs::write(src.path().join("etc/hosts"), b"127.0.0.1 localhost\n").unwrap();
+        std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
+
+        let nodes = collect_nodes(src.path()).expect("collect nodes");
+        let dense = mvm_ext4::build_image(&nodes).expect("dense ext4 image");
+
+        let out = tempfile::tempdir().unwrap();
+        let out_path = out.path().join("rootfs.ext4");
+        let input = MaterializeExt4Input::new(src.path().to_path_buf(), out_path.clone(), 0);
+        let materialized = materialize_ext4_pure(&input).expect("pure materialize");
+
+        assert_eq!(std::fs::read(&out_path).unwrap(), dense);
+        assert_eq!(materialized.size_bytes, dense.len() as u64);
     }
 
     #[cfg(feature = "pure-mkfs")]

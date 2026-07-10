@@ -3111,19 +3111,22 @@ mod linux {
         fn run_job_streaming_threads_tmpdir_through_to_subprocess() {
             let dir = tempfile::tempdir().expect("tempdir");
             let cmd_path = dir.path().join("cmd.sh");
+            let scratch = dir.path().join("scratch");
+            std::fs::create_dir(&scratch).expect("create scratch");
             // The subprocess inherits TMPDIR from its environment;
             // echo it back via stderr so the test sees it.
             std::fs::write(&cmd_path, "echo \"tmpdir=$TMPDIR\" >&2\nexit 0\n")
                 .expect("write cmd.sh");
+            let scratch_str = scratch.to_str().unwrap();
             let (code, tail) = run_job_streaming(
                 cmd_path.to_str().unwrap(),
-                Some("/scratch/abc"),
+                Some(scratch_str),
                 Isolation::Inherit,
                 &[],
                 |_| {},
             );
             assert_eq!(code, 0);
-            assert_eq!(tail, "tmpdir=/scratch/abc");
+            assert_eq!(tail, format!("tmpdir={scratch_str}"));
         }
 
         /// When `tmpdir` is `None` the

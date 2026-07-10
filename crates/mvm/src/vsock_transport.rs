@@ -313,6 +313,7 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn firecracker_transport_constructs_with_instance_dir() {
@@ -383,7 +384,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
         let name = "vz-picker-probe";
         let sock =
             mvm_core::config::vm_vz_vsock_port_socket(name, mvm_guest::vsock::GUEST_AGENT_PORT);
@@ -393,8 +395,6 @@ mod tests {
         let t = for_vm(name).expect("picker should find the vz transport");
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the vz socket");
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]
@@ -410,7 +410,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
         let name = "hvf-picker-probe";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
@@ -419,8 +420,6 @@ mod tests {
         let t = for_vm(name).expect("picker should find the hvf transport");
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the hvf-agent socket");
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]

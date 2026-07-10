@@ -451,12 +451,13 @@ impl MvmClient for LocalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     static DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct IsolatedDataDir {
         _lock: std::sync::MutexGuard<'static, ()>,
-        prev: Option<std::ffi::OsString>,
+        _env: TestEnv,
         dir: tempfile::TempDir,
     }
 
@@ -466,30 +467,17 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = tempfile::tempdir().unwrap();
-            let prev = std::env::var_os("MVM_DATA_DIR");
-            unsafe {
-                std::env::set_var("MVM_DATA_DIR", dir.path());
-            }
+            let mut env = TestEnv::new();
+            env.set("MVM_DATA_DIR", dir.path());
             Self {
                 _lock: lock,
-                prev,
+                _env: env,
                 dir,
             }
         }
 
         fn path(&self) -> &std::path::Path {
             self.dir.path()
-        }
-    }
-
-    impl Drop for IsolatedDataDir {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev {
-                    Some(value) => std::env::set_var("MVM_DATA_DIR", value),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
-            }
         }
     }
 

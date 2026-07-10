@@ -225,6 +225,10 @@ fn fixture_coverage_is_accounted_for() {
         .expect("read machine-fixtures dir")
         .filter_map(|e| {
             let p = e.ok()?.path();
+            let file_name = p.file_name()?.to_str()?;
+            if file_name.starts_with('.') {
+                return None;
+            }
             (p.extension()? == "argv").then(|| p.file_stem()?.to_str().map(str::to_string))?
         })
         .collect();

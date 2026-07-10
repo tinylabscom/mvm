@@ -386,6 +386,7 @@ pub fn generate_vm_name() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn test_empty_registry() {
@@ -856,26 +857,14 @@ mod tests {
     // -------- record_readiness (free-fn, disk-backed) --------
 
     struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
+        _env: TestEnv,
     }
 
     impl EnvGuard {
         fn set(key: &'static str, val: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            // SAFETY: tests under this block hold DATA_DIR_TEST_LOCK, so no
-            // other thread mutates these vars concurrently.
-            unsafe { std::env::set_var(key, val) };
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
+            let mut env = TestEnv::new();
+            env.set(key, val);
+            Self { _env: env }
         }
     }
 

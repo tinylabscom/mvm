@@ -410,7 +410,9 @@ impl OverlayBuildSpec {
 
     /// `nix build` argv, ready to hand to `Command::new` plus
     /// `.args(argv[1..])`. The orchestrator manages its own
-    /// symlink position via `--out-link <path>`.
+    /// symlink position via `--out-link <path>`. The build always
+    /// includes `--impure` because the flake's workspace-root
+    /// contract relies on `MVM_WORKSPACE_PATH`.
     pub fn argv(&self) -> Vec<String> {
         let nix = self
             .nix_binary
@@ -422,6 +424,7 @@ impl OverlayBuildSpec {
             "build".to_string(),
             "--extra-experimental-features".to_string(),
             "nix-command flakes".to_string(),
+            "--impure".to_string(),
             "--out-link".to_string(),
             self.out_link.display().to_string(),
             self.flake_reference(),
@@ -1371,6 +1374,10 @@ mod tests {
             "argv must enable nix-command + flakes: {argv:?}"
         );
         assert_eq!(pair.unwrap()[1], "nix-command flakes");
+        assert!(
+            argv.iter().any(|arg| arg == "--impure"),
+            "argv must opt into the MVM_WORKSPACE_PATH override: {argv:?}"
+        );
         // --out-link <path>
         let out = argv.windows(2).find(|w| w[0] == "--out-link");
         assert!(out.is_some(), "argv must specify --out-link: {argv:?}");

@@ -397,6 +397,7 @@ fn emit_audit(report: &ConvergeReport) {
 mod tests {
     use super::*;
     use crate::vm::name_registry::RegisterParams;
+    use mvm_core::util::test_env::TestEnv;
     use std::cell::RefCell;
     use std::path::Path;
 
@@ -801,30 +802,6 @@ mod tests {
 
     // -------- converge (default-path entry + audit emission) --------
 
-    /// RAII env-var setter that restores the previous value on drop, so a
-    /// panicking assertion can't leak `MVM_*` overrides into sibling tests.
-    struct EnvGuard {
-        key: &'static str,
-        prev: Option<String>,
-    }
-    impl EnvGuard {
-        fn set(key: &'static str, val: &str) -> Self {
-            let prev = std::env::var(key).ok();
-            // SAFETY: tests under this block hold DATA_DIR_TEST_LOCK, so no
-            // other thread mutates these vars concurrently.
-            unsafe { std::env::set_var(key, val) };
-            Self { key, prev }
-        }
-    }
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => unsafe { std::env::set_var(self.key, v) },
-                None => unsafe { std::env::remove_var(self.key) },
-            }
-        }
-    }
-
     #[test]
     fn converge_default_heals_drift_and_emits_audit() {
         let _lock = crate::vm::DATA_DIR_TEST_LOCK
@@ -835,9 +812,10 @@ mod tests {
         let data = tmp.path().join("data");
         let state = tmp.path().join("state");
         std::fs::create_dir_all(data.join("vms")).unwrap();
-        let _g1 = EnvGuard::set("MVM_SHARE_DIR", share.to_str().unwrap());
-        let _g2 = EnvGuard::set("MVM_DATA_DIR", data.to_str().unwrap());
-        let _g3 = EnvGuard::set("MVM_STATE_DIR", state.to_str().unwrap());
+        let mut env = TestEnv::new();
+        env.set("MVM_SHARE_DIR", share.to_str().unwrap());
+        env.set("MVM_DATA_DIR", data.to_str().unwrap());
+        env.set("MVM_STATE_DIR", state.to_str().unwrap());
 
         // A dead-process record under the relocated vms root + its registry.
         let vms_root = data.join("vms");
@@ -869,9 +847,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let _g1 = EnvGuard::set("MVM_SHARE_DIR", tmp.path().join("share").to_str().unwrap());
-        let _g2 = EnvGuard::set("MVM_DATA_DIR", tmp.path().join("data").to_str().unwrap());
-        let _g3 = EnvGuard::set("MVM_STATE_DIR", tmp.path().join("state").to_str().unwrap());
+        let mut env = TestEnv::new();
+        env.set("MVM_SHARE_DIR", tmp.path().join("share").to_str().unwrap());
+        env.set("MVM_DATA_DIR", tmp.path().join("data").to_str().unwrap());
+        env.set("MVM_STATE_DIR", tmp.path().join("state").to_str().unwrap());
         // No registry file, no vms dir — fail-open, clean report, no panic.
         let report = converge(&ConvergeOpts::default());
         assert!(report.is_clean(), "{report:?}");

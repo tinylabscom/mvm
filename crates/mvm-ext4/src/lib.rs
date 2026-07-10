@@ -40,8 +40,8 @@ pub mod mkfs;
 pub mod verity;
 
 use std::collections::BTreeMap;
-
 pub const BLOCK_SIZE: u32 = 4096;
+const BLOCK_SIZE_USIZE: usize = BLOCK_SIZE as usize;
 const INODE_SIZE: u16 = 256;
 const EXT4_MAGIC: u16 = 0xEF53;
 const ROOT_INO: u32 = 2;
@@ -153,6 +153,30 @@ impl Ext4Error {
 
 impl std::error::Error for Ext4Error {}
 
+/// Error emitting an image through the streamed sparse-range API.
+#[derive(Debug)]
+pub enum EmitImageError<E> {
+    Build(Ext4Error),
+    Emit(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for EmitImageError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EmitImageError::Build(err) => write!(f, "{err}"),
+            EmitImageError::Emit(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl<E: std::error::Error + 'static> std::error::Error for EmitImageError<E> {}
+
+impl<E> From<Ext4Error> for EmitImageError<E> {
+    fn from(value: Ext4Error) -> Self {
+        Self::Build(value)
+    }
+}
+
 /// A filesystem node to place in the image. Paths are absolute (`/`-rooted);
 /// `/` (the root) is implicit and always present.
 #[derive(Debug, Clone)]
@@ -231,28 +255,102 @@ struct Extent {
 }
 
 /// A little-endian byte writer over a fixed image buffer. Bounds-checked by
-/// `Vec`/slice indexing (a bug returns/panics, never corrupts memory).
+/// block-local slices (a bug returns/panics, never corrupts memory). Untouched
+/// blocks are implicit zeros, so callers can emit only the sparse ranges they
+/// actually wrote.
 struct Image {
-    bytes: Vec<u8>,
+    total_blocks: u32,
+    blocks: BTreeMap<u32, Box<[u8; BLOCK_SIZE_USIZE]>>,
 }
 
 impl Image {
     fn new(blocks: u32) -> Self {
         Self {
-            bytes: vec![0u8; blocks as usize * BLOCK_SIZE as usize],
+            total_blocks: blocks,
+            blocks: BTreeMap::new(),
         }
     }
+    fn put_u8(&mut self, off: usize, v: u8) {
+        self.put_bytes(off, &[v]);
+    }
     fn put_u16(&mut self, off: usize, v: u16) {
-        self.bytes[off..off + 2].copy_from_slice(&v.to_le_bytes());
+        self.put_bytes(off, &v.to_le_bytes());
     }
     fn put_u32(&mut self, off: usize, v: u32) {
-        self.bytes[off..off + 4].copy_from_slice(&v.to_le_bytes());
+        self.put_bytes(off, &v.to_le_bytes());
     }
     fn put_bytes(&mut self, off: usize, v: &[u8]) {
-        self.bytes[off..off + v.len()].copy_from_slice(v);
+        let mut cursor = off;
+        let mut remaining = v;
+        while !remaining.is_empty() {
+            let block = (cursor / BLOCK_SIZE_USIZE) as u32;
+            let in_block = cursor % BLOCK_SIZE_USIZE;
+            let take = (BLOCK_SIZE_USIZE - in_block).min(remaining.len());
+            self.block_mut(block)[in_block..in_block + take].copy_from_slice(&remaining[..take]);
+            cursor += take;
+            remaining = &remaining[take..];
+        }
     }
     fn block_off(&self, block: u32) -> usize {
-        block as usize * BLOCK_SIZE as usize
+        block as usize * BLOCK_SIZE_USIZE
+    }
+    fn read_bytes(&self, off: usize, len: usize) -> Vec<u8> {
+        let mut out = vec![0u8; len];
+        let mut cursor = off;
+        let mut written = 0usize;
+        while written < len {
+            let block = (cursor / BLOCK_SIZE_USIZE) as u32;
+            let in_block = cursor % BLOCK_SIZE_USIZE;
+            let take = (BLOCK_SIZE_USIZE - in_block).min(len - written);
+            if let Some(bytes) = self.blocks.get(&block) {
+                out[written..written + take].copy_from_slice(&bytes[in_block..in_block + take]);
+            }
+            cursor += take;
+            written += take;
+        }
+        out
+    }
+    fn set_bit(&mut self, base: usize, bit: usize) {
+        let off = base + bit / 8;
+        let block = (off / BLOCK_SIZE_USIZE) as u32;
+        let in_block = off % BLOCK_SIZE_USIZE;
+        self.block_mut(block)[in_block] |= 1u8 << (bit % 8);
+    }
+    fn emit_chunks<E, F>(&self, emit: &mut F) -> Result<(), E>
+    where
+        F: FnMut(u64, &[u8]) -> Result<(), E>,
+    {
+        let mut current_start: Option<u64> = None;
+        let mut current_block = 0u32;
+        let mut current_bytes = Vec::new();
+
+        for (&block, bytes) in &self.blocks {
+            if let Some(start) = current_start {
+                if block == current_block + 1 {
+                    current_block = block;
+                    current_bytes.extend_from_slice(bytes.as_ref());
+                    continue;
+                }
+                emit(start, &current_bytes)?;
+                current_bytes.clear();
+            }
+            current_start = Some(self.block_off(block) as u64);
+            current_block = block;
+            current_bytes.extend_from_slice(bytes.as_ref());
+        }
+
+        if let Some(start) = current_start {
+            emit(start, &current_bytes)?;
+        }
+        Ok(())
+    }
+    fn total_bytes(&self) -> u64 {
+        self.total_blocks as u64 * BLOCK_SIZE as u64
+    }
+    fn block_mut(&mut self, block: u32) -> &mut [u8; BLOCK_SIZE_USIZE] {
+        self.blocks
+            .entry(block)
+            .or_insert_with(|| Box::new([0u8; BLOCK_SIZE_USIZE]))
     }
 }
 
@@ -435,10 +533,46 @@ pub fn build_image(nodes: &[Node]) -> Result<Vec<u8>, Ext4Error> {
     build_image_with_options(nodes, &BuildOptions::default())
 }
 
+/// Emit a deterministic read-only ext4 image containing `nodes` as a series of
+/// sparse `(offset, bytes)` chunks. Returns the final image length in bytes so
+/// callers can size the destination file without guessing.
+pub fn emit_image<E, F>(nodes: &[Node], emit: F) -> Result<u64, EmitImageError<E>>
+where
+    F: FnMut(u64, &[u8]) -> Result<(), E>,
+{
+    emit_image_with_options(nodes, &BuildOptions::default(), emit)
+}
+
 pub fn build_image_with_options(
     nodes: &[Node],
     options: &BuildOptions,
 ) -> Result<Vec<u8>, Ext4Error> {
+    let mut dense = Vec::new();
+    let total_bytes = match emit_image_with_options(nodes, options, |offset, bytes| {
+        let start = offset as usize;
+        let end = start + bytes.len();
+        if dense.len() < end {
+            dense.resize(end, 0);
+        }
+        dense[start..end].copy_from_slice(bytes);
+        Ok::<(), std::convert::Infallible>(())
+    }) {
+        Ok(total_bytes) => total_bytes,
+        Err(EmitImageError::Build(err)) => return Err(err),
+        Err(EmitImageError::Emit(never)) => match never {},
+    };
+    dense.resize(total_bytes as usize, 0);
+    Ok(dense)
+}
+
+pub fn emit_image_with_options<E, F>(
+    nodes: &[Node],
+    options: &BuildOptions,
+    mut emit: F,
+) -> Result<u64, EmitImageError<E>>
+where
+    F: FnMut(u64, &[u8]) -> Result<(), E>,
+{
     // 1. Deterministic order: sort by path so inode numbers + block layout are
     //    a pure function of the input set.
     let mut sorted: Vec<&Node> = nodes.iter().collect();
@@ -449,11 +583,11 @@ pub fn build_image_with_options(
     ino_of.insert("/".to_string(), ROOT_INO);
     let mut next = FIRST_INO;
     for n in &sorted {
-        let p = normalize(n.path())?;
+        let p = normalize(n.path()).map_err(EmitImageError::Build)?;
         // `ino_of` already holds "/" → ROOT_INO, so a node re-claiming root or
         // any repeated path collides here and is refused before layout.
         if ino_of.insert(p.clone(), next).is_some() {
-            return Err(Ext4Error::DuplicatePath(p));
+            return Err(EmitImageError::Build(Ext4Error::DuplicatePath(p)));
         }
         next += 1;
     }
@@ -477,12 +611,13 @@ pub fn build_image_with_options(
         xattr_block: Vec::new(),
     });
     for n in &sorted {
-        let p = normalize(n.path())?;
+        let p = normalize(n.path()).map_err(EmitImageError::Build)?;
         let ino = ino_of[&p];
         let parent_path = parent_of(&p);
         let parent_ino = *ino_of
             .get(&parent_path)
-            .ok_or_else(|| Ext4Error::MissingParent(p.clone()))?;
+            .ok_or_else(|| Ext4Error::MissingParent(p.clone()))
+            .map_err(EmitImageError::Build)?;
         let (kind, mode, data, symlink_target, size) = match n {
             Node::Dir { mode, .. } => {
                 (Kind::Dir, S_IFDIR | (mode & 0o7777), Vec::new(), None, 0u64)
@@ -504,8 +639,9 @@ pub fn build_image_with_options(
         };
         // Encode the inode's xattrs into its in-inode region now; an oversized
         // set surfaces as XattrTooLarge (a capacity limit → builder-VM fallback).
-        let xattr_block =
-            encode_inline_xattrs(n.xattrs()).ok_or(Ext4Error::XattrTooLarge { ino })?;
+        let xattr_block = encode_inline_xattrs(n.xattrs())
+            .ok_or(Ext4Error::XattrTooLarge { ino })
+            .map_err(EmitImageError::Build)?;
         planned.push(Planned {
             ino,
             kind,
@@ -534,14 +670,14 @@ pub fn build_image_with_options(
     // Collect (parent_ino, name, child_ino, ft) first to avoid borrow conflicts.
     let mut child_edges: Vec<(u32, String, u32, u8)> = Vec::new();
     for n in &sorted {
-        let p = normalize(n.path())?;
+        let p = normalize(n.path()).map_err(EmitImageError::Build)?;
         let ino = ino_of[&p];
         let parent_ino = *ino_of.get(&parent_of(&p)).unwrap();
         // The parent must be a directory. A file/symlink parent would leave this
         // node orphaned (no dirent references it), so refuse rather than emit an
         // unreachable inode. Root (ROOT_INO) is always a directory.
         if planned[index[&parent_ino]].kind != Kind::Dir {
-            return Err(Ext4Error::NotADirectory(p.clone()));
+            return Err(EmitImageError::Build(Ext4Error::NotADirectory(p.clone())));
         }
         let name = leaf_name(&p);
         let ft = match n {
@@ -597,7 +733,8 @@ pub fn build_image_with_options(
     //    converges in one or two passes.
     let mut meta_blocks: u64 = 0;
     let layout = loop {
-        let layout = Layout::plan(inode_high, data_blocks_total + meta_blocks)?;
+        let layout = Layout::plan(inode_high, data_blocks_total + meta_blocks)
+            .map_err(EmitImageError::Build)?;
         let mut alloc = RegionAllocator::new(&layout);
         let mut needed = 0u64;
         for p in &planned {
@@ -627,10 +764,10 @@ pub fn build_image_with_options(
         }
         if p.extents.len() > MAX_TREE_EXTENTS {
             // Would need a depth-2 tree (>170 GiB single file) — not supported.
-            return Err(Ext4Error::FileTooFragmented {
+            return Err(EmitImageError::Build(Ext4Error::FileTooFragmented {
                 ino: p.ino,
                 extents: p.extents.len(),
-            });
+            }));
         }
         for _ in 0..leaves_for(p.extents.len()) {
             p.leaf_blocks.push(alloc.take(1)[0].phys);
@@ -648,7 +785,7 @@ pub fn build_image_with_options(
         write_inode(&mut img, &layout, p);
         match p.kind {
             Kind::Dir => write_dir_blocks(&mut img, p),
-            Kind::File => write_file_blocks(&mut img, p),
+            Kind::File => {}
             Kind::Symlink => {
                 if let Some(ext) = p.extents.first() {
                     // Long symlink: target in a data block.
@@ -660,7 +797,13 @@ pub fn build_image_with_options(
         }
     }
 
-    Ok(img.bytes)
+    img.emit_chunks(&mut emit).map_err(EmitImageError::Emit)?;
+    for p in &planned {
+        if p.kind == Kind::File {
+            emit_file_blocks(&mut emit, &img, p).map_err(EmitImageError::Emit)?;
+        }
+    }
+    Ok(img.total_bytes())
 }
 
 fn ceil_div_u32(a: u32, b: u32) -> u32 {
@@ -782,7 +925,7 @@ fn write_bitmaps(img: &mut Image, layout: &Layout) {
         // plus padding past the image end in the final partial group).
         let bb = img.block_off(layout.block_bitmap(g));
         for b in 0..BLOCKS_PER_GROUP {
-            set_bit(&mut img.bytes, bb, b as usize);
+            img.set_bit(bb, b as usize);
         }
         // Inode bitmap: mark occupied inode slots used, pad the rest of the
         // bitmap block used (bits past inodes_per_group are not real inodes).
@@ -790,11 +933,11 @@ fn write_bitmaps(img: &mut Image, layout: &Layout) {
         let base = g * layout.inodes_per_group;
         for local in 0..layout.inodes_per_group {
             if base + local < layout.used_inodes {
-                set_bit(&mut img.bytes, ib, local as usize);
+                img.set_bit(ib, local as usize);
             }
         }
         for pad in layout.inodes_per_group..(BLOCK_SIZE * 8) {
-            set_bit(&mut img.bytes, ib, pad as usize);
+            img.set_bit(ib, pad as usize);
         }
     }
 }
@@ -804,9 +947,9 @@ fn write_bitmaps(img: &mut Image, layout: &Layout) {
 /// expects a backup in each group). Kernel read-only mounts trust the primary;
 /// the backups keep the image self-consistent for offline tools.
 fn write_backups(img: &mut Image, layout: &Layout) {
-    let sb_primary = img.bytes[1024..2048].to_vec();
-    let gdt_bytes = layout.gdt_blocks as usize * BLOCK_SIZE as usize;
-    let gdt_primary = img.bytes[img.block_off(1)..img.block_off(1) + gdt_bytes].to_vec();
+    let sb_primary = img.read_bytes(1024, 1024);
+    let gdt_bytes = layout.gdt_blocks as usize * BLOCK_SIZE_USIZE;
+    let gdt_primary = img.read_bytes(img.block_off(1), gdt_bytes);
     for g in 1..layout.groups {
         let sb_off = img.block_off(layout.group_start(g));
         img.put_bytes(sb_off, &sb_primary);
@@ -814,10 +957,6 @@ fn write_backups(img: &mut Image, layout: &Layout) {
         let gdt_off = img.block_off(layout.group_start(g) + 1);
         img.put_bytes(gdt_off, &gdt_primary);
     }
-}
-
-fn set_bit(bytes: &mut [u8], base: usize, bit: usize) {
-    bytes[base + bit / 8] |= 1u8 << (bit % 8);
 }
 
 // In-inode xattr area: starts at 128 + i_extra_isize(32), runs to the end of
@@ -1038,29 +1177,33 @@ fn put_dirent(img: &mut Image, off: usize, ino: u32, name: &str, ft: u8, last: b
     let block_start = off - (off % BLOCK_SIZE as usize);
     let used = off - block_start;
     let rec_len = if last {
-        BLOCK_SIZE as usize - used
+        BLOCK_SIZE_USIZE - used
     } else {
         dirent_len(name.len())
     };
     img.put_u32(off, ino);
     img.put_u16(off + 0x04, rec_len as u16);
-    img.bytes[off + 0x06] = name.len() as u8;
-    img.bytes[off + 0x07] = ft;
+    img.put_u8(off + 0x06, name.len() as u8);
+    img.put_u8(off + 0x07, ft);
     img.put_bytes(off + 0x08, name.as_bytes());
     rec_len
 }
 
-fn write_file_blocks(img: &mut Image, p: &Planned) {
+fn emit_file_blocks<E, F>(emit: &mut F, img: &Image, p: &Planned) -> Result<(), E>
+where
+    F: FnMut(u64, &[u8]) -> Result<(), E>,
+{
     let mut written = 0usize;
     for ext in &p.extents {
         if written >= p.data.len() {
             break;
         }
-        let span = ext.len as usize * BLOCK_SIZE as usize;
+        let span = ext.len as usize * BLOCK_SIZE_USIZE;
         let end = (written + span).min(p.data.len());
-        img.put_bytes(img.block_off(ext.phys), &p.data[written..end]);
+        emit(img.block_off(ext.phys) as u64, &p.data[written..end])?;
         written += span;
     }
+    Ok(())
 }
 
 // ── path helpers ────────────────────────────────────────────────────────────
@@ -1101,7 +1244,7 @@ fn leaf_name(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{BuildOptions, build_image_with_options};
+    use super::{BuildOptions, EmitImageError, build_image_with_options, emit_image_with_options};
 
     #[test]
     fn build_options_stamp_superblock_uuid_and_volume_name() {
@@ -1119,5 +1262,65 @@ mod tests {
 
         assert_eq!(&image[1024 + 0x68..1024 + 0x78], &uuid);
         assert_eq!(&image[1024 + 0x78..1024 + 0x82], b"mvm-rootfs");
+    }
+
+    #[test]
+    fn streamed_emission_matches_dense_image() {
+        let nodes = vec![
+            super::Node::Dir {
+                path: "/etc".into(),
+                mode: 0o755,
+                xattrs: Vec::new(),
+            },
+            super::Node::Dir {
+                path: "/bin".into(),
+                mode: 0o755,
+                xattrs: Vec::new(),
+            },
+            super::Node::File {
+                path: "/etc/hosts".into(),
+                mode: 0o644,
+                data: b"127.0.0.1 localhost\n".to_vec(),
+                xattrs: Vec::new(),
+            },
+            super::Node::File {
+                path: "/bin/hello".into(),
+                mode: 0o755,
+                data: vec![0x7f; super::BLOCK_SIZE_USIZE + 31],
+                xattrs: Vec::new(),
+            },
+        ];
+        let dense = build_image_with_options(&nodes, &BuildOptions::default()).expect("dense");
+        let mut streamed = Vec::new();
+        let total = emit_image_with_options(&nodes, &BuildOptions::default(), |offset, bytes| {
+            let start = offset as usize;
+            let end = start + bytes.len();
+            if streamed.len() < end {
+                streamed.resize(end, 0);
+            }
+            streamed[start..end].copy_from_slice(bytes);
+            Ok::<(), std::convert::Infallible>(())
+        })
+        .expect("streamed emit");
+        streamed.resize(total as usize, 0);
+        assert_eq!(streamed, dense, "streamed and dense bytes must match");
+    }
+
+    #[test]
+    fn streamed_emission_surfaces_sink_errors() {
+        let nodes = vec![super::Node::File {
+            path: "/payload".into(),
+            mode: 0o644,
+            data: vec![1u8; super::BLOCK_SIZE_USIZE * 2],
+            xattrs: Vec::new(),
+        }];
+        let err = emit_image_with_options(&nodes, &BuildOptions::default(), |_offset, _bytes| {
+            Err::<(), _>("synthetic sink failure")
+        })
+        .expect_err("sink error must surface");
+        match err {
+            EmitImageError::Emit(reason) => assert_eq!(reason, "synthetic sink failure"),
+            other => panic!("expected sink failure, got {other:?}"),
+        }
     }
 }

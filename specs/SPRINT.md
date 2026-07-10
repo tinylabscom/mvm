@@ -441,15 +441,22 @@ plan 25 sequences the work into six independently-shippable workstreams.
       string config-drive content). Remaining Plan 219 gates: macOS HVF/Vz
       live proof, manifest/flake `RunEntrypoint` success, live caller-side
       `verb_denied` emission, full-suite checks, and ADR-103 acceptance.
-- [x] Started
-      [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md)
-      to turn the post-Plan-221 rootfs follow-up into an execution plan. It
-      keeps the shipped block+ext4+dm-verity posture, but sequences the next
-      concrete improvements at the OCI/ext4 seam: a sparse streamed block
-      emission API in `mvm-ext4`, direct streamed file output in
-      `mvm-build` instead of a dense in-memory image, and stronger Linux-tool
-      oracles (`e2fsck`/`debugfs`) plus dense-vs-streamed differential tests at
-      both the writer and OCI materialization layers.
+- [x] Completed
+      [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md):
+      `mvm-ext4` now exposes streamed sparse-range emission, the in-process
+      `mvm-build` OCI/rootfs path now writes `rootfs.ext4` directly instead of
+      first materializing a dense `Vec<u8>`, and dense-vs-streamed differential
+      coverage is green at both the writer and OCI boundaries. Linux-tool
+      oracle tests (`e2fsck`/`debugfs`) are in-tree under Linux-gated coverage
+      and passed on a Debian 6.1 host, including the corruption-rejection
+      witness. Validation: local `cargo fmt --all`, `cargo test -p mvm-ext4`,
+      `cargo test -p mvm-build ext4 --lib`, `cargo test -p mvm-build
+      --features pure-mkfs pure_materialize --lib`, `cargo check --workspace`,
+      `cargo clippy -p mvm-ext4 -p mvm-build --all-targets --features pure-mkfs
+      -- -D warnings`; remote Linux `cargo test -p mvm-ext4`, `cargo test -p
+      mvm-build ext4 --lib`, `cargo test -p mvm-build --features pure-mkfs
+      pure_materialize --lib`, and `cargo clippy -p mvm-ext4 -p mvm-build
+      --all-targets --features pure-mkfs -- -D warnings`.
 - [x] Started
       [`plans/239-kernel-config-subtraction-pass.md`](plans/239-kernel-config-subtraction-pass.md)
       and moved it into active implementation. The current slice keeps the
