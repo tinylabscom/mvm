@@ -7642,7 +7642,8 @@ mod rpc_client_tests {
         let dir = tempfile::tempdir().unwrap();
         let signer = ed25519_dalek::SigningKey::from_bytes(&[20u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([21u8; 16]);
-        let grant_path = write_grant_fixture(dir.path(), &signer, "sess-repin", &nonce, 10);
+        let (grant_path, _pubkey_path) =
+            write_grant_fixture(dir.path(), &signer, "sess-repin", &nonce, 10);
         let now = chrono::Utc::now();
         // Load the envelope from the fixture file and call re_pin_verb_grant directly.
         let raw = std::fs::read(&grant_path).unwrap();
