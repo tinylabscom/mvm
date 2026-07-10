@@ -617,17 +617,27 @@ the semantic protocol).**
     `reverse_path_respects_worker_limits`,
     `reverse_path_quota_exhaustion_shuts_down`; implement; commit.
 
-- [ ] **T4 — Guest config: resolver + default route point at the gateway.**
-  - No guest pump change. Confirm/extend `mvm-guest` `apply_network_config` so the
-    host-authored `TunnelNetworkConfig` (`interface_name`, `guest_ipv4`,
-    `gateway_ipv4`, `dns_servers`, `mtu`) brings the TUN up, installs the default
-    route via `gateway_ipv4`, and writes `/etc/resolv.conf` → `dns_servers`. The
-    host sets `dns_servers` to a real upstream resolver so guest DNS resolves to
-    real IPs (which must then be in the admitted pin set to egress). Host side:
-    `send_network_config` populates those fields from the admitted link config.
-  - Steps: failing tests `tunnel_config_sets_default_route_via_gateway`,
-    `apply_network_config_writes_resolver`,
-    `send_network_config_populates_link_and_dns`; implement; commit.
+- [ ] **T4 — Guest config: default route + admission pins as `/etc/hosts`.**
+  - No live DNS resolver, no synthetic DNS, no dynamic pinning. Resolution is
+    host-authored at admission: the host resolves each allowlisted hostname to its
+    real IPs (the `DnsPinRegistry`) and hands the guest those `host→IP` pairs, which
+    the guest writes to `/etc/hosts`. The guest then resolves each admitted name to
+    exactly the IP the gate admits — pin-consistent by construction — and any
+    non-allowlisted name simply fails to resolve (correct default-deny). This is
+    complete for an allowlist policy: you can only reach what you allowlisted.
+  - Add a bounded `host_entries: Vec<TunnelHostEntry { name: String, ip: Ipv4Addr }>`
+    field to `TunnelNetworkConfig` (`#[serde(default)]`, `deny_unknown_fields`,
+    length-capped, name/label validated). Host side: the worker/`send_network_config`
+    populates it from the admitted `DnsPinRegistry` (IPv4 pins only).
+  - Extend `mvm-guest` `apply_network_config` to: bring the TUN up, set MTU, install
+    the default route via `gateway_ipv4`, and write the `host_entries` into
+    `/etc/hosts` (append/replace an `mvm`-owned block, idempotent). `dns_servers`
+    stays advisory (resolver of last resort); admitted names resolve from
+    `/etc/hosts` first.
+  - Steps: failing tests `tunnel_config_host_entries_serde_roundtrip_and_bounds`,
+    `send_network_config_populates_host_entries_from_pins`,
+    `apply_network_config_installs_default_route_and_hosts_block`,
+    `apply_network_config_hosts_block_is_idempotent`; implement; commit.
 
 - [ ] **T5 — Production caller: populate `VmStartConfig.network_tunnel`.**
   - Files: the admitted workload launch path building `VmStartConfig`
