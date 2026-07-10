@@ -307,48 +307,15 @@ mod tests {
 
     #[test]
     fn select_backend_picks_a_nicless_host_vsock_proxy_backend() {
-        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
         let machine = Machine::builder()
             .image("alpine")
             .network(NetworkMode::HostVsockProxy)
             .build()
             .unwrap();
-
-        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-        {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let supervisor = dir.path().join("mvm-hvf-supervisor");
-            std::fs::write(&supervisor, b"stub").expect("stub supervisor");
-            // SAFETY: test-only env mutation.
-            unsafe {
-                std::env::set_var("MVM_HVF_SUPERVISOR_PATH", &supervisor);
-            }
-            let backend = machine.select_backend().expect("select backend");
-            // SAFETY: test-only env mutation.
-            unsafe {
-                std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-            }
-            let caps = backend.capabilities();
-            assert!(caps.host_vsock_proxy);
-            assert!(caps.no_guest_nic);
-        }
-
-        #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-        {
-            let err = match machine.select_backend() {
-                Ok(_) => panic!("unsupported hosts must fail closed"),
-                Err(err) => err,
-            };
-            let hvf = err
-                .shortfalls
-                .iter()
-                .find(|(backend, _)| *backend == "hvf")
-                .expect("hvf shortfall recorded");
-            assert!(hvf.1.contains(&"host_vsock_proxy"));
-            assert!(hvf.1.contains(&"no_guest_nic"));
-        }
+        let backend = machine.select_backend().expect("select backend");
+        let caps = backend.capabilities();
+        assert!(caps.host_vsock_proxy);
+        assert!(caps.no_guest_nic);
     }
 
     #[test]
