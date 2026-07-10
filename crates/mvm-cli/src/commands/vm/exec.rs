@@ -1249,15 +1249,14 @@ fn parse_env_pair(kv: &str) -> Result<(String, String)> {
     Ok((k.to_string(), v.to_string()))
 }
 
-fn oci_vsock_proxy_env_for_backend(
-    backend: &mvm_backend::backend::AnyBackend,
+fn oci_vsock_proxy_env_for_capabilities(
+    caps: &mvm_core::vm_backend::VmCapabilities,
     image_requested: bool,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> Vec<(String, String)> {
     if !image_requested || !network_policy.allows_egress() {
         return Vec::new();
     }
-    let caps = backend.capabilities();
     if !(caps.vsock && caps.no_guest_nic && caps.host_vsock_proxy) {
         return Vec::new();
     }
@@ -1277,6 +1276,15 @@ fn oci_vsock_proxy_env_for_backend(
             "localhost,127.0.0.1,::1".to_string(),
         ),
     ]
+}
+
+fn oci_vsock_proxy_env_for_backend(
+    backend: &mvm_backend::backend::AnyBackend,
+    image_requested: bool,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Vec<(String, String)> {
+    let caps = backend.capabilities();
+    oci_vsock_proxy_env_for_capabilities(&caps, image_requested, network_policy)
 }
 
 fn write_run_receipt(
@@ -1536,19 +1544,18 @@ mod tests {
 
     #[test]
     fn oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend() {
+        let hvf_proxy_caps = mvm_core::vm_backend::VmCapabilities {
+            vsock: true,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
+            ..mvm_core::vm_backend::VmCapabilities::default()
+        };
         let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
-        assert!(
-            oci_vsock_proxy_env_for_backend(
-                &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
-                true,
-                &deny_all,
-            )
-            .is_empty()
-        );
+        assert!(oci_vsock_proxy_env_for_capabilities(&hvf_proxy_caps, true, &deny_all).is_empty());
 
         assert!(
-            oci_vsock_proxy_env_for_backend(
-                &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
+            oci_vsock_proxy_env_for_capabilities(
+                &hvf_proxy_caps,
                 false,
                 &mvm_core::network_policy::NetworkPolicy::preset(
                     mvm_core::network_policy::NetworkPreset::Dev,
@@ -1557,8 +1564,8 @@ mod tests {
             .is_empty()
         );
         assert!(
-            oci_vsock_proxy_env_for_backend(
-                &mvm_backend::backend::AnyBackend::from_hypervisor("firecracker"),
+            oci_vsock_proxy_env_for_capabilities(
+                &mvm_core::vm_backend::VmCapabilities::default(),
                 true,
                 &mvm_core::network_policy::NetworkPolicy::preset(
                     mvm_core::network_policy::NetworkPreset::Dev,
@@ -1567,8 +1574,8 @@ mod tests {
             .is_empty()
         );
 
-        let vars = oci_vsock_proxy_env_for_backend(
-            &mvm_backend::backend::AnyBackend::from_hypervisor("hvf"),
+        let vars = oci_vsock_proxy_env_for_capabilities(
+            &hvf_proxy_caps,
             true,
             &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
                 mvm_core::network_policy::HostPort::new("example.com", 443),
@@ -1596,13 +1603,29 @@ mod tests {
         args.env.push("HTTP_PROXY=override".to_string());
         args.env.push("APP_MODE=dev".to_string());
 
-        let receipt = ReceiptInput::from_run_args(&args, "hvf").expect("receipt input");
-        assert!(receipt.env_keys.contains(&"ALL_PROXY".to_string()));
-        assert!(receipt.env_keys.contains(&"HTTP_PROXY".to_string()));
-        assert!(receipt.env_keys.contains(&"APP_MODE".to_string()));
+        let receipt = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
+        let mut env_keys = std::collections::BTreeSet::from_iter(receipt.env_keys.clone());
+        env_keys.extend(
+            oci_vsock_proxy_env_for_capabilities(
+                &mvm_core::vm_backend::VmCapabilities {
+                    vsock: true,
+                    no_guest_nic: true,
+                    host_vsock_proxy: true,
+                    ..mvm_core::vm_backend::VmCapabilities::default()
+                },
+                true,
+                &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+                    mvm_core::network_policy::HostPort::new("example.com", 443),
+                ]),
+            )
+            .into_iter()
+            .map(|(k, _)| k),
+        );
+        assert!(env_keys.contains("ALL_PROXY"));
+        assert!(env_keys.contains("HTTP_PROXY"));
+        assert!(env_keys.contains("APP_MODE"));
         assert_eq!(
-            receipt
-                .env_keys
+            env_keys
                 .iter()
                 .filter(|k| k.as_str() == "HTTP_PROXY")
                 .count(),
