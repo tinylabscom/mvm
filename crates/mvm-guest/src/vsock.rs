@@ -2366,66 +2366,6 @@ pub enum RunEntrypointError {
     InternalError,
 }
 
-// ============================================================================
-// Host-bound protocol (guest → host, reverse direction)
-// ============================================================================
-
-/// Port the host listens on for host-bound requests from gateway VMs.
-pub const HOST_BOUND_PORT: u32 = 53;
-
-/// Request FROM a guest VM (gateway) TO the host agent.
-/// Used for wake-on-demand: the gateway VM asks the host to wake a worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum HostBoundRequest {
-    /// Wake a sleeping instance.
-    WakeInstance {
-        tenant_id: String,
-        pool_id: String,
-        instance_id: String,
-    },
-    /// Query current status of an instance.
-    QueryInstanceStatus {
-        tenant_id: String,
-        pool_id: String,
-        instance_id: String,
-    },
-    /// Query host wall-clock time.
-    ///
-    /// The guest agent calls this at boot (and after snapshot
-    /// restore / wake) to set its own clock against host-trusted
-    /// time. Without it, a guest with a broken clock could
-    /// silently bypass TLS certificate-validity checks, JWT
-    /// `exp` checks, and any `expires_at` field in plans /
-    /// secrets / attestation reports.
-    QueryHostTime,
-}
-
-/// Response from host agent to a guest VM's host-bound request.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub enum HostBoundResponse {
-    /// Result of a wake request.
-    WakeResult {
-        success: bool,
-        detail: Option<String>,
-    },
-    /// Status of queried instance.
-    InstanceStatus {
-        status: String,
-        guest_ip: Option<String>,
-    },
-    /// Host wall-clock time. Reported as
-    /// (unix_seconds, unix_nanos) so the response is
-    /// representation-stable across host clock crates and
-    /// language runtimes — the guest reconstructs the
-    /// `chrono::DateTime<Utc>` (or platform equivalent) locally.
-    /// `unix_nanos` is the sub-second component, in `[0, 1_000_000_000)`.
-    HostTime { unix_seconds: i64, unix_nanos: u32 },
-    /// Error from host agent.
-    Error { message: String },
-}
-
 /// Read a single length-prefixed JSON frame from a stream.
 /// Returns the deserialized value.
 pub fn read_frame<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
@@ -4779,21 +4719,6 @@ mod tests {
     }
 
     #[test]
-    fn test_host_bound_request_rejects_unknown_field() {
-        let json =
-            r#"{"WakeInstance":{"tenant_id":"a","pool_id":"b","instance_id":"c","extra":true}}"#;
-        let err = serde_json::from_str::<HostBoundRequest>(json).unwrap_err();
-        assert!(err.to_string().contains("unknown field"));
-    }
-
-    #[test]
-    fn test_host_bound_response_rejects_unknown_field() {
-        let json = r#"{"WakeResult":{"success":true,"detail":null,"oops":1}}"#;
-        let err = serde_json::from_str::<HostBoundResponse>(json).unwrap_err();
-        assert!(err.to_string().contains("unknown field"));
-    }
-
-    #[test]
     fn test_fs_change_rejects_unknown_field() {
         let json = r#"{"path":"/x","kind":"created","size":0,"hidden":42}"#;
         let err = serde_json::from_str::<FsChange>(json).unwrap_err();
@@ -5361,96 +5286,6 @@ mod tests {
     }
 
     #[test]
-    fn test_host_bound_request_roundtrip() {
-        let variants: Vec<HostBoundRequest> = vec![
-            HostBoundRequest::WakeInstance {
-                tenant_id: "alice".to_string(),
-                pool_id: "workers".to_string(),
-                instance_id: "i-abc123".to_string(),
-            },
-            HostBoundRequest::QueryInstanceStatus {
-                tenant_id: "alice".to_string(),
-                pool_id: "workers".to_string(),
-                instance_id: "i-abc123".to_string(),
-            },
-            HostBoundRequest::QueryHostTime,
-        ];
-
-        for req in &variants {
-            let json = serde_json::to_string(req).unwrap();
-            let parsed: HostBoundRequest = serde_json::from_str(&json).unwrap();
-            let json2 = serde_json::to_string(&parsed).unwrap();
-            assert_eq!(json, json2);
-        }
-    }
-
-    #[test]
-    fn test_query_host_time_serialises_as_bare_variant() {
-        // QueryHostTime is unit-shaped — make sure it serialises
-        // as the bare string form rather than picking up an empty
-        // object body, so the wire format is forward-compatible
-        // with other unit variants in the enum.
-        let req = HostBoundRequest::QueryHostTime;
-        let json = serde_json::to_string(&req).unwrap();
-        assert_eq!(json, "\"QueryHostTime\"");
-    }
-
-    #[test]
-    fn test_host_time_response_roundtrip() {
-        let resp = HostBoundResponse::HostTime {
-            unix_seconds: 1_777_372_800,
-            unix_nanos: 123_456_789,
-        };
-        let json = serde_json::to_string(&resp).unwrap();
-        let parsed: HostBoundResponse = serde_json::from_str(&json).unwrap();
-        match parsed {
-            HostBoundResponse::HostTime {
-                unix_seconds,
-                unix_nanos,
-            } => {
-                assert_eq!(unix_seconds, 1_777_372_800);
-                assert_eq!(unix_nanos, 123_456_789);
-            }
-            other => panic!("expected HostTime, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn test_host_time_response_unknown_field_rejected() {
-        // deny_unknown_fields must reject an extra field even on a
-        // successful-looking variant — defends against a future
-        // host accidentally emitting a richer HostTime that older
-        // guests don't understand.
-        let json = r#"{"HostTime":{"unix_seconds":0,"unix_nanos":0,"timezone":"UTC"}}"#;
-        let result: Result<HostBoundResponse, _> = serde_json::from_str(json);
-        assert!(result.is_err(), "extra field must be rejected");
-    }
-
-    #[test]
-    fn test_host_bound_response_roundtrip() {
-        let variants: Vec<HostBoundResponse> = vec![
-            HostBoundResponse::WakeResult {
-                success: true,
-                detail: Some("woke i-abc123".to_string()),
-            },
-            HostBoundResponse::InstanceStatus {
-                status: "Running".to_string(),
-                guest_ip: Some("10.240.1.5".to_string()),
-            },
-            HostBoundResponse::Error {
-                message: "instance not found".to_string(),
-            },
-        ];
-
-        for resp in &variants {
-            let json = serde_json::to_string(resp).unwrap();
-            let parsed: HostBoundResponse = serde_json::from_str(&json).unwrap();
-            let json2 = serde_json::to_string(&parsed).unwrap();
-            assert_eq!(json, json2);
-        }
-    }
-
-    #[test]
     fn test_ping_at_nonexistent_path() {
         let result = ping_at("/nonexistent/v.sock");
         assert!(result.is_err());
@@ -5593,11 +5428,6 @@ mod tests {
             connect_to_port(&socket_path, port, 1).expect("connect succeeds after restart");
         drop(stream);
         worker.join().unwrap();
-    }
-
-    #[test]
-    fn test_host_bound_port_constant() {
-        assert_eq!(HOST_BOUND_PORT, 53);
     }
 
     #[test]
