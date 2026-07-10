@@ -32,6 +32,29 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-10 libkrun supervisor source-checkout stale-helper guard:
+      source-checkout `target/<profile>/mvmctl` now refuses to fall through to
+      an arbitrary `mvm-libkrun-supervisor` on `$PATH` when no same-checkout
+      helper exists, preventing `SupervisorConfig` schema skew failures such as
+      `unknown variant "disconnected"`. The builder and workload libkrun
+      resolver paths both emit the matching profile build command, and the
+      troubleshooting guide documents the symptom and repair. Validation:
+      `cargo fmt --all`; `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-build
+      --features builder-vm supervisor_build_command_tracks_cargo_profile_dir`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-build --features
+      builder-vm source_checkout_path_supervisor_error_names_matching_profile_build`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo test -p mvm-backend
+      source_checkout_supervisor_build_command_tracks_profile`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo clippy -p mvm-build --features
+      builder-vm --lib --tests -- -D warnings`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo clippy -p mvm-backend --lib --tests --
+      -D warnings`; `MVM_SKIP_EMBED_BINARIES=1 cargo test --workspace`
+      (passed outside the sandbox after the sandbox denied a loopback bind in
+      an unrelated native-gateway test);
+      `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D
+      warnings`. Local repair: rebuilt matching release
+      `target/release/mvm-libkrun-supervisor` and normal release
+      `target/release/mvmctl`.
 - [x] 2026-07-08 Plan 213 §D `mvm prepare` + precise not-instant reasons
       (runtime-pack scope): `mvm_core::pack_cache::diagnose_pack` re-scans the
       promoted-pack cache like `resolve_pack` but surfaces the first captured
@@ -103,19 +126,15 @@ plan 25 sequences the work into six independently-shippable workstreams.
       gateway-compat ABI entrypoint still mention `gvproxy`. The active
       libkrun/HVF path no longer depends on `gvproxy`, and the required Linux
       builder smoke is green.
-- [x] 2026-07-09 Plan 236 kickoff / Phase 2A refresh: the synced
-      `scripts/check-plan-236-go.sh` result is still `NO-GO` because the
-      prerequisite `fix/agent-verb-grant-delivery`,
-      `feat/plan-202-native-host-services`,
-      `worktree-vsock-only-egress-cutover`, and
-      `feat/plan-216-s0-mvm-client` worktrees are dirty and/or behind `main`.
-      Execution therefore starts by reusing the cleanest Phase 2A slice:
-      `feat/vsock-port-handler-registry` / PR `#1599`. That branch is now
-      rebased onto current `main`, the rebased invoke-path env tests moved to
-      the shared `mvm_core::util::test_env::TestEnv` guard, and host-side
-      validation is green again on the refreshed branch:
+- [x] 2026-07-09 Plan 236 kickoff / Phase 2A refresh: the execution line first
+      revalidated the then-open prerequisites, reused the cleanest merged slice
+      (`feat/vsock-port-handler-registry` / PR `#1599`), and kept host-side
+      validation green on the refreshed branch:
       `cargo check --workspace`, `cargo test --workspace`, and
-      `cargo clippy --workspace --all-targets -- -D warnings`.
+      `cargo clippy --workspace --all-targets -- -D warnings`. As of the
+      2026-07-10 refresh, the stale prerequisite-branch blocker is cleared by
+      dedicated Codex refresh worktrees rather than left on their original
+      stale branches.
 - [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
       source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
       builds the builder VM just to obtain a workload kernel. The resolver now
@@ -462,22 +481,54 @@ plan 25 sequences the work into six independently-shippable workstreams.
       string config-drive content). Remaining Plan 219 gates: macOS HVF/Vz
       live proof, manifest/flake `RunEntrypoint` success, live caller-side
       `verb_denied` emission, full-suite checks, and ADR-103 acceptance.
-- [x] Completed
-      [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md):
-      `mvm-ext4` now exposes streamed sparse-range emission, the in-process
-      `mvm-build` OCI/rootfs path now writes `rootfs.ext4` directly instead of
-      first materializing a dense `Vec<u8>`, and dense-vs-streamed differential
-      coverage is green at both the writer and OCI boundaries. Linux-tool
-      oracle tests (`e2fsck`/`debugfs`) are in-tree under Linux-gated coverage
-      and passed on a Debian 6.1 host, including the corruption-rejection
-      witness. Validation: local `cargo fmt --all`, `cargo test -p mvm-ext4`,
-      `cargo test -p mvm-build ext4 --lib`, `cargo test -p mvm-build
-      --features pure-mkfs pure_materialize --lib`, `cargo check --workspace`,
-      `cargo clippy -p mvm-ext4 -p mvm-build --all-targets --features pure-mkfs
-      -- -D warnings`; remote Linux `cargo test -p mvm-ext4`, `cargo test -p
-      mvm-build ext4 --lib`, `cargo test -p mvm-build --features pure-mkfs
-      pure_materialize --lib`, and `cargo clippy -p mvm-ext4 -p mvm-build
-      --all-targets --features pure-mkfs -- -D warnings`.
+- [x] Advanced Plan 219 again on 2026-07-10 with the fail-closed sealed-image
+      fix and the caller-audit closeout. The sealed mkGuest path now bakes
+      `{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}`
+      instead of the earlier observe-mode policy, the remote Linux/KVM proof
+      rebuilt and verified that content inside the sealed rootfs, and the guest
+      console now shows `mvm-init: provisioned verb-grant` before
+      `mvm-guest-agent: control plane ready`. Live host probes now cover both
+      sides of the subtractive rule on the rebuilt artifact: restricted
+      `UpdateIdleTimeout -> VerbNotAuthorized`, allow-listed
+      `UpdateIdleTimeoutAck`, and the grant-less regression still passes.
+      The official CLI caller path is now exercised too: `mvmctl machine
+      session set-timeout ...` logged the real grant-denied warning, appended a
+      chain-signed `verb_denied` entry, and `mvmctl trust audit verify --tenant
+      local` still passed. The remaining listed-verb Linux witness is now
+      green too: `examples/python/hello-app/app.py` compiled to
+      `/tmp/plan219-hello-app`, `machine run --entrypoint --flake
+      /tmp/plan219-hello-app --hypervisor firecracker --agent-verb ping
+      --agent-verb run-entrypoint` admitted and launched
+      `invoke-nimble-wombat-b73b`, persisted `verb-grant.json`, returned
+      `"hello ari"`, and a fresh `trust audit verify --tenant local` still
+      exited 0. Required host-side gates are green on the refreshed branch
+      (`cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D
+      warnings`, `cargo test --workspace -- --test-threads=1`). Remaining
+      honest blockers before Plan 219 can be called production-ready: macOS
+      HVF/libkrun live proof and ADR-103 acceptance. The macOS gap is now
+      narrower and better understood: a real stale-helper regression in the
+      source-checkout libkrun Stage 0 path is fixed on the active refresh
+      branch, and the manifest-backed HVF build now advances past the earlier
+      `network_provider = disconnected` parse failure. The same refresh branch
+      also fixes a second real macOS blocker: the builder VM's production
+      egress allowlist had omitted `crates.io`, `index.crates.io`, and
+      `static.crates.io`, which could force Cargo vendoring in the no-guest-NIC
+      builder path through host-generated `403`s. Focused `mvm-build`
+      tests/clippy are green after admitting those hosts, and a fresh
+      `/private/tmp/m236h2` rerun now stays alive in the real workload-build
+      path instead of reproducing the old immediate failure. Remaining macOS
+      blockers: the full sealed HVF/libkrun witness is still not captured
+      end-to-end, and the OCI download path is still blocked on the missing
+      published `v0.17.0` workload-kernel checksum manifest.
+- [x] Started
+      [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md)
+      to turn the post-Plan-221 rootfs follow-up into an execution plan. It
+      keeps the shipped block+ext4+dm-verity posture, but sequences the next
+      concrete improvements at the OCI/ext4 seam: a sparse streamed block
+      emission API in `mvm-ext4`, direct streamed file output in
+      `mvm-build` instead of a dense in-memory image, and stronger Linux-tool
+      oracles (`e2fsck`/`debugfs`) plus dense-vs-streamed differential tests at
+      both the writer and OCI materialization layers.
 - [x] Started
       [`plans/239-kernel-config-subtraction-pass.md`](plans/239-kernel-config-subtraction-pass.md)
       and moved it into active implementation. The current slice keeps the
@@ -556,6 +607,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
       agent-verb grant delivery, and vsock-only egress cutover. It also marks
       the broad transparent-network branch as exploratory input rather than the
       default architecture line.
+- [x] Refreshed the Plan 236 execution line on 2026-07-10 after `main` moved.
+      The GO checker now compares against `origin/main` when available and
+      treats the merged Plan 219 refresh (`#1605`) and merged port-handler
+      registry closeout (`#1599`) as satisfied prerequisites on `main` instead
+      of stale worktree blockers. The three remaining prerequisite branches
+      were then refreshed into clean Codex worktrees:
+      `codex/plan-236-plan202-refresh`,
+      `codex/plan-236-vsock-egress-refresh`, and
+      `codex/plan-236-plan216-refresh`. All three rebase cleanly and collapse
+      to `origin/main`, so the checker now treats "clean + aligned after
+      refresh" as GO rather than requiring an artificial ahead-of-main delta.
+      Plan 236's remaining blockers are therefore the honest live-proof and
+      production-evidence gaps, not stale branch hygiene.
 - [x] Started
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream A: `mvm_core::packs` now defines strict typed manifests for
@@ -4221,5 +4285,6 @@ Issue #1381 follow-on now has the unit-testable path wired:
 
 - [x] Core delivery seams: `VerbGrantEnvelope` cmdline encode/decode, `verb-grant.json` sidecar mint from admitted `ExecutionPlan.agent_verbs`, backend `mvm.verb_grant=` append, and chain-signed `verb_denied` audit entry are implemented and targeted-test green.
 - [x] Config-drive trust anchor: grant-eligible starts attach `host-signer.pub` in `VmStartConfig.config_files`; mkGuest and OCI init stage it at `/run/mvm/host-signer.pub`; the guest pins grants against that file and ignores `VerbGrantEnvelope.pubkey_hex` for trust.
-- [ ] Live proof remains: Vz/macOS and Firecracker/Linux boot validation that `/run/mvm/host-signer.pub` + `/run/mvm/verb-grant.json` exist before agent fork, listed verbs pass, unlisted ProdSafe verbs return `VerbNotAuthorized`, `verb_denied` verifies, and `agent_verbs = None` remains no-token/no-grant.
+- [x] Linux/KVM Firecracker proof now covers the load-bearing sealed-boot path: listed `RunEntrypoint` succeeded (`"hello ari"`), unlisted `UpdateIdleTimeout` denied with a live `verb_denied` audit record, `agent_verbs = None` remained grant-less, and sealed `RunCode` still returned `UnsupportedInProfile { profile: SealedProd, .. }`.
+- [ ] Remaining live proof is now macOS HVF/libkrun parity: confirm the signer key + grant arrive before agent service on the supported macOS path, then close ADR-103.
 - [ ] ADR-103 remains Proposed until maintainer acceptance after live proof.

@@ -8,16 +8,21 @@ remaining guest-NIC and guest-directed escape hatches, narrowing the secrets
 story to explicit host-owned authorities, and shipping a developer-grade
 lifecycle on top of that runtime.
 
-**Execution note (2026-07-09):** `scripts/check-plan-236-go.sh` against synced
-`main` is still `NO-GO`: `fix/agent-verb-grant-delivery`,
-`feat/plan-202-native-host-services`, `worktree-vsock-only-egress-cutover`,
-and `feat/plan-216-s0-mvm-client` remain dirty and/or behind `main`. The first
-execution slice therefore starts with the cleanest reusable Phase 2A input:
-`feat/vsock-port-handler-registry` / PR `#1599`. That branch is now rebased
-onto current `main`, its invoke-path env tests use the shared `TestEnv` guard,
-and host-side `cargo check --workspace`, `cargo test --workspace`, and
-`cargo clippy --workspace --all-targets -- -D warnings` are green on the
-refreshed branch.
+**Execution note (2026-07-10):** the prerequisite picture changed after synced
+`origin/main` advanced on July 10, 2026. The merged Plan 219 refresh
+(`Refresh Plan 219 grant-delivery branch on main`, PR `#1605`) and the merged
+Phase 2A registry closeout (`Finish vsock port-handler registry production
+closeout`, PR `#1599`) are now satisfied directly on `origin/main`. The three
+remaining stale prerequisite branches were then refreshed into dedicated Codex
+worktrees:
+`codex/plan-236-plan202-refresh`,
+`codex/plan-236-vsock-egress-refresh`, and
+`codex/plan-236-plan216-refresh`. All three currently rebase cleanly and
+collapse to `origin/main`, so the checker now treats "clean + aligned with
+main after refresh" as GO rather than forcing an artificial ahead-of-main
+delta. That means the broad branch-staleness blocker is cleared; the remaining
+honest production-readiness blockers for Plan 236 are live-proof and closeout
+evidence, not stale prerequisite worktrees.
 
 ## Thesis
 

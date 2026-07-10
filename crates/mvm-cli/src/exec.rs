@@ -881,6 +881,7 @@ fn run_inner(
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
         start_config.bundle_json = sub.bundle_json;
+        start_config.config_files.extend(sub.config_files);
         use_snapshot = false;
     }
     let t_admitted = timing.then(std::time::Instant::now);
@@ -1261,7 +1262,8 @@ pub struct SessionVm {
 /// Boot a session microVM from a registered template. Snapshot-resume
 /// is taken when the template has one and the backend supports it
 /// (matches the eligibility rule in [`snapshot_eligible`] for the
-/// no-`--add-dir` case).
+/// no-`--add-dir` case), unless an admission hook supplies per-boot
+/// state that must ride the fresh boot path.
 ///
 /// `vm_name_prefix` becomes the human-readable part of the VM name —
 /// callers typically pass `"mcp-session-<short-id>"` so `mvmctl ls`
@@ -1277,6 +1279,7 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     pub plan_json: String,
     pub bundle_json: Option<String>,
+    pub config_files: Vec<mvm_core::vm_backend::VmFile>,
 }
 
 /// Admission callback: given the resolved rootfs + the generated vm_name (both
@@ -1307,12 +1310,9 @@ pub fn boot_session_vm(
 
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
 
-    // Session VMs are short-lived MCP-driven boots that don't go through plan
-    // admission, so tenant_id / plan_json / bundle_json default to None (the
-    // libkrun supervisor stays on the legacy path). A secret-declaring
-    // ephemeral `invoke` lifts that: when `admit` returns a substrate, the
-    // three fields below are populated and the backend spawns the per-VM
-    // substitution endpoint (the guest holds only placeholders).
+    // Session VMs default to the legacy no-admission path. When `admit`
+    // returns a substrate, the plan-bearing fields below and any config-drive
+    // files it supplies are populated before `backend.start()`.
     let mut start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
@@ -1341,17 +1341,23 @@ pub fn boot_session_vm(
     // signed plan into the config so `backend.start` spawns the substitution
     // endpoint. Force a cold boot when secrets are present: snapshot-restore
     // bypasses the endpoint-spawn path. `None` admit ⇒ unchanged legacy path.
-    let mut secret_workload = false;
+    let mut admitted_workload = false;
     if let Some(admit_fn) = admit
         && let Some(sub) = admit_fn(std::path::Path::new(&rootfs), &vm_name)?
     {
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
         start_config.bundle_json = sub.bundle_json;
-        secret_workload = true;
+        start_config.config_files.extend(sub.config_files);
+        admitted_workload = true;
+        if matches!(backend.name(), "firecracker" | "vz" | "libkrun" | "hvf") {
+            mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
+                .context("persisting admitted session plan before backend start")?;
+        }
     }
 
-    let use_snapshot = !secret_workload && snap_info.is_some() && backend.capabilities().snapshots;
+    let use_snapshot =
+        !admitted_workload && snap_info.is_some() && backend.capabilities().snapshots;
     let booted = if use_snapshot {
         let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
         match restore_via_snapshot(&vm_name, env, snap, &start_config) {
