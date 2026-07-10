@@ -1202,10 +1202,6 @@ PLAN 239 — Next kernel-config subtraction pass   ✅ COMPLETE
   [x] Expose and record the resolved builder/workload kernel configs and baseline metrics.
   [x] Audit workload-first feature removals and trim unused compression/initramfs support.
   [x] Test a size-optimized workload kernel and refresh the kernel budget gate with measured results.
-<<<<<<< HEAD
-
-=======
->>>>>>> db6ae0696 (kernel: document workload BPF invariant)
 PLAN 236 — Host-authority runtime roadmap   🟡 IN PROGRESS
   [x] Start execution from an existing prerequisite branch instead of opening a duplicate lane.
   [x] Refresh the cleanest Phase 2A slice (`feat/vsock-port-handler-registry` / PR `#1599`) onto current `main`.
