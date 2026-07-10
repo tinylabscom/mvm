@@ -1212,8 +1212,16 @@ PLAN 236 — Host-authority runtime roadmap   🟡 IN PROGRESS
   [x] Start execution from an existing prerequisite branch instead of opening a duplicate lane.
   [x] Refresh the cleanest Phase 2A slice (`feat/vsock-port-handler-registry` / PR `#1599`) onto current `main`.
   [x] Re-run host-side validation on the refreshed slice (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`).
-  [ ] Fold the refreshed Phase 2A slice into `main`.
-  [x] Reconcile the remaining dirty/behind prerequisite worktrees onto `origin/main`; the temporary Plan 236 readiness helper is no longer kept in-tree.
+  [x] Fold the refreshed Phase 2A slice into `main` (port-handler registry closeout landed as `#1599`).
+  [x] Reconcile the prerequisite worktrees so the Plan 236 readiness check turned `GO` (refresh lanes fast-forwarded; merged slices recognized on `main`); the temporary readiness helper is no longer kept in-tree.
+  [x] Phase 1 §1 — deliver the host-signer verb-grant anchor over the kernel cmdline to the vsock-only backends (libkrun/HVF); sealed guests pin + selectively enforce plan-bound grants (`#1615`).
+  [x] Phase 1 §3.1 — rename `no_guest_nic` → `no_routable_guest_nic` with honest reachability semantics (`#1616`).
+  [x] Phase 2A workload delta — gate the HVF egress endpoint on admitted policy; deny-all spawns none and fails closed, matching libkrun (`#1619`).
+  [x] Phase 1 §2.3.1 — remove the dead `HostBoundRequest` protocol surface.
+  [x] Phase 1 §4 — verb-grant negative-path matrix + `re_pin_verb_grant` self-forgery bypass fix (`#1624`, closes `#1621`).
+  [ ] Phase 1 §1.4 — bake the sealed-image verb-trust policy: blocked on a production/verity OCI seal path (dev-only today; Slice 1 foundation in `#1628`).
+  [ ] Phase 1 §1.6 — macOS live proof of vsock-only verb-grant enforcement (blocked on the workload-kernel checksum manifest).
+  [ ] Bind restore-time authority to per-VM identity — cross-VM replay residual (`#1623`).
 
 PLAN 240 — Vsock port-handler registry production-readiness   ✅ COMPLETE
   [x] Replace the host-I/O thread's fixed 5 ms backstop with readiness-driven fd registration for agent, console, egress, and broker traffic.
