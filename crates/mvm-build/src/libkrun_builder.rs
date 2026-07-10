@@ -2093,7 +2093,7 @@ fn seed_builder_vm_image_from_default_cache(arch_dir: &Path) -> Result<bool, Bui
     // Seeding from the default cache is opportunistic. If the host's shared
     // cache is stale or malformed, skip it and let source-checkout
     // auto-bootstrap build a fresh image into the isolated target cache.
-    if load_builder_vm_image_from_cache(&source_arch_dir).is_err() {
+    if validate_builder_vm_image_cache(&source_arch_dir).is_err() {
         return Ok(false);
     }
     std::fs::create_dir_all(arch_dir).map_err(|e| {
@@ -2345,7 +2345,7 @@ fn builder_vm_bootstrap_helper_target_dir(workspace_root: &Path) -> PathBuf {
         .join("mvm-builder-vm-bootstrap")
 }
 
-fn load_builder_vm_image_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, BuilderVmError> {
+fn validate_builder_vm_image_cache(arch_dir: &Path) -> Result<String, BuilderVmError> {
     let kernel_path = arch_dir.join("vmlinux");
     let rootfs_path = arch_dir.join("rootfs.ext4");
     let cmdline_path = arch_dir.join("cmdline.txt");
@@ -2385,6 +2385,14 @@ fn load_builder_vm_image_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, B
             arch_dir.display(),
         )));
     }
+
+    Ok(cmdline)
+}
+
+fn load_builder_vm_image_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, BuilderVmError> {
+    let kernel_path = arch_dir.join("vmlinux");
+    let rootfs_path = arch_dir.join("rootfs.ext4");
+    let cmdline = validate_builder_vm_image_cache(arch_dir)?;
 
     ensure_rootfs_builder_supported_on_host()?;
 
