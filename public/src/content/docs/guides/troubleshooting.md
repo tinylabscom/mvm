@@ -200,6 +200,37 @@ error: timed out waiting for ...
 
 ## Machine Run Issues
 
+### `machine run --image ... --allow-host ...` is refused on macOS before the image is pulled
+
+`mvm` now checks the macOS HVF host-vsock-proxy path before any OCI pull,
+kernel resolution, or VM boot work. If the detached HVF workload helper is not
+launchable, the CLI fails closed instead of falling back to guest-NIC
+networking.
+
+Typical message:
+
+```text
+... require a NIC-less host-vsock-proxy backend; backend hvf is unavailable on this host
+```
+
+**Fix**:
+
+- If you set `MVM_HVF_SUPERVISOR_PATH`, point it at a real `mvm-hvf-supervisor` binary.
+- In a source checkout, ensure the workspace can build the helper binary.
+- On release installs, make sure `mvm-hvf-supervisor` is present alongside `mvmctl`.
+
+This path is intentionally fail-closed: `--allow-host` on OCI images never
+widens to broad `--net` behavior and never falls back to a guest NIC.
+
+When the helper path is available and you want a live runtime proof, run:
+
+```bash
+just hvf-oci-allow-host-smoke
+```
+
+The script captures both the exact `machine run --image ... --allow-host ...`
+command and a second admit/deny relay proof under `/tmp/`.
+
 ### `machine run --image X -- /bin/sh` exits immediately with no shell
 
 This is **by design**, not a crash. A plain `machine run` is the one-shot

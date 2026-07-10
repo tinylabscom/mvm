@@ -14,6 +14,11 @@ Nix is the core path because it gives `mvm` a better audit surface. The builder 
 
 OCI support is still useful: teams already have images, scanners, registries, and base-image policies. `mvm` should accept those inputs only after turning the mutable registry world into verified local artifacts.
 
+On Apple Silicon macOS, OCI `machine run` / `run` with `--allow-host` stays on
+the HVF no-guest-NIC host-vsock-proxy path. If that helper path is not
+launchable, `mvmctl` refuses the run before any OCI pull or boot work rather
+than widening to guest-networking.
+
 ## Builder VM as the secure build boundary
 
 Developers run `mvmctl build` from the host. The Linux work happens inside the builder VM:

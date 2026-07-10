@@ -285,11 +285,20 @@ pub(crate) fn validate_backend_for_egress(
         return Ok(());
     }
 
-    let missing = AnyBackend::from_hypervisor(backend_name)
+    let backend = AnyBackend::from_hypervisor(backend_name);
+    let missing = backend
         .capabilities()
         .shortfall(&vsock_proxy_backend_requirements());
     if missing.is_empty() {
-        return Ok(());
+        let available = backend
+            .is_available()
+            .with_context(|| format!("probing backend {backend_name} availability"))?;
+        if available {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "{workload} require a NIC-less host-vsock-proxy backend; backend {backend_name} is unavailable on this host"
+        );
     }
 
     anyhow::bail!(
@@ -1513,6 +1522,68 @@ mod tests {
         );
         assert_eq!(hc.interval_secs, 10);
         assert_eq!(build_healthcheck(None, 30, 5, 3, 0), None);
+    }
+
+    #[test]
+    fn validate_backend_for_egress_refuses_unavailable_hvf_before_boot_work() {
+        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("example.com", 443),
+        ]);
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
+        }
+        let err = validate_backend_for_egress(
+            "hvf",
+            true,
+            &policy,
+            "OCI --image runs with outbound egress enabled",
+        )
+        .expect_err("unavailable hvf must fail closed before OCI work");
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
+        }
+        let msg = err.to_string();
+        assert!(msg.contains("NIC-less host-vsock-proxy backend"));
+        assert!(msg.contains("backend hvf lacks ["));
+        assert!(msg.contains("host_vsock_proxy"));
+        assert!(msg.contains("no_guest_nic"));
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn select_backend_name_for_egress_picks_hvf_when_proxy_support_is_available() {
+        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let supervisor = dir.path().join("mvm-hvf-supervisor");
+        std::fs::write(&supervisor, b"stub").expect("stub supervisor");
+        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("example.com", 443),
+        ]);
+
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", &supervisor);
+        }
+        let selected = select_backend_name_for_egress(
+            None,
+            true,
+            &policy,
+            "OCI --image runs with outbound egress enabled",
+        )
+        .expect("hvf should satisfy the proxy backend requirement");
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
+        }
+
+        assert_eq!(selected, "hvf");
     }
 
     #[test]

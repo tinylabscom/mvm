@@ -17,7 +17,7 @@ and which backend limitations apply.
 | Host | Architecture | Runtime backend | Status | Notes |
 | --- | --- | --- | --- | --- |
 | Linux with `/dev/kvm` | x86_64, aarch64 | Firecracker | Supported | Strongest local target; direct KVM microVM path. |
-| macOS Apple Silicon | aarch64 | Apple Virtualization / libkrun-backed paths | Supported | Local development and runtime path for M-series Macs. |
+| macOS Apple Silicon | aarch64 | HVF / libkrun-backed paths | Supported | Local development and runtime path for M-series Macs. OCI `--allow-host` runs use the HVF no-guest-NIC host-vsock-proxy path when `mvm-hvf-supervisor` is available; otherwise the CLI fails closed before pull/boot work. |
 | Linux without `/dev/kvm` | x86_64, aarch64 | QEMU (TCG) | Dev/test | Software-emulated microVM (`--hypervisor qemu`); Tier 2 dev/test — slower, not for production. |
 | Windows native | x86_64, aarch64 | None | Future | Use WSL2 for the supported Windows-adjacent workload path; native Windows runtime support is still tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428). |
 | WSL2 with nested KVM | x86_64, aarch64 | libkrun | Supported workload path | Requires `/dev/kvm`, libkrun installed in the distro, and both the repo and `MVM_DATA_DIR` on the WSL ext4 filesystem rather than `/mnt/<drive>/...`. |
@@ -44,7 +44,7 @@ owns Linux evaluation, image assembly, and artifact extraction.
 Build time and runtime are separate. After an image is built:
 
 - Linux with KVM boots through Firecracker.
-- Apple Silicon macOS uses the supported macOS runtime backend path.
+- Apple Silicon macOS uses the supported macOS runtime backend path. OCI `--image --allow-host ...` uses the HVF host-vsock proxy path with no guest NIC when the helper is available, and is refused early when it is not.
 - Linux without `/dev/kvm` runs QEMU/TCG — a software-emulated microVM for dev/test (Tier 2), not a production isolation target.
 - WSL2 with nested KVM uses the libkrun workload backend inside the distro.
 - Windows native does not have a supported runtime backend today.
@@ -70,7 +70,7 @@ The OS segment is `linux` because the workload runs inside a Linux guest.
 | Backend path | Security posture |
 | --- | --- |
 | Firecracker on Linux/KVM | Preferred local microVM isolation target. |
-| Apple Virtualization / libkrun-backed macOS path | Supported local microVM path with backend-specific feature differences. |
+| HVF / libkrun-backed macOS path | Supported local microVM path with backend-specific feature differences. OCI `--allow-host` on `--image` is the HVF host-vsock-proxy path, not guest-NIC networking. |
 | QEMU (TCG, no `/dev/kvm`) | Tier 2 dev/test microVM; do not use for untrusted code or security-sensitive workloads. |
 | WSL2 nested KVM + libkrun | Supported Tier 2 workload path inside the WSL2 distro. Firecracker is intentionally not part of this Windows slice. |
 
