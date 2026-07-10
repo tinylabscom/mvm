@@ -35,9 +35,9 @@ builtins.path {
       ".cargo"
       "dist"
       ".astro"
-      # Swift Package Manager output. mvm-backend/swift and
-      # mvm-vz-supervisor each carry a multi-GB .build; leaving it in
-      # OOMs the Stage 0 guest while it unpacks the staged workspace.
+      # Swift Package Manager output dirs can carry a multi-GB .build;
+      # leaving it in OOMs the Stage 0 guest while it unpacks the staged
+      # workspace.
       ".build"
       "dev-prebuilt"
       # Test / generated outputs.

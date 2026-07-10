@@ -11,8 +11,8 @@ pub(in crate::commands) struct ReapOutcome {
 }
 
 /// Reap orphaned per-VM helpers left behind by killed
-/// `mvmctl dev up` runs. Covers both backends: libkrun
-/// (`mvm-libkrun-supervisor`) and Vz (`mvm-vz-supervisor`).
+/// `mvmctl dev up` runs. Covers each backend's supervisor
+/// (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`).
 ///
 /// mvmctl spawns the active backend's supervisor binary, which in turn
 /// may spawn auxiliary per-VM helpers. If mvmctl exits abnormally (^C,
