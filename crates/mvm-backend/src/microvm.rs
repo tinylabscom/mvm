@@ -3065,6 +3065,35 @@ pub(crate) fn require_grant_cmdline_token(vm_name: &str) -> Option<String> {
     path.exists().then(|| "mvm.require_grant=1".to_string())
 }
 
+/// Filename of the host-signer public verifying key under the keys dir. The raw
+/// 32-byte Ed25519 public key the grant is verified against.
+const HOST_SIGNER_PUBKEY_FILENAME: &str = "host-signer.pub";
+
+/// The `mvm.host_signer_pub=<hex>` cmdline token for `vm_name`, or `None` when
+/// no verb-grant sidecar was minted (plan carried no `agent_verbs`).
+///
+/// Delivers the host-signer public verifying key — the grant trust anchor — out
+/// of band on the kernel cmdline. On the block backends the anchor rides the
+/// config drive, but a sealed vsock-only guest has no config drive, so the
+/// cmdline is its only per-VM channel. This is a public key, safe on
+/// `/proc/cmdline`. Keyed on the same sidecar the grant token reads, so the
+/// anchor is present exactly when a grant is. Best-effort: a missing or
+/// wrong-sized key file yields `None`, degrading to a grant-less boot rather
+/// than blocking.
+pub(crate) fn host_signer_pub_cmdline_token(vm_name: &str) -> Option<String> {
+    let sidecar = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
+    if !sidecar.exists() {
+        return None;
+    }
+    let pubkey_path = mvm_core::config::mvm_keys_dir().join(HOST_SIGNER_PUBKEY_FILENAME);
+    let bytes = std::fs::read(&pubkey_path).ok()?;
+    if bytes.len() != 32 {
+        return None;
+    }
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("mvm.host_signer_pub={hex}"))
+}
+
 /// Spawn the `mvm-bridge` sibling. Creates a UNIX
 /// socketpair, clears `O_CLOEXEC` on both halves in the child via
 /// `CommandExt::pre_exec` so they survive `execve`, then pipes the
@@ -4433,6 +4462,85 @@ mod tests {
         assert!(
             require_grant_cmdline_token(vm_name).is_none(),
             "absent sidecar must yield None"
+        );
+    }
+
+    // ---- host_signer_pub_cmdline_token ----
+
+    /// Write both the verb-grant sidecar (its content is irrelevant here — the
+    /// token is keyed on existence) and a raw 32-byte host-signer pubkey under
+    /// the data dir keys/ directory.
+    fn seed_grant_and_pubkey(vm_name: &str, pubkey: &[u8; 32]) {
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("verb-grant.json"), b"{}").unwrap();
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.pub"), pubkey).unwrap();
+    }
+
+    #[test]
+    fn host_signer_pub_cmdline_token_some_when_grant_and_key_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let vm_name = "host-signer-pub-present";
+        let pubkey = [0xABu8; 32];
+        seed_grant_and_pubkey(vm_name, &pubkey);
+
+        let token = host_signer_pub_cmdline_token(vm_name).expect("token must be Some");
+        let expected_hex = "ab".repeat(32);
+        assert_eq!(token, format!("mvm.host_signer_pub={expected_hex}"));
+
+        // Round-trip: the value decodes back to the exact key bytes.
+        let hex_part = token.trim_start_matches("mvm.host_signer_pub=");
+        let decoded: Vec<u8> = (0..hex_part.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex_part[i..i + 2], 16).unwrap())
+            .collect();
+        assert_eq!(decoded, pubkey.to_vec());
+    }
+
+    #[test]
+    fn host_signer_pub_cmdline_token_none_when_grant_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        // Key present, but no verb-grant sidecar (plan carried no agent_verbs).
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.pub"), [0u8; 32]).unwrap();
+
+        let vm_name = "host-signer-pub-no-grant";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        assert!(
+            host_signer_pub_cmdline_token(vm_name).is_none(),
+            "no grant sidecar must yield None even when the key exists"
+        );
+    }
+
+    #[test]
+    fn host_signer_pub_cmdline_token_none_when_key_wrong_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let vm_name = "host-signer-pub-bad-key";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::write(state_dir.join("verb-grant.json"), b"{}").unwrap();
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        // 31 bytes: not a valid Ed25519 public key length.
+        std::fs::write(keys_dir.join("host-signer.pub"), [1u8; 31]).unwrap();
+
+        assert!(
+            host_signer_pub_cmdline_token(vm_name).is_none(),
+            "a wrong-sized key must yield None (best-effort, no boot block)"
         );
     }
 }

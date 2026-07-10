@@ -315,6 +315,12 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    // Vsock-only guests have no config drive, so the grant trust anchor rides
+    // the cmdline instead.
+    if let Some(token) = crate::microvm::host_signer_pub_cmdline_token(&config.name) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     let vsock_egress_opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
     if let Some(token) = vsock_egress_cmdline_token(
         vsock_egress_opt_in,

@@ -210,12 +210,19 @@ fn persist_vsock_egress_marker(name: &str, enabled: bool) -> Result<()> {
 }
 
 fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
-    let token = vsock_egress_cmdline_token(config, state_dir)?;
+    let egress = vsock_egress_cmdline_token(config, state_dir);
+    let grants = crate::hvf_bootargs::grant_tokens(&config.name);
+    // Nothing to add ⇒ let the boot path fall back to its built-in default.
+    if egress.is_none() && grants.is_empty() {
+        return None;
+    }
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
     let mut cmdline = crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk);
-    cmdline.push(' ');
-    cmdline.push_str(&token);
+    for token in egress.into_iter().chain(grants) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     Some(cmdline)
 }
 
