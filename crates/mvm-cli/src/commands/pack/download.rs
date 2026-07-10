@@ -17,6 +17,11 @@ pub(in crate::commands) fn run(kind: PackKindArg, version: Option<String>) -> Re
     match kind.to_pack_kind() {
         PackKind::Builder => {
             let promoted = builder::fetch_and_promote(version.as_deref())?;
+            mvm_core::audit_emit!(
+                PackCacheChange,
+                "op=pack_download kind=builder version={}",
+                promoted.release_version
+            );
             crate::ui::success(&format!(
                 "Downloaded and cached builder pack {} (release {}).",
                 builder::short_hash(promoted.hash.as_str()),

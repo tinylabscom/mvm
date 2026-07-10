@@ -24,6 +24,12 @@ pub(in crate::commands) fn run(kind: PackKindArg, to: Option<String>) -> Result<
     };
 
     set_active_version(&target.key, &target.pack_hash)?;
+    mvm_core::audit_emit!(
+        PackCacheChange,
+        "op=pack_rollback kind={} to={}",
+        kind.label(),
+        target.release_version
+    );
     ui::success(&format!(
         "Rolled back {} pack to version {} ({}).",
         kind.label(),

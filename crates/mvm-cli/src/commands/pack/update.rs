@@ -13,6 +13,11 @@ pub(in crate::commands) fn run(kind: PackKindArg) -> Result<()> {
         PackKind::Builder => {
             let promoted = builder::fetch_and_promote(None)?;
             mvm_core::pack_cache::set_active_version(&promoted.key, &promoted.hash)?;
+            mvm_core::audit_emit!(
+                PackCacheChange,
+                "op=pack_update kind=builder version={}",
+                promoted.release_version
+            );
             crate::ui::success(&format!(
                 "Updated builder pack to {} ({}) and activated it.",
                 promoted.release_version,
