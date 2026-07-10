@@ -7,7 +7,7 @@
 //! mvm runtime into the unpacked tree, materialize the ext4 image, and write the
 //! overlay-aware guest sidecar beside it.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -35,6 +35,11 @@ pub struct PrebuiltGuestBinaries<'a> {
 /// `cache_root` holds the guest-agent binary cache; `label` names the image in
 /// the sidecar.
 ///
+/// When `sealed` is set (the `--prod` OCI run), the materialized rootfs is
+/// dm-verity-sealed and a verity initramfs is assembled beside it — atomically
+/// (see [`seal_and_assemble_verity`]) — and the sidecar is written `sealed`, so
+/// the runtime routes the block+ext4 verity boot and refuses interactive access.
+///
 /// Guest binaries resolve in order: a cache hit, then a source-checkout
 /// cross-compile (contributors get their local edits), then the `prebuilt`
 /// bytes embedded in the host binary (the shipped-mvmctl end-user path). A
@@ -46,9 +51,10 @@ pub fn inject_and_materialize(
     label: &str,
     entrypoint: Option<&OciEntrypointConfig>,
     prebuilt: Option<PrebuiltGuestBinaries<'_>>,
+    sealed: bool,
 ) -> Result<()> {
     let bins = resolve_guest_binaries(cache_root, prebuilt)?;
-    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint)
+    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
         .context("inject mvm runtime into OCI rootfs")?;
 
     // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
@@ -60,15 +66,63 @@ pub fn inject_and_materialize(
         tree_size,
     ))?;
 
+    // `--prod`: seal the rootfs and stand up its verity initramfs together,
+    // before the sidecar is written. If this fails we surface it and never
+    // write a `sealed` sidecar over a rootfs that can't verity-boot.
+    if sealed {
+        seal_and_assemble_verity(output, &bins.verity_init)?;
+    }
+
     // The sidecar lives next to rootfs.ext4 so the backend's admit_overlay_aware
     // gate reads it at start.
     let rootfs_dir = output
         .parent()
         .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
-    crate::builder_vm::GuestSidecar::for_oci_run(label)
+    crate::builder_vm::GuestSidecar::for_oci_run(label, sealed)
         .write_to_dir(rootfs_dir)
         .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
     Ok(())
+}
+
+/// Seal an already-materialized `rootfs_ext4` and stand up its verity initramfs
+/// **atomically**: on success both the seal sidecars (`rootfs.verity` +
+/// `rootfs.roothash`) and `rootfs.initrd` exist; on any failure none of them do.
+///
+/// The boot-time guard fails a boot closed when a roothash is present without a
+/// sibling `rootfs.initrd`. To make that state unreachable, the initramfs is
+/// written *first* (it is pure host work, no `veritysetup`), then the seal runs;
+/// a seal failure rolls the initramfs back. So a roothash never lands before its
+/// initramfs, and neither is ever left without the other.
+fn seal_and_assemble_verity(rootfs_ext4: &Path, verity_init_bin: &Path) -> Result<()> {
+    let initrd_path = assemble_and_write_verity_initrd(rootfs_ext4, verity_init_bin)?;
+
+    match seal_run_rootfs_with_verity(rootfs_ext4) {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // Roll the initramfs back so the artifact set is all-or-nothing —
+            // an initrd hinting at a sealed boot must not outlive a failed seal.
+            let _ = std::fs::remove_file(&initrd_path);
+            Err(anyhow::Error::new(e))
+                .with_context(|| format!("dm-verity seal {}", rootfs_ext4.display()))
+        }
+    }
+}
+
+/// Assemble the verity initramfs from `verity_init_bin` and write it to
+/// `rootfs.initrd` beside `rootfs_ext4`. Pure host work — no `veritysetup`, so
+/// it runs identically on every host. Returns the path written.
+fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) -> Result<PathBuf> {
+    let verity_init = std::fs::read(verity_init_bin)
+        .with_context(|| format!("read mvm-verity-init binary {}", verity_init_bin.display()))?;
+    let initrd = crate::verity_initrd::assemble_verity_initramfs(&verity_init)
+        .context("assemble verity initramfs")?;
+    let rootfs_dir = rootfs_ext4.parent().ok_or_else(|| {
+        anyhow::anyhow!("rootfs path has no parent dir: {}", rootfs_ext4.display())
+    })?;
+    let initrd_path = rootfs_dir.join("rootfs.initrd");
+    std::fs::write(&initrd_path, &initrd)
+        .with_context(|| format!("write verity initramfs {}", initrd_path.display()))?;
+    Ok(initrd_path)
 }
 
 /// Resolve the guest-agent binaries: cache hit → source-checkout cross-compile
@@ -207,10 +261,9 @@ pub fn unpacked_tree_size(root: &Path) -> Result<u64> {
 ///
 /// Linux-only at runtime. On macOS `veritysetup` is unavailable, so this returns
 /// [`OciUnpackError::HostUnsupported`] rather than a fabricated hash — the seal
-/// runs on Linux (or via the builder VM in a later slice). This is a
-/// test-exercised capability and is **not** yet wired into the live `--prod` run
-/// path; that lands atomically with the verity initramfs so no unsealed or
-/// no-boot window is ever exposed.
+/// runs on Linux (or via the builder VM in a later slice). The `--prod` run path
+/// drives it through [`seal_and_assemble_verity`], which pairs it atomically with
+/// the verity initramfs so no roothash-without-initrd window is ever exposed.
 pub fn seal_run_rootfs_with_verity(
     rootfs_ext4: &Path,
 ) -> Result<VeritySealedRootfs, OciUnpackError> {
@@ -300,6 +353,107 @@ mod tests {
             matches!(err, OciUnpackError::Io(_)),
             "expected Io error for missing input, got {err:?}"
         );
+    }
+
+    /// A gzip stream starts with the two-byte magic `1f 8b`.
+    fn is_gzip(bytes: &[u8]) -> bool {
+        bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+    }
+
+    #[test]
+    fn assemble_and_write_verity_initrd_emits_gzip_cpio_with_init() {
+        // The written `rootfs.initrd` must be the deterministic gzip'd cpio the
+        // verity boot pivot unpacks — carrying the passed init as `/init`.
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"ext4-bytes").unwrap();
+        let verity_init_bin = tmp.path().join("mvm-verity-init");
+        let init_bytes = b"\x7fELF-fake-verity-init";
+        std::fs::write(&verity_init_bin, init_bytes).unwrap();
+
+        let path = assemble_and_write_verity_initrd(&rootfs, &verity_init_bin).expect("assemble");
+        assert_eq!(path, tmp.path().join("rootfs.initrd"));
+        let written = std::fs::read(&path).unwrap();
+        assert!(!written.is_empty(), "initrd must be non-empty");
+        assert!(is_gzip(&written), "initrd must be gzip'd");
+        // Byte-identical to the pure assembler (which is unit-proven to carry a
+        // `/init` regular-file record equal to the passed binary).
+        let expected =
+            crate::verity_initrd::assemble_verity_initramfs(init_bytes).expect("assemble ref");
+        assert_eq!(written, expected);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn seal_and_assemble_verity_rolls_back_when_seal_unavailable() {
+        // Atomicity: on a host without `veritysetup` the seal fails, and the
+        // helper must leave NEITHER a roothash NOR an initrd — the initramfs it
+        // wrote first is rolled back. The boot guard therefore never sees a
+        // roothash without its initrd.
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"ext4-bytes").unwrap();
+        let verity_init_bin = tmp.path().join("mvm-verity-init");
+        std::fs::write(&verity_init_bin, b"\x7fELF-fake-verity-init").unwrap();
+
+        let err = seal_and_assemble_verity(&rootfs, &verity_init_bin)
+            .expect_err("seal is unavailable off Linux");
+        // The seal path was invoked (this is the veritysetup failure surfacing).
+        assert!(
+            err.to_string().contains("dm-verity seal"),
+            "error must name the seal step: {err:#}"
+        );
+        assert!(
+            !tmp.path().join("rootfs.roothash").exists(),
+            "no roothash on a failed seal"
+        );
+        assert!(
+            !tmp.path().join("rootfs.verity").exists(),
+            "no verity sidecar on a failed seal"
+        );
+        assert!(
+            !tmp.path().join("rootfs.initrd").exists(),
+            "initrd must be rolled back on a failed seal"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn seal_and_assemble_verity_emits_all_artifacts_together() {
+        // The load-bearing `--prod` invariant: seal + initrd land TOGETHER.
+        // Skips cleanly when `veritysetup` (cryptsetup) is not installed.
+        if which::which("veritysetup").is_err() {
+            eprintln!("skipped: veritysetup not on $PATH (install cryptsetup)");
+            return;
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        // veritysetup formats over the raw device bytes; a multiple of the
+        // 1024-byte data-block size is enough (no real ext4 needed here).
+        std::fs::write(&rootfs, vec![0u8; 4096]).unwrap();
+        let verity_init_bin = tmp.path().join("mvm-verity-init");
+        std::fs::write(&verity_init_bin, b"\x7fELF-fake-verity-init").unwrap();
+
+        seal_and_assemble_verity(&rootfs, &verity_init_bin).expect("seal + initrd");
+
+        let roothash = tmp.path().join("rootfs.roothash");
+        let verity = tmp.path().join("rootfs.verity");
+        let initrd = tmp.path().join("rootfs.initrd");
+        assert!(verity.is_file(), "rootfs.verity present");
+        assert!(roothash.is_file(), "rootfs.roothash present");
+        assert!(initrd.is_file(), "rootfs.initrd present");
+        // Both-or-neither: the roothash never lands without its initrd.
+        assert_eq!(
+            roothash.is_file(),
+            initrd.is_file(),
+            "roothash and initrd are all-or-nothing"
+        );
+        let hash = std::fs::read_to_string(&roothash).unwrap();
+        assert!(
+            hash.trim().len() == 64 && hash.trim().bytes().all(|b| b.is_ascii_hexdigit()),
+            "roothash is 64-hex: {hash:?}"
+        );
+        assert!(is_gzip(&std::fs::read(&initrd).unwrap()), "initrd gzip'd");
     }
 
     #[test]

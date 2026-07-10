@@ -379,7 +379,7 @@ pub(in crate::commands) fn resolve_or_pull_run_image(
 }
 
 type RuntimeMaterializer =
-    fn(&Path, &Path, &Path, &str, Option<&OciEntrypointConfig>) -> Result<()>;
+    fn(&Path, &Path, &Path, &str, Option<&OciEntrypointConfig>, bool) -> Result<()>;
 
 fn resolve_or_pull_run_image_with(
     cache_root: &Path,
@@ -421,7 +421,7 @@ fn resolve_or_pull_run_image_with(
             (cached, false, None, None)
         }
         Some(cached) => {
-            match rematerialize_cached_image(cache_root, cached, &runtime_tag, materialize)? {
+            match rematerialize_cached_image(cache_root, cached, &runtime_tag, materialize, prod)? {
                 Some(repaired) => (repaired, false, None, None),
                 None => {
                     let (cached, trust, auth_source) =
@@ -460,6 +460,7 @@ fn resolve_or_pull_run_image_with(
                     &image.reference,
                     oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?
                         .as_ref(),
+                    prod,
                 )
                 .with_context(|| {
                     format!(
@@ -499,6 +500,7 @@ fn rematerialize_cached_image(
     mut image: CachedOciImage,
     runtime_tag: &str,
     materialize: RuntimeMaterializer,
+    prod: bool,
 ) -> Result<Option<CachedOciImage>> {
     let Some(unpacked_root) = unpacked_dir_if_present(cache_root, &image.resolved_digest) else {
         return Ok(None);
@@ -521,6 +523,7 @@ fn rematerialize_cached_image(
             &rootfs_abs,
             &image.reference,
             oci_entrypoint_from_cache_path(cache_root, image.config_path.as_deref())?.as_ref(),
+            prod,
         )
         .with_context(|| {
             format!(
@@ -565,6 +568,7 @@ fn inject_runtime_and_materialize(
     rootfs_abs: &Path,
     image_label: &str,
     entrypoint: Option<&OciEntrypointConfig>,
+    sealed: bool,
 ) -> Result<()> {
     mvm_build::run_image::inject_and_materialize(
         cache_root,
@@ -573,6 +577,7 @@ fn inject_runtime_and_materialize(
         image_label,
         entrypoint,
         embedded_guest_binaries(),
+        sealed,
     )
 }
 
@@ -688,6 +693,8 @@ fn ingest_archive_from_reader<R: Read>(
         &rootfs_abs,
         &image.manifest_digest,
         entrypoint.as_ref(),
+        // Local archives are dev-only (prod refused upstream); never sealed.
+        false,
     )?;
 
     let provenance = OciProvenance {
@@ -1081,6 +1088,7 @@ fn pull_image_ref(
         &rootfs_abs,
         &image_ref.canonical(),
         oci_entrypoint_from_cache_path(cache_root, config_path.as_deref())?.as_ref(),
+        prod,
     )?;
 
     let provenance = OciProvenance {
@@ -1739,6 +1747,7 @@ mod tests {
         rootfs_abs: &Path,
         image_label: &str,
         _entrypoint: Option<&OciEntrypointConfig>,
+        _sealed: bool,
     ) -> Result<()> {
         assert!(unpacked_root.is_dir(), "unpacked root must exist");
         fs::create_dir_all(rootfs_abs.parent().expect("rootfs has parent"))?;

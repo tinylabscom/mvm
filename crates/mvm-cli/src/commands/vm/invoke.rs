@@ -828,10 +828,9 @@ mod tests {
         env.set("MVM_DATA_DIR", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
-        let mut sidecar = GuestSidecar::for_oci_run("audit-probe");
-        sidecar.accessible = false;
-        sidecar.sealed = true;
-        sidecar.write_to_dir(dir.path()).expect("write sidecar");
+        GuestSidecar::for_oci_run("audit-probe", true)
+            .write_to_dir(dir.path())
+            .expect("write sidecar");
 
         let lowered_secrets = LoweredPlanSecrets::default();
         let admitted = admit_entrypoint_boot(

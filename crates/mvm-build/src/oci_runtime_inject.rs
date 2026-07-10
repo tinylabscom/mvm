@@ -87,6 +87,7 @@ pub fn inject_mvm_runtime(
     rootfs_dir: &Path,
     bins: &MvmRuntimeBinaries,
     entrypoint: Option<&OciEntrypointConfig>,
+    sealed: bool,
 ) -> Result<InjectedPaths, io::Error> {
     if !rootfs_dir.is_dir() {
         return Err(io::Error::new(
@@ -116,11 +117,13 @@ pub fn inject_mvm_runtime(
     let runtime_dir = rootfs_dir.join("mvm").join("runtime");
 
     // Minimal markers the agent reads. `variant=dev` keeps the
-    // interactive/console surface enabled (a `run --image` is a dev
-    // surface); `--prod` refuses mutable OCI references upstream.
+    // interactive/console surface enabled (a plain `run --image` is a dev
+    // surface); a `--prod` run bakes `variant=prod` so the sealed agent
+    // links no console/exec and the runtime gate refuses interactive access.
     let etc_mvm = rootfs_dir.join("etc").join("mvm");
     std::fs::create_dir_all(&etc_mvm)?;
-    write_file(&etc_mvm.join("variant"), b"dev\n", 0o644)?;
+    let variant: &[u8] = if sealed { b"prod\n" } else { b"dev\n" };
+    write_file(&etc_mvm.join("variant"), variant, 0o644)?;
     write_file(&etc_mvm.join("name"), b"oci\n", 0o644)?;
 
     // Baked guest binaries.
@@ -261,7 +264,7 @@ mod tests {
             working_dir: Some("/app".to_string()),
         };
 
-        let injected = inject_mvm_runtime(&root, &bins, Some(&entrypoint)).expect("inject");
+        let injected = inject_mvm_runtime(&root, &bins, Some(&entrypoint), false).expect("inject");
 
         // /init is the injected static binary, not a shell script that would
         // require `/bin/sh` or busybox from the source OCI image.
@@ -318,9 +321,9 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bins = fake_bins(tmp.path());
 
-        inject_mvm_runtime(&root, &bins, None).expect("first inject");
+        inject_mvm_runtime(&root, &bins, None, false).expect("first inject");
         // A second inject (e.g. cache reuse) must not error on existing files.
-        let second = inject_mvm_runtime(&root, &bins, None).expect("second inject");
+        let second = inject_mvm_runtime(&root, &bins, None, false).expect("second inject");
         assert!(is_executable(&second.agent));
         assert!(is_executable(&second.egress_client));
         assert!(!root.join("etc/mvm/entrypoint").exists());
@@ -330,8 +333,31 @@ mod tests {
     fn inject_rejects_missing_rootfs_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let bins = fake_bins(tmp.path());
-        let err = inject_mvm_runtime(&tmp.path().join("nope"), &bins, None).unwrap_err();
+        let err = inject_mvm_runtime(&tmp.path().join("nope"), &bins, None, false).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn sealed_inject_writes_prod_variant() {
+        // A `--prod` OCI run bakes `variant=prod`; the dev run keeps `dev`.
+        let tmp = tempfile::tempdir().unwrap();
+        let bins = fake_bins(tmp.path());
+
+        let dev_root = tmp.path().join("dev-rootfs");
+        std::fs::create_dir_all(&dev_root).unwrap();
+        inject_mvm_runtime(&dev_root, &bins, None, false).expect("dev inject");
+        assert_eq!(
+            std::fs::read_to_string(dev_root.join("etc/mvm/variant")).unwrap(),
+            "dev\n"
+        );
+
+        let prod_root = tmp.path().join("prod-rootfs");
+        std::fs::create_dir_all(&prod_root).unwrap();
+        inject_mvm_runtime(&prod_root, &bins, None, true).expect("prod inject");
+        assert_eq!(
+            std::fs::read_to_string(prod_root.join("etc/mvm/variant")).unwrap(),
+            "prod\n"
+        );
     }
 
     #[cfg(unix)]
