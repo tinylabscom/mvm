@@ -416,6 +416,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             tenant_id: c.admitted.plan.tenant.0.clone(),
             plan_json,
             bundle_json,
+            config_files: vec![],
         };
         // Hand the admission context (with its emitter) to the command layer so
         // it can emit `plan.launched` / `plan.failed` once the boot resolves.

@@ -216,6 +216,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                             tenant_id: c.admitted.plan.tenant.0.clone(),
                             plan_json,
                             bundle_json: None,
+                            config_files: vec![],
                         }))
                     },
                 ) as Box<crate::exec::SessionAdmit>

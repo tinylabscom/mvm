@@ -3760,6 +3760,34 @@ fn test_session_start_ephemeral_parses() {
     }
 }
 
+#[test]
+fn test_session_start_agent_verbs_parse() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "session",
+        "start",
+        "tmpl",
+        "--agent-verb",
+        "ping",
+        "--agent-verb",
+        "run-entrypoint",
+    ])
+    .unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected vm group")
+    };
+    let machine::MachineAction::Vm(vmg) = mg.action else {
+        panic!("expected Vm action under machine")
+    };
+    match vmg {
+        group::VmCmd::Session(session::Args {
+            command: session::Cmd::Start(a),
+        }) => assert_eq!(a.agent_verb, vec!["ping", "run-entrypoint"]),
+        _ => panic!("expected session start"),
+    }
+}
+
 // --- Session attach --continue / --resume tests ---
 
 #[test]

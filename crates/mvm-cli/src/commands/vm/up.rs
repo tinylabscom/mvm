@@ -619,7 +619,7 @@ fn attach_host_signer_pubkey_config(
     )
 }
 
-fn attach_host_signer_pubkey_config_for_plan(
+pub(super) fn attach_host_signer_pubkey_config_for_plan(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     plan: &mvm_core::plan::ExecutionPlan,
     host_signer_public_path: &std::path::Path,
@@ -736,6 +736,7 @@ fn untrusted_transient_admit_in(
             tenant_id: c.admitted.plan.tenant.0.clone(),
             plan_json,
             bundle_json: None,
+            config_files: vec![],
         }))
     }
 }
@@ -945,7 +946,7 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
-pub(super) fn persists_plan_before_start(hypervisor: &str) -> bool {
+pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
     matches!(hypervisor, "firecracker" | "vz" | "libkrun" | "hvf")
 }
 
