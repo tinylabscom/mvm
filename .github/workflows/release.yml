@@ -478,6 +478,11 @@ jobs:
   default-microvm:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
+    # This job mints a keyless (OIDC/Fulcio) signature over the attested
+    # runtime pack manifest under the same release.yml@<tag> identity class as
+    # builder-vm-image — gating it behind the same protected environment
+    # constrains which ref can mint a valid signing identity.
+    environment: release-signing
     strategy:
       matrix:
         include:
