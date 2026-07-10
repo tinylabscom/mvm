@@ -40,6 +40,19 @@ pub const MAX_HOST_ENTRIES: usize = 64;
 /// Upper bound on a host-entry name, matching the DNS name length limit.
 pub const MAX_HOST_ENTRY_NAME_LEN: usize = 253;
 
+/// Fixed prefix for the per-interface nftables NAT table the host installs to
+/// source-NAT admitted tunnel egress. Shared so the process that installs the
+/// table and any process that later reaps a leaked one derive the same name.
+pub const HOST_TUN_NAT_TABLE_PREFIX: &str = "mvm_tun_nat_";
+
+/// The nftables table name that source-NATs egress for `interface_name`. The one
+/// source of truth: the host worker that installs and tears down the table and
+/// the backend reap sweep that removes an orphaned worker's leaked table both
+/// derive the name here, so they can never drift.
+pub fn host_tun_nat_table_name(interface_name: &str) -> String {
+    format!("{HOST_TUN_NAT_TABLE_PREFIX}{interface_name}")
+}
+
 /// Fixed frame type tags for the control/data tunnel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
@@ -722,6 +735,12 @@ fn validate_host_entry_name(name: &str) -> Result<(), ControlMessageError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_tun_nat_table_name_composes_from_shared_prefix() {
+        assert_eq!(host_tun_nat_table_name("mvmht0"), "mvm_tun_nat_mvmht0");
+        assert!(host_tun_nat_table_name("mvmt0123456789").starts_with(HOST_TUN_NAT_TABLE_PREFIX));
+    }
 
     #[test]
     fn packet_frame_header_roundtrips() {

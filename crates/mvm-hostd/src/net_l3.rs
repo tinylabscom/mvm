@@ -395,4 +395,84 @@ mod tests {
             L3Decision::Allow
         );
     }
+
+    /// Whole-word substring match: the identifier must not be flanked by another
+    /// identifier char, so `NetMessage` matches `NetMessage` but not
+    /// `SomeNetMessageThing`.
+    fn contains_word(haystack: &str, word: &str) -> bool {
+        let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+        haystack.match_indices(word).any(|(idx, _)| {
+            let before = haystack[..idx].chars().next_back();
+            let after = haystack[idx + word.len()..].chars().next();
+            before.is_none_or(|c| !is_ident(c)) && after.is_none_or(|c| !is_ident(c))
+        })
+    }
+
+    /// Keep only real data-plane code: drop the unit-test module (whose own
+    /// allow-list names the banned identifiers on purpose) and line comments, so
+    /// the scan can never trip on a fixture or a "we do NOT use X" note.
+    fn strip_tests_and_comments(src: &str) -> String {
+        let mut out = String::new();
+        for line in src.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("#[cfg(test)]") || trimmed.starts_with("mod tests") {
+                break;
+            }
+            let code = line.split_once("//").map_or(line, |(head, _)| head);
+            out.push_str(code);
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Guard: the raw-L3 packet-tunnel data plane must never grow a TLS-MITM /
+    /// stream-substitution surface or re-import the old semantic `mvm-net`
+    /// protocol (typed DnsQuery/TcpOpen messages, synthetic 198.19/16 DNS
+    /// mapping). This forwards raw IPv4 packets gated by dst IP — nothing else.
+    ///
+    /// In scope: exactly the six data-plane sources below. The supervisor's
+    /// separate HTTPS-terminating egress path legitimately uses `egress_ca` /
+    /// `stream_transform`, so `supervisor/` is deliberately NOT scanned.
+    #[test]
+    fn l3_data_plane_has_no_mitm_or_semantic_protocol_symbols() {
+        let manifest = env!("CARGO_MANIFEST_DIR"); // .../crates/mvm-hostd
+        let files = [
+            format!("{manifest}/src/net_l3.rs"),
+            format!("{manifest}/src/host_tun.rs"),
+            format!("{manifest}/src/network_tunnel.rs"),
+            format!("{manifest}/src/bin/mvm-network-tunnel-worker.rs"),
+            format!("{manifest}/../mvm-core/src/protocol/network_tunnel.rs"),
+            format!("{manifest}/../mvm-backend/src/network_tunnel_spawn.rs"),
+        ];
+        // MITM / semantic-protocol identifiers the raw-L3 plane must never carry.
+        let banned = [
+            "TlsTransform",
+            "EgressCa",
+            "egress_ca",
+            "StreamTransform",
+            "stream_transform",
+            "SyntheticDnsMap",
+            "NetMessage",
+        ];
+        for path in &files {
+            let src = std::fs::read_to_string(path)
+                .unwrap_or_else(|e| panic!("read data-plane source {path}: {e}"));
+            let code = strip_tests_and_comments(&src);
+            for word in &banned {
+                assert!(
+                    !contains_word(&code, word),
+                    "banned MITM/semantic identifier `{word}` appeared in data-plane file {path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn guard_detects_a_planted_banned_identifier() {
+        // Self-check the whole-word matcher the guard relies on.
+        let planted = "let x: TlsTransform = build();";
+        assert!(contains_word(planted, "TlsTransform"));
+        assert!(!contains_word("let net_message = 1;", "NetMessage"));
+        assert!(!contains_word("egress_carrier", "egress_ca"));
+    }
 }

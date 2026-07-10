@@ -9,6 +9,7 @@ use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 
 use anyhow::{Context, Result, bail};
+use mvm_core::protocol::network_tunnel::host_tun_nat_table_name;
 
 /// Blocking packet device abstraction used by host-side tunnel forwarding.
 pub trait PacketDevice {
@@ -139,8 +140,9 @@ pub fn build_tunnel_masquerade_rules(
 ) -> Result<String, TunnelNatError> {
     validate_nat_interface(link_iface)?;
     validate_nat_interface(egress_iface)?;
+    let table = host_tun_nat_table_name(link_iface);
     Ok(format!(
-        "table ip mvm_tun_nat_{link_iface} {{\n\
+        "table ip {table} {{\n\
          \tchain postrouting {{\n\
          \t\ttype nat hook postrouting priority srcnat; policy accept;\n\
          \t\tip saddr {HOST_TUN_LINK_CIDR} oifname \"{egress_iface}\" masquerade\n\
@@ -154,7 +156,10 @@ pub fn build_tunnel_masquerade_rules(
 /// error on a double teardown.
 pub fn build_tunnel_masquerade_teardown(link_iface: &str) -> Result<String, TunnelNatError> {
     validate_nat_interface(link_iface)?;
-    Ok(format!("delete table ip mvm_tun_nat_{link_iface}\n"))
+    Ok(format!(
+        "delete table ip {}\n",
+        host_tun_nat_table_name(link_iface)
+    ))
 }
 
 /// Parse the default-route interface out of `/proc/net/route` contents. The
@@ -230,6 +235,63 @@ pub fn teardown_host_tun_egress(link_iface: &str) -> Result<(), TunnelNatError> 
 pub fn teardown_host_tun_egress(link_iface: &str) -> Result<(), TunnelNatError> {
     validate_nat_interface(link_iface)?;
     Err(TunnelNatError::LinuxOnly)
+}
+
+/// Convert a graceful stop signal (`SIGTERM`/`SIGINT`) into an egress teardown
+/// for `interface_name` before the process exits. Defense in depth: a caught
+/// stop still removes the per-VM NAT table a hard `SIGKILL` would otherwise
+/// leak (the backend reap sweep covers the uncatchable `SIGKILL` path).
+///
+/// The stop signals are blocked process-wide and consumed by one dedicated
+/// thread via `sigwait`, so teardown runs on a normal stack — `nft`/`ip` exec is
+/// not async-signal-safe and must never run inside a signal handler. Call this
+/// only on the forwarding path, after the NAT is installed: a worker with no NAT
+/// must keep the default terminate-on-`SIGTERM` disposition so a normal reap
+/// stops it without escalating to `SIGKILL`.
+#[cfg(target_os = "linux")]
+pub fn install_egress_teardown_on_stop_signal(interface_name: String) {
+    let set = stop_signal_set();
+    // SAFETY: `set` is a fully initialised sigset; blocking these signals in the
+    // current (main) thread makes every later-spawned thread inherit the block,
+    // so only the sigwait thread below observes them.
+    unsafe { libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) };
+    let _ = std::thread::Builder::new()
+        .name("tunnel-egress-teardown".into())
+        .spawn(move || {
+            let set = stop_signal_set();
+            let mut sig: libc::c_int = 0;
+            // SAFETY: `set` and `sig` are valid; sigwait blocks until one of the
+            // blocked stop signals is delivered, returning its number in `sig`.
+            let rc = unsafe { libc::sigwait(&set, &mut sig) };
+            if rc == 0 {
+                if let Err(err) = teardown_host_tun_egress(&interface_name) {
+                    tracing::warn!(%interface_name, error = %err, "stop-signal host TUN egress teardown failed");
+                }
+            }
+            // Whatever stopped us is going away; a clean status keeps a waiter
+            // from treating the graceful stop as a crash.
+            std::process::exit(0);
+        });
+}
+
+/// Non-Linux hosts never install the host TUN egress, so there is nothing to
+/// tear down on a stop signal.
+#[cfg(not(target_os = "linux"))]
+pub fn install_egress_teardown_on_stop_signal(_interface_name: String) {}
+
+/// The stop signals converted into a graceful egress teardown. Shared by the
+/// process-wide mask and the sigwait so both always agree on the set.
+#[cfg(target_os = "linux")]
+fn stop_signal_set() -> libc::sigset_t {
+    // SAFETY: zero-init then populate via the libc sigset helpers, the standard
+    // construction pattern; the value is fully initialised on return.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        set
+    }
 }
 
 /// Run `ip <args>`. When `tolerate_exists` is set, an `EEXIST`-style failure
@@ -354,6 +416,43 @@ mod tests {
     fn nat_teardown_scopes_to_the_link_table() {
         let rules = build_tunnel_masquerade_teardown("mvmht0").expect("compose teardown");
         assert_eq!(rules, "delete table ip mvm_tun_nat_mvmht0\n");
+    }
+
+    #[test]
+    fn host_tun_nat_table_name_is_stable_and_matches_composed_rule() {
+        // The shared name fn is the one source of truth: the setup rule and the
+        // teardown script must both embed exactly what it returns for an iface.
+        let iface = "mvmht0";
+        let table = host_tun_nat_table_name(iface);
+        assert_eq!(table, "mvm_tun_nat_mvmht0");
+
+        let rules = build_tunnel_masquerade_rules(iface, "eth0").expect("compose rules");
+        assert!(
+            rules.contains(&format!("table ip {table} {{")),
+            "setup rule must embed the shared table name: {rules}"
+        );
+
+        let teardown = build_tunnel_masquerade_teardown(iface).expect("compose teardown");
+        assert_eq!(teardown, format!("delete table ip {table}\n"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn stop_signal_set_covers_term_and_int_only() {
+        let set = stop_signal_set();
+        // SAFETY: `set` is a valid sigset; sigismember only reads it.
+        assert_eq!(unsafe { libc::sigismember(&set, libc::SIGTERM) }, 1);
+        assert_eq!(unsafe { libc::sigismember(&set, libc::SIGINT) }, 1);
+        // The uncatchable signals are never in the graceful-stop set.
+        assert_eq!(unsafe { libc::sigismember(&set, libc::SIGKILL) }, 0);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn install_egress_teardown_is_noop_off_linux() {
+        // Off Linux there is no host TUN egress; the installer must simply
+        // return without blocking signals or spawning a consumer thread.
+        install_egress_teardown_on_stop_signal("mvmht0".to_string());
     }
 
     #[test]

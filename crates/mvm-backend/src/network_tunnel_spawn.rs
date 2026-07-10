@@ -33,6 +33,11 @@ const HOST_TUN_IFACE_PREFIX: &str = "mvmt";
 
 pub(crate) const NETWORK_TUNNEL_WORKER_PID_FILE: &str = "network-tunnel-worker.pid";
 pub(crate) const NETWORK_TUNNEL_AUDIT_JSONL: &str = "network-tunnel.audit.jsonl";
+/// Records the per-VM host TUN interface the worker installed a NAT table for.
+/// Persisted at spawn so a later reap — including one after a SIGKILLed worker
+/// that never ran its own teardown — can remove the leaked NAT table without
+/// re-deriving the name from the VM.
+pub(crate) const NETWORK_TUNNEL_HOST_IFACE_FILE: &str = "network-tunnel-host-iface";
 pub(crate) const NETWORK_TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +103,18 @@ fn worker_packet_policy(
             }
         }
         _ => WorkerPacketPolicy::DropAll,
+    }
+}
+
+impl WorkerPacketPolicy {
+    /// The per-VM host TUN interface whose NAT table must be reaped if this
+    /// worker is orphaned. Only the L3-forward path installs a NAT table, so
+    /// only it names an interface to sweep.
+    fn nat_interface_name(&self) -> Option<&str> {
+        match self {
+            WorkerPacketPolicy::L3Forward { interface_name, .. } => Some(interface_name),
+            _ => None,
+        }
     }
 }
 
@@ -215,6 +232,13 @@ pub(crate) fn spawn_network_tunnel_worker_if_configured(
     let pid_file = state_dir.join(NETWORK_TUNNEL_WORKER_PID_FILE);
     std::fs::write(&pid_file, child.id().to_string())
         .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
+    // Persist the NAT interface so reap can remove a leaked table if the worker
+    // is SIGKILLed before its own teardown runs.
+    if let Some(iface) = packet_policy.nat_interface_name() {
+        let iface_file = state_dir.join(NETWORK_TUNNEL_HOST_IFACE_FILE);
+        std::fs::write(&iface_file, iface)
+            .map_err(|e| anyhow!("write {}: {e}", iface_file.display()))?;
+    }
     Ok(guard)
 }
 
@@ -402,9 +426,54 @@ pub(crate) fn reap_network_tunnel_worker(state_dir: &Path) {
     {
         kill(pid, libc::SIGTERM);
     }
+    // Remove a NAT table a SIGKILLed / orphaned worker could not tear down. The
+    // interface name was persisted at spawn; a missing file means no NAT to
+    // reap (drop-all workers install none).
+    let iface_file = state_dir.join(NETWORK_TUNNEL_HOST_IFACE_FILE);
+    if let Ok(iface) = std::fs::read_to_string(&iface_file) {
+        let iface = iface.trim();
+        if !iface.is_empty() {
+            remove_leaked_nat_table(iface);
+        }
+    }
+    let _ = std::fs::remove_file(&iface_file);
     let _ = std::fs::remove_file(&pid_file);
     let _ = std::fs::remove_file(state_dir.join(NETWORK_TUNNEL_AUDIT_JSONL));
 }
+
+/// Compose the argv that removes a leaked per-VM NAT table. Pure so the reap
+/// wiring is unit-testable without invoking nft. The table name is the shared
+/// source of truth both the host worker (setup/teardown) and this reap derive,
+/// so the two can never drift.
+fn nft_delete_nat_table_argv(interface_name: &str) -> Vec<String> {
+    let table = mvm_core::protocol::network_tunnel::host_tun_nat_table_name(interface_name);
+    vec![
+        "nft".to_string(),
+        "delete".to_string(),
+        "table".to_string(),
+        "ip".to_string(),
+        table,
+    ]
+}
+
+/// Best-effort removal of a leaked per-VM NAT table. The argv is composed on
+/// every platform (keeping the pure composition exercised) but only executed on
+/// Linux. The delete is idempotent: a missing table just fails and is ignored,
+/// so the reap never errors on a double sweep.
+fn remove_leaked_nat_table(interface_name: &str) {
+    let argv = nft_delete_nat_table_argv(interface_name);
+    exec_nft_delete(&argv);
+}
+
+#[cfg(target_os = "linux")]
+fn exec_nft_delete(argv: &[String]) {
+    let _ = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status();
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exec_nft_delete(_argv: &[String]) {}
 
 #[cfg(test)]
 mod tests {
@@ -572,6 +641,69 @@ mod tests {
             worker_packet_policy(None, "vm-1"),
             WorkerPacketPolicy::DropAll
         ));
+    }
+
+    #[test]
+    fn reap_removes_leaked_nat_table() {
+        // The reap sweep composes the exact idempotent nft delete argv from the
+        // per-VM interface name, using the shared table-name source of truth.
+        let iface = host_tun_interface_name("workload-alpha");
+        let expected_table = mvm_core::protocol::network_tunnel::host_tun_nat_table_name(&iface);
+        assert_eq!(
+            nft_delete_nat_table_argv(&iface),
+            vec![
+                "nft".to_string(),
+                "delete".to_string(),
+                "table".to_string(),
+                "ip".to_string(),
+                expected_table.clone(),
+            ]
+        );
+        assert!(expected_table.starts_with("mvm_tun_nat_"));
+    }
+
+    #[test]
+    fn reap_clears_persisted_iface_file() {
+        // Reap consumes the persisted interface file (best-effort NAT sweep) and
+        // removes it so a re-reap is a clean no-op. nft exec is a no-op off Linux.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp =
+            std::env::temp_dir().join(format!("mvm-tun-reap-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&tmp).expect("create temp state dir");
+        let iface_file = tmp.join(NETWORK_TUNNEL_HOST_IFACE_FILE);
+        std::fs::write(&iface_file, host_tun_interface_name("workload-alpha"))
+            .expect("write iface file");
+
+        reap_network_tunnel_worker(&tmp);
+        assert!(
+            !iface_file.exists(),
+            "reap must remove the persisted iface file"
+        );
+        // A second reap on the now-clean dir must not panic.
+        reap_network_tunnel_worker(&tmp);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn drop_all_policy_names_no_nat_interface() {
+        // Only the L3-forward path installs a NAT table, so drop-all persists no
+        // interface and reap has nothing to sweep.
+        assert!(
+            worker_packet_policy(Some(&NetworkPolicy::deny_all()), "vm-1")
+                .nat_interface_name()
+                .is_none()
+        );
+        let l3 = worker_packet_policy(
+            Some(&NetworkPolicy::allow_list(vec![HostPort::new(
+                "93.184.216.34",
+                443,
+            )])),
+            "vm-1",
+        );
+        assert!(l3.nat_interface_name().is_some());
     }
 
     #[test]

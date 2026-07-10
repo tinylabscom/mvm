@@ -183,6 +183,10 @@ fn main() -> Result<()> {
                 mvm_hostd::host_tun::setup_host_tun_egress(&interface_name).with_context(|| {
                     format!("set up host TUN egress + NAT for {interface_name}")
                 })?;
+                // Graceful-stop defense in depth: a caught SIGTERM/SIGINT tears
+                // down NAT before exit. A hard SIGKILL is uncatchable and is
+                // reaped by the backend's spawn-side sweep instead.
+                mvm_hostd::host_tun::install_egress_teardown_on_stop_signal(interface_name.clone());
                 let mut packet_path = HostTunPacketPath::new(device);
                 let result = worker.run_blocking_l3_relay_loop(&mut packet_path, 0, 4);
                 // Tear down NAT + the gateway address regardless of loop outcome.
