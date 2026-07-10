@@ -1548,7 +1548,17 @@ mod tests {
         // it end-to-end over the typed handshake.
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("vsock-21473.sock");
-        let listener = UnixListener::bind(&sock).expect("bind");
+        let listener = match UnixListener::bind(&sock) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping test: sandbox denied binding Unix socket {}: {err}",
+                    sock.display()
+                );
+                return;
+            }
+            Err(err) => panic!("bind: {err}"),
+        };
         let handle = std::thread::spawn(move || {
             // Serve exactly one connection then return.
             let (mut conn, _addr) = listener.accept().expect("accept");
@@ -1573,7 +1583,17 @@ mod tests {
         // crashed daemon that left its socket behind.
         let dir = tempfile::tempdir().expect("tempdir");
         let sock = dir.path().join("vsock-21473.sock");
-        let _listener = UnixListener::bind(&sock).expect("bind");
+        let _listener = match UnixListener::bind(&sock) {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "skipping test: sandbox denied binding Unix socket {}: {err}",
+                    sock.display()
+                );
+                return;
+            }
+            Err(err) => panic!("bind: {err}"),
+        };
         let readiness = probe_builderd_readiness(&sock, Duration::from_millis(150));
         assert!(
             matches!(readiness, BuilderdReadiness::Unreachable { .. }),

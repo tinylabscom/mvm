@@ -97,6 +97,39 @@ curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/checks
 shasum -a 256 --check <(grep "mvmctl-${TARGET}.tar.gz" checksums-sha256.txt)
 ```
 
+## Verifying the runtime overlay release assets
+
+Overlay-backed workloads consume a separate readonly guest-runtime artifact from
+the same release. To verify it manually:
+
+```bash
+VERSION=v0.17.0
+ARCH=aarch64   # or x86_64
+
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.ext4"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.verity"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.roothash"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.VERSION"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}-checksums-sha256.txt"
+
+grep "runtime-overlay-${ARCH}" "runtime-overlay-${ARCH}-checksums-sha256.txt" | sha256sum --check
+```
+
+When `mvmctl build runtime-overlay build --source download` installs these
+assets into `~/.cache/mvm/runtime-overlay/<version>/<arch>/`, it expects the
+same version-matched set.
+
+## Runtime overlay update model
+
+Verification tells you the release assets are authentic; rollout still follows
+the runtime contract:
+
+- stopped VMs pick up an updated version-matched overlay on the next start
+- running VMs keep the runtime they booted with until restart
+- mvm does not hot-remount a different runtime overlay into a live guest
+
+Plan restarts accordingly when moving production workloads onto a new release.
+
 ---
 
 ## What Cosign Keyless Signing Guarantees

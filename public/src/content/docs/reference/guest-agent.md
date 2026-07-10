@@ -3,7 +3,22 @@ title: Guest Agent
 description: The mvm guest agent provides host visibility and control over microVMs via vsock.
 ---
 
-Every microVM built with `mkGuest` includes **mvm-guest-agent**, a lightweight Rust daemon that runs inside the guest on vsock port 5252.
+Every microVM built with `mkGuest` exposes **mvm-guest-agent**, a lightweight
+Rust daemon that runs inside the guest on vsock port 5252.
+
+How the agent reaches the guest depends on the image policy:
+
+- **Dev / preferred-overlay images** keep a baked copy in the rootfs.
+- **Sealed / required-overlay images** boot through the read-only,
+  verity-protected runtime overlay mounted at `/mvm/runtime`; `/init` execs the
+  overlay-resident agent from there instead of falling back to a baked rootfs
+  copy.
+
+The runtime overlay is **version-matched** to the host `mvmctl` build and is
+treated as a boot-time dependency. A running VM keeps the agent/runtime version
+it booted with until restart; mvm does not hot-swap a different runtime overlay
+into a live guest. Stopped VMs pick up an updated version-matched overlay on
+their next boot.
 
 ## Capabilities
 
@@ -17,23 +32,35 @@ Every microVM built with `mkGuest` includes **mvm-guest-agent**, a lightweight R
 | **Filesystem diff** | Walks the overlay upper dir to report files created, modified, or deleted since boot |
 | **Remote command** | Dev-only: execute commands inside the guest via vsock |
 
+## Runtime location
+
+The guest agent binary is not always part of the immutable rootfs closure:
+
+- On fallback/dev images it lives in the rootfs as before.
+- On overlay-required images it lives on the read-only runtime overlay under
+  `/mvm/runtime`.
+
+Other guest-runtime helpers, including `mvm-guest-netinit` and
+`mvm-egress-client`, follow the same overlay-first contract on
+overlay-required boots.
+
+Only guest-executed runtime helpers move into that overlay. Host-executed
+builder/bootstrap binaries remain outside it.
+
+That split is intentional. It lets mvm update the guest runtime for **future
+boots** without rebuilding the workload rootfs, while keeping the runtime sealed
+and version-pinned for the life of a running VM.
+
 ## Protocol
 
-The agent communicates using **length-prefixed JSON frames** over vsock (Firecracker, HVF, microvm.nix):
+The agent communicates using **length-prefixed JSON frames** over vsock on every
+supported microVM backend:
 
 1. Host writes `CONNECT 5252\n` to the socket
 2. Agent responds with `OK 5252\n`
 3. All subsequent communication is request/response pairs
 
 Request types: `ping`, `status`, `sleep-prep`, `wake`, and more.
-
-Both sides treat connection establishment as retryable during a short restart
-window. The host's host→guest attach path and the guest's guest→host broker /
-egress dial path use a bounded exponential backoff (100 ms base, 500 ms cap,
-4 attempts total) for transient transport failures such as a missing socket,
-`ECONNREFUSED`, or a reset while the other side is rebinding. Retry stops at
-the **connect** boundary only: once a stream is established and a request body
-has started flowing, mvm does not blindly replay it.
 
 ## Control plane and data plane
 

@@ -50,12 +50,13 @@ pub fn inject_and_materialize(
     unpacked_root: &Path,
     output: &Path,
     label: &str,
+    profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
     entrypoint: Option<&OciEntrypointConfig>,
     prebuilt: Option<PrebuiltGuestBinaries<'_>>,
     sealed: bool,
 ) -> Result<()> {
     let bins = resolve_guest_binaries(cache_root, prebuilt)?;
-    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
+    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed, profile)
         .context("inject mvm runtime into OCI rootfs")?;
 
     // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
@@ -79,9 +80,13 @@ pub fn inject_and_materialize(
     let rootfs_dir = output
         .parent()
         .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
-    crate::builder_vm::GuestSidecar::for_oci_run(label, sealed)
-        .write_to_dir(rootfs_dir)
-        .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
+    crate::builder_vm::GuestSidecar::for_oci_run(
+        label,
+        sealed,
+        profile == crate::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean,
+    )
+    .write_to_dir(rootfs_dir)
+    .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
     Ok(())
 }
 
@@ -249,7 +254,7 @@ printf '%s\n' "$roothash" > "$ROOTHASH"
 fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) -> Result<PathBuf> {
     let verity_init = std::fs::read(verity_init_bin)
         .with_context(|| format!("read mvm-verity-init binary {}", verity_init_bin.display()))?;
-    let initrd = crate::verity_initrd::assemble_verity_initramfs(&verity_init)
+    let initrd = crate::verity_initrd::build_verity_initrd_bytes(&verity_init)
         .context("assemble verity initramfs")?;
     let rootfs_dir = rootfs_ext4.parent().ok_or_else(|| {
         anyhow::anyhow!("rootfs path has no parent dir: {}", rootfs_ext4.display())
@@ -270,7 +275,7 @@ fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) 
 /// stale, same-version cached agent — the bug that broke local guest-change
 /// validation. A shipped binary with no checkout falls through to the version+arch
 /// cache and the embedded bytes.
-fn resolve_guest_binaries(
+pub fn resolve_guest_binaries(
     cache_root: &Path,
     prebuilt: Option<PrebuiltGuestBinaries<'_>>,
 ) -> Result<MvmRuntimeBinaries> {
@@ -321,14 +326,14 @@ fn resolve_guest_binaries(
 ///
 /// Default: the pure in-process `mvm-ext4` writer. `MVM_MATERIALIZE_BUILDER_VM`
 /// (any value) routes back through the builder-VM `mkfs` path for parity /
-/// debugging. Verity is left off (no `rootfs.verity` / `rootfs.roothash`
-/// sidecars), so the run path's `verity_path`/`roothash = None` boot config is
-/// unchanged — this is a materialization *mechanism* choice, not a boot-semantics
-/// change.
+/// debugging. Both paths emit `rootfs.verity` + `rootfs.roothash` beside the
+/// image so block-backed OCI runs are sealed uniformly across backends.
 pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
+    let input = input.clone().with_verity();
+
     #[cfg(feature = "pure-mkfs")]
     if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none() {
-        match crate::rootfs::materialize_ext4_pure(input) {
+        match crate::rootfs::materialize_ext4_pure(&input) {
             Ok(_) => return Ok(()),
             // Auto-fallback: the in-process writer structurally can't emit a
             // faithful image — too large / too fragmented / a directory over one
@@ -349,7 +354,7 @@ pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
             }
         }
     }
-    materialize_run_rootfs_builder_vm(input)
+    materialize_run_rootfs_builder_vm(&input)
 }
 
 #[cfg(feature = "builder-vm")]

@@ -6,7 +6,7 @@ description: Getting started as a contributor to mvm.
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
-- **macOS Apple Silicon or Linux** — macOS for development via HVF (26+) or libkrun (pre-26); Linux for native `/dev/kvm`. Intel Macs are not a supported local microVM host.
+- **macOS Apple Silicon or Linux** — macOS for development via Vz (26+) or libkrun (pre-26); Linux for native `/dev/kvm`. Intel Macs are not a supported local microVM host.
 - **`zig` + `cargo-zigbuild`** — source-checkout contributors only; `crates/mvm-cli/build.rs` uses them to cross-compile the embedded host-VM binaries (`mvm-host-vm-init`, `mvm-egress-proxy`) as static `aarch64-unknown-linux-musl`. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
@@ -20,7 +20,7 @@ VMM:
 |---|---|
 | macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). `mvmctl dev up` only retries libkrun if the HVF path fails. |
 | macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw`. |
-| Linux + `/dev/kvm` | **No** — Firecracker runs directly; install `passt` from your distro package manager. |
+| Linux + `/dev/kvm` | **No** — auto-detect picks the **QEMU** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
 `mvmctl doctor` reports the resolved choice on the `builder backend`
 line (`<backend> — <source> — <availability>`) and emits install hints
@@ -51,6 +51,10 @@ Or run the bootstrap script on a fresh machine:
 # Build
 just build
 
+# Prebuild the guest runtime overlay once so later required-overlay boots
+# can reuse the cached artifact instead of rebuilding guest binaries.
+just runtime-overlay-build
+
 # Run CLI
 just run -- --help
 
@@ -61,16 +65,19 @@ just run -- dev
 just release-build
 ```
 
+The runtime-overlay command only builds the **guest-executed** runtime payload
+and stores the sealed shared artifact under
+`~/.cache/mvm/runtime-overlay/<version>/<arch>/`. Host-side binaries used for
+bootstrap or supervision stay outside that overlay.
+
 ### Kernel builds
 
 The builder-VM and workload microVM kernels are slim custom Linux
 builds: one shared config in `nix/images/kernel/base.nix` plus a
 per-variant delta (`workload.nix` adds dm-verity; `builder.nix` adds
 the nix-build sandbox + egress-lockdown bits). Because the config is
-custom, `cache.nixos.org` has no substitute. Normal `machine run --image`
-and other runtime paths prefer the published, hash-verified workload
-kernel on a cold cache; compile locally only when you are changing the
-kernel config or explicitly ask for source-built kernels.
+custom, `cache.nixos.org` has no substitute, so the first `dev up` on a
+fresh machine compiles the kernel from source (3-10 min, memory-heavy).
 
 `mvmctl build kernel build` makes that compile explicit and one-time, so
 it stops hijacking your first `dev up`:
@@ -95,9 +102,6 @@ just run -- --kernel-source download dev up
 
 Notes:
 
-- **OCI runs do not implicitly compile kernels.** A source checkout
-  running `machine run --image ...` downloads the release workload kernel
-  on a cold cache unless you explicitly request source compilation.
 - **Host-arch only for `--source compile`.** Stage 0 boots a host-arch
   VM under libkrun, so it builds your host's arch (aarch64 *or* x86_64).
   The other arch is published by the `kernel-build` GitHub workflow,
@@ -117,16 +121,13 @@ effect? The loop is build → boot-smoke → measure:
 
 ```bash
 # 1. Build the variant you touched (compiles your edited config in Stage 0).
-#    This writes the resolved `config` sidecar next to the cached kernel and a
-#    `kernel-metrics-<arch>.json` file beside it.
-just run -- build kernel build --which workload --boot-check
+just run -- build kernel build --which workload
 
-# 2. Or inspect the resolved configs + metrics directly from the kernel flake:
-nix build ./nix/images/kernel#resolved-configs -o /tmp/kernel-configs
-nix build ./nix/images/kernel#workload-metrics -o /tmp/workload-metrics
-nix build ./nix/images/kernel#builder-metrics -o /tmp/builder-metrics
-diff -u /tmp/kernel-configs/builder.config /tmp/kernel-configs/workload.config || true
-cat /tmp/workload-metrics/metrics.json
+# 2. Boot-smoke it — a kernel that builds isn't proof it boots. Boot a
+#    throwaway VM and confirm the in-guest agent answers over vsock.
+just run -- up --flake examples/sleeper --hypervisor libkrun --name smoke -d
+just run -- machine boot-report smoke   # "control plane  ready" == good
+just run -- machine stop smoke
 ```
 
 Two sharp edges worth knowing:
@@ -142,13 +143,13 @@ Two sharp edges worth knowing:
   symbol (or only the builder needs one), put it in that variant's
   delta. (The builder kernel, for example, keeps netfilter for its
   egress lockdown while the workload drops it.)
-- **You can read the resolved `.config` locally.** Stage 0 now leaves a
-  `config` sidecar next to the cached kernel, `build kernel build`
-  writes `kernel-metrics-<arch>.json` beside it, and the kernel flake
-  exposes `builder-configfile`, `workload-configfile`, `resolved-configs`,
-  `builder-metrics`, and `workload-metrics` for direct diff/measurement.
-  CI still uploads the same artifacts in the `kernel-build` lane, and
-  `check-kernel-config-budget` still ratchets on the resolved `=y` count.
+- **You can't read the resolved `.config` locally** — Stage 0 hands the
+  host a `vmlinux`, not the config. The `=y` symbol count + byte size
+  come from the `kernel-build` CI lane, which uploads
+  `workload-config-<arch>` and `kernel-metrics-<arch>.json`. Trigger it
+  without a release via `gh workflow run kernel-build.yml`. The
+  `check-kernel-config-budget` xtask gate fails CI if the `=y` count
+  regresses past `KERNEL_Y_BUDGET`.
 
 ## Testing
 
@@ -185,8 +186,7 @@ just ci
 `crates/mvm-cli/tests/core_demo_e2e.rs` exercises the whole `dev up → compile → up → vsock ping` spine end-to-end. It boots the persistent builder VM, lowers `examples/python/hello-app/app.py` to a flake, builds + boots the workload microVM, and waits for the guest agent to answer over vsock. Default-skips so it doesn't fire on routine `cargo test` runs; gate is `MVM_E2E_SMOKE=1`:
 
 ```bash
-# Local run — requires libkrun + libkrunfw plus the configured native gateway
-# helper on macOS, or
+# Local run — requires libkrun + libkrunfw on pre-26 macOS, or
 # native /dev/kvm on Linux. Threads `--hypervisor` per host.
 MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
 ```
@@ -214,7 +214,7 @@ just lint         # Both format check + clippy
 
 ### Multi-Backend
 
-mvmctl's supported local microVM hosts are native Linux with `/dev/kvm`, macOS Apple Silicon, and WSL2 with nested `/dev/kvm` for the libkrun-backed workload path. Firecracker is the Linux baseline; HVF (macOS 26+ default, vsock-only) and libkrun-backed components cover Apple Silicon macOS. Native Windows and a Hyper-V managed Linux builder remain future backend work.
+mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; Vz and libkrun-backed components cover Apple Silicon macOS. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
 
 ### Host vs. VM
 
@@ -232,7 +232,7 @@ On native Linux, `run_in_vm` executes directly on the host. On supported macOS A
 
 - **Idempotent operations**: every setup step checks if already done before acting
 - **Config drive for metadata**: instance metadata delivered via read-only ext4 disk
-- **Vsock over SSH**: guest communication uses vsock, not sshd (all backends)
+- **Vsock, not SSH**: guest communication uses vsock directly on all supported backends
 - **Same rootfs everywhere**: Nix-built ext4 images work on all backends
 
 ### Adding New Types
@@ -279,7 +279,7 @@ microVMs have no SSH. Interactive access is via `mvmctl machine console` which u
 - Authenticated via the existing Ed25519 vsock protocol
 - Dev-mode only (`access.console` must be `true` in the guest security policy)
 - Single session per VM, 15-minute idle timeout
-- Supports both Firecracker and HVF backends
+- Supports both Firecracker and Vz backends
 
 ### XDG Directory Layout
 

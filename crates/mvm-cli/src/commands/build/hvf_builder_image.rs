@@ -25,7 +25,7 @@ use mvm_build::rootfs_inject::InjectBinary;
 use mvm_core::crypto::image_verify::sha256_file;
 use sha2::{Digest, Sha256};
 
-use crate::host_binaries::extract::ensure_extracted_for_boot;
+use crate::host_binaries::extract::ensure_boot_host_binaries;
 
 /// Derive a deterministic cache key from the SHA-256 digests of the three
 /// inputs that determine the baked image's content. Pure: reads files, never
@@ -81,10 +81,11 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError>
     }
 
     let host_bins_cache = PathBuf::from(mvm_core::config::mvm_cache_dir()).join("host-bins");
-    let host_bin_dir =
-        ensure_extracted_for_boot(&host_bins_cache).map_err(|e| BuilderVmError::HvfVmmFailed {
-            detail: format!("extract embedded host binaries: {e}"),
-        })?;
+    let host_bin_dir = ensure_boot_host_binaries(&host_bins_cache)
+        .map_err(|e| BuilderVmError::HvfVmmFailed {
+            detail: format!("materialize boot host binaries: {e}"),
+        })?
+        .dir;
 
     let host_init = host_bin_dir.join("mvm-host-vm-init");
     let key = hvf_image_cache_key(&vmlinux, &base_rootfs, &host_init);
@@ -184,6 +185,8 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_backend::builder_runner::hvf_builder::HvfBuilderVm;
+    use mvm_build::libkrun_builder::BuilderShellJob;
 
     #[test]
     fn cache_key_is_stable_and_input_sensitive() {
@@ -264,6 +267,65 @@ mod tests {
         assert!(
             !is_cached(&final_dir),
             "partial dir must not satisfy is_cached on the final path"
+        );
+    }
+
+    #[test]
+    #[ignore = "live: needs macOS/Apple Silicon with the CLI-resolved HVF builder image path"]
+    fn live_resolved_hvf_builder_runtime_overlay_is_read_only() {
+        let (kernel_path, rootfs_path) =
+            resolve_hvf_builder_image().expect("HVF builder image must resolve");
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let work_dir = tmp.path().join("work");
+        let artifact_out = tmp.path().join("out");
+        std::fs::create_dir_all(&work_dir).expect("create work_dir");
+
+        let job = BuilderShellJob {
+            work_dir,
+            artifact_out: artifact_out.clone(),
+            script: r#"
+set -eu
+awk '$2=="/mvm/runtime"{print; found=1} END{exit(found?0:1)}' /proc/mounts > /out/runtime-mount.txt
+cat /proc/cmdline > /out/proc-cmdline.txt
+if ! grep -q ' /mvm/runtime .* ro[, ]' /out/runtime-mount.txt; then
+  echo "runtime overlay mount is not read-only" >&2
+  echo "/proc/cmdline: $(cat /proc/cmdline)" >&2
+  cat /out/runtime-mount.txt >&2
+  exit 1
+fi
+if touch /mvm/runtime/probe-write 2>/out/runtime-touch.err; then
+  echo "runtime overlay unexpectedly writable" >&2
+  echo "/proc/cmdline: $(cat /proc/cmdline)" >&2
+  exit 1
+fi
+"#
+            .to_string(),
+            extra_disks: Vec::new(),
+        };
+
+        let result = HvfBuilderVm::new(kernel_path, rootfs_path)
+            .run_shell_script(&job)
+            .expect("builder shell job must succeed");
+        let mount_line = std::fs::read_to_string(result.job_dir.join("runtime-mount.txt"))
+            .expect("read runtime-mount.txt");
+        let touch_err = std::fs::read_to_string(result.job_dir.join("runtime-touch.err"))
+            .expect("read runtime-touch.err");
+        assert!(
+            mount_line.contains("/mvm/runtime"),
+            "proof artifact must contain the runtime mount line: {mount_line}"
+        );
+        assert!(
+            mount_line.contains(" ro,") || mount_line.ends_with(" ro"),
+            "runtime overlay mount must be read-only: {mount_line}"
+        );
+        assert!(
+            touch_err.contains("Read-only file system"),
+            "write attempt must fail with EROFS: {touch_err}"
+        );
+        assert!(
+            result.vm_state_dir.join("console.log").exists(),
+            "live proof must leave a console log for diagnosis"
         );
     }
 }

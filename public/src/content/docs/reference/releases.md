@@ -25,6 +25,59 @@ GitHub Release:
 | `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
 | `mvmctl update` | the tarball for the latest release, in-place swap |
 | `mvmctl kernel build --source download` | `vmlinux-<arch>-<variant>` + `kernel-<arch>-checksums-sha256.txt`, pinned to the binary's own release tag |
+| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.{ext4,verity,roothash,VERSION}` + `runtime-overlay-<arch>-checksums-sha256.txt`, installed into `~/.cache/mvm/runtime-overlay/<version>/<arch>/` |
+
+## Runtime overlay release assets
+
+Every release publishes the shared guest-runtime overlay alongside the CLI
+tarballs and the default images:
+
+- `runtime-overlay-<arch>.ext4`
+- `runtime-overlay-<arch>.verity`
+- `runtime-overlay-<arch>.roothash`
+- `runtime-overlay-<arch>.VERSION`
+- `runtime-overlay-<arch>-checksums-sha256.txt`
+
+Those assets are the readonly, version-matched guest-runtime payload consumed by
+overlay-backed boots. They are not an optional side channel or a developer-only
+cache convenience; they are part of the shipped release surface for the
+backends that admit `RequiredOverlay`.
+
+Only **guest-executed** runtime binaries belong in this artifact. Host-side
+helpers and supervisors still ship in the `mvmctl-<target>.tar.gz` bundle next
+to `mvmctl`.
+
+## Runtime overlay rollout contract
+
+Operationally, runtime-overlay updates are a **release + restart** story:
+
+- A fresh boot on an admitted backend resolves the runtime overlay for the
+  running `mvmctl` version and mounts it read-only inside the guest.
+- A stopped VM picks up the newer version-matched overlay on its next
+  `machine start` or `machine restart`.
+- A running VM keeps the overlay version it already booted with until restart.
+- mvm does **not** hot-remount or live-swap a different runtime overlay into an
+  already-running guest.
+
+That means the normal rollout path is:
+
+1. Publish the new `mvmctl` release and the matching runtime-overlay assets.
+2. Update hosts to that release.
+3. Restart overlay-backed VMs when you want them to adopt the new runtime.
+
+## Rollback / downgrade behavior
+
+Rollback follows the same version-matched rule:
+
+- If you downgrade `mvmctl` to an earlier release, the host resolves the
+  runtime overlay published for that earlier version.
+- Running VMs are unchanged until restart.
+- Restarted VMs come back on the downgraded version's overlay, assuming the
+  matching release assets are still available and verified.
+
+If a backend cannot safely consume the runtime overlay for a given boot shape,
+it must fail closed rather than silently falling back to a writable or
+version-skewed runtime path.
 
 ## Verifying provenance
 

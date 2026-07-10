@@ -1,11 +1,11 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::collections::BTreeMap;
 
 use mvm_core::build_env::BuildEnvironment;
 use mvm_core::instance::InstanceNet;
 use mvm_core::tenant::TenantNet;
 
-use crate::build::{BUILDER_DIR, BUILDER_OUTPUT_DISK_MIB, BUILDER_SSH_USER, builder_ssh_key_path};
+use crate::build::{BUILDER_DIR, BUILDER_OUTPUT_DISK_MIB};
 use crate::scripts::render_script;
 
 fn kill_builder_pid_from_file_best_effort(env: &dyn BuildEnvironment, run_dir: &str) {
@@ -23,125 +23,6 @@ fn kill_builder_pid_from_file_best_effort(env: &dyn BuildEnvironment, run_dir: &
         "#,
         pid = pid_path
     ));
-}
-
-/// Boot an ephemeral Firecracker builder VM for SSH-driven builds. Returns the FC process PID.
-pub(crate) fn boot_builder(
-    env: &dyn BuildEnvironment,
-    run_dir: &str,
-    builder_net: &InstanceNet,
-    tenant_net: &TenantNet,
-    vcpus: u8,
-    mem_mib: u32,
-) -> Result<u32> {
-    env.log_info("Booting builder VM...");
-
-    // Set up TAP device for builder
-    env.setup_tap(builder_net, &tenant_net.bridge_name)?;
-
-    // Generate FC config inline as JSON (avoids depending on mvm FcConfig types)
-    let fc_config_json = serde_json::json!({
-        "boot-source": {
-            "kernel_image_path": format!("{}/vmlinux", BUILDER_DIR),
-            "boot_args": format!(
-                "keep_bootcon console=ttyS0 reboot=k panic=1 pci=off ip={}::{}:255.255.255.0::eth0:off",
-                builder_net.guest_ip, builder_net.gateway_ip,
-            ),
-        },
-        "drives": [{
-            "drive_id": "rootfs",
-            "path_on_host": format!("{}/rootfs.ext4", BUILDER_DIR),
-            "is_root_device": true,
-            "is_read_only": false,
-        }],
-        "network-interfaces": [{
-            "iface_id": "net1",
-            "guest_mac": builder_net.mac,
-            "host_dev_name": builder_net.tap_dev,
-        }],
-        "machine-config": {
-            "vcpu_count": vcpus,
-            "mem_size_mib": mem_mib,
-        },
-    });
-
-    let config_json = serde_json::to_string_pretty(&fc_config_json)?;
-    let config_path = format!("{}/fc-builder.json", run_dir);
-    let socket_path = format!("{}/firecracker.socket", run_dir);
-    let log_path = format!("{}/firecracker.log", run_dir);
-    let pid_path = format!("{}/fc.pid", run_dir);
-
-    // Write FC config
-    env.shell_exec(&format!(
-        "cat > {} << 'MVMEOF'\n{}\nMVMEOF",
-        config_path, config_json
-    ))?;
-
-    // Launch Firecracker in background
-    let mut launch_ctx = BTreeMap::new();
-    launch_ctx.insert("run_dir", run_dir.to_string());
-    launch_ctx.insert("socket", socket_path.clone());
-    launch_ctx.insert("config", config_path.clone());
-    launch_ctx.insert("log", log_path.clone());
-    launch_ctx.insert("pid", pid_path.clone());
-    if let Err(e) = env.shell_exec(&render_script("launch_firecracker_ssh", &launch_ctx)?) {
-        // If Firecracker failed during boot, it may have left the TAP device behind (we create it
-        // before launching FC). Also attempt to kill any partially-started FC process via pid file.
-        kill_builder_pid_from_file_best_effort(env, run_dir);
-        let _ = env.teardown_tap(&builder_net.tap_dev);
-        return Err(e);
-    }
-
-    // Read the PID
-    let pid_str = env.shell_exec_stdout(&format!("cat {}", pid_path))?;
-    let pid: u32 = pid_str
-        .trim()
-        .parse()
-        .with_context(|| format!("Failed to parse builder PID: {:?}", pid_str))?;
-
-    env.log_info(&format!("Builder VM started (PID: {})", pid));
-
-    // Wait for builder VM to be SSH-accessible
-    env.log_info("Waiting for builder VM to become ready...");
-    env.shell_exec(&format!(
-        r#"
-        for i in $(seq 1 60); do
-            if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=2 \
-                   -o PasswordAuthentication=no -o BatchMode=yes -i {key} \
-                   {user}@{ip} true 2>/dev/null; then
-                echo "Builder ready after ${{i}}s"
-                exit 0
-            fi
-            sleep 1
-        done
-        echo "Builder VM did not become ready in 60s" >&2
-        exit 1
-        "#,
-        ip = builder_net.guest_ip,
-        key = builder_ssh_key_path(),
-        user = BUILDER_SSH_USER,
-    ))?;
-
-    // Probe permissions of injected authorized_keys for quick debugging
-    let _ = env.shell_exec_visible(&format!(
-        r#"
-        ssh -o StrictHostKeyChecking=no -o PasswordAuthentication=no -o BatchMode=yes -i {key} {user}@{ip} '
-            echo "[mvm] auth probe (user: {user})"
-            ls -l /root/.ssh 2>/dev/null || true
-            ls -l /root/.ssh/authorized_keys 2>/dev/null || true
-            stat -c "mode:%a uid:%u gid:%g %n" /root/.ssh/authorized_keys 2>/dev/null || true
-            if [ -f /home/ubuntu/.ssh/authorized_keys ]; then
-                ls -l /home/ubuntu/.ssh/authorized_keys 2>/dev/null || true
-                stat -c "mode:%a uid:%u gid:%g %n" /home/ubuntu/.ssh/authorized_keys 2>/dev/null || true
-            fi
-        '
-        "#,
-        ip = builder_net.guest_ip,
-        key = builder_ssh_key_path(),
-        user = BUILDER_SSH_USER,
-    ));
-
-    Ok(pid)
 }
 
 /// Inputs for [`boot_builder_vsock`]: the run dir, the builder/tenant network

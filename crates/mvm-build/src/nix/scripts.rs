@@ -9,29 +9,14 @@ fn script_source(name: &str) -> Option<&'static str> {
         "ensure_builder_artifacts" => Some(include_str!(
             "../../resources/builder_scripts/ensure_builder_artifacts.sh.tera"
         )),
-        "launch_firecracker_ssh" => Some(include_str!(
-            "../../resources/builder_scripts/launch_firecracker_ssh.sh.tera"
-        )),
         "launch_firecracker_vsock" => Some(include_str!(
             "../../resources/builder_scripts/launch_firecracker_vsock.sh.tera"
-        )),
-        "builder_keygen" => Some(include_str!(
-            "../../resources/builder_scripts/builder_keygen.sh.tera"
         )),
         "refresh_builder_rootfs" => Some(include_str!(
             "../../resources/builder_scripts/refresh_builder_rootfs.sh.tera"
         )),
         "download_builder_artifacts" => Some(include_str!(
             "../../resources/builder_scripts/download_builder_artifacts.sh.tera"
-        )),
-        "sync_local_flake" => Some(include_str!(
-            "../../resources/builder_scripts/sync_local_flake.sh.tera"
-        )),
-        "run_nix_build_ssh" => Some(include_str!(
-            "../../resources/builder_scripts/run_nix_build_ssh.sh.tera"
-        )),
-        "extract_artifacts_ssh" => Some(include_str!(
-            "../../resources/builder_scripts/extract_artifacts_ssh.sh.tera"
         )),
         "extract_artifacts_vsock_disk" => Some(include_str!(
             "../../resources/builder_scripts/extract_artifacts_vsock_disk.sh.tera"
@@ -50,14 +35,9 @@ fn script_source(name: &str) -> Option<&'static str> {
 fn script_names() -> &'static [&'static str] {
     &[
         "ensure_builder_artifacts",
-        "launch_firecracker_ssh",
         "launch_firecracker_vsock",
-        "builder_keygen",
         "refresh_builder_rootfs",
         "download_builder_artifacts",
-        "sync_local_flake",
-        "run_nix_build_ssh",
-        "extract_artifacts_ssh",
         "extract_artifacts_vsock_disk",
         "run_nix_build_host",
         "extract_artifacts_host",
@@ -128,25 +108,27 @@ mod tests {
     fn test_missing_var_fails() {
         let mut ctx = BTreeMap::new();
         ctx.insert("run_dir", "/tmp".to_string());
-        // launch_firecracker_ssh requires more vars than just run_dir.
-        let err = render_script("launch_firecracker_ssh", &ctx).unwrap_err();
+        // launch_firecracker_vsock requires more vars than just run_dir.
+        let err = render_script("launch_firecracker_vsock", &ctx).unwrap_err();
         let msg = format!("{err:#}");
         eprintln!("{msg}");
-        assert!(msg.contains("launch_firecracker_ssh"));
+        assert!(msg.contains("launch_firecracker_vsock"));
         assert!(msg.contains("missing template variable"));
     }
 
     #[test]
-    fn test_smoke_render_launch_firecracker_ssh() {
+    fn test_smoke_render_launch_firecracker_vsock() {
         let mut ctx = BTreeMap::new();
         ctx.insert("run_dir", "/tmp/mvm".to_string());
         ctx.insert("socket", "/tmp/mvm/firecracker.socket".to_string());
         ctx.insert("config", "/tmp/mvm/fc-builder.json".to_string());
         ctx.insert("log", "/tmp/mvm/firecracker.log".to_string());
         ctx.insert("pid", "/tmp/mvm/fc.pid".to_string());
+        ctx.insert("out_disk", "/tmp/mvm/build-out.ext4".to_string());
+        ctx.insert("vsock_uds", "/tmp/mvm/builder.vsock".to_string());
 
         let rendered =
-            render_script("launch_firecracker_ssh", &ctx).expect("render should succeed");
+            render_script("launch_firecracker_vsock", &ctx).expect("render should succeed");
         assert!(rendered.contains("/tmp/mvm"));
         assert!(rendered.contains("/tmp/mvm/firecracker.socket"));
         assert!(rendered.contains("/tmp/mvm/fc-builder.json"));

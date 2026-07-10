@@ -9,7 +9,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
-use super::{compile, kernel, validate};
+use super::{compile, kernel, runtime_overlay, validate};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -25,6 +25,9 @@ pub(in crate::commands) enum BuildCmd {
     Validate(validate::Args),
     /// Build the custom microVM kernels (builder / workload)
     Kernel(kernel::Args),
+    /// Prebuild or refresh the read-only runtime overlay cache
+    #[command(name = "runtime-overlay")]
+    RuntimeOverlay(runtime_overlay::Args),
 }
 
 impl BuildCmd {
@@ -34,6 +37,7 @@ impl BuildCmd {
             BuildCmd::Compile(_) => "compile",
             BuildCmd::Validate(_) => "validate",
             BuildCmd::Kernel(_) => "kernel",
+            BuildCmd::RuntimeOverlay(_) => "runtime-overlay",
         }
     }
 }
@@ -43,5 +47,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         BuildCmd::Compile(a) => compile::run(cli, a, cfg),
         BuildCmd::Validate(a) => validate::run(cli, a, cfg),
         BuildCmd::Kernel(a) => kernel::run(cli, a, cfg),
+        BuildCmd::RuntimeOverlay(a) => runtime_overlay::run(cli, a, cfg),
     }
 }

@@ -87,82 +87,75 @@ impl EgressGate {
         }
     }
 
-    /// Resolve every admitted socket address for `target`.
-    ///
-    /// Numeric `ip:port` targets yield either that exact address or a refusal.
-    /// Hostname targets yield every pinned/permitted socket address in order so
-    /// callers can retry a later admitted address when an earlier connect stalls
-    /// or fails.
-    pub fn admitted_addrs(&self, target: &str) -> Result<Vec<SocketAddr>, EgressVerdict> {
-        let target = target.trim();
-        if let Ok(addr) = target.parse::<SocketAddr>() {
-            return match self.decide_addr(addr.ip(), addr.port()) {
-                EgressVerdict::Allow { .. } => Ok(vec![addr]),
-                other => Err(other),
-            };
-        }
-
-        let Some((host, port_str)) = target.rsplit_once(':') else {
-            return Err(EgressVerdict::Malformed);
-        };
-        let Ok(port) = port_str.parse::<u16>() else {
-            return Err(EgressVerdict::Malformed);
-        };
-
-        if let Some(pin) = self.pins.lookup(host) {
-            let addrs = pin
-                .ips
-                .iter()
-                .filter_map(|ip| match self.decide_addr(*ip, port) {
-                    EgressVerdict::Allow { ip, port } => Some(SocketAddr::new(ip, port)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            return if addrs.is_empty() {
-                Err(EgressVerdict::Deny)
-            } else {
-                Ok(addrs)
-            };
-        }
-
-        if matches!(self.egress, CanonicalEgress::Unrestricted) {
-            let addrs = (host, port)
-                .to_socket_addrs()
-                .map_err(|_| EgressVerdict::Deny)?
-                .filter(|addr| {
-                    matches!(
-                        self.decide_addr(addr.ip(), addr.port()),
-                        EgressVerdict::Allow { .. }
-                    )
-                })
-                .collect::<Vec<_>>();
-            return if addrs.is_empty() {
-                Err(EgressVerdict::Deny)
-            } else {
-                Ok(addrs)
-            };
-        }
-
-        Err(EgressVerdict::Deny)
-    }
-
     /// Decide a guest connect request — either a numeric `"<ip>:<port>"` or a
     /// `"<hostname>:<port>"` (DNS-over-vsock: the `socks5h` client sends a name and
     /// the host resolves it here against the pin registry, never the guest). A
     /// hostname with no matching pin is refused (`Deny`); an unparseable target is
     /// `Malformed`. Fail-closed throughout.
     pub fn decide_request(&self, target: &str) -> EgressVerdict {
-        match self.admitted_addrs(target) {
-            Ok(mut addrs) => {
-                let addr = addrs.remove(0);
-                EgressVerdict::Allow {
-                    ip: addr.ip(),
-                    port: addr.port(),
-                }
-            }
-            Err(verdict) => verdict,
+        self.decide_request_with(target, resolve_hostname_ips)
+    }
+
+    /// Like [`decide_request`], but lets the caller supply the hostname resolver.
+    /// This is the escape hatch for confined runtimes that must avoid libc/NSS
+    /// hostname resolution and instead use a pure-Rust DNS path.
+    pub fn decide_request_with<F>(&self, target: &str, resolve: F) -> EgressVerdict
+    where
+        F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+    {
+        let target = target.trim();
+        // Numeric ip:port — decide directly.
+        if let Ok(addr) = target.parse::<SocketAddr>() {
+            return self.decide_addr(addr.ip(), addr.port());
+        }
+        // hostname:port — resolve host-side against the pinned set, then policy-check
+        // each pinned IP. Admit iff some pinned IP is permitted.
+        match target.rsplit_once(':') {
+            Some((host, port_str)) => match port_str.parse::<u16>() {
+                Ok(port) => self.decide_hostname_request(host, port, resolve),
+                Err(_) => EgressVerdict::Malformed,
+            },
+            None => EgressVerdict::Malformed,
         }
     }
+
+    fn decide_hostname_request<F>(&self, host: &str, port: u16, resolve: F) -> EgressVerdict
+    where
+        F: Fn(&str) -> std::io::Result<Vec<IpAddr>>,
+    {
+        if let Some(pin) = self.pins.lookup(host) {
+            return pin
+                .ips
+                .iter()
+                .find_map(|ip| match self.decide_addr(*ip, port) {
+                    EgressVerdict::Allow { ip, port } => Some(EgressVerdict::Allow { ip, port }),
+                    _ => None,
+                })
+                .unwrap_or(EgressVerdict::Deny);
+        }
+
+        if !matches!(self.egress, CanonicalEgress::Unrestricted) {
+            return EgressVerdict::Deny;
+        }
+
+        match resolve(host) {
+            Ok(ips) => ips
+                .into_iter()
+                .find_map(|ip| match self.decide_addr(ip, port) {
+                    EgressVerdict::Allow { ip, port } => Some(EgressVerdict::Allow { ip, port }),
+                    _ => None,
+                })
+                .unwrap_or(EgressVerdict::Deny),
+            Err(_) => EgressVerdict::Deny,
+        }
+    }
+}
+
+fn resolve_hostname_ips(host: &str) -> std::io::Result<Vec<IpAddr>> {
+    Ok((host, 0u16)
+        .to_socket_addrs()?
+        .map(|addr| addr.ip())
+        .collect())
 }
 
 #[cfg(test)]
@@ -228,22 +221,30 @@ mod tests {
     }
 
     #[test]
-    fn unrestricted_resolves_hostnames_without_pins() {
+    fn unrestricted_hostname_without_pin_resolves_host_side() {
         let gate = EgressGate::new(CanonicalEgress::Unrestricted);
-        match gate.decide_request("localhost:80") {
-            EgressVerdict::Allow { .. } | EgressVerdict::Deny => {}
-            other => panic!("hostname under unrestricted must not be malformed: {other:?}"),
-        }
+        let verdict = gate.decide_hostname_request("cache.nixos.org", 443, |_host| {
+            Ok(vec!["151.101.1.91".parse().unwrap()])
+        });
+        assert_eq!(
+            verdict,
+            EgressVerdict::Allow {
+                ip: "151.101.1.91".parse().unwrap(),
+                port: 443
+            }
+        );
     }
 
     #[test]
-    fn unrestricted_returns_every_admitted_resolved_address() {
-        let gate = EgressGate::new(CanonicalEgress::Unrestricted);
-        let addrs = gate
-            .admitted_addrs("cache.nixos.org:443")
-            .expect("cache.nixos.org should resolve on a connected host");
-        assert!(!addrs.is_empty());
-        assert!(addrs.iter().all(|addr| addr.port() == 443));
+    fn pinned_allow_list_without_matching_pin_still_denies_hostname() {
+        let gate = EgressGate::new(CanonicalEgress::Rules(vec![allow_rule(
+            "151.101.1.91/32",
+            443,
+        )]));
+        let verdict = gate.decide_hostname_request("cache.nixos.org", 443, |_host| {
+            Ok(vec!["151.101.1.91".parse().unwrap()])
+        });
+        assert_eq!(verdict, EgressVerdict::Deny);
     }
 
     /// The gate composes with the real `NetworkPolicy` projection — the path the
@@ -394,32 +395,6 @@ mod tests {
                 ip: pinned,
                 port: 443
             }
-        );
-    }
-
-    #[test]
-    fn pinned_hostname_returns_all_permitted_addresses() {
-        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
-        use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
-
-        let now = "2026-01-01T00:00:00Z";
-        let first: IpAddr = "192.0.2.10".parse().unwrap();
-        let second: IpAddr = "198.51.100.20".parse().unwrap();
-        let mut pins = DnsPinRegistry::new();
-        pins.add(DnsPin::at(
-            "multi.example.test",
-            vec![first, second],
-            "2025-01-01T00:00:00Z",
-            "2030-01-01T00:00:00Z",
-        ));
-        let policy = NetworkPolicy::allow_list(vec![HostPort {
-            host: "multi.example.test".into(),
-            port: 443,
-        }]);
-        let gate = EgressGate::from_network_policy(&policy, &pins, now);
-        assert_eq!(
-            gate.admitted_addrs("multi.example.test:443").unwrap(),
-            vec![SocketAddr::new(first, 443), SocketAddr::new(second, 443)]
         );
     }
 }

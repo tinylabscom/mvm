@@ -59,6 +59,7 @@ impl FirecrackerConfig {
             runtime_overlay_path: config.runtime_overlay_path.clone(),
             runtime_overlay_verity_path: config.runtime_overlay_verity_path.clone(),
             runtime_overlay_roothash: config.runtime_overlay_roothash.clone(),
+            runtime_source_policy: config.runtime_source_policy,
             revision_hash: config.revision_hash.clone(),
             flake_ref: config.flake_ref.clone(),
             profile: config.profile.clone(),
@@ -286,8 +287,15 @@ impl VmBackend for FirecrackerBackend {
         // `microvm::run_from_build` so a refusal exits clean — no FC
         // API socket, no VM dir half-populated.
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
-        mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
-        crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        mvm_build::builder_vm::admit_runtime_overlay_contract(
+            rootfs_dir,
+            config.runtime_source_policy,
+        )?;
+        crate::base::runtime_meta::record_from_start_config(
+            &config.name,
+            StartMode::Detached,
+            config,
+        )?;
         let mut slot_reservation = microvm::SlotReservationGuard::new(&fc_config.run_config.slot);
         microvm::run_from_build(&fc_config.run_config)?;
         slot_reservation.defuse();
@@ -486,7 +494,7 @@ pub enum AnyBackend {
     /// `mvm-hvf-supervisor`. Selectable via `--hypervisor hvf` / `MVM_BACKEND=hvf`,
     /// and the macOS-26 auto-detect default (Vz is sunset, opt-in only). Its
     /// `start()` spawns the per-VM gating endpoint that is the sole claim-10 egress
-    /// gate over vsock — no guest-NIC helper sidecar. The destination macOS backend.
+    /// gate over vsock — no legacy userspace gateway sidecar. The destination macOS backend.
     Hvf(HvfBackend),
     /// The hvf VMM driven through the unified `WorkloadRunner` over the
     /// driver seam — the role-runner that will replace the per-backend
@@ -538,7 +546,7 @@ impl AnyBackend {
     ///
     /// Priority:
     /// 1. **Firecracker** (if native Linux `/dev/kvm` is available — production Tier 1)
-    /// 2. HVF VMM (macOS 26+ Apple Silicon — vsock-only egress, no Vz/native-gateway helper)
+    /// 2. HVF VMM (macOS 26+ Apple Silicon — vsock-only egress, no guest-NIC helper path)
     /// 3. raw libkrun
     ///
     /// If none of the above match, the function returns Firecracker as
@@ -557,7 +565,8 @@ impl AnyBackend {
 
         // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`). Vz is sunset
         //    (opt-in only via `--hypervisor vz`); the hvf path enforces claim-10
-        //    egress via its per-VM gating endpoint over vsock — no guest-NIC helper sidecar.
+        //    egress via its per-VM gating endpoint over vsock — no legacy
+        //    userspace gateway sidecar.
         if plat.is_vz_default_tier() {
             return Self::Hvf(HvfBackend);
         }

@@ -113,6 +113,8 @@ pub struct CaptureFsQuickParams {
     /// Absolute path to the VM's live rootfs image to clone.
     pub rootfs: PathBuf,
     pub supervisor_config_digest: String,
+    pub runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
+    pub runtime_overlay_version: Option<String>,
     pub tag: Option<String>,
     pub created_unix: u64,
     /// The caller asserts the VM is stopped or paused-and-synced. A non-quiesced
@@ -227,6 +229,8 @@ pub fn fork_checkpoint(store: &CheckpointStore, params: ForkParams) -> Result<Ch
     .created_unix(params.created_unix)
     .content(parent.content.clone())
     .supervisor_config_digest(parent.supervisor_config_digest)
+    .runtime_source_policy(parent.runtime_source_policy)
+    .runtime_overlay_version(parent.runtime_overlay_version)
     .build();
     store.write_meta(&child)?;
     Ok(child)
@@ -287,6 +291,8 @@ pub fn fork_vm_full_fc(
     .created_unix(params.created_unix)
     .content(parent.content.clone())
     .supervisor_config_digest(parent.supervisor_config_digest)
+    .runtime_source_policy(parent.runtime_source_policy)
+    .runtime_overlay_version(parent.runtime_overlay_version)
     .build();
     store.write_meta(&child)?;
     Ok(child)
@@ -336,6 +342,8 @@ pub struct CaptureVmFullParams {
     pub id: CheckpointId,
     pub vm_name: String,
     pub supervisor_config_digest: String,
+    pub runtime_source_policy: Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
+    pub runtime_overlay_version: Option<String>,
     /// The live VM's persisted supervisor config, copied into the checkpoint so
     /// restore can rebuild the state dir (every stop reaps the live one).
     /// `None` for backends that do not use a Vz-style supervisor config (the
@@ -446,6 +454,8 @@ pub fn capture_vm_full(
         .created_unix(params.created_unix)
         .content(content)
         .supervisor_config_digest(params.supervisor_config_digest)
+        .runtime_source_policy(params.runtime_source_policy)
+        .runtime_overlay_version(params.runtime_overlay_version)
         .build();
     store.write_meta(&meta)?;
     Ok(meta)
@@ -703,6 +713,8 @@ pub fn capture_fs_quick(
         .created_unix(params.created_unix)
         .content(content)
         .supervisor_config_digest(params.supervisor_config_digest)
+        .runtime_source_policy(params.runtime_source_policy)
+        .runtime_overlay_version(params.runtime_overlay_version)
         .build();
     store.write_meta(&meta)?;
     Ok(meta)
@@ -797,6 +809,8 @@ mod tests {
             vm_name: "vm".into(),
             rootfs: rootfs.clone(),
             supervisor_config_digest: "d".into(),
+            runtime_source_policy: None,
+            runtime_overlay_version: None,
             tag: None,
             created_unix: 7,
             quiesced: false,
@@ -814,6 +828,8 @@ mod tests {
                 vm_name: "parentvm".into(),
                 rootfs,
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 tag: None,
                 created_unix: 1,
                 quiesced: true,
@@ -920,6 +936,8 @@ mod tests {
                 vm_name: "parentvm".into(),
                 rootfs,
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 tag: None,
                 created_unix: 1,
                 quiesced: true,
@@ -1050,6 +1068,8 @@ mod tests {
                 id: CheckpointId::new("v1"),
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 9,
@@ -1098,6 +1118,8 @@ mod tests {
                 id: CheckpointId::new("v2"),
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 10,
@@ -1150,6 +1172,8 @@ mod tests {
                 id: CheckpointId::new("v3"),
                 vm_name: "vm".into(),
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 11,
@@ -1203,6 +1227,8 @@ mod tests {
                 id: CheckpointId::new(id),
                 vm_name: "origin".into(),
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 supervisor_config_src: Some(config),
                 tag: None,
                 created_unix: 1,
@@ -1307,6 +1333,8 @@ mod tests {
             vm_name: "vm".into(),
             rootfs,
             supervisor_config_digest: "d".into(),
+            runtime_source_policy: Some(mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay),
+            runtime_overlay_version: Some("0.17.0".to_string()),
             tag: Some("gold".into()),
             created_unix: 7,
             quiesced: true,
@@ -1318,6 +1346,11 @@ mod tests {
         assert_eq!(meta.content[0].name, "rootfs.ext4");
         assert_eq!(meta.content[0].sha256.len(), 64);
         assert_eq!(meta.tag.as_deref(), Some("gold"));
+        assert_eq!(
+            meta.runtime_source_policy,
+            Some(mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay)
+        );
+        assert_eq!(meta.runtime_overlay_version.as_deref(), Some("0.17.0"));
         assert_eq!(store.read_meta(&meta.id).unwrap(), meta);
     }
 
@@ -1467,6 +1500,8 @@ mod tests {
                 id: CheckpointId::new("fc1"),
                 vm_name: "fc-vm".into(),
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 1,
@@ -1525,6 +1560,8 @@ mod tests {
                 id: id.clone(),
                 vm_name: "fc-vm".into(),
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 2,
@@ -1598,6 +1635,8 @@ mod tests {
                 id: checkpoint_id,
                 vm_name: "fc-origin".into(),
                 supervisor_config_digest: "d".into(),
+                runtime_source_policy: None,
+                runtime_overlay_version: None,
                 supervisor_config_src: None,
                 tag: None,
                 created_unix: 1,

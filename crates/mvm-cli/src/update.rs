@@ -694,7 +694,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         // Write a tiny shell script that prints a version-like string and exits 0.
-        let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("mvm-smoke-test.sh");
         {
             let mut file = std::fs::File::create(&path).unwrap();

@@ -96,6 +96,24 @@ impl Default for OciCacheIndex {
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct OciImageConfigInner {
+    #[serde(default, rename = "Entrypoint")]
+    entrypoint: Option<Vec<String>>,
+    #[serde(default, rename = "Cmd")]
+    cmd: Option<Vec<String>>,
+    #[serde(default, rename = "Env")]
+    env: Vec<String>,
+    #[serde(default, rename = "WorkingDir")]
+    working_dir: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OciImageConfig {
+    #[serde(default, rename = "config")]
+    config: OciImageConfigInner,
+}
+
 fn schema_version() -> u32 {
     1
 }
@@ -131,9 +149,10 @@ pub(in crate::commands) struct ResolvedOciRunImage {
     pub reference: String,
     pub resolved_digest: String,
     pub rootfs_path: PathBuf,
-    /// The unpacked+injected OCI tree (`<cache>/unpacked/<hash>`), when it is
-    /// present on disk — the source a virtiofs-root dev boot serves directly.
-    /// `None` when only the cached ext4 is available (booted as block rootfs).
+    /// The prepared rootfs-only OCI tree, when it is present on disk — the
+    /// source a virtiofs-root dev boot serves directly. This is distinct from
+    /// the raw unpacked layer tree so the virtiofs `RootfsOnly` contract does
+    /// not share one injected runtime layout with the block-backed ext4 image.
     pub unpacked_root: Option<PathBuf>,
     pub pulled: bool,
     pub provenance: OciProvenance,
@@ -312,36 +331,40 @@ pub(in crate::commands) fn oci_cache_root() -> PathBuf {
     PathBuf::from(mvm_core::config::mvm_cache_dir()).join("oci")
 }
 
+/// Bump when the injected OCI runtime (guest agent, netinit, or `/init`
+/// script) changes such that already-materialized rootfs images must be
+/// re-sealed. Folded with the crate version into [`oci_runtime_tag`]; a
+/// stale rootfs then re-materializes instead of booting an outdated agent.
+/// Epoch 1 introduces the dev-shell exec handler in the OCI agent. Epoch 2 adds
+/// the detached-workload handler — a rootfs sealed with an older agent would
+/// reject the run-detached request, so it must re-materialize. Epoch 3 moves
+/// `mvm-egress-client` onto the runtime overlay contract: cached injected
+/// rootfs images that still bake the old helper path must be re-materialized so
+/// block-backed boots pick up the overlay-first layout. Epoch 4 rolls the
+/// required-overlay `/init` contract fix that initializes the vsock-egress
+/// flag safely under `set -u`; stale cached rootfs images otherwise keep
+/// booting the pre-fix PID-1 script and panic before the agent binds. Epoch 5
+/// teaches that same `/init` to skip re-mounting `/mvm/runtime` when
+/// `mvm-verity-init` already mounted the verity-protected overlay there; stale
+/// cached runtime-lean rootfs entries otherwise panic after the verity handoff.
+const OCI_RUNTIME_EPOCH: u32 = 6;
+
 /// Identity of the guest runtime the running mvmctl bakes into an OCI rootfs.
 /// Cheap and build-free (no agent cross-compile) so it can gate the cache-hit
 /// path without forcing a rebuild on hosts that only have a warm rootfs cache.
 fn oci_runtime_tag() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    format!("{}.{}", env!("CARGO_PKG_VERSION"), OCI_RUNTIME_EPOCH)
 }
 
-/// Whether a cached image's materialized rootfs can be booted as-is: it must
-/// exist and carry the current runtime tag. A `None` tag (pre-tag entry) or a
-/// mismatch means the baked agent may be outdated, so the rootfs is stale.
-fn cached_rootfs_is_current(cached: &CachedOciImage, runtime_tag: &str) -> bool {
-    cached.rootfs_path.is_some() && cached.runtime_tag.as_deref() == Some(runtime_tag)
+fn oci_tree_key(identity: &str) -> String {
+    sha256_hex(identity).unwrap_or_else(|_| identity.replace(['/', ':'], "-"))
 }
 
-#[derive(Debug, Deserialize)]
-struct OciImageConfig {
-    #[serde(default)]
-    config: OciImageConfigInner,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct OciImageConfigInner {
-    #[serde(default, rename = "Entrypoint")]
-    entrypoint: Option<Vec<String>>,
-    #[serde(default, rename = "Cmd")]
-    cmd: Option<Vec<String>>,
-    #[serde(default, rename = "Env")]
-    env: Vec<String>,
-    #[serde(default, rename = "WorkingDir")]
-    working_dir: Option<String>,
+fn prepared_virtiofs_root(cache_root: &Path, identity: &str, runtime_tag: &str) -> PathBuf {
+    cache_root
+        .join("prepared-roots")
+        .join(format!("{}-{runtime_tag}", oci_tree_key(identity)))
+        .join("rootfs-only")
 }
 
 fn oci_entrypoint_from_config_bytes(bytes: &[u8]) -> Result<Option<OciEntrypointConfig>> {
@@ -368,6 +391,40 @@ fn oci_entrypoint_from_cache_path(
     let path = safe_cache_path(cache_root, config_path)?;
     let bytes = fs::read(&path).with_context(|| format!("read OCI config {}", path.display()))?;
     oci_entrypoint_from_config_bytes(&bytes)
+}
+
+/// Whether a cached image's materialized rootfs can be booted as-is: it must
+/// exist and carry the current runtime tag. A `None` tag (pre-tag entry) or a
+/// mismatch means the baked agent may be outdated, so the rootfs is stale.
+fn cached_rootfs_is_current(cached: &CachedOciImage, runtime_tag: &str) -> bool {
+    cached.rootfs_path.is_some() && cached.runtime_tag.as_deref() == Some(runtime_tag)
+}
+
+fn rootfs_verity_sidecars_present(rootfs_path: &Path) -> bool {
+    let Some(parent) = rootfs_path.parent() else {
+        return false;
+    };
+    parent.join("rootfs.verity").is_file() && parent.join("rootfs.roothash").is_file()
+}
+
+fn ensure_rootfs_verity_sidecars(
+    rootfs_path: &Path,
+    image_reference: &str,
+    unpacked_root: Option<&Path>,
+) -> Result<()> {
+    if rootfs_verity_sidecars_present(rootfs_path) {
+        return Ok(());
+    }
+    let unpacked_note = unpacked_root
+        .map(|path| format!("cached unpacked tree: {}", path.display()))
+        .unwrap_or_else(|| "cached unpacked tree: unavailable".to_string());
+    bail!(
+        "cached OCI image {} is missing sealed block-root sidecars beside {} \
+         after materialization; required files rootfs.verity and rootfs.roothash were not produced ({})",
+        image_reference,
+        rootfs_path.display(),
+        unpacked_note
+    );
 }
 
 pub(in crate::commands) fn resolve_or_pull_run_image(
@@ -444,13 +501,16 @@ fn resolve_or_pull_run_image_with(
         );
     };
     let rootfs_path = safe_cache_path(cache_root, rootfs_relative)?;
-    if !rootfs_path.is_file() {
+    let mut rematerialized_from = None;
+    if !rootfs_path.is_file() || !rootfs_verity_sidecars_present(&rootfs_path) {
         // Self-heal a cache whose index still records a materialized rootfs but
-        // whose `rootfs.ext4` has since vanished (an interrupted prune, a
-        // partial GC, a manual delete). If the unpacked layer tree survives,
-        // re-run the same seal `image pull` performs — network-free, from the
-        // cached layers — rather than failing the run. Only when the unpacked
-        // tree is gone too is this a genuine cache loss the user must re-pull.
+        // whose sealed block-root artifacts have since drifted. That covers a
+        // vanished `rootfs.ext4` (interrupted prune / manual delete) and older
+        // ext4-only cache entries that predate the current verity-backed OCI
+        // materializer. If the unpacked layer tree survives, re-run the same
+        // seal `image pull` performs — network-free, from the cached layers —
+        // rather than failing the run. Only when the unpacked tree is gone too
+        // is this a genuine cache loss the user must re-pull.
         match unpacked_dir_if_present(cache_root, &image.resolved_digest) {
             Some(unpacked_root) => {
                 materialize(
@@ -464,14 +524,15 @@ fn resolve_or_pull_run_image_with(
                 )
                 .with_context(|| {
                     format!(
-                        "re-materializing missing rootfs for cached OCI image {} from {}",
+                        "re-materializing cached OCI rootfs artifacts for {} from {}",
                         image.reference,
                         unpacked_root.display()
                     )
                 })?;
+                rematerialized_from = Some(unpacked_root);
             }
             None => bail!(
-                "cached OCI image {} rootfs is missing at {} and its unpacked \
+                "cached OCI image {} is missing sealed rootfs artifacts beside {} and its unpacked \
                  layers are gone; run `mvmctl image pull {}` to re-fetch",
                 image.reference,
                 rootfs_path.display(),
@@ -479,11 +540,18 @@ fn resolve_or_pull_run_image_with(
             ),
         }
     }
+    ensure_rootfs_verity_sidecars(
+        &rootfs_path,
+        &image.reference,
+        rematerialized_from.as_deref(),
+    )?;
     let trust = match trust_from_pull {
         Some(trust) => trust,
         None => trust_decision_for_cached_image(&image_ref, &image, prod, &CosignCommandVerifier)?,
     };
-    let unpacked_root = unpacked_dir_if_present(cache_root, &image.resolved_digest);
+    let unpacked_root = unpacked_dir_if_present(cache_root, &image.resolved_digest)
+        .map(|raw| prepare_rootfs_only_tree(cache_root, &raw, &image.resolved_digest))
+        .transpose()?;
     Ok(ResolvedOciRunImage {
         provenance: image.provenance("run_image", reference, &trust),
         reference: image.reference,
@@ -554,10 +622,9 @@ fn rematerialize_cached_image(
 ///
 /// Default: the pure in-process `mvm-ext4` writer — no builder VM, no `mkfs`,
 /// no subprocess. `MVM_MATERIALIZE_BUILDER_VM` (any value) routes back through
-/// the builder-VM `mkfs` path for parity / debugging. Verity is deliberately
-/// left off (no `rootfs.verity` / `rootfs.roothash` sidecars), so the run
-/// path's `verity_path`/`roothash = None` boot config is unchanged — this flips
-/// the materialization *mechanism*, not the boot semantics.
+/// the builder-VM `mkfs` path for parity / debugging. Both paths emit
+/// `rootfs.verity` / `rootfs.roothash`, so OCI block roots boot sealed no
+/// matter which materializer produced them.
 fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
     mvm_build::run_image::materialize_run_rootfs(input)
 }
@@ -575,10 +642,111 @@ fn inject_runtime_and_materialize(
         unpacked_root,
         rootfs_abs,
         image_label,
+        mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean,
         entrypoint,
         embedded_guest_binaries(),
         sealed,
     )
+}
+
+fn prepare_rootfs_only_tree(
+    cache_root: &Path,
+    raw_unpacked_root: &Path,
+    identity: &str,
+) -> Result<PathBuf> {
+    let prepared_root = prepared_virtiofs_root(cache_root, identity, &oci_runtime_tag());
+    if prepared_root.exists() {
+        return Ok(prepared_root);
+    }
+    if let Some(parent) = prepared_root.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    copy_tree(raw_unpacked_root, &prepared_root).with_context(|| {
+        format!(
+            "copy raw OCI tree {} -> {}",
+            raw_unpacked_root.display(),
+            prepared_root.display()
+        )
+    })?;
+    let bins = mvm_build::run_image::resolve_guest_binaries(cache_root, embedded_guest_binaries())
+        .context("resolve guest binaries for rootfs-only OCI tree")?;
+    mvm_build::oci_runtime_inject::inject_mvm_runtime(
+        &prepared_root,
+        &bins,
+        None,
+        false,
+        mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RootfsOnly,
+    )
+    .with_context(|| {
+        format!(
+            "inject rootfs-only runtime into {}",
+            prepared_root.display()
+        )
+    })?;
+    Ok(prepared_root)
+}
+
+fn materialize_overlay_lean_rootfs(
+    cache_root: &Path,
+    raw_unpacked_root: &Path,
+    rootfs_abs: &Path,
+    image_label: &str,
+) -> Result<()> {
+    let staging_root = rootfs_abs.with_extension("staging");
+    if staging_root.exists() {
+        fs::remove_dir_all(&staging_root)
+            .with_context(|| format!("remove stale staging dir {}", staging_root.display()))?;
+    }
+    copy_tree(raw_unpacked_root, &staging_root).with_context(|| {
+        format!(
+            "copy raw OCI tree {} -> {}",
+            raw_unpacked_root.display(),
+            staging_root.display()
+        )
+    })?;
+    let result = inject_runtime_and_materialize(
+        cache_root,
+        &staging_root,
+        rootfs_abs,
+        image_label,
+        None,
+        false,
+    );
+    let cleanup = fs::remove_dir_all(&staging_root);
+    if let Err(err) = cleanup
+        && staging_root.exists()
+    {
+        tracing::warn!(
+            error = %err,
+            staging = %staging_root.display(),
+            "failed to remove OCI runtime-lean staging tree"
+        );
+    }
+    result
+}
+
+#[cfg(unix)]
+fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
+    while let Some((from_dir, to_dir)) = stack.pop() {
+        fs::create_dir_all(&to_dir)?;
+        for entry in fs::read_dir(&from_dir)? {
+            let entry = entry?;
+            let ft = entry.file_type()?;
+            let from = entry.path();
+            let to = to_dir.join(entry.file_name());
+            if ft.is_symlink() {
+                let target = fs::read_link(&from)?;
+                let _ = fs::remove_file(&to);
+                std::os::unix::fs::symlink(&target, &to)?;
+            } else if ft.is_dir() {
+                stack.push((from, to));
+            } else {
+                fs::copy(&from, &to)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The guest-agent binaries embedded in this mvmctl at build time (build.rs).
@@ -687,15 +855,13 @@ fn ingest_archive_from_reader<R: Read>(
 
     let rootfs_rel = format!("rootfs/{manifest_hex}-{}/rootfs.ext4", oci_runtime_tag());
     let rootfs_abs = cache_root.join(&rootfs_rel);
-    let entrypoint = oci_entrypoint_from_config_bytes(&image.config_bytes)?;
-    inject_runtime_and_materialize(
+    let rootfs_only_tree =
+        prepare_rootfs_only_tree(cache_root, &unpacked_root, &image.manifest_digest)?;
+    materialize_overlay_lean_rootfs(
         cache_root,
         &unpacked_root,
         &rootfs_abs,
         &image.manifest_digest,
-        entrypoint.as_ref(),
-        // Local archives are dev-only (prod refused upstream); never sealed.
-        false,
     )?;
 
     let provenance = OciProvenance {
@@ -719,7 +885,7 @@ fn ingest_archive_from_reader<R: Read>(
         reference: image.manifest_digest.clone(),
         resolved_digest: image.manifest_digest,
         rootfs_path: rootfs_abs,
-        unpacked_root: Some(unpacked_root.clone()),
+        unpacked_root: Some(rootfs_only_tree),
         pulled: true,
         provenance,
         auth_source: None,
@@ -1088,8 +1254,8 @@ fn pull_image_ref(
         &unpacked_root,
         &rootfs_abs,
         &image_ref.canonical(),
-        oci_entrypoint_from_cache_path(cache_root, config_path.as_deref())?.as_ref(),
-        prod,
+        None,
+        false,
     )?;
 
     let provenance = OciProvenance {
@@ -1625,13 +1791,11 @@ mod tests {
     use tar::{Builder, EntryType, Header};
 
     // The default run-path materialize is the pure in-process writer, and it
-    // must NOT emit dm-verity sidecars — the run path boots these images with
-    // `verity_path`/`roothash = None`, so emitting `rootfs.verity` /
-    // `rootfs.roothash` (which the transient path's probe would pick up) would
-    // silently switch OCI runs to verified boot. This guards the mechanism swap.
+    // must emit dm-verity sidecars so OCI block roots boot sealed even before
+    // the builder-VM fallback is exercised.
     #[cfg(feature = "pure-mkfs")]
     #[test]
-    fn materialize_run_rootfs_default_is_pure_and_verity_free() {
+    fn materialize_run_rootfs_default_is_pure_and_verity_backed() {
         // The builder-VM escape hatch must be unset for the default (pure) path.
         assert!(
             std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none(),
@@ -1653,9 +1817,10 @@ mod tests {
         // A real ext4 image was written in-process (superblock magic present)…
         let img = std::fs::read(&rootfs).unwrap();
         assert_eq!(&img[1024 + 0x38..1024 + 0x3A], &[0x53, 0xEF]);
-        // …and NO verity sidecars sit beside it (boot semantics unchanged).
-        assert!(!out.path().join("rootfs.verity").exists());
-        assert!(!out.path().join("rootfs.roothash").exists());
+        // …and the sealed-boot sidecars sit beside it.
+        assert!(out.path().join("rootfs.verity").exists());
+        let roothash = std::fs::read_to_string(out.path().join("rootfs.roothash")).unwrap();
+        assert_eq!(roothash.trim().len(), 64);
     }
 
     struct MockCosignVerifier {
@@ -2024,6 +2189,12 @@ mod tests {
             },
         );
         write_file(tmp.path(), "rootfs/alpine/rootfs.ext4", b"rootfs");
+        write_file(tmp.path(), "rootfs/alpine/rootfs.verity", b"verity");
+        write_file(
+            tmp.path(),
+            "rootfs/alpine/rootfs.roothash",
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+        );
 
         let resolved =
             resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
@@ -2175,6 +2346,82 @@ mod tests {
         // A current tag with no materialized rootfs is still not bootable.
         image.rootfs_path = None;
         assert!(!cached_rootfs_is_current(&image, &current));
+    }
+
+    #[test]
+    fn rootfs_verity_sidecars_present_requires_both_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        assert!(!rootfs_verity_sidecars_present(&rootfs));
+
+        std::fs::write(tmp.path().join("rootfs.verity"), b"verity").expect("write verity");
+        assert!(!rootfs_verity_sidecars_present(&rootfs));
+
+        std::fs::write(tmp.path().join("rootfs.roothash"), b"abc\n").expect("write roothash");
+        assert!(rootfs_verity_sidecars_present(&rootfs));
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn resolve_run_image_reseals_cached_rootfs_when_verity_sidecars_are_missing() {
+        use mvm_build::guest_agent_build::GuestAgentLayout;
+        use mvm_core::arch::GuestArch;
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
+        image.rootfs_path = Some("rootfs/alpine/rootfs.ext4".to_string());
+        image.runtime_tag = Some(oci_runtime_tag());
+        write_index(
+            tmp.path(),
+            &OciCacheIndex {
+                schema_version: 1,
+                images: vec![image],
+            },
+        );
+        write_file(tmp.path(), "rootfs/alpine/rootfs.ext4", b"stale-rootfs");
+        let unpacked = tmp
+            .path()
+            .join("unpacked")
+            .join(sha256_hex(digest).expect("hex digest key"));
+        std::fs::create_dir_all(unpacked.join("etc")).expect("create unpacked tree");
+        std::fs::write(unpacked.join("etc/hostname"), b"box\n").expect("write unpacked file");
+        let guest_layout =
+            GuestAgentLayout::under(tmp.path(), env!("CARGO_PKG_VERSION"), GuestArch::host());
+        std::fs::create_dir_all(&guest_layout.dir).expect("create guest cache dir");
+        for path in [
+            &guest_layout.oci_init,
+            &guest_layout.agent,
+            &guest_layout.netinit,
+            &guest_layout.egress_client,
+            &guest_layout.entrypoint_runner,
+        ] {
+            std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("seed guest runtime cache");
+        }
+
+        let resolved =
+            resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)
+                .expect("stale verity-free cached rootfs must be re-sealed");
+
+        assert!(resolved.rootfs_path.ends_with("rootfs/alpine/rootfs.ext4"));
+        assert!(resolved.rootfs_path.is_file());
+        assert!(
+            resolved
+                .rootfs_path
+                .parent()
+                .unwrap()
+                .join("rootfs.verity")
+                .is_file()
+        );
+        assert!(
+            resolved
+                .rootfs_path
+                .parent()
+                .unwrap()
+                .join("rootfs.roothash")
+                .is_file()
+        );
     }
 
     #[test]
@@ -2579,48 +2826,5 @@ require_signatures = false
         let index = load_index(tmp.path()).expect("load index");
         assert_eq!(index.images.len(), 1);
         assert_eq!(index.images[0].reference, "docker.io/library/busybox:1");
-    }
-
-    #[test]
-    fn oci_entrypoint_combines_entrypoint_and_cmd_without_shell() {
-        let config = br#"{
-          "config": {
-            "Entrypoint": ["/usr/bin/python3", "-m", "app"],
-            "Cmd": ["--port", "8080"],
-            "Env": ["PATH=/custom/bin", "APP_ENV=prod"],
-            "WorkingDir": "/srv/app"
-          }
-        }"#;
-
-        let entrypoint = oci_entrypoint_from_config_bytes(config)
-            .expect("parse")
-            .expect("entrypoint present");
-
-        assert_eq!(
-            entrypoint.argv,
-            ["/usr/bin/python3", "-m", "app", "--port", "8080"]
-        );
-        assert_eq!(entrypoint.env, ["PATH=/custom/bin", "APP_ENV=prod"]);
-        assert_eq!(entrypoint.working_dir.as_deref(), Some("/srv/app"));
-    }
-
-    #[test]
-    fn oci_entrypoint_uses_cmd_when_entrypoint_absent() {
-        let config = br#"{"config":{"Cmd":["/bin/myapp","serve"]}}"#;
-
-        let entrypoint = oci_entrypoint_from_config_bytes(config)
-            .expect("parse")
-            .expect("cmd becomes argv");
-
-        assert_eq!(entrypoint.argv, ["/bin/myapp", "serve"]);
-    }
-
-    #[test]
-    fn oci_entrypoint_absent_for_scratch_config_without_cmd() {
-        let config = br#"{"architecture":"amd64","os":"linux","config":{}}"#;
-
-        let entrypoint = oci_entrypoint_from_config_bytes(config).expect("parse");
-
-        assert!(entrypoint.is_none());
     }
 }

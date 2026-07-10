@@ -60,6 +60,7 @@ let
     "VIRTIO" "VIRTIO_MENU" "VIRTIO_MMIO" "VIRTIO_PCI"
     "PCI" "PCI_MSI"
     "VIRTIO_BLK" "VIRTIO_NET" "VIRTIO_CONSOLE"
+    "HVC_DRIVER"
     "VSOCKETS" "VIRTIO_VSOCKETS" "VIRTIO_BALLOON"
     "HW_RANDOM" "HW_RANDOM_VIRTIO"
 
@@ -237,13 +238,6 @@ let
     # workload.nix.
     "BLK_DEV_NBD"          # network block device — no NBD server on any backend
     "BLK_DEV_NVME" "NVME_CORE"  # NVMe — no NVMe controller behind virtio
-
-    # The shipped boot artifacts need gzip only: x86_64's Firecracker path
-    # extracts an ELF `vmlinux` from a gzip-wrapped bzImage, and the workload
-    # verity initramfs is `cpio.gz`. No current builder or workload path boots
-    # an xz/lz4/lzo/lzma/zstd-compressed initramfs, so keep `RD_GZIP` and drop
-    # the rest from the shared base.
-    "RD_BZIP2" "RD_LZMA" "RD_XZ" "RD_LZO" "RD_LZ4" "RD_ZSTD"
   ] ++ pkgs.lib.optionals (kernelArch == "arm64") [
     # arm64 boots from the FDT libkrun / Firecracker hand us; ACPI is
     # never consulted, so drop the ACPICA interpreter and the whole
@@ -274,20 +268,8 @@ let
       chmod -R u+w .
 
       export ARCH=${kernelArch}
-      # Kbuild's config phase shells out through helper probes that assume a
-      # plain compiler/tool name surface. Relying on the ambient stdenv vars
-      # can leak wrapper-specific values into those probes, which then get
-      # treated as literal commands during `make defconfig`.
-      export HOSTCC=cc
-      export HOSTCXX=c++
-      export CC=cc
-      export CXX=c++
-      export LD=ld
-      export AR=ar
-      export NM=nm
-      export OBJCOPY=objcopy
-      export OBJDUMP=objdump
-      export STRIP=strip
+      export SHELL=${pkgs.bash}/bin/bash
+      export CONFIG_SHELL=${pkgs.bash}/bin/bash
 
       # Linux Kconfig's `$(shell,...)` helper goes through `popen()`, which
       # hardwires `/bin/sh -c ...` instead of respecting PATH or Kbuild's
@@ -309,7 +291,7 @@ let
       # kernel that builds but writes zero bytes on hvc0. `defconfig` is
       # the upstream recommended starting point; we carve it down via
       # the disables below.
-      make defconfig
+      make SHELL="$SHELL" defconfig
 
       # Enables first, then disables — a disable must win over a
       # defconfig-implied enable. Symbols within each pass are distinct,
@@ -321,7 +303,7 @@ let
         ./scripts/config --disable "$s"
       done
 
-      make olddefconfig
+      make SHELL="$SHELL" olddefconfig
 
       # Guard: every requested enable must survive olddefconfig. When a
       # symbol's Kconfig `depends on` isn't met — e.g. a shrink disabled a

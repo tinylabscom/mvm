@@ -1,6 +1,4 @@
-use super::receipt::{
-    MachineStartAuthPolicy, MachineStartInitPolicy, select_machine_start_backend,
-};
+use super::receipt::{MachineStartAuthPolicy, MachineStartInitPolicy};
 use super::runtime::resolve_persistent_spec;
 use super::*;
 use crate::commands::{Cli, Commands};
@@ -157,10 +155,7 @@ fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecurityS
         summary.receipt_network_posture,
         summary.preflight_network_posture
     );
-    assert_eq!(
-        summary.receipt_egress_enforcement,
-        "firecracker:l4-host-port"
-    );
+    assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
     assert_eq!(summary.preflight_command, summary.receipt_command);
     assert!(summary.preflight_command.contains("argv_len=3"));
     assert!(!summary.preflight_command.contains("echo ok"));
@@ -352,7 +347,7 @@ fn run_accepts_passthrough_flags() {
         "1G",
         "--profile",
         "dev",
-        "--mount",
+        "--volume",
         "/host:/work:rw",
         "-e",
         "FOO=bar",
@@ -377,12 +372,12 @@ fn run_accepts_passthrough_flags() {
 }
 
 #[test]
-fn mount_flag_carries_dir_share_and_d_is_no_longer_a_share() {
+fn volume_flag_carries_dir_share_and_d_is_no_longer_a_share() {
     let args = parse_run(&[
         "run",
         "--image",
         "alpine",
-        "--mount",
+        "--volume",
         "/host:/work:rw",
         "--",
         "true",
@@ -594,15 +589,6 @@ fn run_spec_maps_run_args_into_a_machine_spec() {
 }
 
 #[test]
-fn run_spec_records_runtime_pack_source_with_no_image_or_manifest() {
-    let args = parse_run(&["run", "--runtime-pack", "--name", "web", "-d"]).expect("parse");
-    let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
-    assert!(spec.runtime_pack);
-    assert!(spec.image.is_none());
-    assert!(spec.manifest.is_none());
-}
-
-#[test]
 fn agent_verb_flag_persisted_in_spec_and_survives_roundtrip() {
     let _state = IsolatedMachineState::new();
     let args = parse_run(&[
@@ -659,7 +645,7 @@ fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
         "x",
         "--name",
         "web",
-        "--mount",
+        "--volume",
         &format!("{host}:/work:ro"),
     ])
     .expect("parse");
@@ -687,7 +673,7 @@ fn run_rw_volume_requires_dev_profile() {
         "x",
         "--name",
         "web",
-        "--mount",
+        "--volume",
         &format!("{host}:/work:rw"),
     ])
     .expect("parse");
@@ -704,7 +690,7 @@ fn run_rw_volume_requires_dev_profile() {
         "web",
         "--profile",
         "dev",
-        "--mount",
+        "--volume",
         &format!("{host}:/work:rw"),
     ])
     .expect("parse");
@@ -734,19 +720,6 @@ fn persistent_spec_reconnects_without_image_and_errors_when_absent() {
 }
 
 #[test]
-fn persistent_spec_creates_fresh_from_runtime_pack_with_no_existing_machine() {
-    // `--runtime-pack` alone is a source: it must not fall into the
-    // reconnect-only path that errors when no machine exists yet.
-    let args = parse_run(&["run", "--runtime-pack", "--name", "web", "-d"]).expect("parse");
-    let (spec, action) =
-        resolve_persistent_spec(&args, "web", None, None).expect("fresh runtime-pack create");
-    assert_eq!(action, SpecReconcile::Create);
-    assert!(spec.runtime_pack);
-    assert!(spec.image.is_none());
-    assert!(spec.manifest.is_none());
-}
-
-#[test]
 fn interactive_requires_a_host_tty() {
     require_tty(true).expect("a host TTY is allowed");
     let err = require_tty(false).expect_err("no TTY must be refused, not left to hang");
@@ -773,6 +746,8 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
             mode: mvm::vm::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: None,
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+            runtime_overlay_version: None,
         },
     )
     .expect("write sealed runtime meta");
@@ -877,9 +852,7 @@ fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
         .expect("sdk args parse as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run,
-        "hvf",
-        "firecracker",
+        &run, "hvf", "hvf",
     )
     .expect("CLI receipt input accepts SDK args");
 
@@ -892,10 +865,7 @@ fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
         summary.receipt_network_posture,
         summary.preflight_network_posture
     );
-    assert_eq!(
-        summary.receipt_egress_enforcement,
-        "firecracker:l4-host-port"
-    );
+    assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
 }
 
 #[test]
@@ -922,9 +892,7 @@ fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
         .expect("sdk args parse as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run,
-        "hvf",
-        "firecracker",
+        &run, "hvf", "hvf",
     )
     .expect("CLI receipt input accepts SDK args");
 
@@ -956,9 +924,7 @@ fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture(
         .expect("Python/TypeScript SDK fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run,
-        "hvf",
-        "firecracker",
+        &run, "hvf", "hvf",
     )
     .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 
@@ -971,10 +937,7 @@ fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture(
         summary.receipt_network_posture,
         summary.preflight_network_posture
     );
-    assert_eq!(
-        summary.receipt_egress_enforcement,
-        "firecracker:l4-host-port"
-    );
+    assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
 }
 
 #[test]
@@ -984,9 +947,7 @@ fn python_typescript_machine_run_fixture_matches_cli_admission_and_receipt_input
         .expect("Python/TypeScript SDK fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run,
-        "hvf",
-        "firecracker",
+        &run, "hvf", "hvf",
     )
     .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 
@@ -1593,16 +1554,20 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         health_check: None,
     };
 
-    let summary = machine_start_receipt_input(&spec, "hvf").expect("receipt input");
-    assert_eq!(summary.network_posture, "allow-list:api.example.com:443");
-    assert_eq!(summary.egress_enforcement, "hvf:l4-host-port");
-    assert_eq!(summary.auth.mode, "none");
-    assert_eq!(summary.volumes.len(), 1);
-    assert_eq!(summary.volumes[0].kind, "dir_share");
-    assert!(!summary.volumes[0].host_path_sha256.is_empty());
-    assert_eq!(summary.volumes[0].guest_path, "/work");
-    assert!(!summary.volumes[0].read_only);
-    assert_eq!(summary.init.command_count, 1);
+    let summary =
+        machine_start_preflight_summary(&spec, None, Some(Path::new("/tmp/web.receipt.json")))
+            .expect("preflight summary");
+    assert_eq!(
+        summary.invocation.network_posture,
+        "allow-list:api.example.com:443"
+    );
+    assert_eq!(summary.invocation.auth.mode, "none");
+    assert_eq!(summary.invocation.volumes.len(), 1);
+    assert_eq!(summary.invocation.volumes[0].kind, "dir_share");
+    assert!(!summary.invocation.volumes[0].host_path_sha256.is_empty());
+    assert_eq!(summary.invocation.volumes[0].guest_path, "/work");
+    assert!(!summary.invocation.volumes[0].read_only);
+    assert_eq!(summary.invocation.init.command_count, 1);
     let json = serde_json::to_string(&summary).expect("summary json");
     assert!(!json.contains("/Users/example/src"));
     assert!(json.contains("allow-list:api.example.com:443"));
@@ -1636,37 +1601,6 @@ fn machine_start_preflight_surfaces_ssh_agent_auth_mode() {
     assert_eq!(summary.invocation.auth.mode, "ssh-agent-socket");
     let json = serde_json::to_string(&summary).expect("summary json");
     assert!(json.contains("ssh-agent-socket"));
-}
-
-#[test]
-fn machine_start_backend_selection_refuses_firecracker_for_oci_egress() {
-    let spec = MachineSpec {
-        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
-        name: "web".to_string(),
-        image: Some("ghcr.io/acme/web:latest".to_string()),
-        manifest: None,
-        resolved_digest: Some("sha256:abc".to_string()),
-        runtime_pack: false,
-        net: false,
-        allow_host: vec!["api.example.com".to_string()],
-        cpus: 2,
-        memory: "512M".to_string(),
-        mem_initial: None,
-        profile: "dev".to_string(),
-        volumes: Vec::new(),
-        init: Vec::new(),
-        ssh_agent: false,
-        agent_verb: Vec::new(),
-        created_at: Some("2026-06-18T00:00:00Z".to_string()),
-        last_started_at: None,
-        health_check: None,
-    };
-
-    let err = select_machine_start_backend(&spec, Some("firecracker"))
-        .expect_err("firecracker must be refused for OCI egress-backed machine starts");
-    let msg = err.to_string();
-    assert!(msg.contains("NIC-less host-vsock-proxy backend"));
-    assert!(msg.contains("firecracker"));
 }
 
 #[test]
@@ -1743,6 +1677,36 @@ fn machine_start_receipt_input_records_ssh_agent_socket_for_dev_profiles() {
         mvm_core::plan::AuthPolicy::ssh_agent_socket()
     );
     assert!(machine_start_audit_detail(&input).contains("auth=ssh-agent-socket"));
+}
+
+#[test]
+fn machine_start_preflight_reports_uniform_l4_enforcement_for_oci_allow_host() {
+    let spec = MachineSpec {
+        schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+        name: "web".to_string(),
+        image: Some("ghcr.io/acme/web:latest".to_string()),
+        manifest: None,
+        resolved_digest: None,
+        runtime_pack: false,
+        net: false,
+        allow_host: vec!["api.example.com".to_string()],
+        cpus: 2,
+        memory: "512M".to_string(),
+        mem_initial: None,
+        profile: "dev".to_string(),
+        volumes: Vec::new(),
+        init: Vec::new(),
+        ssh_agent: false,
+        agent_verb: Vec::new(),
+        created_at: Some("2026-06-18T00:00:00Z".to_string()),
+        last_started_at: None,
+        health_check: None,
+    };
+
+    let summary = machine_start_preflight_summary(&spec, Some("libkrun"), None)
+        .expect("libkrun OCI allow-host preflight should summarize the active vsock/L4 contract");
+    assert_eq!(summary.invocation.network_posture, "allow-list:api.example.com:443");
+    assert_eq!(summary.invocation.egress_enforcement, "libkrun:l4-host-port");
 }
 
 #[test]

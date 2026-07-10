@@ -7,7 +7,7 @@
 //! ## File shape
 //!
 //! ```json
-//! {"mode": "attached" | "detached", "accessible": true | false}
+//! {"mode": "attached" | "detached", "accessible": true | false, ...}
 //! ```
 //!
 //! Older single-field shape (`{"mode": "..."}`) is parsed with
@@ -24,7 +24,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use mvm_core::vm_backend::StartMode;
+use mvm_core::vm_backend::{RuntimeSourcePolicy, StartMode, VmStartConfig};
 use serde::{Deserialize, Serialize};
 
 /// Workspace-wide test serialization for tests that mutate `HOME`
@@ -62,6 +62,23 @@ pub struct VmRuntimeMeta {
     /// supervisor config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rootfs_path: Option<String>,
+
+    /// Declared guest-runtime source policy for the boot that wrote this file.
+    /// Older mode.json files without this field default to `RootfsOnly`.
+    #[serde(default)]
+    pub runtime_source_policy: RuntimeSourcePolicy,
+
+    /// Version of the runtime overlay actually attached for this boot, if any.
+    ///
+    /// This is observational boot metadata, not a live control knob:
+    /// ordinary future boots still resolve the current host-matched overlay,
+    /// while lifecycle consumers that need same-version continuity
+    /// (checkpoint/fork-style fresh boots) may reuse the recorded value
+    /// explicitly. Running VMs never treat this field as permission to
+    /// remount or hot-swap a different runtime in place.
+    /// Older mode.json files and rootfs-only boots read as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_overlay_version: Option<String>,
 }
 
 fn default_accessible() -> bool {
@@ -163,6 +180,8 @@ pub fn dev_attached(mode: StartMode) -> VmRuntimeMeta {
         mode: mode.into(),
         accessible: true,
         rootfs_path: None,
+        runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+        runtime_overlay_version: None,
     }
 }
 
@@ -180,6 +199,8 @@ pub fn from_sidecar(mode: StartMode, rootfs_dir: &std::path::Path) -> Result<VmR
         mode: mode.into(),
         accessible,
         rootfs_path: None,
+        runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+        runtime_overlay_version: None,
     })
 }
 
@@ -199,6 +220,22 @@ pub fn record_from_rootfs(name: &str, mode: StartMode, rootfs: &std::path::Path)
     let dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut meta = from_sidecar(mode, dir)?;
     meta.rootfs_path = Some(rootfs.to_string_lossy().into_owned());
+    write(name, &meta)
+}
+
+/// Preferred writer for backend start paths: captures the sidecar-derived
+/// accessibility bit plus the concrete boot contract from `VmStartConfig`.
+pub fn record_from_start_config(
+    name: &str,
+    mode: StartMode,
+    start_config: &VmStartConfig,
+) -> Result<()> {
+    let rootfs = std::path::Path::new(&start_config.rootfs_path);
+    let dir = rootfs.parent().unwrap_or_else(|| std::path::Path::new("."));
+    let mut meta = from_sidecar(mode, dir)?;
+    meta.rootfs_path = Some(start_config.rootfs_path.clone());
+    meta.runtime_source_policy = start_config.runtime_source_policy;
+    meta.runtime_overlay_version = start_config.runtime_overlay_version.clone();
     write(name, &meta)
 }
 
@@ -243,6 +280,8 @@ mod tests {
                 mode: StartModeKind::Attached,
                 accessible: true,
                 rootfs_path: None,
+                runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+                runtime_overlay_version: None,
             };
             write("rt-test-1", &meta).expect("write");
             let read_back = read("rt-test-1").expect("read").expect("present");
@@ -257,6 +296,8 @@ mod tests {
                 mode: StartModeKind::Detached,
                 accessible: false,
                 rootfs_path: None,
+                runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+                runtime_overlay_version: None,
             };
             write("rt-test-2", &meta).expect("write");
             let read_back = read("rt-test-2").expect("read").expect("present");
@@ -290,6 +331,8 @@ mod tests {
         let meta = dev_attached(StartMode::Attached);
         assert_eq!(meta.mode, StartModeKind::Attached);
         assert!(meta.accessible);
+        assert_eq!(meta.runtime_source_policy, RuntimeSourcePolicy::RootfsOnly);
+        assert!(meta.runtime_overlay_version.is_none());
     }
 
     #[test]
@@ -317,6 +360,7 @@ mod tests {
             rootless_entrypoint: true,
             hypervisor: "firecracker".to_string(),
             overlay_aware: true,
+            runtime_lean: true,
         };
         sidecar.write_to_dir(tmp.path()).expect("write sidecar");
         let meta = from_sidecar(StartMode::Detached, tmp.path()).expect("ok");
@@ -388,19 +432,73 @@ mod tests {
                 mode: StartModeKind::Detached,
                 accessible: false,
                 rootfs_path: Some("/abs/path/rootfs.ext4".to_string()),
+                runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+                runtime_overlay_version: Some("0.17.0".to_string()),
             };
             write("rp-with", &with_path).expect("write");
             let back = read("rp-with").expect("read").expect("present");
             assert_eq!(back.rootfs_path.as_deref(), Some("/abs/path/rootfs.ext4"));
+            assert_eq!(
+                back.runtime_source_policy,
+                RuntimeSourcePolicy::RequiredOverlay
+            );
+            assert_eq!(back.runtime_overlay_version.as_deref(), Some("0.17.0"));
 
             let without_path = VmRuntimeMeta {
                 mode: StartModeKind::Attached,
                 accessible: true,
                 rootfs_path: None,
+                runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+                runtime_overlay_version: None,
             };
             write("rp-without", &without_path).expect("write");
             let back2 = read("rp-without").expect("read").expect("present");
             assert!(back2.rootfs_path.is_none());
+            assert_eq!(back2.runtime_source_policy, RuntimeSourcePolicy::RootfsOnly);
+            assert!(back2.runtime_overlay_version.is_none());
+        });
+    }
+
+    #[test]
+    fn runtime_overlay_fields_absent_in_old_file_read_as_defaults() {
+        with_home_temp(|home| {
+            let dir = home.join(".mvm").join("vms").join("oldvm-runtime");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("mode.json"),
+                "{\"mode\":\"detached\",\"accessible\":false,\"rootfs_path\":\"/r.ext4\"}\n",
+            )
+            .unwrap();
+            let meta = read("oldvm-runtime").expect("read").expect("present");
+            assert_eq!(meta.runtime_source_policy, RuntimeSourcePolicy::RootfsOnly);
+            assert!(meta.runtime_overlay_version.is_none());
+        });
+    }
+
+    #[test]
+    fn record_from_start_config_persists_runtime_overlay_contract() {
+        with_home_temp(|_home| {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let rootfs = tmp.path().join("rootfs.ext4");
+            std::fs::write(&rootfs, b"fake").expect("write rootfs");
+
+            let start_config = VmStartConfig {
+                name: "rt-start-config".to_string(),
+                rootfs_path: rootfs.to_string_lossy().into_owned(),
+                runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
+                runtime_overlay_version: Some("0.17.0".to_string()),
+                ..Default::default()
+            };
+            record_from_start_config("rt-start-config", StartMode::Detached, &start_config)
+                .expect("record");
+
+            let meta = read("rt-start-config").expect("read").expect("present");
+            assert_eq!(
+                meta.runtime_source_policy,
+                RuntimeSourcePolicy::RequiredOverlay
+            );
+            assert_eq!(meta.runtime_overlay_version.as_deref(), Some("0.17.0"));
+            assert_eq!(meta.rootfs_path.as_deref(), Some(rootfs.to_str().unwrap()));
         });
     }
 }

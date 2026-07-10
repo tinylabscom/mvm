@@ -50,7 +50,7 @@ mvm-guest.workspace = true
 # (`builder_vm::admit_overlay_aware`) called from every backend's
 # `start` impl. The base substrate's sidecar reader already pulls
 # `mvm-build`, so this doesn't widen the dependency graph.
-mvm-build = { workspace = true, features = ["builder-vm"] }
+mvm-build = { workspace = true, features = ["builder-vm", "pure-mkfs"] }
 libkrun-sys.workspace = true
 mio.workspace = true
 # Folded in with the former mvm-base crate: the base substrate's ui

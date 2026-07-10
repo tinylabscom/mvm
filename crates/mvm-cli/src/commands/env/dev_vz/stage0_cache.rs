@@ -1,5 +1,8 @@
 use super::*;
 
+const BUILDER_VM_CACHE_REQUIRED_ARTIFACTS: &[&str] =
+    &["vmlinux", "rootfs.ext4", "cmdline.txt", "manifest.json"];
+
 /// Which phase of Stage 0 failed. Each variant maps to a
 /// `stage=...` value in the `Stage0Failed` audit detail so a dashboard
 /// can break down "Stage 0 reliability" by failure phase. String
@@ -665,12 +668,9 @@ pub(super) fn write_builder_vm_source_fingerprint(
 
 fn builder_vm_artifact_digest_manifest(dir: &std::path::Path) -> Result<String> {
     let mut lines = Vec::new();
-    for name in ["vmlinux", "rootfs.ext4", "cmdline.txt"] {
+    for name in BUILDER_VM_CACHE_REQUIRED_ARTIFACTS {
         let path = dir.join(name);
         if !path.exists() {
-            if name == "cmdline.txt" {
-                continue;
-            }
             anyhow::bail!("builder VM artifact digest missing {}", path.display());
         }
         let bytes = std::fs::read(&path)
@@ -720,12 +720,9 @@ fn builder_vm_source_cache_provenance(
 
 fn builder_vm_artifact_names_present(dir: &std::path::Path) -> Result<Vec<String>> {
     let mut names = Vec::new();
-    for name in ["vmlinux", "rootfs.ext4", "cmdline.txt"] {
+    for name in BUILDER_VM_CACHE_REQUIRED_ARTIFACTS {
         let path = dir.join(name);
         if !path.exists() {
-            if name == "cmdline.txt" {
-                continue;
-            }
             anyhow::bail!("builder VM provenance missing artifact {}", path.display());
         }
         names.push(name.to_string());
@@ -839,11 +836,10 @@ pub(super) fn promote_builder_vm_stage0_cache(
 ///
 /// Mirrors `download_dev_image_inner` for the dev-shell image, minus
 /// cosign signing (the signed-manifest path extends to builder-vm
-/// artifacts as a follow-up). The required artifacts are `vmlinux` +
-/// `rootfs.ext4`; `cmdline.txt` and `manifest.json` sidecars are
-/// best-effort downloads with a fallback at the `mvm-build` consumer
-/// (`ensure_builder_vm_image` uses the canonical cmdline when
-/// `cmdline.txt` is missing).
+/// artifacts as a follow-up). The required artifacts are `vmlinux`,
+/// `rootfs.ext4`, `cmdline.txt`, and `manifest.json`; the runtime
+/// builder-image loader rejects caches that do not carry the full
+/// contract.
 ///
 /// Gated behind `release-artifact-bootstrap`. Contributor
 /// builds (default) never compile this in, so the "no flake + cache
@@ -861,11 +857,18 @@ pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<(
     let manifest_url = format!("{base_url}/{}", names.manifest);
     let checksums_url = format!("{base_url}/{}", names.checksums);
 
-    // Required artifacts only; sidecars get best-effort treatment
-    // below. `fetch_expected_hashes` enforces that the checksum file
-    // contains entries for everything in `wanted` before any download
-    // starts.
-    let expected = fetch_expected_hashes(&checksums_url, &[&names.kernel, &names.rootfs])?;
+    // The builder-image cache contract is fail-closed: every artifact
+    // the runtime loader consumes must be listed in checksums and
+    // downloaded here before the cache is considered usable.
+    let expected = fetch_expected_hashes(
+        &checksums_url,
+        &[
+            &names.kernel,
+            &names.rootfs,
+            &names.cmdline,
+            &names.manifest,
+        ],
+    )?;
 
     ui::info("  Fetching kernel...");
     let kernel_path = format!("{cache_dir}/vmlinux");
@@ -887,22 +890,29 @@ pub(super) fn download_builder_vm_image(arch: &str, cache_dir: &str) -> Result<(
     })?;
     verify_artifact_hash(&rootfs_path, &names.rootfs, expected.get(&names.rootfs))?;
 
-    // Sidecars — best-effort. `cmdline.txt` has a documented fallback
-    // in `mvm-build::libkrun_builder::ensure_builder_vm_image`;
-    // `manifest.json` is informational. A 404 on either is fine; a
-    // hash mismatch when the file IS present is still a hard fail.
-    if let Some(expected_cmdline) = expected.get(&names.cmdline) {
-        let cmdline_path = format!("{cache_dir}/cmdline.txt");
-        if download_file(&cmdline_url, &cmdline_path).is_ok() {
-            verify_artifact_hash(&cmdline_path, &names.cmdline, Some(expected_cmdline))?;
-        }
-    }
-    if let Some(expected_manifest) = expected.get(&names.manifest) {
-        let manifest_path = format!("{cache_dir}/manifest.json");
-        if download_file(&manifest_url, &manifest_path).is_ok() {
-            verify_artifact_hash(&manifest_path, &names.manifest, Some(expected_manifest))?;
-        }
-    }
+    ui::info("  Fetching cmdline...");
+    let cmdline_path = format!("{cache_dir}/cmdline.txt");
+    download_file(&cmdline_url, &cmdline_path).map_err(|e| {
+        bump_verify_outcome("network");
+        e.context(format!(
+            "Failed to download builder VM cmdline from {cmdline_url}"
+        ))
+    })?;
+    verify_artifact_hash(&cmdline_path, &names.cmdline, expected.get(&names.cmdline))?;
+
+    ui::info("  Fetching manifest...");
+    let manifest_path = format!("{cache_dir}/manifest.json");
+    download_file(&manifest_url, &manifest_path).map_err(|e| {
+        bump_verify_outcome("network");
+        e.context(format!(
+            "Failed to download builder VM manifest from {manifest_url}"
+        ))
+    })?;
+    verify_artifact_hash(
+        &manifest_path,
+        &names.manifest,
+        expected.get(&names.manifest),
+    )?;
 
     ui::success(&format!(
         "Builder VM image downloaded, hash-verified, and cached at {cache_dir}."
@@ -995,10 +1005,10 @@ pub(super) fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)>
     // The builder-vm flake's cmd.sh reads MVM_HOST_BIN_DIR=/mvm-bins to
     // install the correct cross-compiled binaries into the rootfs.
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+    let host_bin_dir = crate::host_binaries::extract::ensure_boot_host_binaries(
         std::path::Path::new(&host_bins_cache),
-    )
-    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    )?
+    .dir;
 
     let job = BuilderJob::Flake {
         flake_ref: "path:/work/nix/images/builder-vm".to_string(),

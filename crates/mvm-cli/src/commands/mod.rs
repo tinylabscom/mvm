@@ -18,6 +18,7 @@ mod pack;
 /// crate-root `exec` runner can reach the glue.
 pub(crate) mod pool;
 mod qemu_bridge;
+mod runtime_overlay;
 mod shared;
 mod ssh_agent_proxy;
 mod storage;
@@ -50,8 +51,8 @@ pub(in crate::commands) struct Cli {
     /// Override which hypervisor drives the builder VM.
     /// Highest priority — beats `MVM_BUILDER_BACKEND`
     /// env and the platform-default auto-detect (macOS 26+ Apple
-    /// Silicon → hvf; everywhere else → libkrun).
-    #[arg(long, global = true, value_parser = ["libkrun", "qemu", "hvf"])]
+    /// Silicon → hvf; Linux native → qemu; everywhere else → libkrun).
+    #[arg(long, global = true, value_parser = ["libkrun", "vz", "qemu", "hvf"])]
     pub builder: Option<String>,
 
     /// Where the builder VM's kernel comes from when its image is
@@ -121,6 +122,9 @@ pub(in crate::commands) enum Commands {
     /// first `dev up` is fast. Run automatically by install.sh unless
     /// `MVM_SKIP_BUILDER_PREFETCH=1`.
     Bootstrap(bootstrap::Args),
+    /// Internal: bootstrap only the builder VM image cache.
+    #[command(name = "__builder-vm-bootstrap", hide = true)]
+    BuilderVmBootstrap(bootstrap::BuilderVmBootstrapArgs),
     /// Environment / install lifecycle (bootstrap, update, sign, …)
     #[command(hide = true)]
     Env(env::group::Args),

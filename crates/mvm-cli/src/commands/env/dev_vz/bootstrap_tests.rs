@@ -49,6 +49,16 @@ mod attested_builder_pack_tests {
         std::fs::create_dir_all(dir).expect("mkdir artifacts");
         std::fs::write(dir.join("vmlinux"), vec![0x7f; 1024 * 1024 + 1]).expect("write vmlinux");
         std::fs::write(dir.join("rootfs.ext4"), rootfs_bytes(4 * 1024 * 1024 + 1)).expect("rootfs");
+        std::fs::write(
+            dir.join("cmdline.txt"),
+            b"console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
+        )
+        .expect("write cmdline");
+        std::fs::write(
+            dir.join("manifest.json"),
+            br#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+        )
+        .expect("write manifest");
     }
 
     fn rootfs_bytes(len: usize) -> Vec<u8> {

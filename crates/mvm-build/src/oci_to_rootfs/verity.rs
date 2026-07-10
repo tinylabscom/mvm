@@ -9,11 +9,10 @@
 //!
 //! ## Parameters (DO NOT CHANGE without updating `mvm-verity-init`)
 //!
-//! - `--data-block-size=1024` — must match the hard-coded
-//!   constant in `mvm-guest/src/bin/mvm-verity-init.rs`. The
-//!   comment there explains why we use 1 KiB blocks (matches
-//!   mke2fs's default for sub-512 MiB images, lines up with
-//!   ext4's device-block-size constraint).
+//! - `--data-block-size=4096` — must match the ext4 block size
+//!   our workload-root materializer emits by default and the
+//!   geometry `mvm-verity-init` probes from the rootfs image at
+//!   boot.
 //! - `--hash-block-size=4096` — veritysetup default; the hash
 //!   tree's internal node size.
 //! - `--salt=00…00` (64 hex zeros) — pinned for determinism.
@@ -41,11 +40,11 @@ use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::ext4::MaterializedRootfs;
 use std::path::{Path, PathBuf};
 
-/// `data-block-size` pinned to 1024 bytes. Must match the
-/// `DATA_BLOCK_SIZE` constant in
-/// `crates/mvm-guest/src/bin/mvm-verity-init.rs` or boot fails
-/// with "metadata block 0 is corrupted" at the dm-verity layer.
-pub const MVM_VERITY_DATA_BLOCK_SIZE: u32 = 1024;
+/// `data-block-size` pinned to 4096 bytes. Must match the
+/// workload ext4 block size the run path materializes; otherwise
+/// dm-verity validates the wrong geometry and the guest fails
+/// before `/init` pivots into the real rootfs.
+pub const MVM_VERITY_DATA_BLOCK_SIZE: u32 = 4096;
 
 /// `hash-block-size` pinned to 4096 bytes. Matches veritysetup's
 /// own default; the kernel's verity target reads metadata at
@@ -79,7 +78,8 @@ pub const MVM_VERITY_PINNED_UUID: &str = "00000000-0000-0000-0000-000000000003";
 #[derive(Debug, Clone)]
 pub struct VeritysetupOptions {
     /// Data block size in bytes. See module docs for why this
-    /// must be 1024 for compatibility with `mvm-verity-init`.
+    /// must match the rootfs ext4 block size for compatibility
+    /// with `mvm-verity-init`.
     pub data_block_size: u32,
     /// Hash tree internal block size. Default 4096
     /// (veritysetup default).
@@ -336,7 +336,7 @@ mod tests {
     #[test]
     fn defaults_match_mvm_verity_init_constants() {
         let o = defaults();
-        assert_eq!(o.data_block_size, 1024);
+        assert_eq!(o.data_block_size, 4096);
         assert_eq!(o.hash_block_size, 4096);
         assert_eq!(o.salt, MVM_VERITY_PINNED_SALT);
         assert_eq!(o.algorithm, "sha256");
@@ -344,7 +344,7 @@ mod tests {
         // The constants themselves are the contract; restate
         // them so any future drift fires this test before the
         // kernel panics at boot.
-        assert_eq!(MVM_VERITY_DATA_BLOCK_SIZE, 1024);
+        assert_eq!(MVM_VERITY_DATA_BLOCK_SIZE, 4096);
         assert_eq!(MVM_VERITY_HASH_BLOCK_SIZE, 4096);
         assert_eq!(MVM_VERITY_PINNED_SALT.len(), 64);
         assert!(MVM_VERITY_PINNED_SALT.bytes().all(|b| b == b'0'));

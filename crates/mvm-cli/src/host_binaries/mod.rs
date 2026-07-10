@@ -12,3 +12,4 @@ pub mod embedded;
 pub mod extract;
 pub mod manifest;
 pub mod source_build;
+pub mod toolchain;

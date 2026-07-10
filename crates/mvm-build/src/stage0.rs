@@ -634,9 +634,14 @@ mod tests {
 
     #[test]
     fn cache_dir_is_under_home() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = TempDir::new().unwrap();
+        env.remove("MVM_CACHE_DIR");
+        env.set("XDG_CACHE_HOME", tmp.path());
         let path = stage0_cache_dir();
         let s = path.to_string_lossy();
-        assert!(s.contains(".cache/mvm/stage0"), "got {s}");
+        assert!(s.contains("/mvm/stage0"), "got {s}");
+        assert!(path.starts_with(tmp.path()), "got {s}");
     }
 
     #[test]

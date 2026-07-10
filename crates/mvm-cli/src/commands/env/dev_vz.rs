@@ -43,7 +43,9 @@ use default_microvm::{
     WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
     find_reusable_builder_kernel, resolve_workload_kernel_bootstrap,
 };
-pub(crate) use default_microvm::{ensure_default_microvm_image, ensure_workload_kernel};
+pub(crate) use default_microvm::{
+    ensure_default_microvm_image, ensure_workload_kernel, ensure_workload_verity_initrd,
+};
 pub use image_ops::cmd_dev_import_image;
 pub(in crate::commands) use image_ops::ensure_dev_image;
 #[cfg(test)]

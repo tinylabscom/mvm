@@ -97,7 +97,8 @@ pub fn build_egress_tls_delivery(bound_hosts: &[&str], ca_dir: &Path) -> Result<
 
 /// Read the per-VM egress intermediate (`cert_pem` + `key_pem`) persisted under
 /// `<state_dir>/egress-intermediate.json`. Returns `None` when absent.
-pub fn read_egress_intermediate(state_dir: &Path) -> Result<Option<(String, String)>> {
+#[cfg(target_os = "linux")]
+pub(crate) fn read_egress_intermediate(state_dir: &Path) -> Result<Option<(String, String)>> {
     let path = state_dir.join("egress-intermediate.json");
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,

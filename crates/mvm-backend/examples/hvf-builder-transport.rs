@@ -77,6 +77,7 @@ fn main() {
             job_dir: &job,
             work_src: &work,
             host_bin_dir: &bins,
+            runtime_overlay: None,
             output_size: 64 << 20,
             vcpus: 2,
             // Builder-appropriate RAM (a real nix build OOMs at 512 MiB);

@@ -70,7 +70,6 @@ struct BuildArgs {
 enum Which {
     Builder,
     Workload,
-    WorkloadSizeopt,
 }
 
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,9 +117,6 @@ fn run_build(args: BuildArgs, verbose: bool) -> Result<()> {
         match args.which {
             Which::Builder => vec![(KernelVariant::Builder, "builder")],
             Which::Workload => vec![(KernelVariant::Workload, "workload")],
-            Which::WorkloadSizeopt => {
-                vec![(KernelVariant::WorkloadSizeopt, "workload-sizeopt")]
-            }
         }
     };
 

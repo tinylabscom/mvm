@@ -26,14 +26,22 @@ use mvm_build::persistent_builder::{
 /// reading any incoming `HostVmRequest`, writing responses, and
 /// dropping the stream. Returns the listener thread handle —
 /// callers `join` after asserting the supervisor outcome.
-fn spawn_fake_guest<F>(socket_path: &Path, handler: F) -> std::thread::JoinHandle<()>
+fn spawn_fake_guest<F>(socket_path: &Path, handler: F) -> std::thread::JoinHandle<bool>
 where
     F: FnOnce(std::os::unix::net::UnixStream) + Send + 'static,
 {
-    let listener = UnixListener::bind(socket_path).expect("bind unix socket");
+    let listener = match UnixListener::bind(socket_path) {
+        Ok(listener) => listener,
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            eprintln!("skipping persistent_builder_supervisor unix listener test: {err}");
+            return std::thread::spawn(|| false);
+        }
+        Err(err) => panic!("bind unix socket: {err}"),
+    };
     std::thread::spawn(move || {
         let (conn, _) = listener.accept().expect("accept");
         handler(conn);
+        true
     })
 }
 
@@ -84,17 +92,17 @@ fn submit_round_trips_request_and_result_with_no_stderr_chunks() {
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
 
-    let outcome = supervisor
-        .submit(
-            BuilderJob::Flake {
-                flake_ref: "path:/work".to_string(),
-                attr_path: "packages.aarch64-linux.default".to_string(),
-            },
-            "00000000-0000-0000-0000-000000000000".to_string(),
-        )
-        .expect("submit");
-
-    guest.join().expect("guest");
+    let outcome = supervisor.submit(
+        BuilderJob::Flake {
+            flake_ref: "path:/work".to_string(),
+            attr_path: "packages.aarch64-linux.default".to_string(),
+        },
+        "00000000-0000-0000-0000-000000000000".to_string(),
+    );
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let outcome = outcome.expect("submit");
     assert_eq!(outcome.exit_code, 0);
     assert_eq!(outcome.stderr_chunks.len(), 0);
     assert_eq!(outcome.job_timings.build_ms, 1000);
@@ -142,17 +150,17 @@ fn submit_streams_stderr_chunks_then_collects_terminating_result() {
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
 
-    let outcome = supervisor
-        .submit(
-            BuilderJob::Flake {
-                flake_ref: "path:/work".to_string(),
-                attr_path: "packages.aarch64-linux.default".to_string(),
-            },
-            "abc".to_string(),
-        )
-        .expect("submit");
-
-    guest.join().expect("guest");
+    let outcome = supervisor.submit(
+        BuilderJob::Flake {
+            flake_ref: "path:/work".to_string(),
+            attr_path: "packages.aarch64-linux.default".to_string(),
+        },
+        "abc".to_string(),
+    );
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let outcome = outcome.expect("submit");
     assert_eq!(outcome.exit_code, 0);
     assert_eq!(
         outcome.stderr_chunks,
@@ -182,17 +190,17 @@ fn submit_returns_premature_eof_when_guest_closes_without_result() {
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
 
-    let err = supervisor
-        .submit(
-            BuilderJob::Flake {
-                flake_ref: "path:/work".to_string(),
-                attr_path: "packages.aarch64-linux.default".to_string(),
-            },
-            "abc".to_string(),
-        )
-        .expect_err("must error on premature EOF");
-
-    guest.join().expect("guest");
+    let err = supervisor.submit(
+        BuilderJob::Flake {
+            flake_ref: "path:/work".to_string(),
+            attr_path: "packages.aarch64-linux.default".to_string(),
+        },
+        "abc".to_string(),
+    );
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let err = err.expect_err("must error on premature EOF");
     match err {
         PersistentBuilderError::PrematureEof { chunks } => assert_eq!(chunks, 0),
         other => panic!("expected PrematureEof, got {other:?}"),
@@ -222,17 +230,17 @@ fn submit_detects_job_id_mismatch_in_result() {
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
 
-    let err = supervisor
-        .submit(
-            BuilderJob::Flake {
-                flake_ref: "path:/work".to_string(),
-                attr_path: "packages.aarch64-linux.default".to_string(),
-            },
-            "abc".to_string(),
-        )
-        .expect_err("must reject job_id mismatch");
-
-    guest.join().expect("guest");
+    let err = supervisor.submit(
+        BuilderJob::Flake {
+            flake_ref: "path:/work".to_string(),
+            attr_path: "packages.aarch64-linux.default".to_string(),
+        },
+        "abc".to_string(),
+    );
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let err = err.expect_err("must reject job_id mismatch");
     assert!(matches!(err, PersistentBuilderError::JobIdMismatch { .. }));
 }
 
@@ -253,8 +261,11 @@ fn shutdown_writes_shutdown_request_and_consumes_bye() {
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
 
-    supervisor.shutdown().expect("shutdown");
-    guest.join().expect("guest");
+    let result = supervisor.shutdown();
+    if !guest.join().expect("guest") {
+        return;
+    }
+    result.expect("shutdown");
 }
 
 // Suppress the unused-import warning when running under feature
@@ -338,16 +349,17 @@ fn submit_with_audit_sink_emits_dispatched_then_completed_on_success() {
         .with_frame_read_timeout(Duration::from_secs(1))
         .with_audit_sink(sink.clone());
 
-    let outcome = supervisor
-        .submit(
-            BuilderJob::Flake {
-                flake_ref: "path:/work".to_string(),
-                attr_path: "packages.aarch64-linux.default".to_string(),
-            },
-            "abc123".to_string(),
-        )
-        .expect("submit");
-    guest.join().expect("guest");
+    let outcome = supervisor.submit(
+        BuilderJob::Flake {
+            flake_ref: "path:/work".to_string(),
+            attr_path: "packages.aarch64-linux.default".to_string(),
+        },
+        "abc123".to_string(),
+    );
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let outcome = outcome.expect("submit");
 
     let events = sink.events.lock().unwrap();
     assert_eq!(events.len(), 2, "dispatched + completed; got {events:?}");
@@ -385,16 +397,17 @@ fn submit_with_audit_sink_emits_dispatched_then_failed_on_premature_eof() {
         .with_frame_read_timeout(Duration::from_secs(2))
         .with_audit_sink(sink.clone());
 
-    let err = supervisor
-        .submit(
-            BuilderJob::Flake {
-                flake_ref: "path:/work".to_string(),
-                attr_path: "x".to_string(),
-            },
-            "deadbeef".to_string(),
-        )
-        .expect_err("submit should fail");
-    guest.join().expect("guest");
+    let err = supervisor.submit(
+        BuilderJob::Flake {
+            flake_ref: "path:/work".to_string(),
+            attr_path: "x".to_string(),
+        },
+        "deadbeef".to_string(),
+    );
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let err = err.expect_err("submit should fail");
 
     assert!(matches!(err, PersistentBuilderError::PrematureEof { .. }));
     let events = sink.events.lock().unwrap();
@@ -437,16 +450,17 @@ fn submit_without_audit_sink_emits_nothing() {
 
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
-    supervisor
-        .submit(
-            BuilderJob::Flake {
-                flake_ref: "path:/work".to_string(),
-                attr_path: "x".to_string(),
-            },
-            "no-sink".to_string(),
-        )
-        .expect("submit");
-    guest.join().expect("guest");
+    let result = supervisor.submit(
+        BuilderJob::Flake {
+            flake_ref: "path:/work".to_string(),
+            attr_path: "x".to_string(),
+        },
+        "no-sink".to_string(),
+    );
+    if !guest.join().expect("guest") {
+        return;
+    }
+    result.expect("submit");
     // No sink, no panic, no recorded events. The test passes if
     // we get here cleanly — the supervisor's `Option<sink>`
     // branches don't dereference None.
@@ -494,10 +508,11 @@ fn submit_workload_start_round_trips_started() {
 
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
-    let outcome = supervisor
-        .submit_workload_start(sample_workload_params())
-        .expect("workload start");
-    guest.join().expect("guest");
+    let outcome = supervisor.submit_workload_start(sample_workload_params());
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let outcome = outcome.expect("workload start");
     assert_eq!(outcome.pid, 4242);
 }
 
@@ -521,10 +536,11 @@ fn submit_workload_start_surfaces_workload_failed() {
 
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
-    let err = supervisor
-        .submit_workload_start(sample_workload_params())
-        .expect_err("must surface WorkloadFailed");
-    guest.join().expect("guest");
+    let err = supervisor.submit_workload_start(sample_workload_params());
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let err = err.expect_err("must surface WorkloadFailed");
     match err {
         PersistentBuilderError::WorkloadFailed { error, .. } => {
             assert!(error.contains("ENOENT"), "error lost: {error}");
@@ -546,10 +562,11 @@ fn submit_workload_start_rejects_unexpected_response() {
 
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
-    let err = supervisor
-        .submit_workload_start(sample_workload_params())
-        .expect_err("must reject wrong-kind response");
-    guest.join().expect("guest");
+    let err = supervisor.submit_workload_start(sample_workload_params());
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let err = err.expect_err("must reject wrong-kind response");
     match err {
         PersistentBuilderError::UnexpectedResponse { expected, got } => {
             assert_eq!(expected, "workload_started");
@@ -572,10 +589,11 @@ fn submit_workload_start_premature_eof_when_guest_closes() {
 
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
-    let err = supervisor
-        .submit_workload_start(sample_workload_params())
-        .expect_err("must surface PrematureEof");
-    guest.join().expect("guest");
+    let err = supervisor.submit_workload_start(sample_workload_params());
+    if !guest.join().expect("guest") {
+        return;
+    }
+    let err = err.expect_err("must surface PrematureEof");
     assert!(matches!(err, PersistentBuilderError::PrematureEof { .. }));
 }
 
@@ -600,8 +618,11 @@ fn submit_workload_stop_and_status_round_trip() {
         });
     let supervisor =
         PersistentBuilderSupervisor::new(&socket).with_frame_read_timeout(Duration::from_secs(1));
-    supervisor.submit_workload_stop(wid).expect("stop ok");
-    guest.join().expect("guest");
+    let stop_result = supervisor.submit_workload_stop(wid);
+    if !guest.join().expect("guest") {
+        return;
+    }
+    stop_result.expect("stop ok");
 
     // Status → WorkloadStatusReport{status} → Ok(status)
     let scratch2 = tempfile::tempdir().expect("tempdir");
@@ -623,7 +644,10 @@ fn submit_workload_stop_and_status_round_trip() {
     });
     let supervisor2 =
         PersistentBuilderSupervisor::new(&socket2).with_frame_read_timeout(Duration::from_secs(1));
-    let status = supervisor2.submit_workload_status(wid).expect("status ok");
-    guest2.join().expect("guest");
+    let status = supervisor2.submit_workload_status(wid);
+    if !guest2.join().expect("guest") {
+        return;
+    }
+    let status = status.expect("status ok");
     assert_eq!(status, "running");
 }

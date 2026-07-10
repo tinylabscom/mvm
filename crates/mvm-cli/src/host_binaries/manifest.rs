@@ -18,6 +18,14 @@ pub struct HostBinary {
     pub mode: u32,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct SourceBuiltBinary {
+    /// Workspace package that owns the binary target.
+    pub package: &'static str,
+    /// Name on disk after cargo zigbuild and in the extracted cache.
+    pub name: &'static str,
+}
+
 pub const HOST_BINARIES: &[HostBinary] = &[
     HostBinary {
         name: "mvm-host-vm-init",
@@ -50,3 +58,12 @@ pub const HOST_BINARIES: &[HostBinary] = &[
 /// `/init` (re-bakes a builder rootfs with the current host binaries on the
 /// hvf VMM — no legacy builder).
 pub const SEED_BINARIES: &[&str] = &["stage0-init", "mvm-rootfs-patcher"];
+
+/// Stage 0 and builder bootstrap helpers also need a small set of support
+/// binaries mounted under `/mvm-bins` before the runtime overlay is available.
+/// These stay out of the builder/dev VM rootfs, but the source-built fallback
+/// must still compile and cache them alongside the primary host binaries.
+pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary {
+    package: "mvm-guest-helpers",
+    name: "mvm-egress-client",
+}];

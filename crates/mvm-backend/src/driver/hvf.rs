@@ -113,15 +113,17 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         })
         .collect();
 
-    // A workload MUST route egress through the gated endpoint — a missing relay
-    // fails closed. A trusted builder carries no untrusted workload and boots with
-    // no egress gate, so it has no relay socket.
-    let egress_relay_socket = if spec.trusted_builder {
-        None
-    } else {
-        Some(vsock_socket(spec, EGRESS_PORT).ok_or_else(|| {
-            anyhow!("hvf workload spec is missing the EGRESS_PORT vsock relay socket")
-        })?)
+    // Guests that need host egress carry an explicit EGRESS_PORT relay socket in
+    // the spec. Workloads must provide one; trusted builders now provide the same
+    // vsock relay so every backend uses one egress path.
+    let egress_relay_socket = match vsock_socket(spec, EGRESS_PORT) {
+        Some(socket) => Some(socket),
+        None if spec.trusted_builder => None,
+        None => {
+            return Err(anyhow!(
+                "hvf workload spec is missing the EGRESS_PORT vsock relay socket"
+            ));
+        }
     };
 
     // An empty spec cmdline means "use the supervisor's workload default"
@@ -511,18 +513,21 @@ mod tests {
     }
 
     #[test]
-    fn relay_config_trusted_builder_needs_no_egress_relay() {
-        // A trusted builder boots with no egress gate — no EGRESS_PORT required,
-        // and no relay socket is wired. (A workload without one still fails closed;
-        // see relay_config_missing_egress_port_fails_closed.)
+    fn relay_config_trusted_builder_uses_the_same_egress_relay() {
         let mut spec = spec_with(
             KernelImage::Path("/img/Image".into()),
-            vec![agent_port("/run/agent.sock")],
+            vec![
+                agent_port("/run/agent.sock"),
+                egress_port("/run/egress.sock"),
+            ],
             vec![],
         );
         spec.trusted_builder = true;
         let cfg = relay_supervisor_config(&spec, &sample_paths()).unwrap();
-        assert_eq!(cfg.egress_relay_socket, None);
+        assert_eq!(
+            cfg.egress_relay_socket,
+            Some(PathBuf::from("/run/egress.sock"))
+        );
     }
 
     #[test]
@@ -554,13 +559,15 @@ mod tests {
 
     #[test]
     fn vsock_connect_reaches_the_agent_socket_and_rejects_other_ports() {
+        use crate::test_support::bind_unix_listener;
         use std::io::{Read, Write};
-        use std::os::unix::net::UnixListener;
 
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("agent.sock");
         // Stand-in for the supervisor's agent bridge: echo one byte back.
-        let listener = UnixListener::bind(&sock).unwrap();
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
         let server = std::thread::spawn(move || {
             if let Ok((mut c, _)) = listener.accept() {
                 let mut b = [0u8; 1];
@@ -618,14 +625,16 @@ mod tests {
 
     #[test]
     fn vsock_connect_console_port_resolves_to_vsock_subdir() {
+        use crate::test_support::bind_unix_listener;
         use std::io::{Read, Write};
-        use std::os::unix::net::UnixListener;
 
         let dir = tempfile::tempdir().unwrap();
         let vsock_dir = dir.path().join("vsock");
         std::fs::create_dir_all(&vsock_dir).unwrap();
         let sock = vsock_dir.join("vsock-20001.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
         let server = std::thread::spawn(move || {
             if let Ok((mut c, _)) = listener.accept() {
                 let mut b = [0u8; 1];

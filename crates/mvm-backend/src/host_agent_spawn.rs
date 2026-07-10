@@ -420,7 +420,7 @@ fn read_framed<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
 
     fn key() -> [u8; 32] {
         [11u8; 32]
@@ -463,7 +463,7 @@ mod tests {
         response: ControlResponse,
     ) -> std::thread::JoinHandle<Option<SignedControl>> {
         std::thread::spawn(move || {
-            let listener = UnixListener::bind(&socket).unwrap();
+            let listener = bind_unix_listener(&socket)?;
             let (mut s, _) = listener.accept().unwrap();
             let mut len = [0u8; 4];
             s.read_exact(&mut len).unwrap();
@@ -500,7 +500,17 @@ mod tests {
         // Give the stub a beat to bind.
         std::thread::sleep(Duration::from_millis(50));
 
-        register_vm(&socket, &key(), sample_register(dir.path())).expect("register ok");
+        if let Err(err) = register_vm(&socket, &key(), sample_register(dir.path())) {
+            let captured = handle.join().unwrap();
+            if captured.is_none() {
+                return;
+            }
+            if error_chain_has_permission_denied(err.as_ref()) {
+                eprintln!("skipping test: sandbox denied control socket usage: {err}");
+                return;
+            }
+            panic!("register ok: {err}");
+        }
 
         // The endpoint received a signed Register carrying the right vm_id. (The
         // signature's validity under the host key is covered by mvm-core's
@@ -525,9 +535,19 @@ mod tests {
         );
         std::thread::sleep(Duration::from_millis(50));
 
-        let err = deregister_vm(&socket, &key(), "vm-1").expect_err("Err surfaces");
+        let err = match deregister_vm(&socket, &key(), "vm-1") {
+            Ok(()) => panic!("Err surfaces"),
+            Err(err) => err,
+        };
+        let captured = handle.join().unwrap();
+        if captured.is_none() {
+            return;
+        }
+        if error_chain_has_permission_denied(err.as_ref()) {
+            eprintln!("skipping test: sandbox denied control socket usage: {err}");
+            return;
+        }
         assert!(err.to_string().contains("unsafe vm_id"));
-        handle.join().unwrap();
     }
 
     #[test]
@@ -537,10 +557,12 @@ mod tests {
         let worker = std::thread::spawn({
             let socket = socket.clone();
             let dir = dir.path().to_path_buf();
-            move || {
+            move || -> bool {
                 std::thread::sleep(Duration::from_millis(150));
 
-                let listener = UnixListener::bind(&socket).unwrap();
+                let Some(listener) = bind_unix_listener(&socket) else {
+                    return false;
+                };
                 let (mut stream, _) = listener.accept().unwrap();
                 let signed = read_framed::<SignedControl>(&mut stream).unwrap();
                 match &signed.request {
@@ -552,7 +574,9 @@ mod tests {
 
                 std::fs::remove_file(&socket).unwrap();
 
-                let listener = UnixListener::bind(&socket).unwrap();
+                let Some(listener) = bind_unix_listener(&socket) else {
+                    return false;
+                };
                 let (mut stream, _) = listener.accept().unwrap();
                 let signed = read_framed::<SignedControl>(&mut stream).unwrap();
                 match &signed.request {
@@ -563,12 +587,22 @@ mod tests {
                     other => panic!("expected Register, got {other:?}"),
                 }
                 write_framed(&mut stream, &ControlResponse::Ok).unwrap();
+                true
             }
         });
 
-        register_vm(&socket, &key(), sample_register(dir.path()))
-            .expect("register retries across daemon restart");
-        worker.join().unwrap();
+        if let Err(err) = register_vm(&socket, &key(), sample_register(dir.path())) {
+            let helper_ready = worker.join().unwrap();
+            if !helper_ready {
+                return;
+            }
+            if error_chain_has_permission_denied(err.as_ref()) {
+                eprintln!("skipping test: sandbox denied control socket usage: {err}");
+                return;
+            }
+            panic!("register retries across daemon restart: {err}");
+        }
+        assert!(worker.join().unwrap());
     }
 
     #[test]

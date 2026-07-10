@@ -1,7 +1,5 @@
 use anyhow::Result;
 use std::collections::BTreeMap;
-use std::env;
-use std::fs;
 #[cfg(not(test))]
 use std::path::{Path, PathBuf};
 
@@ -9,14 +7,8 @@ use mvm_core::build_env::BuildEnvironment;
 use mvm_core::config::{ARCH, fc_version, fc_version_short};
 use mvm_core::pool::pool_artifacts_dir;
 
-use crate::build::{
-    BUILDER_AGENT_GUEST_BIN, BUILDER_AGENT_SERVICE, BUILDER_DIR, builder_ssh_key_path,
-};
+use crate::build::{BUILDER_AGENT_GUEST_BIN, BUILDER_AGENT_SERVICE, BUILDER_DIR};
 use crate::scripts::render_script;
-
-fn builder_ssh_pub_path() -> String {
-    format!("{}/id_rsa.pub", BUILDER_DIR)
-}
 
 #[cfg(test)]
 fn resolve_builder_agent_binary(_env: &dyn BuildEnvironment) -> Result<String> {
@@ -25,14 +17,14 @@ fn resolve_builder_agent_binary(_env: &dyn BuildEnvironment) -> Result<String> {
 
 #[cfg(not(test))]
 fn resolve_builder_agent_binary(env: &dyn BuildEnvironment) -> Result<String> {
-    if let Ok(v) = env::var("MVM_BUILDER_AGENT_BIN") {
+    if let Ok(v) = std::env::var("MVM_BUILDER_AGENT_BIN") {
         let p = PathBuf::from(v.trim());
         if p.is_file() {
             return Ok(p.to_string_lossy().to_string());
         }
     }
 
-    if let Ok(exe) = env::current_exe()
+    if let Ok(exe) = std::env::current_exe()
         && let Some(bin_dir) = exe.parent()
     {
         let sibling = bin_dir.join("mvm-builder-agent");
@@ -48,7 +40,7 @@ fn resolve_builder_agent_binary(env: &dyn BuildEnvironment) -> Result<String> {
         .map(Path::to_path_buf)
         .unwrap_or(manifest_dir.clone());
     let mut target_roots = vec![workspace_root.join("target")];
-    if let Ok(td) = env::var("CARGO_TARGET_DIR")
+    if let Ok(td) = std::env::var("CARGO_TARGET_DIR")
         && !td.trim().is_empty()
     {
         let p = PathBuf::from(td.trim());
@@ -110,10 +102,7 @@ fn resolve_builder_agent_binary(env: &dyn BuildEnvironment) -> Result<String> {
 }
 
 /// Ensure the builder kernel and rootfs exist.
-pub(crate) fn ensure_builder_artifacts(
-    env: &dyn BuildEnvironment,
-    require_ssh_keys: bool,
-) -> Result<()> {
+pub(crate) fn ensure_builder_artifacts(env: &dyn BuildEnvironment) -> Result<()> {
     let kernel_path = format!("{}/vmlinux", BUILDER_DIR);
     let rootfs_path = format!("{}/rootfs.ext4", BUILDER_DIR);
     let exists = env.shell_exec_stdout(&format!(
@@ -121,74 +110,16 @@ pub(crate) fn ensure_builder_artifacts(
         kernel_path, rootfs_path
     ))?;
 
-    // Always refresh builder SSH key pair to match injected authorized_keys
-    let key_path = builder_ssh_key_path();
-    let pub_path = builder_ssh_pub_path();
-    let mut keygen_ctx = BTreeMap::new();
-    keygen_ctx.insert("builder_dir", BUILDER_DIR.to_string());
-    keygen_ctx.insert("key", key_path.clone());
-    keygen_ctx.insert("pub", pub_path.clone());
-    env.shell_exec(&render_script("builder_keygen", &keygen_ctx)?)?;
-
     // Ensure host-side builder agent binary exists for injection into builder rootfs.
     let agent_bin = resolve_builder_agent_binary(env)?;
     env.log_info(&format!("Using builder agent binary: {}", agent_bin));
 
-    // In vsock-only mode we deliberately avoid SSH injection/probing.
-    let (inject_ssh, auth_keys_escaped) = if !require_ssh_keys {
-        (false, String::new())
-    } else {
-        let builder_pub = fs::read_to_string(&pub_path)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let mut extra_keys = Vec::new();
-        if let Ok(home) = env::var("HOME") {
-            for name in ["id_ed25519.pub", "id_rsa.pub"] {
-                let p = format!("{home}/.ssh/{name}");
-                if let Ok(k) = fs::read_to_string(&p) {
-                    let t = k.trim();
-                    if !t.is_empty() {
-                        extra_keys.push(t.to_string());
-                    }
-                }
-            }
-        }
-        if let Ok(k) = env::var("MVM_BUILDER_AUTHORIZED_KEY") {
-            let t = k.trim();
-            if !t.is_empty() {
-                extra_keys.push(t.to_string());
-            }
-        }
-        let mut all_keys = Vec::new();
-        if !builder_pub.is_empty() {
-            all_keys.push(builder_pub);
-        }
-        all_keys.extend(extra_keys);
-
-        let inject_ssh = !all_keys.is_empty();
-        if !inject_ssh {
-            return Err(anyhow::anyhow!(
-                "No SSH pubkeys found for builder (set MVM_BUILDER_AUTHORIZED_KEY or ensure ~/.ssh/id_ed25519.pub exists)"
-            ));
-        }
-        env.log_info(&format!(
-            "Injecting {} SSH key(s) into builder rootfs",
-            all_keys.len()
-        ));
-        let auth_keys = all_keys.join("\n");
-        (true, auth_keys.replace('\'', "'\\''"))
-    };
-
     if exists.trim() == "yes" {
-        env.log_info("Builder artifacts found (refreshing SSH keys)...");
+        env.log_info("Builder artifacts found.");
         let mut refresh_ctx = BTreeMap::new();
         refresh_ctx.insert("builder_dir", BUILDER_DIR.to_string());
-        refresh_ctx.insert(
-            "inject_ssh",
-            if inject_ssh { "yes" } else { "no" }.to_string(),
-        );
-        refresh_ctx.insert("auth_keys", auth_keys_escaped.clone());
+        refresh_ctx.insert("inject_ssh", "no".to_string());
+        refresh_ctx.insert("auth_keys", String::new());
         refresh_ctx.insert("agent_src", agent_bin.clone());
         refresh_ctx.insert("agent_dst", BUILDER_AGENT_GUEST_BIN.to_string());
         refresh_ctx.insert("agent_service", BUILDER_AGENT_SERVICE.to_string());
@@ -203,20 +134,6 @@ pub(crate) fn ensure_builder_artifacts(
         dir = BUILDER_DIR,
     ))?;
 
-    // Ensure builder SSH key exists (used to access the builder VM).
-    let pub_path = builder_ssh_pub_path();
-    env.shell_exec(&format!(
-        r#"
-        if [ ! -f {key} ]; then
-            ssh-keygen -t ed25519 -N '' -f {key} -q
-        fi
-        chmod 600 {key}
-        chmod 644 {pub}
-        "#,
-        key = key_path,
-        pub = pub_path,
-    ))?;
-
     // Ensure required tools are present (wget/curl, unsquashfs, mkfs.ext4)
     env.shell_exec_visible(
         "sudo apt-get update -qq && sudo apt-get install -y -qq wget curl squashfs-tools e2fsprogs",
@@ -224,19 +141,14 @@ pub(crate) fn ensure_builder_artifacts(
 
     let fc_short = fc_version_short();
     let fc_full = fc_version();
-    let builder_pub = builder_ssh_pub_path();
-
     let mut download_ctx = BTreeMap::new();
     download_ctx.insert("builder_dir", BUILDER_DIR.to_string());
     download_ctx.insert("fc_short", fc_short);
     download_ctx.insert("fc_full", fc_full);
     download_ctx.insert("arch", ARCH.to_string());
-    download_ctx.insert("builder_pub", builder_pub);
-    download_ctx.insert(
-        "inject_ssh",
-        if inject_ssh { "yes" } else { "no" }.to_string(),
-    );
-    download_ctx.insert("auth_keys", auth_keys_escaped.clone());
+    download_ctx.insert("builder_pub", String::new());
+    download_ctx.insert("inject_ssh", "no".to_string());
+    download_ctx.insert("auth_keys", String::new());
     download_ctx.insert("agent_src", agent_bin);
     download_ctx.insert("agent_dst", BUILDER_AGENT_GUEST_BIN.to_string());
     download_ctx.insert("agent_service", BUILDER_AGENT_SERVICE.to_string());

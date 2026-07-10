@@ -725,6 +725,10 @@ pub struct FlakeRunConfig {
     /// 64-char lowercase-hex root hash for the overlay; baked into
     /// the cmdline as `mvm.runtime_roothash=`.
     pub runtime_overlay_roothash: Option<String>,
+    /// Declared guest-runtime source contract carried through the kernel
+    /// cmdline so the guest launcher can distinguish required-overlay vs
+    /// preferred-overlay boots.
+    pub runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).
@@ -2274,6 +2278,25 @@ pub fn build_verity_cmdline_args(
     }
 }
 
+/// Build the runtime-overlay cmdline fragment for Firecracker workload boots.
+///
+/// Verity-root boots use the fixed `/dev/vdc` + `/dev/vdd` runtime pair that
+/// `mvm-verity-init` consumes. Injected OCI non-verity boots instead mount a
+/// plain read-only overlay ext4 from `/dev/vdb` in their `/init`, so they only
+/// need the data-device token.
+pub fn build_runtime_overlay_cmdline_args(
+    rootfs_roothash: Option<&str>,
+    overlay_present: bool,
+) -> Option<String> {
+    if !overlay_present {
+        return None;
+    }
+    match rootfs_roothash {
+        Some(_) => Some("mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd".to_string()),
+        None => Some("mvm.runtime_data=/dev/vdb".to_string()),
+    }
+}
+
 /// Resolve whether the runtime-overlay drives should be attached
 /// alongside the rootfs verity sidecar. Returns the
 /// `(overlay_ext4_path, overlay_verity_sidecar_path,
@@ -2377,21 +2400,20 @@ pub fn configure_flake_microvm_with_drives_dir(
     // roothash-requested boot with no verity initramfs must error rather than
     // silently mount /dev/vda unsealed.
     let effective_initrd = resolve_effective_initrd(config)?;
-    // The runtime overlay only has a consumer when verity is on —
-    // `mvm-verity-init` is the PID 1 that reads
-    // `mvm.runtime_roothash=` and bind-mounts the overlay at
-    // `/sysroot/mvm/runtime`. Outside the verity boot path there's
-    // no init to mount the drives, so we'd just be reserving virtio
-    // slots for nothing. Drop the overlay silently when verity is
-    // off rather than failing the boot — the caller didn't ask for
-    // verity, so the overlay is moot.
-    let overlay = if config.roothash.is_some() {
-        resolved_runtime_overlay(config)
-    } else {
-        None
-    };
+    // Verity-root workloads rely on `mvm-verity-init` to mount the runtime
+    // overlay. Injected OCI `/init` is different: it can mount a plain
+    // read-only overlay ext4 itself even when the rootfs is not verity-backed.
+    // Resolve the overlay unconditionally so both boot shapes keep the same
+    // attach contract.
+    let overlay = resolved_runtime_overlay(config);
     let verity_args: Option<String> =
         build_verity_cmdline_args(config.roothash.as_deref(), overlay.map(|(_, _, h)| h));
+    let runtime_overlay_args =
+        if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly {
+            build_runtime_overlay_cmdline_args(config.roothash.as_deref(), overlay.is_some())
+        } else {
+            None
+        };
 
     let boot_args = if effective_initrd.is_some() {
         // initrd owns root mounting. Verity adds the cmdline knobs the
@@ -2430,10 +2452,14 @@ pub fn configure_flake_microvm_with_drives_dir(
         Some(token) => format!("{boot_args} {token}"),
         None => boot_args,
     };
-    let boot_args = match network_tunnel_cmdline_token(config) {
+    let boot_args = match runtime_overlay_args {
         Some(token) => format!("{boot_args} {token}"),
         None => boot_args,
     };
+    let boot_args = format!(
+        "{boot_args} {}",
+        mvm_core::vm_backend::encode_runtime_source_policy_cmdline(config.runtime_source_policy)
+    );
 
     // FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
     // published default-microvm x86_64 kernel is a bzImage (named `vmlinux`),
@@ -2514,17 +2540,12 @@ pub fn configure_flake_microvm_with_drives_dir(
         )?;
     }
 
-    // mvm runtime overlay: when the workload opted in,
-    // attach the overlay ext4 + its verity sidecar as the third and
-    // fourth virtio-blk drives. Order matters — Firecracker assigns
-    // drive letters in API-call order, so this pair must follow
-    // `/drives/verity` and precede the config/secrets drives so the
-    // overlay maps to `/dev/vdc` (data) and `/dev/vdd` (hash), which
-    // the verity-init cmdline knobs `mvm.runtime_data=/dev/vdc` and
-    // `mvm.runtime_hash=/dev/vdd` (built above) name explicitly.
-    // Both are read-only: writing the overlay would break the
-    // Merkle-tree check at the next read, same posture as
-    // `/drives/verity`.
+    // Runtime overlay:
+    // - verity-root workloads attach ext4 + verity sidecar as `/dev/vdc` +
+    //   `/dev/vdd` for `mvm-verity-init`.
+    // - injected OCI non-verity boots attach only the ext4 as `/dev/vdb`; the
+    //   injected `/init` mounts it read-only from `mvm.runtime_data=/dev/vdb`.
+    // The data drive is always read-only.
     if let Some((overlay_path, overlay_verity_path, _)) = overlay {
         ui::info(&format!("Attaching runtime overlay ext4: {}", overlay_path));
         api_put_socket(
@@ -2535,18 +2556,20 @@ pub fn configure_flake_microvm_with_drives_dir(
                 path = overlay_path,
             ),
         )?;
-        ui::info(&format!(
-            "Attaching runtime overlay verity sidecar: {}",
-            overlay_verity_path
-        ));
-        api_put_socket(
-            socket,
-            "/drives/runtime_verity",
-            &format!(
-                r#"{{"drive_id": "runtime_verity", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
-                path = overlay_verity_path,
-            ),
-        )?;
+        if config.roothash.is_some() {
+            ui::info(&format!(
+                "Attaching runtime overlay verity sidecar: {}",
+                overlay_verity_path
+            ));
+            api_put_socket(
+                socket,
+                "/drives/runtime_verity",
+                &format!(
+                    r#"{{"drive_id": "runtime_verity", "path_on_host": "{path}", "is_root_device": false, "is_read_only": true}}"#,
+                    path = overlay_verity_path,
+                ),
+            )?;
+        }
     }
 
     // Create and attach mvm-config drive (config.json + role.toml)
@@ -3570,6 +3593,7 @@ mod tests {
             runtime_overlay_path: None,
             runtime_overlay_verity_path: None,
             runtime_overlay_roothash: None,
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
             revision_hash: "abc".to_string(),
             flake_ref: "/p".to_string(),
             profile: None,
@@ -3635,12 +3659,12 @@ mod tests {
     #[test]
     fn build_verity_cmdline_args_none_without_roothash() {
         assert_eq!(build_verity_cmdline_args(None, None), None);
-        // Overlay hash alone without rootfs verity is a nonsense
-        // input — we shouldn't synthesize a half cmdline.
+        // Overlay hash alone without rootfs verity does not synthesize verity
+        // knobs; non-verity OCI boots use the separate runtime-data token path.
         assert_eq!(
             build_verity_cmdline_args(None, Some(OVERLAY_HASH)),
             None,
-            "overlay-only input should not produce a cmdline"
+            "overlay-only input should not produce verity cmdline knobs"
         );
     }
 
@@ -3669,6 +3693,31 @@ mod tests {
         assert!(got.contains(&format!("mvm.runtime_roothash={OVERLAY_HASH}")));
         assert!(got.contains("mvm.runtime_data=/dev/vdc"));
         assert!(got.contains("mvm.runtime_hash=/dev/vdd"));
+    }
+
+    #[test]
+    fn build_runtime_overlay_cmdline_args_none_without_overlay() {
+        assert_eq!(build_runtime_overlay_cmdline_args(None, false), None);
+        assert_eq!(
+            build_runtime_overlay_cmdline_args(Some(ROOTFS_HASH), false),
+            None
+        );
+    }
+
+    #[test]
+    fn build_runtime_overlay_cmdline_args_uses_verity_shape_when_rootfs_is_verified() {
+        assert_eq!(
+            build_runtime_overlay_cmdline_args(Some(ROOTFS_HASH), true).as_deref(),
+            Some("mvm.runtime_data=/dev/vdc mvm.runtime_hash=/dev/vdd")
+        );
+    }
+
+    #[test]
+    fn build_runtime_overlay_cmdline_args_uses_non_verity_oci_shape() {
+        assert_eq!(
+            build_runtime_overlay_cmdline_args(None, true).as_deref(),
+            Some("mvm.runtime_data=/dev/vdb")
+        );
     }
 
     #[test]
@@ -3837,26 +3886,18 @@ mod tests {
     }
 
     #[test]
-    fn resolved_runtime_overlay_ignored_when_verity_off() {
-        // Mirrors the gate inside `configure_flake_microvm_…`: a
-        // workload with overlay fields set but verity off has no
-        // consumer for the drives. The free function itself
-        // doesn't enforce this — it's the caller's job — but
-        // documenting the convention here keeps the linkage
-        // visible to future readers.
+    fn resolved_runtime_overlay_can_feed_non_verity_oci_mount_path() {
         let mut cfg = baseline_run_config(None);
         cfg.roothash = None; // verity off
         cfg.runtime_overlay_path = Some("/k/rootfs.runtime.ext4".into());
         cfg.runtime_overlay_verity_path = Some("/k/rootfs.runtime.verity".into());
         cfg.runtime_overlay_roothash = Some(OVERLAY_HASH.into());
-        // The triple is structurally complete, so the resolver
-        // returns Some — the gate lives in the caller.
         assert!(resolved_runtime_overlay(&cfg).is_some());
-        // And the cmdline builder refuses to synthesize anything
-        // overlay-related when rootfs verity is off — together,
-        // these two behaviours make the configure_flake path
-        // skip the drive attachments.
-        assert_eq!(build_verity_cmdline_args(None, Some(OVERLAY_HASH)), None,);
+        assert_eq!(build_verity_cmdline_args(None, Some(OVERLAY_HASH)), None);
+        assert_eq!(
+            build_runtime_overlay_cmdline_args(None, true).as_deref(),
+            Some("mvm.runtime_data=/dev/vdb")
+        );
     }
 
     #[test]

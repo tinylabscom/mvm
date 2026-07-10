@@ -73,6 +73,12 @@ dev-clippy:
 dev-check:
     bash -c 'source scripts/dev-env.sh && cargo check --workspace'
 
+# Prebuild or refresh the version-matched read-only runtime overlay once so
+# later required-overlay boots can reuse it without rebuilding guest binaries
+# on the hot path. Pass through extra args like `--force` or `--source download`.
+runtime-overlay-build *ARGS:
+    bin/dev build runtime-overlay build {{ARGS}}
+
 # ── Testing (nextest) ────────────────────────────────────────────────────
 
 # Run all tests

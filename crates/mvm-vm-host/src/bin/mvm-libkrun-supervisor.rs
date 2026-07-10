@@ -2,13 +2,25 @@
 //!
 //! Reads a [`SupervisorConfig`] JSON document on stdin, ad-hoc
 //! codesigns itself for `Hypervisor.framework` (macOS gate),
-//! creates the per-VM state directory, writes its own PID, then calls
-//! [`run_supervisor`] on a vsock-only libkrun configuration. Used by Stage 0
-//! builder VMs, by the vsock-only libkrun workload path, and by any other
-//! dev-mode call site that doesn't synthesize a guest NIC.
+//! creates the per-VM state directory, writes its own PID, then
+//! either:
 //!
-//! The supervisor blocks in `krun_start_enter` until the guest powers off, at
-//! which point libkrun calls `exit()` on the process.
+//! 1. **Bridge path** (`cfg.tenant_id` is `Some`) — calls
+//!    [`run_supervisor_with_bridge`] with a factory that spawns the
+//!    per-VM gateway audit bridge (`mvm_hostd::supervisor::gateway_bridge::
+//!    spawn_bridge_thread`). Every guest network byte transits the
+//!    bridge, FlowOpened/FlowClosed entries chain-sign into
+//!    `~/.mvm/audit/<tenant>.jsonl`, and `nc -U
+//!    <gateway_audit_socket>` subscribers see the live NDJSON feed.
+//!    This is the claim-10 substrate path.
+//! 2. **Legacy path** (`cfg.tenant_id` is `None`) — falls back to
+//!    [`run_supervisor`] which boots libkrun without
+//!    interposing a bridge. Used by Stage 0 builder VMs and any
+//!    other dev-mode call site that doesn't synthesize an
+//!    `ExecutionPlan`.
+//!
+//! Both paths block in `krun_start_enter` until the guest powers
+//! off, at which point libkrun calls `exit()` on the process.
 //!
 //! ## Why one process per VM
 //!
@@ -21,34 +33,35 @@
 //!
 //! ## Why this is its own crate
 //!
-//! The binary name is preserved so
-//! `mvm-backend::libkrun::resolve_supervisor_path()` keeps resolving it.
+//! The bin's bridge-factory branch depends on
+//! `mvm-supervisor` (gateway audit substrate). Adding
+//! `mvm-supervisor` to `mvm-libkrun`'s deps would close the cycle
+//! `mvm-supervisor → mvm-backend → mvm-libkrun`. Splitting the bin
+//! into a leaf crate breaks the cycle cleanly. The binary name is
+//! preserved so `mvm-backend::libkrun::resolve_supervisor_path()`
+//! keeps resolving it.
 
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::process::ExitCode;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
+use ed25519_dalek::SigningKey;
 use libkrun_sys::{
-    LogLevel, SupervisorBaseConfig, SupervisorConfig, init_log, run_supervisor, set_log_level,
+    BridgeFds, LogLevel, SupervisorBaseConfig, SupervisorConfig, init_log, run_supervisor,
+    run_supervisor_with_bridge, set_log_level,
 };
-use mvm_core::plan::NonceStore;
-
-fn validate_vsock_only_networking(cfg: &SupervisorConfig) -> Result<()> {
-    if matches!(
-        cfg.krun.networking,
-        libkrun_sys::NetworkingMode::Disconnected { .. }
-    ) {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "libkrun guest networking must stay on the disconnected sink/vsock-only path; \
-         use the vsock egress transport"
-    );
-}
+use mvm_core::plan::{ExecutionPlan, NonceStore, SignedExecutionPlan};
+use mvm_core::policy::PolicyBundle;
+use mvm_hostd::supervisor::audit::AuditSigner;
+use mvm_hostd::supervisor::audit_file::FileAuditSigner;
+use mvm_hostd::supervisor::gateway_bridge::{
+    BridgeConfig, BridgeEndpoints, spawn_bridge_thread, spawn_native_audit_feed,
+};
 
 /// Per-connection attach timeout. An abandoned connect must not wedge the
 /// standby; pool size bounds the blast radius.
@@ -147,10 +160,16 @@ fn main() -> ExitCode {
 /// listener and route to the bridge/legacy boot path. Extracted so both
 /// entrypoints run identical post-config logic.
 fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
-    if let Err(e) = validate_vsock_only_networking(&cfg) {
-        eprintln!("supervisor failed: {e}");
-        return ExitCode::from(1);
-    }
+    append_supervisor_breadcrumb(
+        std::path::Path::new(&cfg.vm_state_dir),
+        "dispatch_config",
+        format!(
+            "tenant_id_present={} host_listen_ports={:?} networking={:?}",
+            cfg.tenant_id.is_some(),
+            cfg.krun.host_listen_ports,
+            cfg.krun.networking
+        ),
+    );
 
     // Bind the workload-exit control listener and capture
     // the guest's exit code on a background thread. Must bind BEFORE the
@@ -179,83 +198,30 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
         }
     }
 
-    // Phase A: transparent-TCP vsock egress. When the host opted in and the
-    // workload carries no bound secrets (so the substitution endpoint is NOT
-    // binding EGRESS_PORT), bind the EGRESS_PORT UDS and run the claim-10 egress
-    // server. The NIC is still attached (Phase A retains it); this is the opt-in
-    // vsock path used to live-prove egress before the NIC is removed in Phase B.
-    {
-        let opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
-        let builder_policy_egress =
-            cfg.tenant_id.is_none() && cfg.network_policy.as_ref().is_some();
-        // Short-circuit on the opt-in flag so the default (flag-off) path does no
-        // extra plan.json read. `should_serve_vsock_egress` also requires `opt_in`,
-        // so passing `has_secrets = false` when opted out changes nothing.
-        let has_secrets = (opt_in || builder_policy_egress)
-            && mvm_backend::egress_shared::state_has_bound_secrets(std::path::Path::new(
-                &cfg.vm_state_dir,
-            ))
-            .unwrap_or(false);
-        let should_serve = mvm_vm_host::egress_server::should_serve_vsock_egress(
-            &cfg.krun.host_listen_ports,
-            opt_in || builder_policy_egress,
-            has_secrets,
+    // Route to the bridge path when the producer
+    // populated the audit substrate, otherwise fall back to the
+    // legacy direct-libkrun path (Stage 0 builder VMs, smoke tests,
+    // etc. that haven't synthesized an ExecutionPlan).
+    let outcome = if should_use_bridge_route(&cfg) {
+        append_supervisor_breadcrumb(
+            std::path::Path::new(&cfg.vm_state_dir),
+            "dispatch_route",
+            "bridge".to_string(),
         );
-        eprintln!(
-            "mvm-libkrun-supervisor: egress startup: tenant_id_present={} host_listen_ports={:?} opt_in={} builder_policy_egress={} has_secrets={} should_serve={}",
-            cfg.tenant_id.is_some(),
-            cfg.krun.host_listen_ports,
-            opt_in,
-            builder_policy_egress,
-            has_secrets,
-            should_serve
+        run_with_bridge(cfg)
+    } else {
+        let route = if cfg.tenant_id.is_some() {
+            "legacy_direct_vsock"
+        } else {
+            "legacy"
+        };
+        append_supervisor_breadcrumb(
+            std::path::Path::new(&cfg.vm_state_dir),
+            "dispatch_route",
+            route.to_string(),
         );
-        if should_serve {
-            let policy: mvm_core::network_policy::NetworkPolicy = cfg
-                .network_policy
-                .clone()
-                .and_then(|v| serde_json::from_value(v).ok())
-                .unwrap_or_else(mvm_core::network_policy::NetworkPolicy::deny_all);
-            let gate = mvm_hostd::supervisor::substitution_endpoint::build_egress_gate(&policy);
-            let egress_sock = cfg.krun.vsock_socket_path(mvm_guest::vsock::EGRESS_PORT);
-            eprintln!(
-                "mvm-libkrun-supervisor: egress startup: socket_path={}",
-                egress_sock.display()
-            );
-            // Bind INSIDE the runtime context: `tokio::net::UnixListener::bind`
-            // registers the fd with the reactor via `Handle::current()` and panics if
-            // no runtime is entered. `dispatch_config` runs on a plain (non-tokio)
-            // thread, so create + enter the runtime first, then remove_file + bind,
-            // then serve — mirroring the runtime-first pattern in
-            // `mvm_hostd::supervisor::gateway_bridge`.
-            std::thread::spawn(move || {
-                eprintln!("mvm-libkrun-supervisor: egress startup: spawn thread");
-                let rt = match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt,
-                    Err(e) => {
-                        eprintln!("mvm-libkrun-supervisor: egress runtime: {e}");
-                        return;
-                    }
-                };
-                eprintln!("mvm-libkrun-supervisor: egress startup: runtime ready");
-                let _guard = rt.enter();
-                let _ = std::fs::remove_file(&egress_sock);
-                let listener = match tokio::net::UnixListener::bind(&egress_sock) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        eprintln!("mvm-libkrun-supervisor: bind egress socket: {e}");
-                        return;
-                    }
-                };
-                eprintln!("mvm-libkrun-supervisor: egress startup: listener bound");
-                if let Err(e) = rt.block_on(mvm_vm_host::egress_server::run(listener, gate)) {
-                    eprintln!("mvm-libkrun-supervisor: egress server: {e}");
-                }
-            });
-        }
-    }
-
-    let outcome = run_legacy(&cfg);
+        run_legacy(&cfg)
+    };
 
     match outcome {
         // run_supervisor / run_supervisor_with_bridge return
@@ -266,6 +232,14 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
             ExitCode::from(1)
         }
     }
+}
+
+fn should_use_bridge_route(cfg: &SupervisorConfig) -> bool {
+    cfg.tenant_id.is_some()
+        && !matches!(
+            cfg.krun.networking,
+            libkrun_sys::NetworkingMode::Tsi | libkrun_sys::NetworkingMode::VsockDirect
+        )
 }
 
 /// Prelaunched-standby flow. `ensure_signed()` + the libkrun
@@ -378,19 +352,320 @@ fn accept_one_with_timeout(
 /// Legacy boot path — direct libkrun with no gateway audit bridge.
 /// Returns `Result<Infallible, _>`, propagated up.
 fn run_legacy(cfg: &SupervisorConfig) -> Result<std::convert::Infallible> {
-    run_supervisor(cfg).map_err(|e| anyhow!("run_supervisor failed: {e}"))
+    let vm_state_dir = std::path::Path::new(&cfg.vm_state_dir);
+    append_supervisor_breadcrumb(
+        vm_state_dir,
+        "run_legacy_enter",
+        format!(
+            "vm={} host_listen_ports={:?}",
+            cfg.krun.name, cfg.krun.host_listen_ports
+        ),
+    );
+    run_supervisor(cfg).map_err(|e| {
+        append_supervisor_breadcrumb(vm_state_dir, "run_legacy_error", e.to_string());
+        anyhow!("run_supervisor failed: {e}")
+    })
+}
+
+/// Bridge boot path — sets up the per-VM gateway audit bridge
+/// before calling libkrun's `start_enter`. Synthesizes the bridge
+/// factory closure that converts `BridgeFds` (mvm-libkrun shape)
+/// into `BridgeEndpoints` (mvm-supervisor shape), builds
+/// `BridgeConfig` from the JSON-encoded plan + bundle and the
+/// chain-signing `FileAuditSigner`, then calls
+/// `spawn_bridge_thread`. The bridge thread runs concurrently with
+/// `krun_start_enter` and is reaped by `exit()` on guest shutdown.
+fn run_with_bridge(mut cfg: SupervisorConfig) -> Result<std::convert::Infallible> {
+    let vm_state_dir = std::path::PathBuf::from(&cfg.vm_state_dir);
+    append_supervisor_breadcrumb(
+        &vm_state_dir,
+        "run_with_bridge_enter",
+        format!(
+            "vm={} tenant_id={}",
+            cfg.krun.name,
+            cfg.tenant_id.as_deref().unwrap_or("")
+        ),
+    );
+
+    // Pre-extract the audit-substrate paths + plan/bundle. The
+    // factory closure needs them as owned values; the legacy
+    // `&SupervisorConfig` reference path doesn't fit because
+    // run_supervisor_with_bridge takes a `&SupervisorConfig` and
+    // the factory captures these owned by move.
+    let vm_name = cfg.krun.name.clone();
+    let tenant_id = cfg
+        .tenant_id
+        .clone()
+        .ok_or_else(|| anyhow!("run_with_bridge called without cfg.tenant_id"))?;
+    let audit_dir = cfg.audit_dir.clone().ok_or_else(|| {
+        anyhow!("cfg.audit_dir missing — validate_audit_substrate should have refused")
+    })?;
+    let audit_socket = cfg
+        .gateway_audit_socket
+        .clone()
+        .ok_or_else(|| anyhow!("cfg.gateway_audit_socket missing"))?;
+    let signing_key_path = cfg
+        .signing_key_path
+        .clone()
+        .ok_or_else(|| anyhow!("cfg.signing_key_path missing"))?;
+    let plan_value = cfg
+        .plan
+        .clone()
+        .ok_or_else(|| anyhow!("cfg.plan missing on bridge path"))?;
+    let bundle_value = cfg.bundle.clone();
+
+    // Deserialize the JSON-Value-carrier into typed values. The
+    // round-trip cost is trivial vs the bridge's IO budget.
+    // cfg.plan carries the SignedExecutionPlan envelope the host admitted +
+    // signed (plan_admission.rs serializes `admitted.signed`), not a bare
+    // ExecutionPlan. Decode the envelope and read the inner plan from its
+    // payload. The host already verified the signature + G4 window/nonce at
+    // admit time and spawns this supervisor over a private channel, so since
+    // the host is trusted we extract rather than re-verify here.
+    // Defense-in-depth re-verify via `mvm_core::plan::verify_plan` with the host
+    // signer pubkey is a follow-up.
+    let signed: SignedExecutionPlan =
+        serde_json::from_value(plan_value).context("decode cfg.plan into SignedExecutionPlan")?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)
+        .context("decode ExecutionPlan from signed plan payload")?;
+    let bundle: Option<PolicyBundle> = match bundle_value {
+        Some(v) => Some(serde_json::from_value(v).context("decode cfg.bundle into PolicyBundle")?),
+        None => None,
+    };
+    // Bare egress policy for the no-bundle path. The bridge derives the flow
+    // gate + DNS allow-list from it when no bundle resolves (transient/dev).
+    let network_policy: Option<mvm_core::network_policy::NetworkPolicy> =
+        match cfg.network_policy.clone() {
+            Some(v) => Some(
+                serde_json::from_value(v)
+                    .context("decode cfg.network_policy into NetworkPolicy")?,
+            ),
+            None => None,
+        };
+
+    // Historical native-gateway hook: this now stays inert because the active
+    // libkrun transport is direct-vsock only. Keep the surrounding
+    // native-flow-audit plumbing in place so an eventual gateway-backed
+    // transport reintroduction does not need a larger structural rewrite.
+    let mut native_flow_audit_path: Option<std::path::PathBuf> = None;
+    if matches!(
+        mvm_build::libkrun_builder::resolve_networking_mode(),
+        mvm_build::libkrun_builder::NetworkingPreference::VsockDirect
+    ) && let libkrun_sys::NetworkingMode::NativeGateway { scratch_dir, .. } =
+        &cfg.krun.networking
+    {
+        let scratch = std::path::PathBuf::from(scratch_dir);
+        // Matches `write_native_gateway_config`'s `[audit]` export path.
+        native_flow_audit_path = Some(scratch.join("flow-audit.jsonl"));
+        // Fail closed: a native gateway we can't configure must not silently
+        // fall back to gvproxy-compat, which carries no policy.
+        let transparent = cfg.transparent_terminator_port.map(|terminator_port| {
+            mvm_hostd::supervisor::network::rvproxy_config::RvproxyTransparentConfig {
+                terminator_host: std::net::Ipv4Addr::new(127, 0, 0, 1),
+                terminator_port,
+            }
+        });
+        let config_path =
+            mvm_hostd::supervisor::network::rvproxy_launch::write_native_gateway_config(
+                bundle.as_ref(),
+                &plan.tenant,
+                &vm_name,
+                &scratch,
+                transparent,
+                chrono::Utc::now(),
+            )
+            .context("render native rvproxy gateway config")?;
+        tracing::info!(
+            vm = %vm_name,
+            config = %config_path.display(),
+            "native rvproxy gateway: rendered run --config"
+        );
+        cfg.krun = cfg
+            .krun
+            .with_native_gateway_config(config_path.to_string_lossy().into_owned());
+    }
+
+    // Load the host signer secret bytes. The file is mode 0600 and
+    // written by mvm-cli's `host_signer::load_or_init_at` at admit
+    // time; we re-read on each VM start. Path was already
+    // canonicalized under `~/.mvm/keys/` by
+    // `SupervisorConfig::validate_audit_substrate`.
+    let key_bytes = std::fs::read(&signing_key_path)
+        .with_context(|| format!("read signing key {}", signing_key_path.display()))?;
+    let key_array: [u8; 32] = key_bytes.as_slice().try_into().with_context(|| {
+        format!(
+            "signing key {} is {} bytes, expected 32",
+            signing_key_path.display(),
+            key_bytes.len()
+        )
+    })?;
+    let signing_key = SigningKey::from_bytes(&key_array);
+
+    // FileAuditSigner is what mvm-supervisor's chain emitter wraps.
+    // The cross-process flock serializes writes from concurrent VM
+    // supervisors for the same tenant.
+    let signer = FileAuditSigner::open(signing_key, &audit_dir)
+        .with_context(|| format!("open FileAuditSigner at {}", audit_dir.display()))?;
+    let signer: Arc<dyn AuditSigner> = Arc::new(signer);
+
+    // Sanity log so operators tailing the bin's stderr can see the
+    // bridge wired up.
+    tracing::info!(
+        vm = %vm_name,
+        tenant = %tenant_id,
+        audit_socket = %audit_socket.display(),
+        audit_dir = %audit_dir.display(),
+        "starting bridge-mode libkrun supervisor"
+    );
+
+    // Observer chain from admitted plan + host
+    // allowlist. `resolve_observer_chain_from_plan` returns an empty
+    // Vec for the `local-default` plan ref WITHOUT consulting the
+    // allowlist; only non-default refs trigger the
+    // `~/.mvm/observers/allowlist.toml` load. This preserves the
+    // Stage 0 / dev-mode path (and the dispatch
+    // smoke, which uses a placeholder plan that fails decode before
+    // reaching this code).
+    //
+    // Leaf capabilities are fixed per backend: libkrun reports
+    // `payload_tap: true`. The Vz drainer will
+    // set `payload_tap: false` from its own bin.
+    let leaf_caps = mvm_hostd::supervisor::network::ProviderCapabilities {
+        flow_events: true,
+        payload_tap: true,
+    };
+    let observer_names = mvm_hostd::supervisor::network::resolve_observer_chain_from_policy_source(
+        &plan,
+        bundle.as_ref(),
+    )
+    .context("resolve observer chain from admitted policy source")?;
+    let observers = if observer_names.is_empty() {
+        Vec::new()
+    } else {
+        let allowlist = mvm_hostd::supervisor::network::ObserverAllowlist::load_from_host_config()
+            .context("load ObserverAllowlist from ~/.mvm/observers/allowlist.toml")?;
+        let mut pipe = mvm_hostd::supervisor::network::Pipeline::new();
+        for name in observer_names {
+            let obs = allowlist
+                .resolve(&name)
+                .context("resolve observer name in allowlist")?;
+            pipe = pipe
+                .observe(obs, leaf_caps)
+                .context("observer capability gate")?;
+        }
+        pipe.build_observers()
+    };
+
+    let bridge_cfg = BridgeConfig {
+        vm_name: vm_name.clone(),
+        plan: Arc::new(plan),
+        bundle: bundle.map(Arc::new),
+        audit_socket,
+        signer,
+        // Observers resolved above from the
+        // admitted plan's `network_policy` ref through the host
+        // allowlist. Empty for `local-default` plans (preserves
+        // prior behavior); non-empty for tenant policies that
+        // reference an allowlisted observer by name.
+        observers,
+        // Bare-policy enforcement seam for the no-bundle path, decoded from
+        // SupervisorConfig.network_policy (which the libkrun backend fills from
+        // VmStartConfig.network_policy).
+        network_policy,
+        // Native rvproxy gateway: tail its flow-audit export into the chain
+        // signer. `Some` only when the native gateway was rendered above; the
+        // gvproxy/passt path leaves it `None` (splice is the sole audit source).
+        native_flow_audit_path,
+    };
+
+    // Native rvproxy: libkrun attaches DIRECTLY to rvproxy (no splice in the
+    // data path — interposing the splice in front of rvproxy breaks the vfkit
+    // return path and would only mask rvproxy's own enforcement). rvproxy is the
+    // sole egress enforcer; a standalone audit feed re-feeds its flow-audit
+    // export into the chain signer so the claim-10 audit stays mvm's source of
+    // truth. gvproxy/passt keep the in-line splice bridge.
+    if bridge_cfg.native_flow_audit_path.is_some() {
+        append_supervisor_breadcrumb(
+            &vm_state_dir,
+            "run_with_bridge_native",
+            "native_flow_audit".to_string(),
+        );
+        // JoinHandle dropped — libkrun's exit() on guest shutdown reaps it;
+        // the feed's own catch_unwind → exit(1) is the fail-closed signal.
+        let _feed = spawn_native_audit_feed(bridge_cfg);
+        return run_supervisor(&cfg).map_err(|e| {
+            append_supervisor_breadcrumb(
+                &vm_state_dir,
+                "run_with_bridge_native_error",
+                e.to_string(),
+            );
+            anyhow!("run_supervisor (native) failed: {e}")
+        });
+    }
+
+    append_supervisor_breadcrumb(
+        &vm_state_dir,
+        "run_with_bridge_spawn_bridge",
+        "inline_bridge".to_string(),
+    );
+    run_supervisor_with_bridge(&cfg, move |bridge_fds| {
+        let endpoints = match bridge_fds {
+            BridgeFds::Passt {
+                gateway_fd,
+                supervisor_fd,
+            } => BridgeEndpoints::Passt {
+                gateway_fd,
+                supervisor_fd,
+            },
+            BridgeFds::LibkrunNativeGateway {
+                gateway_socket_path,
+                supervisor_listen_path,
+            } => BridgeEndpoints::LibkrunNativeGateway {
+                gateway_socket_path,
+                supervisor_listen_path,
+            },
+        };
+        // Bridge thread JoinHandle is intentionally dropped — libkrun's
+        // exit() on guest shutdown reaps the thread without graceful
+        // join. The bridge's own `catch_unwind → exit(1)` provides the
+        // fail-closed signal for the claim-10 substrate.
+        let _join = spawn_bridge_thread(endpoints, bridge_cfg);
+    })
+    .map_err(|e| {
+        append_supervisor_breadcrumb(&vm_state_dir, "run_with_bridge_error", e.to_string());
+        anyhow!("run_supervisor_with_bridge failed: {e}")
+    })
+}
+
+fn append_supervisor_breadcrumb(vm_state_dir: &std::path::Path, stage: &str, detail: String) {
+    let path = vm_state_dir.join("supervisor.lifecycle.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let timestamp = chrono::Utc::now().to_rfc3339();
+    let line = format!("{timestamp} {stage}: {detail}\n");
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{append_supervisor_breadcrumb, should_use_bridge_route};
+    use libkrun_sys::{BridgeRestartPolicy, KrunContext, NetworkingMode, SupervisorConfig};
 
-    fn sample_cfg() -> SupervisorConfig {
+    fn sample_cfg(networking: NetworkingMode, tenant_id: Option<&str>) -> SupervisorConfig {
+        let mut krun = KrunContext::new("vm-1", "/k", "/r");
+        krun.networking = networking;
         SupervisorConfig {
-            krun: libkrun_sys::KrunContext::new("vm", "/kernel", "/rootfs"),
-            vm_state_dir: "/tmp/vm".into(),
+            krun,
+            vm_state_dir: "/run/state/vm-1".into(),
             pid_file_name: None,
-            tenant_id: None,
+            tenant_id: tenant_id.map(str::to_string),
             audit_dir: None,
             gateway_audit_socket: None,
             gateway_events_socket: None,
@@ -398,37 +673,41 @@ mod tests {
             plan: None,
             bundle: None,
             network_policy: None,
-            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
+            bridge_restart_policy: BridgeRestartPolicy::HardFail,
             transparent_terminator_port: None,
         }
     }
 
     #[test]
-    fn validate_vsock_only_networking_accepts_disconnected_configs() {
-        let mut cfg = sample_cfg();
-        cfg.tenant_id = Some("tenant-a".into());
-        cfg.krun = cfg.krun.with_disconnected_net([0x02, 0, 0, 0, 0, 1]);
-
-        assert!(validate_vsock_only_networking(&cfg).is_ok());
+    fn append_supervisor_breadcrumb_writes_lifecycle_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        append_supervisor_breadcrumb(dir.path(), "dispatch_config", "detail".to_string());
+        let body = std::fs::read_to_string(dir.path().join("supervisor.lifecycle.log"))
+            .expect("read lifecycle log");
+        assert!(body.contains("dispatch_config: detail"), "body: {body}");
     }
 
     #[test]
-    fn validate_vsock_only_networking_rejects_guest_nic_configs() {
-        let mut cfg = sample_cfg();
-        cfg.tenant_id = Some("tenant-a".into());
-        cfg.krun = cfg
-            .krun
-            .with_native_gateway([0x02, 0, 0, 0, 0, 1], "/tmp/scratch");
-
-        let err = validate_vsock_only_networking(&cfg).expect_err("guest nic must be rejected");
-        assert!(err.to_string().contains("disconnected sink"));
+    fn bridge_route_skips_admitted_vsock_direct_workloads() {
+        let cfg = sample_cfg(NetworkingMode::VsockDirect, Some("tenant-a"));
+        assert!(
+            !should_use_bridge_route(&cfg),
+            "VsockDirect admitted workloads must stay on the legacy no-gateway route"
+        );
     }
 
     #[test]
-    fn validate_vsock_only_networking_rejects_tsi_configs() {
-        let cfg = sample_cfg();
-
-        let err = validate_vsock_only_networking(&cfg).expect_err("tsi must be rejected");
-        assert!(err.to_string().contains("disconnected sink"));
+    fn bridge_route_keeps_gateway_backed_admitted_workloads() {
+        let cfg = sample_cfg(
+            NetworkingMode::Passt {
+                mac: [0x02, 0x00, 0x00, 0x00, 0x00, 0x01],
+                scratch_dir: "/tmp/passt".into(),
+            },
+            Some("tenant-a"),
+        );
+        assert!(
+            should_use_bridge_route(&cfg),
+            "gateway-backed admitted workloads must keep the bridge route"
+        );
     }
 }

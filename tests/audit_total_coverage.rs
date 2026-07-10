@@ -112,11 +112,20 @@ const OPS_SUB: &[(&str, AuditPosture)] = &[
 // may trigger are emitted by the shared bootstrap, same as `dev`.
 const KERNEL_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
 
+// `build runtime-overlay build` primes the shared guest-runtime cache for the
+// current host version. Like the other build-time cache preparation verbs here,
+// it does not emit a local audit-chain entry of its own.
+const RUNTIME_OVERLAY_SUB: &[(&str, AuditPosture)] = &[("build", AuditPosture::ReadOnly)];
+
 // Plan 178 (D1) — build-time verbs grouped under `build <sub>`.
 const BUILD_SUB: &[(&str, AuditPosture)] = &[
     ("compile", AuditPosture::ReadOnly),
     ("validate", AuditPosture::ReadOnly),
     ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
+    (
+        "runtime-overlay",
+        AuditPosture::DelegatesToSub(RUNTIME_OVERLAY_SUB),
+    ),
 ];
 
 // Plan 93 Phase 2 Lever 0 — `mvmctl bench microvm-launch`. The live
@@ -417,6 +426,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("explain", AuditPosture::ReadOnly),
     ("run", AuditPosture::InteractiveOrControl),
     ("__sdk-no-vm", AuditPosture::InteractiveOrControl),
+    ("__builder-vm-bootstrap", AuditPosture::InteractiveOrControl),
     // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
     // kernel grouped under `build <sub>`.
     ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),

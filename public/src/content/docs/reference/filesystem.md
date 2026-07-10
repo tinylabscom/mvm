@@ -5,7 +5,8 @@ description: Drive model, mount points, and filesystem layout inside microVMs.
 
 ## Drive Model
 
-Each microVM gets up to four virtio-block drives (on all backends -- Firecracker, HVF, libkrun, microvm.nix):
+Each microVM gets up to four virtio-block drives on the supported workload
+backends:
 
 | Drive | Mount Point | Permissions | Purpose |
 |-------|-------------|-------------|---------|
@@ -19,10 +20,42 @@ Each microVM gets up to four virtio-block drives (on all backends -- Firecracker
 The rootfs is built by `mkGuest` and contains:
 
 - **Busybox** — init system, core utilities
-- **Guest agent** — vsock communication daemon
+- **Overlay-aware boot logic** — the `/init` path and `/mvm/runtime` mount point
+  needed to bring the guest runtime online
+- **Guest agent** — present directly in dev/preferred-overlay images; provided by
+  the sealed runtime overlay on overlay-required boots
 - **Your packages** — specified in the flake's `packages` parameter
 - **Service scripts** — generated from `services.<name>` definitions
 - **Health check configs** — generated from `healthChecks.<name>`
+
+### Runtime Overlay
+
+Sealed workload boots can attach a second **read-only, verity-protected runtime
+overlay** that is mounted inside the guest at `/mvm/runtime`.
+
+- The overlay carries the guest runtime binaries such as `mvm-guest-agent`,
+  `mvm-guest-netinit`, and `mvm-egress-client`.
+- Only **guest-executed** runtime binaries belong in this artifact. Host-side
+  helpers and bootstrap tools stay outside the overlay.
+- The rootfs keeps the mount point and boot logic, but sealed
+  `RequiredOverlay` images intentionally omit the baked fallback binaries.
+- The overlay is **version-matched** to the running `mvmctl` build; mvm does
+  not attach an arbitrary "latest" overlay.
+- The overlay is mounted read-only in the guest. A backend that cannot provide
+  that read-only contract must stay on the fallback policy instead of using
+  `RequiredOverlay`.
+- The artifact is shared across microVMs from the local cache under
+  `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
+
+### Runtime updates
+
+Runtime overlay updates are a **next-boot** operation:
+
+- A stopped VM can pick up a newer version-matched overlay the next time it
+  starts.
+- A running VM keeps the overlay version it booted with until restart.
+- mvm does **not** support hot-swapping or live-remounting a different runtime
+  overlay into an already-running guest.
 
 ### ext4 vs squashfs
 
@@ -63,10 +96,10 @@ The data drive (`/dev/vdd`, mounted at `/mnt/data/`) is a persistent ext4 volume
 - Survives restarts and snapshots
 - Use for application state, databases, logs
 
-Specify size with `--mount`:
+Specify size with `--volume`:
 
 ```bash
-mvmctl machine run --flake . --mount ./data:/data:1024
+mvmctl machine run --flake . --volume ./data:/data:1024
 ```
 
 For managed encrypted local volumes and workspace cleanup policy, see
@@ -82,6 +115,8 @@ For managed encrypted local volumes and workspace cleanup policy, see
 │       ├── integrations.d/   # health check definitions (JSON)
 │       └── probes.d/         # read-only probe definitions (JSON)
 ├── init                 # busybox init script
+├── mvm/
+│   └── runtime/         # read-only runtime overlay mount point when attached
 ├── nix/store/           # Nix packages
 ├── mnt/
 │   ├── config/          # /dev/vdb (ro) — config drive
@@ -119,3 +154,8 @@ On the host (on Linux) or inside the builder VM (on macOS), mvm stores data at:
             ├── secrets.ext4
             └── data.ext4
 ```
+
+The shared guest-runtime overlay cache lives separately under
+`~/.cache/mvm/runtime-overlay/<version>/<arch>/` and contains the sealed
+`overlay.ext4`, `overlay.verity`, and version metadata reused by every VM that
+boots that runtime version.

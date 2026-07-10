@@ -96,6 +96,7 @@ libkrun-sys = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+ext4-view.workspace = true
 # `.mvm` packed artifacts carry an Ed25519
 # manifest signature. We verify (and produce, when the caller
 # hands us a signing key) signatures inside this crate so the
@@ -149,6 +150,7 @@ rand = "0.8"
 # Builder-daemon readiness-probe tests bind a real UnixListener under a
 # temp dir to drive `serve_connection` end-to-end.
 tempfile.workspace = true
+mvm-ext4.workspace = true
 
 [features]
 default = []

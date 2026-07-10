@@ -14,8 +14,8 @@
 //! 2. **Env var** `MVM_BUILDER_BACKEND` — `libkrun` / `hvf` /
 //!    `qemu`, case-insensitive, surrounding whitespace trimmed.
 //! 3. **Auto-detect** by host platform when neither override is set:
-//!    macOS 26+ Apple Silicon → HVF builder; everywhere else →
-//!    libkrun.
+//!    macOS 26+ Apple Silicon → HVF builder; Linux native →
+//!    QEMU builder; everywhere else → libkrun.
 //!
 //! An unrecognised env value (typo, removed backend) falls through to
 //! auto-detect with a `tracing::warn!` so the operator sees the
@@ -88,15 +88,23 @@ impl BuilderBackendChoice {
     }
 }
 
-/// Pure auto-detect from a single boolean: "is this host macOS 26+
-/// on Apple Silicon?" Lifted out so unit tests are fully hermetic
-/// — they don't have to spoof the live OS version or the
+/// Pure auto-detect from the platform and a single boolean:
+/// "is this host macOS 26+ on Apple Silicon?" Lifted out so unit tests are
+/// fully hermetic — they don't have to spoof the live OS version or the
 /// compile-time `cfg!(target_arch)` macro.
 ///
-/// Decision: macOS 26+ Apple Silicon → HVF builder; everything else → libkrun.
-pub fn auto_detect_default_for(is_macos_26_apple_silicon: bool) -> BuilderBackendChoice {
+/// Decision:
+/// - macOS 26+ Apple Silicon → HVF builder
+/// - Linux native → QEMU builder
+/// - everything else → libkrun
+pub fn auto_detect_default_for(
+    plat: Platform,
+    is_macos_26_apple_silicon: bool,
+) -> BuilderBackendChoice {
     if is_macos_26_apple_silicon {
         BuilderBackendChoice::Hvf
+    } else if matches!(plat, Platform::LinuxNative) {
+        BuilderBackendChoice::Qemu
     } else {
         BuilderBackendChoice::Libkrun
     }
@@ -108,7 +116,7 @@ pub fn auto_detect_default_for(is_macos_26_apple_silicon: bool) -> BuilderBacken
 /// Silicon" half of the predicate.
 pub fn auto_detect_default() -> BuilderBackendChoice {
     let is_target = current().is_vz_default_tier() && cfg!(target_arch = "aarch64");
-    auto_detect_default_for(is_target)
+    auto_detect_default_for(current(), is_target)
 }
 
 /// Parse the env var on its own, without applying auto-detect when
@@ -510,16 +518,35 @@ mod tests {
 
     #[test]
     fn auto_detect_default_for_macos_26_apple_silicon_picks_hvf() {
-        assert_eq!(auto_detect_default_for(true), BuilderBackendChoice::Hvf);
+        assert_eq!(
+            auto_detect_default_for(Platform::MacOS, true),
+            BuilderBackendChoice::Hvf
+        );
     }
 
     #[test]
-    fn auto_detect_default_for_everything_else_picks_libkrun() {
-        // Linux, macOS Intel, macOS 13-25 Apple Silicon, Windows, WSL2 —
-        // they all collapse into the same "not macOS 26 + AS" bucket,
+    fn auto_detect_default_for_linux_native_picks_qemu() {
+        assert_eq!(
+            auto_detect_default_for(Platform::LinuxNative, false),
+            BuilderBackendChoice::Qemu
+        );
+    }
+
+    #[test]
+    fn auto_detect_default_for_non_linux_non_hvf_hosts_picks_libkrun() {
+        // macOS Intel, macOS 13-25 Apple Silicon, Windows, WSL2 — they all
+        // collapse into the same "not macOS 26 + AS, not Linux native" bucket,
         // which means libkrun.
         assert_eq!(
-            auto_detect_default_for(false),
+            auto_detect_default_for(Platform::MacOS, false),
+            BuilderBackendChoice::Libkrun
+        );
+        assert_eq!(
+            auto_detect_default_for(Platform::Wsl2, false),
+            BuilderBackendChoice::Libkrun
+        );
+        assert_eq!(
+            auto_detect_default_for(Platform::LinuxNoKvm, false),
             BuilderBackendChoice::Libkrun
         );
     }

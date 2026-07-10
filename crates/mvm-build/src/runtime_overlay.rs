@@ -58,6 +58,9 @@ use mvm_core::arch::GuestArch;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
+#[cfg(feature = "pure-mkfs")]
+use crate::guest_agent_build::RuntimeOverlayGuestBinaries;
+
 #[derive(Debug, Error)]
 pub enum RuntimeOverlayError {
     /// One of the four files the cache layout requires
@@ -95,6 +98,23 @@ pub enum RuntimeOverlayError {
     /// unreadable.
     #[error("runtime overlay VERSION file invalid: {reason}")]
     InvalidVersionFile { reason: String },
+
+    /// The ext4 payload itself is missing a required runtime binary.
+    #[error(
+        "runtime overlay payload invalid at {overlay_ext4:?}: \
+         missing required guest path {missing_path}"
+    )]
+    PayloadIncomplete {
+        overlay_ext4: PathBuf,
+        missing_path: String,
+    },
+
+    /// The ext4 payload could not be opened or inspected.
+    #[error("runtime overlay payload invalid at {overlay_ext4:?}: {reason}")]
+    PayloadUnreadable {
+        overlay_ext4: PathBuf,
+        reason: String,
+    },
 
     /// `nix build` exited non-zero or couldn't be spawned by the
     /// orchestrator that drives `nix build` against the
@@ -145,6 +165,10 @@ pub enum RuntimeOverlayError {
     /// is the fail-closed integrity contract.
     #[error("checksum manifest at {checksums_url} did not list an entry for {name}")]
     ChecksumMissing { name: String, checksums_url: String },
+
+    #[cfg(feature = "pure-mkfs")]
+    #[error("direct runtime overlay build failed: {reason}")]
+    DirectBuildFailed { reason: String },
 }
 
 /// File-system layout for one resolved overlay artifact. The
@@ -159,6 +183,8 @@ pub struct RuntimeOverlayLayout {
     pub sidecar: PathBuf,
     pub roothash_file: PathBuf,
     pub version_file: PathBuf,
+    pub local_source_fingerprint_file: PathBuf,
+    pub local_build_epoch_file: PathBuf,
     pub arch: GuestArch,
     pub version: String,
 }
@@ -176,6 +202,8 @@ impl RuntimeOverlayLayout {
             sidecar: artifact_dir.join("overlay.verity"),
             roothash_file: artifact_dir.join("overlay.roothash"),
             version_file: artifact_dir.join("VERSION"),
+            local_source_fingerprint_file: artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE),
+            local_build_epoch_file: artifact_dir.join(LOCAL_BUILD_EPOCH_FILE),
             artifact_dir,
             arch,
             version: version.to_string(),
@@ -197,6 +225,185 @@ pub struct RuntimeOverlayArtifact {
     pub roothash: String,
     pub arch: GuestArch,
     pub version: String,
+}
+
+#[cfg(feature = "pure-mkfs")]
+const DIRECT_OVERLAY_VERITY_SALT: [u8; 32] = [0u8; 32];
+#[cfg(feature = "pure-mkfs")]
+const DIRECT_OVERLAY_DATA_BLOCK_SIZE: u32 = 4096;
+#[cfg(feature = "pure-mkfs")]
+const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
+const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
+    "/agent",
+    "/agent-dev-shell",
+    "/netinit",
+    "/seccomp-apply",
+    "/runner",
+    "/egress-client",
+    "/VERSION",
+];
+const LOCAL_SOURCE_FINGERPRINT_FILE: &str = "SOURCE_FINGERPRINT";
+const LOCAL_BUILD_EPOCH_FILE: &str = "BUILD_EPOCH";
+const LOCAL_BUILD_EPOCH: &str = "1";
+
+#[cfg(feature = "pure-mkfs")]
+pub fn build_runtime_overlay_from_guest_binaries(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    bins: &RuntimeOverlayGuestBinaries,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    let staging = tempfile::tempdir()?;
+    let root = staging.path().join("overlay-root");
+    std::fs::create_dir_all(&root)?;
+
+    stage_runtime_overlay_binary(&bins.agent, &root.join("agent"))?;
+    stage_runtime_overlay_binary(&bins.agent_dev_shell, &root.join("agent-dev-shell"))?;
+    stage_runtime_overlay_binary(&bins.netinit, &root.join("netinit"))?;
+    stage_runtime_overlay_binary(&bins.seccomp_apply, &root.join("seccomp-apply"))?;
+    stage_runtime_overlay_binary(&bins.runner, &root.join("runner"))?;
+    stage_runtime_overlay_binary(&bins.egress_client, &root.join("egress-client"))?;
+    std::fs::write(root.join("VERSION"), format!("{version}\n"))?;
+
+    let image = mvm_ext4::build_image(&collect_overlay_nodes(&root)?).map_err(|e| {
+        RuntimeOverlayError::DirectBuildFailed {
+            reason: format!("build ext4 image: {e}"),
+        }
+    })?;
+    let verity = mvm_ext4::verity::format(
+        &image,
+        &DIRECT_OVERLAY_VERITY_SALT,
+        DIRECT_OVERLAY_DATA_BLOCK_SIZE as usize,
+        DIRECT_OVERLAY_HASH_BLOCK_SIZE as usize,
+    );
+    let roothash = mvm_ext4::verity::to_hex(&verity.root_hash);
+
+    let artifact_dir = staging.path().join("artifact");
+    std::fs::create_dir_all(&artifact_dir)?;
+    std::fs::write(artifact_dir.join("overlay.ext4"), &image)?;
+    std::fs::write(artifact_dir.join("overlay.verity"), &verity.hash_tree)?;
+    std::fs::write(
+        artifact_dir.join("overlay.roothash"),
+        format!("{roothash}\n"),
+    )?;
+    std::fs::write(artifact_dir.join("VERSION"), format!("{version}\n"))?;
+
+    let built = read_overlay_artifact_from_dir(&artifact_dir, arch)?;
+    install_overlay_into_cache(&built, cache_root, &InstallOptions { overwrite: true })?;
+    RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string()).resolve(arch)
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn stage_runtime_overlay_binary(src: &Path, dst: &Path) -> Result<(), RuntimeOverlayError> {
+    if !src.is_file() {
+        return Err(RuntimeOverlayError::DirectBuildFailed {
+            reason: format!(
+                "required runtime-overlay binary missing at {}",
+                src.display()
+            ),
+        });
+    }
+    std::fs::copy(src, dst)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dst, std::fs::Permissions::from_mode(0o555))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_ext4::Node>, RuntimeOverlayError> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let file_type = entry.file_type()?;
+            if file_type.is_symlink() {
+                let target = std::fs::read_link(&path)?;
+                out.push(mvm_ext4::Node::Symlink {
+                    path: overlay_guest_path(root, &path),
+                    target: target.to_string_lossy().into_owned(),
+                });
+            } else if file_type.is_dir() {
+                out.push(mvm_ext4::Node::Dir {
+                    path: overlay_guest_path(root, &path),
+                    mode: overlay_mode_of(&path, 0o755),
+                    xattrs: Vec::new(),
+                });
+                stack.push(path);
+            } else if file_type.is_file() {
+                out.push(mvm_ext4::Node::File {
+                    path: overlay_guest_path(root, &path),
+                    mode: overlay_mode_of(&path, 0o644),
+                    data: std::fs::read(&path)?,
+                    xattrs: Vec::new(),
+                });
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn overlay_guest_path(root: &Path, path: &Path) -> String {
+    match path.strip_prefix(root) {
+        Ok(rel) => format!("/{}", rel.to_string_lossy()),
+        Err(_) => format!("/{}", path.to_string_lossy()),
+    }
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn overlay_mode_of(path: &Path, default: u16) -> u16 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => (metadata.permissions().mode() & 0o7777) as u16,
+            Err(_) => default,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        default
+    }
+}
+
+/// Read and validate a built/downloaded overlay artifact from `dir`, where the
+/// canonical four files live side-by-side (`overlay.ext4`, `overlay.verity`,
+/// `overlay.roothash`, `VERSION`).
+pub fn read_overlay_artifact_from_dir(
+    dir: &Path,
+    arch: GuestArch,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    let overlay_ext4 = dir.join("overlay.ext4");
+    let sidecar = dir.join("overlay.verity");
+    let roothash_file = dir.join("overlay.roothash");
+    let version_file = dir.join("VERSION");
+    for required in [&overlay_ext4, &sidecar, &roothash_file, &version_file] {
+        if !required.is_file() {
+            return Err(RuntimeOverlayError::ArtifactIncomplete {
+                artifact_dir: dir.to_path_buf(),
+                missing: required.clone(),
+                version: read_version_file(&version_file)
+                    .unwrap_or_else(|_| "<unreadable>".to_string()),
+                arch: arch.to_string(),
+            });
+        }
+    }
+    let version = read_version_file(&version_file)?;
+    let roothash = read_and_validate_roothash(&roothash_file)?;
+    Ok(RuntimeOverlayArtifact {
+        overlay_ext4,
+        sidecar,
+        roothash_file,
+        roothash,
+        arch,
+        version,
+    })
 }
 
 /// Host-side resolver for the runtime overlay cache. Stateless
@@ -236,6 +443,21 @@ impl RuntimeOverlayResolver {
     /// fallback: the agent must come from a trusted overlay or the
     /// verified-boot claim is silently weakened.
     pub fn resolve(&self, arch: GuestArch) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+        match self.resolve_local(arch) {
+            Ok(artifact) => Ok(artifact),
+            Err(initial_error) => {
+                if self.seed_from_default_cache(arch)? {
+                    return self.resolve_local(arch);
+                }
+                Err(initial_error)
+            }
+        }
+    }
+
+    fn resolve_local(
+        &self,
+        arch: GuestArch,
+    ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
         let layout = self.layout(arch);
         check_exists(
             &layout.overlay_ext4,
@@ -271,6 +493,7 @@ impl RuntimeOverlayResolver {
         }
 
         let roothash = read_and_validate_roothash(&layout.roothash_file)?;
+        validate_overlay_payload(&layout.overlay_ext4)?;
 
         Ok(RuntimeOverlayArtifact {
             overlay_ext4: layout.overlay_ext4,
@@ -281,6 +504,108 @@ impl RuntimeOverlayResolver {
             version,
         })
     }
+
+    fn seed_from_default_cache(&self, arch: GuestArch) -> Result<bool, RuntimeOverlayError> {
+        let default_cache_root = PathBuf::from(mvm_core::config::default_mvm_cache_dir());
+        if self.cache_root == default_cache_root {
+            return Ok(false);
+        }
+
+        let source =
+            Self::new(default_cache_root, self.expected_version.clone()).resolve_local(arch);
+        let Ok(source) = source else {
+            return Ok(false);
+        };
+
+        install_overlay_into_cache(&source, &self.cache_root, &InstallOptions::default())?;
+        Ok(true)
+    }
+}
+
+/// Resolve a local runtime overlay for the current source checkout, rebuilding
+/// it into the cache when the cached artifact is missing or invalid.
+pub fn resolve_or_build_local_runtime_overlay(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    let resolver = RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string());
+    let Some(workspace_root) = runtime_overlay_source_checkout_root() else {
+        return resolver.resolve(arch);
+    };
+    let expected_fingerprint =
+        crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(&workspace_root)
+            .map_err(|e| RuntimeOverlayError::NixBuildFailed {
+                reason: format!("compute runtime-overlay source fingerprint: {e}"),
+            })?;
+    match resolver.resolve(arch) {
+        Ok(artifact)
+            if local_source_cache_is_fresh(&resolver.layout(arch), &expected_fingerprint)? =>
+        {
+            Ok(artifact)
+        }
+        Ok(_) => {
+            tracing::info!(
+                cache_root = %cache_root.display(),
+                version,
+                arch = %arch,
+                "runtime overlay source-built cache is stale; rebuilding from source checkout"
+            );
+            build_runtime_overlay_from_source_checkout(cache_root, version, arch, &workspace_root)
+        }
+        Err(initial_error) => {
+            tracing::info!(
+                cache_root = %cache_root.display(),
+                version,
+                arch = %arch,
+                error = %initial_error,
+                "runtime overlay cache miss or invalid payload; rebuilding from source checkout"
+            );
+            build_runtime_overlay_from_source_checkout(cache_root, version, arch, &workspace_root)
+        }
+    }
+}
+
+#[cfg(any(feature = "pure-mkfs", target_os = "linux"))]
+fn write_local_source_fingerprint(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    fingerprint: &str,
+) -> Result<(), RuntimeOverlayError> {
+    let layout = RuntimeOverlayLayout::under(cache_root, version, arch);
+    std::fs::write(
+        layout.local_source_fingerprint_file,
+        format!("{fingerprint}\n"),
+    )?;
+    Ok(())
+}
+
+#[cfg(any(feature = "pure-mkfs", target_os = "linux"))]
+fn write_local_build_epoch(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+) -> Result<(), RuntimeOverlayError> {
+    let layout = RuntimeOverlayLayout::under(cache_root, version, arch);
+    std::fs::write(
+        layout.local_build_epoch_file,
+        format!("{LOCAL_BUILD_EPOCH}\n"),
+    )?;
+    Ok(())
+}
+
+fn local_source_cache_is_fresh(
+    layout: &RuntimeOverlayLayout,
+    expected: &str,
+) -> Result<bool, RuntimeOverlayError> {
+    let Ok(found) = std::fs::read_to_string(&layout.local_source_fingerprint_file) else {
+        return Ok(false);
+    };
+    let Ok(epoch) = std::fs::read_to_string(&layout.local_build_epoch_file) else {
+        return Ok(false);
+    };
+    Ok(found.trim() == expected && epoch.trim() == LOCAL_BUILD_EPOCH)
 }
 
 fn check_exists(
@@ -314,6 +639,30 @@ fn read_version_file(path: &Path) -> Result<String, RuntimeOverlayError> {
         });
     }
     Ok(trimmed)
+}
+
+fn validate_overlay_payload(overlay_ext4: &Path) -> Result<(), RuntimeOverlayError> {
+    let fs = ext4_view::Ext4::load_from_path(overlay_ext4).map_err(|e| {
+        RuntimeOverlayError::PayloadUnreadable {
+            overlay_ext4: overlay_ext4.to_path_buf(),
+            reason: format!("load ext4 image: {e}"),
+        }
+    })?;
+    for required in REQUIRED_OVERLAY_GUEST_PATHS {
+        let present = fs
+            .exists(*required)
+            .map_err(|e| RuntimeOverlayError::PayloadUnreadable {
+                overlay_ext4: overlay_ext4.to_path_buf(),
+                reason: format!("lookup {required}: {e}"),
+            })?;
+        if !present {
+            return Err(RuntimeOverlayError::PayloadIncomplete {
+                overlay_ext4: overlay_ext4.to_path_buf(),
+                missing_path: (*required).to_string(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn read_and_validate_roothash(path: &Path) -> Result<String, RuntimeOverlayError> {
@@ -507,32 +856,72 @@ fn run_nix_build(spec: &OverlayBuildSpec) -> Result<(), RuntimeOverlayError> {
 fn validate_built_artifact(
     spec: &OverlayBuildSpec,
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
-    let dir = &spec.out_link;
-    let overlay_ext4 = dir.join("overlay.ext4");
-    let sidecar = dir.join("overlay.verity");
-    let roothash_file = dir.join("overlay.roothash");
-    let version_file = dir.join("VERSION");
-    for required in [&overlay_ext4, &sidecar, &roothash_file, &version_file] {
-        if !required.is_file() {
-            return Err(RuntimeOverlayError::ArtifactIncomplete {
-                artifact_dir: dir.to_path_buf(),
-                missing: required.clone(),
-                version: read_version_file(&version_file)
-                    .unwrap_or_else(|_| "<unreadable>".to_string()),
-                arch: spec.arch.to_string(),
-            });
-        }
+    read_overlay_artifact_from_dir(&spec.out_link, spec.arch)
+}
+
+fn runtime_overlay_source_checkout_root() -> Option<PathBuf> {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir.parent()?.parent()?;
+    workspace_root
+        .join("nix")
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix")
+        .is_file()
+        .then(|| workspace_root.to_path_buf())
+}
+
+fn build_runtime_overlay_from_source_checkout(
+    cache_root: &Path,
+    version: &str,
+    arch: GuestArch,
+    workspace_root: &Path,
+) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
+    #[cfg(any(feature = "pure-mkfs", target_os = "linux"))]
+    let source_fingerprint =
+        crate::guest_agent_build::runtime_overlay_source_checkout_fingerprint(workspace_root)
+            .map_err(|e| RuntimeOverlayError::NixBuildFailed {
+                reason: format!("compute runtime-overlay source fingerprint: {e}"),
+            })?;
+    #[cfg(feature = "pure-mkfs")]
+    {
+        let bins = crate::guest_agent_build::resolve_or_build_runtime_overlay_guest_binaries(
+            cache_root,
+            version,
+            arch,
+            workspace_root,
+        )
+        .map_err(|e| RuntimeOverlayError::DirectBuildFailed {
+            reason: format!("build guest binaries for runtime overlay: {e}"),
+        })?;
+        let artifact = build_runtime_overlay_from_guest_binaries(cache_root, version, arch, &bins)?;
+        write_local_source_fingerprint(cache_root, version, arch, &source_fingerprint)?;
+        write_local_build_epoch(cache_root, version, arch)?;
+        Ok(artifact)
     }
-    let version = read_version_file(&version_file)?;
-    let roothash = read_and_validate_roothash(&roothash_file)?;
-    Ok(RuntimeOverlayArtifact {
-        overlay_ext4,
-        sidecar,
-        roothash_file,
-        roothash,
-        arch: spec.arch,
-        version,
-    })
+    #[cfg(all(not(feature = "pure-mkfs"), target_os = "linux"))]
+    {
+        let temp = tempfile::tempdir()?;
+        let spec = OverlayBuildSpec::new(
+            workspace_root.to_path_buf(),
+            arch,
+            temp.path().join("result"),
+        );
+        let built = build_overlay_with_nix(&spec)?;
+        let _installed =
+            install_overlay_into_cache(&built, cache_root, &InstallOptions { overwrite: true })?;
+        write_local_source_fingerprint(cache_root, version, arch, &source_fingerprint)?;
+        write_local_build_epoch(cache_root, version, arch)?;
+        RuntimeOverlayResolver::new(cache_root.to_path_buf(), version.to_string()).resolve(arch)
+    }
+    #[cfg(all(not(feature = "pure-mkfs"), not(target_os = "linux")))]
+    {
+        let _ = (cache_root, version, arch, workspace_root);
+        Err(RuntimeOverlayError::HostUnsupported {
+            operation: "runtime overlay local rebuild",
+            reason: "direct runtime-overlay rebuild requires either the pure-mkfs feature or a Linux nix build path",
+        })
+    }
 }
 
 // =================================================================
@@ -552,8 +941,7 @@ pub struct InstallOptions {
     pub overwrite: bool,
 }
 
-/// Copy `source`'s four files (`overlay.ext4`, `overlay.verity`,
-/// `overlay.roothash`, `VERSION`) into the canonical cache
+/// Copy `source`'s runtime overlay files into the canonical cache
 /// layout under `cache_root`:
 ///
 /// ```text
@@ -648,6 +1036,10 @@ pub fn install_overlay_into_cache(
     install_file_with_perms(&source.sidecar, &staging.join("overlay.verity"))?;
     install_file_with_perms(&source.roothash_file, &staging.join("overlay.roothash"))?;
     install_file_with_perms(&source_version_file, &staging.join("VERSION"))?;
+    std::fs::write(
+        staging.join(LOCAL_BUILD_EPOCH_FILE),
+        format!("{LOCAL_BUILD_EPOCH}\n"),
+    )?;
 
     // Replace the existing artifact dir, if any. Two-phase
     // (remove old, then rename new) — not strictly atomic across
@@ -1012,6 +1404,7 @@ fn validate_roothash_shape(s: &str) -> Result<(), RuntimeOverlayError> {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+    use mvm_ext4::Node;
     use tempfile::TempDir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1035,12 +1428,62 @@ mod tests {
             version,
             arch,
             &[
-                ("overlay.ext4", b"ext4-bytes"),
+                ("overlay.ext4", &valid_overlay_ext4_bytes(true)),
                 ("overlay.verity", b"verity-sidecar"),
                 ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
                 ("VERSION", format!("{version}\n").as_bytes()),
             ],
         )
+    }
+
+    fn valid_overlay_ext4_bytes(include_egress_client: bool) -> Vec<u8> {
+        let mut nodes = vec![
+            Node::File {
+                path: "/agent".into(),
+                mode: 0o555,
+                data: b"agent".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/agent-dev-shell".into(),
+                mode: 0o555,
+                data: b"agent-dev".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/netinit".into(),
+                mode: 0o555,
+                data: b"netinit".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/seccomp-apply".into(),
+                mode: 0o555,
+                data: b"seccomp".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/runner".into(),
+                mode: 0o555,
+                data: b"runner".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/VERSION".into(),
+                mode: 0o444,
+                data: b"0.14.0\n".to_vec(),
+                xattrs: Vec::new(),
+            },
+        ];
+        if include_egress_client {
+            nodes.push(Node::File {
+                path: "/egress-client".into(),
+                mode: 0o555,
+                data: b"egress".to_vec(),
+                xattrs: Vec::new(),
+            });
+        }
+        mvm_ext4::build_image(&nodes).expect("build valid overlay ext4 fixture")
     }
 
     #[test]
@@ -1275,7 +1718,7 @@ mod tests {
             "0.14.0",
             GuestArch::Aarch64,
             &[
-                ("overlay.ext4", b"ext4"),
+                ("overlay.ext4", &valid_overlay_ext4_bytes(true)),
                 ("overlay.verity", b"sidecar"),
                 ("overlay.roothash", FAKE_ROOTHASH.as_bytes()),
                 ("VERSION", b"0.14.0"),
@@ -1284,6 +1727,28 @@ mod tests {
         let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
         let artifact = resolver.resolve(GuestArch::Aarch64).expect("resolve");
         assert_eq!(artifact.roothash, FAKE_ROOTHASH);
+    }
+
+    #[test]
+    fn resolve_rejects_overlay_payload_missing_egress_client() {
+        let cache = make_cache(
+            "0.14.0",
+            GuestArch::Aarch64,
+            &[
+                ("overlay.ext4", &valid_overlay_ext4_bytes(false)),
+                ("overlay.verity", b"sidecar"),
+                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
+                ("VERSION", b"0.14.0\n"),
+            ],
+        );
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
+        match err {
+            RuntimeOverlayError::PayloadIncomplete { missing_path, .. } => {
+                assert_eq!(missing_path, "/egress-client");
+            }
+            other => panic!("expected PayloadIncomplete, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1382,6 +1847,10 @@ mod tests {
         let out = argv.windows(2).find(|w| w[0] == "--out-link");
         assert!(out.is_some(), "argv must specify --out-link: {argv:?}");
         assert_eq!(out.unwrap()[1], "/tmp/result");
+        assert!(
+            argv.iter().any(|arg| arg == "--impure"),
+            "argv must opt into impure evaluation so MVM_WORKSPACE_PATH is visible: {argv:?}"
+        );
         // Final positional is the flake reference.
         assert_eq!(
             argv.last().unwrap(),
@@ -1452,7 +1921,7 @@ mod tests {
     ) -> (TempDir, RuntimeOverlayArtifact) {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path();
-        std::fs::write(dir.join("overlay.ext4"), b"source-ext4-bytes").unwrap();
+        std::fs::write(dir.join("overlay.ext4"), valid_overlay_ext4_bytes(true)).unwrap();
         std::fs::write(dir.join("overlay.verity"), b"source-verity-bytes").unwrap();
         std::fs::write(
             dir.join("overlay.roothash"),
@@ -1476,6 +1945,8 @@ mod tests {
     fn install_copies_all_four_files_into_canonical_cache_layout() {
         let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
+        let source_ext4 = std::fs::read(&source.overlay_ext4).unwrap();
+        let source_sidecar = std::fs::read(&source.sidecar).unwrap();
 
         let installed =
             install_overlay_into_cache(&source, cache.path(), &InstallOptions::default())
@@ -1500,18 +1971,15 @@ mod tests {
         assert_eq!(installed.arch, GuestArch::Aarch64);
 
         // Content matches the source verbatim.
-        assert_eq!(
-            std::fs::read(&installed.overlay_ext4).unwrap(),
-            b"source-ext4-bytes"
-        );
-        assert_eq!(
-            std::fs::read(&installed.sidecar).unwrap(),
-            b"source-verity-bytes"
-        );
+        assert_eq!(std::fs::read(&installed.overlay_ext4).unwrap(), source_ext4);
+        assert_eq!(std::fs::read(&installed.sidecar).unwrap(), source_sidecar);
         let roothash_text = std::fs::read_to_string(&installed.roothash_file).unwrap();
         assert_eq!(roothash_text.trim(), FAKE_ROOTHASH);
         let version_text = std::fs::read_to_string(expected_dir.join("VERSION")).unwrap();
         assert_eq!(version_text.trim(), "0.14.0");
+        let build_epoch =
+            std::fs::read_to_string(expected_dir.join(LOCAL_BUILD_EPOCH_FILE)).unwrap();
+        assert_eq!(build_epoch.trim(), LOCAL_BUILD_EPOCH);
     }
 
     #[test]
@@ -1534,11 +2002,33 @@ mod tests {
     }
 
     #[test]
+    fn local_source_cache_requires_current_build_epoch_marker() {
+        let cache = TempDir::new().unwrap();
+        let layout = RuntimeOverlayLayout::under(cache.path(), "0.14.0", GuestArch::Aarch64);
+        std::fs::create_dir_all(&layout.artifact_dir).unwrap();
+        std::fs::write(&layout.local_source_fingerprint_file, b"abc\n").unwrap();
+        assert!(
+            !local_source_cache_is_fresh(&layout, "abc").expect("stale without build epoch"),
+            "source-built overlay cache must be invalidated when the host-side build epoch marker is missing"
+        );
+        std::fs::write(
+            &layout.local_build_epoch_file,
+            format!("{LOCAL_BUILD_EPOCH}\n"),
+        )
+        .unwrap();
+        assert!(
+            local_source_cache_is_fresh(&layout, "abc").expect("fresh with build epoch"),
+            "matching fingerprint plus current build epoch must keep the source-built overlay cache hot"
+        );
+    }
+
+    #[test]
     fn install_is_idempotent_under_default_options() {
         // Second install with overwrite=false short-circuits and
         // returns the cache-view artifact without re-copying.
         let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
         let cache = TempDir::new().unwrap();
+        let original_ext4 = std::fs::read(&source.overlay_ext4).unwrap();
 
         let first = install_overlay_into_cache(&source, cache.path(), &InstallOptions::default())
             .expect("first install");
@@ -1553,7 +2043,7 @@ mod tests {
         assert_eq!(first.overlay_ext4, second.overlay_ext4);
         let cached_bytes = std::fs::read(&second.overlay_ext4).unwrap();
         assert_eq!(
-            cached_bytes, b"source-ext4-bytes",
+            cached_bytes, original_ext4,
             "idempotent install must NOT overwrite existing cache content"
         );
     }
@@ -1685,6 +2175,41 @@ mod tests {
                 .path()
                 .join("runtime-overlay/0.15.0/aarch64/overlay.ext4")
                 .is_file()
+        );
+    }
+
+    #[test]
+    fn resolve_seeds_missing_worktree_cache_from_default_cache() {
+        let mut env = TestEnv::new();
+        let scratch = TempDir::new().unwrap();
+        env.set("HOME", scratch.path());
+        env.set("MVM_CACHE_DIR", scratch.path().join("isolated-cache"));
+
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
+        let default_cache_root = scratch.path().join(".cache").join("mvm");
+        install_overlay_into_cache(&source, &default_cache_root, &InstallOptions::default())
+            .expect("install source into default cache");
+
+        let resolver = RuntimeOverlayResolver::new(
+            scratch.path().join("isolated-cache"),
+            "0.14.0".to_string(),
+        );
+        let artifact = resolver
+            .resolve(GuestArch::Aarch64)
+            .expect("seeded resolve should succeed");
+
+        let seeded_dir = scratch
+            .path()
+            .join("isolated-cache")
+            .join("runtime-overlay")
+            .join("0.14.0")
+            .join("aarch64");
+        assert_eq!(artifact.overlay_ext4, seeded_dir.join("overlay.ext4"));
+        assert!(artifact.overlay_ext4.is_file());
+        assert_eq!(
+            std::fs::read(seeded_dir.join("overlay.ext4")).unwrap(),
+            std::fs::read(default_cache_root.join("runtime-overlay/0.14.0/aarch64/overlay.ext4"))
+                .unwrap()
         );
     }
 
@@ -2084,5 +2609,44 @@ short  bar.ext4
         let mut h = Sha256::new();
         h.update(bytes);
         format!("{:x}", h.finalize())
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn direct_overlay_build_writes_cache_layout() {
+        let cache = TempDir::new().unwrap();
+        let src = TempDir::new().unwrap();
+        let make_bin = |name: &str| {
+            let path = src.path().join(name);
+            std::fs::write(&path, format!("fake-{name}")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            path
+        };
+        let bins = RuntimeOverlayGuestBinaries {
+            agent: make_bin("agent"),
+            agent_dev_shell: make_bin("agent-dev-shell"),
+            netinit: make_bin("netinit"),
+            seccomp_apply: make_bin("seccomp-apply"),
+            runner: make_bin("runner"),
+            egress_client: make_bin("egress-client"),
+            verity_init: make_bin("verity-init"),
+        };
+
+        let artifact = build_runtime_overlay_from_guest_binaries(
+            cache.path(),
+            "1.2.3",
+            GuestArch::X86_64,
+            &bins,
+        )
+        .expect("build direct overlay");
+
+        assert!(artifact.overlay_ext4.is_file());
+        assert!(artifact.sidecar.is_file());
+        assert_eq!(artifact.version, "1.2.3");
+        assert_eq!(artifact.roothash.len(), 64);
     }
 }

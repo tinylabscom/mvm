@@ -66,6 +66,7 @@ pub mod rootfs_inject;
 pub mod run_image;
 pub mod stage0;
 pub mod template_reuse;
+pub mod verity_initrd;
 
 /// libkrun-backed builder VM (gated by `builder-vm`). See module-level
 /// docs.
@@ -79,7 +80,7 @@ pub mod libkrun_network_provider;
 
 /// QEMU-backed builder VM (the Linux dev/builder substrate). Boots the
 /// nix-tarball Stage 0 seed on the stock distro kernel + initramfs with
-/// ext4 disks + slirp networking. Linux-only at runtime; compiles
+/// ext4 disks + vsock-only egress. Linux-only at runtime; compiles
 /// everywhere (the selection only picks it on Linux).
 /// Shared in-guest static-IP helpers: `configure_static` (gated
 /// `cfg(linux)`) plus pure address-parsing/encoding utilities tested
@@ -88,10 +89,11 @@ pub mod guest_net;
 
 pub mod qemu_builder;
 
-/// Builder-runtime selection. `MVM_BUILDER_BACKEND` picks between
-/// `libkrun` (default) and `vz`; the caller receives a
-/// `Box<dyn BuilderVm>` so the dispatch site doesn't depend on which
-/// concrete driver the env-var resolved to.
+/// Builder-runtime selection. `MVM_BUILDER_BACKEND` picks among the
+/// available builder backends; the platform default is hvf on macOS 26+
+/// Apple Silicon, qemu on Linux native, and libkrun elsewhere. The caller
+/// receives a `Box<dyn BuilderVm>` so the dispatch site doesn't depend on
+/// which concrete driver the env-var resolved to.
 #[cfg(feature = "builder-vm")]
 pub mod builder_backend_select;
 /// Per-host builder-VM health cache (skip a libkrun backend that can't create
@@ -122,7 +124,6 @@ pub mod runtime_overlay;
 /// In-process assembler for the `mvm-verity-init` verity initramfs
 /// (`rootfs.initrd`): a deterministic gzip'd newc cpio carrying the init
 /// binary, device nodes, and pivot mount points.
-pub mod verity_initrd;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.
 pub use nix::manifest as nix_manifest;

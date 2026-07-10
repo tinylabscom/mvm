@@ -2,18 +2,20 @@
 mod build_aux_helpers;
 #[path = "build_embed_mode.rs"]
 mod build_embed_mode;
+#[path = "src/host_binaries/toolchain.rs"]
+mod host_binaries_toolchain;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use host_binaries_toolchain::{
+    Pin, pinned_zig_path_or_fail, rustup_cargo_and_rustc, strip_glibc,
+    workspace_root_from_manifest_dir,
+};
+
 fn main() {
     let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let workspace_root = manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let workspace_root = workspace_root_from_manifest_dir(&manifest_dir);
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let bins_out = out_dir.join("mvm-host-bins");
     std::fs::create_dir_all(&bins_out).expect("create OUT_DIR/mvm-host-bins");
@@ -72,6 +74,12 @@ fn main() {
     let skip_embed = should_skip_embed_binaries();
     println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_BINARIES");
+    if skip_embed {
+        println!(
+            "cargo:warning=embedding zero-byte host-vm stubs for this non-release build; \
+             set MVM_EMBED_BINARIES=1 to force real embedded binaries"
+        );
+    }
 
     for name in manifest.iter() {
         let out_file = bins_out.join(name);
@@ -96,8 +104,8 @@ fn main() {
         );
     }
 
-    // Guest runtime binaries (OCI PID 1 + entrypoint runner + agent + netinit + netd + egress-client,
-    // guest arch = host arch). Embedded alongside the host bins so an end-user mvmctl with no
+    // Guest runtime binaries (agent + netinit + egress-client, guest arch =
+    // host arch). Embedded alongside the host bins so an end-user mvmctl with no
     // source checkout can inject them into an OCI `run --image` rootfs. Built in
     // one cargo invocation; they ride the same `EMBEDDED` array and are looked
     // up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte stubs) — a stub
@@ -112,8 +120,6 @@ fn main() {
         );
     }
     for name in [
-        "mvm-oci-init",
-        "mvm-oci-entrypoint",
         "mvm-guest-agent",
         "mvm-guest-netinit",
         "mvm-guest-netd",
@@ -128,10 +134,15 @@ fn main() {
         let sha = sha256_hex(&out_file);
         entries.push((name.to_string(), out_file, sha));
     }
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("crates/mvm-guest/src").display()
-    );
+    // Watch the guest source trees file-by-file, not as a directory. Cargo's
+    // directory-level `rerun-if-changed` does not reliably fire on a content
+    // edit to an existing file (only on add/remove), so a change to e.g. the
+    // guest agent's request handler would otherwise leave the *embedded* agent
+    // stale on an incremental build — `machine run --image` would then inject an
+    // out-of-date agent. Emitting one `rerun-if-changed` per file guarantees the
+    // cross-compile re-runs on any edit.
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-guest/src"));
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-guest-helpers/src"));
 
     build_native_aux_helpers(&workspace_root, &out_dir);
 
@@ -155,16 +166,29 @@ fn main() {
         "cargo:rerun-if-changed={}",
         workspace_root.join("Cargo.lock").display()
     );
-    println!(
-        "cargo:rerun-if-changed={}",
-        workspace_root.join("crates/mvm-build/src").display()
-    );
+    // Same file-by-file watch for the `mvm-build` lib the host bins link (a
+    // content edit there must re-cross-compile the embedded host bins).
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-build/src"));
 }
 
-struct Pin {
-    zig: String,
-    cargo_zigbuild: String,
-    target: String,
+/// Emit one `cargo:rerun-if-changed` per file under `root`, recursively. Unlike
+/// a single directory-level `rerun-if-changed` (which cargo does not reliably
+/// re-trigger on a content edit to an existing file), this forces the build
+/// script — and therefore the embedded-binary cross-compile — to re-run whenever
+/// any watched source file changes. Missing trees are silently skipped (the
+/// dir-level watch already fails soft the same way).
+fn emit_rerun_for_tree(root: &Path) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            emit_rerun_for_tree(&path);
+        } else {
+            println!("cargo:rerun-if-changed={}", path.display());
+        }
+    }
 }
 
 fn should_skip_embed_binaries() -> bool {
@@ -277,38 +301,14 @@ fn libkrun_header_present() -> bool {
 }
 
 fn read_pinned_toolchain(root: &Path) -> Pin {
-    let toml_str = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    let v: toml::Value = toml::from_str(&toml_str).unwrap();
-    let p = &v["workspace"]["metadata"]["mvm"]["toolchain"];
-    // The embed target follows the arch mvmctl is built for: the local
-    // builder/Stage 0 VM is always same-arch as the host, so an x86_64
-    // mvmctl must embed x86_64 bins and an aarch64 mvmctl aarch64 bins.
-    // `CARGO_CFG_TARGET_ARCH` is set by cargo for build scripts.
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH")
         .expect("CARGO_CFG_TARGET_ARCH is set by cargo for build scripts");
-    Pin {
-        zig: p["zig"].as_str().unwrap().to_string(),
-        cargo_zigbuild: p["cargo-zigbuild"].as_str().unwrap().to_string(),
-        target: resolve_target_for_arch(p, &arch),
-    }
+    host_binaries_toolchain::read_pinned_toolchain(root, &arch)
 }
 
-/// Resolve the pinned musl target triple for `arch` from the
-/// `[workspace.metadata.mvm.toolchain.targets]` table. Fails closed on an
-/// arch with no pinned target (mvmctl doesn't support that guest arch yet).
+#[cfg(test)]
 fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
-    toolchain
-        .get("targets")
-        .and_then(|t| t.get(arch))
-        .and_then(|t| t.as_str())
-        .unwrap_or_else(|| {
-            panic!(
-                "no embedded-host-binary target pinned for arch `{arch}` in \
-                 [workspace.metadata.mvm.toolchain.targets] — mvmctl does not yet \
-                 support this guest arch (Plan 164). Add a `{arch} = \"...-musl\"` entry."
-            )
-        })
-        .to_string()
+    host_binaries_toolchain::resolve_target_for_arch(toolchain, arch)
 }
 
 /// Parse `name:` fields from the Rust struct literals in
@@ -360,14 +360,6 @@ fn extract_quoted_after(line: &str, key: &str) -> Option<String> {
     let q1 = rest.find('"')? + 1;
     let q2 = rest[q1..].find('"')?;
     Some(rest[q1..q1 + q2].to_string())
-}
-
-/// Strip the optional glibc version suffix from a target triple to get
-/// the rustup target name / `target/<triple>` output dir.
-/// e.g. `aarch64-unknown-linux-gnu.2.17` → `aarch64-unknown-linux-gnu`;
-/// a suffix-less triple like `aarch64-unknown-linux-musl` is unchanged.
-fn strip_glibc(t: &str) -> &str {
-    t.split('.').next().unwrap()
 }
 
 fn run_cargo_zigbuild(
@@ -426,9 +418,8 @@ fn run_cargo_zigbuild(
 fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
     eprintln!(
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-guest \
-         --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-guest-agent --bin mvm-guest-netinit \
-         --bin mvm-verity-init --bin mvm-guest-netd -p mvm-guest-helpers \
-         --bin mvm-egress-client --features mvm-guest/dev-shell"
+         --bin mvm-guest-agent --bin mvm-guest-netinit --bin mvm-verity-init \
+         -p mvm-guest-helpers --bin mvm-egress-client --features mvm-guest/dev-shell"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
     let mut cmd = Command::new(&cargo);
@@ -440,17 +431,11 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "-p",
         "mvm-guest",
         "--bin",
-        "mvm-oci-init",
-        "--bin",
-        "mvm-oci-entrypoint",
-        "--bin",
         "mvm-guest-agent",
         "--bin",
         "mvm-guest-netinit",
         "--bin",
         "mvm-verity-init",
-        "--bin",
-        "mvm-guest-netd",
         "-p",
         "mvm-guest-helpers",
         "--bin",
@@ -476,8 +461,6 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
     );
     let rel = target_dir.join(strip_glibc(target)).join("release");
     for name in [
-        "mvm-oci-init",
-        "mvm-oci-entrypoint",
         "mvm-guest-agent",
         "mvm-guest-netinit",
         "mvm-guest-netd",
@@ -489,161 +472,6 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         std::fs::copy(&built, &dest)
             .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), dest.display()));
     }
-}
-
-/// Resolve the zig binary cargo-zigbuild must use, pinned to `zig_pin`.
-///
-/// Order: explicit `MVM_EMBED_ZIG` → the `ziglang` PyPI package (version-exact,
-/// Homebrew-independent) → a PATH `zig` that already matches the pin (returns
-/// `None`, letting cargo-zigbuild find it). Panics with an actionable message
-/// when nothing matches — the alternative is cargo-zigbuild picking a
-/// Homebrew-upgraded zig and failing far downstream with `CacheCheckFailed`.
-fn pinned_zig_path_or_fail(zig_pin: &str) -> Option<String> {
-    if let Ok(p) = std::env::var("MVM_EMBED_ZIG")
-        && !p.is_empty()
-    {
-        return Some(p);
-    }
-    if let Some(path) = ziglang_zig_path(zig_pin) {
-        return Some(path);
-    }
-    if zig_on_path_matches(zig_pin) {
-        return None;
-    }
-    panic!(
-        "zig {zig_pin} is required to cross-compile the embedded host binaries but was not \
-         found. Install it with `pip install ziglang=={zig_pin}` (recommended — the build \
-         auto-detects it), put zig {zig_pin} on PATH, or set MVM_EMBED_ZIG=/path/to/zig. \
-         Homebrew's `zig` is usually a newer, incompatible release that fails downstream with \
-         `CacheCheckFailed`."
-    );
-}
-
-/// Absolute path to the `ziglang` PyPI package's bundled zig, iff its version is
-/// exactly `zig_pin`. `python3 -m ziglang version` prints the version; the binary
-/// sits next to the package's `__init__`.
-fn ziglang_zig_path(zig_pin: &str) -> Option<String> {
-    let ver = Command::new("python3")
-        .args(["-m", "ziglang", "version"])
-        .output()
-        .ok()?;
-    if !ver.status.success() || String::from_utf8_lossy(&ver.stdout).trim() != zig_pin {
-        return None;
-    }
-    let path = Command::new("python3")
-        .args([
-            "-c",
-            "import ziglang, os; print(os.path.join(os.path.dirname(ziglang.__file__), 'zig'))",
-        ])
-        .output()
-        .ok()?;
-    if !path.status.success() {
-        return None;
-    }
-    let p = String::from_utf8_lossy(&path.stdout).trim().to_string();
-    (!p.is_empty()).then_some(p)
-}
-
-/// True when a PATH `zig` reports exactly the pinned version.
-fn zig_on_path_matches(zig_pin: &str) -> bool {
-    Command::new("zig")
-        .arg("version")
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == zig_pin)
-        .unwrap_or(false)
-}
-
-/// Find a `(cargo, rustc)` pair that has `target` installed in its sysroot.
-fn rustup_cargo_and_rustc(target: &str) -> (String, String) {
-    if let Some((cargo, rustc)) = configured_embed_tools() {
-        assert!(
-            rustc_has_target(&rustc, target),
-            "MVM_EMBED_RUSTC={rustc:?} does not provide target {target}; \
-             unset MVM_EMBED_RUSTC or point it at a Rust toolchain with that std target"
-        );
-        return (cargo, rustc);
-    }
-
-    let env_rustc = std::env::var("RUSTC").unwrap_or_default();
-    let env_cargo = std::env::var("CARGO").unwrap_or_default();
-    if !env_rustc.is_empty() && rustc_has_target(&env_rustc, target) {
-        return (
-            if env_cargo.is_empty() {
-                "cargo".to_string()
-            } else {
-                env_cargo
-            },
-            env_rustc,
-        );
-    }
-
-    let home = std::env::var("HOME").unwrap_or_default();
-    let rustup_candidates = vec!["rustup".to_string(), format!("{home}/.cargo/bin/rustup")];
-    for rustup in &rustup_candidates {
-        let rustc_out = Command::new(rustup).args(["which", "rustc"]).output();
-        let cargo_out = Command::new(rustup).args(["which", "cargo"]).output();
-        if let (Ok(rc), Ok(ca)) = (rustc_out, cargo_out)
-            && rc.status.success()
-            && ca.status.success()
-        {
-            let rc_path = String::from_utf8_lossy(&rc.stdout).trim().to_string();
-            let ca_path = String::from_utf8_lossy(&ca.stdout).trim().to_string();
-            if !rc_path.is_empty() && !ca_path.is_empty() && rustc_has_target(&rc_path, target) {
-                return (ca_path, rc_path);
-            }
-        }
-    }
-
-    (
-        if env_cargo.is_empty() {
-            "cargo".to_string()
-        } else {
-            env_cargo
-        },
-        if env_rustc.is_empty() {
-            "rustc".to_string()
-        } else {
-            env_rustc
-        },
-    )
-}
-
-fn configured_embed_tools() -> Option<(String, String)> {
-    configured_embed_tools_from(
-        std::env::var("MVM_EMBED_CARGO").ok(),
-        std::env::var("MVM_EMBED_RUSTC").ok(),
-    )
-}
-
-fn configured_embed_tools_from(
-    embed_cargo: Option<String>,
-    embed_rustc: Option<String>,
-) -> Option<(String, String)> {
-    let rustc = embed_rustc?.trim().to_string();
-    assert!(
-        !rustc.is_empty(),
-        "MVM_EMBED_RUSTC must not be empty when set"
-    );
-    let cargo = embed_cargo
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "cargo".to_string());
-    Some((cargo, rustc))
-}
-
-fn rustc_has_target(rustc: &str, target: &str) -> bool {
-    let out = Command::new(rustc)
-        .args(["--target", target, "--print", "target-libdir"])
-        .output();
-    if let Ok(o) = out
-        && o.status.success()
-    {
-        let dir = String::from_utf8_lossy(&o.stdout).trim().to_string();
-        if !dir.is_empty() && std::path::Path::new(&dir).exists() {
-            return true;
-        }
-    }
-    false
 }
 
 fn sha256_hex(p: &Path) -> String {

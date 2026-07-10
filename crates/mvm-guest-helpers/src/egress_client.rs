@@ -18,11 +18,28 @@ use tokio::sync::watch;
 
 use crate::guest_vsock_session::HostVsockSession;
 
+const EGRESS_VSOCK_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
+
 /// Host vsock port of the egress gateway.
 ///
 /// Must match `mvm_guest::vsock::EGRESS_PORT`. mvm-guest is not a dep of this
 /// crate (see `mvm-exit-report`) — keep in sync manually.
 pub const EGRESS_VSOCK_PORT: u32 = 5253;
+
+fn configured_egress_vsock_port() -> u32 {
+    match std::env::var(EGRESS_VSOCK_PORT_ENV) {
+        Ok(value) => match value.parse::<u32>() {
+            Ok(port) if port > 0 => port,
+            _ => {
+                eprintln!(
+                    "mvm-egress-client: ignoring invalid {EGRESS_VSOCK_PORT_ENV}={value:?}; using default {EGRESS_VSOCK_PORT}"
+                );
+                EGRESS_VSOCK_PORT
+            }
+        },
+        Err(_) => EGRESS_VSOCK_PORT,
+    }
+}
 
 /// SOCKS protocol version 5.
 const SOCKS5: u8 = 0x05;
@@ -334,7 +351,7 @@ async fn serve_http_forward(
     framed.extend_from_slice(HTTP_FORWARD_FRAME);
     framed.extend_from_slice(head);
     framed.extend_from_slice(&body);
-    let mut upstream = HostVsockSession::connect(EGRESS_VSOCK_PORT)
+    let mut upstream = HostVsockSession::connect(configured_egress_vsock_port())
         .await?
         .write_initial_bytes(&framed)
         .await?
@@ -359,7 +376,7 @@ where
 
 async fn connect_to_host_egress(target: &str) -> std::io::Result<HostVsockSession<TcpStream>> {
     let target_line = format!("{target}\n");
-    HostVsockSession::connect(EGRESS_VSOCK_PORT)
+    HostVsockSession::connect(configured_egress_vsock_port())
         .await?
         .write_initial_bytes(target_line.as_bytes())
         .await
@@ -455,7 +472,11 @@ fn invalid_http(message: &str) -> std::io::Error {
 /// Bind the loopback SOCKS5 listener at `listen` and serve egress indefinitely.
 pub async fn run(listen: std::net::SocketAddr) -> std::io::Result<()> {
     let listener = TcpListener::bind(listen).await?;
-    tracing::info!(%listen, vsock_port = EGRESS_VSOCK_PORT, "egress proxy client started");
+    tracing::info!(
+        %listen,
+        vsock_port = configured_egress_vsock_port(),
+        "egress SOCKS5 client started"
+    );
     loop {
         match listener.accept().await {
             Ok((client, peer)) => {

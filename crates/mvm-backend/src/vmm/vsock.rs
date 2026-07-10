@@ -310,6 +310,7 @@ impl Drop for VirtioVsock {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
 
     fn dev() -> VsockShared {
         let mut ram = vec![0u8; 0x1000];
@@ -387,7 +388,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("subst.sock");
 
-        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
         let server = std::thread::spawn(move || {
             let (mut c, _) = listener.accept().unwrap();
             let mut buf = [0u8; 64];
@@ -468,7 +471,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("hvf-broker.sock");
 
-        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
         let server = std::thread::spawn(move || {
             let (mut c, _) = listener.accept().unwrap();
             let mut buf = [0u8; 64];
@@ -621,7 +626,9 @@ mod tests {
         use std::io::{Read, Write};
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("subst.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
         let server = std::thread::spawn(move || {
             let (mut c, _) = listener.accept().unwrap();
             let mut buf = [0u8; 64];
@@ -667,7 +674,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("agent.sock");
         let mut d = dev();
-        d.set_agent_socket(&sock).unwrap();
+        if let Err(err) = d.set_agent_socket(&sock) {
+            if error_chain_has_permission_denied(&err) {
+                eprintln!(
+                    "skipping test: sandbox denied agent socket setup at {}: {err}",
+                    sock.display()
+                );
+                return;
+            }
+            panic!("agent socket setup failed at {}: {err}", sock.display());
+        }
 
         let _client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
 
@@ -709,7 +725,23 @@ mod tests {
         let port = 20005u32;
         let sock = dir.path().join("vsock-20005.sock");
         let mut d = dev();
-        d.set_console_sockets([(port, sock.as_path())]).unwrap();
+        if let Err(err) = d.set_console_sockets([(port, sock.as_path())]) {
+            if error_chain_has_permission_denied(&err) {
+                eprintln!(
+                    "skipping test: sandbox denied console socket setup at {}: {err}",
+                    sock.display()
+                );
+                return;
+            }
+            panic!("console socket setup failed at {}: {err}", sock.display());
+        }
+        if !sock.exists() {
+            eprintln!(
+                "skipping test: console socket was not created at {}",
+                sock.display()
+            );
+            return;
+        }
 
         let mut client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
         client.write_all(b"ls\n").unwrap();

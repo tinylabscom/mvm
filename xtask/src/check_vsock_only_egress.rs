@@ -7,11 +7,11 @@
 //! a tap, or a userspace net gateway to that path re-introduces a guest NIC and
 //! fails closed here.
 //!
-//! Scope note: Firecracker / libkrun still attach a virtio-net NIC today and are
-//! converging onto the vsock gateway separately — they are deliberately
-//! **out of scope** for this gate until that lands. This gate therefore guards
-//! only the workload/backend paths and the new raw tunnel implementation paths
-//! that are supposed to already stay NIC-free and helper-free.
+//! Scope note: this gate covers the backend paths that are already expected to
+//! stay on the no-guest-NIC model in the current tree. If a backend still has
+//! historical gateway code elsewhere, that does not weaken the invariant here:
+//! the converged workload launch sites covered by this gate must remain
+//! vsock-only.
 
 use anyhow::{Result, bail};
 use regex::Regex;
@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 const GUARDED_PATHS: &[&str] = &[
     "crates/mvm-backend/src/vmm",
     "crates/mvm-backend/src/hvf",
+    "crates/mvm-backend/src/libkrun.rs",
     "crates/mvm-backend/src/vsock_egress_bridge",
     "crates/mvm-backend/src/network_tunnel_spawn.rs",
     "crates/mvm-guest/src/network_tunnel.rs",

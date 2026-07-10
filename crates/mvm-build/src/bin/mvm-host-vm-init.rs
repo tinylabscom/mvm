@@ -361,6 +361,145 @@ const AGENT_UID: u32 = 990;
 /// Same order the workload `/init` probes.
 #[cfg(any(target_os = "linux", test))]
 const AGENT_BIN_CANDIDATES: [&str; 2] = ["/mvm/runtime/agent", "/usr/local/bin/mvm-guest-agent"];
+/// Candidate paths for the guest-side egress shim, in preference order.
+/// Builder/dev VMs keep the baked fallback today, but when the runtime overlay
+/// is attached it is the authoritative location for the helper.
+#[cfg(any(target_os = "linux", test))]
+const EGRESS_CLIENT_BIN_CANDIDATES: [&str; 2] = [
+    "/mvm/runtime/egress-client",
+    "/usr/local/bin/mvm-egress-client",
+];
+#[cfg(target_os = "linux")]
+const RUNTIME_OVERLAY_MOUNT: &str = "/mvm/runtime";
+
+/// Builder/dev VMs still default to the compatibility posture until their
+/// attach path is ready: prefer the overlay when present, but allow the baked
+/// rootfs copy when the host omitted the token.
+#[cfg(any(target_os = "linux", test))]
+fn runtime_source_policy_from_cmdline(cmdline: &str) -> mvm_core::vm_backend::RuntimeSourcePolicy {
+    cmdline
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("mvm.runtime_source_policy="))
+        .and_then(mvm_core::vm_backend::RuntimeSourcePolicy::from_cmdline_value)
+        .unwrap_or(mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn runtime_overlay_device_from_cmdline(cmdline: &str) -> Option<String> {
+    cmdline
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("mvm.runtime_data="))
+        .map(ToOwned::to_owned)
+}
+
+#[cfg(any(target_os = "linux", test))]
+const VSOCK_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
+#[cfg(any(target_os = "linux", test))]
+const VSOCK_EGRESS_NO_PROXY: &str = "localhost,127.0.0.1,::1";
+#[cfg(target_os = "linux")]
+const VSOCK_EGRESS_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
+#[cfg(any(target_os = "linux", test))]
+const VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";
+#[cfg(any(target_os = "linux", test))]
+const INIT_LIFECYCLE_BREADCRUMB_FILE: &str = "mvm-host-vm-init.lifecycle.log";
+
+#[cfg(any(target_os = "linux", test))]
+fn vsock_egress_requested_from_cmdline(cmdline: &str) -> bool {
+    cmdline
+        .split_whitespace()
+        .any(|tok| tok == "mvm.vsock_egress=1")
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn vsock_egress_port_from_cmdline(cmdline: &str) -> Option<u32> {
+    cmdline
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix(VSOCK_EGRESS_PORT_TOKEN_PREFIX))
+        .and_then(|value| value.parse::<u32>().ok())
+        .filter(|port| *port > 0)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn apply_vsock_egress_proxy_env(cmd: &mut std::process::Command) {
+    cmd.env("ALL_PROXY", VSOCK_EGRESS_PROXY_URL)
+        .env("HTTP_PROXY", VSOCK_EGRESS_PROXY_URL)
+        .env("HTTPS_PROXY", VSOCK_EGRESS_PROXY_URL)
+        .env("http_proxy", VSOCK_EGRESS_PROXY_URL)
+        .env("https_proxy", VSOCK_EGRESS_PROXY_URL)
+        .env("NO_PROXY", VSOCK_EGRESS_NO_PROXY)
+        .env("no_proxy", VSOCK_EGRESS_NO_PROXY);
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn format_init_breadcrumb_line(stage: &str, detail: &str) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!(
+        "{}.{:03} {}: {}\n",
+        now.as_secs(),
+        now.subsec_millis(),
+        stage,
+        detail
+    )
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn append_init_breadcrumb_at(
+    run_log_path: &std::path::Path,
+    persistent_targets: &[&std::path::Path],
+    stage: &str,
+    detail: &str,
+) {
+    use std::io::Write;
+
+    let line = format_init_breadcrumb_line(stage, detail);
+    if let Some(parent) = run_log_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(run_log_path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+    for persistent_mount in persistent_targets {
+        let _ = std::fs::create_dir_all(persistent_mount);
+        let persistent_log = persistent_mount.join(INIT_LIFECYCLE_BREADCRUMB_FILE);
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&persistent_log)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn resolve_egress_client_binary(
+    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+    is_exec: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let candidates: &[&str] = match runtime_source_policy {
+        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => {
+            &EGRESS_CLIENT_BIN_CANDIDATES[..1]
+        }
+        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => &EGRESS_CLIENT_BIN_CANDIDATES,
+        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &EGRESS_CLIENT_BIN_CANDIDATES[1..],
+    };
+    candidates
+        .iter()
+        .map(Path::new)
+        .find(|p| is_exec(p))
+        .map(Path::to_path_buf)
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn runtime_overlay_mount_flag_bits() -> libc::c_ulong {
+    1
+}
 
 /// Resolve which agent binary to launch: the first candidate `is_exec`
 /// reports runnable. `is_exec` is injected so the preference order is
@@ -369,8 +508,16 @@ const AGENT_BIN_CANDIDATES: [&str; 2] = ["/mvm/runtime/agent", "/usr/local/bin/m
 /// agent-less, which is non-fatal and surfaced in `mvmctl status`,
 /// exactly as the workload path treats a missing agent.
 #[cfg(any(target_os = "linux", test))]
-fn resolve_agent_binary(is_exec: impl Fn(&Path) -> bool) -> Option<PathBuf> {
-    AGENT_BIN_CANDIDATES
+fn resolve_agent_binary(
+    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+    is_exec: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let candidates: &[&str] = match runtime_source_policy {
+        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => &AGENT_BIN_CANDIDATES[..1],
+        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => &AGENT_BIN_CANDIDATES,
+        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => &AGENT_BIN_CANDIDATES[1..],
+    };
+    candidates
         .iter()
         .map(Path::new)
         .find(|p| is_exec(p))
@@ -421,22 +568,222 @@ mod tests {
     #[test]
     fn resolve_agent_binary_prefers_runtime_overlay() {
         // Both present → the verity overlay path wins.
-        let got = resolve_agent_binary(|_| true);
+        let got = resolve_agent_binary(
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            |_| true,
+        );
         assert_eq!(got, Some(PathBuf::from("/mvm/runtime/agent")));
     }
 
     #[test]
     fn resolve_agent_binary_falls_back_to_baked_copy() {
         // Overlay absent, baked copy present → the rootfs copy.
-        let got = resolve_agent_binary(|p| p == Path::new("/usr/local/bin/mvm-guest-agent"));
+        let got = resolve_agent_binary(
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            |p| p == Path::new("/usr/local/bin/mvm-guest-agent"),
+        );
         assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-guest-agent")));
     }
 
     #[test]
     fn resolve_agent_binary_none_when_neither_present() {
         // Neither present → boot agent-less (non-fatal, surfaced in status).
-        let got = resolve_agent_binary(|_| false);
+        let got = resolve_agent_binary(
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            |_| false,
+        );
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn resolve_agent_binary_refuses_baked_fallback_when_overlay_is_required() {
+        let got = resolve_agent_binary(
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            |p| p == Path::new("/usr/local/bin/mvm-guest-agent"),
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn resolve_agent_binary_rootfs_only_skips_runtime_overlay() {
+        let got =
+            resolve_agent_binary(mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly, |p| {
+                p == Path::new("/usr/local/bin/mvm-guest-agent")
+            });
+        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-guest-agent")));
+    }
+
+    #[test]
+    fn resolve_egress_client_binary_prefers_runtime_overlay() {
+        let got = resolve_egress_client_binary(
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            |_| true,
+        );
+        assert_eq!(got, Some(PathBuf::from("/mvm/runtime/egress-client")));
+    }
+
+    #[test]
+    fn resolve_egress_client_binary_falls_back_to_baked_copy() {
+        let got = resolve_egress_client_binary(
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
+        );
+        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-egress-client")));
+    }
+
+    #[test]
+    fn resolve_egress_client_binary_refuses_baked_fallback_when_overlay_is_required() {
+        let got = resolve_egress_client_binary(
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
+        );
+        assert_eq!(got, None);
+    }
+
+    #[test]
+    fn resolve_egress_client_binary_rootfs_only_skips_runtime_overlay() {
+        let got = resolve_egress_client_binary(
+            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+            |p| p == Path::new("/usr/local/bin/mvm-egress-client"),
+        );
+        assert_eq!(got, Some(PathBuf::from("/usr/local/bin/mvm-egress-client")));
+    }
+
+    #[test]
+    fn runtime_source_policy_from_cmdline_defaults_to_prefer_overlay() {
+        assert_eq!(
+            runtime_source_policy_from_cmdline("console=hvc0 root=/dev/vda"),
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
+        );
+    }
+
+    #[test]
+    fn runtime_source_policy_from_cmdline_decodes_required_overlay() {
+        assert_eq!(
+            runtime_source_policy_from_cmdline(
+                "console=hvc0 mvm.runtime_source_policy=required_overlay root=/dev/vda"
+            ),
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+        );
+    }
+
+    #[test]
+    fn runtime_overlay_device_from_cmdline_finds_runtime_disk() {
+        assert_eq!(
+            runtime_overlay_device_from_cmdline(
+                "console=hvc0 mvm.runtime_data=/dev/vdc root=/dev/vda"
+            )
+            .as_deref(),
+            Some("/dev/vdc")
+        );
+    }
+
+    #[test]
+    fn runtime_overlay_device_from_cmdline_ignores_absent_token() {
+        assert_eq!(
+            runtime_overlay_device_from_cmdline("console=hvc0 root=/dev/vda"),
+            None
+        );
+    }
+
+    #[test]
+    fn vsock_egress_requested_from_cmdline_matches_exact_token() {
+        assert!(vsock_egress_requested_from_cmdline(
+            "console=hvc0 mvm.vsock_egress=1 root=/dev/vda"
+        ));
+        assert!(!vsock_egress_requested_from_cmdline(
+            "console=hvc0 mvm.vsock_egress=0 root=/dev/vda"
+        ));
+        assert!(!vsock_egress_requested_from_cmdline(
+            "console=hvc0 root=/dev/vda"
+        ));
+    }
+
+    #[test]
+    fn vsock_egress_port_from_cmdline_reads_positive_port() {
+        assert_eq!(
+            vsock_egress_port_from_cmdline(
+                "console=hvc0 mvm.vsock_egress=1 mvm.vsock_egress_port=45253 root=/dev/vda"
+            ),
+            Some(45253)
+        );
+        assert_eq!(
+            vsock_egress_port_from_cmdline("console=hvc0 mvm.vsock_egress_port=0 root=/dev/vda"),
+            None
+        );
+    }
+
+    #[test]
+    fn apply_vsock_egress_proxy_env_sets_proxy_contract() {
+        let mut cmd = Command::new("/bin/sh");
+        apply_vsock_egress_proxy_env(&mut cmd);
+        let env: std::collections::BTreeMap<_, _> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.expect("proxy env present").to_string_lossy().into_owned(),
+                )
+            })
+            .collect();
+        for key in [
+            "ALL_PROXY",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "http_proxy",
+            "https_proxy",
+        ] {
+            assert_eq!(
+                env.get(key).map(String::as_str),
+                Some(VSOCK_EGRESS_PROXY_URL)
+            );
+        }
+        for key in ["NO_PROXY", "no_proxy"] {
+            assert_eq!(
+                env.get(key).map(String::as_str),
+                Some(VSOCK_EGRESS_NO_PROXY)
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_overlay_mount_flags_are_read_only() {
+        assert_eq!(runtime_overlay_mount_flag_bits(), 1);
+    }
+
+    #[test]
+    fn init_breadcrumb_writer_appends_to_run_and_all_persistent_logs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run_log = dir.path().join("run").join(INIT_LIFECYCLE_BREADCRUMB_FILE);
+        let persistent_a = dir.path().join("persistent-a");
+        let persistent_b = dir.path().join("persistent-b");
+        std::fs::create_dir_all(&persistent_a).expect("persistent-a dir");
+        std::fs::create_dir_all(&persistent_b).expect("persistent-b dir");
+
+        append_init_breadcrumb_at(
+            &run_log,
+            &[&persistent_a, &persistent_b],
+            "stage-a",
+            "first",
+        );
+        append_init_breadcrumb_at(
+            &run_log,
+            &[&persistent_a, &persistent_b],
+            "stage-b",
+            "second",
+        );
+
+        let run_body = std::fs::read_to_string(&run_log).expect("read run log");
+        let persistent_a_body =
+            std::fs::read_to_string(persistent_a.join(INIT_LIFECYCLE_BREADCRUMB_FILE))
+                .expect("read persistent-a log");
+        let persistent_b_body =
+            std::fs::read_to_string(persistent_b.join(INIT_LIFECYCLE_BREADCRUMB_FILE))
+                .expect("read persistent log");
+        assert!(run_body.contains("stage-a: first"));
+        assert!(run_body.contains("stage-b: second"));
+        assert_eq!(run_body, persistent_a_body);
+        assert_eq!(run_body, persistent_b_body);
     }
 
     /// `setup_dev_fd_symlinks` lays down all four conventional symlinks
@@ -683,7 +1030,6 @@ mod linux {
     use std::time::Instant;
 
     use crate::boot_timings::BootTimings;
-    use crate::proxy::ProxyLifecycle;
 
     /// Persistent Nix-store device — virtio-blk attached as
     /// `/dev/vdb` by `LibkrunBuilderVm` via its `extra_disks` entry.
@@ -724,6 +1070,7 @@ mod linux {
     /// the standard Nix store inspects, so the marker is invisible
     /// to nix-daemon.
     const NIX_DB_LOADED_MARKER: &str = "/nix-store/.seed-db-loaded";
+    const RUN_LIFECYCLE_LOG: &str = "/run/mvm-host-vm-init.lifecycle.log";
 
     /// Per-job command staging dir (`/job/cmd.sh`, `/job/env`,
     /// `/job/result`). Mounted via virtio-fs from the host
@@ -765,6 +1112,22 @@ mod linux {
     /// (`krun_set_console_output`).
     const STDERR_TAIL_LINES: usize = 20;
 
+    fn append_init_breadcrumb(stage: &str, detail: &str) {
+        let mut persistent_targets = Vec::new();
+        for candidate in [NIX_STORE_MOUNT, JOB_DIR, OUT_DIR] {
+            let path = Path::new(candidate);
+            if path.is_dir() {
+                persistent_targets.push(path);
+            }
+        }
+        crate::append_init_breadcrumb_at(
+            Path::new(RUN_LIFECYCLE_LOG),
+            &persistent_targets,
+            stage,
+            detail,
+        );
+    }
+
     /// Filename for the structured install spec. When
     /// `/job/install_spec.json` is present the init
     /// binary routes through the app-deps install pipeline instead
@@ -782,7 +1145,17 @@ mod linux {
     fn fork_guest_agent() {
         use std::os::unix::process::CommandExt;
 
-        let Some(agent_bin) = crate::resolve_agent_binary(is_executable) else {
+        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(
+            &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
+        );
+        let Some(agent_bin) = crate::resolve_agent_binary(runtime_source_policy, is_executable)
+        else {
+            if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
+                eprintln!(
+                    "mvm-host-vm-init: runtime overlay required but /mvm/runtime/agent is missing; refusing boot"
+                );
+                std::process::exit(1);
+            }
             eprintln!(
                 "mvm-host-vm-init: no mvm-guest-agent found at {:?}; booting agent-less",
                 crate::AGENT_BIN_CANDIDATES
@@ -807,9 +1180,74 @@ mod linux {
                 child.id(),
                 agent_bin.display()
             ),
+            Err(e) => {
+                if runtime_source_policy
+                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+                {
+                    eprintln!(
+                        "mvm-host-vm-init: failed to fork required overlay agent from {}: {e}; refusing boot",
+                        agent_bin.display()
+                    );
+                    std::process::exit(1);
+                }
+                eprintln!(
+                    "mvm-host-vm-init: failed to fork mvm-guest-agent from {}: {e}; booting agent-less",
+                    agent_bin.display()
+                )
+            }
+        }
+    }
+
+    /// Start the guest-side SOCKS5 -> vsock egress shim when the host requested
+    /// vsock-only egress on the kernel cmdline. Best-effort: a missing binary or
+    /// spawn failure logs and returns so offline builds still boot.
+    fn fork_vsock_egress_client_if_requested(cmdline: &str) {
+        use std::os::unix::process::CommandExt;
+
+        if !crate::vsock_egress_requested_from_cmdline(cmdline) {
+            return;
+        }
+
+        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(cmdline);
+        let Some(egress_client) =
+            crate::resolve_egress_client_binary(runtime_source_policy, is_executable)
+        else {
+            if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
+                eprintln!(
+                    "mvm-host-vm-init: runtime overlay required but /mvm/runtime/egress-client is missing; refusing boot"
+                );
+                std::process::exit(1);
+            }
+            eprintln!(
+                "mvm-host-vm-init: mvm.vsock_egress=1 requested but no egress client was found at {:?}; continuing without builder egress client",
+                crate::EGRESS_CLIENT_BIN_CANDIDATES
+            );
+            return;
+        };
+
+        let _ = Command::new("/bin/busybox")
+            .args(["ip", "link", "set", "lo", "up"])
+            .status();
+
+        let mut cmd = Command::new(&egress_client);
+        if let Some(port) = crate::vsock_egress_port_from_cmdline(cmdline) {
+            cmd.env(crate::VSOCK_EGRESS_PORT_ENV, port.to_string());
+        }
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+        match cmd.spawn() {
+            Ok(child) => eprintln!(
+                "mvm-host-vm-init: forked mvm-egress-client pid={} from {}",
+                child.id(),
+                egress_client.display()
+            ),
             Err(e) => eprintln!(
-                "mvm-host-vm-init: failed to fork mvm-guest-agent from {}: {e}; booting agent-less",
-                agent_bin.display()
+                "mvm-host-vm-init: failed to fork mvm-egress-client from {}: {e}",
+                egress_client.display()
             ),
         }
     }
@@ -825,6 +1263,30 @@ mod linux {
         unsafe { libc::access(c.as_ptr(), libc::X_OK) == 0 }
     }
 
+    fn mount_runtime_overlay(cmdline: &str) -> Result<bool, String> {
+        use nix::mount::mount;
+
+        let Some(dev) = crate::runtime_overlay_device_from_cmdline(cmdline) else {
+            return Ok(false);
+        };
+        std::fs::create_dir_all(crate::RUNTIME_OVERLAY_MOUNT)
+            .map_err(|e| format!("create {}: {e}", crate::RUNTIME_OVERLAY_MOUNT))?;
+        mount(
+            Some(dev.as_str()),
+            crate::RUNTIME_OVERLAY_MOUNT,
+            Some("ext4"),
+            nix::mount::MsFlags::from_bits_retain(crate::runtime_overlay_mount_flag_bits()),
+            None::<&str>,
+        )
+        .map_err(|e| {
+            format!(
+                "mount runtime overlay {dev} -> {}: {e}",
+                crate::RUNTIME_OVERLAY_MOUNT
+            )
+        })?;
+        Ok(true)
+    }
+
     /// Builder jobs need the Nix client from the mounted `/nix` view, not just
     /// from the read-only seed rootfs. When the overlay path loses these
     /// executables, the VM must fall back to a seeded bind-mount instead of
@@ -837,6 +1299,7 @@ mod linux {
 
     pub fn run() -> ExitCode {
         eprintln!("mvm-host-vm-init: pid 1 starting");
+        append_init_breadcrumb("run_enter", "pid1");
 
         // The Linux kernel doesn't pass a PATH to PID 1, so without
         // this every `Command::new("iptables")` /
@@ -881,6 +1344,7 @@ mod linux {
             write_boot_timings(&timings);
             return power_off();
         }
+        append_init_breadcrumb("mount_pseudofs_ok", "ready");
         stamp(&timings, |t| {
             t.pseudofs_ready_ms = Some(BootTimings::ms_since(anchor))
         });
@@ -965,12 +1429,61 @@ mod linux {
             return power_off();
         }
 
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        append_init_breadcrumb("cmdline_loaded", cmdline.trim());
+        let runtime_source_policy = crate::runtime_source_policy_from_cmdline(&cmdline);
+        match mount_runtime_overlay(&cmdline) {
+            Ok(true) => {
+                append_init_breadcrumb("runtime_overlay_mount_ok", crate::RUNTIME_OVERLAY_MOUNT);
+                eprintln!(
+                    "mvm-host-vm-init: mounted runtime overlay at {}",
+                    crate::RUNTIME_OVERLAY_MOUNT
+                )
+            }
+            Ok(false) => {
+                append_init_breadcrumb("runtime_overlay_mount_none", "no runtime disk declared");
+                if runtime_source_policy
+                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+                {
+                    eprintln!(
+                        "mvm-host-vm-init: runtime overlay required but no runtime disk was declared; refusing boot"
+                    );
+                    write_result(
+                        2,
+                        "runtime overlay required but no runtime disk was declared",
+                    );
+                    stamp(&timings, |t| {
+                        t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+                    });
+                    write_boot_timings(&timings);
+                    return power_off();
+                }
+            }
+            Err(e) => {
+                append_init_breadcrumb("runtime_overlay_mount_error", &e);
+                if runtime_source_policy
+                    == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+                {
+                    eprintln!("mvm-host-vm-init: {e}; refusing boot");
+                    write_result(2, &e);
+                    stamp(&timings, |t| {
+                        t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
+                    });
+                    write_boot_timings(&timings);
+                    return power_off();
+                }
+                eprintln!("mvm-host-vm-init: runtime overlay mount warning (non-fatal): {e}");
+            }
+        }
+
         // Fork the guest agent under setpriv so the builder/dev VM runs
         // the *same* agent every workload VM does (vsock 5252). Non-fatal
         // so a missing agent or spawn failure never wedges PID 1 — the
         // builder protocol is the primary job, the agent is additive
         // (mirrors the workload /init, which also never blocks on the agent).
         fork_guest_agent();
+        fork_vsock_egress_client_if_requested(&cmdline);
+        append_init_breadcrumb("post_agent_fork", "continuing");
 
         // Dispatch: if the host staged a
         // `dispatch.sock.marker` in /job, this VM is persistent
@@ -980,6 +1493,7 @@ mod linux {
         // install_spec flows exactly.
         let dispatch_marker = format!("{JOB_DIR}/dispatch.sock.marker");
         if Path::new(&dispatch_marker).exists() {
+            append_init_breadcrumb("dispatch_mode", "persistent");
             eprintln!("mvm-host-vm-init: dispatch marker detected, entering W3 dispatch loop");
             stamp(&timings, |t| {
                 t.job_start_ms = Some(BootTimings::ms_since(anchor))
@@ -1010,6 +1524,7 @@ mod linux {
         // existing cmd.sh flake-build flow.
         let install_spec_path = format!("{JOB_DIR}/{INSTALL_SPEC_FILENAME}");
         if Path::new(&install_spec_path).exists() {
+            append_init_breadcrumb("dispatch_mode", "install");
             eprintln!("mvm-host-vm-init: install spec detected, routing through install pipeline");
             stamp(&timings, |t| {
                 t.job_start_ms = Some(BootTimings::ms_since(anchor))
@@ -1027,6 +1542,7 @@ mod linux {
 
         let cmd_path = format!("{JOB_DIR}/cmd.sh");
         if !Path::new(&cmd_path).exists() {
+            append_init_breadcrumb("cmd_missing", &cmd_path);
             write_result(2, &format!("missing {cmd_path}"));
             stamp(&timings, |t| {
                 t.poweroff_start_ms = Some(BootTimings::ms_since(anchor))
@@ -1038,6 +1554,7 @@ mod linux {
         stamp(&timings, |t| {
             t.job_start_ms = Some(BootTimings::ms_since(anchor))
         });
+        append_init_breadcrumb("dispatch_mode", "cmd_sh");
         let job_start_at = Instant::now();
         let (code, tail) = run_job(&cmd_path);
         let build_ms = u64::try_from(job_start_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -1732,43 +2249,27 @@ mod linux {
                         }
                     };
                     let started = Instant::now();
-                    let mut proxy = crate::proxy::VsockProxyLifecycle::default();
-                    let proxy_started = proxy.start().map_err(|e| {
-                        eprintln!("mvm-host-vm-init: dispatch loop: proxy start failed: {e}");
-                        e
-                    });
-                    let proxy_env = if proxy_started.is_ok() {
-                        vec![
-                            ("HTTPS_PROXY", crate::proxy::PROXY_URL),
-                            ("HTTP_PROXY", crate::proxy::PROXY_URL),
-                            ("https_proxy", crate::proxy::PROXY_URL),
-                            ("http_proxy", crate::proxy::PROXY_URL),
-                            ("ALL_PROXY", crate::proxy::PROXY_URL),
-                            ("all_proxy", crate::proxy::PROXY_URL),
-                        ]
-                    } else {
-                        Vec::new()
-                    };
-                    let (code, tail) = if proxy_started.is_ok() {
-                        run_job_streaming(
-                            &cmd_path,
-                            tmpdir.as_deref(),
-                            Isolation::Unshared,
-                            &proxy_env,
-                            |line| {
-                                let frame =
-                                    crate::dispatch_response::stderr_chunk_json(&job_id, line);
-                                if !write_frame(conn, frame.as_bytes()) {
-                                    eprintln!(
-                                        "mvm-host-vm-init: dispatch loop: write StderrChunk failed"
-                                    );
-                                }
-                            },
-                        )
-                    } else {
-                        (126, "egress proxy start failed".to_string())
-                    };
-                    proxy.stop();
+                    let (code, tail) = run_job_streaming(
+                        &cmd_path,
+                        tmpdir.as_deref(),
+                        Isolation::Unshared,
+                        |line| {
+                            let frame = crate::dispatch_response::stderr_chunk_json(&job_id, line);
+                            if !write_frame(conn, frame.as_bytes()) {
+                                // Host probably closed the conn
+                                // (e.g. supervisor went away
+                                // mid-build). Log and keep
+                                // draining stderr so the build's
+                                // exit code is still meaningful —
+                                // the terminal Result write will
+                                // fail loudly back in the
+                                // dispatch loop.
+                                eprintln!(
+                                    "mvm-host-vm-init: dispatch loop: write StderrChunk failed"
+                                );
+                            }
+                        },
+                    );
                     let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                     // Hold `scratch` until after the build returns
                     // so its `Drop` cleans up after the
@@ -1873,10 +2374,12 @@ mod linux {
         };
         let json = snapshot.to_json();
         eprintln!("mvm-host-vm-init: boot-timings={json}");
+        let body = format!("{json}\n");
         let path = format!("{JOB_DIR}/boot-timings.json");
-        if let Err(e) = std::fs::write(&path, format!("{json}\n")) {
+        if let Err(e) = std::fs::write(&path, &body) {
             eprintln!("mvm-host-vm-init: failed to write {path}: {e}");
         }
+        mirror_host_visible_out_artifact("boot-timings.json", &body);
     }
 
     /// Drive the install pipeline against `/job/install_spec.json`.
@@ -1907,7 +2410,7 @@ mod linux {
             InstallContext, InstallError, RESULT_FILENAME, SystemCommandRunner, run_install,
         };
         use crate::install_spec::parse;
-        use crate::proxy::VsockProxyLifecycle;
+        use crate::proxy::ChildProxyLifecycle;
 
         let bytes = match std::fs::read(spec_path) {
             Ok(b) => b,
@@ -1939,7 +2442,12 @@ mod linux {
         }
 
         let runner = SystemCommandRunner;
-        let mut proxy = VsockProxyLifecycle::default();
+        // The production proxy lifecycle
+        // spawns `mvm-egress-proxy` from PATH. The builder VM
+        // flake installs the binary at `/sbin/mvm-egress-proxy`
+        // (alongside `/sbin/mvm-host-vm-init`), which is on the
+        // kernel's default PATH for PID 1.
+        let mut proxy = ChildProxyLifecycle::default_binary();
         let ctx = InstallContext {
             spec: &spec,
             job_dir: Path::new(job_dir),
@@ -2073,13 +2581,16 @@ mod linux {
     /// over /nix. Each step depends on the previous, so this stays
     /// single-threaded inside.
     fn setup_nix_store(timings: &Arc<Mutex<BootTimings>>, anchor: Instant) -> Result<(), String> {
+        append_init_breadcrumb("setup_nix_store_enter", NIX_STORE_DEV);
         std::fs::create_dir_all(NIX_STORE_MOUNT)
             .map_err(|e| format!("create {NIX_STORE_MOUNT}: {e}"))?;
         if let Some(reason) = nix_store_dev_needs_format(NIX_STORE_DEV)? {
+            append_init_breadcrumb("setup_nix_store_format", &reason);
             eprintln!("mvm-host-vm-init: formatting {NIX_STORE_DEV} ({reason})");
             format_ext4(NIX_STORE_DEV)?;
         }
         mount_fs(NIX_STORE_DEV, NIX_STORE_MOUNT, "ext4")?;
+        append_init_breadcrumb("setup_nix_store_mounted", NIX_STORE_MOUNT);
         stamp(timings, |t| {
             t.nix_device_ready_ms = Some(BootTimings::ms_since(anchor))
         });
@@ -2091,8 +2602,9 @@ mod linux {
         // — the kernel comes up with the subsystems registered.
 
         match mount_nix_overlay() {
-            Ok(()) => {}
+            Ok(()) => append_init_breadcrumb("setup_nix_overlay", "overlay"),
             Err(e) => {
+                append_init_breadcrumb("setup_nix_overlay_fallback", &e);
                 eprintln!(
                     "mvm-host-vm-init: overlay /nix setup failed ({e}); falling back to seed copy"
                 );
@@ -2143,6 +2655,7 @@ mod linux {
     /// kernel modules (themselves fanned out across two threads),
     /// then mounts the three virtio-fs shares.
     fn setup_modules_and_virtiofs(timings: &Arc<Mutex<BootTimings>>, anchor: Instant) {
+        append_init_breadcrumb("setup_modules_and_virtiofs_enter", "start");
         // Load FUSE + virtio-fs kernel modules before mounting the
         // host-exported shares. Stock nixpkgs kernel ships these as
         // `=m` (loadable modules); without modprobe, `mount -t
@@ -2175,7 +2688,10 @@ mod linux {
         // surfaces as a normal file-not-found inside cmd.sh.
         for (tag, target) in VIRTIOFS_MOUNTS {
             if let Err(e) = mount_virtiofs(tag, target) {
+                append_init_breadcrumb("virtiofs_mount_error", &format!("{tag}->{target}: {e}"));
                 eprintln!("mvm-host-vm-init: virtio-fs '{tag}' -> {target} failed: {e}");
+            } else {
+                append_init_breadcrumb("virtiofs_mount_ok", &format!("{tag}->{target}"));
             }
         }
         // User-supplied volumes (`mvmctl dev up -v …` / MVM_VOLUMES),
@@ -2281,7 +2797,12 @@ mod linux {
     /// artifact tar onto the raw output block device for the host to read back
     /// with `builder_disk_transport::read_output_disk`.
     fn collect_disk_transport_output(t: &crate::DiskTransport) -> Result<(), String> {
-        for f in ["result", "boot-timings.json"] {
+        for f in [
+            "result",
+            "boot-timings.json",
+            "nix-stderr.log",
+            "nix-stdout.log",
+        ] {
             let src = format!("{JOB_DIR}/{f}");
             if Path::new(&src).exists() {
                 let _ = std::fs::copy(&src, format!("{OUT_DIR}/{f}"));
@@ -2343,14 +2864,9 @@ mod linux {
         }
 
         // eth0 bring-up + DHCP + static fallback (.3) via the shared guest-net
-        // helper — the same path the workload guest netinit uses. The static
-        // fallback applies on the shared gateway-backed libkrun/Vz subnet
-        // only; QEMU/slirp uses its own `ip=` autoconfig.
-        if !std::path::Path::new("/sys/class/net/eth0").exists() {
-            eprintln!("mvm-host-vm-init: no eth0 present; using vsock-only egress path");
-            return Ok(());
-        }
-
+        // helper — the same path the workload guest netinit uses. This only
+        // exists for the lanes that still present an `eth0` at all; the
+        // overlay/runtime rollout itself stays on the explicit vsock seams.
         mvm_guest::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.3")
     }
 
@@ -2366,7 +2882,7 @@ mod linux {
         // serves the persistent dispatch
         // loop; this single-shot wrapper passes a no-op so the
         // two code paths share their `Command`/`wait` logic.
-        run_job_streaming(cmd_sh, None, Isolation::Inherit, &[], |_line| {})
+        run_job_streaming(cmd_sh, None, Isolation::Inherit, |_line| {})
     }
 
     /// How the build subprocess relates to
@@ -2493,7 +3009,6 @@ mod linux {
         cmd_sh: &str,
         tmpdir: Option<&str>,
         isolation: Isolation,
-        env: &[(&str, &str)],
         mut on_line: F,
     ) -> (i32, String) {
         use std::collections::VecDeque;
@@ -2517,8 +3032,10 @@ mod linux {
         if let Some(t) = tmpdir {
             cmd.env("TMPDIR", t);
         }
-        for (key, value) in env {
-            cmd.env(key, value);
+        if crate::vsock_egress_requested_from_cmdline(
+            &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
+        ) {
+            crate::apply_vsock_egress_proxy_env(&mut cmd);
         }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -2569,9 +3086,28 @@ mod linux {
             nl = "\n",
         );
         let path = format!("{JOB_DIR}/result");
-        if let Err(e) = std::fs::write(&path, body) {
+        if let Err(e) = std::fs::write(&path, &body) {
             eprintln!("mvm-host-vm-init: failed to write {path}: {e}");
         }
+        mirror_host_visible_out_artifact("result", &body);
+    }
+
+    pub(crate) fn mirror_artifact_into_dir(dir: &Path, file_name: &str, body: &str) {
+        if !dir.is_dir() {
+            return;
+        }
+        let path = dir.join(file_name);
+        if let Err(e) = std::fs::write(&path, body) {
+            eprintln!(
+                "mvm-host-vm-init: failed to mirror {} into {}: {e}",
+                file_name,
+                path.display()
+            );
+        }
+    }
+
+    fn mirror_host_visible_out_artifact(file_name: &str, body: &str) {
+        mirror_artifact_into_dir(Path::new(OUT_DIR), file_name, body);
     }
 
     /// Minimal JSON string escaper. Only handles the characters
@@ -3023,7 +3559,6 @@ mod linux {
                 cmd_path.to_str().unwrap(),
                 None,
                 Isolation::Inherit,
-                &[],
                 |line| {
                     collected.lock().unwrap().push(line.to_string());
                 },
@@ -3055,7 +3590,6 @@ mod linux {
                 cmd_path.to_str().unwrap(),
                 None,
                 Isolation::Inherit,
-                &[],
                 |line| {
                     collected.lock().unwrap().push(line.to_string());
                 },
@@ -3146,7 +3680,6 @@ mod linux {
                 cmd_path.to_str().unwrap(),
                 Some(scratch_str),
                 Isolation::Inherit,
-                &[],
                 |_| {},
             );
             assert_eq!(code, 0);
@@ -3178,13 +3711,8 @@ mod linux {
             let sentinel = dir.path().to_str().expect("utf-8 tempdir").to_string();
             let mut env = mvm_core::util::test_env::TestEnv::new();
             env.set("TMPDIR", &sentinel);
-            let (code, tail) = run_job_streaming(
-                cmd_path.to_str().unwrap(),
-                None,
-                Isolation::Inherit,
-                &[],
-                |_| {},
-            );
+            let (code, tail) =
+                run_job_streaming(cmd_path.to_str().unwrap(), None, Isolation::Inherit, |_| {});
             assert_eq!(code, 0);
             assert_eq!(tail, format!("tmpdir={sentinel}"));
         }
@@ -3243,7 +3771,6 @@ mod linux {
                 cmd_path.to_str().unwrap(),
                 None,
                 Isolation::Unshared,
-                &[],
                 |_| {},
             );
             assert_eq!(code, 0, "tail={tail}");
