@@ -2271,6 +2271,39 @@ pub fn resolved_runtime_overlay(config: &FlakeRunConfig) -> Option<(&str, &str, 
     ))
 }
 
+/// Resolve the initrd to attach for a flake boot, enforcing the dm-verity
+/// fail-closed invariant.
+///
+/// A caller-supplied stage-1 initrd wins over the verity initramfs at
+/// `<rootfs_dir>/rootfs.initrd` (the two never co-exist in practice). When
+/// verity is requested — a `roothash` is set — but neither an initrd is
+/// available, refuse to boot: without the verity initramfs the kernel would
+/// silently mount `/dev/vda` directly, dropping dm-verity and booting an
+/// unsealed root. That must fail closed, not fall through to an unverified
+/// boot.
+fn resolve_effective_initrd(config: &FlakeRunConfig) -> Result<Option<String>> {
+    // Convention from the flake: the verity initrd lives at
+    // `<rev_dir>/rootfs.initrd`, alongside `rootfs.{ext4,verity,roothash}`.
+    // Only derived when both the verity sidecar and roothash are present.
+    let verity_initrd_path = config
+        .verity_path
+        .as_deref()
+        .zip(config.roothash.as_deref())
+        .and_then(|_| {
+            std::path::Path::new(&config.rootfs_path)
+                .parent()
+                .map(|p| format!("{}/rootfs.initrd", p.display()))
+        })
+        .filter(|p| std::path::Path::new(p).exists());
+
+    let effective_initrd = config.initrd_path.clone().or(verity_initrd_path);
+
+    if config.roothash.is_some() && effective_initrd.is_none() {
+        anyhow::bail!("verity roothash present but no verity initramfs; refusing to boot unsealed");
+    }
+    Ok(effective_initrd)
+}
+
 /// Configure a flake-built microVM via the Firecracker API (multi-VM).
 #[instrument(skip_all, fields(name = %config.name))]
 pub fn configure_flake_microvm(config: &FlakeRunConfig, abs_dir: &str, socket: &str) -> Result<()> {
@@ -2321,20 +2354,10 @@ pub fn configure_flake_microvm_with_drives_dir(
     // the pivot in userspace via the initramfs, the kernel's `root=`
     // setting becomes irrelevant — `mvm-verity-init` chooses the real
     // root explicitly via `mount` + `switch_root`.
-    let verity_initrd_path = config
-        .verity_path
-        .as_deref()
-        .zip(config.roothash.as_deref())
-        .and_then(|_| {
-            // Convention from `nix/flake.nix`: the verity initrd lives
-            // at `<rev_dir>/rootfs.initrd`, alongside `rootfs.{ext4,
-            // verity,roothash}`. Fall back to `None` if the file isn't
-            // present (older templates that pre-date the initrd path).
-            std::path::Path::new(&config.rootfs_path)
-                .parent()
-                .map(|p| format!("{}/rootfs.initrd", p.display()))
-        })
-        .filter(|p| std::path::Path::new(p).exists());
+    // Resolve the initrd, enforcing the fail-closed verity invariant: a
+    // roothash-requested boot with no verity initramfs must error rather than
+    // silently mount /dev/vda unsealed.
+    let effective_initrd = resolve_effective_initrd(config)?;
     // The runtime overlay only has a consumer when verity is on —
     // `mvm-verity-init` is the PID 1 that reads
     // `mvm.runtime_roothash=` and bind-mounts the overlay at
@@ -2350,15 +2373,6 @@ pub fn configure_flake_microvm_with_drives_dir(
     };
     let verity_args: Option<String> =
         build_verity_cmdline_args(config.roothash.as_deref(), overlay.map(|(_, _, h)| h));
-
-    // Pick the initrd to attach: caller-supplied (NixOS stage-1) wins
-    // over the verity initrd. They can't both be present in practice —
-    // the production minimal-init path doesn't use a NixOS stage-1 —
-    // but the precedence is documented for future contributors.
-    let effective_initrd = config
-        .initrd_path
-        .clone()
-        .or_else(|| verity_initrd_path.clone());
 
     let boot_args = if effective_initrd.is_some() {
         // initrd owns root mounting. Verity adds the cmdline knobs the
@@ -3646,6 +3660,87 @@ mod tests {
         std::fs::write(dir.path().join("rootfs.verity"), b"hash-tree").unwrap();
         std::fs::write(dir.path().join("rootfs.roothash"), b"not-a-hex-roothash").unwrap();
         assert_eq!(probe_verity_sidecar(rootfs.to_str().unwrap()), (None, None));
+    }
+
+    #[test]
+    fn resolve_effective_initrd_fails_closed_when_verity_requested_without_initramfs() {
+        // A roothash means dm-verity was requested. With no verity
+        // initramfs present (and no caller-supplied stage-1), booting would
+        // silently mount /dev/vda unsealed — the claim-3 hole. Refuse.
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"data").unwrap();
+        std::fs::write(dir.path().join("rootfs.verity"), b"hash-tree").unwrap();
+        // Deliberately do NOT write rootfs.initrd.
+
+        let mut cfg = baseline_run_config(None);
+        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
+        cfg.verity_path = Some(
+            dir.path()
+                .join("rootfs.verity")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        cfg.roothash = Some(ROOTFS_HASH.into());
+
+        let err = resolve_effective_initrd(&cfg).expect_err("must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("refusing to boot unsealed"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn resolve_effective_initrd_proceeds_when_verity_initramfs_present() {
+        // Roothash + the sibling rootfs.initrd present ⇒ the verity boot
+        // path is complete, so resolution yields that initrd.
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"data").unwrap();
+        std::fs::write(dir.path().join("rootfs.verity"), b"hash-tree").unwrap();
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&initrd, b"initramfs").unwrap();
+
+        let mut cfg = baseline_run_config(None);
+        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
+        cfg.verity_path = Some(
+            dir.path()
+                .join("rootfs.verity")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        cfg.roothash = Some(ROOTFS_HASH.into());
+
+        let got = resolve_effective_initrd(&cfg).expect("verity boot path is complete");
+        assert_eq!(got.as_deref(), Some(initrd.to_str().unwrap()));
+    }
+
+    #[test]
+    fn resolve_effective_initrd_proceeds_with_caller_supplied_initrd() {
+        // A caller-supplied stage-1 initrd satisfies the invariant even when
+        // no sibling rootfs.initrd exists, and takes precedence.
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"data").unwrap();
+
+        let mut cfg = baseline_run_config(None);
+        cfg.rootfs_path = rootfs.to_string_lossy().into_owned();
+        cfg.roothash = Some(ROOTFS_HASH.into());
+        cfg.initrd_path = Some("/k/stage1.initrd".into());
+
+        let got = resolve_effective_initrd(&cfg).expect("caller initrd satisfies the guard");
+        assert_eq!(got.as_deref(), Some("/k/stage1.initrd"));
+    }
+
+    #[test]
+    fn resolve_effective_initrd_unsealed_boot_unaffected() {
+        // No roothash ⇒ verity is not requested. The guard must not fire;
+        // a plain unsealed rootfs boots with no initrd (kernel mounts vda).
+        let cfg = baseline_run_config(None);
+        assert!(cfg.roothash.is_none());
+        let got = resolve_effective_initrd(&cfg).expect("plain unsealed boot proceeds");
+        assert_eq!(got, None);
     }
 
     #[test]

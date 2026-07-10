@@ -20,6 +20,7 @@ use mvm_build::oci_to_rootfs::{
     ImageStaging, MaterializedRootfs, Mke2fsOptions, OciUnpackError, StagingOptions,
     VeritysetupOptions, materialize_to_ext4, seal_with_verity,
 };
+use mvm_build::run_image::seal_run_rootfs_with_verity;
 use std::path::Path;
 use tempfile::TempDir;
 
@@ -238,6 +239,77 @@ fn seal_detects_post_format_rootfs_tamper() {
         "veritysetup verify must reject a tampered rootfs; stdout={} stderr={}",
         String::from_utf8_lossy(&verify.stdout),
         String::from_utf8_lossy(&verify.stderr)
+    );
+}
+
+/// Materialize a small ext4 whose `etc/version` carries `payload`, so two
+/// distinct payloads yield rootfs images with distinct data blocks — the input
+/// the content-binding assertion needs. Output is named `rootfs.ext4` so the
+/// sealer derives the `rootfs.verity` / `rootfs.roothash` sibling names the boot
+/// probe expects.
+fn make_ext4_with_payload(payload: &[u8]) -> (TempDir, std::path::PathBuf) {
+    let staging_tmp = TempDir::new().unwrap();
+    let staging = ImageStaging::new(staging_tmp.path(), StagingOptions::default()).unwrap();
+    write_file(staging_tmp.path(), "etc/version", payload);
+    write_file(staging_tmp.path(), "bin/sh", b"#!/bin/sh\necho ok\n");
+    let staged = staging.finalize().unwrap();
+
+    let out_dir = TempDir::new().unwrap();
+    let output = out_dir.path().join("rootfs.ext4");
+    let mke2fs_options = Mke2fsOptions {
+        block_size: 1024,
+        ..Mke2fsOptions::default()
+    };
+    materialize_to_ext4(&staged, &output, &mke2fs_options).expect("materialize_to_ext4");
+    (out_dir, output)
+}
+
+#[test]
+fn seal_run_rootfs_emits_probe_compatible_sidecars() {
+    // The path-based capability must emit the exact sibling names the backend's
+    // `probe_verity_sidecar` reads (`rootfs.verity` + `rootfs.roothash`) with a
+    // 64-char lowercase-hex roothash — the probe's acceptance contract.
+    if skip_if_no_veritysetup() || skip_if_no_mke2fs() {
+        return;
+    }
+    let (_keep, rootfs_ext4) = make_ext4_with_payload(b"v1");
+    let sealed = seal_run_rootfs_with_verity(&rootfs_ext4).expect("seal_run_rootfs_with_verity");
+
+    let dir = rootfs_ext4.parent().unwrap();
+    assert_eq!(sealed.sidecar_path, dir.join("rootfs.verity"));
+    assert_eq!(sealed.roothash_path, dir.join("rootfs.roothash"));
+    assert!(sealed.sidecar_path.exists(), "verity sidecar must exist");
+    assert!(sealed.roothash_path.exists(), "roothash file must exist");
+
+    let on_disk = std::fs::read_to_string(&sealed.roothash_path).unwrap();
+    let hash = on_disk.trim();
+    assert!(!hash.is_empty(), "roothash file must be non-empty");
+    // Mirror `probe_verity_sidecar`'s acceptance check exactly: 64 hex chars.
+    assert_eq!(hash.len(), 64, "sha256 hex roothash must be 64 chars");
+    assert!(
+        hash.bytes().all(|b| b.is_ascii_hexdigit()),
+        "roothash must be hex: {hash:?}"
+    );
+    assert_eq!(hash, sealed.roothash);
+}
+
+#[test]
+fn seal_run_rootfs_roothash_binds_to_content() {
+    // Changing the rootfs bytes must change the roothash — the load-bearing
+    // claim-3 content-binding property. Different `etc/version` payloads produce
+    // different data blocks and so must produce different roothashes.
+    if skip_if_no_veritysetup() || skip_if_no_mke2fs() {
+        return;
+    }
+    let (_keep_a, rootfs_a) = make_ext4_with_payload(b"content-alpha");
+    let (_keep_b, rootfs_b) = make_ext4_with_payload(b"content-bravo-differs");
+
+    let sealed_a = seal_run_rootfs_with_verity(&rootfs_a).expect("seal a");
+    let sealed_b = seal_run_rootfs_with_verity(&rootfs_b).expect("seal b");
+
+    assert_ne!(
+        sealed_a.roothash, sealed_b.roothash,
+        "distinct rootfs content must yield distinct roothashes"
     );
 }
 
