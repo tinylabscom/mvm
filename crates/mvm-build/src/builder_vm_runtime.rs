@@ -1579,6 +1579,7 @@ mod tests {
     fn read_job_result_with_diagnostics_includes_vm_logs_on_missing_result() {
         let scratch = tempfile::TempDir::new().unwrap();
         let vm_state_dir = scratch.path().join("vm-state");
+        let persistent_store_image = scratch.path().join("nix-store.img");
         std::fs::create_dir_all(&vm_state_dir).unwrap();
         std::fs::write(vm_state_dir.join("console.log"), b"console line\n").unwrap();
         std::fs::write(vm_state_dir.join("supervisor.stderr.log"), b"stderr line\n").unwrap();
@@ -1590,7 +1591,11 @@ mod tests {
         .unwrap();
         std::fs::write(
             vm_state_dir.join("supervisor-config.json"),
-            r#"{"krun":{"extra_disks":[{"id":"nix-store","path":"/tmp/nix-store.img"},{"id":"input","path":"/tmp/input.img"}]}}"#,
+            format!(
+                r#"{{"krun":{{"extra_disks":[{{"id":"nix-store","path":"{}"}},{{"id":"input","path":"{}"}}]}}}}"#,
+                persistent_store_image.display(),
+                scratch.path().join("input.img").display(),
+            ),
         )
         .unwrap();
         std::fs::write(
@@ -1617,7 +1622,7 @@ mod tests {
         assert!(msg.contains("supervisor-config.json:"));
         assert!(msg.contains("mvm-host-vm-init.lifecycle.log:"));
         assert!(msg.contains("virtiofs_mount_ok: job->/job"));
-        assert!(msg.contains("persistent nix-store init lifecycle:"));
+        assert!(msg.contains("persistent nix-store init lifecycle"));
     }
 
     #[test]

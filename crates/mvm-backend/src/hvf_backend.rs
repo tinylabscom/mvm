@@ -314,8 +314,7 @@ fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<Stri
     if egress.is_none()
         && grants.is_empty()
         && !verity_enabled
-        && config.runtime_source_policy
-            == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
+        && config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
     {
         return None;
     }
