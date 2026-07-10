@@ -572,7 +572,8 @@ impl VmBackend for LibkrunBackend {
                         tunnel.guest_port,
                     ))
                 }),
-                host_tun_interface_name: None,
+                network_policy: Some(&config.network_policy),
+                vm_name: &config.name,
             })?;
         let pid_file = cfg.pid_file();
         // Remove any stale PID file from a previous crashed supervisor

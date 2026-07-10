@@ -116,6 +116,10 @@ mod workload_wait;
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 pub use libkrun::LibkrunBackend;
 pub use mock::MockBackend;
+/// Derive a workload's packet-tunnel launch config from its egress policy. The
+/// admitted launch path (`mvmctl`) calls this to enable the L3 forwarding tunnel
+/// for an allow-list policy on the vsock-only backend.
+pub use network_tunnel_spawn::{TunnelLaunchIdentity, network_tunnel_for_launch};
 pub use qemu::QemuBackend;
 pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 

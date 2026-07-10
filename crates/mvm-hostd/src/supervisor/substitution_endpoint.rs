@@ -32,36 +32,6 @@ fn default_forward_timeout_secs() -> u64 {
     30
 }
 
-/// Resolve a network policy's host-allowlist entries to IPs (the admission-time
-/// DNS pin) so `host:port` rules gate at L4. Literal IPs need no lookup; an
-/// unresolvable host pins an empty IP set so the projection fails CLOSED (deny)
-/// rather than widening.
-fn resolve_dns_pins(
-    np: &mvm_core::policy::network_policy::NetworkPolicy,
-) -> mvm_core::policy::dns_pin::DnsPinRegistry {
-    use std::net::{IpAddr, ToSocketAddrs};
-    let mut reg = mvm_core::policy::dns_pin::DnsPinRegistry::new();
-    let Some(rules) = np.resolve_rules() else {
-        return reg; // unrestricted: no L4 pin set
-    };
-    for hp in rules {
-        let ips: Vec<IpAddr> = if let Ok(ip) = hp.host.parse::<IpAddr>() {
-            vec![ip]
-        } else {
-            (hp.host.as_str(), 0u16)
-                .to_socket_addrs()
-                .map(|addrs| addrs.map(|sa| sa.ip()).collect())
-                .unwrap_or_default()
-        };
-        reg.add(mvm_core::policy::dns_pin::DnsPin::new(
-            hp.host,
-            ips,
-            chrono::Duration::hours(24),
-        ));
-    }
-    reg
-}
-
 /// Build the claim-10 egress gate for a resolved network policy: resolve the
 /// host-allowlist DNS pins once (fails closed on an unresolvable host), then
 /// project through the shared claim-10 gate every backend agrees on. The
@@ -70,7 +40,7 @@ fn resolve_dns_pins(
 pub fn build_egress_gate(
     policy: &mvm_core::policy::network_policy::NetworkPolicy,
 ) -> mvm_backend::vmm::egress_gate::EgressGate {
-    let pins = resolve_dns_pins(policy);
+    let pins = mvm_core::policy::dns_pin::resolve_network_policy_pins(policy);
     let now = chrono::Utc::now().to_rfc3339();
     mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now)
 }

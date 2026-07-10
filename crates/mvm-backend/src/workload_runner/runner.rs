@@ -144,7 +144,8 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
                         tunnel.guest_port,
                     ))
                 }),
-                host_tun_interface_name: None,
+                network_policy: Some(&inputs.config.network_policy),
+                vm_name: &inputs.config.name,
             })?;
 
         let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {

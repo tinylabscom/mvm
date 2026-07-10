@@ -229,3 +229,81 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+    use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
+    use mvm_hostd::net_l3::L3Decision;
+
+    /// The exact wire shape `network_tunnel_spawn` emits for an admitted
+    /// allow-list: the packet policy is `l3_forward` carrying the policy + pins
+    /// nested under `gate`, plus a per-VM host TUN interface name.
+    fn l3_forward_worker_config_json() -> serde_json::Value {
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
+        let mut pins = DnsPinRegistry::new();
+        pins.add(DnsPin::at(
+            "api.example.com",
+            vec!["93.184.216.34".parse().unwrap()],
+            "2026-05-15T12:00:00Z",
+            "2026-05-15T13:00:00Z",
+        ));
+        serde_json::json!({
+            "listener": { "kind": "uds", "path": "/run/mvm/tunnel.sock" },
+            "audit_jsonl_path": "/run/mvm/network-tunnel.audit.jsonl",
+            "worker": {
+                "expected_session": {
+                    "tenant_id": "tenant-a",
+                    "vm_id": "vm-1",
+                    "boot_id": "boot-1",
+                    "session_nonce": "nonce-1",
+                    "maximum_frame_size": 4096,
+                    "accepted_features": { "ipv4": true, "audit_stream": true }
+                },
+                "network_config": {
+                    "interface_name": "mvm-net0",
+                    "guest_ipv4": "10.240.0.2",
+                    "prefix_len": 30,
+                    "gateway_ipv4": "10.240.0.1",
+                    "dns_servers": ["10.240.0.1"],
+                    "mtu": 1500
+                },
+                "initial_credit": { "flow_id": 0, "bytes": 4096, "packets": 1024 },
+                "packet_policy": {
+                    "kind": "l3_forward",
+                    "gate": { "policy": policy, "pins": pins },
+                    "interface_name": "mvmt0123456789"
+                },
+                "limits": { "max_packets": 1024, "max_bytes": 8388608 }
+            }
+        })
+    }
+
+    #[test]
+    fn worker_parses_l3_forward_config_into_gate() {
+        let config: SubprocessConfig =
+            serde_json::from_value(l3_forward_worker_config_json()).expect("l3_forward parses");
+        config.worker.validate().expect("valid worker config");
+
+        let TunnelPacketPolicy::L3Forward {
+            gate,
+            interface_name,
+        } = config.worker.packet_policy
+        else {
+            panic!("an l3_forward config must parse into a TunnelPacketPolicy::L3Forward");
+        };
+        assert_eq!(interface_name.as_deref(), Some("mvmt0123456789"));
+
+        // The reconstructed gate admits the pinned destination and drops an
+        // unpinned one — the admission decision survives the wire round-trip.
+        assert_eq!(
+            gate.decide("93.184.216.34".parse().unwrap(), 6, Some(443)),
+            L3Decision::Allow
+        );
+        assert!(matches!(
+            gate.decide("203.0.113.7".parse().unwrap(), 6, Some(443)),
+            L3Decision::Drop(_)
+        ));
+    }
+}
