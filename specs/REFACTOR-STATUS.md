@@ -1213,7 +1213,7 @@ PLAN 236 — Host-authority runtime roadmap   🟡 IN PROGRESS
   [x] Refresh the cleanest Phase 2A slice (`feat/vsock-port-handler-registry` / PR `#1599`) onto current `main`.
   [x] Re-run host-side validation on the refreshed slice (`cargo check --workspace`, `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`).
   [ ] Fold the refreshed Phase 2A slice into `main`.
-  [ ] Reconcile the remaining dirty/behind prerequisite worktrees so `scripts/check-plan-236-go.sh` can turn `GO`.
+  [x] Reconcile the remaining dirty/behind prerequisite worktrees onto `origin/main`; the temporary Plan 236 readiness helper is no longer kept in-tree.
 
 PLAN 240 — Vsock port-handler registry production-readiness   ✅ COMPLETE
   [x] Replace the host-I/O thread's fixed 5 ms backstop with readiness-driven fd registration for agent, console, egress, and broker traffic.
