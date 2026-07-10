@@ -3693,7 +3693,7 @@ fn builder_flag_appears_in_help() {
         "`--builder` flag not surfaced in `mvmctl --help`; help text was:\n{help}"
     );
     assert!(
-        help.contains("libkrun") && help.contains("vz"),
+        help.contains("libkrun") && help.contains("hvf"),
         "`--builder` value choices missing from help; help text was:\n{help}"
     );
 }
@@ -3705,14 +3705,21 @@ fn builder_flag_accepts_libkrun() {
 }
 
 #[test]
-fn builder_flag_accepts_vz() {
-    let cli = Cli::try_parse_from(["mvmctl", "--builder", "vz", "doctor"]).expect("parse");
-    assert_eq!(cli.builder.as_deref(), Some("vz"));
+fn builder_flag_rejects_vz() {
+    // The vz backend was removed; `--builder vz` must no longer parse.
+    let err = Cli::try_parse_from(["mvmctl", "--builder", "vz", "doctor"]).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("invalid value")
+            || msg.contains("possible values")
+            || msg.contains("one of the values isn't valid for an argument"),
+        "expected clap to reject `--builder vz`, got: {msg}"
+    );
 }
 
 #[test]
 fn builder_flag_rejects_unknown_value() {
-    // Clap's `value_parser = ["libkrun", "vz"]` should refuse
+    // Clap's `value_parser = ["libkrun", "qemu", "hvf"]` should refuse
     // anything outside that set. Catches typos like `=vmz` early
     // rather than letting `MVM_BUILDER_BACKEND_ENV`'s
     // warn-and-fall-through path eat them.
