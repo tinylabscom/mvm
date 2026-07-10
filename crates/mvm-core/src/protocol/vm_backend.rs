@@ -1959,6 +1959,40 @@ mod tests {
         assert!(!caps.satisfies(&required));
     }
 
+    /// Capability-honesty selection over `no_routable_guest_nic`. A vsock-only
+    /// backend (libkrun / HVF advertise this guarantee) satisfies a run that
+    /// requires it, while a NIC-bearing backend (Firecracker / qemu) shortfalls
+    /// and the diagnostic names the field so selection fails closed with a
+    /// recovery hint instead of silently degrading onto a routable-NIC backend.
+    /// The concrete per-backend values are witnessed in the backend crate; this
+    /// pins the selection LOGIC over that renamed capability.
+    #[test]
+    fn no_routable_guest_nic_required_selects_only_vsock_only_backends() {
+        let required = RequiredCapabilities {
+            no_routable_guest_nic: true,
+            ..Default::default()
+        };
+
+        // libkrun / HVF shape: no host-routable guest NIC ⇒ satisfied.
+        let vsock_only = VmCapabilities {
+            no_routable_guest_nic: true,
+            ..VmCapabilities::default()
+        };
+        assert!(vsock_only.shortfall(&required).is_empty());
+        assert!(vsock_only.satisfies(&required));
+
+        // Firecracker / qemu shape: routable guest NIC ⇒ shortfall names the field.
+        let nic_bearing = VmCapabilities {
+            no_routable_guest_nic: false,
+            ..VmCapabilities::default()
+        };
+        assert_eq!(
+            nic_bearing.shortfall(&required),
+            vec!["no_routable_guest_nic"]
+        );
+        assert!(!nic_bearing.satisfies(&required));
+    }
+
     #[test]
     fn satisfies_when_backend_advertises_every_required_capability() {
         let caps = VmCapabilities {

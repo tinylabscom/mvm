@@ -1639,6 +1639,81 @@ mod tests {
         assert_eq!(vsock_egress_cmdline_token(true, true), None);
     }
 
+    fn seed_grant_sidecar_and_key(vm_name: &str) {
+        use mvm_core::plan::{Nonce, VerbGrant, VerbId};
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let nonce = Nonce::from_bytes([3u8; 16]);
+        let not_after = mvm_core::time::parse_iso8601("2099-01-01T00:00:00Z").unwrap();
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: "cc".repeat(32),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            grant: VerbGrant {
+                session_id: vm_name.to_string(),
+                plan_nonce: nonce,
+                not_after,
+                verbs: vec![VerbId::new("run-entrypoint").unwrap()],
+                sig: vec![0u8; 64],
+            },
+        };
+        std::fs::write(
+            state_dir.join("verb-grant.json"),
+            serde_json::to_vec(&envelope).unwrap(),
+        )
+        .unwrap();
+        let keys_dir = mvm_core::config::mvm_keys_dir();
+        std::fs::create_dir_all(&keys_dir).unwrap();
+        std::fs::write(keys_dir.join("host-signer.pub"), [0xEEu8; 32]).unwrap();
+    }
+
+    /// The libkrun supervisor cmdline must carry all three plan-bound grant
+    /// tokens — the verb grant envelope, the enforcement assertion, and the
+    /// host-signer trust anchor — mirroring the HVF `grant_tokens` parity test.
+    /// A vsock-only guest has no config drive, so all three ride the cmdline;
+    /// an auto-fallback HVF→libkrun must not land on a backend that drops them.
+    #[test]
+    fn build_supervisor_config_cmdline_carries_all_three_grant_tokens() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let vm_name = "libkrun-grant-parity";
+        seed_grant_sidecar_and_key(vm_name);
+
+        let config = VmStartConfig {
+            name: vm_name.into(),
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            ..Default::default()
+        };
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        let cfg = build_supervisor_config(&config, &state_dir).expect("build");
+        let cmdline = cfg
+            .krun
+            .kernel_cmdline
+            .as_deref()
+            .expect("supervisor cmdline present");
+        assert!(
+            cmdline.contains("mvm.verb_grant="),
+            "verb grant token missing: {cmdline}"
+        );
+        assert!(
+            cmdline.contains(&crate::microvm::require_grant_cmdline_token(vm_name).unwrap()),
+            "require_grant token missing: {cmdline}"
+        );
+        assert!(
+            cmdline.contains("mvm.host_signer_pub="),
+            "host_signer_pub trust anchor missing: {cmdline}"
+        );
+    }
+
     #[test]
     fn persist_vsock_egress_marker_writes_and_clears_marker() {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
