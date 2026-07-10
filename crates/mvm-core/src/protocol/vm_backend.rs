@@ -549,8 +549,13 @@ pub struct VmCapabilities {
     /// Backend can restore a guest by eager copy-on-write (`MAP_PRIVATE`) of a
     /// snapshot RAM section — the primary local warm-restore path.
     pub eager_cow_restore: bool,
-    /// Backend can run a guest with no virtio-net device (no guest NIC).
-    pub no_guest_nic: bool,
+    /// Guest has no host-routable NIC: nothing in the guest can reach the
+    /// network by IP. This is a reachability guarantee, not a device-count one
+    /// — a backend that attaches a virtio-net device but drains/sinks it with
+    /// no upstream route still satisfies this (libkrun), and so does a backend
+    /// that presents no NIC at all (HVF). Egress, when permitted, rides the
+    /// vsock proxy instead.
+    pub no_routable_guest_nic: bool,
     /// Backend supports host/vsock-mediated networking (egress/ingress brokers
     /// over vsock) instead of a guest NIC.
     pub host_vsock_proxy: bool,
@@ -581,7 +586,7 @@ pub struct RequiredCapabilities {
     pub device_state_snapshot: bool,
     pub vcpu_state_snapshot: bool,
     pub vsock: bool,
-    pub no_guest_nic: bool,
+    pub no_routable_guest_nic: bool,
     pub host_vsock_proxy: bool,
     pub pty_exec: bool,
 }
@@ -617,7 +622,11 @@ impl VmCapabilities {
                 "vcpu_state_snapshot",
             ),
             (required.vsock, self.vsock, "vsock"),
-            (required.no_guest_nic, self.no_guest_nic, "no_guest_nic"),
+            (
+                required.no_routable_guest_nic,
+                self.no_routable_guest_nic,
+                "no_routable_guest_nic",
+            ),
             (
                 required.host_vsock_proxy,
                 self.host_vsock_proxy,

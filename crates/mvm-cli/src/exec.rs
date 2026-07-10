@@ -317,7 +317,7 @@ fn requires_vsock_proxy_backend(
 fn vsock_proxy_backend_requirements() -> RequiredCapabilities {
     RequiredCapabilities {
         vsock: true,
-        no_guest_nic: true,
+        no_routable_guest_nic: true,
         host_vsock_proxy: true,
         ..Default::default()
     }
@@ -1557,7 +1557,7 @@ mod tests {
         assert!(msg.contains("NIC-less host-vsock-proxy backend"));
         assert!(msg.contains("backend hvf lacks ["));
         assert!(msg.contains("host_vsock_proxy"));
-        assert!(msg.contains("no_guest_nic"));
+        assert!(msg.contains("no_routable_guest_nic"));
     }
 
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

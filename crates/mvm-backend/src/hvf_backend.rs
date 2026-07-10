@@ -281,7 +281,7 @@ impl VmBackend for HvfBackend {
             // rides the host vsock proxy (the gating endpoint), not a guest NIC.
             // Advertise those workload-path capabilities only when the detached
             // supervisor path is actually launchable on this host.
-            no_guest_nic: proxy_path_ready,
+            no_routable_guest_nic: proxy_path_ready,
             host_vsock_proxy: proxy_path_ready,
             // The hvf VMM can serve the unpacked OCI tree as a read-only
             // virtiofs root (dev tier); the run-path tier gate selects it only for
@@ -725,7 +725,7 @@ mod tests {
         unsafe {
             std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
         }
-        assert!(!caps.no_guest_nic);
+        assert!(!caps.no_routable_guest_nic);
         assert!(!caps.host_vsock_proxy);
         assert!(!caps.virtiofs_root);
     }
@@ -751,7 +751,7 @@ mod tests {
             std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
         }
         assert!(available);
-        assert!(caps.no_guest_nic);
+        assert!(caps.no_routable_guest_nic);
         assert!(caps.host_vsock_proxy);
         assert!(caps.virtiofs_root);
     }
