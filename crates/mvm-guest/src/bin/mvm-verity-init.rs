@@ -293,7 +293,7 @@ mod config {
             let data_blocks = 9_448;
             let hash_dev_size = 76 * 4_096;
             assert_eq!(
-                super::linux::choose_hash_start_block(data_blocks, hash_dev_size)
+                crate::linux::choose_hash_start_block(data_blocks, hash_dev_size)
                     .expect("hash start block"),
                 1
             );
@@ -305,7 +305,7 @@ mod config {
             let data_blocks = 9_448;
             let hash_dev_size = 75 * 4_096;
             assert_eq!(
-                super::linux::choose_hash_start_block(data_blocks, hash_dev_size)
+                crate::linux::choose_hash_start_block(data_blocks, hash_dev_size)
                     .expect("hash start block"),
                 0
             );
@@ -317,7 +317,7 @@ mod config {
             let data_blocks = 9_448;
             let hash_dev_size = 74 * 4_096;
             let err =
-                super::linux::choose_hash_start_block(data_blocks, hash_dev_size).unwrap_err();
+                crate::linux::choose_hash_start_block(data_blocks, hash_dev_size).unwrap_err();
             assert!(err.contains("hash device too small"), "{err}");
         }
     }
