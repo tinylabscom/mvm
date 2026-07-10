@@ -86,16 +86,22 @@ Delete `build_in_workspace` and the run-time mtime auto-rebuild. `resolve_or_bui
 and skipping absent ones:
 
 1. Explicit per-bin env override (`MVM_HVF_SUPERVISOR_PATH`, …).
-2. **Sibling of the current exe** — a shipped release ships helpers next to
-   `mvmctl`; this must win so releases resolve correctly.
-3. `MVM_AUX_BIN_DIR` (baked in at build time; the dev path).
+2. `MVM_AUX_BIN_DIR` (baked in at build time; the dev path — the freshly built
+   copy).
+3. **Sibling of the current exe** — a shipped release ships helpers next to
+   `mvmctl`.
 4. Workspace `target/{release,debug}` (explicit `just build-supervisors`, IDE
    builds, etc.).
 
-`MVM_AUX_BIN_DIR` is baked into release binaries too, but points at the CI
+`MVM_AUX_BIN_DIR` must precede the exe-sibling: in a dev `cargo run` the exe is
+`target/debug/mvmctl`, so the exe-sibling dir *is* `target/debug` — which cargo
+never refreshes for a `[[bin]]` it didn't just build, so a stale copy there
+(e.g. from `just build-supervisors`) would otherwise shadow the freshly built
+`MVM_AUX_BIN_DIR` copy and defeat the freshness guarantee. This is release-safe:
+`MVM_AUX_BIN_DIR` is baked into release binaries too but points at the CI
 builder's `OUT_DIR`, which does not exist on an end-user machine — so it is
-`is_file`-skipped there and the sibling check (2) wins. Release resolution is
-unchanged.
+`is_file`-skipped there and the exe-sibling (the release tarball dir) wins.
+Release resolution is unchanged.
 
 If a genuinely-needed helper is absent, `resolve` returns a precise error naming
 the bin, the reason it is likely missing (e.g. "requires libkrun"), and the
