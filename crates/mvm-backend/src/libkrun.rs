@@ -1047,35 +1047,12 @@ impl VmBackend for LibkrunBackend {
 
 // ─── helpers ───────────────────────────────────────────────────────
 
-const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
-    "Cargo.toml",
-    "Cargo.lock",
-    "crates/mvm-vm-host/Cargo.toml",
-    "crates/mvm-vm-host/src",
-    "crates/deps/libkrun-sys/Cargo.toml",
-    "crates/deps/libkrun-sys/src",
-    "crates/mvm-backend/Cargo.toml",
-    "crates/mvm-backend/src",
-    "crates/mvm-build/Cargo.toml",
-    "crates/mvm-build/src",
-    "crates/mvm-core/Cargo.toml",
-    "crates/mvm-core/src",
-    "crates/mvm-guest/Cargo.toml",
-    "crates/mvm-guest/src",
-    "crates/mvm-hostd/Cargo.toml",
-    "crates/mvm-hostd/src",
-];
-
-/// Resolve the absolute path to the `mvm-libkrun-supervisor` binary. Source
-/// checkouts rebuild the helper when its transitive inputs are newer so the
-/// supervisor JSON parser cannot drift behind the driver.
+/// Resolve the absolute path to the `mvm-libkrun-supervisor` binary. Compiled
+/// by mvmctl's build script; see [`crate::aux_bin`] for the search order.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
+    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
         bin: "mvm-libkrun-supervisor",
-        package: "mvm-vm-host",
         env_var: "MVM_LIBKRUN_SUPERVISOR_PATH",
-        features: &["libkrun-sys"],
-        input_roots: LIBKRUN_SUPERVISOR_INPUT_ROOTS,
     })
 }
 
