@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
@@ -87,11 +88,21 @@ impl AgentBridge {
         self.active = Some(counter);
     }
 
-    /// Raw fd of the bound listener, for the host-I/O thread to register with its
-    /// `mio::Poll` (readiness-driven accept). `None` until [`Self::bind`].
-    pub fn listener_fd(&self) -> Option<std::os::fd::RawFd> {
-        use std::os::fd::AsRawFd as _;
-        self.listener.as_ref().map(|l| l.as_raw_fd())
+    /// Fds the host-I/O thread should watch: the listener plus any established
+    /// host streams. Unestablished streams are excluded so buffered pre-accept
+    /// bytes do not keep the readiness loop hot before the guest accepts them.
+    pub fn poll_fds(&self) -> Vec<RawFd> {
+        let mut fds = Vec::new();
+        if let Some(listener) = &self.listener {
+            fds.push(listener.as_raw_fd());
+        }
+        fds.extend(
+            self.conns
+                .values()
+                .filter(|conn| conn.established)
+                .map(|conn| conn.stream.as_raw_fd()),
+        );
+        fds
     }
 
     /// Is `conn_id` a host-initiated agent stream (so guest packets addressed to it
@@ -340,5 +351,24 @@ mod tests {
         // Drained: a second take is empty (not re-reported).
         assert!(bridge.take_host_closed().is_empty());
         assert!(!bridge.is_agent_stream(conn_id), "conn removed on close");
+    }
+
+    #[test]
+    fn poll_fds_include_listener_and_only_established_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("agent.sock");
+        let mut bridge = AgentBridge::new();
+        bridge.bind(&sock).unwrap();
+
+        let client = UnixStream::connect(&sock).unwrap();
+        client.set_nonblocking(true).unwrap();
+        let conn_id = bridge.accept_new()[0];
+
+        let before_established = bridge.poll_fds();
+        assert_eq!(before_established.len(), 1, "listener only before accept");
+
+        bridge.on_established(conn_id);
+        let after_established = bridge.poll_fds();
+        assert_eq!(after_established.len(), 2, "listener plus established conn");
     }
 }

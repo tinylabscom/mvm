@@ -15,6 +15,7 @@
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
 
 use crate::addon_vsock_bridge::connect_host_vsock;
 
@@ -184,6 +185,44 @@ pub async fn run(listen: std::net::SocketAddr) -> std::io::Result<()> {
                 });
             }
             Err(e) => tracing::warn!(error = %e, "egress client accept failed"),
+        }
+    }
+}
+
+/// Bind the loopback SOCKS5 listener at `listen` and serve until `shutdown`
+/// flips to `true`.
+pub async fn run_until_shutdown(
+    listen: std::net::SocketAddr,
+    mut shutdown: watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    let listener = TcpListener::bind(listen).await?;
+    tracing::info!(
+        %listen,
+        vsock_port = EGRESS_VSOCK_PORT,
+        "egress SOCKS5 client started"
+    );
+    loop {
+        tokio::select! {
+            changed = shutdown.changed() => {
+                match changed {
+                    Ok(()) if *shutdown.borrow() => return Ok(()),
+                    Ok(()) => continue,
+                    Err(_) => return Ok(()),
+                }
+            }
+            accepted = listener.accept() => {
+                match accepted {
+                    Ok((client, peer)) => {
+                        tracing::debug!(%peer, "accepted egress client connection");
+                        tokio::spawn(async move {
+                            if let Err(e) = serve(client).await {
+                                tracing::warn!(error = %e, "egress client connection failed");
+                            }
+                        });
+                    }
+                    Err(e) => tracing::warn!(error = %e, "egress client accept failed"),
+                }
+            }
         }
     }
 }

@@ -547,7 +547,7 @@ stored machine requests outbound egress and is OCI-backed (`machine create
 host-vsock-proxy backend gate as transient `run --image`: only backends that
 honestly advertise `{ vsock, no_guest_nic, host_vsock_proxy }` are allowed,
 and incapable backends are refused instead of silently falling back to a guest
-NIC or `gvproxy`/`passt`. When the named spec came from an image-backed
+NIC helper or `passt`. When the named spec came from an image-backed
 manifest, `machine create --manifest`
 persists the manifest's `net`, `[network].allow_hosts`, `cpus`, `mem`,
 `mem_initial`, `[dev].volumes`, and `[dev].init` fields into the durable

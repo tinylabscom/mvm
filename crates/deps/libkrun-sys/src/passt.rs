@@ -47,6 +47,10 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// not reshuffle interface names.
 pub const DEFAULT_GUEST_MAC: [u8; 6] = [0xAE, 0xAD, 0xBE, 0xEF, 0x00, 0x01];
 
+const GATEWAY_ADDR: &str = "192.168.127.1";
+const HOST_ADDR: &str = "192.168.127.2";
+const GUEST_NETMASK: &str = "255.255.255.0";
+
 /// Errors the supervisor can return. Mirrors the
 /// [`crate::Error`] shape so consumers can surface a single error
 /// type, but keeps passt-specific failures distinguishable.
@@ -201,6 +205,15 @@ pub fn spawn(scratch_dir: &std::path::Path) -> Result<PasstHandle, PasstError> {
     //                       into a startup failure
     //   --quiet           — drop the boot-time chatter on inherited stdio
     //   --mtu 65520       — match libkrun's COMPAT_NET_FEATURES MTU
+    //   --address 192.168.127.2
+    //                     — expose a stable host-side IP inside the guest
+    //                       subnet rather than deriving one from the host's
+    //                       real uplink
+    //   --gateway 192.168.127.1
+    //                     — keep the guest's default route aligned with the
+    //                       long-standing libkrun native-gateway contract
+    //   --netmask 255.255.255.0
+    //                     — same /24 the shared guest-network fallback uses
     let mut cmd = Command::new(&passt_bin);
     cmd.args(passt_args(child_fd.as_raw_fd(), &pid_path));
 
@@ -307,6 +320,12 @@ fn passt_args(child_fd: RawFd, pid_path: &std::path::Path) -> Vec<OsString> {
         OsString::from("--quiet"),
         OsString::from("--mtu"),
         OsString::from("65520"),
+        OsString::from("--address"),
+        OsString::from(HOST_ADDR),
+        OsString::from("--gateway"),
+        OsString::from(GATEWAY_ADDR),
+        OsString::from("--netmask"),
+        OsString::from(GUEST_NETMASK),
     ]
 }
 
@@ -387,6 +406,20 @@ mod tests {
         assert!(
             args.iter().any(|arg| arg == "-P"),
             "passt args should keep the pid file path: {args:?}"
+        );
+        assert!(
+            args.windows(2).any(|pair| pair == ["--address", HOST_ADDR]),
+            "passt args should pin the host-side guest-subnet address: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--gateway", GATEWAY_ADDR]),
+            "passt args should pin the guest gateway address: {args:?}"
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--netmask", GUEST_NETMASK]),
+            "passt args should pin the guest subnet mask: {args:?}"
         );
     }
 

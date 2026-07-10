@@ -194,6 +194,21 @@ fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Optio
     .then(|| "mvm.vsock_egress=1".to_string())
 }
 
+fn persist_vsock_egress_marker(name: &str, enabled: bool) -> Result<()> {
+    let marker = mvm_core::config::vm_vsock_egress_marker_path(name);
+    if enabled {
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create vsock egress marker dir {}", parent.display()))?;
+        }
+        std::fs::write(&marker, b"1")
+            .with_context(|| format!("write vsock egress marker {}", marker.display()))?;
+    } else {
+        let _ = std::fs::remove_file(&marker);
+    }
+    Ok(())
+}
+
 fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
     let token = vsock_egress_cmdline_token(config, state_dir)?;
     let virtiofs_root = config.virtiofs_root.is_some();
@@ -271,6 +286,10 @@ impl VmBackend for HvfBackend {
         let console_log = state_dir.join("console.log");
         // Create/truncate the console capture file up front.
         let _ = crate::libkrun::open_console_capture(&console_log);
+        persist_vsock_egress_marker(
+            &config.name,
+            vsock_egress_cmdline_token(config, &state_dir).is_some(),
+        )?;
 
         // Clear any prior run's exit code so `wait` reads only this launch's.
         let workload_exit = state_dir.join("workload.exit");
@@ -589,6 +608,7 @@ fn hvf_probe() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn identifies_as_hvf() {
@@ -668,6 +688,21 @@ mod tests {
         assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
         assert!(cmdline.contains("mvm.vsock_egress=1"));
+    }
+
+    #[test]
+    fn persist_vsock_egress_marker_writes_and_clears_marker() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let dir = tempfile::tempdir().expect("tempdir");
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+
+        persist_vsock_egress_marker("hvf-marker-vm", true).expect("write marker");
+        assert!(mvm_core::config::vm_vsock_egress_marker_path("hvf-marker-vm").is_file());
+
+        persist_vsock_egress_marker("hvf-marker-vm", false).expect("clear marker");
+        assert!(!mvm_core::config::vm_vsock_egress_marker_path("hvf-marker-vm").exists());
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]

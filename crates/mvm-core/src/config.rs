@@ -532,6 +532,13 @@ pub fn vm_substitution_env_path(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("substitution-env.json")
 }
 
+/// Per-VM marker that the guest booted with the loopback SOCKS5 vsock egress
+/// client enabled. Invoke-time env synthesis reads it to route plain workload
+/// egress through the vsock proxy rather than any guest NIC path.
+pub fn vm_vsock_egress_marker_path(name: &str) -> std::path::PathBuf {
+    vm_state_dir(name).join("vsock-egress-enabled")
+}
+
 /// Per-VM Unix socket the `mvm-substitution-endpoint` binds and the hvf VMM's
 /// substitution bridge connects to: `<vm_state_dir>/substitution-endpoint.sock`
 ///. Unlike the Vz path (where the Swift supervisor proxies the guest

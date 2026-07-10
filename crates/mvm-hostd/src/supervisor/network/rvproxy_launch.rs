@@ -3,8 +3,8 @@
 //! Bridges the admitted policy bundle to [`super::rvproxy_config`]: resolve the
 //! tenant's effective egress, lower it, and write the `rvproxy run --config`
 //! TOML into the per-VM scratch dir. The supervisor sets the written path as
-//! `NetworkingMode::Gvproxy.native_config` so libkrun's gateway spawn launches
-//! rvproxy natively instead of in gvproxy-compat mode.
+//! `NetworkingMode::NativeGateway.native_config` so libkrun's gateway spawn launches
+//! rvproxy natively instead of in vfkit-gateway-compat mode.
 //!
 //! [`resolve_egress_and_dns`] is the single resolution the in-line splice also
 //! consumes, so the native gateway and the splice enforce byte-identical policy.
@@ -20,7 +20,8 @@ use mvm_core::policy::{EffectivePolicy, PolicyBundle, canonicalize_l4, resolve};
 
 use super::rvproxy_config::{RvproxyConfigParams, RvproxyTransparentConfig, render_rvproxy_config};
 
-/// Upstream resolvers the native gateway forwards allowed lookups to. gvproxy
+/// Upstream resolvers the native gateway forwards allowed lookups to. The old
+/// compat gateway
 /// reads the host's resolv.conf implicitly; rvproxy needs them named in
 /// `[dns].upstream`. Sourcing these from the host's resolver config is a
 /// follow-up — these public anycast resolvers keep the first cut self-contained.
@@ -63,7 +64,7 @@ pub fn egress_and_dns_from_effective(eff: &EffectivePolicy) -> (CanonicalEgress,
 
 /// Render the native rvproxy config for `bundle` and write it to
 /// `<scratch_dir>/rvproxy.toml`, returning the path. The transport socket is
-/// `<scratch_dir>/gvproxy.sock` — the exact path the gateway spawn polls — so
+/// `<scratch_dir>/native-gateway.sock` — the exact path the gateway spawn polls — so
 /// libkrun connects to the socket rvproxy binds. No bundle (Stage 0 / dev) →
 /// deny-all egress (the gateway still answers DNS for the dev network).
 pub fn write_native_gateway_config(
@@ -78,7 +79,7 @@ pub fn write_native_gateway_config(
         Some(b) => resolve_egress_and_dns(b, tenant, now),
         None => (CanonicalEgress::Rules(Vec::new()), Vec::new()),
     };
-    let transport_socket = scratch_dir.join("gvproxy.sock");
+    let transport_socket = scratch_dir.join("native-gateway.sock");
     let api_socket = scratch_dir.join("rvproxy-api.sock");
     let flow_audit_path = scratch_dir.join("flow-audit.jsonl");
     let toml = render_rvproxy_config(&RvproxyConfigParams {
@@ -145,7 +146,7 @@ mod tests {
         // Transport socket is the spawn-poll path.
         assert!(toml.contains(&format!(
             "path = \"{}\"",
-            tmp.path().join("gvproxy.sock").display()
+            tmp.path().join("native-gateway.sock").display()
         )));
         // Flow-audit export points where rvproxy_flow_audit tails.
         assert!(toml.contains(&format!(

@@ -12,14 +12,14 @@ use mvm_guest::guest_net::parse_ipv4;
 /// recovered from its host-readable `console.log`.
 ///
 /// The builder guest's init brings `eth0` up, runs busybox `udhcpc`, and
-/// on a failed lease falls back to the fixed gvproxy static address. Each
-/// path emits a distinct console line; this enum is the classification of
-/// the *last* such line (a VM can reboot, so later lines win).
+/// on a failed lease falls back to the fixed shared-gateway static address.
+/// Each path emits a distinct console line; this enum is the classification
+/// of the *last* such line (a VM can reboot, so later lines win).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuilderNetBootstrap {
     /// busybox udhcpc obtained a DHCP lease for `ip`.
     Lease { ip: String },
-    /// udhcpc failed and init applied the fixed gvproxy static address.
+    /// udhcpc failed and init applied the fixed shared-gateway static address.
     /// Degraded but reachable.
     StaticFallback { ip: String },
     /// udhcpc failed and no static fallback was applied — the builder VM
@@ -29,11 +29,11 @@ pub enum BuilderNetBootstrap {
     Unknown,
 }
 
-/// The fixed gvproxy static address init falls back to when DHCP fails.
-/// gvproxy's virtual subnet is `192.168.127.0/24` (gateway+DNS at `.1`,
-/// first DHCP client at `.3`); each builder VM gets its own gvproxy
+/// The fixed shared-gateway static address init falls back to when DHCP fails.
+/// The gateway-backed virtual subnet is `192.168.127.0/24` (gateway+DNS at
+/// `.1`, first DHCP client at `.3`); each builder VM gets its own gateway
 /// instance, so this address can't collide across VMs.
-const GVPROXY_STATIC_FALLBACK_IP: &str = "192.168.127.3";
+const SHARED_GATEWAY_STATIC_FALLBACK_IP: &str = "192.168.127.3";
 
 /// Classify a persistent builder VM's network-bootstrap outcome from its
 /// `console.log` contents.
@@ -47,9 +47,9 @@ pub fn classify_builder_net_bootstrap(console_log: &str) -> BuilderNetBootstrap 
     for line in console_log.lines() {
         if let Some(ip) = parse_udhcpc_lease_ip(line) {
             outcome = BuilderNetBootstrap::Lease { ip };
-        } else if line.contains("falling back to static gvproxy addressing") {
+        } else if is_static_fallback_line(line) {
             outcome = BuilderNetBootstrap::StaticFallback {
-                ip: GVPROXY_STATIC_FALLBACK_IP.to_string(),
+                ip: SHARED_GATEWAY_STATIC_FALLBACK_IP.to_string(),
             };
         } else if (line.contains("setup_network warning (non-fatal)")
             || line.contains("guest-net:"))
@@ -60,6 +60,11 @@ pub fn classify_builder_net_bootstrap(console_log: &str) -> BuilderNetBootstrap 
         }
     }
     outcome
+}
+
+fn is_static_fallback_line(line: &str) -> bool {
+    line.contains("falling back to static gateway addressing")
+        || line.contains("falling back to static gvproxy addressing")
 }
 
 /// Extract the leased IP from a busybox udhcpc lease line, if this is one.
@@ -109,6 +114,19 @@ some-service: ready";
     fn classify_static_fallback() {
         let log = "\
 udhcpc: no lease, failing
+guest-net: udhcpc exit 1 — falling back to static gateway addressing (192.168.127.3)";
+        assert_eq!(
+            classify_builder_net_bootstrap(log),
+            BuilderNetBootstrap::StaticFallback {
+                ip: "192.168.127.3".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn classify_static_fallback_accepts_legacy_gvproxy_wording() {
+        let log = "\
+udhcpc: no lease, failing
 guest-net: udhcpc exit 1 — falling back to static gvproxy addressing (192.168.127.3)";
         assert_eq!(
             classify_builder_net_bootstrap(log),
@@ -151,7 +169,7 @@ guest-net: spawn /bin/udhcpc: udhcpc exit 1";
         let log = "\
 udhcpc: lease of 192.168.127.3 obtained from 192.168.127.1, lease time 3600
 --- reboot ---
-guest-net: udhcpc exit 1 — falling back to static gvproxy addressing (192.168.127.3)";
+guest-net: udhcpc exit 1 — falling back to static gateway addressing (192.168.127.3)";
         assert_eq!(
             classify_builder_net_bootstrap(log),
             BuilderNetBootstrap::StaticFallback {

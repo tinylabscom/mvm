@@ -66,7 +66,7 @@ jobs:
   #      commands or host multi-tenant orchestration state.
   #   5. Ephemeral port discovery — `TcpListener::bind("127.0.0.1:0")`
   #      in `crates/mvm-cli/src/template_cmd.rs` and
-  #      `crates/deps/libkrun-sys/src/gvproxy.rs` (`free_loopback_port`).
+  #      `crates/deps/libkrun-sys/src/native_gateway.rs` (`free_loopback_port`).
   #      Binds to find a free port; drops the listener immediately so
   #      the caller (here, gvproxy's mandatory ssh-forward listener)
   #      can claim it. Not a daemon.
@@ -204,7 +204,7 @@ jobs:
               --glob '!crates/mvm-cli/src/commands/shared/vsock.rs' \
               --glob '!crates/mvm-cli/src/metrics_server.rs' \
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
-              --glob '!crates/deps/libkrun-sys/src/gvproxy.rs' \
+              --glob '!crates/deps/libkrun-sys/src/native_gateway.rs' \
               --glob '!crates/mvm-backend/src/mock_guest_agent.rs' \
               --glob '!crates/mvm-guest-helpers/src/addon_vsock_bridge.rs' \
               --glob '!crates/mvm-backend/src/qemu.rs' \

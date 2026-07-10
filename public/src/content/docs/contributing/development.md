@@ -19,8 +19,8 @@ VMM:
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
 | macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). `mvmctl dev up` only retries libkrun if the HVF path fails. |
-| macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy`. |
-| Linux + `/dev/kvm` | **No** — Firecracker runs directly. Swap `gvproxy` for `passt` from your distro package manager. |
+| macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw`. |
+| Linux + `/dev/kvm` | **No** — Firecracker runs directly; install `passt` from your distro package manager. |
 
 `mvmctl doctor` reports the resolved choice on the `builder backend`
 line (`<backend> — <source> — <availability>`) and emits install hints
@@ -182,7 +182,8 @@ just ci
 `crates/mvm-cli/tests/core_demo_e2e.rs` exercises the whole `dev up → compile → up → vsock ping` spine end-to-end. It boots the persistent builder VM, lowers `examples/python/hello-app/app.py` to a flake, builds + boots the workload microVM, and waits for the guest agent to answer over vsock. Default-skips so it doesn't fire on routine `cargo test` runs; gate is `MVM_E2E_SMOKE=1`:
 
 ```bash
-# Local run — requires libkrun + libkrunfw + gvproxy on macOS, or
+# Local run — requires libkrun + libkrunfw plus the configured native gateway
+# helper on macOS, or
 # native /dev/kvm on Linux. Threads `--hypervisor` per host.
 MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
 ```

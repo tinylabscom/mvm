@@ -266,10 +266,10 @@ fn materialize_ext4_in_builder_vm(
         }],
     };
 
-    // Auto-fallback: an auto-detected libkrun materializer that fails at
-    // VM creation on Linux (libkrun rc -22 / `KVM_SET_USER_MEMORY_REGION`)
-    // transparently retries on the qemu builder, which works there. An
-    // explicit `MVM_BUILDER_BACKEND` opts out.
+    // Keep the materializer on the same builder-backend policy as the rest of
+    // the builder surface. In particular, do not silently retry on qemu here:
+    // qemu's user-net path is a dev/test tier, not a production substitute for
+    // the vsock-oriented builder/runtime contract.
     let selected = ext4_materializer_choice();
     let explicit = crate::builder_backend_select::resolve_env_override().is_some();
     crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {

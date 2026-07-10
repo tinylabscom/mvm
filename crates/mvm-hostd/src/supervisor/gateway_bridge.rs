@@ -2,7 +2,7 @@
 //! trust boundary unaudited).
 //!
 //! Sits in-process between the guest virtio-net fd and the host
-//! gateway (passt / gvproxy). Two variants cover the backends
+//! gateway (passt / native gateway). Two variants cover the backends
 //! mvm ships today:
 //!
 //! - [`BridgeEndpoints::Passt`] — libkrun on Linux. SOCK_STREAM
@@ -10,8 +10,8 @@
 //!   with `tokio::io::copy_bidirectional`. The libkrun-side fd is
 //!   the supervisor's half of a *second* socketpair, so libkrun
 //!   reads bridge-relayed bytes instead of passt directly.
-//! - [`BridgeEndpoints::LibkrunGvproxy`] — libkrun on macOS.
-//!   SOCK_DGRAM (vfkit unixgram); gvproxy creates a listener,
+//! - [`BridgeEndpoints::LibkrunNativeGateway`] — libkrun on macOS.
+//!   SOCK_DGRAM (vfkit unixgram); the native gateway creates a listener,
 //!   bridge binds an outer listener libkrun connects to, shuffles
 //!   datagrams both ways. SOCK_DGRAM preserves packet boundaries.
 //!
@@ -292,13 +292,13 @@ pub enum BridgeEndpoints {
         /// `krun_add_net_unixstream_fd`.
         supervisor_fd: OwnedFd,
     },
-    /// macOS libkrun + gvproxy. SOCK_DGRAM datagram shuffle —
-    /// gvproxy creates its own listener at
-    /// `gvproxy_socket_path`; bridge binds at
+    /// macOS libkrun + native gateway. SOCK_DGRAM datagram shuffle —
+    /// the gateway creates its own listener at
+    /// `gateway_socket_path`; bridge binds at
     /// `supervisor_listen_path` and libkrun connects to *that*.
     /// Bridge relays datagrams both directions.
-    LibkrunGvproxy {
-        gvproxy_socket_path: PathBuf,
+    LibkrunNativeGateway {
+        gateway_socket_path: PathBuf,
         supervisor_listen_path: PathBuf,
     },
 }
@@ -334,7 +334,8 @@ pub struct BridgeConfig {
     /// `FlowEvent` lifecycle there). The bridge spawns a follower that maps each
     /// record into a [`FlowEvent`] and feeds the **same** chain-signer the splice
     /// feeds — so rvproxy's native flow events become a source of the chain-signed
-    /// audit. `None` for the gvproxy/passt path (the splice is the only source).
+    /// audit. `None` for the native-gateway/passt path (the splice is the only
+    /// source).
     pub native_flow_audit_path: Option<PathBuf>,
 }
 
@@ -815,12 +816,12 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
                 )
                 .await;
             }
-            BridgeEndpoints::LibkrunGvproxy {
-                gvproxy_socket_path,
+            BridgeEndpoints::LibkrunNativeGateway {
+                gateway_socket_path,
                 supervisor_listen_path,
             } => {
-                run_libkrun_gvproxy_bridge(
-                    gvproxy_socket_path,
+                run_libkrun_native_gateway_bridge(
+                    gateway_socket_path,
                     supervisor_listen_path,
                     cfg.vm_name.clone(),
                     cfg.plan.tenant.0.clone(),
@@ -1237,7 +1238,7 @@ async fn bridge_copy_bidirectional(
 }
 
 // ============================================================================
-// libkrun + gvproxy bridge (SOCK_DGRAM shuffle)
+// libkrun + native-gateway bridge (SOCK_DGRAM shuffle)
 // ============================================================================
 
 /// True if `raw` parses to a flow already in `killed`. Cheap:
@@ -1257,8 +1258,8 @@ async fn flow_is_killed(killed: &tokio::sync::Mutex<HashSet<FlowKey>>, raw: &[u8
     }
 }
 
-async fn run_libkrun_gvproxy_bridge(
-    gvproxy_socket_path: PathBuf,
+async fn run_libkrun_native_gateway_bridge(
+    gateway_socket_path: PathBuf,
     supervisor_listen_path: PathBuf,
     vm_name: String,
     tenant: String,
@@ -1278,19 +1279,19 @@ async fn run_libkrun_gvproxy_bridge(
             tracing::error!(
                 path = %supervisor_listen_path.display(),
                 error = %e,
-                "gvproxy bridge: failed to bind libkrun-facing socket"
+                "native gateway bridge: failed to bind libkrun-facing socket"
             );
             return;
         }
     };
-    // The gvproxy-facing socket MUST be bound to a pathname, not left
-    // unbound/autobind: gvproxy refuses datagrams from an empty-address
+    // The gateway-facing socket MUST be bound to a pathname, not left
+    // unbound/autobind: the gateway refuses datagrams from an empty-address
     // peer ("vfkit accept error: vfkit socket address is empty") and needs
     // a concrete address to send replies back to. macOS additionally never
     // autobinds AF_UNIX datagram sockets, so an unbound socket here has no
     // address at all and the gateway can neither accept our frames nor
     // reply. Bind a sibling path next to the libkrun-facing listener.
-    let outbound_bind_path = gvproxy_outbound_bind_path(&supervisor_listen_path);
+    let outbound_bind_path = native_gateway_outbound_bind_path(&supervisor_listen_path);
     let _ = std::fs::remove_file(&outbound_bind_path);
     let outbound = match UnixDatagram::bind(&outbound_bind_path) {
         Ok(s) => s,
@@ -1298,16 +1299,16 @@ async fn run_libkrun_gvproxy_bridge(
             tracing::error!(
                 path = %outbound_bind_path.display(),
                 error = %e,
-                "gvproxy bridge: failed to bind gvproxy-facing socket"
+                "native gateway bridge: failed to bind gateway-facing socket"
             );
             return;
         }
     };
-    if let Err(e) = outbound.connect(&gvproxy_socket_path) {
+    if let Err(e) = outbound.connect(&gateway_socket_path) {
         tracing::error!(
-            path = %gvproxy_socket_path.display(),
+            path = %gateway_socket_path.display(),
             error = %e,
-            "gvproxy bridge: failed to connect to gvproxy"
+            "native gateway bridge: failed to connect to gateway"
         );
         return;
     }
@@ -1409,7 +1410,7 @@ async fn run_libkrun_gvproxy_bridge(
                 &latency_a,
             ) {
                 PacketDecision::Forward { frame, .. } => {
-                    // send (not send_to) — outbound is connected to gvproxy.
+                    // send (not send_to) — outbound is connected to the gateway.
                     outbound_a.send(&frame).await?;
                 }
                 PacketDecision::Kill {
@@ -1546,11 +1547,11 @@ async fn run_libkrun_gvproxy_bridge(
     let _ = std::fs::remove_file(&outbound_bind_path);
 }
 
-/// Bind path for the bridge's gvproxy-facing datagram socket — a sibling
+/// Bind path for the bridge's gateway-facing datagram socket — a sibling
 /// of the libkrun-facing listener (`<listen>.gw-out`). Must be a real
-/// pathname: gvproxy rejects empty-address peers and macOS never
+/// pathname: the gateway rejects empty-address peers and macOS never
 /// autobinds AF_UNIX datagram sockets.
-fn gvproxy_outbound_bind_path(supervisor_listen_path: &std::path::Path) -> PathBuf {
+fn native_gateway_outbound_bind_path(supervisor_listen_path: &std::path::Path) -> PathBuf {
     let mut s = supervisor_listen_path.as_os_str().to_os_string();
     s.push(".gw-out");
     PathBuf::from(s)
@@ -2183,7 +2184,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // gvproxy packet-observer pipeline wiring
+    // native-gateway packet-observer pipeline wiring
     // -----------------------------------------------------------------
 
     use crate::supervisor::network::latency::ObserverLatency;
@@ -2312,16 +2313,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn gvproxy_pipeline_forwards_modified_frame() {
+    async fn native_gateway_pipeline_forwards_modified_frame() {
         let dir = tempfile::tempdir().unwrap();
-        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
-        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
 
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
         let policy = unrestricted_flow_policy();
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
-            gvproxy_path.clone(),
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
+            gateway_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
             "t".to_string(),
@@ -2337,34 +2338,34 @@ mod tests {
             .unwrap();
 
         let mut buf = vec![0u8; 65536];
-        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gvproxy.recv(&mut buf))
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gateway.recv(&mut buf))
             .await
-            .expect("gvproxy must receive the forwarded frame in time")
+            .expect("gateway must receive the forwarded frame in time")
             .expect("recv ok");
         let parsed = crate::supervisor::network::packet::parse(&buf[..n])
             .expect("forwarded frame re-parses");
         assert!(
             parsed.l4_payload.windows(6).any(|w| w == b"XXXXXX"),
-            "gvproxy must see the redacted payload"
+            "gateway must see the redacted payload"
         );
         assert!(
             !parsed.l4_payload.windows(6).any(|w| w == b"SECRET"),
-            "the secret must not reach gvproxy"
+            "the secret must not reach the gateway"
         );
         bridge.abort();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn gvproxy_pipeline_drop_kills_flow_and_emits_fault() {
+    async fn native_gateway_pipeline_drop_kills_flow_and_emits_fault() {
         let dir = tempfile::tempdir().unwrap();
-        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
-        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
         let policy = unrestricted_flow_policy();
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
-            gvproxy_path.clone(),
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
+            gateway_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
             "t".to_string(),
@@ -2376,14 +2377,14 @@ mod tests {
         let libkrun = connect_libkrun(&sup_listen).await;
         libkrun.send(&tcp_egress_frame(b"anything")).await.unwrap();
 
-        // The dropped packet must NOT reach gvproxy.
+        // The dropped packet must NOT reach the gateway.
         let mut buf = vec![0u8; 65536];
         let got = tokio::time::timeout(
             std::time::Duration::from_millis(500),
-            gvproxy.recv(&mut buf),
+            gateway.recv(&mut buf),
         )
         .await;
-        assert!(got.is_err(), "dropped packet must not reach gvproxy");
+        assert!(got.is_err(), "dropped packet must not reach the gateway");
 
         // A FlowOpened then an ObserverFault must arrive on the event stream.
         let mut saw_fault = false;
@@ -2406,10 +2407,10 @@ mod tests {
 
     // ───────────────────────────────────────────────────────────────
     // Per-tenant L4 egress enforcement exercised
-    // through the LIVE libkrun gvproxy bridge (real Unix datagram
+    // through the LIVE libkrun native-gateway bridge (real Unix datagram
     // sockets, no VM). Drives the production scan (`build_egress_scan`)
-    // over `run_libkrun_gvproxy_bridge`: a denied flow is withheld from
-    // gvproxy, an allowed flow is forwarded.
+    // over `run_libkrun_native_gateway_bridge`: a denied flow is withheld from
+    // the gateway, an allowed flow is forwarded.
     // ───────────────────────────────────────────────────────────────
 
     /// A bridge `ObserverWiring` whose egress scan is the real production scan for
@@ -2454,7 +2455,7 @@ mod tests {
     /// 255.255.255.255:67). The payload is a stub — only the UDP 5-tuple matters
     /// to the flow gate. Used to pin the deny-all control-plane posture: DHCP is
     /// an egress flow and is dropped at the gate under deny-all (the guest then
-    /// self-assigns the static gvproxy fallback address — no lease, no hang).
+    /// self-assigns the static native-gateway fallback address — no lease, no hang).
     fn dhcp_discover_frame() -> Vec<u8> {
         use etherparse::PacketBuilder;
         let b = PacketBuilder::ethernet2([1; 6], [0xff; 6])
@@ -2468,16 +2469,16 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn l4_policy_denied_flow_is_dropped_through_the_live_bridge() {
         let dir = tempfile::tempdir().unwrap();
-        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
-        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
 
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
         let policy = unrestricted_flow_policy();
         // deny_all egress → the egress frame to 93.184.216.34:443 has no
         // matching rule → L4PolicyScan drops it at the chokepoint.
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
-            gvproxy_path.clone(),
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
+            gateway_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
             "t".to_string(),
@@ -2489,16 +2490,16 @@ mod tests {
         let libkrun = connect_libkrun(&sup_listen).await;
         libkrun.send(&tcp_egress_frame(b"payload")).await.unwrap();
 
-        // The denied packet must NOT reach gvproxy.
+        // The denied packet must NOT reach the gateway helper.
         let mut buf = vec![0u8; 65536];
         let got = tokio::time::timeout(
             std::time::Duration::from_millis(500),
-            gvproxy.recv(&mut buf),
+            gateway.recv(&mut buf),
         )
         .await;
         assert!(
             got.is_err(),
-            "an L4-denied egress packet must not reach gvproxy"
+            "an L4-denied egress packet must not reach the gateway helper"
         );
 
         // The scan-chain kill surfaces as an ObserverFault on the flow stream.
@@ -2540,7 +2541,7 @@ mod tests {
             port_hi: 443,
         }])
         .unwrap();
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -2576,7 +2577,7 @@ mod tests {
         let policy = unrestricted_flow_policy();
         // Egress allow-list = {example.com} → a UDP/53 query for a host outside
         // it is sink-holed at the chokepoint.
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -2634,7 +2635,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
         let policy = unrestricted_flow_policy();
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -2664,7 +2665,7 @@ mod tests {
 
     // ───────────────────────────────────────────────────────────────
     // Per-tenant FlowPolicy enforce exercised through the
-    // LIVE libkrun gvproxy bridge (real Unix datagram sockets, no VM). Unlike
+    // LIVE libkrun native-gateway bridge (real Unix datagram sockets, no VM). Unlike
     // the L4/DNS scan tests above, these drive the *flow-open* gate
     // (`PlanFlowPolicy`) with a NoopScan wiring, isolating the coarse
     // deny-by-default gate from the packet-scan layer.
@@ -2684,7 +2685,7 @@ mod tests {
         let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_effective(
             &mvm_core::policy::EffectivePolicy::default(),
         ));
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -2740,7 +2741,7 @@ mod tests {
 
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
         // `open` egress mode → the flow opens; with NoopScan the frame is
-        // forwarded to gvproxy.
+        // forwarded to the gateway.
         let eff = mvm_core::policy::EffectivePolicy {
             egress: mvm_core::policy::EgressPolicy {
                 mode: Some("open".to_string()),
@@ -2749,7 +2750,7 @@ mod tests {
             ..Default::default()
         };
         let policy: Arc<dyn FlowPolicy> = Arc::new(PlanFlowPolicy::from_effective(&eff));
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -2795,7 +2796,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -2815,7 +2816,7 @@ mod tests {
         .await;
         assert!(
             got.is_err(),
-            "deny-all bare policy must withhold egress from gvproxy"
+            "deny-all bare policy must withhold egress from the gateway"
         );
         let mut saw_drop = false;
         for _ in 0..4 {
@@ -2845,7 +2846,7 @@ mod tests {
     async fn bare_unrestricted_policy_forwards_egress_through_the_live_bridge() {
         // `--network-preset unrestricted`: the bare lowering opens the flow gate
         // and the L4 scan resolves to `Unrestricted` (no host:port gate), so
-        // arbitrary egress reaches gvproxy under the always-on mandatory-deny
+        // arbitrary egress reaches the gateway under the always-on mandatory-deny
         // backstop. This is the verdict-0 arm of the libkrun egress matrix
         // (`up --network-preset unrestricted`), the sibling of the deny-all and
         // allow-list arms above. Its absence let the "drops every flow regardless
@@ -2856,12 +2857,12 @@ mod tests {
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
         );
         let dir = tempfile::tempdir().unwrap();
-        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
-        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
-            gvproxy_path.clone(),
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
+            gateway_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
             "t".to_string(),
@@ -2876,9 +2877,9 @@ mod tests {
             .await
             .unwrap();
         let mut buf = vec![0u8; 65536];
-        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gvproxy.recv(&mut buf))
+        let n = tokio::time::timeout(std::time::Duration::from_secs(3), gateway.recv(&mut buf))
             .await
-            .expect("unrestricted egress must reach gvproxy")
+            .expect("unrestricted egress must reach the gateway")
             .expect("recv ok");
         let parsed = crate::supervisor::network::packet::parse(&buf[..n])
             .expect("forwarded frame re-parses");
@@ -2888,7 +2889,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn live_bridge_relays_ingress_reply_back_to_the_guest() {
-        // Full-duplex proof: an internet→guest reply gvproxy emits must traverse
+        // Full-duplex proof: an internet→guest reply the gateway emits must traverse
         // the bridge back to the guest. libkrun listens for the return path on a
         // derived `<listen>-krun.sock` sibling — NOT the recvfrom source of its
         // egress datagrams (on macOS that source is not a usable reply target).
@@ -2903,12 +2904,12 @@ mod tests {
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
         );
         let dir = tempfile::tempdir().unwrap();
-        let gvproxy_path = dir.path().join("gvproxy.sock");
+        let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
-        let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
+        let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
-            gvproxy_path.clone(),
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
+            gateway_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
             "t".to_string(),
@@ -2939,18 +2940,18 @@ mod tests {
         let mut buf = vec![0u8; 65536];
         let (n, bridge_peer) = tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            gvproxy.recv_from(&mut buf),
+            gateway.recv_from(&mut buf),
         )
         .await
-        .expect("egress must reach gvproxy")
+        .expect("egress must reach the gateway")
         .expect("recv ok");
         assert!(n > 0);
-        // gvproxy emits the internet→guest reply back to the bridge's
-        // gvproxy-facing socket.
+        // The gateway emits the internet→guest reply back to the bridge's
+        // gateway-facing socket.
         let bridge_outbound = bridge_peer
             .as_pathname()
-            .expect("the bridge's gvproxy-facing socket is bound to a pathname");
-        gvproxy
+            .expect("the bridge's gateway-facing socket is bound to a pathname");
+        gateway
             .send_to(
                 &tcp_ingress_frame_from([1, 1, 1, 1], 443, b"synack"),
                 bridge_outbound,
@@ -2972,7 +2973,7 @@ mod tests {
     async fn bare_deny_all_drops_dhcp_discover_through_the_live_bridge() {
         // Deny-all control-plane posture (loopback-only): DHCP is an egress flow,
         // so it is dropped at the flow gate under deny-all — no lease reaches the
-        // guest. The guest then self-assigns the static gvproxy fallback address
+        // guest. The guest then self-assigns the static native-gateway fallback address
         // (udhcpc `-n` exits rather than hanging on a never-arriving OFFER). This
         // pins the decision: deny-all admits NO control-plane carve-out; egress
         // (incl. DHCP) is uniformly denied and the static fallback keeps eth0 up.
@@ -2985,7 +2986,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -3026,7 +3027,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -3064,7 +3065,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -3110,7 +3111,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -3150,7 +3151,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -3194,7 +3195,7 @@ mod tests {
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
         let (tx, _rx) = mpsc::channel::<FlowEvent>(64);
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gvproxy_path.clone(),
             sup_listen.clone(),
             "vm-test".to_string(),
@@ -3224,11 +3225,11 @@ mod tests {
 
     // -----------------------------------------------------------------
     // Live DHCP handshake through a REAL gateway
-    // (gvproxy / rvproxy). Opt-in (MVM_GATEWAY_DHCP_E2E=1); skips when
+    // (compat gateway / rvproxy). Opt-in (MVM_GATEWAY_DHCP_E2E=1); skips when
     // unset or when the gateway binary is absent. Validates the macOS
-    // gvproxy datagram arm end-to-end against a real userspace gateway:
+    // native-gateway datagram arm end-to-end against a real userspace gateway:
     // no microVM, no KVM. Doubles as an rvproxy drop-in conformance check
-    // (point MVM_GATEWAY_BIN at it once it speaks the gvproxy `-listen-vfkit`
+    // (point MVM_GATEWAY_BIN at it once it speaks the compat `-listen-vfkit`
     // CLI + vfkit/DHCP contract — see rvproxy's GVPROXY_CONFORMANCE.md).
     // -----------------------------------------------------------------
 
@@ -3301,21 +3302,22 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn gvproxy_dhcp_offer_roundtrips_through_bridge() {
+    async fn native_gateway_dhcp_offer_roundtrips_through_bridge() {
         if std::env::var("MVM_GATEWAY_DHCP_E2E").is_err() {
             eprintln!("skip: set MVM_GATEWAY_DHCP_E2E=1 to run the live gateway DHCP test");
             return;
         }
-        let gw_bin = std::env::var("MVM_GATEWAY_BIN").unwrap_or_else(|_| "gvproxy".to_string());
+        let gw_bin = std::env::var("MVM_GATEWAY_BIN")
+            .unwrap_or_else(|_| "native gateway helper".to_string());
         let tmp = tempfile::tempdir().unwrap();
         let gw_sock = tmp.path().join("gw.sock");
         let gw_log = tmp.path().join("gw.log");
         let stdio = std::fs::File::create(tmp.path().join("gw-stdio.log")).unwrap();
 
         // Real gateway: `-listen-vfkit unixgram://<sock>` is the contract
-        // (gvproxy's, and what rvproxy must match). `-ssh-port` is
-        // gvproxy-specific (it always binds an SSH-forward listener); only
-        // pass it for gvproxy so other gateways aren't tripped by an
+        // (the compat gateway's, and what rvproxy must match). `-ssh-port` is
+        // compat-gateway-specific (it always binds an SSH-forward listener); only
+        // pass it when the helper is literally `gvproxy` so other gateways aren't tripped by an
         // unknown flag.
         let mut cmd = std::process::Command::new(&gw_bin);
         cmd.arg("-listen-vfkit")
@@ -3324,10 +3326,10 @@ mod tests {
             .arg(&gw_log)
             .stdout(stdio.try_clone().unwrap())
             .stderr(stdio);
-        let is_gvproxy = std::path::Path::new(&gw_bin)
+        let is_legacy_gvproxy = std::path::Path::new(&gw_bin)
             .file_name()
             .is_none_or(|n| n == "gvproxy");
-        if is_gvproxy {
+        if is_legacy_gvproxy {
             cmd.arg("-ssh-port").arg(free_tcp_port().to_string());
         }
         let mut gateway = match cmd.spawn() {
@@ -3356,12 +3358,12 @@ mod tests {
             );
         }
 
-        // Bridge: gvproxy-facing = the gateway's socket; libkrun-facing =
+        // Bridge: gateway-facing = the gateway's socket; libkrun-facing =
         // a listener the harness connects to.
         let sup_listen = tmp.path().join("sup.sock");
         let (tx, mut rx) = mpsc::channel::<FlowEvent>(64);
         let policy = unrestricted_flow_policy();
-        let bridge = tokio::spawn(run_libkrun_gvproxy_bridge(
+        let bridge = tokio::spawn(run_libkrun_native_gateway_bridge(
             gw_sock.clone(),
             sup_listen.clone(),
             "vm-dhcp".to_string(),

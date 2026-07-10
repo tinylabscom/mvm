@@ -31,7 +31,7 @@ pub(in crate::commands) enum CacheAction {
         #[arg(long)]
         orphan_builds: bool,
         /// Skip reaping orphaned per-VM helpers. By default `prune` reaps
-        /// `mvm-libkrun-supervisor` / `gvproxy` / console-tail processes that
+        /// `mvm-libkrun-supervisor` / legacy gateway / console-tail processes that
         /// were reparented to launchd when their parent `mvmctl` was killed
         /// mid-run, plus their `~/.cache/mvm/builder-vm/vms/<id>/` cache
         /// directories — so dead microVMs don't accumulate. The sweep is

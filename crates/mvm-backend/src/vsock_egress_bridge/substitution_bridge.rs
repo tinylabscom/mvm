@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -69,6 +70,11 @@ impl SubstitutionBridge {
     /// True while at least one endpoint stream is open (the heartbeat gate).
     pub fn has_active(&self) -> bool {
         !self.conns.is_empty()
+    }
+
+    /// Fds the host-I/O thread should watch for endpoint replies.
+    pub fn poll_fds(&self) -> Vec<RawFd> {
+        self.conns.values().map(AsRawFd::as_raw_fd).collect()
     }
 
     /// Relay one inbound frame on stream `conn_id`. The first frame opens the
@@ -253,5 +259,27 @@ mod tests {
         // The single endpoint connection received both frames' bytes concatenated.
         let got = server.join().unwrap();
         assert_eq!(got, b"firstsecond");
+    }
+
+    #[test]
+    fn poll_fds_include_open_endpoint_streams() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("subst.sock");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (_c, _) = listener.accept().unwrap();
+        });
+
+        let mut bridge = SubstitutionBridge::new();
+        bridge.set_endpoint(&sock);
+        assert!(bridge.poll_fds().is_empty());
+        assert_eq!(
+            bridge.handle_frame(7, b"first"),
+            SubstitutionAction::Relayed
+        );
+        assert_eq!(bridge.poll_fds().len(), 1);
+        bridge.close(7);
+        assert!(bridge.poll_fds().is_empty());
+        server.join().unwrap();
     }
 }

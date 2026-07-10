@@ -242,28 +242,31 @@ pub fn progress(msg: &str) {
 pub fn banner(lines: &[&str]) {
     let width = lines.iter().map(|l| l.len()).max().unwrap_or(0) + 4;
     let rule = "=".repeat(width);
+    let stream = if chrome_to_stderr() {
+        Stream::Stderr
+    } else {
+        Stream::Stdout
+    };
 
-    println!();
-    println!(
-        "{}",
-        style_text(Stream::Stdout, &rule, &[Style::Bold, Style::Green])
-    );
+    let print_line = |line: &str| {
+        if chrome_to_stderr() {
+            eprintln!("{line}");
+        } else {
+            println!("{line}");
+        }
+    };
+    print_line("");
+    print_line(&style_text(stream, &rule, &[Style::Bold, Style::Green]));
     for line in lines {
         let pad = width - line.len() - 4;
-        println!(
-            "{}",
-            style_text(
-                Stream::Stdout,
-                &format!("  {}{}  ", line, " ".repeat(pad)),
-                &[Style::Bold, Style::Green]
-            )
-        );
+        print_line(&style_text(
+            stream,
+            &format!("  {}{}  ", line, " ".repeat(pad)),
+            &[Style::Bold, Style::Green],
+        ));
     }
-    println!(
-        "{}",
-        style_text(Stream::Stdout, &rule, &[Style::Bold, Style::Green])
-    );
-    println!();
+    print_line(&style_text(stream, &rule, &[Style::Bold, Style::Green]));
+    print_line("");
 }
 
 // ---------------------------------------------------------------------------

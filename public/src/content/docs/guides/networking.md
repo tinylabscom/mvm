@@ -11,7 +11,7 @@ Networking differs by backend:
 |---------|-------------|----------|-------------|
 | Firecracker (Linux native) | TAP device | 172.16.0.2/30 | Direct via TAP |
 | HVF (macOS 26+, default) | vsock-only | — | Guest I/O over vsock; no guest NIC |
-| libkrun (macOS) | TSI (transparent socket impl) | host-loopback | Via per-port vsock listeners |
+| libkrun (macOS) | vsock-only | — | Control/data via vsock; egress via the host-side vsock proxy |
 | microvm.nix | TAP device | 172.16.0.2/30 | Direct via TAP |
 
 ## Firecracker Network Layout
@@ -22,7 +22,7 @@ Firecracker microVM (172.16.0.2/30, eth0)
 Linux host (172.16.0.1/30, tap0)  --  iptables NAT  --  internet
 ```
 
-On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. The TAP device connects the microVM to the host network namespace and gets NAT'd to the internet. On macOS hosts, networking is backend-specific: the default HVF backend is vsock-only (guest I/O crosses vsock, no guest NIC); libkrun uses TSI (transparent socket impl) where outbound TCP/UDP appears as host-side socket calls.
+On Linux with `/dev/kvm`, Firecracker boots directly on the host — no VM hop. The TAP device connects the microVM to the host network namespace and gets NAT'd to the internet. On macOS hosts, networking is backend-specific: the default HVF backend is vsock-only (guest I/O crosses vsock, no guest NIC); libkrun now follows the same workload shape, with guest traffic routed through the host-side vsock egress path instead of a guest-NIC helper.
 
 ## Port Forwarding
 
@@ -89,8 +89,6 @@ endpoint. The injected guest runtime starts `mvm-egress-client` and the runtime
 sets standard proxy env vars to its loopback SOCKS listener automatically.
 Today that contract is provided by `hvf`; if no available backend can
 provide it, the start is refused up front instead of silently degrading to a
-Today that contract is provided by `hvf`; if no available backend can provide
-it, the start is refused up front instead of silently degrading to a
 guest NIC. This enables tools such as `curl` and `wget`; it does **not** add
 raw ICMP, so `ping google.com` is still expected to fail. Use an HTTP/TCP probe
 as the smoke test instead.
@@ -119,7 +117,11 @@ The resolved profile is copied into the signed `ExecutionPlan` admission record 
 
 ## DNS
 
-The guest's `/etc/resolv.conf` is configured at build time to use the host's DNS resolver. Internet access works out of the box through the NAT chain (Firecracker) or the host-vsock egress endpoint (HVF).
+Guest DNS is backend-specific. Firecracker guests use the host-side bridge/NAT
+path. HVF guests that request outbound egress use the host-vsock egress
+endpoint. libkrun guests seed `/etc/resolv.conf` toward the active virtual
+gateway inside the guest network path instead of copying a host nameserver into
+the kernel cmdline.
 
 ### Local addon DNS (opt-in)
 

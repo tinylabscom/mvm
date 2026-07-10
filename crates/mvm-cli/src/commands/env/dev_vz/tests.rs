@@ -762,28 +762,29 @@ mod reap_orphans_tests {
     }
 
     #[test]
-    fn reap_spares_gvproxy_of_live_workload() {
+    fn reap_spares_live_helper_of_live_workload() {
         let mut sup = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .expect("spawn stand-in supervisor");
         let sup_pid = sup.id() as i32;
-        let mut gv = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn stand-in gvproxy");
-        let gv_pid = gv.id() as i32;
-        let snapshot = ProcSnapshot::from_parts(
-            [(sup_pid, 1), (gv_pid, 1)].into_iter().collect(),
-            Vec::new(),
-        );
-
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-workload-livegv-9c2a-running");
+        let vm = vms_root.join("mvm-workload-livehelper-9c2a-running");
         std::fs::create_dir_all(&vm).expect("mkdir");
+        let helper_cmd = format!("sleep 30 # {}", vm.file_name().unwrap().to_string_lossy());
+        let mut helper = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&helper_cmd)
+            .spawn()
+            .expect("spawn stand-in helper");
+        let helper_pid = helper.id() as i32;
+        let snapshot = ProcSnapshot::from_parts(
+            [(sup_pid, 1), (helper_pid, 1)].into_iter().collect(),
+            vec![(helper_pid, helper_cmd)],
+        );
+
         std::fs::write(vm.join("vz.pid"), format!("{sup_pid}\n")).expect("write sup pid");
-        std::fs::write(vm.join("host-gvproxy.pid"), format!("{gv_pid}\n")).expect("write gv pid");
 
         let out = reap_orphaned_vm_helpers_at_with_snapshot(
             &vms_root,
@@ -795,37 +796,38 @@ mod reap_orphans_tests {
         )
         .expect("reap");
 
-        assert_eq!(
-            out.killed, 0,
-            "live VM's supervisor and gvproxy both spared"
-        );
+        assert_eq!(out.killed, 0, "live VM's supervisor and helper both spared");
         assert!(
-            pid_is_alive(gv_pid),
-            "gvproxy of a live VM was wrongly killed"
+            pid_is_alive(helper_pid),
+            "helper of a live VM was wrongly killed"
         );
 
         let _ = sup.kill();
         let _ = sup.wait();
-        let _ = gv.kill();
-        let _ = gv.wait();
+        let _ = helper.kill();
+        let _ = helper.wait();
     }
 
     #[test]
-    fn reap_kills_leaked_gvproxy_of_dead_workload() {
-        let mut gv = std::process::Command::new("sleep")
-            .arg("30")
-            .spawn()
-            .expect("spawn stand-in gvproxy");
-        let gv_pid = gv.id() as i32;
-        let dead_sup = i32::MAX;
-        let snapshot = ProcSnapshot::from_parts([(gv_pid, 1)].into_iter().collect(), Vec::new());
-
+    fn reap_kills_leaked_helper_of_dead_workload() {
         let dir = tempfile::tempdir().expect("tempdir");
         let vms_root = dir.path().join("vms");
-        let vm = vms_root.join("mvm-workload-deadgv-4e7b-stopped");
+        let vm = vms_root.join("mvm-workload-deadhelper-4e7b-stopped");
         std::fs::create_dir_all(&vm).expect("mkdir");
+        let helper_cmd = format!("sleep 30 # {}", vm.file_name().unwrap().to_string_lossy());
+        let mut helper = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&helper_cmd)
+            .spawn()
+            .expect("spawn stand-in helper");
+        let helper_pid = helper.id() as i32;
+        let dead_sup = i32::MAX;
+        let snapshot = ProcSnapshot::from_parts(
+            [(helper_pid, 1)].into_iter().collect(),
+            vec![(helper_pid, helper_cmd)],
+        );
+
         std::fs::write(vm.join("vz.pid"), format!("{dead_sup}\n")).expect("write dead sup pid");
-        std::fs::write(vm.join("host-gvproxy.pid"), format!("{gv_pid}\n")).expect("write gv pid");
 
         let out = reap_orphaned_vm_helpers_at_with_snapshot(
             &vms_root,
@@ -839,11 +841,11 @@ mod reap_orphans_tests {
 
         assert_eq!(
             out.killed, 1,
-            "leaked gvproxy of a stopped VM must be reaped"
+            "leaked helper of a stopped VM must be reaped"
         );
 
-        let _ = gv.kill();
-        let _ = gv.wait();
+        let _ = helper.kill();
+        let _ = helper.wait();
     }
 
     #[test]

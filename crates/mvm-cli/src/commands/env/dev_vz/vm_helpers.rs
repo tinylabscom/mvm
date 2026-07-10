@@ -11,14 +11,14 @@ pub(in crate::commands) struct ReapOutcome {
 }
 
 /// Reap orphaned per-VM helpers left behind by killed
-/// `mvmctl dev up` runs. Covers both backends: libkrun (`mvm-libkrun-`
-/// supervisor` + `gvproxy`) and Vz (`mvm-vz-supervisor`).
+/// `mvmctl dev up` runs. Covers both backends: libkrun
+/// (`mvm-libkrun-supervisor`) and Vz (`mvm-vz-supervisor`).
 ///
 /// mvmctl spawns the active backend's supervisor binary, which in turn
-/// spawns its networking helper (gvproxy for libkrun). If mvmctl exits
-/// abnormally (^C, SIGKILL, crash), supervisor + helpers are reparented
-/// to launchd PID 1 and outlive mvmctl indefinitely. This is the
-/// "clean up after the fact" side, distinct from the prevention path.
+/// may spawn auxiliary per-VM helpers. If mvmctl exits abnormally (^C,
+/// SIGKILL, crash), supervisor + helpers are reparented to launchd PID 1
+/// and outlive mvmctl indefinitely. This is the "clean up after the fact"
+/// side, distinct from the prevention path.
 ///
 /// The dir traversal below is **prefix-agnostic**: it iterates every
 /// subdirectory of `~/.cache/mvm/builder-vm/vms/`, so both
@@ -30,7 +30,7 @@ pub(in crate::commands) struct ReapOutcome {
 /// must update that test.
 ///
 /// A microVM is several processes: the supervisor (the VMM-host that
-/// owns the guest) plus dependent helpers (a host gvproxy for egress, a
+/// owns the guest) plus dependent helpers (for example a
 /// `tail -F console.log` reader). The supervisor is the authoritative
 /// liveness signal, so the sweep runs in two phases per dir:
 ///
@@ -46,8 +46,7 @@ pub(in crate::commands) struct ReapOutcome {
 ///    an alive launchd-parented supervisor is a build whose CLI crashed
 ///    and should be SIGTERM'd. Without the managed carve-out the startup
 ///    sweep kills the live dev VM on every `up` / `dev up` / `ls`.
-/// 2. **Helper phase.** The gvproxy sidecars (`gvproxy.pid` /
-///    `host-gvproxy.pid`) plus argv-scanned grandchildren whose argv
+/// 2. **Helper phase.** Any argv-scanned grandchildren whose argv
 ///    carries the dir's unique basename. A helper's fate follows its
 ///    supervisor: if Phase 1 found the VM live every helper is spared;
 ///    once the supervisor is gone a still-running launchd-parented
@@ -69,9 +68,8 @@ pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<Rea
 /// Best-effort orphan-helper sweep run at the start of `mvmctl dev up`
 /// / `mvmctl up`. The next launch reaps the previous run's corpses:
 /// startup is the robust trigger because an abnormal exit (^C, SIGKILL,
-/// crash, the libkrun `krun_start_enter` `exit()` that skips
-/// `GvproxyHandle::Drop`) is exactly when the CLI can't self-clean and
-/// reparents its helpers to launchd.
+/// crash, the libkrun `krun_start_enter` `exit()`) is exactly when the CLI
+/// can't self-clean and reparents its helpers to launchd.
 ///
 /// Kill-only: it signals provably-orphaned helpers but removes no
 /// directories, so it never deletes host bytes and carries no audit
@@ -95,8 +93,7 @@ pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
 pub(super) const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 
 /// Sidecar PID file names a workload VM dir under `~/.mvm/vms/<name>/`.
-pub(super) const WORKLOAD_SIDECARS: &[&str] =
-    &["libkrun.pid", "vz.pid", "gvproxy.pid", "host-gvproxy.pid"];
+pub(super) const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid"];
 
 /// Dir-name prefix of the persistent dev builder VM.
 const PERSISTENT_BUILDER_DIR_PREFIX: &str = "mvm-persistent-builder-";

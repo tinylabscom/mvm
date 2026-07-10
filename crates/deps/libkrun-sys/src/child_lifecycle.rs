@@ -1,10 +1,10 @@
-//! Tie a spawned networking helper (gvproxy / passt) to the lifetime of the
+//! Tie a spawned networking helper (native gateway / passt) to the lifetime of the
 //! supervisor that spawns it, so a dead supervisor never orphans the helper.
 //!
-//! The supervisor's `SIGTERM` handler already reaps gvproxy on a graceful
+//! The supervisor's `SIGTERM` handler already reaps the native gateway on a graceful
 //! `mvmctl stop` / `kill`, but a `SIGKILL` or a panic it can't catch leaves the
 //! helper re-parented to init — accumulating as a leaked daemon (commonly stuck
-//! at gvproxy's "waiting for clients" when the VM never connected).
+//! at the gateway's "waiting for clients" when the VM never connected).
 //!
 //! On Linux, `PR_SET_PDEATHSIG` closes that gap at the source: the kernel
 //! delivers `SIGTERM` to the child the instant its parent dies, for *any*
@@ -24,7 +24,7 @@ pub(crate) fn tie_to_parent_death(cmd: &mut Command) {
         // before `execve(2)`, where only async-signal-safe functions are
         // permitted — `prctl`, `getppid`, and `_exit` all qualify
         // (signal-safety(7)). `PR_SET_PDEATHSIG` is preserved across the
-        // following `execve` for a non-set-id binary (gvproxy / passt are
+        // following `execve` for a non-set-id binary (native gateway / passt are
         // not set-id). The `getppid() == 1` check closes the race where the
         // parent exits between `fork` and `prctl`: if we were already
         // re-parented to init, honour the death signal we just missed.

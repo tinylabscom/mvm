@@ -3,7 +3,7 @@ members = [
     "crates/mvm-core",
     "crates/mvm-storage",
     # plan 123 Phase A — NetworkProvider trait + provisioning/policy seam.
-    # Low seam crate: the TAP/bridge/gvproxy/passt impl stays in mvm-backend
+    # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-backend
     # (where the in-VM shell lives) and the WireGuard/Tailscale mesh impl is
     # mvmd's; both register against this trait.
     "crates/mvm-network",
@@ -73,7 +73,7 @@ members = [
     # builds stay green for non-Linux contributors.
     # Plan 113 §Task 10 / ADR-064 — per-VM Vz drainer binary (legacy
     # NDJSON ingest path; superseded by the Rust supervisor's in-process
-    # VzGvproxy splice, retained pending a dead-code sweep). Threads the
+    # Vz gateway-compat splice, retained pending a dead-code sweep). Threads the
     # `FlowEventWire` stream through the chain-signing audit pipeline.
     # Parallel role to `mvm-libkrun-supervisor` for the Vz backend.
     # Plan 113 §Task 12 / ADR-064 — per-VM Firecracker bridge sidecar.
@@ -345,6 +345,7 @@ tree-sitter-typescript = "0.23.2"
 mvm-core = { path = "crates/mvm-core", version = "0.17.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.17.0" }
 mvm-guest = { path = "crates/mvm-guest", version = "0.17.0" }
+mvm-guest-helpers = { path = "crates/mvm-guest-helpers", version = "0.17.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.17.0", default-features = false }
 mvm = { path = "crates/mvm", version = "0.17.0", default-features = false }
 mvm-oci = { path = "crates/mvm-oci", version = "0.17.0" }

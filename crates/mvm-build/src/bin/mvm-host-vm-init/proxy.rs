@@ -2,12 +2,13 @@
 //! pipeline.
 //!
 //! `mvm-host-vm-init` runs the installer (`uv` / `pnpm`) with
-//! `HTTP_PROXY` + `HTTPS_PROXY` pointing at `mvm-egress-proxy`,
-//! which sits between the installer and the network and refuses
-//! anything outside the four-hostname registry allowlist.
+//! `HTTP_PROXY` + `HTTPS_PROXY` pointing at a guest-local CONNECT
+//! proxy on `127.0.0.1:8443`. The production path tunnels admitted
+//! CONNECT requests over the builder VM's `EGRESS_PORT` vsock channel
+//! to the host-side claim-10 egress gate; legacy tests can still use
+//! a no-op or child-process lifecycle.
 //!
-//! The proxy is a separate Linux binary
-//! (`crates/mvm-egress-proxy`); we drive it as a subprocess:
+//! The production lifecycle binds the proxy in-process:
 //!
 //! 1. **Spawn** at install start — bind `127.0.0.1:8443`.
 //! 2. **Wait for ready** — TCP-connect-probe up to 2s.
@@ -15,8 +16,8 @@
 //!    `HTTPS_PROXY` set to `http://127.0.0.1:8443`. (`HTTPS_PROXY`
 //!    is what `uv`/`pip`/`pnpm` honor for HTTPS fetches; both keys
 //!    are set so any case-insensitive variant is covered.)
-//! 4. **Shutdown** after the installer exits — SIGTERM, wait up to
-//!    1s, then SIGKILL.
+//! 4. **Shutdown** after the installer exits — stop accepting and
+//!    join the proxy thread.
 //!
 //! The lifecycle abstraction is split into a [`ProxyLifecycle`]
 //! trait so unit tests can supply a noop / fake controller. The
@@ -38,6 +39,8 @@ use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+use mvm_build::egress_proxy::{Allowlist, ConnectPolicy, VsockProxyHandle, start_vsock_proxy};
 
 /// Where the in-VM proxy listens. mvm-egress-proxy's
 /// `DEFAULT_BIND` constant; duplicated here so we don't pull the
@@ -70,6 +73,59 @@ pub trait ProxyLifecycle {
     /// a future iptables drop-rule may relax this for offline-only
     /// builds.)
     fn is_running(&self) -> bool;
+}
+
+/// Production lifecycle — bind a guest-local CONNECT proxy that tunnels every
+/// admitted target over the host-vsock egress channel.
+pub struct VsockProxyLifecycle {
+    handle: Option<VsockProxyHandle>,
+    started: bool,
+}
+
+impl VsockProxyLifecycle {
+    pub fn new() -> Self {
+        Self {
+            handle: None,
+            started: false,
+        }
+    }
+}
+
+impl Default for VsockProxyLifecycle {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ProxyLifecycle for VsockProxyLifecycle {
+    fn start(&mut self) -> Result<(), String> {
+        if self.started {
+            return Ok(());
+        }
+        self.handle = Some(
+            start_vsock_proxy(
+                PROXY_BIND_ADDR,
+                ConnectPolicy::Allowlist(Allowlist::production()),
+            )
+            .map_err(|e| format!("bind {PROXY_BIND_ADDR}: {e}"))?,
+        );
+        self.started = true;
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        if !self.started {
+            return;
+        }
+        if let Some(mut handle) = self.handle.take() {
+            handle.shutdown();
+        }
+        self.started = false;
+    }
+
+    fn is_running(&self) -> bool {
+        self.started
+    }
 }
 
 /// Production lifecycle — spawns `mvm-egress-proxy` as a child

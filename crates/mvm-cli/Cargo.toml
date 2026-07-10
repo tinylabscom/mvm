@@ -63,7 +63,8 @@ rand.workspace = true
 sha2.workspace = true
 hex.workspace = true
 # core_demo_e2e uses libc::kill(-pgid, SIGKILL) to reap a timed-out
-# mvmctl process tree (supervisor + gvproxy) so the run can never hang.
+# mvmctl process tree (supervisor + any legacy gateway helper) so the run can
+# never hang.
 libc.workspace = true
 
 [features]

@@ -683,6 +683,7 @@ mod linux {
     use std::time::Instant;
 
     use crate::boot_timings::BootTimings;
+    use crate::proxy::ProxyLifecycle;
 
     /// Persistent Nix-store device — virtio-blk attached as
     /// `/dev/vdb` by `LibkrunBuilderVm` via its `extra_disks` entry.
@@ -1721,27 +1722,43 @@ mod linux {
                         }
                     };
                     let started = Instant::now();
-                    let (code, tail) = run_job_streaming(
-                        &cmd_path,
-                        tmpdir.as_deref(),
-                        Isolation::Unshared,
-                        |line| {
-                            let frame = crate::dispatch_response::stderr_chunk_json(&job_id, line);
-                            if !write_frame(conn, frame.as_bytes()) {
-                                // Host probably closed the conn
-                                // (e.g. supervisor went away
-                                // mid-build). Log and keep
-                                // draining stderr so the build's
-                                // exit code is still meaningful —
-                                // the terminal Result write will
-                                // fail loudly back in the
-                                // dispatch loop.
-                                eprintln!(
-                                    "mvm-host-vm-init: dispatch loop: write StderrChunk failed"
-                                );
-                            }
-                        },
-                    );
+                    let mut proxy = crate::proxy::VsockProxyLifecycle::default();
+                    let proxy_started = proxy.start().map_err(|e| {
+                        eprintln!("mvm-host-vm-init: dispatch loop: proxy start failed: {e}");
+                        e
+                    });
+                    let proxy_env = if proxy_started.is_ok() {
+                        vec![
+                            ("HTTPS_PROXY", crate::proxy::PROXY_URL),
+                            ("HTTP_PROXY", crate::proxy::PROXY_URL),
+                            ("https_proxy", crate::proxy::PROXY_URL),
+                            ("http_proxy", crate::proxy::PROXY_URL),
+                            ("ALL_PROXY", crate::proxy::PROXY_URL),
+                            ("all_proxy", crate::proxy::PROXY_URL),
+                        ]
+                    } else {
+                        Vec::new()
+                    };
+                    let (code, tail) = if proxy_started.is_ok() {
+                        run_job_streaming(
+                            &cmd_path,
+                            tmpdir.as_deref(),
+                            Isolation::Unshared,
+                            &proxy_env,
+                            |line| {
+                                let frame =
+                                    crate::dispatch_response::stderr_chunk_json(&job_id, line);
+                                if !write_frame(conn, frame.as_bytes()) {
+                                    eprintln!(
+                                        "mvm-host-vm-init: dispatch loop: write StderrChunk failed"
+                                    );
+                                }
+                            },
+                        )
+                    } else {
+                        (126, "egress proxy start failed".to_string())
+                    };
+                    proxy.stop();
                     let ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                     // Hold `scratch` until after the build returns
                     // so its `Drop` cleans up after the
@@ -1880,7 +1897,7 @@ mod linux {
             InstallContext, InstallError, RESULT_FILENAME, SystemCommandRunner, run_install,
         };
         use crate::install_spec::parse;
-        use crate::proxy::ChildProxyLifecycle;
+        use crate::proxy::VsockProxyLifecycle;
 
         let bytes = match std::fs::read(spec_path) {
             Ok(b) => b,
@@ -1912,12 +1929,7 @@ mod linux {
         }
 
         let runner = SystemCommandRunner;
-        // The production proxy lifecycle
-        // spawns `mvm-egress-proxy` from PATH. The builder VM
-        // flake installs the binary at `/sbin/mvm-egress-proxy`
-        // (alongside `/sbin/mvm-host-vm-init`), which is on the
-        // kernel's default PATH for PID 1.
-        let mut proxy = ChildProxyLifecycle::default_binary();
+        let mut proxy = VsockProxyLifecycle::default();
         let ctx = InstallContext {
             spec: &spec,
             job_dir: Path::new(job_dir),
@@ -2308,8 +2320,13 @@ mod linux {
 
         // eth0 bring-up + DHCP + static fallback (.3) via the shared guest-net
         // helper — the same path the workload guest netinit uses. The static
-        // fallback applies on the gvproxy backends only; QEMU/slirp uses its
-        // own `ip=` autoconfig.
+        // fallback applies on the shared gateway-backed libkrun/Vz subnet
+        // only; QEMU/slirp uses its own `ip=` autoconfig.
+        if !std::path::Path::new("/sys/class/net/eth0").exists() {
+            eprintln!("mvm-host-vm-init: no eth0 present; using vsock-only egress path");
+            return Ok(());
+        }
+
         mvm_guest::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.3")
     }
 
@@ -2325,7 +2342,7 @@ mod linux {
         // serves the persistent dispatch
         // loop; this single-shot wrapper passes a no-op so the
         // two code paths share their `Command`/`wait` logic.
-        run_job_streaming(cmd_sh, None, Isolation::Inherit, |_line| {})
+        run_job_streaming(cmd_sh, None, Isolation::Inherit, &[], |_line| {})
     }
 
     /// How the build subprocess relates to
@@ -2452,6 +2469,7 @@ mod linux {
         cmd_sh: &str,
         tmpdir: Option<&str>,
         isolation: Isolation,
+        env: &[(&str, &str)],
         mut on_line: F,
     ) -> (i32, String) {
         use std::collections::VecDeque;
@@ -2474,6 +2492,9 @@ mod linux {
         // see [`run_job`].
         if let Some(t) = tmpdir {
             cmd.env("TMPDIR", t);
+        }
+        for (key, value) in env {
+            cmd.env(key, value);
         }
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -2978,6 +2999,7 @@ mod linux {
                 cmd_path.to_str().unwrap(),
                 None,
                 Isolation::Inherit,
+                &[],
                 |line| {
                     collected.lock().unwrap().push(line.to_string());
                 },
@@ -3009,6 +3031,7 @@ mod linux {
                 cmd_path.to_str().unwrap(),
                 None,
                 Isolation::Inherit,
+                &[],
                 |line| {
                     collected.lock().unwrap().push(line.to_string());
                 },
@@ -3096,6 +3119,7 @@ mod linux {
                 cmd_path.to_str().unwrap(),
                 Some("/scratch/abc"),
                 Isolation::Inherit,
+                &[],
                 |_| {},
             );
             assert_eq!(code, 0);
@@ -3127,8 +3151,13 @@ mod linux {
             let sentinel = dir.path().to_str().expect("utf-8 tempdir").to_string();
             let mut env = mvm_core::util::test_env::TestEnv::new();
             env.set("TMPDIR", &sentinel);
-            let (code, tail) =
-                run_job_streaming(cmd_path.to_str().unwrap(), None, Isolation::Inherit, |_| {});
+            let (code, tail) = run_job_streaming(
+                cmd_path.to_str().unwrap(),
+                None,
+                Isolation::Inherit,
+                &[],
+                |_| {},
+            );
             assert_eq!(code, 0);
             assert_eq!(tail, format!("tmpdir={sentinel}"));
         }
@@ -3187,6 +3216,7 @@ mod linux {
                 cmd_path.to_str().unwrap(),
                 None,
                 Isolation::Unshared,
+                &[],
                 |_| {},
             );
             assert_eq!(code, 0, "tail={tail}");

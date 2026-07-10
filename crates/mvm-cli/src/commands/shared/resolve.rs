@@ -238,7 +238,7 @@ fn parse_allow_host(entry: &str) -> Result<mvm_core::network_policy::HostPort> {
 
 /// Resolve the requested hypervisor to the effective one for this host. `firecracker`
 /// (the default `--hypervisor`) auto-detects: KVM → firecracker, macOS 26+ Apple Silicon
-/// → hvf (the HVF VMM with vsock-only egress — no gvproxy),
+/// → hvf (the HVF VMM with vsock-only egress — no guest-NIC helper),
 /// macOS 13-25 + libkrun → libkrun, else firecracker (surfaces a clear
 /// "not available" error). Any explicit value is returned as-is. The `MVM_HYPERVISOR`
 /// env var (alias `MVM_BACKEND`) overrides auto-detect — the workload-VMM override
@@ -266,7 +266,7 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
     } else if plat.is_vz_default_tier() {
         // macOS 26+ Apple Silicon: the HVF VMM (`hvf`) is the workload
         // default; the hvf path carries claim-10 egress over vsock via its
-        // per-VM gating endpoint — no gvproxy sidecar.
+        // per-VM gating endpoint — no guest-NIC helper sidecar.
         "hvf"
     } else if plat.has_libkrun() {
         "libkrun"

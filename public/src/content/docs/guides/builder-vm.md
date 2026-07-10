@@ -85,6 +85,17 @@ mvmctl machine run --flake . --hypervisor hvf
 
 On macOS 26+ the default runtime backend is HVF (Hypervisor.framework, vsock-only). The builder VM remains a build-time implementation detail. It is not the same VM as your workload VM.
 
+That distinction matters for networking. A macOS HVF workload VM is already
+vsock-only, with no guest NIC in the runtime path. The builder VM is different:
+the workload path does not imply anything about builder bootstrap. On current
+macOS HVF hosts, a source-checkout builder-image rebuild now stays on the
+trusted HVF builder transport once a cached or verified base builder image
+exists, rather than silently falling back to the older libkrun gateway path.
+If the base image is missing, the builder path may still need a verified
+bootstrap artifact for fetch-capable rebuilds. So seeing a `network-backend` or
+gateway check in `mvmctl doctor` does not mean workload traffic is going
+through a legacy guest-NIC helper.
+
 For development convenience, `mvmctl run` combines the two phases:
 
 ```bash

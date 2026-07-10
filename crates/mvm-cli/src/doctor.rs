@@ -298,6 +298,11 @@ fn builder_store_check() -> Check {
 const BUILDER_EGRESS_POSTURE: &str = "egress is locked on the deps-install arm (proxy-uid-only, fail-closed) \
      and open for flake-build fetches";
 
+#[cfg(feature = "builder-vm")]
+fn current_builder_backend_choice() -> mvm_build::builder_backend_select::BuilderBackendChoice {
+    mvm_build::builder_backend_select::resolve_choice()
+}
+
 /// Map a parsed network-bootstrap outcome to its `Check` body.
 /// Pure so the classification → report mapping is unit-testable without
 /// touching the filesystem.
@@ -310,7 +315,9 @@ fn builder_egress_check_from_outcome(outcome: mvm_build::guest_net::BuilderNetBo
     let (ok, info) = match outcome {
         BuilderNetBootstrap::Lease { ip } => (
             true,
-            format!("DHCP lease {ip} via the gvproxy gateway; {BUILDER_EGRESS_POSTURE}"),
+            format!(
+                "DHCP lease {ip} on the guest-network bootstrap path; {BUILDER_EGRESS_POSTURE}"
+            ),
         ),
         BuilderNetBootstrap::StaticFallback { ip } => (
             true,
@@ -348,6 +355,17 @@ fn builder_egress_check_from_outcome(outcome: mvm_build::guest_net::BuilderNetBo
 /// the check reports that cleanly.
 #[cfg(feature = "builder-vm")]
 fn builder_egress_check() -> Check {
+    if current_builder_backend_choice()
+        == mvm_build::builder_backend_select::BuilderBackendChoice::Hvf
+    {
+        return Check {
+            name: "builder egress",
+            category: "platform",
+            ok: true,
+            info: "n/a on HVF builder (vsock-only host/guest transport; no DHCP/gateway bootstrap)"
+                .to_string(),
+        };
+    }
     let log_path = mvm_core::config::vm_state_dir("mvm-dev").join("console.log");
     let Ok(contents) = std::fs::read_to_string(&log_path) else {
         return Check {
@@ -1218,16 +1236,11 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
     }
 }
 
-/// Userspace network-gateway host-side availability. Probes `$PATH`
-/// for the gateway binary the host's libkrun build defaults to:
-/// `passt` on Linux, `gvproxy` on macOS (passt does not build on
-/// macOS). Surfaces the version when present and emits a
-/// **failing** check when missing — there is no TSI bypass, so the
-/// host needs a gateway binary to run any libkrun-backed VM
-/// (no-bypass invariant).
+/// Host-side network-helper availability for the current libkrun/HVF path.
 ///
-/// Skipped on Windows (no native libkrun port either; the whole
-/// libkrun + virtio-net stack is macOS / Linux).
+/// The production builder/workload transport is vsock-only, so there is no
+/// required host gateway binary to probe here. Keep the row so `doctor` still
+/// surfaces that posture explicitly.
 #[cfg(target_family = "unix")]
 fn network_backend_check(plat: Platform) -> Check {
     if plat.is_windows() {
@@ -1238,74 +1251,23 @@ fn network_backend_check(plat: Platform) -> Check {
             info: "n/a (no native Windows port)".to_string(),
         };
     }
-    if cfg!(target_os = "macos") {
-        return gateway_check(
-            "gvproxy",
-            libkrun_sys::gvproxy::locate_gvproxy(),
-            libkrun_sys::gvproxy::install_hint(),
-        );
-    }
-    gateway_check(
-        "passt",
-        libkrun_sys::passt::locate_passt(),
-        libkrun_sys::passt::install_hint(),
-    )
-}
-
-/// Shared probe body for the per-OS userspace gateway. Returns a
-/// `Check` row with the version (when the binary supports
-/// `--version`) or the install hint (when missing). Missing now
-/// fails the check — there is no TSI escape hatch, so a libkrun
-/// host without a gateway can't boot any VM.
-#[cfg(target_family = "unix")]
-fn gateway_check(
-    name: &'static str,
-    located: Option<std::path::PathBuf>,
-    install_hint: &str,
-) -> Check {
-    match located {
-        Some(path) => {
-            // Best-effort version probe. passt prints to stdout;
-            // gvproxy 0.7+ recognises `--version` (older builds
-            // exit nonzero, which we silently fall through on).
-            let version = std::process::Command::new(&path)
-                .arg("--version")
-                .output()
-                .ok()
-                .and_then(|out| {
-                    if out.status.success() {
-                        let s = String::from_utf8_lossy(&out.stdout)
-                            .lines()
-                            .next()
-                            .unwrap_or("")
-                            .trim()
-                            .to_string();
-                        if s.is_empty() { None } else { Some(s) }
-                    } else {
-                        None
-                    }
-                });
-            let info = match version {
-                Some(v) => format!("available — {v}"),
-                None => format!("available at {}", path.display()),
-            };
-            Check {
-                name,
-                category: "platform",
-                ok: true,
-                info,
-            }
-        }
-        None => Check {
-            name,
-            category: "platform",
-            ok: false, // No TSI escape; the gateway is mandatory.
-            info: format!(
-                "not available ({install_hint}) — required for libkrun \
-                 virtio-net; TSI escape hatch was removed in Plan 102 W6.A \
-                 (claim-10 no-bypass invariant, ADR-058)"
-            ),
-        },
+    #[cfg(feature = "builder-vm")]
+    let info = if current_builder_backend_choice()
+        == mvm_build::builder_backend_select::BuilderBackendChoice::Hvf
+    {
+        "n/a on the active HVF tier (builder and workload transport are vsock-only)".to_string()
+    } else {
+        "n/a on the active libkrun/HVF path (builder and workload transport are vsock-only)"
+            .to_string()
+    };
+    #[cfg(not(feature = "builder-vm"))]
+    let info = "n/a on the active libkrun/HVF path (builder and workload transport are vsock-only)"
+        .to_string();
+    Check {
+        name: "network-backend",
+        category: "platform",
+        ok: true,
+        info,
     }
 }
 
@@ -2560,7 +2522,7 @@ mod tests {
         assert_eq!(c.category, "platform");
         assert!(c.ok);
         assert!(c.info.contains("DHCP lease 192.168.127.3"));
-        assert!(c.info.contains("gvproxy gateway"));
+        assert!(c.info.contains("guest-network bootstrap path"));
         assert!(c.info.contains("fail-closed"), "posture appended");
     }
 
@@ -2604,6 +2566,7 @@ mod tests {
         // no-VM-yet info and exits ok.
         let scratch = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "libkrun");
         env.set("MVM_CACHE_DIR", scratch.path());
         let c = builder_egress_check();
         assert!(c.ok);
@@ -2612,10 +2575,37 @@ mod tests {
 
     #[cfg(feature = "builder-vm")]
     #[test]
+    fn builder_egress_check_reports_hvf_builder_as_vsock_only() {
+        use mvm_core::util::test_env::TestEnv;
+
+        let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "hvf");
+        let c = builder_egress_check();
+        assert!(c.ok);
+        assert!(c.info.contains("vsock-only"));
+        assert!(!c.info.contains("gvproxy"));
+    }
+
+    #[cfg(all(feature = "builder-vm", target_os = "macos"))]
+    #[test]
+    fn network_backend_check_reports_hvf_builder_as_vsock_only() {
+        use mvm_core::util::test_env::TestEnv;
+
+        let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "hvf");
+        let c = network_backend_check(Platform::MacOS);
+        assert!(c.ok);
+        assert!(c.info.contains("vsock-only"));
+        assert!(!c.info.contains("gvproxy"));
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
     fn builder_egress_check_classifies_a_fixture_console_log() {
         use mvm_core::util::test_env::TestEnv;
         let scratch = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
+        env.set("MVM_BUILDER_BACKEND", "libkrun");
         env.set("MVM_DATA_DIR", scratch.path());
         // Materialize a fixture console.log at the exact path the helper
         // resolves, then assert the lease is read end-to-end.

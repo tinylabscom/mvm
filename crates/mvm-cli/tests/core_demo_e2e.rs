@@ -57,7 +57,7 @@ struct Step {
 /// `<scratch>/<label>.{stdout,stderr}.log`. NEVER blocks on a pipe: the
 /// freeze that cost us multiple sessions was `Command::output()` waiting
 /// on pipe EOF that an orphaned gvproxy held open (libkrun `exit()`s on
-/// guest poweroff, skipping `GvproxyHandle::Drop`). Here stdio goes to
+/// guest poweroff, skipping `NativeGatewayHandle::Drop`). Here stdio goes to
 /// files (no pipe to hold) and the child runs in its own process group,
 /// SIGKILLed whole on timeout so the supervisor + gvproxy are reaped.
 fn mvmctl(args: &[&str], scratch: &std::path::Path, label: &str, budget: Duration) -> Step {

@@ -46,10 +46,10 @@ npm install @runmvm/mvm         # TypeScript
 ```
 
 Host prerequisites: **macOS 26+ Apple Silicon** needs nothing (the in-house HVF
-backend and builder are dependency-free); **macOS 13–25** needs the libkrun trio
-(`brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy`); **Linux**
-needs `/dev/kvm` (Firecracker is managed for you). `mvmctl doctor` diagnoses your
-host and prints exact install hints for anything missing.
+backend and builder are dependency-free); **macOS 13–25** needs the libkrun
+runtime (`brew install slp/krun/libkrun slp/krun/libkrunfw`); **Linux** needs
+`/dev/kvm` (Firecracker is managed for you). `mvmctl doctor` diagnoses your host
+and prints exact install hints for anything missing.
 
 ## Quick start
 

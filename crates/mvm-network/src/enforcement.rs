@@ -53,7 +53,7 @@ impl std::error::Error for EnforcementError {}
 
 /// The seam the supervisor's host-egress enforcement sits behind. Object-safe
 /// and dependency-light. A [`NetworkProvider`](crate::NetworkProvider) that
-/// doesn't self-enforce in `provision` (e.g. the future libkrun gvproxy/passt
+/// doesn't self-enforce in `provision` (e.g. the future libkrun native-gateway/passt
 /// provider) returns one of these from `egress_enforcer()`, and the supervisor
 /// drives it; the Firecracker provider self-enforces (iptables in `provision`)
 /// and returns `None`.

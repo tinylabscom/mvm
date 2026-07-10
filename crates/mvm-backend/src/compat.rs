@@ -12,7 +12,7 @@
 //!   `console=hvc0`; no jailer or snapshots (host process == supervisor).
 //! - (Vz removed)
 //!   macOS-only, aarch64-only in practice (Apple Silicon + HVF),
-//!   gvproxy networking, snapshot-capable on macOS 14+
+//!   native-gateway networking, snapshot-capable on macOS 14+
 //!   (capabilities() is host-probed; compat reports the nominal capability).
 //! - **Qemu**: no implementation yet; capabilities are conventional QEMU
 //!   defaults for the mvm workload shape (ELF/Image per arch, ext4 rootfs,
@@ -45,7 +45,7 @@ pub enum RootfsFormat {
 #[serde(rename_all = "snake_case")]
 pub enum NetworkingModel {
     Tap,
-    Gvproxy,
+    NativeGateway,
     Passt,
     UserModeVirtio,
     None,
@@ -112,8 +112,7 @@ static FIRECRACKER: BackendCompat = BackendCompat {
 // excluded here. Uncompressed Image and Pe have no KRUN_KERNEL_FORMAT constant
 // (to_krun_format returns Err for both) — excluded. Only the bundled kernel is
 // used today, but the full accepted-format list reflects the actual FFI surface.
-// gvproxy on macOS (CLAUDE.md host-deps); passt on Linux — model as Gvproxy
-// (the macOS default) since mvm's libkrun path is primarily macOS today.
+// Current libkrun launches are NIC-less and route egress over vsock.
 static LIBKRUN: BackendCompat = BackendCompat {
     backend: MicrovmBackend::Libkrun,
     guest_arches: &[X86_64, Aarch64],
@@ -131,8 +130,7 @@ static LIBKRUN: BackendCompat = BackendCompat {
     required_boot_args: &["console=hvc0"],
     supports_snapshots: false,
     supports_jailer: false,
-    // macOS primary; Linux uses passt — Gvproxy is the default in CLAUDE.md.
-    networking: NetworkingModel::Gvproxy,
+    networking: NetworkingModel::None,
 };
 
 // Qemu: no implementation yet. Capabilities are conventional QEMU defaults

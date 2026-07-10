@@ -2,7 +2,7 @@
 name = "mvm-network"
 version.workspace = true
 edition.workspace = true
-description = "NetworkProvider trait + provisioning/policy/registry seam for mvm (plan 123 Phase A). The TAP/bridge/gvproxy/passt impl lives in mvm-backend; the WireGuard/Tailscale mesh impl is mvmd's."
+description = "NetworkProvider trait + provisioning/policy/registry seam for mvm (plan 123 Phase A). The TAP/bridge/native-gateway/passt impl lives in mvm-backend; the WireGuard/Tailscale mesh impl is mvmd's."
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true

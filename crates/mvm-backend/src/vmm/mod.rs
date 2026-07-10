@@ -26,4 +26,6 @@ pub mod run;
 pub mod virtio;
 pub mod virtio_fs;
 pub mod vsock;
+pub(crate) mod vsock_handlers;
 mod vsock_io;
+pub(crate) mod vsock_transport;

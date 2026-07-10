@@ -144,14 +144,16 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
 mod tests {
     use super::*;
     use crate::driver::mock::MockDriver;
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn build_packs_inputs_boots_the_builder_spec_and_extracts_the_output() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        // Isolate per-VM state to the tempdir. nextest runs each test in its own
-        // process, so this env override doesn't leak to sibling tests.
-        // SAFETY: single-threaded test setup, before any VM state is resolved.
-        unsafe { std::env::set_var("MVM_DATA_DIR", tmp.path()) };
+        env.set("MVM_DATA_DIR", tmp.path());
 
         // Real input trees + placeholder image files on disk.
         let job = tmp.path().join("job");

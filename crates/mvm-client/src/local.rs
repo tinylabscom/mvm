@@ -452,6 +452,47 @@ impl MvmClient for LocalBackend {
 mod tests {
     use super::*;
 
+    static DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct IsolatedDataDir {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+        dir: tempfile::TempDir,
+    }
+
+    impl IsolatedDataDir {
+        fn new() -> Self {
+            let lock = DATA_DIR_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let dir = tempfile::tempdir().unwrap();
+            let prev = std::env::var_os("MVM_DATA_DIR");
+            unsafe {
+                std::env::set_var("MVM_DATA_DIR", dir.path());
+            }
+            Self {
+                _lock: lock,
+                prev,
+                dir,
+            }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            self.dir.path()
+        }
+    }
+
+    impl Drop for IsolatedDataDir {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.prev {
+                    Some(value) => std::env::set_var("MVM_DATA_DIR", value),
+                    None => std::env::remove_var("MVM_DATA_DIR"),
+                }
+            }
+        }
+    }
+
     #[test]
     fn status_maps_all_variants() {
         assert_eq!(map_status(&VmStatus::Running), MachineStatus::Running);
@@ -515,12 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_boots_admitted_plan_from_materialized_rootfs() {
-        // Isolate the host signer + mock VM dirs under a tempdir.
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test; no other thread reads these vars.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let data = IsolatedDataDir::new();
         let rootfs = data.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
 
@@ -549,13 +585,7 @@ mod tests {
 
     #[tokio::test]
     async fn remove_drops_the_machine_from_list_and_is_idempotent() {
-        // Isolate the host signer + mock VM dirs under a tempdir (nextest runs
-        // each test in its own process, so the env var can't race a sibling).
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test; no other thread reads these vars.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let data = IsolatedDataDir::new();
         let rootfs = data.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
 
@@ -652,11 +682,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_refuses_network_changes_on_local_backend() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test process (nextest runs each test in its own process).
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let _data = IsolatedDataDir::new();
         persist_test_spec("web");
         let be = LocalBackend::with_hypervisor("mock");
         let err = be
@@ -678,11 +704,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_refuses_allow_host_changes_on_local_backend() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test process.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let _data = IsolatedDataDir::new();
         persist_test_spec("web2");
         let be = LocalBackend::with_hypervisor("mock");
         let err = be
@@ -704,11 +726,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_unknown_machine_is_error() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test process.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let _data = IsolatedDataDir::new();
         let be = LocalBackend::with_hypervisor("mock");
         let err = be
             .reconfigure_machine(
@@ -729,11 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_stopped_machine_updates_spec_and_returns_stopped() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test process.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let _data = IsolatedDataDir::new();
         persist_test_spec("myapp");
         let be = LocalBackend::with_hypervisor("mock");
         // Machine is not running in the mock backend — just patching the spec.
@@ -758,11 +772,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_rejects_zero_cpus() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test process.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let _data = IsolatedDataDir::new();
         persist_test_spec("zero-cpu-machine");
         let be = LocalBackend::with_hypervisor("mock");
         let err = be
@@ -789,11 +799,7 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_noop_returns_stopped_without_overwriting_spec() {
-        let data = tempfile::tempdir().unwrap();
-        // SAFETY: single-threaded test process.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", data.path());
-        }
+        let _data = IsolatedDataDir::new();
         persist_test_spec("noop-machine");
         let be = LocalBackend::with_hypervisor("mock");
         // No fields changed → should short-circuit, not error.

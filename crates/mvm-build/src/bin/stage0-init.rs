@@ -3,11 +3,14 @@
 //! kernel cmdline marker), carrying the official Nix release tarball's
 //! `/nix/store` + this binary as `/init` — no Alpine, no apk, no busybox.
 //!
-//! **libkrun** (macOS/aarch64): the seed root arrives over virtiofs
-//! (`krun_set_root`) on libkrunfw's bundled kernel; shares are virtio-fs; we
-//! copy the seed `/nix/store` into a tmpfs and bind it over `/nix` (virtiofs
-//! writes fail under FUSE); eth0 + DHCP come from libkrun, so we just point
-//! `/etc/resolv.conf` at gvproxy's gateway. Proven E2E on aarch64.
+//! **libkrun**: the seed root arrives over virtiofs (`krun_set_root`) on
+//! libkrunfw's bundled kernel; shares are virtio-fs; we copy the seed
+//! `/nix/store` into a tmpfs and bind it over `/nix` (virtiofs writes fail
+//! under FUSE). The guest brings `eth0` up through the shared
+//! `mvm_guest::guest_net` path so DHCP and the static gateway fallback stay
+//! aligned with the steady-state builder VM, while the host can still pass an
+//! explicit resolver through `/out/stage0-build.conf` when the passt/libkrun
+//! path needs one before the proxy-driven build starts.
 //!
 //! **QEMU** (Linux/x86_64): the stock distro kernel +
 //! initramfs mount the seed as an **ext4** root (`/dev/vda`, writable — so
@@ -41,8 +44,11 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 mod linux {
     use sha2::{Digest, Sha256};
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::process::{Command, ExitCode, Stdio};
+
+    const STAGE0_PROXY_ADDR: &str = "127.0.0.1:8443";
 
     /// Where nix runs from (its store paths are absolute `/nix/store/...`).
     const NIX_TARGET: &str = "/nix";
@@ -61,6 +67,8 @@ mod linux {
     /// build output added later.
     const STAGE0_NIX_STORE_MARKER: &str = "/nix-stage0-store/.mvm-stage0-nix-store";
     const STAGE0_NIX_STORE_MARKER_SCHEMA_VERSION: u32 = 1;
+    const VSOCK_ONLY_CMDLINE_TOKEN: &str = "mvm.vsock_only=1";
+    const VSOCK_ONLY_ENV_VAR: &str = "MVM_VSOCK_ONLY";
 
     pub fn run() -> ExitCode {
         // libkrunfw's bundled kernel hands PID 1 a low RLIMIT_NOFILE on some
@@ -125,6 +133,11 @@ mod linux {
             .unwrap_or(false)
     }
 
+    fn vsock_only_mode(cmdline: &str) -> bool {
+        cmdline.contains(VSOCK_ONLY_CMDLINE_TOKEN)
+            || std::env::var_os(VSOCK_ONLY_ENV_VAR).as_deref() == Some("1".as_ref())
+    }
+
     /// Mounts the pseudo-filesystems + the host shares, then makes `/nix` a
     /// writable store. libkrun supplies eth0 (DHCP); under QEMU the Debian
     /// initramfs brings up eth0 from the `ip=` cmdline.
@@ -138,6 +151,7 @@ mod linux {
         }
 
         let qemu = is_qemu();
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
         eprintln!(
             "stage0-init: backend = {}",
             if qemu { "qemu" } else { "libkrun" }
@@ -174,11 +188,24 @@ mod linux {
             // writable store — no virtiofs-over-FUSE problem, no tmpfs copy
             // (and no EMFILE). nix writes directly to `/nix/store`.
             configure_network_qemu()?;
-            log_qemu_net_state();
+            log_net_state();
         } else {
+            if vsock_only_mode(&cmdline) {
+                eprintln!(
+                    "stage0-init: vsock-only marker present; skipping guest NIC bring-up and using vsock-only egress path"
+                );
+            } else if Path::new("/sys/class/net/eth0").exists() {
+                eprintln!("stage0-init: configuring libkrun guest network via shared guest_net");
+                mvm_guest::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.3")?;
+                eprintln!("stage0-init: shared guest_net completed");
+            } else {
+                eprintln!("stage0-init: no eth0 present; using vsock-only egress path");
+            }
+            log_net_state();
             setup_nix_store()?;
         }
-        configure_nix_runtime(qemu)?;
+        let conf = read_build_conf("/out/stage0-build.conf");
+        configure_nix_runtime(qemu, &conf)?;
         Ok(())
     }
 
@@ -206,7 +233,7 @@ mod linux {
     /// Diagnostic dump of the guest's network state under QEMU — so a boot log
     /// shows whether the initramfs `ip=` autoconfig brought eth0 up (address +
     /// default route) before we rely on it for the nix fetch.
-    fn log_qemu_net_state() {
+    fn log_net_state() {
         let ifaces = std::fs::read_dir("/sys/class/net")
             .map(|d| {
                 d.filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
@@ -222,24 +249,81 @@ mod linux {
         eprintln!("stage0-init: net ifaces=[{ifaces}] default_route={default_route}");
     }
 
-    /// DNS + nix store state the seed rootfs doesn't ship. Neither VMM writes
-    /// `/etc/resolv.conf`, so point it at the gateway's resolver — `192.168.127.1`
-    /// for libkrun/gvproxy, and QEMU user-mode networking's built-in DNS at
-    /// `10.0.2.3` (fixed; no DHCP, no passt). nix needs it to reach
-    /// cache.nixos.org. Also seed the local store dirs so nix runs single-user.
-    fn configure_nix_runtime(qemu: bool) -> Result<(), String> {
-        std::fs::create_dir_all("/etc").map_err(|e| format!("create /etc: {e}"))?;
-        let resolver: &[u8] = if qemu {
-            b"nameserver 10.0.2.3\n"
-        } else {
-            b"nameserver 192.168.127.1\n"
-        };
-        std::fs::write("/etc/resolv.conf", resolver)
-            .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
-        for d in ["/nix/var", "/nix/var/nix", "/nix/var/log/nix"] {
-            std::fs::create_dir_all(d).map_err(|e| format!("create {d}: {e}"))?;
+    /// DNS + nix store state the seed rootfs doesn't ship. QEMU uses its fixed
+    /// slirp DNS (`10.0.2.3`). The libkrun path normally keeps the resolver
+    /// already present in the guest, but accepts an explicit host-selected
+    /// resolver via `/out/stage0-build.conf` when Stage 0 needs one before the
+    /// proxy-driven build takes over.
+    fn configure_nix_runtime(qemu: bool, conf: &HashMap<String, String>) -> Result<(), String> {
+        configure_nix_runtime_at(Path::new("/"), qemu, conf)
+    }
+
+    fn configure_nix_runtime_at(
+        root: &Path,
+        qemu: bool,
+        conf: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let etc_dir = root.join("etc");
+        let resolv_conf = etc_dir.join("resolv.conf");
+        std::fs::create_dir_all(&etc_dir)
+            .map_err(|e| format!("create {}: {e}", etc_dir.display()))?;
+        if qemu || !resolv_conf.exists() {
+            let resolver = resolver_seed(qemu, conf)?;
+            std::fs::write(&resolv_conf, resolver)
+                .map_err(|e| format!("write {}: {e}", resolv_conf.display()))?;
+        }
+        for dir in [
+            root.join("nix/var"),
+            root.join("nix/var/nix"),
+            root.join("nix/var/log/nix"),
+        ] {
+            std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
         Ok(())
+    }
+
+    struct Stage0VsockEgress {
+        handle: Option<mvm_build::egress_proxy::VsockProxyHandle>,
+    }
+
+    impl Stage0VsockEgress {
+        fn start() -> Result<Self, String> {
+            let handle = mvm_build::egress_proxy::start_vsock_proxy(
+                STAGE0_PROXY_ADDR,
+                mvm_build::egress_proxy::ConnectPolicy::Unrestricted,
+            )
+            .map_err(|e| {
+                format!("start Stage 0 vsock CONNECT proxy at {STAGE0_PROXY_ADDR}: {e}")
+            })?;
+            Ok(Self {
+                handle: Some(handle),
+            })
+        }
+    }
+
+    impl Drop for Stage0VsockEgress {
+        fn drop(&mut self) {
+            if let Some(mut handle) = self.handle.take() {
+                handle.shutdown();
+            }
+        }
+    }
+
+    fn resolver_seed(qemu: bool, conf: &HashMap<String, String>) -> Result<Vec<u8>, String> {
+        if qemu {
+            return Ok(b"nameserver 10.0.2.3\n".to_vec());
+        }
+
+        if let Some(resolver) = conf.get("MVM_STAGE0_RESOLVER") {
+            if mvm_guest::guest_net::parse_ipv4(resolver).is_none() {
+                return Err(format!(
+                    "invalid MVM_STAGE0_RESOLVER {resolver:?} in /out/stage0-build.conf"
+                ));
+            }
+            return Ok(format!("nameserver {resolver}\n").into_bytes());
+        }
+
+        Ok(b"nameserver 192.168.127.1\n".to_vec())
     }
 
     /// Standard PID-1 pseudo-filesystems. libkrun's kernel pre-mounts some;
@@ -495,6 +579,7 @@ mod linux {
     /// same one `dev up` / `kernel build` write.
     fn build_and_copy() -> Result<(), String> {
         let nix = find_seed_bin("nix")?;
+        let nix_collect_garbage = find_seed_bin("nix-collect-garbage")?;
         let cacert = find_seed_cacert()?;
 
         // Env: HOME / MVM_WORKSPACE_PATH / MVM_HOST_BIN_DIR for the nix build.
@@ -506,25 +591,6 @@ mod linux {
                 format!("{}:{path}", bindir.display())
             })
             .unwrap_or_default();
-        // SAFETY: this is PID 1, single-threaded at this point — no other
-        // thread can observe a torn environment. `set_var` is `unsafe` in
-        // edition 2024 only for that thread-safety reason.
-        // CA bundle = HTTPS trust for cache.nixos.org / flake inputs (libkrun
-        // gives us DNS; `nss-cacert` from the seed gives the trust roots).
-        // PATH = the seed nix's own bin dir (curl/xz/etc. live beside `nix`).
-        unsafe {
-            std::env::set_var("HOME", "/root");
-            std::env::set_var("MVM_WORKSPACE_PATH", "/work");
-            std::env::set_var("MVM_HOST_BIN_DIR", "/mvm-bins");
-            std::env::set_var("NIX_SSL_CERT_FILE", &cacert);
-            // Force single-user (local store) — the seed has no nix-daemon;
-            // an empty NIX_REMOTE makes nix build directly as root.
-            std::env::set_var("NIX_REMOTE", "");
-            if !nix_path.is_empty() {
-                std::env::set_var("PATH", nix_path);
-            }
-        }
-
         // Console diagnostics (the console.log persists across the power-off;
         // /out gets cleaned up on failure). Confirms the seed nix is runnable
         // before the long build.
@@ -541,6 +607,26 @@ mod linux {
         // Optional host-dropped build config (single-attr / kernel-only
         // modes); absent it, build the full image.
         let conf = read_build_conf("/out/stage0-build.conf");
+        let workspace_root = workspace_root_for_build(&conf)?;
+        // SAFETY: this is PID 1, single-threaded at this point — no other
+        // thread can observe a torn environment. `set_var` is `unsafe` in
+        // edition 2024 only for that thread-safety reason.
+        // CA bundle = HTTPS trust for cache.nixos.org / flake inputs (libkrun
+        // gives us DNS; `nss-cacert` from the seed gives the trust roots).
+        // PATH = the seed nix's own bin dir (curl/xz/etc. live beside `nix`).
+        unsafe {
+            std::env::set_var("HOME", "/root");
+            std::env::set_var("MVM_WORKSPACE_PATH", &workspace_root);
+            std::env::set_var("MVM_HOST_BIN_DIR", "/mvm-bins");
+            std::env::set_var("NIX_SSL_CERT_FILE", &cacert);
+            // Force single-user (local store) — the seed has no nix-daemon;
+            // an empty NIX_REMOTE makes nix build directly as root.
+            std::env::set_var("NIX_REMOTE", "");
+            if !nix_path.is_empty() {
+                std::env::set_var("PATH", nix_path);
+            }
+        }
+        maybe_collect_stage0_nix_garbage(&nix_collect_garbage);
         let attr = conf
             .get("MVM_STAGE0_BUILD_ATTR")
             .cloned()
@@ -550,9 +636,21 @@ mod linux {
             .cloned()
             .unwrap_or_else(|| "image".into());
         let arch = machine_arch()?;
-        let flake_ref = format!("path:/work/nix/images/builder-vm#packages.{arch}-linux.{attr}");
+        let flake_ref = format!(
+            "path:{}/nix/images/builder-vm#packages.{arch}-linux.{attr}",
+            workspace_root.display()
+        );
+        let extra_build_flags = stage0_nix_extra_flags(&conf)?;
 
         eprintln!("stage0-init: building {flake_ref} (output_mode={mode})");
+        let proxy = if is_qemu() {
+            None
+        } else {
+            eprintln!(
+                "stage0-init: starting local CONNECT-over-vsock egress proxy at {STAGE0_PROXY_ADDR}"
+            );
+            Some(Stage0VsockEgress::start()?)
+        };
         let mut cmd = Command::new(&nix);
         cmd.args([
             "build",
@@ -579,11 +677,23 @@ mod linux {
             "--print-out-paths",
             "--print-build-logs",
         ]);
+        cmd.args(&extra_build_flags);
+        if proxy.is_some() {
+            for (k, v) in stage0_proxy_env() {
+                cmd.env(k, v);
+            }
+            // The NIC-less libkrun Stage 0 path depends on proxy env for every
+            // networked Nix step. Keep the inner Nix work unsandboxed inside
+            // the already-isolated VM so fetch/build subprocesses inherit the
+            // same proxy and substituter settings as the outer `nix build`.
+            cmd.env("NIX_CONFIG", stage0_nix_config_for_vsock_proxy());
+        }
         // Echo nix's `--print-build-logs` to the guest's own stderr, which the
         // host captures to `console.log` live — that's what makes the otherwise-
         // silent multi-minute build tailable from the host.
         let (status, stderr_log, stdout) =
             run_streaming(cmd, &mut std::io::stderr()).map_err(|e| format!("nix build: {e}"))?;
+        drop(proxy);
 
         // Persist the full log to /out (a virtio-fs share) for host-side
         // post-mortem at ~/.cache/mvm/builder-vm/.../nix-stderr.log.
@@ -591,6 +701,7 @@ mod linux {
         if !status.success() {
             return Err(format!("nix build exit {}", status.code().unwrap_or(-1)));
         }
+        maybe_collect_stage0_nix_garbage(&nix_collect_garbage);
         let store_path = stdout.trim().to_string();
         if store_path.is_empty() {
             return Err("nix build emitted no /nix/store path".into());
@@ -604,7 +715,7 @@ mod linux {
         // artifact that matters.
         if mode == "kernel"
             && let Some(config_attr) = conf.get("MVM_STAGE0_CONFIG_ATTR")
-            && let Err(e) = emit_resolved_config(&nix, &arch, config_attr)
+            && let Err(e) = emit_resolved_config(&nix, &arch, &workspace_root, config_attr)
         {
             eprintln!("stage0-init: skipping kernel-config emit: {e}");
         }
@@ -614,9 +725,18 @@ mod linux {
     /// Realise the resolved-`.config` flake attr and copy it to
     /// `/out/mvm-kernel.config`. Cheap — it's a cached dependency of the
     /// kernel just built.
-    fn emit_resolved_config(nix: &Path, arch: &str, config_attr: &str) -> Result<(), String> {
-        let flake_ref =
-            format!("path:/work/nix/images/builder-vm#packages.{arch}-linux.{config_attr}");
+    fn emit_resolved_config(
+        nix: &Path,
+        arch: &str,
+        workspace_root: &Path,
+        config_attr: &str,
+    ) -> Result<(), String> {
+        let flake_ref = format!(
+            "path:{}/nix/images/builder-vm#packages.{arch}-linux.{config_attr}",
+            workspace_root.display()
+        );
+        let conf = read_build_conf("/out/stage0-build.conf");
+        let extra_build_flags = stage0_nix_extra_flags(&conf)?;
         let mut cmd = Command::new(nix);
         cmd.args([
             "build",
@@ -633,6 +753,7 @@ mod linux {
             "--impure",
             "--print-out-paths",
         ]);
+        cmd.args(&extra_build_flags);
         let out = cmd.output().map_err(|e| format!("nix build config: {e}"))?;
         if !out.status.success() {
             return Err(format!(
@@ -645,6 +766,79 @@ mod linux {
             return Err("config build emitted no /nix/store path".into());
         }
         copy_deref(Path::new(&store_path), Path::new("/out/mvm-kernel.config"))
+    }
+
+    fn maybe_collect_stage0_nix_garbage(nix_collect_garbage: &Path) {
+        let gc_cap_kib = mvm_build::builder_vm_runtime::builder_store_gc_cap_kib();
+        let store_kib = match nix_filesystem_used_kib(Path::new(NIX_TARGET)) {
+            Ok(store_kib) => store_kib,
+            Err(e) => {
+                eprintln!("stage0-init: unable to measure /nix filesystem usage: {e}");
+                return;
+            }
+        };
+        if store_kib <= gc_cap_kib {
+            return;
+        }
+
+        eprintln!(
+            "stage0-init: /nix store {store_kib} KiB > cap {gc_cap_kib} KiB; running nix-collect-garbage --delete-older-than 14d"
+        );
+        match Command::new(nix_collect_garbage)
+            .args(["--delete-older-than", "14d"])
+            .output()
+        {
+            Ok(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if !stdout.trim().is_empty() {
+                    eprint!("{stdout}");
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !stderr.trim().is_empty() {
+                    eprint!("{stderr}");
+                }
+                if !output.status.success() {
+                    eprintln!(
+                        "stage0-init: nix-collect-garbage exited {} (continuing)",
+                        output.status.code().unwrap_or(-1)
+                    );
+                }
+            }
+            Err(e) => eprintln!("stage0-init: failed to spawn nix-collect-garbage: {e}"),
+        }
+    }
+
+    fn nix_filesystem_used_kib(path: &Path) -> Result<u64, String> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let c_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| format!("{} contains interior NUL", path.display()))?;
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        // SAFETY: c_path is a valid NUL-terminated path and stat points to
+        // writable memory for libc to initialize.
+        let rc = unsafe { libc::statvfs(c_path.as_ptr(), stat.as_mut_ptr()) };
+        if rc != 0 {
+            return Err(format!(
+                "statvfs {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: statvfs succeeded, so libc initialized `stat`.
+        let stat = unsafe { stat.assume_init() };
+        let used_blocks = stat.f_blocks.saturating_sub(stat.f_bavail);
+        let block_size = u128::from(stat.f_frsize.max(stat.f_bsize));
+        let used_bytes = u128::from(used_blocks) * block_size;
+        Ok((used_bytes / 1024) as u64)
+    }
+
+    fn workspace_root_for_build(conf: &HashMap<String, String>) -> Result<PathBuf, String> {
+        if let Some(archive_path) = conf.get("MVM_STAGE0_WORKSPACE_ARCHIVE") {
+            localize_override_source_at(Path::new("/nix"), "stage0-work", archive_path)?;
+            return Ok(PathBuf::from("/nix/stage0-work"));
+        }
+        Ok(PathBuf::from("/work"))
     }
 
     /// Spawn `cmd`, streaming its stderr line-by-line to `live` (flushed per
@@ -823,8 +1017,7 @@ mod linux {
     }
 
     /// Minimal `KEY=VALUE` / `KEY="VALUE"` reader for the optional
-    /// host-dropped build conf — the host only ever writes two plain
-    /// assignments (`MVM_STAGE0_BUILD_ATTR`, `MVM_STAGE0_OUTPUT_MODE`).
+    /// host-dropped build conf.
     fn read_build_conf(path: &str) -> std::collections::HashMap<String, String> {
         let mut map = std::collections::HashMap::new();
         let Ok(text) = std::fs::read_to_string(path) else {
@@ -841,6 +1034,148 @@ mod linux {
             }
         }
         map
+    }
+
+    fn stage0_nix_extra_flags(conf: &HashMap<String, String>) -> Result<Vec<String>, String> {
+        stage0_nix_extra_flags_with_localized_inputs(conf, Path::new("/nix/stage0-inputs"))
+    }
+
+    fn stage0_nix_extra_flags_with_localized_inputs(
+        conf: &HashMap<String, String>,
+        local_root: &Path,
+    ) -> Result<Vec<String>, String> {
+        let mut args = Vec::new();
+        if truthy_env_value(conf.get("MVM_STAGE0_OFFLINE")) {
+            args.push("--offline".to_string());
+        }
+        let mut override_keys = conf
+            .keys()
+            .filter(|key| key.starts_with("MVM_STAGE0_OVERRIDE_INPUT_"))
+            .cloned()
+            .collect::<Vec<_>>();
+        override_keys.sort();
+        for key in override_keys {
+            let value = conf
+                .get(&key)
+                .ok_or_else(|| format!("{key} disappeared during Stage 0 config read"))?;
+            let (input_path, guest_path) = value.split_once('=').ok_or_else(|| {
+                format!("invalid {key} value {value:?}; expected <input_path>=<guest_path>")
+            })?;
+            let localized = localize_override_source_at(local_root, input_path, guest_path)?;
+            args.push("--override-input".to_string());
+            args.push(input_path.to_string());
+            args.push(format!("path:{}", localized.display()));
+        }
+        Ok(args)
+    }
+
+    fn truthy_env_value(value: Option<&String>) -> bool {
+        value.is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+    }
+
+    fn stage0_proxy_env() -> [(&'static str, &'static str); 4] {
+        [
+            ("HTTPS_PROXY", "http://127.0.0.1:8443"),
+            ("HTTP_PROXY", "http://127.0.0.1:8443"),
+            ("https_proxy", "http://127.0.0.1:8443"),
+            ("http_proxy", "http://127.0.0.1:8443"),
+        ]
+    }
+
+    fn stage0_nix_config_for_vsock_proxy() -> &'static str {
+        "experimental-features = nix-command flakes\n\
+         sandbox = false\n\
+         build-users-group =\n\
+         max-jobs = 1\n\
+         cores = 0\n\
+         substituters = https://cache.nixos.org/\n\
+         trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+    }
+
+    fn localize_override_source_at(
+        local_root: &Path,
+        input_path: &str,
+        guest_path: &str,
+    ) -> Result<PathBuf, String> {
+        let source = Path::new(guest_path);
+        if !source.exists() {
+            return Err(format!(
+                "override input {input_path} source {} does not exist",
+                source.display()
+            ));
+        }
+
+        std::fs::create_dir_all(local_root)
+            .map_err(|e| format!("create {}: {e}", local_root.display()))?;
+        let target = local_root.join(input_path.replace('/', "__"));
+        if target.exists() {
+            if target.is_dir() {
+                std::fs::remove_dir_all(&target)
+                    .map_err(|e| format!("remove {}: {e}", target.display()))?;
+            } else {
+                std::fs::remove_file(&target)
+                    .map_err(|e| format!("remove {}: {e}", target.display()))?;
+            }
+        }
+
+        if guest_path.ends_with(".tar.gz") {
+            extract_tar_gz_strip_root_path(source, &target)?;
+        } else if source.is_dir() {
+            copy_tree(source, &target)
+                .map_err(|e| format!("copy {} -> {}: {e}", source.display(), target.display()))?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("create {}: {e}", parent.display()))?;
+            }
+            std::fs::copy(source, &target)
+                .map_err(|e| format!("copy {} -> {}: {e}", source.display(), target.display()))?;
+        }
+        Ok(target)
+    }
+
+    fn extract_tar_gz_strip_root_path(src: &Path, dest: &Path) -> Result<(), String> {
+        let parent = dest
+            .parent()
+            .ok_or_else(|| format!("{} has no parent", dest.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        let temp = tempfile::tempdir_in(parent)
+            .map_err(|e| format!("create tempdir under {}: {e}", parent.display()))?;
+        let file = std::fs::File::open(src).map_err(|e| format!("open {}: {e}", src.display()))?;
+        let decoder = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        archive.unpack(temp.path()).map_err(|e| {
+            format!(
+                "unpack {} into {}: {e}",
+                src.display(),
+                temp.path().display()
+            )
+        })?;
+        let mut entries = std::fs::read_dir(temp.path())
+            .map_err(|e| format!("read {}: {e}", temp.path().display()))?
+            .filter_map(|entry| entry.ok())
+            .collect::<Vec<_>>();
+        if entries.len() != 1 {
+            return Err(format!(
+                "expected one top-level directory when unpacking {} into {}, found {}",
+                src.display(),
+                temp.path().display(),
+                entries.len()
+            ));
+        }
+        let extracted = entries.pop().expect("one entry present").path();
+        if dest.exists() {
+            if dest.is_dir() {
+                std::fs::remove_dir_all(dest)
+                    .map_err(|e| format!("remove {}: {e}", dest.display()))?;
+            } else {
+                std::fs::remove_file(dest)
+                    .map_err(|e| format!("remove {}: {e}", dest.display()))?;
+            }
+        }
+        std::fs::rename(&extracted, dest)
+            .map_err(|e| format!("move {} to {}: {e}", extracted.display(), dest.display()))?;
+        Ok(())
     }
 
     fn copy_deref(src: &Path, dst: &Path) -> Result<(), String> {
@@ -867,7 +1202,16 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
+        use super::configure_nix_runtime_at;
+        use super::nix_filesystem_used_kib;
+        use super::resolver_seed;
         use super::run_streaming;
+        use super::stage0_nix_config_for_vsock_proxy;
+        use super::stage0_nix_extra_flags;
+        use super::stage0_nix_extra_flags_with_localized_inputs;
+        use super::stage0_proxy_env;
+        use std::collections::HashMap;
+        use std::path::Path;
         use std::process::Command;
 
         #[test]
@@ -897,6 +1241,142 @@ mod linux {
             let (status, stderr_log, _stdout) = run_streaming(cmd, &mut live).unwrap();
             assert_eq!(status.code(), Some(7));
             assert_eq!(stderr_log, b"boom\n");
+        }
+
+        #[test]
+        fn resolver_seed_prefers_qemu_builtin_dns() {
+            assert_eq!(
+                resolver_seed(true, &HashMap::new()).unwrap(),
+                b"nameserver 10.0.2.3\n"
+            );
+        }
+
+        #[test]
+        fn configure_nix_runtime_libkrun_leaves_existing_resolver_seed_alone() {
+            let tmp = tempfile::tempdir().unwrap();
+            std::fs::create_dir_all(tmp.path().join("etc")).unwrap();
+            std::fs::write(
+                tmp.path().join("etc/resolv.conf"),
+                "nameserver 192.168.127.1\n",
+            )
+            .unwrap();
+            configure_nix_runtime_at(tmp.path(), false, &HashMap::new()).unwrap();
+            assert_eq!(
+                std::fs::read_to_string(tmp.path().join("etc/resolv.conf")).unwrap(),
+                "nameserver 192.168.127.1\n"
+            );
+        }
+
+        #[test]
+        fn resolver_seed_uses_host_override_for_libkrun() {
+            let mut conf = HashMap::new();
+            conf.insert("MVM_STAGE0_RESOLVER".to_string(), "10.10.0.53".to_string());
+            assert_eq!(
+                resolver_seed(false, &conf).unwrap(),
+                b"nameserver 10.10.0.53\n"
+            );
+        }
+
+        #[test]
+        fn resolver_seed_rejects_invalid_host_override() {
+            let mut conf = HashMap::new();
+            conf.insert("MVM_STAGE0_RESOLVER".to_string(), "not-an-ip".to_string());
+            let err = resolver_seed(false, &conf).unwrap_err();
+            assert!(err.contains("invalid MVM_STAGE0_RESOLVER"));
+        }
+
+        #[test]
+        fn stage0_proxy_env_uses_http_connect_only() {
+            assert_eq!(
+                stage0_proxy_env(),
+                [
+                    ("HTTPS_PROXY", "http://127.0.0.1:8443"),
+                    ("HTTP_PROXY", "http://127.0.0.1:8443"),
+                    ("https_proxy", "http://127.0.0.1:8443"),
+                    ("http_proxy", "http://127.0.0.1:8443"),
+                ]
+            );
+        }
+
+        #[test]
+        fn stage0_nix_config_for_vsock_proxy_disables_inner_sandbox() {
+            let config = stage0_nix_config_for_vsock_proxy();
+            assert!(config.contains("sandbox = false"));
+            assert!(config.contains("build-users-group ="));
+            assert!(config.contains("substituters = https://cache.nixos.org/"));
+        }
+
+        #[test]
+        fn stage0_nix_extra_flags_adds_offline_and_override_inputs() {
+            let tmp = tempfile::tempdir().unwrap();
+            let source_root = tmp.path().join("source");
+            std::fs::create_dir_all(source_root.join("nixpkgs-root")).unwrap();
+            std::fs::create_dir_all(source_root.join("microvm-root")).unwrap();
+            std::fs::write(source_root.join("nixpkgs-root/flake.nix"), "{}").unwrap();
+            std::fs::write(source_root.join("microvm-root/flake.nix"), "{}").unwrap();
+            let nixpkgs_archive = source_root.join("nixpkgs.tar.gz");
+            let microvm_archive = source_root.join("microvm.tar.gz");
+            build_test_archive(
+                &source_root.join("nixpkgs-root"),
+                &nixpkgs_archive,
+                "source",
+            );
+            build_test_archive(
+                &source_root.join("microvm-root"),
+                &microvm_archive,
+                "source",
+            );
+            let mut conf = HashMap::new();
+            conf.insert("MVM_STAGE0_OFFLINE".to_string(), "1".to_string());
+            conf.insert(
+                "MVM_STAGE0_OVERRIDE_INPUT_1".to_string(),
+                format!("microvm={}", microvm_archive.display()),
+            );
+            conf.insert(
+                "MVM_STAGE0_OVERRIDE_INPUT_0".to_string(),
+                format!("nixpkgs={}", nixpkgs_archive.display()),
+            );
+            let local_root = tmp.path().join("localized");
+            assert_eq!(
+                stage0_nix_extra_flags_with_localized_inputs(&conf, &local_root).unwrap(),
+                vec![
+                    "--offline".to_string(),
+                    "--override-input".to_string(),
+                    "nixpkgs".to_string(),
+                    format!("path:{}", local_root.join("nixpkgs").display()),
+                    "--override-input".to_string(),
+                    "microvm".to_string(),
+                    format!("path:{}", local_root.join("microvm").display()),
+                ]
+            );
+            assert!(local_root.join("nixpkgs/flake.nix").is_file());
+            assert!(local_root.join("microvm/flake.nix").is_file());
+        }
+
+        fn build_test_archive(src: &Path, dest: &Path, root_name: &str) {
+            let file = std::fs::File::create(dest).unwrap();
+            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+            let mut archive = tar::Builder::new(encoder);
+            archive.append_dir_all(root_name, src).unwrap();
+            let encoder = archive.into_inner().unwrap();
+            encoder.finish().unwrap();
+        }
+
+        #[test]
+        fn stage0_nix_extra_flags_rejects_malformed_override() {
+            let mut conf = HashMap::new();
+            conf.insert(
+                "MVM_STAGE0_OVERRIDE_INPUT_0".to_string(),
+                "missing-separator".to_string(),
+            );
+            let err = stage0_nix_extra_flags(&conf).unwrap_err();
+            assert!(err.contains("expected <input_path>=<guest_path>"));
+        }
+
+        #[test]
+        fn nix_filesystem_used_kib_reports_nonzero_usage() {
+            let used = nix_filesystem_used_kib(Path::new("/")).unwrap();
+            assert!(used > 0);
         }
     }
 }

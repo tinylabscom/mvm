@@ -6,7 +6,7 @@
 //! and builds the matching
 //! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant, applying
 //! `mvm-jailer-lite` confinement through one cfg-gated codepath wherever the OS
-//! supports it (the Linux `Passt` endpoint). The macOS libkrun-gvproxy arm runs
+//! supports it (the Linux `Passt` endpoint). The macOS native-gateway arm runs
 //! unconfined — `confine_self` is Linux-only (Landlock+seccomp).
 //!
 //! ## Fail-closed parsing
@@ -93,7 +93,7 @@ pub struct BridgeConfigJson {
 /// Backend-specific transport for the bridge, selecting which
 /// `BridgeEndpoints` variant the sidecar builds.
 ///
-/// Externally tagged (`{"passt": {…}}` / `{"libkrun_gvproxy": {…}}`) with
+/// Externally tagged (`{"passt": {…}}` / `{"libkrun_native_gateway": {…}}`) with
 /// per-variant `deny_unknown_fields`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
@@ -112,11 +112,11 @@ pub enum BridgeEndpointKind {
         /// Raw fd of the supervisor half of the inner virtio-net socketpair.
         supervisor_fd_raw: i32,
     },
-    /// macOS libkrun + gvproxy: gvproxy owns its listener at
-    /// `gvproxy_socket_path`; the bridge binds `supervisor_listen_path` and
+    /// macOS libkrun + native gateway: the helper owns its listener at
+    /// `gateway_socket_path`; the bridge binds `supervisor_listen_path` and
     /// libkrun connects to that. Datagrams are relayed both directions.
-    LibkrunGvproxy {
-        gvproxy_socket_path: PathBuf,
+    LibkrunNativeGateway {
+        gateway_socket_path: PathBuf,
         supervisor_listen_path: PathBuf,
     },
 }
@@ -189,17 +189,18 @@ mod tests {
     }
 
     #[test]
-    fn libkrun_gvproxy_endpoint_roundtrips() {
+    fn libkrun_native_gateway_endpoint_roundtrips() {
         let json = with_endpoint(serde_json::json!({
-            "libkrun_gvproxy": {
-                "gvproxy_socket_path": "/tmp/gv.sock",
+            "libkrun_native_gateway": {
+                "gateway_socket_path": "/tmp/gv.sock",
                 "supervisor_listen_path": "/tmp/sup.sock",
             }
         }));
-        let cfg: BridgeConfigJson = serde_json::from_str(&json).expect("libkrun_gvproxy parses");
+        let cfg: BridgeConfigJson =
+            serde_json::from_str(&json).expect("libkrun_native_gateway parses");
         assert!(matches!(
             cfg.endpoint,
-            BridgeEndpointKind::LibkrunGvproxy { .. }
+            BridgeEndpointKind::LibkrunNativeGateway { .. }
         ));
     }
 
@@ -210,7 +211,7 @@ mod tests {
         obj.insert("bundle_json".into(), serde_json::json!("{\"x\":1}"));
         obj.insert(
             "endpoint".into(),
-            serde_json::json!({ "libkrun_gvproxy": { "gvproxy_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
+            serde_json::json!({ "libkrun_native_gateway": { "gateway_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
         );
         let cfg: BridgeConfigJson = serde_json::from_str(&serde_json::to_string(&v).unwrap())
             .expect("parses with bundle_json");
@@ -224,7 +225,7 @@ mod tests {
         obj.insert("attacker_injected".into(), serde_json::json!("evil"));
         obj.insert(
             "endpoint".into(),
-            serde_json::json!({ "libkrun_gvproxy": { "gvproxy_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
+            serde_json::json!({ "libkrun_native_gateway": { "gateway_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
         );
         let err = serde_json::from_str::<BridgeConfigJson>(&serde_json::to_string(&v).unwrap())
             .expect_err("deny_unknown_fields must reject");
@@ -234,8 +235,8 @@ mod tests {
     #[test]
     fn unknown_field_within_a_variant_is_rejected() {
         let json = with_endpoint(serde_json::json!({
-            "libkrun_gvproxy": {
-                "gvproxy_socket_path": "/gv.sock",
+            "libkrun_native_gateway": {
+                "gateway_socket_path": "/gv.sock",
                 "supervisor_listen_path": "/sup.sock",
                 "sneaky": true,
             }
@@ -273,7 +274,7 @@ mod tests {
     #[test]
     fn network_policy_json_defaults_to_none_and_decodes_none() {
         let json = with_endpoint(serde_json::json!({
-            "libkrun_gvproxy": { "gvproxy_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" }
+            "libkrun_native_gateway": { "gateway_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" }
         }));
         let cfg: BridgeConfigJson = serde_json::from_str(&json).unwrap();
         assert!(cfg.network_policy_json.is_none());
@@ -289,7 +290,7 @@ mod tests {
         obj.insert("network_policy_json".into(), serde_json::json!(policy_json));
         obj.insert(
             "endpoint".into(),
-            serde_json::json!({ "libkrun_gvproxy": { "gvproxy_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
+            serde_json::json!({ "libkrun_native_gateway": { "gateway_socket_path": "/gv.sock", "supervisor_listen_path": "/sup.sock" } }),
         );
         let cfg: BridgeConfigJson =
             serde_json::from_str(&serde_json::to_string(&v).unwrap()).unwrap();

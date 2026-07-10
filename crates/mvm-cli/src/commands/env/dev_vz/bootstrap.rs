@@ -15,6 +15,10 @@ use super::stage0_cache::{
     validate_builder_vm_stage0_artifacts,
 };
 use super::*;
+#[cfg(feature = "builder-vm")]
+use serde::Deserialize;
+#[cfg(feature = "builder-vm")]
+use std::collections::HashMap;
 
 pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
     let arch = builder_vm_host_arch();
@@ -97,6 +101,413 @@ pub(super) fn builder_vm_host_arch() -> &'static str {
     } else {
         "x86_64"
     }
+}
+
+#[cfg(feature = "builder-vm")]
+pub(super) fn first_nameserver_from_resolv_conf(body: &str) -> Option<String> {
+    body.lines().find_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let mut parts = line.split_whitespace();
+        match (parts.next(), parts.next(), parts.next()) {
+            (Some("nameserver"), Some(ip), None)
+                if mvm_guest::guest_net::parse_ipv4(ip).is_some() =>
+            {
+                Some(ip.to_string())
+            }
+            _ => None,
+        }
+    })
+}
+
+#[cfg(feature = "builder-vm")]
+fn stage0_resolver_override() -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+
+    std::fs::read_to_string("/etc/resolv.conf")
+        .ok()
+        .and_then(|body| first_nameserver_from_resolv_conf(&body))
+}
+
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Stage0InputOverride {
+    pub input_path: String,
+    pub guest_path: String,
+}
+
+#[cfg(feature = "builder-vm")]
+const STAGE0_WORKSPACE_ARCHIVE_NAME: &str = "stage0-workspace.tar.gz";
+
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Deserialize)]
+struct Stage0FlakeLock {
+    nodes: HashMap<String, Stage0FlakeLockNode>,
+}
+
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Deserialize)]
+struct Stage0FlakeLockNode {
+    locked: Option<Stage0FlakeLockSource>,
+}
+
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Deserialize)]
+struct Stage0FlakeLockSource {
+    #[serde(rename = "type")]
+    kind: String,
+    owner: Option<String>,
+    repo: Option<String>,
+    rev: Option<String>,
+    url: Option<String>,
+}
+
+#[cfg(feature = "builder-vm")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum Stage0RemoteInput {
+    Github {
+        owner: String,
+        repo: String,
+        rev: String,
+    },
+    Git {
+        url: String,
+        rev: String,
+    },
+}
+
+#[cfg(feature = "builder-vm")]
+pub(super) fn stage0_locked_input_sources(
+    builder_flake_dir: &str,
+) -> Result<Vec<(&'static str, &'static str, Stage0RemoteInput)>> {
+    let lock_path = std::path::Path::new(builder_flake_dir).join("flake.lock");
+    let body = std::fs::read_to_string(&lock_path)
+        .with_context(|| format!("reading {}", lock_path.display()))?;
+    let lock: Stage0FlakeLock =
+        serde_json::from_str(&body).with_context(|| format!("parsing {}", lock_path.display()))?;
+    let mut out = Vec::new();
+    for (node_name, input_path, guest_name) in [
+        ("nixpkgs", "nixpkgs", "nixpkgs"),
+        ("microvm", "microvm", "microvm"),
+        ("spectrum", "microvm/spectrum", "spectrum"),
+    ] {
+        let node = lock
+            .nodes
+            .get(node_name)
+            .ok_or_else(|| anyhow::anyhow!("flake.lock missing node {node_name}"))?;
+        let locked = node
+            .locked
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("flake.lock node {node_name} has no locked source"))?;
+        let source =
+            match locked.kind.as_str() {
+                "github" => Stage0RemoteInput::Github {
+                    owner: locked.owner.clone().ok_or_else(|| {
+                        anyhow::anyhow!("flake.lock node {node_name} missing owner")
+                    })?,
+                    repo: locked.repo.clone().ok_or_else(|| {
+                        anyhow::anyhow!("flake.lock node {node_name} missing repo")
+                    })?,
+                    rev: locked.rev.clone().ok_or_else(|| {
+                        anyhow::anyhow!("flake.lock node {node_name} missing rev")
+                    })?,
+                },
+                "git" => Stage0RemoteInput::Git {
+                    url: locked.url.clone().ok_or_else(|| {
+                        anyhow::anyhow!("flake.lock node {node_name} missing url")
+                    })?,
+                    rev: locked.rev.clone().ok_or_else(|| {
+                        anyhow::anyhow!("flake.lock node {node_name} missing rev")
+                    })?,
+                },
+                other => {
+                    anyhow::bail!("unsupported flake.lock source type {other} for node {node_name}")
+                }
+            };
+        out.push((input_path, guest_name, source));
+    }
+    Ok(out)
+}
+
+#[cfg(feature = "builder-vm")]
+fn stage0_fetch_github_input(
+    owner: &str,
+    repo: &str,
+    rev: &str,
+    dest: &std::path::Path,
+) -> Result<()> {
+    let url = format!("https://github.com/{owner}/{repo}/archive/{rev}.tar.gz");
+    let response = reqwest::blocking::get(&url).with_context(|| format!("fetching {url}"))?;
+    if !response.status().is_success() {
+        anyhow::bail!("fetching {url} returned {}", response.status());
+    }
+    let bytes = response
+        .bytes()
+        .with_context(|| format!("reading response body from {url}"))?;
+    let parent = dest
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent", dest.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    std::fs::write(dest, bytes.as_ref()).with_context(|| format!("writing {}", dest.display()))
+}
+
+#[cfg(feature = "builder-vm")]
+fn stage0_fetch_git_input(url: &str, rev: &str, dest: &std::path::Path) -> Result<()> {
+    let parent = dest
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent", dest.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    let clone_dir = tempfile::tempdir_in(parent)
+        .with_context(|| format!("creating tempdir under {}", parent.display()))?;
+    let clone_path = clone_dir.path().join("checkout");
+    let status = std::process::Command::new("git")
+        .args(["clone", url, &clone_path.display().to_string()])
+        .status()
+        .with_context(|| format!("spawning git clone for {url}"))?;
+    if !status.success() {
+        anyhow::bail!(
+            "git clone {url} -> {} exited {status}",
+            clone_path.display()
+        );
+    }
+    let status = std::process::Command::new("git")
+        .args(["-C", &clone_path.display().to_string(), "checkout", rev])
+        .status()
+        .with_context(|| format!("spawning git checkout {rev} in {}", clone_path.display()))?;
+    if !status.success() {
+        anyhow::bail!(
+            "git checkout {rev} in {} exited {status}",
+            clone_path.display()
+        );
+    }
+    if dest.exists() {
+        std::fs::remove_file(dest).with_context(|| format!("removing {}", dest.display()))?;
+    }
+    let status = std::process::Command::new("git")
+        .args([
+            "-C",
+            &clone_path.display().to_string(),
+            "archive",
+            "--format=tar.gz",
+            &format!("--output={}", dest.display()),
+            "--prefix=source/",
+            "HEAD",
+        ])
+        .status()
+        .with_context(|| format!("spawning git archive in {}", clone_path.display()))?;
+    if !status.success() {
+        anyhow::bail!(
+            "git archive in {} -> {} exited {status}",
+            clone_path.display(),
+            dest.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(feature = "builder-vm")]
+fn stage0_prefetch_locked_inputs(
+    builder_flake_dir: &str,
+    staging_dir: &std::path::Path,
+) -> Result<Vec<Stage0InputOverride>> {
+    let inputs_dir = staging_dir.join("stage0-inputs");
+    std::fs::create_dir_all(&inputs_dir)
+        .with_context(|| format!("creating {}", inputs_dir.display()))?;
+    let mut overrides = Vec::new();
+    for (input_path, guest_name, source) in stage0_locked_input_sources(builder_flake_dir)? {
+        let host_dest = inputs_dir.join(format!("{guest_name}.tar.gz"));
+        match source {
+            Stage0RemoteInput::Github { owner, repo, rev } => {
+                stage0_fetch_github_input(&owner, &repo, &rev, &host_dest)?
+            }
+            Stage0RemoteInput::Git { url, rev } => stage0_fetch_git_input(&url, &rev, &host_dest)?,
+        }
+        overrides.push(Stage0InputOverride {
+            input_path: input_path.to_string(),
+            guest_path: format!("/out/stage0-inputs/{guest_name}.tar.gz"),
+        });
+    }
+    Ok(overrides)
+}
+
+#[cfg(feature = "builder-vm")]
+fn cleanup_stage0_prefetched_inputs(staging_dir: &std::path::Path) -> Result<()> {
+    let inputs_dir = staging_dir.join("stage0-inputs");
+    if inputs_dir.exists() {
+        std::fs::remove_dir_all(&inputs_dir)
+            .with_context(|| format!("removing {}", inputs_dir.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "builder-vm")]
+fn stage0_workspace_archive_path(staging_dir: &std::path::Path) -> std::path::PathBuf {
+    staging_dir.join(STAGE0_WORKSPACE_ARCHIVE_NAME)
+}
+
+#[cfg(feature = "builder-vm")]
+fn stage0_workspace_file_list(workspace_root: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    let output = std::process::Command::new("git")
+        .args([
+            "-C",
+            &workspace_root.display().to_string(),
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .output()
+        .with_context(|| format!("spawning git ls-files under {}", workspace_root.display()))?;
+    if output.status.success() {
+        let mut files = output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| {
+                std::str::from_utf8(entry)
+                    .map(std::path::PathBuf::from)
+                    .with_context(|| {
+                        format!(
+                            "git ls-files under {} emitted non-utf8 path",
+                            workspace_root.display()
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        files.sort();
+        return Ok(files);
+    }
+    stage0_workspace_file_list_from_walk(workspace_root)
+}
+
+#[cfg(feature = "builder-vm")]
+fn stage0_workspace_file_list_from_walk(
+    workspace_root: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>> {
+    let mut out = Vec::new();
+    let mut stack = vec![workspace_root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries =
+            std::fs::read_dir(&dir).with_context(|| format!("read_dir {}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.with_context(|| format!("read_dir entry in {}", dir.display()))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name == "target" || name.ends_with(".swp") {
+                continue;
+            }
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("file_type {}", path.display()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if file_type.is_file() || file_type.is_symlink() {
+                out.push(
+                    path.strip_prefix(workspace_root)
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "strip_prefix {} from {}: {e}",
+                                workspace_root.display(),
+                                path.display()
+                            )
+                        })?
+                        .to_path_buf(),
+                );
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+#[cfg(feature = "builder-vm")]
+fn stage0_archive_workspace(
+    workspace_root: &std::path::Path,
+    archive_path: &std::path::Path,
+) -> Result<()> {
+    let parent = archive_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} has no parent", archive_path.display()))?;
+    std::fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    if archive_path.exists() {
+        std::fs::remove_file(archive_path)
+            .with_context(|| format!("removing {}", archive_path.display()))?;
+    }
+    let file = std::fs::File::create(archive_path)
+        .with_context(|| format!("creating {}", archive_path.display()))?;
+    let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    for rel in stage0_workspace_file_list(workspace_root)? {
+        let src = workspace_root.join(&rel);
+        if !src.exists() {
+            continue;
+        }
+        archive
+            .append_path_with_name(&src, std::path::Path::new("stage0-work").join(&rel))
+            .with_context(|| {
+                format!(
+                    "archiving {} into {}",
+                    src.display(),
+                    archive_path.display()
+                )
+            })?;
+    }
+    let encoder = archive
+        .into_inner()
+        .with_context(|| format!("finalizing tar stream for {}", archive_path.display()))?;
+    encoder
+        .finish()
+        .with_context(|| format!("finalizing gzip stream for {}", archive_path.display()))?;
+    Ok(())
+}
+
+#[cfg(feature = "builder-vm")]
+fn cleanup_stage0_workspace_archive(staging_dir: &std::path::Path) -> Result<()> {
+    let archive = stage0_workspace_archive_path(staging_dir);
+    if archive.exists() {
+        std::fs::remove_file(&archive)
+            .with_context(|| format!("removing {}", archive.display()))?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "builder-vm")]
+pub(super) fn stage0_build_conf_contents(
+    build_attr: &str,
+    output_mode: &str,
+    resolver_override: Option<&str>,
+    workspace_archive: Option<&str>,
+    offline: bool,
+    input_overrides: &[Stage0InputOverride],
+) -> String {
+    let mut conf =
+        format!("MVM_STAGE0_BUILD_ATTR={build_attr}\nMVM_STAGE0_OUTPUT_MODE={output_mode}\n");
+    if let Some(resolver) = resolver_override {
+        conf.push_str(&format!("MVM_STAGE0_RESOLVER={resolver}\n"));
+    }
+    if let Some(workspace_archive) = workspace_archive {
+        conf.push_str(&format!(
+            "MVM_STAGE0_WORKSPACE_ARCHIVE={workspace_archive}\n"
+        ));
+    }
+    if offline {
+        conf.push_str("MVM_STAGE0_OFFLINE=1\n");
+    }
+    for (idx, override_input) in input_overrides.iter().enumerate() {
+        conf.push_str(&format!(
+            "MVM_STAGE0_OVERRIDE_INPUT_{idx}={}={}\n",
+            override_input.input_path, override_input.guest_path
+        ));
+    }
+    conf
 }
 
 /// Cadence of [`BuildHeartbeat`] liveness lines. ~20s keeps a multi-minute
@@ -782,6 +1193,28 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     let staging_dir = unique_builder_vm_stage0_staging_dir(out_dir_path)?;
     std::fs::create_dir_all(&staging_dir)
         .with_context(|| format!("creating Stage 0 staging dir {}", staging_dir.display()))?;
+    let input_overrides = if cfg!(target_os = "linux") {
+        stage0_prefetch_locked_inputs(builder_flake_dir, &staging_dir)?
+    } else {
+        Vec::new()
+    };
+    let workspace_archive = if cfg!(target_os = "linux") {
+        let archive = stage0_workspace_archive_path(&staging_dir);
+        stage0_archive_workspace(&workspace_root, &archive)?;
+        Some(format!("/out/{STAGE0_WORKSPACE_ARCHIVE_NAME}"))
+    } else {
+        None
+    };
+    let stage0_conf = stage0_build_conf_contents(
+        "default",
+        "image",
+        stage0_resolver_override().as_deref(),
+        workspace_archive.as_deref(),
+        false,
+        &input_overrides,
+    );
+    std::fs::write(staging_dir.join("stage0-build.conf"), stage0_conf)
+        .with_context(|| format!("writing stage0-build.conf in {}", staging_dir.display()))?;
 
     let started = std::time::Instant::now();
     let fingerprint_prefix = stage0_fingerprint_prefix(source_fingerprint);
@@ -849,6 +1282,10 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
 
     match result {
         Ok(()) => {
+            cleanup_stage0_prefetched_inputs(&staging_dir)
+                .context("cleaning Stage 0 prefetched input staging")?;
+            cleanup_stage0_workspace_archive(&staging_dir)
+                .context("cleaning Stage 0 workspace archive staging")?;
             promote_builder_vm_stage0_cache(&staging_dir, out_dir_path, source_fingerprint)
                 .context("promoting Stage 0 artifacts into the builder VM cache")?;
             mvm_core::audit_emit!(
