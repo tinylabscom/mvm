@@ -30,11 +30,15 @@ pub mod health_probe;
 /// Idle-registration self-termination logic for the `mvm-host-agent` worker.
 pub mod host_agent_idle;
 pub mod host_signer;
+/// Host-side `/dev/net/tun` helper for the shared packet-tunnel data plane.
+pub mod host_tun;
 pub mod jailer;
 /// Secret keyholder — the `SecretRef` → credential boundary: the
 /// [`keyholder::SecretResolver`] trait + the single-host
 /// [`keyholder::LocalResolver`].
 pub mod keyholder;
+/// Host-side session validation helpers for the shared network tunnel contract.
+pub mod network_tunnel;
 /// Child-side parent-death watchdog: each subprocess-moat bin exits the
 /// instant its supervisor dies, closing the macOS / abnormal-death gap the
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.

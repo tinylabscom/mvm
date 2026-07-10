@@ -47,6 +47,10 @@ use std::time::{Duration, Instant, SystemTime};
 /// libkrun backend (Linux KVM / macOS Hypervisor.framework).
 pub struct LibkrunBackend;
 
+use crate::network_tunnel_spawn::{
+    NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
+    spawn_network_tunnel_worker_if_configured,
+};
 use crate::substitution_spawn::EndpointGuard;
 
 /// Spawn the per-VM substitution endpoint when the admitted plan carries egress
@@ -321,6 +325,14 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    if let Some(token) = config
+        .network_tunnel
+        .as_ref()
+        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline)
+    {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     let vsock_egress_opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
     if let Some(token) = vsock_egress_cmdline_token(
         vsock_egress_opt_in,
@@ -550,6 +562,18 @@ impl VmBackend for LibkrunBackend {
             cfg.transparent_terminator_port
                 .expect("libkrun transparent terminator port is set"),
         )?;
+        let mut tunnel_guard =
+            spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
+                state_dir: &state_dir,
+                runtime_config: config.network_tunnel.as_ref(),
+                listener: config.network_tunnel.as_ref().map(|tunnel| {
+                    NetworkTunnelListener::Uds(mvm_core::config::vm_vsock_port_socket_at(
+                        &state_dir,
+                        tunnel.guest_port,
+                    ))
+                }),
+                host_tun_interface_name: None,
+            })?;
         let pid_file = cfg.pid_file();
         // Remove any stale PID file from a previous crashed supervisor
         // so the wait-loop below can detect the new one unambiguously.
@@ -696,6 +720,7 @@ impl VmBackend for LibkrunBackend {
             pid_file.display()
         ));
         endpoint_guard.defuse();
+        tunnel_guard.defuse();
         broker_guard.defuse();
         Ok(VmId(config.name.clone()))
     }
@@ -706,6 +731,7 @@ impl VmBackend for LibkrunBackend {
         // guest. Mirrors the FC `stop_vm` ordering — safe because reap is a
         // no-op when nothing exists, even before the not-running early return.
         crate::substitution_spawn::reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        reap_network_tunnel_worker(&vm_state_dir(&id.0));
         // Reap the per-VM broker + audit-signer too (no-op when none spawned),
         // so they can't outlive the guest.
         crate::broker_services_spawn::reap_broker_services(&vm_state_dir(&id.0));
@@ -1711,6 +1737,39 @@ mod tests {
         assert!(
             cmdline.contains("mvm.host_signer_pub="),
             "host_signer_pub trust anchor missing: {cmdline}"
+        );
+    }
+
+    #[test]
+    fn build_supervisor_config_appends_network_tunnel_cmdline_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            name: "netd-vm".to_string(),
+            kernel_path: Some("/tmp/kernel".to_string()),
+            rootfs_path: "/tmp/rootfs.ext4".to_string(),
+            network_tunnel: Some(mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
+                guest_port: 5302,
+                session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
+                    tenant_id: "tenant-a".into(),
+                    vm_id: "vm-1".into(),
+                    boot_id: "boot-1".into(),
+                    session_nonce: "nonce-1".into(),
+                    requested_features: mvm_core::protocol::network_tunnel::TunnelFeatures::default(
+                    ),
+                    maximum_frame_size: 4096,
+                },
+            }),
+            ..Default::default()
+        };
+
+        let supervisor = build_supervisor_config(&config, dir.path()).expect("supervisor config");
+        assert!(
+            supervisor
+                .krun
+                .kernel_cmdline
+                .as_deref()
+                .unwrap_or_default()
+                .contains("mvm.network_tunnel=")
         );
     }
 

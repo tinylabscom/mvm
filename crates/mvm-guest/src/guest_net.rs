@@ -56,6 +56,8 @@ const SIOCSIFADDR_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFADDR)
 #[cfg(target_os = "linux")]
 const SIOCSIFNETMASK_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFNETMASK);
 #[cfg(target_os = "linux")]
+const SIOCSIFMTU_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFMTU);
+#[cfg(target_os = "linux")]
 const SIOCGIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCGIFFLAGS);
 #[cfg(target_os = "linux")]
 const SIOCSIFFLAGS_REQUEST: libc::Ioctl = target_ioctl_request(libc::SIOCSIFFLAGS);
@@ -132,6 +134,28 @@ pub fn resolver_seed(cmdline: &str) -> Vec<u8> {
     } else {
         b"nameserver 192.168.127.1\n".to_vec()
     }
+}
+
+/// Render a resolv.conf body from an explicit list of DNS servers.
+pub fn render_resolv_conf(nameservers: &[std::net::IpAddr]) -> Vec<u8> {
+    nameservers
+        .iter()
+        .map(|addr| format!("nameserver {addr}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// Convert an IPv4 prefix length into a dotted-decimal netmask.
+pub fn ipv4_netmask_from_prefix_len(prefix_len: u8) -> Option<std::net::Ipv4Addr> {
+    if prefix_len > 32 {
+        return None;
+    }
+    let mask = if prefix_len == 0 {
+        0
+    } else {
+        u32::MAX << (u32::BITS - u32::from(prefix_len))
+    };
+    Some(std::net::Ipv4Addr::from(mask.to_be_bytes()))
 }
 
 /// True when a DHCP failure should trigger the static shared-gateway fallback.
@@ -323,9 +347,15 @@ pub fn bring_iface_up(iface: &str) -> Result<(), String> {
 #[cfg(target_os = "linux")]
 pub fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
     let seed = resolver_seed(cmdline);
+    seed_resolv_conf_bytes(&seed)
+}
+
+/// Stage a concrete resolv.conf body for the guest.
+#[cfg(target_os = "linux")]
+pub fn seed_resolv_conf_bytes(seed: &[u8]) -> Result<(), String> {
     std::fs::create_dir_all("/etc").map_err(|e| format!("mkdir /etc: {e}"))?;
     std::fs::create_dir_all("/run/mvm").map_err(|e| format!("mkdir /run/mvm: {e}"))?;
-    std::fs::write("/run/mvm/resolv.conf", &seed)
+    std::fs::write("/run/mvm/resolv.conf", seed)
         .map_err(|e| format!("seed /run/mvm/resolv.conf: {e}"))?;
     // Prefer a bind-mount so the image's own /etc/resolv.conf stays pristine.
     // A minimal OCI rootfs may have no bind target or no /bin/busybox, so on
@@ -346,9 +376,76 @@ pub fn seed_resolv_conf(cmdline: &str) -> Result<(), String> {
             return Ok(());
         }
     }
-    std::fs::write("/etc/resolv.conf", &seed)
-        .map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
+    std::fs::write("/etc/resolv.conf", seed).map_err(|e| format!("write /etc/resolv.conf: {e}"))?;
     Ok(())
+}
+
+/// Apply `SIOCSIFMTU` directly so tunnel-backed guests do not depend on `ip(8)`.
+#[cfg(target_os = "linux")]
+pub fn set_iface_mtu(iface: &str, mtu: u16) -> Result<(), String> {
+    let name = encode_iface_name(iface)?;
+    // SAFETY: socket(2) returns -1 on error (checked) or a valid fd; closed below.
+    let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if sock < 0 {
+        return Err(format!(
+            "socket(AF_INET, SOCK_DGRAM) for {iface}: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let result = (|| {
+        // SAFETY: `ifreq` is repr(C); zero-init + per-variant assignment is the
+        // standard ioctl pattern for network interfaces.
+        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
+        ifr.ifr_name = name;
+        ifr.ifr_ifru.ifru_mtu = i32::from(mtu);
+        if unsafe { libc::ioctl(sock, SIOCSIFMTU_REQUEST, &ifr) } < 0 {
+            return Err(format!(
+                "SIOCSIFMTU {iface} {mtu}: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    })();
+    // SAFETY: sock is owned by this function until close.
+    unsafe { libc::close(sock) };
+    result
+}
+
+/// Apply the host-authored packet-tunnel guest interface config.
+#[cfg(target_os = "linux")]
+pub fn configure_tunnel_guest_network(
+    config: &mvm_core::protocol::network_tunnel::TunnelNetworkConfig,
+) -> Result<(), String> {
+    config
+        .validate()
+        .map_err(|e| format!("invalid tunnel network config: {e}"))?;
+    let netmask = ipv4_netmask_from_prefix_len(config.prefix_len)
+        .ok_or_else(|| format!("invalid tunnel prefix length {}", config.prefix_len))?;
+
+    set_iface_mtu(&config.interface_name, config.mtu)?;
+    bring_iface_up(&config.interface_name)?;
+    configure_static(
+        &config.interface_name,
+        &config.guest_ipv4.to_string(),
+        &netmask.to_string(),
+        &config.gateway_ipv4.to_string(),
+    )?;
+
+    if !config.dns_servers.is_empty() {
+        let seed = render_resolv_conf(&config.dns_servers);
+        seed_resolv_conf_bytes(&seed)?;
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn configure_tunnel_guest_network(
+    config: &mvm_core::protocol::network_tunnel::TunnelNetworkConfig,
+) -> Result<(), String> {
+    config
+        .validate()
+        .map_err(|e| format!("invalid tunnel network config: {e}"))?;
+    Err("tunnel guest-network configuration is only supported on Linux guests".to_string())
 }
 
 /// Bring `iface` up, seed `/etc/resolv.conf` to the gateway resolver, obtain a
@@ -504,11 +601,41 @@ nameserver 10.0.0.3
         assert!(!gateway_static_fallback_applies("mvm.backend=qemu", false));
     }
 
+    #[test]
+    fn render_resolv_conf_lists_every_nameserver() {
+        let rendered = render_resolv_conf(&[
+            "1.1.1.1".parse().expect("ipv4"),
+            "2606:4700:4700::1111".parse().expect("ipv6"),
+        ]);
+        assert_eq!(
+            String::from_utf8(rendered).expect("utf8"),
+            "nameserver 1.1.1.1\nnameserver 2606:4700:4700::1111\n"
+        );
+    }
+
+    #[test]
+    fn ipv4_netmask_from_prefix_len_handles_edges() {
+        assert_eq!(
+            ipv4_netmask_from_prefix_len(0),
+            Some("0.0.0.0".parse().expect("mask"))
+        );
+        assert_eq!(
+            ipv4_netmask_from_prefix_len(24),
+            Some("255.255.255.0".parse().expect("mask"))
+        );
+        assert_eq!(
+            ipv4_netmask_from_prefix_len(32),
+            Some("255.255.255.255".parse().expect("mask"))
+        );
+        assert_eq!(ipv4_netmask_from_prefix_len(33), None);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn network_ioctl_requests_fit_target_request_type() {
         assert_eq!(SIOCSIFADDR_REQUEST as u64, libc::SIOCSIFADDR as u64);
         assert_eq!(SIOCSIFNETMASK_REQUEST as u64, libc::SIOCSIFNETMASK as u64);
+        assert_eq!(SIOCSIFMTU_REQUEST as u64, libc::SIOCSIFMTU as u64);
         assert_eq!(SIOCGIFFLAGS_REQUEST as u64, libc::SIOCGIFFLAGS as u64);
         assert_eq!(SIOCSIFFLAGS_REQUEST as u64, libc::SIOCSIFFLAGS as u64);
         assert_eq!(SIOCADDRT_REQUEST as u64, libc::SIOCADDRT as u64);

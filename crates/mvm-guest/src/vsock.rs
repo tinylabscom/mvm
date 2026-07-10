@@ -73,6 +73,12 @@ pub const EGRESS_PORT: u32 = 5253;
 /// is no live collision.
 pub const BROKER_PORT: u32 = 5300;
 
+/// Vsock port for the backend-agnostic guest-TUN ↔ host-worker packet tunnel.
+/// The shared contract lives in `mvm_core::protocol::network_tunnel`; this
+/// guest crate re-exports the port so the standing vsock maps and any future
+/// guest network agent consume one source of truth.
+pub const NETWORK_TUNNEL_PORT: u32 = mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT;
+
 /// Vsock port used for dev-tier SSH-agent socket forwarding. The guest agent
 /// binds a guest Unix socket and splices each accepted connection to
 /// `connect_host_vsock(SSH_AGENT_PORT)`, where the host-side mvmctl proxy

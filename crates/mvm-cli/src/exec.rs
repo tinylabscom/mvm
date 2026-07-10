@@ -1086,6 +1086,7 @@ fn restore_via_snapshot(
         // Inherit the resolved egress policy so a restored transient VM
         // enforces the same posture as a cold-boot one.
         network_policy: start_config.network_policy.clone(),
+        network_tunnel: start_config.network_tunnel.clone(),
     };
     let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
         mvm::vm::template::lifecycle::current_revision_id_for_slot(template_id)?

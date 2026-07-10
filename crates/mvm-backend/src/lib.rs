@@ -88,6 +88,7 @@ pub mod netinit_audit;
 pub mod network;
 /// `NetworkProvider` impl over the bridge+TAP path.
 pub mod network_provider;
+pub(crate) mod network_tunnel_spawn;
 /// QEMU workload runtime backend (dev/test).
 pub mod qemu;
 /// Capability-aware backend selection (fail-closed, no silent downgrade).
