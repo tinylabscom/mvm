@@ -117,6 +117,7 @@ fn main() {
         "mvm-guest-agent",
         "mvm-guest-netinit",
         "mvm-egress-client",
+        "mvm-verity-init",
     ] {
         let out_file = bins_out.join(name);
         if skip_embed {
@@ -424,7 +425,8 @@ fn run_cargo_zigbuild(
 fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
     eprintln!(
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-guest \
-         --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-guest-agent --bin mvm-guest-netinit -p mvm-guest-helpers \
+         --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-guest-agent --bin mvm-guest-netinit \
+         --bin mvm-verity-init -p mvm-guest-helpers \
          --bin mvm-egress-client --features mvm-guest/dev-shell"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
@@ -444,6 +446,8 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "mvm-guest-agent",
         "--bin",
         "mvm-guest-netinit",
+        "--bin",
+        "mvm-verity-init",
         "-p",
         "mvm-guest-helpers",
         "--bin",
@@ -474,6 +478,7 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "mvm-guest-agent",
         "mvm-guest-netinit",
         "mvm-egress-client",
+        "mvm-verity-init",
     ] {
         let built = rel.join(name);
         let dest = out_dir.join(name);
