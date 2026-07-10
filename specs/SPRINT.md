@@ -505,8 +505,15 @@ plan 25 sequences the work into six independently-shippable workstreams.
       (`cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D
       warnings`, `cargo test --workspace -- --test-threads=1`). Remaining
       honest blockers before Plan 219 can be called production-ready: macOS
-      HVF/libkrun live proof, the sealed-image `DevOnly` refusal witness, and
-      ADR-103 acceptance.
+      HVF/libkrun live proof and ADR-103 acceptance. The macOS gap is now
+      narrower and better understood: a real stale-helper regression in the
+      source-checkout libkrun Stage 0 path is fixed on the active refresh
+      branch, and the manifest-backed HVF build now advances past the earlier
+      `network_provider = disconnected` parse failure. The remaining macOS
+      blockers are the honest runtime/external ones: builder-VM crate fetch
+      `403`s on the manifest-backed source-build path and the missing
+      published `v0.17.0` workload-kernel checksum manifest on the OCI
+      download path.
 - [x] Started
       [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md)
       to turn the post-Plan-221 rootfs follow-up into an execution plan. It
