@@ -1251,15 +1251,18 @@ fn network_backend_check(plat: Platform) -> Check {
             info: "n/a (no native Windows port)".to_string(),
         };
     }
-    let info = if cfg!(feature = "builder-vm")
-        && current_builder_backend_choice()
-            == mvm_build::builder_backend_select::BuilderBackendChoice::Hvf
+    #[cfg(feature = "builder-vm")]
+    let info = if current_builder_backend_choice()
+        == mvm_build::builder_backend_select::BuilderBackendChoice::Hvf
     {
         "n/a on the active HVF tier (builder and workload transport are vsock-only)".to_string()
     } else {
         "n/a on the active libkrun/HVF path (builder and workload transport are vsock-only)"
             .to_string()
     };
+    #[cfg(not(feature = "builder-vm"))]
+    let info = "n/a on the active libkrun/HVF path (builder and workload transport are vsock-only)"
+        .to_string();
     Check {
         name: "network-backend",
         category: "platform",
