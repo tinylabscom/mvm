@@ -248,10 +248,10 @@ fn run_cargo_native_build(
 /// script uses to decide the `-lkrun` link. Gate for building the libkrun
 /// supervisor so an HVF-only / CI host does not attempt (and noisily fail) it.
 fn libkrun_header_present() -> bool {
-    if let Some(p) = std::env::var_os("MVM_LIBKRUN_HEADER") {
-        if Path::new(&p).is_file() {
-            return true;
-        }
+    if let Some(p) = std::env::var_os("MVM_LIBKRUN_HEADER")
+        && Path::new(&p).is_file()
+    {
+        return true;
     }
     [
         "/opt/homebrew/include/libkrun.h",
