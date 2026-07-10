@@ -227,9 +227,26 @@ fn apply_startup_env(cli: &Cli) {
     if let Some(ref backend) = cli.builder {
         unsafe { std::env::set_var("MVM_BUILDER_BACKEND", backend) };
     }
+    if let Some(dir) = aux_bin_dir_to_apply(
+        env!("MVM_AUX_BIN_DIR"),
+        std::env::var_os("MVM_AUX_BIN_DIR").is_some(),
+    ) {
+        unsafe { std::env::set_var("MVM_AUX_BIN_DIR", dir) };
+    }
     if let Some(ref source) = cli.kernel_source {
         unsafe { std::env::set_var("MVM_KERNEL_SOURCE", source) };
     }
+}
+
+/// The value to write to `MVM_AUX_BIN_DIR`, or `None` to leave the env alone.
+/// The build script bakes in the dir where it compiled the per-VM helpers; we
+/// surface it to mvm-backend's resolver unless the caller already set it (an
+/// explicit override wins) or the build produced no path.
+fn aux_bin_dir_to_apply(baked: &str, already_set: bool) -> Option<String> {
+    if already_set || baked.is_empty() {
+        return None;
+    }
+    Some(baked.to_string())
 }
 
 fn register_inhouse_builder() {
@@ -310,4 +327,17 @@ fn maybe_converge_on_entry(command: &Commands) {
         return;
     }
     let _ = mvm::vm::reconcile::converge(&mvm::vm::reconcile::ConvergeOpts::default());
+}
+
+#[cfg(test)]
+mod aux_bin_dir_tests {
+    #[test]
+    fn aux_bin_dir_applied_only_when_unset_and_nonempty() {
+        assert_eq!(
+            super::aux_bin_dir_to_apply("/x/aux/debug", false),
+            Some("/x/aux/debug".to_string())
+        );
+        assert_eq!(super::aux_bin_dir_to_apply("/x/aux/debug", true), None);
+        assert_eq!(super::aux_bin_dir_to_apply("", false), None);
+    }
 }
