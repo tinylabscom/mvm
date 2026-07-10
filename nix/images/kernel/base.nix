@@ -222,6 +222,13 @@ let
     # workload.nix.
     "BLK_DEV_NBD"          # network block device — no NBD server on any backend
     "BLK_DEV_NVME" "NVME_CORE"  # NVMe — no NVMe controller behind virtio
+
+    # The shipped boot artifacts need gzip only: x86_64's Firecracker path
+    # extracts an ELF `vmlinux` from a gzip-wrapped bzImage, and the workload
+    # verity initramfs is `cpio.gz`. No current builder or workload path boots
+    # an xz/lz4/lzo/lzma/zstd-compressed initramfs, so keep `RD_GZIP` and drop
+    # the rest from the shared base.
+    "RD_BZIP2" "RD_LZMA" "RD_XZ" "RD_LZO" "RD_LZ4" "RD_ZSTD"
   ] ++ pkgs.lib.optionals (kernelArch == "arm64") [
     # arm64 boots from the FDT libkrun / Firecracker hand us; ACPI is
     # never consulted, so drop the ACPICA interpreter and the whole

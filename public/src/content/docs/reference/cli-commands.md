@@ -120,6 +120,13 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl build image --flake <ref> --watch` | Build and rebuild on flake.lock changes |
 | `mvmctl build image --json` | Output structured JSON events instead of human-readable output |
 | `mvmctl build image -o <path>` | Output path for the built .elf image |
+| `mvmctl build kernel build --which <builder\|workload\|workload-sizeopt>` | Compile one slim microVM kernel into the local cache and the builder VM's Nix store. Default: `builder` |
+| `mvmctl build kernel build --all` | Build both builder and workload kernels in one pass |
+| `mvmctl build kernel build --source <compile\|download\|auto>` | Kernel source mode: local Stage 0 compile (default), release-artifact download, or try download then fall back to compile |
+| `mvmctl build kernel build --arch <aarch64\|x86_64>` | Target architecture. Defaults to the host arch; non-host arches are supported only for `--source download` |
+| `mvmctl build kernel build --which workload-sizeopt` | Build the measured comparison workload variant with `CONFIG_CC_OPTIMIZE_FOR_SIZE=y` without replacing the default workload cache entry |
+| `mvmctl build kernel build --which workload --boot-check` | After building the default workload kernel, boot a throwaway VM on it and wait for the guest agent to answer over vsock. Requires a source checkout plus a populated builder-VM cache |
+| `mvmctl build kernel build` | When the local compile path runs, `mvmctl` also writes a resolved `config` sidecar and `kernel-metrics-<arch>.json` beside the cached kernel so the built-in (`=y`) symbol count is visible without a CI round-trip |
 | `mvmctl env cleanup` | Remove old dev-build artifacts and run Nix garbage collection |
 | `mvmctl env cleanup --all` | Remove all cached build revisions |
 | `mvmctl env cleanup --keep <N>` | Keep the N newest build revisions |

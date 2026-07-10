@@ -23,10 +23,12 @@
 # importing through `workspace` forces realisation of the filtered store
 # path, which `nix flake check --no-build` refuses.
 
-{ pkgs, base }:
+{ pkgs, base, optimizeForSize ? false }:
 
 base.mkKernel {
-  extraEnables = [ "MD" "BLK_DEV_DM" "DM_VERITY" "VIRTIO_FS" "FUSE_FS" ];
+  extraEnables =
+    [ "MD" "BLK_DEV_DM" "DM_VERITY" "VIRTIO_FS" "FUSE_FS" ]
+    ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_SIZE" ];
   # Workload-only disables. Each drop lives here (not in shared base.nix)
   # because it depends on a workload-specific enable or would be unsafe for
   # the builder kernel:
@@ -51,5 +53,27 @@ base.mkKernel {
   #                 squashfs / disk image in-guest would need this re-enabled;
   #                 unlike NBD/NVMe (no host-side device exists) loop is
   #                 guest-internal, so this is a policy choice, not a free cut.
-  extraDisables = [ "NETFILTER" "BLK_DEV_MD" "BLK_DEV_LOOP" ];
+  #   BPF / PERF / IKCONFIG / CHECKPOINT_RESTORE — the sealed workload path has
+  #                 no eBPF loader, no perf tooling, no `/proc/config.gz`
+  #                 consumer, and no CRIU-style checkpoint/restore contract.
+  #                 Workload checkpoints are a host-level lifecycle feature, not
+  #                 an in-guest process checkpoint feature.
+  #   CC_OPTIMIZE_FOR_PERFORMANCE — flipped off only for the size experiment
+  #                 output; the default workload kernel keeps the current mode
+  #                 until measured results prove the size-oriented mode is worth
+  #                 shipping.
+  extraDisables =
+    [
+      "NETFILTER"
+      "BLK_DEV_MD"
+      "BLK_DEV_LOOP"
+      "BPF"
+      "BPF_SYSCALL"
+      "PERF_EVENTS"
+      "PROFILING"
+      "IKCONFIG"
+      "IKCONFIG_PROC"
+      "CHECKPOINT_RESTORE"
+    ]
+    ++ pkgs.lib.optionals optimizeForSize [ "CC_OPTIMIZE_FOR_PERFORMANCE" ];
 }

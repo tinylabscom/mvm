@@ -25,14 +25,48 @@ mvmctl build kernel build --all --source auto
 
 Flags:
 
-- `--which {builder,workload}` — which kernel (default `builder`).
+- `--which {builder,workload,workload-sizeopt}` — which kernel (default `builder`).
 - `--all` — build both variants.
 - `--source {compile,download,auto}` — where the kernel comes from (default `compile`).
 - `--arch {aarch64,x86_64}` — target arch (default: host arch).
+- `--boot-check` — after building the default workload kernel, boot a throwaway
+  VM on it and confirm the in-guest agent answers over vsock.
+
+Use `--which workload-sizeopt` to build the measured comparison variant with
+`CONFIG_CC_OPTIMIZE_FOR_SIZE=y` without changing the shipped default workload
+kernel cache entry.
 
 The compiled or downloaded kernel is cached at
 `~/.cache/mvm/builder-vm/<arch>/kernels/<variant>/vmlinux` and reused by every
 later `dev up`.
+
+When the kernel was compiled locally, the cache directory also carries a
+resolved `config` sidecar and `kernel-metrics-<arch>.json`, so you can inspect
+the exact `olddefconfig` result without a CI round-trip.
+
+## Inspect resolved configs and metrics
+
+```bash
+# Direct flake outputs for the resolved configs
+nix build ./nix/images/kernel#builder-configfile -o /tmp/builder.config
+nix build ./nix/images/kernel#workload-configfile -o /tmp/workload.config
+diff -u /tmp/builder.config /tmp/workload.config || true
+
+# Or build both together
+nix build ./nix/images/kernel#resolved-configs -o /tmp/kernel-configs
+ls -l /tmp/kernel-configs
+
+# Per-variant metrics
+nix build ./nix/images/kernel#builder-metrics -o /tmp/builder-metrics
+nix build ./nix/images/kernel#workload-metrics -o /tmp/workload-metrics
+cat /tmp/workload-metrics/metrics.json
+
+# Size-mode experiment output (does not change the shipped default by itself)
+nix build ./nix/images/kernel#workload-sizeopt-metrics -o /tmp/workload-sizeopt-metrics
+cat /tmp/workload-sizeopt-metrics/metrics.json
+```
+
+The legacy `metrics` output remains an alias of `workload-metrics`.
 
 ## compile vs download
 
