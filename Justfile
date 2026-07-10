@@ -117,29 +117,26 @@ test-cargo:
     cargo test --workspace
 
 # Run the core-demo end-to-end smoke (libkrun builder + workload VM, minutes).
-# Builds two binaries first that `cargo test -p mvm-cli` does NOT rebuild:
-#   1. `mvmctl` — the root-package binary the test execs via
-#      `Command::cargo_bin`. `-p mvm-cli` only rebuilds the mvm-cli *lib*;
-#      without this, the test silently runs a STALE mvmctl and changes to
-#      `crates/mvm-cli/src/commands/**` (e.g. the `up` agent-wait) never take
-#      effect — a false green.
-#   2. `mvm-libkrun-supervisor` — a standalone bin gated behind
-#      `required-features = ["libkrun-sys"]`; a stale one reintroduces the
-#      gvproxy-orphan hang.
+# Builds `mvmctl` first — `cargo test -p mvm-cli` does NOT rebuild it:
+#   - `mvmctl` is the root-package binary the test execs via
+#     `Command::cargo_bin`. `-p mvm-cli` only rebuilds the mvm-cli *lib*;
+#     without this, the test silently runs a STALE mvmctl and changes to
+#     `crates/mvm-cli/src/commands/**` (e.g. the `up` agent-wait) never take
+#     effect — a false green.
+#   - `cargo build --bin mvmctl` also runs mvmctl's build script, which
+#     compiles the per-VM supervisor bins (incl. `mvm-libkrun-supervisor`) —
+#     so this one line covers them too, and no stale-supervisor gvproxy-orphan
+#     hazard remains.
 e2e-core-demo:
     cargo build --bin mvmctl
-    # Plan 121 D2 folded the supervisor bin into mvm-vm-host; build the
-    # cfg-gated [[bin]] by crate + bin name (it is no longer its own crate).
-    cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
     MVM_E2E_SMOKE=1 MVM_BUILDER_BACKEND=libkrun cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
 
-# Build the per-VM host helper bins `mvmctl` spawns. `cargo run` builds only
-# `mvmctl`; the backend resolves these alongside the exe / in `target/` and also
-# self-builds them on the first `machine run`, so this is just the explicit route.
+# Build the per-VM host helper bins explicitly. mvmctl's build script already
+# compiles them during `cargo build`/`cargo run`; this is the manual route for
+# a targeted rebuild or CI.
 build-supervisors:
     cargo build -p mvm-hostd --bin mvm-substitution-endpoint
     cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
-    cargo build -p mvm-vm-host --bin mvm-vz-supervisor
     cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
 
 # Live macOS Apple-Silicon HVF proof for OCI --allow-host:

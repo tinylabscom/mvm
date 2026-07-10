@@ -100,30 +100,12 @@ pub(crate) fn terminate_pid(pid: libc::pid_t) {
     }
 }
 
-/// Locate the per-VM supervisor binary, rebuilding it on a source checkout if
-/// its source inputs are newer. See [`crate::aux_bin`].
+/// Locate the per-VM HVF supervisor binary. Compiled by mvmctl's build script;
+/// see [`crate::aux_bin`] for the search order.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
-    crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
+    crate::aux_bin::resolve(&crate::aux_bin::AuxBin {
         bin: "mvm-hvf-supervisor",
-        package: "mvm-vm-host",
         env_var: "MVM_HVF_SUPERVISOR_PATH",
-        features: &[],
-        input_roots: &[
-            "Cargo.toml",
-            "Cargo.lock",
-            "crates/mvm-vm-host/Cargo.toml",
-            "crates/mvm-vm-host/src",
-            "crates/mvm-backend/Cargo.toml",
-            "crates/mvm-backend/src",
-            "crates/mvm-build/Cargo.toml",
-            "crates/mvm-build/src",
-            "crates/mvm-core/Cargo.toml",
-            "crates/mvm-core/src",
-            "crates/mvm-guest/Cargo.toml",
-            "crates/mvm-guest/src",
-            "crates/mvm-hostd/Cargo.toml",
-            "crates/mvm-hostd/src",
-        ],
     })
 }
 

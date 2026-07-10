@@ -122,8 +122,7 @@ jobs:
       # source-tree `target/`) finds nothing. They ship next to `mvmctl` in the
       # tarball below so the resolver locates them.
       #   - mvm-bridge: cross-platform external-VMM gateway/audit sidecar
-      #     (Firecracker passt + vz VzIngest). Builds everywhere, no extra deps.
-      #   - mvm-vz-supervisor (macOS only): the vz VMM supervisor.
+      #     (Firecracker passt). Builds everywhere, no extra deps.
       #   - mvm-hvf-supervisor (macOS only): the raw-HVF VMM supervisor.
       #   - mvm-libkrun-supervisor (macOS only, and INTENTIONALLY so — not a
       #     follow-up): it has `required-features = ["libkrun-sys"]`, and the
@@ -148,7 +147,7 @@ jobs:
         run: |
           if [[ "${TARGET}" == *apple-darwin ]]; then
             cargo build --release --target "${TARGET}" -p mvm-vm-host \
-              --bin mvm-bridge --bin mvm-vz-supervisor \
+              --bin mvm-bridge \
               --bin mvm-hvf-supervisor \
               --bin mvm-libkrun-supervisor --features libkrun-sys
           else
@@ -213,9 +212,9 @@ jobs:
           # Per-VM host processes (built in the prior step), shipped next to
           # mvmctl so the backend's adjacent-to-exe resolver finds them on a
           # downloaded install. copy-if-exists: the set differs by OS (macOS gets
-          # the vz/hvf/libkrun supervisors; Linux gets mvm-bridge only), but the
+          # the hvf/libkrun supervisors; Linux gets mvm-bridge only), but the
           # substitution endpoint ships on every target.
-          for hostbin in mvm-bridge mvm-vz-supervisor mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
+          for hostbin in mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
             src="target/${TARGET}/release/${hostbin}"
             [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
           done
