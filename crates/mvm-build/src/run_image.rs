@@ -13,6 +13,9 @@ use anyhow::{Context, Result};
 
 use crate::guest_agent_build::GuestRuntimeBinaryBytes;
 use crate::oci_runtime_inject::{MvmRuntimeBinaries, OciEntrypointConfig};
+use crate::oci_to_rootfs::{
+    MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
+};
 use crate::rootfs::MaterializeExt4Input;
 
 /// Guest runtime binaries embedded in the host binary at build time — the
@@ -190,6 +193,38 @@ pub fn unpacked_tree_size(root: &Path) -> Result<u64> {
     Ok(total)
 }
 
+/// Seal an already-materialized `rootfs.ext4` at `rootfs_ext4` into a dm-verity
+/// artifact set, emitting the sibling `rootfs.verity` (Merkle hash tree) and
+/// `rootfs.roothash` (lowercase-hex root hash) files. Those are the exact sibling
+/// names the backend's boot-time sidecar probe reads to decide a sealed boot.
+///
+/// Delegates to [`seal_with_verity`], which pins the 1024-byte data block size
+/// the verity initramfs requires. Do **not** reach for
+/// `materialize_ext4_pure(..).with_verity()` in this role: its 4096-byte data
+/// blocks disagree with the initramfs and the resulting image will not boot.
+///
+/// Linux-only at runtime. On macOS `veritysetup` is unavailable, so this returns
+/// [`OciUnpackError::HostUnsupported`] rather than a fabricated hash — the seal
+/// runs on Linux (or via the builder VM in a later slice). This is a
+/// test-exercised capability and is **not** yet wired into the live `--prod` run
+/// path; that lands atomically with the verity initramfs so no unsealed or
+/// no-boot window is ever exposed.
+pub fn seal_run_rootfs_with_verity(
+    rootfs_ext4: &Path,
+) -> Result<VeritySealedRootfs, OciUnpackError> {
+    let size_bytes = std::fs::metadata(rootfs_ext4)?.len();
+    // `seal_with_verity` only reads `path`; the descriptor's label/uuid are
+    // metadata mirrored for diagnostics. Name them like the materialize path so
+    // the two artifacts read together coherently.
+    let descriptor = MaterializedRootfs {
+        path: rootfs_ext4.to_path_buf(),
+        size_bytes,
+        label: "mvm-rootfs".to_string(),
+        uuid: String::new(),
+    };
+    seal_with_verity(&descriptor, &VeritysetupOptions::default())
+}
+
 /// Which rootfs strategy the run path uses for a workload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootStrategy {
@@ -233,6 +268,37 @@ pub fn select_root_strategy(s: RootStrategySelection) -> RootStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn seal_run_rootfs_surfaces_host_unsupported_on_non_linux() {
+        // On macOS the sealing capability is compiled and callable, but the
+        // underlying `veritysetup` is Linux-only, so it must surface
+        // `HostUnsupported` — never a fabricated roothash. The real seal runs on
+        // Linux / via the builder VM.
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"ext4-bytes").unwrap();
+        let err = seal_run_rootfs_with_verity(&rootfs).expect_err("veritysetup is Linux-only");
+        assert!(
+            matches!(err, OciUnpackError::HostUnsupported { .. }),
+            "expected HostUnsupported on non-Linux, got {err:?}"
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn seal_run_rootfs_errors_on_missing_input_file() {
+        // A missing input surfaces the metadata I/O error before any host probe —
+        // fail closed, never a silent success.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("rootfs.ext4");
+        let err = seal_run_rootfs_with_verity(&missing).expect_err("missing input must error");
+        assert!(
+            matches!(err, OciUnpackError::Io(_)),
+            "expected Io error for missing input, got {err:?}"
+        );
+    }
 
     #[test]
     fn virtiofs_root_only_for_capable_non_prod_non_sealed() {
