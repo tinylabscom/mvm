@@ -14,6 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
+mod index;
+pub use index::{PackEntry, PackIndex, PackKey};
+
 use crate::arch::GuestArch;
 use crate::config::{pack_cache_dir, pack_dir};
 use crate::packs::{
