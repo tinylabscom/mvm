@@ -771,9 +771,9 @@ pub(in crate::commands) mod attested_builder_pack {
     /// revoked?". An empty config (no publishers) trusts no key and allows no
     /// channel, so every promoted pack fails verification and the caller falls
     /// back to the download — fail-open on availability, never on trust.
-    struct HostPackVerifyInputs {
-        policy: LocalPackPolicy,
-        trust: PackTrustConfig,
+    pub(in crate::commands) struct HostPackVerifyInputs {
+        pub(in crate::commands) policy: LocalPackPolicy,
+        pub(in crate::commands) trust: PackTrustConfig,
     }
 
     /// Load the on-disk trust config, folding both the absent and the malformed
@@ -795,7 +795,7 @@ pub(in crate::commands) mod attested_builder_pack {
         }
     }
 
-    fn host_pack_verify_inputs(arch: GuestArch) -> HostPackVerifyInputs {
+    pub(in crate::commands) fn host_pack_verify_inputs(arch: GuestArch) -> HostPackVerifyInputs {
         let trust = load_host_pack_trust();
         HostPackVerifyInputs {
             policy: LocalPackPolicy {
@@ -882,7 +882,9 @@ pub(in crate::commands) mod attested_builder_pack {
     /// fetch entirely, and the caller falls back to the local cache or the
     /// builder VM instead of treating it as an error.
     #[cfg(feature = "manifest-verify")]
-    fn fetch_release_builder_pack_staging(arch: &str) -> Result<Option<tempfile::TempDir>> {
+    pub(in crate::commands) fn fetch_release_builder_pack_staging(
+        arch: &str,
+    ) -> Result<Option<tempfile::TempDir>> {
         let trust = load_host_pack_trust();
         let version = env!("CARGO_PKG_VERSION");
         let default_base =
