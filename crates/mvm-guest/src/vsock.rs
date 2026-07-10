@@ -4681,6 +4681,10 @@ mod tests {
                 continue;
             }
             let path = entry.path();
+            let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+            if file_name.starts_with('.') {
+                continue;
+            }
             let bytes = std::fs::read(&path).expect("read seed");
             // Tolerate an optional trailing newline editors add.
             let trimmed = bytes.trim_ascii_end().to_vec();

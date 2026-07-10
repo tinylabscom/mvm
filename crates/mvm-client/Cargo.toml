@@ -45,4 +45,5 @@ tempfile = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }

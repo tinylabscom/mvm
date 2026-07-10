@@ -651,7 +651,7 @@ fn hvf_platform_supported() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn identifies_as_hvf() {
@@ -807,17 +807,18 @@ mod tests {
 
     #[test]
     fn persist_vsock_egress_marker_writes_and_clears_marker() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
 
         persist_vsock_egress_marker("hvf-marker-vm", true).expect("write marker");
         assert!(mvm_core::config::vm_vsock_egress_marker_path("hvf-marker-vm").is_file());
 
         persist_vsock_egress_marker("hvf-marker-vm", false).expect("clear marker");
         assert!(!mvm_core::config::vm_vsock_egress_marker_path("hvf-marker-vm").exists());
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]
@@ -850,10 +851,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: serialized by HOME_TEST_LOCK.
-        unsafe {
-            std::env::set_var("MVM_DATA_DIR", tmp.path());
-        }
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", tmp.path());
 
         let name = "hvf-host-agent-reap-test-vm";
         let state_dir = vm_state_dir(name);
@@ -867,11 +866,6 @@ mod tests {
             !tenant_ref.exists(),
             "stop() must reap the host-agent tenant-ref marker"
         );
-
-        // SAFETY: serialized by HOME_TEST_LOCK.
-        unsafe {
-            std::env::remove_var("MVM_DATA_DIR");
-        }
     }
 
     #[test]
@@ -902,11 +896,9 @@ mod tests {
         let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        // SAFETY: single-threaded test mutation of a process env var.
-        unsafe { std::env::set_var("MVM_HVF_SUPERVISOR_PATH", dir.path()) };
+        let mut env = TestEnv::new();
+        env.set("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
         let r = resolve_supervisor_path();
-        unsafe { std::env::remove_var("MVM_HVF_SUPERVISOR_PATH") };
         assert!(r.is_err());
     }
 

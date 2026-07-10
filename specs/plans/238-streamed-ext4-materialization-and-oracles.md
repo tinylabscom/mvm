@@ -1,10 +1,19 @@
 # Plan 238 - Streamed ext4 materialization and OCI/ext4 oracles
 
-**Status:** PROPOSED
+**Status:** COMPLETE
 **Created:** 2026-07-09
 **Goal:** remove dense in-memory ext4 image materialization from the in-process
 OCI rootfs path while preserving byte-for-byte output confidence through
 streamed writers and Linux-tool validation oracles.
+
+**Progress (2026-07-09):** `mvm-ext4` now exposes a streamed sparse-range
+emission API (`emit_image[_with_options]`) that returns the final image length,
+`mvm-build`'s in-process OCI/rootfs materializers now seek/write directly to
+the destination file instead of first building a dense `Vec<u8>`, and both
+writer-level plus OCI-boundary dense-vs-streamed differential tests are green.
+Linux-tool oracle tests (`e2fsck`, `debugfs`) are implemented under
+Linux-gated coverage and were executed successfully on a Debian 6.1 host,
+including the corruption-rejection witness.
 
 ## Why this plan exists
 
@@ -54,11 +63,11 @@ the seam with Linux-tool and dense-vs-streamed differential tests.
 
 **Goal:** record exactly what the current path guarantees before replacing it.
 
-- [ ] Identify the current dense ext4 materialization entry points in
+- [x] Identify the current dense ext4 materialization entry points in
       `mvm-ext4` and the in-process OCI call path in `mvm-build`.
-- [ ] Record the current test coverage and any existing determinism guarantees
+- [x] Record the current test coverage and any existing determinism guarantees
       that the streamed path must preserve.
-- [ ] Identify the artifact boundaries where independent Linux-tool validation
+- [x] Identify the artifact boundaries where independent Linux-tool validation
       can run reliably in CI or targeted local validation.
 
 **Validation**
@@ -72,13 +81,13 @@ the seam with Linux-tool and dense-vs-streamed differential tests.
 **Goal:** let callers write the ext4 image directly to an output sink instead of
 forcing dense whole-image assembly first.
 
-- [ ] Add a streamed block-emission API to `mvm-ext4` that can write the final
+- [x] Add a streamed block-emission API to `mvm-ext4` that can write the final
       image to an output target incrementally.
-- [ ] Keep the API narrow and explicit about offsets, sparse ranges, and final
+- [x] Keep the API narrow and explicit about offsets, sparse ranges, and final
       image length so callers can reason about correctness.
-- [ ] Preserve the existing dense path long enough to use it as a direct
+- [x] Preserve the existing dense path long enough to use it as a direct
       differential oracle during rollout.
-- [ ] Add tests proving that dense and streamed emission produce byte-identical
+- [x] Add tests proving that dense and streamed emission produce byte-identical
       final filesystem images for the same logical input.
 
 **Validation**
@@ -91,13 +100,13 @@ forcing dense whole-image assembly first.
 **Goal:** remove the dense in-memory image from the in-process OCI materialize
 path.
 
-- [ ] Thread the new streamed ext4 emission API into the `mvm-build` OCI rootfs
+- [x] Thread the new streamed ext4 emission API into the `mvm-build` OCI rootfs
       materialization path.
-- [ ] Write the ext4 output directly to the destination file instead of building
+- [x] Write the ext4 output directly to the destination file instead of building
       a full dense image in memory first.
-- [ ] Keep the integration boundary small so the OCI layer still reasons in
+- [x] Keep the integration boundary small so the OCI layer still reasons in
       terms of filesystem contents, not ext4 internals.
-- [ ] Preserve any existing metadata, sizing, and verity-preparation invariants
+- [x] Preserve any existing metadata, sizing, and verity-preparation invariants
       that the current artifact pipeline expects.
 
 **Validation**
@@ -110,13 +119,13 @@ path.
 
 **Goal:** prove the streamed path with tools outside the Rust implementation.
 
-- [ ] Add Linux-tool validation oracles using `e2fsck` and `debugfs` against the
+- [x] Add Linux-tool validation oracles using `e2fsck` and `debugfs` against the
       emitted ext4 image.
-- [ ] Add differential tests that compare dense and streamed outputs at the OCI
+- [x] Add differential tests that compare dense and streamed outputs at the OCI
       materialization boundary, not only at the raw writer boundary.
-- [ ] Verify directory structure, file presence, and expected metadata using the
+- [x] Verify directory structure, file presence, and expected metadata using the
       external tools in addition to raw byte comparison where appropriate.
-- [ ] Keep these oracle tests scoped to the ext4/OCI seam so failures are easy
+- [x] Keep these oracle tests scoped to the ext4/OCI seam so failures are easy
       to attribute.
 
 **Validation**
@@ -130,11 +139,11 @@ path.
 **Goal:** make the streamed path the normal in-process materialization route
 once equivalence is proven.
 
-- [ ] Remove or retire the dense-only in-process OCI materialization path where
+- [x] Remove or retire the dense-only in-process OCI materialization path where
       it is no longer needed.
-- [ ] Keep any helper logic that remains genuinely reusable; delete only the
+- [x] Keep any helper logic that remains genuinely reusable; delete only the
       memory-heavy path that has been replaced.
-- [ ] Re-run the full ext4/OCI differential and oracle coverage after the
+- [x] Re-run the full ext4/OCI differential and oracle coverage after the
       fallback removal.
 
 **Validation**

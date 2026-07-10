@@ -1238,6 +1238,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set("MVM_DATA_DIR", dir.path());
+        let keys_dir = mvm_core::config::mvm_keys_dir();
 
         // Build an admitted plan that carries agent_verbs.
         let mut input = fixture_input("vm-verb-grant");
@@ -1246,7 +1247,7 @@ mod tests {
             &input,
             &SystemClock,
             &InMemoryNonceLedger::new(),
-            Some(dir.path()),
+            Some(keys_dir.as_path()),
             None,
         )
         .expect("admit with agent_verbs");
@@ -1295,13 +1296,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set("MVM_DATA_DIR", dir.path());
+        let keys_dir = mvm_core::config::mvm_keys_dir();
 
         // Plain plan with no agent_verbs — the fixture default.
         let admitted = admit_for_run(
             &fixture_input("vm-no-verbs"),
             &SystemClock,
             &InMemoryNonceLedger::new(),
-            Some(dir.path()),
+            Some(keys_dir.as_path()),
             None,
         )
         .expect("admit without agent_verbs");
@@ -1328,6 +1330,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
         env.set("MVM_DATA_DIR", dir.path());
+        let keys_dir = mvm_core::config::mvm_keys_dir();
 
         let vm_name = "vm-stale-grant";
 
@@ -1338,7 +1341,7 @@ mod tests {
             &input_with,
             &SystemClock,
             &InMemoryNonceLedger::new(),
-            Some(dir.path()),
+            Some(keys_dir.as_path()),
             None,
         )
         .expect("admit with agent_verbs");
@@ -1360,7 +1363,7 @@ mod tests {
             &fixture_input(vm_name),
             &SystemClock,
             &InMemoryNonceLedger::new(),
-            Some(dir.path()),
+            Some(keys_dir.as_path()),
             None,
         )
         .expect("admit without agent_verbs");

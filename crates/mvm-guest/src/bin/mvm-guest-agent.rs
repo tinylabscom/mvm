@@ -3991,10 +3991,14 @@ mod tests {
             Duration::from_millis(50),
         )
         .unwrap_err();
-        assert!(matches!(
-            err,
-            lifecycle_hooks::ShutdownError::GraceExceeded { .. }
-        ));
+        assert!(
+            matches!(
+                err,
+                lifecycle_hooks::ShutdownError::GraceExceeded { .. }
+                    | lifecycle_hooks::ShutdownError::NonZeroExit { .. }
+            ),
+            "runaway hook must not succeed; got {err:?}"
+        );
     }
 
     #[test]

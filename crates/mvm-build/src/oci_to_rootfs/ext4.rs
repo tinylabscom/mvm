@@ -26,6 +26,8 @@
 
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::unpack::StagedRootfs;
+#[cfg(target_os = "linux")]
+use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "linux", test))]
@@ -213,16 +215,25 @@ fn materialize_in_process(
     build_options: &mvm_ext4::BuildOptions,
 ) -> Result<MaterializedRootfs, OciUnpackError> {
     let nodes = collect_nodes(staged_root)?;
-    let image = mvm_ext4::build_image_with_options(&nodes, build_options).map_err(|e| {
-        OciUnpackError::Mke2fsFailed {
-            reason: format!("in-process ext4 build failed: {e}"),
-        }
-    })?;
     if let Some(parent) = output.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(output, &image)?;
-    Ok(materialized_rootfs(output, image.len() as u64, options))
+    let mut file = std::fs::File::create(output)?;
+    let size_bytes =
+        match mvm_ext4::emit_image_with_options(&nodes, build_options, |offset, bytes| {
+            file.seek(SeekFrom::Start(offset))
+                .and_then(|_| file.write_all(bytes))
+        }) {
+            Ok(size_bytes) => size_bytes,
+            Err(mvm_ext4::EmitImageError::Build(err)) => {
+                return Err(OciUnpackError::Mke2fsFailed {
+                    reason: format!("in-process ext4 build failed: {err}"),
+                });
+            }
+            Err(mvm_ext4::EmitImageError::Emit(err)) => return Err(err.into()),
+        };
+    file.set_len(size_bytes)?;
+    Ok(materialized_rootfs(output, size_bytes, options))
 }
 
 #[cfg(target_os = "linux")]
@@ -397,6 +408,8 @@ fn walk_size(root: &Path) -> Result<(u64, u64), OciUnpackError> {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(target_os = "linux")]
+    use std::process::Command;
     use tempfile::TempDir;
 
     fn defaults() -> Mke2fsOptions {
@@ -583,5 +596,115 @@ mod tests {
             }
             other => panic!("expected HostUnsupported, got {other:?}"),
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn in_process_materialize_matches_dense_writer_bytes() {
+        let staged_dir = TempDir::new().unwrap();
+        fs::create_dir_all(staged_dir.path().join("etc")).unwrap();
+        fs::write(
+            staged_dir.path().join("etc/hosts"),
+            b"127.0.0.1 localhost\n",
+        )
+        .unwrap();
+        fs::write(
+            staged_dir.path().join("hello"),
+            b"hello from streamed ext4\n",
+        )
+        .unwrap();
+        let staged = StagedRootfs {
+            root: staged_dir.path().to_path_buf(),
+        };
+        let output_dir = TempDir::new().unwrap();
+        let output = output_dir.path().join("rootfs.ext4");
+        let options = defaults();
+        let build_options = in_process_build_options(&options).expect("default options supported");
+        let nodes = collect_nodes(&staged.root).expect("collect nodes");
+        let dense =
+            mvm_ext4::build_image_with_options(&nodes, &build_options).expect("dense image");
+
+        let materialized = materialize_in_process(&staged.root, &output, &options, &build_options)
+            .expect("streamed in-process materialize");
+
+        let streamed = fs::read(&output).expect("read streamed rootfs");
+        assert_eq!(streamed, dense, "streamed bytes must match dense writer");
+        assert_eq!(materialized.size_bytes, dense.len() as u64);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_tools_validate_streamed_rootfs_and_reject_corruption() {
+        if !tool_available("e2fsck") || !tool_available("debugfs") {
+            eprintln!("skipping linux ext4 oracles: e2fsck/debugfs unavailable");
+            return;
+        }
+
+        let staged_dir = TempDir::new().unwrap();
+        fs::create_dir_all(staged_dir.path().join("etc")).unwrap();
+        fs::write(
+            staged_dir.path().join("etc/hosts"),
+            b"127.0.0.1 localhost\n",
+        )
+        .unwrap();
+        fs::write(staged_dir.path().join("hello"), b"oracle witness\n").unwrap();
+        let output_dir = TempDir::new().unwrap();
+        let output = output_dir.path().join("rootfs.ext4");
+        let options = defaults();
+        let build_options = in_process_build_options(&options).expect("default options supported");
+
+        materialize_in_process(staged_dir.path(), &output, &options, &build_options)
+            .expect("streamed in-process materialize");
+
+        let fsck = Command::new("e2fsck")
+            .args(["-fn", output.to_str().expect("utf-8 path")])
+            .output()
+            .expect("run e2fsck");
+        assert!(
+            fsck.status.success(),
+            "e2fsck should accept the streamed image: {}",
+            String::from_utf8_lossy(&fsck.stderr)
+        );
+
+        let listing = Command::new("debugfs")
+            .args(["-R", "ls -l /etc", output.to_str().expect("utf-8 path")])
+            .output()
+            .expect("run debugfs ls");
+        assert!(
+            listing.status.success(),
+            "debugfs ls should succeed: {}",
+            String::from_utf8_lossy(&listing.stderr)
+        );
+        let listing_stdout = String::from_utf8_lossy(&listing.stdout);
+        assert!(
+            listing_stdout.contains("hosts"),
+            "debugfs listing should mention /etc/hosts: {listing_stdout}"
+        );
+
+        let cat = Command::new("debugfs")
+            .args(["-R", "cat /hello", output.to_str().expect("utf-8 path")])
+            .output()
+            .expect("run debugfs cat");
+        assert!(cat.status.success(), "debugfs cat should succeed");
+        assert_eq!(cat.stdout, b"oracle witness\n");
+
+        let corrupt = output_dir.path().join("rootfs-corrupt.ext4");
+        let mut bytes = fs::read(&output).expect("read good rootfs");
+        bytes[1024 + 0x38] ^= 0xFF;
+        fs::write(&corrupt, &bytes).expect("write corrupt rootfs");
+
+        let corrupted_fsck = Command::new("e2fsck")
+            .args(["-fn", corrupt.to_str().expect("utf-8 path")])
+            .output()
+            .expect("run e2fsck on corrupt image");
+        assert!(
+            !corrupted_fsck.status.success(),
+            "e2fsck should reject the corrupted image"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn tool_available(name: &str) -> bool {
+        Command::new(name).arg("-V").output().is_ok()
     }
 }

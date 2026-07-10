@@ -751,6 +751,7 @@ fn run_curl(socket: &Path, method: &str, endpoint: &str, body: &str) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
     use std::os::unix::fs::PermissionsExt;
 
     /// Run a closure with `MVM_DATA_DIR` overridden to a tempdir
@@ -760,7 +761,7 @@ mod tests {
     /// `DATA_DIR_LOCK` since `set_var` is process-global.
     struct DataDirGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
-        prev: Option<String>,
+        _env: TestEnv,
         _tmp: tempfile::TempDir,
     }
 
@@ -770,28 +771,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let tmp = tempfile::tempdir().expect("tempdir");
-            let prev = std::env::var("MVM_DATA_DIR").ok();
-            // SAFETY: the lock above serialises this set/restore
-            // pair across the test binary; no other threads are
-            // observing MVM_DATA_DIR while the guard is held.
-            unsafe {
-                std::env::set_var("MVM_DATA_DIR", tmp.path());
-            }
+            let mut env = TestEnv::new();
+            env.set("MVM_DATA_DIR", tmp.path());
             DataDirGuard {
                 _guard: lock,
-                prev,
+                _env: env,
                 _tmp: tmp,
-            }
-        }
-    }
-
-    impl Drop for DataDirGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
             }
         }
     }

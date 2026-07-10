@@ -104,6 +104,10 @@ fn every_shared_machine_fixture_parses_to_its_verb() {
     let mut seen = 0;
     for entry in std::fs::read_dir(&dir).expect("read machine-fixtures dir") {
         let path = entry.expect("dir entry").path();
+        let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or("");
+        if file_name.starts_with('.') {
+            continue;
+        }
         if path.extension().and_then(|e| e.to_str()) != Some("argv") {
             continue;
         }

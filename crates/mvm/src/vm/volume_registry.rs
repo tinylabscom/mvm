@@ -269,10 +269,11 @@ impl VolumeMountRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::util::test_env::TestEnv;
 
     struct DataDirGuard {
         _guard: std::sync::MutexGuard<'static, ()>,
-        prev: Option<String>,
+        _env: TestEnv,
         _tmp: tempfile::TempDir,
     }
 
@@ -282,25 +283,12 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
             let tmp = tempfile::tempdir().expect("tempdir");
-            let prev = std::env::var("MVM_DATA_DIR").ok();
-            unsafe {
-                std::env::set_var("MVM_DATA_DIR", tmp.path());
-            }
+            let mut env = TestEnv::new();
+            env.set("MVM_DATA_DIR", tmp.path());
             DataDirGuard {
                 _guard: g,
-                prev,
+                _env: env,
                 _tmp: tmp,
-            }
-        }
-    }
-
-    impl Drop for DataDirGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.prev {
-                    Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                    None => std::env::remove_var("MVM_DATA_DIR"),
-                }
             }
         }
     }

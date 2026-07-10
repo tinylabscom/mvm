@@ -1103,7 +1103,7 @@ fn send_signal(pid: libc::pid_t, sig: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use mvm_core::util::test_env::TestEnv;
 
     fn sample_standby_spec() -> StandbySpec {
         StandbySpec {
@@ -1459,11 +1459,9 @@ mod tests {
     /// `HOME` (or `MVM_LIBKRUN_SUPERVISOR_PATH`) mid-call and corrupt
     /// our assertions.
     fn with_env<F: FnOnce()>(body: F) {
-        use std::sync::Mutex;
-        static ENV_LOCK: Mutex<()> = Mutex::new(());
-        // Poisoned guard is fine — earlier panic doesn't taint env
-        // for us; we restore explicitly below.
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         body();
     }
 
@@ -1476,16 +1474,9 @@ mod tests {
             // Point HOME at a fresh temp dir so we get a known-empty
             // ~/.mvm/vms/ layout.
             let temp = tempfile::tempdir().expect("tempdir");
-            let saved = std::env::var_os("HOME");
-            // SAFETY: serialised by ENV_LOCK.
-            unsafe { std::env::set_var("HOME", temp.path()) };
+            let mut env = TestEnv::new();
+            env.set("HOME", temp.path());
             let result = LibkrunBackend.list();
-            unsafe {
-                match saved {
-                    Some(v) => std::env::set_var("HOME", v),
-                    None => std::env::remove_var("HOME"),
-                }
-            }
             let vms = result.expect("list should not error on missing root");
             assert!(vms.is_empty(), "expected empty list, got {vms:?}");
         });
@@ -1495,10 +1486,9 @@ mod tests {
     fn resolve_supervisor_path_honors_env_override() {
         with_env(|| {
             let temp = tempfile::NamedTempFile::new().expect("tempfile");
-            // SAFETY: serialised by ENV_LOCK.
-            unsafe { std::env::set_var("MVM_LIBKRUN_SUPERVISOR_PATH", temp.path()) };
+            let mut env = TestEnv::new();
+            env.set("MVM_LIBKRUN_SUPERVISOR_PATH", temp.path());
             let result = resolve_supervisor_path();
-            unsafe { std::env::remove_var("MVM_LIBKRUN_SUPERVISOR_PATH") };
             let path = result.expect("env override resolves");
             assert_eq!(path, temp.path());
         });
@@ -1507,15 +1497,12 @@ mod tests {
     #[test]
     fn resolve_supervisor_path_rejects_missing_env_target() {
         with_env(|| {
-            // SAFETY: serialised by ENV_LOCK.
-            unsafe {
-                std::env::set_var(
-                    "MVM_LIBKRUN_SUPERVISOR_PATH",
-                    "/definitely/does/not/exist/mvm-libkrun-supervisor",
-                )
-            };
+            let mut env = TestEnv::new();
+            env.set(
+                "MVM_LIBKRUN_SUPERVISOR_PATH",
+                "/definitely/does/not/exist/mvm-libkrun-supervisor",
+            );
             let result = resolve_supervisor_path();
-            unsafe { std::env::remove_var("MVM_LIBKRUN_SUPERVISOR_PATH") };
             let err = result.expect_err("expected missing-file error");
             assert!(err.to_string().contains("not a file"));
         });
@@ -1673,16 +1660,17 @@ mod tests {
 
     #[test]
     fn persist_vsock_egress_marker_writes_and_clears_marker() {
-        let _guard = ENV_LOCK.lock().expect("env lock");
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
-        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let mut env = TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
 
         persist_vsock_egress_marker("marker-vm", true).expect("write marker");
         assert!(mvm_core::config::vm_vsock_egress_marker_path("marker-vm").is_file());
 
         persist_vsock_egress_marker("marker-vm", false).expect("clear marker");
         assert!(!mvm_core::config::vm_vsock_egress_marker_path("marker-vm").exists());
-
-        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 }
