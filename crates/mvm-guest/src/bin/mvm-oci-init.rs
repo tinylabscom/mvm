@@ -292,63 +292,62 @@ mod linux {
     }
 
     fn bring_loopback_up() {
-        let sock = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, 0) };
-        if sock < 0 {
-            eprintln!(
-                "mvm-oci-init: socket for loopback setup: {}",
-                std::io::Error::last_os_error()
-            );
+        if let Err(e) = mvm_guest::guest_net::bring_iface_up("lo") {
+            eprintln!("mvm-oci-init: bring loopback up: {e}");
+        }
+        if loopback_is_up() {
             return;
         }
-        let (get_flags, set_flags) = loopback_flag_requests();
-        let mut ifr = IfReq::for_name("lo");
-        let get_rc = unsafe { libc::ioctl(sock, get_flags, &mut ifr) };
-        if get_rc == 0 {
-            ifr.flags |= (libc::IFF_UP | libc::IFF_RUNNING) as libc::c_short;
-            let set_rc = unsafe { libc::ioctl(sock, set_flags, &ifr) };
-            if set_rc != 0 {
-                eprintln!(
-                    "mvm-oci-init: bring loopback up: {}",
-                    std::io::Error::last_os_error()
-                );
+        if bring_loopback_up_with_busybox() {
+            if loopback_is_up() {
+                return;
             }
-        } else {
-            eprintln!(
-                "mvm-oci-init: read loopback flags: {}",
-                std::io::Error::last_os_error()
-            );
+            eprintln!("mvm-oci-init: busybox loopback fallback ran, but lo is still down");
+            return;
         }
-        unsafe {
-            libc::close(sock);
-        }
+        eprintln!("mvm-oci-init: loopback remains down (no working busybox ip/ifconfig fallback)");
     }
 
-    fn loopback_flag_requests() -> (libc::Ioctl, libc::Ioctl) {
-        (
-            libc::SIOCGIFFLAGS as libc::Ioctl,
-            libc::SIOCSIFFLAGS as libc::Ioctl,
-        )
+    fn loopback_is_up() -> bool {
+        let Ok(flags) = fs::read_to_string("/sys/class/net/lo/flags") else {
+            return false;
+        };
+        loopback_flags_indicate_up(&flags)
     }
 
-    #[repr(C)]
-    struct IfReq {
-        name: [libc::c_char; libc::IFNAMSIZ],
-        flags: libc::c_short,
-        pad: [u8; 24],
+    fn loopback_flags_indicate_up(flags: &str) -> bool {
+        let Some(hex) = flags.trim().strip_prefix("0x") else {
+            return false;
+        };
+        u32::from_str_radix(hex, 16)
+            .map(|bits| bits & (libc::IFF_UP as u32) != 0)
+            .unwrap_or(false)
     }
 
-    impl IfReq {
-        fn for_name(name: &str) -> Self {
-            let mut ifr = Self {
-                name: [0; libc::IFNAMSIZ],
-                flags: 0,
-                pad: [0; 24],
-            };
-            for (dst, src) in ifr.name.iter_mut().zip(name.as_bytes()) {
-                *dst = *src as libc::c_char;
-            }
-            ifr
+    fn bring_loopback_up_with_busybox() -> bool {
+        let busybox = Path::new("/bin/busybox");
+        if !is_executable(busybox) {
+            return false;
         }
+        let ip_ok = Command::new(busybox)
+            .args(["ip", "link", "set", "lo", "up"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if ip_ok {
+            return true;
+        }
+        Command::new(busybox)
+            .args(["ifconfig", "lo", "up"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
     }
 
     fn idle_forever() -> ! {
@@ -382,18 +381,10 @@ mod linux {
         }
 
         #[test]
-        fn ifreq_name_is_nul_padded() {
-            let ifr = IfReq::for_name("lo");
-            assert_eq!(ifr.name[0], b'l' as libc::c_char);
-            assert_eq!(ifr.name[1], b'o' as libc::c_char);
-            assert_eq!(ifr.name[2], 0);
-        }
-
-        #[test]
-        fn loopback_ioctl_requests_match_libc_constants() {
-            let (get_flags, set_flags) = loopback_flag_requests();
-            assert_eq!(get_flags, libc::SIOCGIFFLAGS as libc::Ioctl);
-            assert_eq!(set_flags, libc::SIOCSIFFLAGS as libc::Ioctl);
+        fn loopback_flags_indicate_up_reads_hex_flags() {
+            assert!(!loopback_flags_indicate_up("0x8\n"));
+            assert!(loopback_flags_indicate_up("0x9\n"));
+            assert!(!loopback_flags_indicate_up("garbage"));
         }
     }
 }

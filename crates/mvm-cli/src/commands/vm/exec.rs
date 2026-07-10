@@ -1260,22 +1260,7 @@ fn oci_vsock_proxy_env_for_capabilities(
     if !(caps.vsock && caps.no_guest_nic && caps.host_vsock_proxy) {
         return Vec::new();
     }
-    let proxy = "socks5h://127.0.0.1:1080".to_string();
-    vec![
-        ("ALL_PROXY".to_string(), proxy.clone()),
-        ("HTTP_PROXY".to_string(), proxy.clone()),
-        ("HTTPS_PROXY".to_string(), proxy.clone()),
-        ("http_proxy".to_string(), proxy.clone()),
-        ("https_proxy".to_string(), proxy),
-        (
-            "NO_PROXY".to_string(),
-            "localhost,127.0.0.1,::1".to_string(),
-        ),
-        (
-            "no_proxy".to_string(),
-            "localhost,127.0.0.1,::1".to_string(),
-        ),
-    ]
+    mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
 }
 
 fn oci_vsock_proxy_env_for_backend(
@@ -1583,11 +1568,11 @@ mod tests {
         );
         assert!(
             vars.iter()
-                .any(|(k, v)| k == "ALL_PROXY" && v == "socks5h://127.0.0.1:1080")
+                .any(|(k, v)| k == "ALL_PROXY" && v == "http://127.0.0.1:1080")
         );
         assert!(
             vars.iter()
-                .any(|(k, v)| k == "HTTP_PROXY" && v == "socks5h://127.0.0.1:1080")
+                .any(|(k, v)| k == "HTTP_PROXY" && v == "http://127.0.0.1:1080")
         );
         assert!(
             vars.iter()

@@ -13,11 +13,11 @@
 
 use serde::{Deserialize, Serialize};
 use std::net::{Ipv4Addr, SocketAddrV4};
-#[cfg(target_os = "linux")]
-use std::os::fd::FromRawFd;
 use std::path::Path;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
+
+use crate::guest_vsock_session::HostVsockSession;
 
 /// One peer-name → loopback-IP + vsock-port mapping. The full set
 /// for a consumer instance comes from the config disk's
@@ -149,77 +149,25 @@ async fn accept_loop(listener: TcpListener, binding: LoopbackBinding) {
 }
 
 async fn handle_client(client: TcpStream, binding: LoopbackBinding) -> std::io::Result<()> {
-    let upstream = connect_host_vsock(binding.vsock_port).await?;
-    proxy_with_peer_header(client, upstream, &binding.peer).await
+    HostVsockSession::connect(binding.vsock_port)
+        .await?
+        .write_initial_bytes(&encode_peer_header(&PeerHeader::new(binding.peer)))
+        .await?
+        .splice(client)
+        .await
 }
 
 /// Write the v1 peer header to `upstream`, then proxy bytes both ways.
-pub async fn proxy_with_peer_header<C, U>(
-    mut client: C,
-    mut upstream: U,
-    peer: &str,
-) -> std::io::Result<()>
+pub async fn proxy_with_peer_header<C, U>(client: C, upstream: U, peer: &str) -> std::io::Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin,
     U: AsyncRead + AsyncWrite + Unpin,
 {
-    let header = PeerHeader::new(peer.to_string());
-    upstream.write_all(&encode_peer_header(&header)).await?;
-    upstream.flush().await?;
-    tokio::io::copy_bidirectional(&mut client, &mut upstream)
+    HostVsockSession::new(upstream)
+        .write_initial_bytes(&encode_peer_header(&PeerHeader::new(peer.to_string())))
+        .await?
+        .splice(client)
         .await
-        .map(|_| ())
-}
-
-/// Open a stream to the host addon proxy over AF_VSOCK.
-pub async fn connect_host_vsock(port: u32) -> std::io::Result<TcpStream> {
-    tokio::task::spawn_blocking(move || connect_host_vsock_blocking(port))
-        .await
-        .map_err(|e| std::io::Error::other(format!("vsock dial task failed: {e}")))?
-}
-
-#[cfg(target_os = "linux")]
-fn connect_host_vsock_blocking(port: u32) -> std::io::Result<TcpStream> {
-    const VMADDR_CID_HOST: u32 = 2;
-
-    let fd = unsafe { libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM, 0) };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-
-    let addr = libc::sockaddr_vm {
-        svm_family: libc::AF_VSOCK as libc::sa_family_t,
-        svm_reserved1: 0,
-        svm_port: port,
-        svm_cid: VMADDR_CID_HOST,
-        svm_zero: [0; 4],
-    };
-    let rc = unsafe {
-        libc::connect(
-            fd,
-            (&addr as *const libc::sockaddr_vm).cast::<libc::sockaddr>(),
-            std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t,
-        )
-    };
-    if rc < 0 {
-        let err = std::io::Error::last_os_error();
-        unsafe {
-            libc::close(fd);
-        }
-        return Err(err);
-    }
-
-    let stream = unsafe { std::net::TcpStream::from_raw_fd(fd) };
-    stream.set_nonblocking(true)?;
-    TcpStream::from_std(stream)
-}
-
-#[cfg(not(target_os = "linux"))]
-fn connect_host_vsock_blocking(_port: u32) -> std::io::Result<TcpStream> {
-    Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "AF_VSOCK addon bridge dialing is only available on Linux guests",
-    ))
 }
 
 /// Serialize a peer header as a length-prefixed wire frame ready to

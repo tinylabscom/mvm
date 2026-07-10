@@ -546,18 +546,7 @@ fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
     if !mvm_core::config::vm_vsock_egress_marker_path(vm_name).is_file() {
         return Vec::new();
     }
-    let proxy = "socks5h://127.0.0.1:1080".to_string();
-    let no_proxy = "localhost,127.0.0.1,::1".to_string();
-    vec![
-        ("HTTP_PROXY".to_string(), proxy.clone()),
-        ("HTTPS_PROXY".to_string(), proxy.clone()),
-        ("ALL_PROXY".to_string(), proxy.clone()),
-        ("http_proxy".to_string(), proxy.clone()),
-        ("https_proxy".to_string(), proxy.clone()),
-        ("all_proxy".to_string(), proxy),
-        ("NO_PROXY".to_string(), no_proxy.clone()),
-        ("no_proxy".to_string(), no_proxy),
-    ]
+    mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
 }
 
 /// Whether the per-VM egress CA sidecar exists — i.e. egress substitution
@@ -818,7 +807,7 @@ mod tests {
     }
 
     #[test]
-    fn vsock_egress_env_emits_socks5_proxy_vars_when_marker_present() {
+    fn vsock_egress_env_emits_http_proxy_vars_when_marker_present() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
         env.set("MVM_DATA_DIR", dir.path());
@@ -830,7 +819,11 @@ mod tests {
         let env = super::vsock_egress_env("plain-vm");
         assert!(
             env.iter()
-                .any(|(k, v)| k == "ALL_PROXY" && v == "socks5h://127.0.0.1:1080")
+                .any(|(k, v)| k == "ALL_PROXY" && v == "http://127.0.0.1:1080")
+        );
+        assert!(
+            env.iter()
+                .any(|(k, v)| k == "HTTP_PROXY" && v == "http://127.0.0.1:1080")
         );
         assert!(
             env.iter()
@@ -858,7 +851,10 @@ mod tests {
 
         let env = super::workload_egress_env("pref-vm");
         assert!(env.iter().any(|(k, _)| k == "HTTP_PROXY"));
-        assert!(env.iter().all(|(_, v)| !v.starts_with("socks5h://")));
+        assert!(
+            env.iter()
+                .all(|(_, v)| !v.starts_with("http://127.0.0.1:1080"))
+        );
     }
 
     #[test]

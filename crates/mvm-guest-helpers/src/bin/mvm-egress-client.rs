@@ -1,9 +1,9 @@
-//! `mvm-egress-client` — in-guest SOCKS5 → vsock egress proxy.
+//! `mvm-egress-client` — in-guest proxy → vsock egress bridge.
 //!
-//! Runs inside a NIC-less microVM guest. Listens for SOCKS5 CONNECT on loopback
-//! and forwards each connection's target over AF_VSOCK to the host egress gateway,
-//! which makes the claim-10 decision and proxies the bytes. Workloads opt in with
-//! `ALL_PROXY=socks5h://127.0.0.1:<port>`.
+//! Runs inside a NIC-less microVM guest. Listens on loopback for SOCKS5 CONNECT
+//! plus ordinary HTTP-proxy requests, then relays them over AF_VSOCK to the host
+//! egress gateway, which makes the claim-10 decision and either splices raw
+//! bytes or acts as the forward proxy.
 //!
 //! Listen address: `MVM_EGRESS_LISTEN` (default `127.0.0.1:1080`). Linux-only
 //! (AF_VSOCK); a no-op off Linux so the workspace builds on macOS dev hosts.

@@ -53,6 +53,27 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace` (6987/6987);
       `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D
       warnings` green.
+- [x] 2026-07-09 Plan 241 guest vsock session helper refactor: the guest-side
+      addon bridge and SOCKS5 egress client now share
+      `mvm_guest_helpers::guest_vsock_session::HostVsockSession`, a narrow
+      helper for the repeated "dial host vsock, write the already-framed
+      prelude, then splice bytes" lifecycle. Behavior stayed fixed at the wire
+      boundary: addon peer-header framing is unchanged, SOCKS5 negotiation and
+      the newline-terminated `host:port\n` target line are unchanged, and no
+      host policy or claim-10 enforcement moved out of the host. Coverage now
+      includes the shared helper ordering witness plus guest-path regression
+      tests for both addon and egress call paths, plus host-side raw-egress and
+      HTTP forward-proxy tests for the reserved-frame dispatch. Validation:
+      `cargo fmt --all --check`; `MVM_DATA_DIR="$PWD/.mvm-test" CARGO_TARGET_DIR="$PWD/.mvm-test/target" CARGO_HOME="$PWD/.mvm-test/cargo" cargo test -p mvm-guest-helpers`; `cargo test -p mvm-hostd raw_egress --lib`; `cargo test -p mvm-hostd http_forward --lib`; `cargo clippy -p mvm-guest-helpers -p mvm-hostd --all-targets -- -D warnings`; `cargo check --workspace`; `cargo test --workspace`; and `cargo clippy --workspace --all-targets -- -D warnings`.
+      A same-day local HVF runtime proof on the rebased branch needed
+      `mvmctl env sign` first and a short `/tmp` `MVM_DATA_DIR` because the
+      worktree-local substitution-endpoint UDS path exceeded `SUN_LEN`. After
+      switching plain admitted egress env to `http://127.0.0.1:1080`,
+      broadening the guest loopback proxy to accept absolute-form HTTP proxy
+      requests, and dispatching a reserved first frame into the host-side
+      forward-proxy path, the required BusyBox HTTPS smoke passed:
+      `mvmctl machine run --image busybox --allow-host google.com --allow-host www.google.com -- /bin/sh -lc 'wget -qO- https://google.com >/dev/null; echo exit:$?'`
+      reported `exit:0`.
 - [x] 2026-07-08 Plan 240 vsock port-handler registry production-readiness
       follow-up: the HVF-side vsock host-I/O loop now uses readiness-driven fd
       registration across the agent, console, egress, and broker bridges rather
