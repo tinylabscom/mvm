@@ -184,8 +184,7 @@ fn main() -> Result<()> {
                     format!("set up host TUN egress + NAT for {interface_name}")
                 })?;
                 let mut packet_path = HostTunPacketPath::new(device);
-                let result =
-                    worker.run_until_shutdown_l3_forward_with_packet_path(&mut packet_path);
+                let result = worker.run_blocking_l3_relay_loop(&mut packet_path, 0, 4);
                 // Tear down NAT + the gateway address regardless of loop outcome.
                 if let Err(err) = mvm_hostd::host_tun::teardown_host_tun_egress(&interface_name) {
                     tracing::warn!(%interface_name, error = %err, "host TUN egress teardown failed");
