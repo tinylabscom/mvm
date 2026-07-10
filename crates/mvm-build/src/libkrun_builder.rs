@@ -6,16 +6,16 @@
 //!
 //! ## What `LibkrunBuilderVm` does
 //!
-//! Given a populated builder VM image cache and `mvm-libkrun-supervisor`
-//! on PATH, `run_build` runs a one-shot `nix build` against the
+//! Given a populated builder VM image cache and a current
+//! `mvm-libkrun-supervisor`, `run_build` runs a one-shot `nix build` against the
 //! caller's `BuilderJob` and returns `BuilderArtifacts`. The
 //! pipeline (in `BuilderVm::run_build`):
 //!
 //! 1. Validate mounts + job (`validate_mounts`, `validate_job`).
 //! 2. Check `libkrun_sys::is_available()` — bail with install hint
 //!    if libkrun isn't on the host.
-//! 3. Locate `mvm-libkrun-supervisor` (env override / next-to-exe /
-//!    PATH).
+//! 3. Locate or build `mvm-libkrun-supervisor` (env override / next-to-exe /
+//!    source checkout build / PATH).
 //! 4. Read the builder VM image from
 //!    `~/.cache/mvm/builder-vm/<arch>/` — vmlinux + rootfs.ext4 +
 //!    cmdline.txt + manifest.json, the shape the builder-vm flake
@@ -54,6 +54,7 @@
 //! runs a one-shot `nix build`, while the runtime mounts the
 //! user's rootfs and runs the user's entrypoint.
 
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -1585,10 +1586,31 @@ pub(crate) fn unique_job_id() -> String {
 // `crate::builder_vm_runtime` so the future VzBuilderVm path can reuse
 // them.
 
-/// Locate the `mvm-libkrun-supervisor` binary. Mirrors the
-/// resolver in `mvm-backend::libkrun::resolve_supervisor_path`
-/// (kept local rather than re-exported to keep the dep graph
-/// flat). Order: env override → next to current_exe → PATH.
+const LIBKRUN_SUPERVISOR_BIN: &str = "mvm-libkrun-supervisor";
+const LIBKRUN_SUPERVISOR_PACKAGE: &str = "mvm-vm-host";
+const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/mvm-vm-host/Cargo.toml",
+    "crates/mvm-vm-host/src",
+    "crates/deps/libkrun-sys/Cargo.toml",
+    "crates/deps/libkrun-sys/src",
+    "crates/mvm-backend/Cargo.toml",
+    "crates/mvm-backend/src",
+    "crates/mvm-build/Cargo.toml",
+    "crates/mvm-build/src",
+    "crates/mvm-core/Cargo.toml",
+    "crates/mvm-core/src",
+    "crates/mvm-guest/Cargo.toml",
+    "crates/mvm-guest/src",
+    "crates/mvm-hostd/Cargo.toml",
+    "crates/mvm-hostd/src",
+];
+
+/// Locate the `mvm-libkrun-supervisor` binary. Mirrors the resolver in
+/// `mvm-backend::libkrun::resolve_supervisor_path` (kept local rather than
+/// re-exported to keep the dep graph flat). Order: env override → next to
+/// current_exe → current source checkout build → PATH.
 /// Where [`resolve_supervisor_path`] found the supervisor binary. The source
 /// matters because a PATH hit is an installed copy (`cargo install`) that a
 /// source-checkout `cargo build` never refreshes — so it can silently lag the
@@ -1649,7 +1671,7 @@ fn sibling_profile_supervisor(exe_dir: &Path) -> Option<PathBuf> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|profile_dir| profile_dir.is_dir() && profile_dir != exe_dir)
-        .map(|profile_dir| profile_dir.join("mvm-libkrun-supervisor"))
+        .map(|profile_dir| profile_dir.join(LIBKRUN_SUPERVISOR_BIN))
         .filter(|bin| bin.is_file())
         .filter_map(|bin| Some((std::fs::metadata(&bin).ok()?.modified().ok()?, bin)))
         .collect();
@@ -1672,6 +1694,185 @@ fn supervisor_build_outranks_path(candidate: &Path, on_path: Option<&Path>) -> b
     }
 }
 
+fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir.parent()?.parent().map(Path::to_path_buf)
+}
+
+fn source_checkout_supervisor(exe_dir: Option<&Path>) -> Option<Result<PathBuf, BuilderVmError>> {
+    let exe_dir = exe_dir?;
+    let workspace_root = workspace_root_from_manifest_dir()?;
+    if !workspace_root.join("Cargo.toml").is_file() {
+        return None;
+    }
+    let (target_dir, profile) = source_checkout_exe_target_dir(exe_dir, &workspace_root)?;
+
+    let candidate = target_dir.join(profile).join(LIBKRUN_SUPERVISOR_BIN);
+    let input_roots = supervisor_input_roots(&workspace_root);
+    match supervisor_needs_rebuild(&candidate, &input_roots) {
+        Ok(false) => Some(Ok(candidate)),
+        Ok(true) => Some(build_supervisor_in_workspace(
+            &workspace_root,
+            target_dir,
+            profile,
+        )),
+        Err(e) => Some(Err(BuilderVmError::LibkrunUnavailable(format!(
+            "checking {} freshness: {e}",
+            candidate.display()
+        )))),
+    }
+}
+
+fn source_checkout_exe_target_dir<'a>(
+    exe_dir: &'a Path,
+    workspace_root: &Path,
+) -> Option<(&'a Path, &'a str)> {
+    source_checkout_exe_target_dir_with_effective(
+        exe_dir,
+        workspace_root,
+        &effective_cargo_target_dir(workspace_root),
+    )
+}
+
+fn source_checkout_exe_target_dir_with_effective<'a>(
+    exe_dir: &'a Path,
+    workspace_root: &Path,
+    effective_target_dir: &Path,
+) -> Option<(&'a Path, &'a str)> {
+    let profile = exe_dir.file_name()?.to_str()?;
+    let target_dir = exe_dir.parent()?;
+    let default_target_dir = workspace_root.join("target");
+    if target_dir == default_target_dir || target_dir == effective_target_dir {
+        Some((target_dir, profile))
+    } else {
+        None
+    }
+}
+
+fn effective_cargo_target_dir(workspace_root: &Path) -> PathBuf {
+    cargo_target_dir_from_env(workspace_root, std::env::var_os("CARGO_TARGET_DIR"))
+}
+
+fn cargo_target_dir_from_env(workspace_root: &Path, target_dir: Option<OsString>) -> PathBuf {
+    let Some(target_dir) = target_dir else {
+        return workspace_root.join("target");
+    };
+    if target_dir.is_empty() {
+        return workspace_root.join("target");
+    }
+    let target_dir = PathBuf::from(target_dir);
+    if target_dir.is_absolute() {
+        target_dir
+    } else {
+        workspace_root.join(target_dir)
+    }
+}
+
+fn supervisor_input_roots(workspace_root: &Path) -> Vec<PathBuf> {
+    LIBKRUN_SUPERVISOR_INPUT_ROOTS
+        .iter()
+        .map(|root| workspace_root.join(root))
+        .collect()
+}
+
+fn supervisor_needs_rebuild(helper: &Path, input_roots: &[PathBuf]) -> std::io::Result<bool> {
+    let Ok(helper_meta) = std::fs::metadata(helper) else {
+        return Ok(true);
+    };
+    let helper_modified = helper_meta.modified()?;
+    let newest_input = newest_modified_input(input_roots)?;
+    Ok(newest_input.is_some_and(|modified| modified > helper_modified))
+}
+
+fn newest_modified_input(
+    input_roots: &[PathBuf],
+) -> std::io::Result<Option<std::time::SystemTime>> {
+    let mut newest = None;
+    for root in input_roots {
+        newest = max_system_time(newest, newest_modified_under(root)?);
+    }
+    Ok(newest)
+}
+
+fn newest_modified_under(path: &Path) -> std::io::Result<Option<std::time::SystemTime>> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return Ok(None);
+    };
+    let mut newest = Some(meta.modified()?);
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            newest = max_system_time(newest, newest_modified_under(&entry.path())?);
+        }
+    }
+    Ok(newest)
+}
+
+fn max_system_time(
+    a: Option<std::time::SystemTime>,
+    b: Option<std::time::SystemTime>,
+) -> Option<std::time::SystemTime> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn build_supervisor_in_workspace(
+    workspace_root: &Path,
+    target_dir: &Path,
+    profile: &str,
+) -> Result<PathBuf, BuilderVmError> {
+    eprintln!(
+        "[mvm] building {LIBKRUN_SUPERVISOR_BIN} for this source checkout so the supervisor matches mvmctl"
+    );
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let mut cmd = Command::new(cargo);
+    cmd.current_dir(workspace_root).args([
+        "build",
+        "-p",
+        LIBKRUN_SUPERVISOR_PACKAGE,
+        "--bin",
+        LIBKRUN_SUPERVISOR_BIN,
+        "--features",
+        "libkrun-sys",
+    ]);
+    match profile {
+        "debug" => {}
+        "release" => {
+            cmd.arg("--release");
+        }
+        other => {
+            cmd.args(["--profile", other]);
+        }
+    }
+    let status = cmd.status().map_err(|e| {
+        BuilderVmError::LibkrunUnavailable(format!(
+            "spawn cargo build for {LIBKRUN_SUPERVISOR_BIN}: {e}"
+        ))
+    })?;
+    if !status.success() {
+        return Err(BuilderVmError::LibkrunUnavailable(format!(
+            "cargo build for {LIBKRUN_SUPERVISOR_BIN} failed with status {status}"
+        )));
+    }
+    let built = supervisor_path_in_target_dir(target_dir, profile);
+    if built.is_file() {
+        Ok(built)
+    } else {
+        Err(BuilderVmError::LibkrunUnavailable(format!(
+            "cargo build completed but {} was not produced",
+            built.display()
+        )))
+    }
+}
+
+fn supervisor_path_in_target_dir(target_dir: &Path, profile: &str) -> PathBuf {
+    target_dir.join(profile).join(LIBKRUN_SUPERVISOR_BIN)
+}
+
 fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
     // An explicit override that points at a non-file is a hard error, not a
     // silent fall-through to a different binary — surface the operator's typo.
@@ -1688,20 +1889,30 @@ fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
         }
         None => None,
     };
+    if let Some(path) = env_override {
+        return Ok(path);
+    }
     let exe = std::env::current_exe().ok();
     let exe_dir = exe.as_deref().and_then(Path::parent);
+    let on_path = which::which(LIBKRUN_SUPERVISOR_BIN).ok();
+    let source_checkout_build = match source_checkout_supervisor(exe_dir) {
+        Some(Ok(path)) => Some(path),
+        Some(Err(err)) => return Err(err),
+        None => None,
+    };
     let next_to_exe = exe_dir
-        .map(|dir| dir.join("mvm-libkrun-supervisor"))
+        .map(|dir| dir.join(LIBKRUN_SUPERVISOR_BIN))
         .filter(|candidate| candidate.is_file());
-    let on_path = which::which("mvm-libkrun-supervisor").ok();
     // A sibling-profile build (fresh local `cargo build`) closes the stale-PATH
     // trap — but only when it's at least as fresh as the `$PATH` copy, so a
     // stale leftover build can't shadow a freshly installed supervisor.
-    let local_build = exe_dir
-        .and_then(sibling_profile_supervisor)
-        .filter(|candidate| supervisor_build_outranks_path(candidate, on_path.as_deref()));
+    let local_build = source_checkout_build.or_else(|| {
+        exe_dir
+            .and_then(sibling_profile_supervisor)
+            .filter(|candidate| supervisor_build_outranks_path(candidate, on_path.as_deref()))
+    });
 
-    match choose_supervisor(env_override, next_to_exe, local_build, on_path) {
+    match choose_supervisor(None, next_to_exe, local_build, on_path) {
         Some((path, SupervisorSource::Path)) => {
             // The stale-install trap: a `cargo install`ed copy on $PATH is used
             // because no fresh binary sits next to the exe. Source checkouts
@@ -3896,6 +4107,52 @@ mod tests {
         assert_eq!(sibling_profile_supervisor(&installed), None);
     }
 
+    #[test]
+    fn supervisor_path_uses_supplied_target_dir() {
+        let target = Path::new("/tmp/mvm-target");
+        assert_eq!(
+            supervisor_path_in_target_dir(target, "release"),
+            Path::new("/tmp/mvm-target/release/mvm-libkrun-supervisor")
+        );
+    }
+
+    #[test]
+    fn cargo_target_dir_from_env_honors_absolute_and_relative_overrides() {
+        let root = Path::new("/repo/mvm");
+
+        assert_eq!(cargo_target_dir_from_env(root, None), root.join("target"));
+        assert_eq!(
+            cargo_target_dir_from_env(root, Some(OsString::from("/tmp/mvm-target"))),
+            Path::new("/tmp/mvm-target")
+        );
+        assert_eq!(
+            cargo_target_dir_from_env(root, Some(OsString::from("build/target"))),
+            root.join("build/target")
+        );
+    }
+
+    #[test]
+    fn source_checkout_exe_target_dir_accepts_effective_cargo_target_dir() {
+        let root = Path::new("/repo/mvm");
+        let effective = Path::new("/tmp/mvm-target");
+        let exe_dir = effective.join("release");
+        let (target_dir, profile) =
+            source_checkout_exe_target_dir_with_effective(&exe_dir, root, effective)
+                .expect("effective target dir should be accepted");
+
+        assert_eq!(target_dir, effective);
+        assert_eq!(profile, "release");
+        assert!(
+            source_checkout_exe_target_dir_with_effective(
+                Path::new("/usr/local/bin"),
+                root,
+                effective
+            )
+            .is_none(),
+            "installed layouts must not be treated as source-checkout cargo target dirs"
+        );
+    }
+
     /// A sibling build outranks `$PATH` when it is missing/newer/equal, but a
     /// stale build must not shadow a freshly installed `$PATH` copy.
     #[test]
@@ -3920,6 +4177,33 @@ mod tests {
         set_mtime(&path, newer);
         set_mtime(&build, older);
         assert!(!supervisor_build_outranks_path(&build, Some(&path)));
+    }
+
+    #[test]
+    fn supervisor_needs_rebuild_when_source_input_is_newer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let helper = tmp.path().join("mvm-libkrun-supervisor");
+        let input_dir = tmp.path().join("crates").join("deps").join("libkrun-sys");
+        std::fs::create_dir_all(&input_dir).unwrap();
+        let input = input_dir.join("lib.rs");
+        std::fs::write(&helper, b"old-helper").unwrap();
+        std::fs::write(&input, b"enum NetworkingMode {}").unwrap();
+
+        let older = std::time::SystemTime::UNIX_EPOCH;
+        let newer = older + std::time::Duration::from_secs(100);
+        set_mtime(&helper, older);
+        set_mtime(&input, newer);
+        assert!(
+            supervisor_needs_rebuild(&helper, std::slice::from_ref(&input)).unwrap(),
+            "newer libkrun-sys input must force a supervisor rebuild"
+        );
+
+        set_mtime(&helper, newer);
+        set_mtime(&input, older);
+        assert!(
+            !supervisor_needs_rebuild(&helper, &[input]).unwrap(),
+            "fresh helper should be reused"
+        );
     }
 
     fn set_mtime(path: &Path, when: std::time::SystemTime) {

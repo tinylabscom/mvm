@@ -9,6 +9,7 @@
 //! command just works with no manual step. A downloaded release ships these next
 //! to `mvmctl` and is resolved by the sibling check before ever building.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
@@ -61,10 +62,16 @@ pub(crate) fn resolve_or_build(spec: &AuxBin) -> Result<PathBuf> {
         }
     }
     if let Some(workspace_root) = workspace_root.as_deref() {
-        for variant in ["release", "debug"] {
-            let candidate = workspace_root.join("target").join(variant).join(spec.bin);
-            if candidate.is_file() {
-                return existing_source_candidate_or_rebuild(candidate, Some(workspace_root), spec);
+        for target_dir in source_checkout_target_dirs(workspace_root) {
+            for variant in ["release", "debug"] {
+                let candidate = target_dir.join(variant).join(spec.bin);
+                if candidate.is_file() {
+                    return existing_source_candidate_or_rebuild(
+                        candidate,
+                        Some(workspace_root),
+                        spec,
+                    );
+                }
             }
         }
         // Source checkout: build the missing helper (matching the running
@@ -114,7 +121,45 @@ fn existing_source_candidate_or_rebuild(
 }
 
 fn is_source_checkout_binary(candidate: &Path, workspace_root: &Path) -> bool {
-    candidate.starts_with(workspace_root.join("target"))
+    is_source_checkout_binary_in_target_dirs(
+        candidate,
+        &source_checkout_target_dirs(workspace_root),
+    )
+}
+
+fn is_source_checkout_binary_in_target_dirs(candidate: &Path, target_dirs: &[PathBuf]) -> bool {
+    target_dirs
+        .iter()
+        .any(|target_dir| candidate.starts_with(target_dir))
+}
+
+fn source_checkout_target_dirs(workspace_root: &Path) -> Vec<PathBuf> {
+    let default_target_dir = workspace_root.join("target");
+    let effective_target_dir = effective_cargo_target_dir(workspace_root);
+    if effective_target_dir == default_target_dir {
+        vec![default_target_dir]
+    } else {
+        vec![effective_target_dir, default_target_dir]
+    }
+}
+
+fn effective_cargo_target_dir(workspace_root: &Path) -> PathBuf {
+    cargo_target_dir_from_env(workspace_root, std::env::var_os("CARGO_TARGET_DIR"))
+}
+
+fn cargo_target_dir_from_env(workspace_root: &Path, target_dir: Option<OsString>) -> PathBuf {
+    let Some(target_dir) = target_dir else {
+        return workspace_root.join("target");
+    };
+    if target_dir.is_empty() {
+        return workspace_root.join("target");
+    }
+    let target_dir = PathBuf::from(target_dir);
+    if target_dir.is_absolute() {
+        target_dir
+    } else {
+        workspace_root.join(target_dir)
+    }
 }
 
 fn source_candidate_needs_rebuild(
@@ -179,7 +224,9 @@ fn build_in_workspace(workspace_root: &Path, spec: &AuxBin) -> Option<PathBuf> {
     if !cmd.status().map(|s| s.success()).unwrap_or(false) {
         return None;
     }
-    let built = workspace_root.join("target").join(variant).join(spec.bin);
+    let built = effective_cargo_target_dir(workspace_root)
+        .join(variant)
+        .join(spec.bin);
     built.is_file().then_some(built)
 }
 
@@ -259,13 +306,40 @@ mod tests {
     #[test]
     fn source_candidate_check_is_limited_to_workspace_target() {
         let root = Path::new("/repo/mvm");
-        assert!(is_source_checkout_binary(
+        assert!(is_source_checkout_binary_in_target_dirs(
             Path::new("/repo/mvm/target/release/mvm-hvf-supervisor"),
-            root
+            &[root.join("target")]
         ));
-        assert!(!is_source_checkout_binary(
+        assert!(!is_source_checkout_binary_in_target_dirs(
             Path::new("/usr/local/bin/mvm-hvf-supervisor"),
-            root
+            &[root.join("target")]
+        ));
+    }
+
+    #[test]
+    fn cargo_target_dir_from_env_honors_absolute_and_relative_overrides() {
+        let root = Path::new("/repo/mvm");
+
+        assert_eq!(cargo_target_dir_from_env(root, None), root.join("target"));
+        assert_eq!(
+            cargo_target_dir_from_env(root, Some(OsString::from("/tmp/mvm-target"))),
+            Path::new("/tmp/mvm-target")
+        );
+        assert_eq!(
+            cargo_target_dir_from_env(root, Some(OsString::from("build/target"))),
+            root.join("build/target")
+        );
+    }
+
+    #[test]
+    fn source_candidate_check_includes_effective_cargo_target_dir() {
+        let helper = Path::new("/tmp/mvm-target/release/mvm-hvf-supervisor");
+        assert!(is_source_checkout_binary_in_target_dirs(
+            helper,
+            &[
+                PathBuf::from("/tmp/mvm-target"),
+                PathBuf::from("/repo/mvm/target")
+            ]
         ));
     }
 

@@ -502,9 +502,9 @@ For OCI `--image` runs that request outbound egress (`--net` or `--allow-host`),
 `mvmctl` selects only backends that can keep the guest NIC-less and proxy
 traffic over the host-vsock egress endpoint. On that path the injected guest
 `/init` starts `mvm-egress-client` and the runtime injects proxy env vars
-pointing at its loopback SOCKS listener automatically. Today that means `hvf`;
-incapable backends are refused rather than silently falling back to a
-guest NIC. That makes TCP/HTTP clients work, but it does **not** add ICMP
+pointing at its loopback SOCKS listener automatically. Today that means `hvf`
+or `libkrun`; incapable backends are refused rather than silently falling back
+to a guest NIC. That makes TCP/HTTP clients work, but it does **not** add ICMP
 support: `ping` is not a valid smoke test for `--allow-host`.
 
 Naming a foreground run does not make it persistent; it only gives the transient
