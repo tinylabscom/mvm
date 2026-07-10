@@ -397,10 +397,17 @@ pub struct ObserverWiring {
     pub latency: Arc<ObserverLatency>,
     pub killed_flows: Arc<tokio::sync::Mutex<HashSet<FlowKey>>>,
     pub mtu: usize,
+    pub transcript_capture_roots: Option<TranscriptCaptureRoots>,
     /// Egress stages. Default no-op; the secrets subsystem sets these so its
     /// substitution/leak-scan run on the live egress path without a code edit.
     pub substitution: Arc<dyn SubstitutionStage>,
     pub scan: Arc<dyn ScanStage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct TranscriptCaptureRoots {
+    pub transcripts_dir: std::path::PathBuf,
+    pub keys_dir: std::path::PathBuf,
 }
 
 /// Per-subscriber NDJSON wire shape. Stable contract for `nc -U`
@@ -787,6 +794,7 @@ fn run_bridge_inner(endpoints: BridgeEndpoints, cfg: BridgeConfig) {
             )),
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
+            transcript_capture_roots: None,
             // Always-on egress redactor: mask any UNDECLARED
             // secret-shaped / PII run in the guest's outbound bytes to `XXX`
             // (mask-and-continue). Declared secrets never reach the guest (they
@@ -969,15 +977,20 @@ async fn bridge_copy_bidirectional(
     let latency = wiring.latency;
     let killed_flows = wiring.killed_flows;
     let mtu = wiring.mtu;
+    let transcript_capture_roots = wiring.transcript_capture_roots;
     let substitution = wiring.substitution;
     let scan = wiring.scan;
 
     // Forensic transcript capture (opt-in). If an operator armed a capture for
     // this VM, fan the forwarded frames into its sink; `None` (the common case)
     // costs nothing. The two directions share the sink behind an async mutex.
+    let capture_roots = transcript_capture_roots.unwrap_or_else(|| TranscriptCaptureRoots {
+        transcripts_dir: mvm_core::config::mvm_transcripts_dir(),
+        keys_dir: mvm_core::config::mvm_keys_dir(),
+    });
     let capture = crate::supervisor::transcript_sink::TranscriptCaptureSink::open_for_vm(
-        &mvm_core::config::mvm_transcripts_dir(),
-        &mvm_core::config::mvm_keys_dir(),
+        &capture_roots.transcripts_dir,
+        &capture_roots.keys_dir,
         &tenant,
         &vm_name,
     )
@@ -1907,19 +1920,17 @@ mod tests {
     async fn armed_capture_records_forwarded_frames_and_export_round_trips() {
         use std::os::unix::net::UnixStream as StdUs;
 
-        // Isolate the transcript store under a temp MVM_DATA_DIR.
-        let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        let capture_roots = TranscriptCaptureRoots {
+            transcripts_dir: tmp.path().join("audit").join("transcripts"),
+            keys_dir: tmp.path().join("keys"),
+        };
 
         // Arm a capture for tenant "t" / vm "vm-test", the way the operator CLI
         // does: a sealed-but-empty manifest with the data key wrapped under KEK.
-        let cap_dir = mvm_core::config::mvm_transcripts_dir()
-            .join("t")
-            .join("cap-test");
+        let cap_dir = capture_roots.transcripts_dir.join("t").join("cap-test");
         std::fs::create_dir_all(&cap_dir).unwrap();
-        let kek =
-            mvm_core::transcript::load_or_init_kek(&mvm_core::config::mvm_keys_dir()).unwrap();
+        let kek = mvm_core::transcript::load_or_init_kek(&capture_roots.keys_dir).unwrap();
         let data_key = mvm_core::crypto::aead::Key::random();
         let cfg = mvm_core::transcript::TranscriptWriterConfig {
             capture_id: "cap-test".into(),
@@ -1963,7 +1974,10 @@ mod tests {
             "t".to_string(),
             unrestricted_flow_policy(),
             tx,
-            wiring_with(vec![]),
+            ObserverWiring {
+                transcript_capture_roots: Some(capture_roots.clone()),
+                ..wiring_with(vec![])
+            },
         ));
 
         // guest → passt = egress; the forwarded frame must be captured.
@@ -2285,6 +2299,7 @@ mod tests {
             latency: Arc::new(ObserverLatency::new("vm-test", "t")),
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
+            transcript_capture_roots: None,
             substitution: Arc::new(NoopSubstitution),
             scan: Arc::new(NoopScan),
         }
@@ -2424,6 +2439,7 @@ mod tests {
             latency: Arc::new(ObserverLatency::new("vm-test", "t")),
             killed_flows: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             mtu: BRIDGE_MTU,
+            transcript_capture_roots: None,
             substitution: Arc::new(NoopSubstitution),
             scan: build_egress_scan(l4, dns_allow),
         }
