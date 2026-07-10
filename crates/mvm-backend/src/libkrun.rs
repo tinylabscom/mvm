@@ -470,14 +470,18 @@ impl VmBackend for LibkrunBackend {
 
     fn capabilities(&self) -> VmCapabilities {
         // libkrun does not support memory snapshots (same trade as
-        // Apple Container) — vsock and TAP are available; pause/resume
-        // is theoretically possible but not exposed by libkrun's public
-        // C API today.
+        // Apple Container). The mvm libkrun launch path is intentionally
+        // vsock-only: the supervisor accepts only the disconnected sink
+        // configuration and serves egress through the host-bound vsock proxy.
+        // Pause/resume is theoretically possible but not exposed by libkrun's
+        // public C API today.
         VmCapabilities {
             pause_resume: false,
             snapshots: false,
             vsock: true,
             tap_networking: false,
+            no_guest_nic: true,
+            host_vsock_proxy: true,
             // libkrun's C API doesn't expose virtio-balloon control
             // today; the upstream crate carries no `.balloon(...)`
             // builder. Declared `false` until wiring lands.
@@ -1043,46 +1047,36 @@ impl VmBackend for LibkrunBackend {
 
 // ─── helpers ───────────────────────────────────────────────────────
 
-/// Resolve the absolute path to the `mvm-libkrun-supervisor` binary,
-/// checking three sources in order:
-///
-/// 1. `MVM_LIBKRUN_SUPERVISOR_PATH` — explicit override, used by tests
-///    and `cargo run` workflows.
-/// 2. A binary named `mvm-libkrun-supervisor` adjacent to the current
-///    executable — the layout produced by `cargo install mvm-libkrun`
-///    or by a Homebrew bottle that ships `mvmctl` and
-///    `mvm-libkrun-supervisor` side-by-side.
-/// 3. `PATH` lookup.
-///
-/// Returns an actionable error if all three fail.
+const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
+    "Cargo.toml",
+    "Cargo.lock",
+    "crates/mvm-vm-host/Cargo.toml",
+    "crates/mvm-vm-host/src",
+    "crates/deps/libkrun-sys/Cargo.toml",
+    "crates/deps/libkrun-sys/src",
+    "crates/mvm-backend/Cargo.toml",
+    "crates/mvm-backend/src",
+    "crates/mvm-build/Cargo.toml",
+    "crates/mvm-build/src",
+    "crates/mvm-core/Cargo.toml",
+    "crates/mvm-core/src",
+    "crates/mvm-guest/Cargo.toml",
+    "crates/mvm-guest/src",
+    "crates/mvm-hostd/Cargo.toml",
+    "crates/mvm-hostd/src",
+];
+
+/// Resolve the absolute path to the `mvm-libkrun-supervisor` binary. Source
+/// checkouts rebuild the helper when its transitive inputs are newer so the
+/// supervisor JSON parser cannot drift behind the driver.
 pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
-    if let Some(p) = std::env::var_os("MVM_LIBKRUN_SUPERVISOR_PATH") {
-        let path = PathBuf::from(p);
-        if path.is_file() {
-            return Ok(path);
-        }
-        bail!(
-            "MVM_LIBKRUN_SUPERVISOR_PATH points at {} which is not a file",
-            path.display()
-        );
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let candidate = dir.join("mvm-libkrun-supervisor");
-        if candidate.is_file() {
-            return Ok(candidate);
-        }
-    }
-    if let Ok(path) = which::which("mvm-libkrun-supervisor") {
-        return Ok(path);
-    }
-    bail!(
-        "mvm-libkrun-supervisor binary not found. Looked for: \
-         $MVM_LIBKRUN_SUPERVISOR_PATH, alongside the current exe, and on $PATH. \
-         Install it via `cargo install --path crates/mvm-libkrun --features libkrun-sys` \
-         or set MVM_LIBKRUN_SUPERVISOR_PATH=/abs/path/to/the/binary."
-    )
+    crate::aux_bin::resolve_or_build(&crate::aux_bin::AuxBin {
+        bin: "mvm-libkrun-supervisor",
+        package: "mvm-vm-host",
+        env_var: "MVM_LIBKRUN_SUPERVISOR_PATH",
+        features: &["libkrun-sys"],
+        input_roots: LIBKRUN_SUPERVISOR_INPUT_ROOTS,
+    })
 }
 
 fn read_pid(path: &Path) -> Option<libc::pid_t> {
@@ -1201,6 +1195,8 @@ mod tests {
     fn libkrun_capabilities() {
         let caps = LibkrunBackend.capabilities();
         assert!(caps.vsock);
+        assert!(caps.no_guest_nic);
+        assert!(caps.host_vsock_proxy);
         assert!(!caps.snapshots);
         assert!(!caps.pause_resume);
         assert!(!caps.tap_networking);
