@@ -131,22 +131,43 @@ fn vms_root() -> PathBuf {
     PathBuf::from(mvm_data_dir()).join("vms")
 }
 
-/// Always spawn the per-VM gating endpoint carrying the resolved `NetworkPolicy`,
-/// returning an armed `EndpointGuard` and the endpoint socket to hand the
-/// supervisor as its `egress_relay_socket`. Unlike the legacy helper, a secret-free
-/// workload still gets an endpoint here — it is the sole egress gate now, so it must
-/// run for every VM. When the plan carries no secrets, the endpoint runs raw (no
-/// substitution) but still enforces the policy.
-fn spawn_hvf_gating_endpoint(
+/// The per-VM gating endpoint is the sole egress gate on hvf (claim-10
+/// default-deny plus optional secret substitution). It only needs to run for a
+/// workload that can actually reach the network: an admitted egress policy, or a
+/// bound-secret authority whose credentials are substituted on the egress path.
+/// A deny-all run carrying no secrets has no reachable egress, so the endpoint is
+/// skipped and `EGRESS_PORT` is left unwired — any guest dial then fails closed,
+/// mirroring libkrun's no-secrets no-op.
+fn hvf_endpoint_needed(
+    network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
+    state_dir: &Path,
+) -> bool {
+    network_policy.allows_egress()
+        || crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false)
+}
+
+/// Spawn the per-VM gating endpoint carrying the resolved `NetworkPolicy` when the
+/// run can reach the network ([`hvf_endpoint_needed`]), returning an armed
+/// `EndpointGuard` and the endpoint socket to hand the supervisor as its
+/// `egress_relay_socket`. When neither egress is admitted nor a secret is bound,
+/// no endpoint is spawned: a defused (no-op) guard and `None` socket are returned
+/// so the guest's egress path stays unwired and fails closed. When a plan carries
+/// no secrets but egress is admitted, the endpoint runs raw (no substitution) but
+/// still enforces the policy.
+fn spawn_hvf_gating_endpoint_if_needed(
     vm_name: &str,
     state_dir: &Path,
     network_policy: &mvm_core::policy::network_policy::NetworkPolicy,
     config_tenant: &str,
-) -> Result<(crate::substitution_spawn::EndpointGuard, PathBuf)> {
+) -> Result<(crate::substitution_spawn::EndpointGuard, Option<PathBuf>)> {
     use crate::substitution_spawn::{
         EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
     use mvm_core::policy::RedactionPolicy;
+
+    if !hvf_endpoint_needed(network_policy, state_dir) {
+        return Ok((EndpointGuard::defused(), None));
+    }
 
     // Owned defaults + the decoded plan outlive the params below so the borrows
     // stay valid across both branches.
@@ -181,7 +202,7 @@ fn spawn_hvf_gating_endpoint(
         network_policy: Some(network_policy),
         raw_egress: secrets.is_empty(),
     })?;
-    Ok((EndpointGuard::new(vm_name), socket))
+    Ok((EndpointGuard::new(vm_name), Some(socket)))
 }
 
 /// Kernel cmdline token that turns on the in-guest vsock egress client.
@@ -345,21 +366,21 @@ impl VmBackend for HvfBackend {
         let workload_exit = state_dir.join("workload.exit");
         let _ = std::fs::remove_file(&workload_exit);
 
-        // Always spawn the per-VM gating endpoint carrying the resolved policy and
-        // route egress to it via `egress_relay_socket` — the endpoint is the sole
-        // claim-10 gate (and secret substituter); the run loop only relays. The
-        // guard reaps the endpoint on any early return below (a decrypted-secret
-        // process can't outlive a failed launch) and is defused once boot is
-        // confirmed (the stop path then owns teardown).
-        let (mut endpoint_guard, egress_relay_socket) = {
-            let (g, uds) = spawn_hvf_gating_endpoint(
-                &config.name,
-                &state_dir,
-                &config.network_policy,
-                config.tenant_id.as_deref().unwrap_or(""),
-            )?;
-            (g, Some(uds))
-        };
+        // Spawn the per-VM gating endpoint only for a run that can reach the
+        // network (admitted egress or a bound-secret authority) and route egress
+        // to it via `egress_relay_socket` — the endpoint is the sole claim-10 gate
+        // (and secret substituter); the run loop only relays. A deny-all run with
+        // no secrets gets no endpoint and no relay socket, so the guest's egress
+        // path stays unwired and fails closed. The guard reaps the endpoint on any
+        // early return below (a decrypted-secret process can't outlive a failed
+        // launch) and is defused once boot is confirmed (the stop path then owns
+        // teardown); a skipped endpoint yields a defused no-op guard.
+        let (mut endpoint_guard, egress_relay_socket) = spawn_hvf_gating_endpoint_if_needed(
+            &config.name,
+            &state_dir,
+            &config.network_policy,
+            config.tenant_id.as_deref().unwrap_or(""),
+        )?;
         // Productionized per-VM agent RPC socket threaded through the supervisor
         // config; the `MVM_HVF_AGENT_SOCKET` dev hook still wins for live drivers.
         let agent_socket = std::env::var_os("MVM_HVF_AGENT_SOCKET")
@@ -775,6 +796,93 @@ mod tests {
             first.host_socket,
             PathBuf::from("/state/hvf/vsock/vsock-20001.sock")
         );
+    }
+
+    #[test]
+    fn endpoint_not_needed_for_deny_all_without_secrets() {
+        // Fail-closed default: a deny-all workload carrying no bound secrets has
+        // no reachable egress path, so no gating endpoint is spawned and the
+        // supervisor gets no relay socket. Mirrors libkrun's no-secrets no-op.
+        let dir = tempfile::tempdir().unwrap();
+        let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
+        assert!(!hvf_endpoint_needed(&deny_all, dir.path()));
+    }
+
+    #[test]
+    fn endpoint_needed_when_egress_admitted() {
+        // Any admitted egress authority means the endpoint is the sole gate and
+        // must run (claim-10 default-deny + optional substitution).
+        let dir = tempfile::tempdir().unwrap();
+        let allow_egress = mvm_core::network_policy::NetworkPolicy::preset(
+            mvm_core::network_policy::NetworkPreset::Dev,
+        );
+        assert!(allow_egress.allows_egress());
+        assert!(hvf_endpoint_needed(&allow_egress, dir.path()));
+    }
+
+    #[test]
+    fn endpoint_needed_when_bound_secrets_present_even_under_deny_all() {
+        // A bound-secret authority routes outbound through the substitution
+        // endpoint even when the policy itself denies raw egress, so the
+        // endpoint must run. Plant a bare admitted plan carrying one secret.
+        let dir = tempfile::tempdir().unwrap();
+        write_plan_with_secret(dir.path());
+        let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
+        assert!(!deny_all.allows_egress());
+        assert!(
+            crate::egress_shared::state_has_bound_secrets(dir.path()).unwrap(),
+            "planted plan must decode a bound secret"
+        );
+        assert!(hvf_endpoint_needed(&deny_all, dir.path()));
+    }
+
+    /// Write a bare `ExecutionPlan` carrying one static secret to
+    /// `<state_dir>/plan.json`, the shape `decode_plan_secrets_from_state` reads.
+    fn write_plan_with_secret(state_dir: &Path) {
+        use mvm_core::plan::{
+            AuthPolicy, PlanSeccompTier, SecretBinding, SecretReleasePolicy, SecretSource,
+            SynthesisInput, synthesize_plan,
+        };
+        use mvm_core::policy::RedactionPolicy;
+
+        let input = SynthesisInput {
+            vm_name: "hvf-secret-vm",
+            tenant: None,
+            backend_name: "hvf",
+            image_name: "img",
+            image_sha256: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            image_cosign_bundle: None,
+            intent: None,
+            seccomp_tier: PlanSeccompTier::Standard,
+            network_policy_ref: None,
+            fs_policy_ref: None,
+            egress_policy_ref: None,
+            tool_policy_ref: None,
+            secret_release: SecretReleasePolicy::PlanBound,
+            secrets: vec![SecretBinding {
+                name: "API_KEY".into(),
+                source: SecretSource::Static {
+                    value: "s3cr3t".into(),
+                },
+            }],
+            auth: AuthPolicy::none(),
+            audit_event_prefix: None,
+            cpus: 2,
+            mem_mib: 512,
+            disk_mib: 0,
+            boot_timeout_secs: 60,
+            exec_timeout_secs: 0,
+            destroy_on_exit: false,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: RedactionPolicy::default(),
+            audit_labels: Default::default(),
+            agent_verbs: None,
+        };
+        let plan = synthesize_plan(&input).expect("synthesize plan with secret");
+        let json = serde_json::to_string(&plan).expect("serialize plan");
+        std::fs::write(state_dir.join("plan.json"), json).expect("write plan.json");
     }
 
     #[test]

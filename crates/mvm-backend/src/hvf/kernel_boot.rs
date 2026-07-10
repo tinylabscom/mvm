@@ -723,7 +723,8 @@ unsafe fn run(
             // back to the dev/live `MVM_HVF_SUBSTITUTION_SOCKET` hook. Shares the
             // heartbeat counter so an in-flight request awaiting its reply keeps the
             // loop polling. With no relay wired, EGRESS_PORT fails closed at the
-            // bridge (an hvf VM must always carry a relay socket).
+            // bridge — the admitted-runtime case for a deny-all workload carrying
+            // no bound secrets, which spawns no endpoint and has no egress path.
             if let Some(relay) = egress_relay.as_ref().or(substitution_socket.as_ref()) {
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);
