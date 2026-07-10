@@ -7483,6 +7483,7 @@ mod rpc_client_tests {
         signer: &ed25519_dalek::SigningKey,
         session: &str,
         nonce: &mvm_core::plan::Nonce,
+        verbs: &[&str],
         valid_minutes: i64,
     ) -> (std::path::PathBuf, std::path::PathBuf) {
         use mvm_core::plan::{VerbGrant, VerbId};
@@ -7492,7 +7493,7 @@ mod rpc_client_tests {
             session_id: session.into(),
             plan_nonce: nonce.clone(),
             not_after: now + chrono::Duration::minutes(valid_minutes),
-            verbs: vec![VerbId::new("ping").unwrap()],
+            verbs: verbs.iter().map(|v| VerbId::new(v).unwrap()).collect(),
             sig: vec![],
         };
         grant.sig = {
@@ -7523,7 +7524,7 @@ mod rpc_client_tests {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([8u8; 16]);
         let (grant_path, pubkey_path) =
-            write_grant_fixture(dir.path(), &signer, "sess-valid", &nonce, 10);
+            write_grant_fixture(dir.path(), &signer, "sess-valid", &nonce, &["ping"], 10);
         let now = chrono::Utc::now();
         let result = load_pinned_verb_grant(&grant_path, &pubkey_path, now);
         assert!(
@@ -7589,7 +7590,7 @@ mod rpc_client_tests {
         let attacker = ed25519_dalek::SigningKey::from_bytes(&[13u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([14u8; 16]);
         let (grant_path, pubkey_path) =
-            write_grant_fixture(dir.path(), &signer, "sess-wrong-key", &nonce, 10);
+            write_grant_fixture(dir.path(), &signer, "sess-wrong-key", &nonce, &["ping"], 10);
         let attacker_pubkey_hex: String = attacker
             .verifying_key()
             .to_bytes()
@@ -7610,14 +7611,109 @@ mod rpc_client_tests {
         let dir = tempfile::tempdir().unwrap();
         let signer = ed25519_dalek::SigningKey::from_bytes(&[15u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([16u8; 16]);
-        let (grant_path, pubkey_path) =
-            write_grant_fixture(dir.path(), &signer, "sess-bad-pubkey", &nonce, 10);
+        let (grant_path, pubkey_path) = write_grant_fixture(
+            dir.path(),
+            &signer,
+            "sess-bad-pubkey",
+            &nonce,
+            &["ping"],
+            10,
+        );
         std::fs::write(&pubkey_path, "not-valid-hex\n").unwrap();
         let result = load_pinned_verb_grant(&grant_path, &pubkey_path, chrono::Utc::now());
         assert!(
             result.is_none(),
             "malformed config-drive pubkey must return None"
         );
+    }
+
+    /// The vsock-only payoff: when the host-signer pubkey is present (as the
+    /// cmdline-delivered trust anchor now provides on the OCI/vsock path), a
+    /// valid pinned grant enforces its verb list SELECTIVELY — the listed verb
+    /// (and baseline verbs) are served while an unlisted verb is refused —
+    /// instead of collapsing to a deny-all posture. Drives the real per-verb
+    /// gate `enforce_verb_grant` against the pinned grant, not just a
+    /// grant-present shortcut.
+    #[test]
+    fn present_host_signer_pub_enforces_verb_list_selectively() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[21u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([22u8; 16]);
+        // List a single non-baseline verb so "listed" is distinguishable from
+        // the always-answerable baseline set.
+        let (grant_path, pubkey_path) = write_grant_fixture(
+            dir.path(),
+            &signer,
+            "sess-selective",
+            &nonce,
+            &["update-idle-timeout"],
+            10,
+        );
+        let now = chrono::Utc::now();
+
+        // Anchor present ⇒ grant pins, carrying the listed verb.
+        let pinned = load_pinned_verb_grant(&grant_path, &pubkey_path, now)
+            .expect("anchor present ⇒ valid grant must pin");
+        assert!(
+            pinned
+                .verbs
+                .iter()
+                .any(|v| v.as_str() == "update-idle-timeout"),
+            "listed verb must survive into the pinned grant"
+        );
+
+        // Listed, non-baseline verb ⇒ enforce_verb_grant permits (no refusal).
+        let listed = GuestRequest::UpdateIdleTimeout { secs: 0 };
+        assert!(
+            enforce_verb_grant(&listed, Some(&pinned)).is_none(),
+            "listed verb must be served under the pinned grant"
+        );
+        // Baseline verb ⇒ permitted even though absent from the verb list.
+        assert!(
+            enforce_verb_grant(&GuestRequest::Ping, Some(&pinned)).is_none(),
+            "baseline verb must be served regardless of the verb list"
+        );
+        // Unlisted, non-baseline verb ⇒ refused. This is what proves selective
+        // enforcement rather than deny-all or serve-all.
+        let unlisted = GuestRequest::WorkerStatus;
+        let unlisted_name = unlisted.kind_name();
+        match enforce_verb_grant(&unlisted, Some(&pinned)) {
+            Some(GuestResponse::VerbNotAuthorized { verb }) => assert_eq!(verb, unlisted_name),
+            other => panic!("unlisted verb must be refused, got {other:?}"),
+        }
+
+        // Anchor absent ⇒ no grant pins ⇒ launch-asserted enforcement fails closed.
+        let missing_anchor = dir.path().join("no-host-signer.pub");
+        assert!(
+            load_pinned_verb_grant(&grant_path, &missing_anchor, now).is_none(),
+            "absent anchor is the current OCI/vsock regression: grant cannot pin"
+        );
+        assert_eq!(
+            trust_decision(None, false, true),
+            TrustDecision::FailClosed,
+            "no grant under launch-asserted enforcement is the deny-all path"
+        );
+    }
+
+    /// The shipped anchor form: `mvm-oci-init` writes `host-signer.pub` as the
+    /// RAW 32 pubkey bytes, not hex. Exercise that byte layout end-to-end
+    /// through the reader into `load_pinned_verb_grant`.
+    #[test]
+    fn load_pinned_verb_grant_accepts_raw_32_byte_pubkey() {
+        let dir = tempfile::tempdir().unwrap();
+        let signer = ed25519_dalek::SigningKey::from_bytes(&[23u8; 32]);
+        let nonce = mvm_core::plan::Nonce::from_bytes([24u8; 16]);
+        let (grant_path, pubkey_path) =
+            write_grant_fixture(dir.path(), &signer, "sess-raw", &nonce, &["ping"], 10);
+        // Replace the hex fixture pubkey with the raw 32-byte form.
+        std::fs::write(&pubkey_path, signer.verifying_key().to_bytes()).unwrap();
+        assert_eq!(std::fs::read(&pubkey_path).unwrap().len(), 32);
+        let result = load_pinned_verb_grant(&grant_path, &pubkey_path, chrono::Utc::now());
+        assert!(
+            result.is_some(),
+            "raw 32-byte host-signer pubkey must pin the grant (not the anchor-absent None path)"
+        );
+        assert_eq!(result.unwrap().session_id, "sess-raw");
     }
 
     #[test]
@@ -7654,7 +7750,7 @@ mod rpc_client_tests {
         let signer = ed25519_dalek::SigningKey::from_bytes(&[20u8; 32]);
         let nonce = mvm_core::plan::Nonce::from_bytes([21u8; 16]);
         let (grant_path, _pubkey_path) =
-            write_grant_fixture(dir.path(), &signer, "sess-repin", &nonce, 10);
+            write_grant_fixture(dir.path(), &signer, "sess-repin", &nonce, &["ping"], 10);
         let now = chrono::Utc::now();
         // Load the envelope from the fixture file and call re_pin_verb_grant directly.
         let raw = std::fs::read(&grant_path).unwrap();
