@@ -397,16 +397,16 @@ pub fn unpacked_tree_size(root: &Path) -> Result<u64> {
 /// `rootfs.roothash` (lowercase-hex root hash) files. Those are the exact sibling
 /// names the backend's boot-time sidecar probe reads to decide a sealed boot.
 ///
-/// Delegates to [`seal_with_verity`], which pins the 1024-byte data block size
-/// the verity initramfs requires. Do **not** reach for
-/// `materialize_ext4_pure(..).with_verity()` in this role: its 4096-byte data
-/// blocks disagree with the initramfs and the resulting image will not boot.
+/// Delegates to [`seal_with_verity`], which pins the 4096-byte data block size
+/// the verity initramfs expects. Do **not** swap in a different dm-verity
+/// geometry here: the initramfs probes the rootfs geometry at boot, so a
+/// mismatched sidecar will fail closed before `/init` pivots into the real
+/// rootfs.
 ///
 /// Linux-only at runtime. On macOS `veritysetup` is unavailable, so this returns
 /// [`OciUnpackError::HostUnsupported`] rather than a fabricated hash — the seal
-/// runs on Linux (or via the builder VM in a later slice). The `--prod` run path
-/// drives it through [`seal_and_assemble_verity`], which pairs it atomically with
-/// the verity initramfs so no roothash-without-initrd window is ever exposed.
+/// runs on Linux or via the builder VM when the host cannot execute
+/// `veritysetup` directly.
 pub fn seal_run_rootfs_with_verity(
     rootfs_ext4: &Path,
 ) -> Result<VeritySealedRootfs, OciUnpackError> {
