@@ -1,4 +1,4 @@
-# Plan 239 — WSL2-first Windows support
+# Plan 234 — WSL2-first Windows support
 
 **Status: IN PROGRESS**
 **Created: 2026-07-08**

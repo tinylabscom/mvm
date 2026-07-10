@@ -1,4 +1,4 @@
-# Vsock Port-Handler Registry Production Readiness
+# Plan 240 — Vsock Port-Handler Registry Production Readiness
 
 > **For agentic workers:** keep the checkboxes current. The last unchecked item is the current blocker.
 

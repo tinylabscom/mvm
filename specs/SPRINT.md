@@ -53,7 +53,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `MVM_SKIP_EMBED_BINARIES=1 cargo nextest run --workspace` (6987/6987);
       `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --workspace --all-targets -- -D
       warnings` green.
-- [x] 2026-07-08 Plan 234 vsock port-handler registry production-readiness
+- [x] 2026-07-08 Plan 240 vsock port-handler registry production-readiness
       follow-up: the HVF-side vsock host-I/O loop now uses readiness-driven fd
       registration across the agent, console, egress, and broker bridges rather
       than the old fixed 5 ms backstop, and the refactor's bridge-fd unit tests
@@ -477,7 +477,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
       are rehomed to the shared Vz live-validation lane, not left as Plan 189
       implementation blockers.
 - [x] Advanced
-      [`plans/239-wsl2-workload-support.md`](plans/239-wsl2-workload-support.md)
+      [`plans/234-wsl2-workload-support.md`](plans/234-wsl2-workload-support.md)
       from docs-only into implementation. `Platform::Wsl2` now exposes a
       dedicated workload-host capability, backend auto-selection and CLI
       hypervisor resolution pick `libkrun` for supported WSL2 + nested-KVM
