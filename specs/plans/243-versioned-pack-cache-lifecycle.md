@@ -227,16 +227,19 @@ git commit -m "feat(pack-cache): persist index; resolve_pack prefers the active 
 - Test: inline `#[cfg(test)]`
 
 **Interfaces:**
-- Produces (public facade, reachable as `mvmctl::core::pack_cache::*`):
+- Produces (public facade, reachable as `mvmctl::core::pack_cache::*`). **These derive the cache root via `mvm_cache_dir()` internally — the same as `resolve_pack`/`promote` — and take NO `cache_root` param**, so a production caller cannot pass `pack_cache_dir()` (which already appends `packs/`) by mistake. Tests isolate via the existing `isolated_cache()` helper (sets `MVM_CACHE_DIR`). The `load_index`/`save_index(cache_root)` internals keep their param; only the *public facade* drops it.
   ```rust
   pub struct PackProvenanceInput { pub channel: String, pub release_version: String, pub promoted_at_unix: u64 }
   /// Promote (verify+place) AND record into the index. Wraps `promote`.
   pub fn promote_and_record(staged_root: &Path, manifest: &PackManifest, prov: &PackProvenanceInput, ctx: &PackVerifyCtx) -> Result<VerifiedPackDir, PackCacheError>;
-  pub fn set_active_version(cache_root: &Path, key: &PackKey, hash: &Sha256Hex) -> Result<(), PackCacheError>; // err if hash not in index for key
-  pub fn list_versions(cache_root: &Path, filter: Option<PackKind>) -> Result<Vec<PackEntry>, PackCacheError>; // active-flagged via a returned wrapper or side map
-  pub fn prune_versions(cache_root: &Path, keep_recent: usize, dry_run: bool) -> Result<Vec<Sha256Hex>, PackCacheError>; // never removes an active hash; deletes pack dir + index entry
+  pub fn set_active_version(key: &PackKey, hash: &Sha256Hex) -> Result<(), PackCacheError>; // err if hash not in index for key
+  pub fn list_versions(filter: Option<PackKind>) -> Result<Vec<PackListEntry>, PackCacheError>; // PackListEntry = PackEntry + `active: bool`
+  pub fn prune_versions(keep_recent: usize, dry_run: bool) -> Result<Vec<Sha256Hex>, PackCacheError>; // never removes an active hash; deletes pack dir + index entry
   ```
-- [ ] **Step 1: Write failing tests** — `promote_and_record` makes the pack resolvable AND appears in `list_versions`; `set_active_version` errors on an unknown hash and switches resolution when valid; `prune_versions(keep_recent=1)` removes the oldest non-active pack dir + its index entry but never the active one, and `dry_run=true` removes nothing.
+- [ ] **Step 1: Write failing tests** (use `isolated_cache()` for the cache root — the same helper Task 2's tests use):
+  - **End-to-end guard (critical):** `promote_and_record` a builder pack, then `resolve_pack(Builder, …)` returns it as active — this exercises the *production* `mvm_cache_dir()` path end to end and catches any index-path/cache-root mismatch. It also appears in `list_versions` flagged `active: true`.
+  - `set_active_version` errors on an unknown hash; switches which pack `resolve_pack` returns when valid.
+  - `prune_versions(keep_recent=1)` removes the oldest non-active pack dir + its index entry but never the active one; `dry_run=true` removes nothing (dirs + index intact).
 
 - [ ] **Step 2: Run to verify fail** — methods undefined.
 
