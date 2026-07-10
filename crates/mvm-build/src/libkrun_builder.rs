@@ -5178,30 +5178,48 @@ mod tests {
         std::fs::set_permissions(&script, perms).unwrap();
         env.set(BUILDER_VM_BOOTSTRAP_BIN_ENV, &script);
 
-        let image = ensure_builder_vm_image().expect("auto-bootstrap should populate cache");
-        match image {
-            BuilderVmImage::Rootfs {
-                kernel_path,
-                rootfs_path,
-                cmdline,
-            } => {
-                assert_eq!(
-                    kernel_path,
-                    cache_root.join("builder-vm").join(&arch).join("vmlinux")
-                );
-                assert_eq!(
-                    rootfs_path,
-                    cache_root
-                        .join("builder-vm")
-                        .join(&arch)
-                        .join("rootfs.ext4")
-                );
-                assert_eq!(
-                    cmdline,
-                    "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init"
-                );
+        let arch_dir = cache_root.join("builder-vm").join(&arch);
+        let expected_cmdline =
+            "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init";
+
+        #[cfg(target_os = "linux")]
+        {
+            let err = ensure_builder_vm_image()
+                .expect_err("Linux/KVM should fail closed after helper bootstrap");
+            match err {
+                BuilderVmError::LibkrunUnavailable(message) => {
+                    assert!(
+                        message.contains("rootfs-backed libkrun builder"),
+                        "got {message}"
+                    );
+                    assert!(message.contains("qemu builder"), "got {message}");
+                }
+                other => panic!("expected LibkrunUnavailable, got {other:?}"),
             }
-            BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
+            assert_eq!(std::fs::read(arch_dir.join("vmlinux")).unwrap(), b"kernel");
+            assert_eq!(std::fs::read(arch_dir.join("rootfs.ext4")).unwrap(), b"rootfs");
+            assert_eq!(
+                std::fs::read_to_string(arch_dir.join("cmdline.txt")).unwrap(),
+                format!("{expected_cmdline}\n")
+            );
+        }
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let image =
+                ensure_builder_vm_image().expect("auto-bootstrap should populate cache");
+            match image {
+                BuilderVmImage::Rootfs {
+                    kernel_path,
+                    rootfs_path,
+                    cmdline,
+                } => {
+                    assert_eq!(kernel_path, arch_dir.join("vmlinux"));
+                    assert_eq!(rootfs_path, arch_dir.join("rootfs.ext4"));
+                    assert_eq!(cmdline, expected_cmdline);
+                }
+                BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
+            }
         }
     }
 
