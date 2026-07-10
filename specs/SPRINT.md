@@ -509,11 +509,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
       narrower and better understood: a real stale-helper regression in the
       source-checkout libkrun Stage 0 path is fixed on the active refresh
       branch, and the manifest-backed HVF build now advances past the earlier
-      `network_provider = disconnected` parse failure. The remaining macOS
-      blockers are the honest runtime/external ones: builder-VM crate fetch
-      `403`s on the manifest-backed source-build path and the missing
-      published `v0.17.0` workload-kernel checksum manifest on the OCI
-      download path.
+      `network_provider = disconnected` parse failure. The same refresh branch
+      also fixes a second real macOS blocker: the builder VM's production
+      egress allowlist had omitted `crates.io`, `index.crates.io`, and
+      `static.crates.io`, which could force Cargo vendoring in the no-guest-NIC
+      builder path through host-generated `403`s. Focused `mvm-build`
+      tests/clippy are green after admitting those hosts, and a fresh
+      `/private/tmp/m236h2` rerun now stays alive in the real workload-build
+      path instead of reproducing the old immediate failure. Remaining macOS
+      blockers: the full sealed HVF/libkrun witness is still not captured
+      end-to-end, and the OCI download path is still blocked on the missing
+      published `v0.17.0` workload-kernel checksum manifest.
 - [x] Started
       [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md)
       to turn the post-Plan-221 rootfs follow-up into an execution plan. It

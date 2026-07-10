@@ -1,15 +1,29 @@
 //! Hostname + port allowlist for the builder-VM egress proxy.
 //!
-//! Four hostnames the builder VM is allowed to dial
-//! during `uv pip install` / `pnpm install`:
+//! Hostnames the builder VM is allowed to dial during
+//! dependency installs and no-NIC flake builds:
 //!
 //! - `pypi.org` — the Python package index API.
 //! - `files.pythonhosted.org` — pypi's CDN for the actual sdists +
 //!   wheels.
 //! - `registry.npmjs.org` — the npm metadata + tarball registry.
+//! - `crates.io` — crates.io sparse-index metadata redirects and API
+//!   endpoints Cargo may hit during vendoring.
+//! - `index.crates.io` — the sparse registry index host used by modern
+//!   Cargo when resolving crates.io dependencies.
+//! - `static.crates.io` — the crate tarball CDN for the actual
+//!   `.crate` downloads during vendoring.
 //! - `objects.githubusercontent.com` — GitHub's release-asset CDN,
 //!   reachable as a transitive fetch when a Python lockfile pins a
 //!   git-based dep.
+//! - `cache.nixos.org` — the public binary cache Nix uses for
+//!   substitutes during builder-VM flake builds.
+//! - `github.com` — pinned flake input archives such as
+//!   `github.com/NixOS/nixpkgs/archive/<rev>.tar.gz`.
+//! - `codeload.github.com` — GitHub archive downloads redirect here,
+//!   so flake input tarballs must be admitted on this host as well.
+//! - `api.github.com` — flake metadata resolution for GitHub-backed
+//!   inputs when Nix cannot satisfy it from the local lock/cache.
 //!
 //! Everything else fails closed: the proxy returns HTTP 403 and
 //! tears the socket down without ever establishing a tunnel.
@@ -38,13 +52,20 @@
 //! RFC 4343); we lowercase the candidate before comparing to the
 //! lowercase static list.
 
-/// The four allowed hostnames, lowercased. Order doesn't matter;
+/// The allowed hostnames, lowercased. Order doesn't matter;
 /// the matcher walks the slice with `.iter().any()`.
 pub const PRODUCTION_HOSTNAMES: &[&str] = &[
     "pypi.org",
     "files.pythonhosted.org",
     "registry.npmjs.org",
+    "crates.io",
+    "index.crates.io",
+    "static.crates.io",
     "objects.githubusercontent.com",
+    "cache.nixos.org",
+    "github.com",
+    "codeload.github.com",
+    "api.github.com",
 ];
 
 /// Only port the proxy permits — the allowlisted hosts serve
@@ -124,13 +145,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn production_allowlist_contains_four_adr_047_hostnames() {
+    fn production_allowlist_contains_builder_install_and_flake_hosts() {
         let a = Allowlist::production();
-        assert_eq!(a.hostnames().len(), 4, "ADR-047 names exactly four");
+        assert_eq!(
+            a.hostnames().len(),
+            11,
+            "builder allowlist should stay explicit"
+        );
         assert!(a.is_allowed("pypi.org", 443));
         assert!(a.is_allowed("files.pythonhosted.org", 443));
         assert!(a.is_allowed("registry.npmjs.org", 443));
+        assert!(a.is_allowed("crates.io", 443));
+        assert!(a.is_allowed("index.crates.io", 443));
+        assert!(a.is_allowed("static.crates.io", 443));
         assert!(a.is_allowed("objects.githubusercontent.com", 443));
+        assert!(a.is_allowed("cache.nixos.org", 443));
+        assert!(a.is_allowed("github.com", 443));
+        assert!(a.is_allowed("codeload.github.com", 443));
+        assert!(a.is_allowed("api.github.com", 443));
     }
 
     #[test]
