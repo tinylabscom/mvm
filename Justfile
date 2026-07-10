@@ -142,6 +142,12 @@ build-supervisors:
     cargo build -p mvm-vm-host --bin mvm-vz-supervisor
     cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
 
+# Live macOS Apple-Silicon HVF proof for OCI --allow-host:
+#  1. exact `machine run --image ... --allow-host ... -- ps aux` path
+#  2. admit/deny relay proof over the host-vsock egress endpoint
+hvf-oci-allow-host-smoke:
+    bash scripts/check-hvf-oci-allow-host-smoke.sh
+
 # ── Lint & Format ────────────────────────────────────────────────────────
 
 # Format all code

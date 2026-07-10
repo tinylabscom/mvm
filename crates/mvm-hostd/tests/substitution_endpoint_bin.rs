@@ -16,7 +16,7 @@ use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
 use mvm_core::plan::{SecretBinding, SecretSource};
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
-use mvm_hostd::supervisor::substitution_endpoint::{EndpointConfig, EndpointTransport};
+use mvm_hostd::supervisor::substitution_endpoint::{EgressMode, EndpointConfig, EndpointTransport};
 use mvm_sdk::ir::AuthType;
 use secrecy::SecretBox;
 
@@ -229,5 +229,53 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
             panic!("deny-all policy must refuse the destination, got Ok status {status}")
         }
     }
+    drop(guard);
+}
+
+#[test]
+fn endpoint_bin_raw_no_secret_mode_handshakes_without_placeholders() {
+    let dir = tempfile::tempdir().unwrap();
+    let sock = dir.path().join("raw-egress.sock");
+
+    let cfg = EndpointConfig {
+        tenant_id: "local".into(),
+        secrets: Vec::new(),
+        transport: EndpointTransport::Uds { path: sock.clone() },
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        forward_timeout_secs: 30,
+        secret_store_dir: None,
+        binding_store_dir: None,
+        terminator_listen: None,
+        tls_intermediate: None,
+        network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::allow_list(
+            vec![mvm_core::policy::network_policy::HostPort::new(
+                "142.250.72.14",
+                443,
+            )],
+        )),
+        egress_mode: EgressMode::Raw,
+    };
+
+    let mut child = Command::new(BIN)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn endpoint bin");
+    let mut stdin = child.stdin.take().unwrap();
+    stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
+    drop(stdin);
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let guard = Kill(child);
+
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+    let handed: Vec<(String, String)> = serde_json::from_str(line.trim()).expect("handshake json");
+    assert!(
+        handed.is_empty(),
+        "raw no-secret endpoint should hand out no placeholders"
+    );
+
+    UnixStream::connect(&sock).expect("raw endpoint UDS is bound before handshake");
     drop(guard);
 }

@@ -64,26 +64,37 @@ fn main() -> Result<()> {
         "mvm-substitution-endpoint config loaded"
     );
 
-    let (service, handed) = assemble(&cfg).context("assembling substitution service")?;
-
     // Bind BEFORE the handshake so the backend knows the endpoint is reachable
     // the moment it reads the ready line — no listen/connect race at boot. The
     // terminator listener binds here too when configured, so the nft redirect
     // target is live before the guest boots.
     let bound = bind_transport(&cfg.transport)?;
     let terminator = bind_terminator(cfg.terminator_listen)?;
+    let raw_only = can_skip_substitution_assembly(&cfg);
+    let assembled = if raw_only {
+        None
+    } else {
+        Some(assemble(&cfg).context("assembling substitution service")?)
+    };
 
     // Ready handshake: report the minted (guest var → placeholder) pairs on
     // stdout so the backend can set them in the guest launch env, then boot.
     // Values are never reported — only opaque placeholders.
-    let env = secret_placeholder_env(&handed);
+    let handed_len = assembled
+        .as_ref()
+        .map(|(_, handed)| handed.len())
+        .unwrap_or_default();
+    let env = assembled
+        .as_ref()
+        .map(|(_, handed)| secret_placeholder_env(handed))
+        .unwrap_or_default();
     let line = serde_json::to_string(&env).context("serializing handed placeholders")?;
     {
         let mut stdout = std::io::stdout().lock();
         writeln!(stdout, "{line}").context("writing handshake line")?;
         stdout.flush().context("flushing handshake line")?;
     }
-    info!(handed = handed.len(), "placeholders handed; serving");
+    info!(handed = handed_len, "placeholders handed; serving");
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -106,7 +117,14 @@ fn main() -> Result<()> {
     // any confinement error aborts before the first guest connection.
     runtime.block_on(async move {
         confine_endpoint(&cfg)?;
-        serve(&cfg, service, bound, terminator, forward_timeout).await
+        serve(
+            &cfg,
+            assembled.map(|(service, _)| service),
+            bound,
+            terminator,
+            forward_timeout,
+        )
+        .await
     })
 }
 
@@ -216,7 +234,7 @@ fn bind_terminator(addr: Option<std::net::SocketAddr>) -> Result<Option<std::net
 /// (placeholder-bearing requests) AND the redirected terminator path.
 async fn serve(
     cfg: &EndpointConfig,
-    service: std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>,
+    service: Option<std::sync::Arc<mvm_hostd::supervisor::substitution_proxy::SubstitutionService>>,
     bound: Bound,
     terminator: Option<std::net::TcpListener>,
     forward_timeout: std::time::Duration,
@@ -225,10 +243,13 @@ async fn serve(
     // owns the task.
     let terminator_task = match terminator {
         Some(std_listener) => {
+            let service = service
+                .as_ref()
+                .context("terminator configured without a substitution service")?;
             let listener = tokio::net::TcpListener::from_std(std_listener)
                 .context("adopting terminator TCP listener into the tokio runtime")?;
             Some(tokio::spawn(
-                std::sync::Arc::clone(&service).serve_terminator(listener, forward_timeout),
+                std::sync::Arc::clone(service).serve_terminator(listener, forward_timeout),
             ))
         }
         None => None,
@@ -236,7 +257,11 @@ async fn serve(
 
     match cfg.egress_mode {
         // Default, secret-bearing path: framed WireRequest substitution.
-        EgressMode::Wire => serve_wire(service, bound, forward_timeout).await?,
+        EgressMode::Wire => {
+            let service =
+                service.context("wire egress configured without a substitution service")?;
+            serve_wire(service, bound, forward_timeout).await?;
+        }
         // No secrets: the relayed stream is raw TCP, gated then spliced.
         EgressMode::Raw => serve_raw(cfg, bound, forward_timeout).await?,
     }
@@ -245,6 +270,13 @@ async fn serve(
         task.abort();
     }
     Ok(())
+}
+
+fn can_skip_substitution_assembly(cfg: &EndpointConfig) -> bool {
+    cfg.egress_mode == EgressMode::Raw
+        && cfg.secrets.is_empty()
+        && cfg.terminator_listen.is_none()
+        && cfg.tls_intermediate.is_none()
 }
 
 /// The WireRequest substitution serve loop over the adopted listener.
@@ -286,4 +318,51 @@ async fn serve_raw(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mvm_core::plan::{SecretBinding, SecretSource};
+
+    fn uds_cfg() -> EndpointConfig {
+        EndpointConfig {
+            tenant_id: "local".into(),
+            secrets: Vec::new(),
+            transport: EndpointTransport::Uds {
+                path: "/tmp/mvm-substitution-endpoint-test.sock".into(),
+            },
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            forward_timeout_secs: 30,
+            secret_store_dir: None,
+            binding_store_dir: None,
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: Some(mvm_core::policy::network_policy::NetworkPolicy::allow_list(
+                vec![mvm_core::policy::network_policy::HostPort::new(
+                    "142.250.72.14",
+                    443,
+                )],
+            )),
+            egress_mode: EgressMode::Raw,
+        }
+    }
+
+    #[test]
+    fn raw_no_secret_endpoint_skips_substitution_assembly() {
+        let cfg = uds_cfg();
+        assert!(can_skip_substitution_assembly(&cfg));
+    }
+
+    #[test]
+    fn raw_endpoint_uses_substitution_assembly_when_secrets_are_present() {
+        let mut cfg = uds_cfg();
+        cfg.secrets.push(SecretBinding {
+            name: "OPENAI_API_KEY".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+        });
+        assert!(!can_skip_substitution_assembly(&cfg));
+    }
 }

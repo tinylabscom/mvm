@@ -93,6 +93,17 @@ guest NIC. This enables tools such as `curl` and `wget`; it does **not** add
 raw ICMP, so `ping google.com` is still expected to fail. Use an HTTP/TCP probe
 as the smoke test instead.
 
+For a repeatable live proof on macOS Apple Silicon, run:
+
+```bash
+just hvf-oci-allow-host-smoke
+```
+
+That wrapper packages both the exact CLI path
+`mvmctl machine run --hypervisor hvf --image alpine --allow-host google.com -- ps aux`
+and a second admit/deny relay proof that demonstrates allowed traffic is
+reachable while a non-admitted destination is refused, all without a guest NIC.
+
 Network policies are enforced via iptables FORWARD rules on the bridge interface (Firecracker backend on Linux). DNS (port 53) is always allowed so domain resolution works. Rules are automatically cleaned up when the VM stops. On macOS backends, policies are enforced at the host-side layer rather than via iptables.
 
 ## Security Profiles

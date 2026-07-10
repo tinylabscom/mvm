@@ -219,24 +219,67 @@ fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<Stri
     Some(cmdline)
 }
 
+fn workspace_root_from_manifest_dir() -> Option<PathBuf> {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir.parent()?.parent().map(Path::to_path_buf)
+}
+
+fn hvf_supervisor_launch_support_available() -> bool {
+    if let Some(path) = std::env::var_os("MVM_HVF_SUPERVISOR_PATH").map(PathBuf::from) {
+        return path.is_file();
+    }
+
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        && dir.join("mvm-hvf-supervisor").is_file()
+    {
+        return true;
+    }
+
+    let Some(workspace_root) = workspace_root_from_manifest_dir() else {
+        return false;
+    };
+
+    for variant in ["release", "debug"] {
+        if workspace_root
+            .join("target")
+            .join(variant)
+            .join("mvm-hvf-supervisor")
+            .is_file()
+        {
+            return true;
+        }
+    }
+
+    workspace_root.join("Cargo.toml").is_file()
+}
+
+fn hvf_workload_support_available() -> bool {
+    hvf_platform_supported() && hvf_supervisor_launch_support_available()
+}
+
 impl VmBackend for HvfBackend {
     fn name(&self) -> &str {
         "hvf"
     }
 
     fn capabilities(&self) -> VmCapabilities {
+        let proxy_path_ready = hvf_workload_support_available();
         // vsock is live-proven through the unified run loop; the rest land as
         // pause/snapshot/networking are wired onto the primitive.
         VmCapabilities {
             vsock: true,
             // The hvf VMM is vsock-only by design: no guest NIC, and egress
             // rides the host vsock proxy (the gating endpoint), not a guest NIC.
-            no_guest_nic: true,
-            host_vsock_proxy: true,
+            // Advertise those workload-path capabilities only when the detached
+            // supervisor path is actually launchable on this host.
+            no_guest_nic: proxy_path_ready,
+            host_vsock_proxy: proxy_path_ready,
             // The hvf VMM can serve the unpacked OCI tree as a read-only
             // virtiofs root (dev tier); the run-path tier gate selects it only for
             // non-prod, non-sealed workloads.
-            virtiofs_root: true,
+            virtiofs_root: proxy_path_ready,
             // pause/snapshot/cow/remap land as they are wired onto the primitive.
             ..Default::default()
         }
@@ -576,15 +619,15 @@ impl VmBackend for HvfBackend {
     }
 
     fn is_available(&self) -> Result<bool> {
-        Ok(hvf_probe())
+        Ok(hvf_workload_support_available())
     }
 
     fn install(&self) -> Result<()> {
         ui::info("Hypervisor.framework is built into macOS; no host install needed.");
-        if !hvf_probe() {
+        if !hvf_workload_support_available() {
             ui::info(
-                "HVF unavailable — needs macOS / Apple silicon (and the binary \
-                 codesigned with com.apple.security.hypervisor).",
+                "HVF workload launch unavailable — needs macOS / Apple silicon and a \
+                 launchable mvm-hvf-supervisor helper.",
             );
         }
         Ok(())
@@ -594,10 +637,10 @@ impl VmBackend for HvfBackend {
 /// Probe whether HVF can actually run here. The backend's lifecycle is
 /// platform-agnostic (spawns a binary + tracks PID files), so it compiles
 /// everywhere; only this probe is macOS/Apple-silicon-specific.
-fn hvf_probe() -> bool {
+fn hvf_platform_supported() -> bool {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
-        crate::hvf::probe_available()
+        true
     }
     #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
     {
@@ -632,6 +675,78 @@ mod tests {
         assert!(!c.pause_resume);
         assert!(!c.snapshots);
         assert!(!c.tap_networking);
+    }
+
+    #[test]
+    fn supervisor_launch_support_respects_override_path() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = dir.path().join("mvm-hvf-supervisor");
+        std::fs::write(&good, b"stub").expect("stub supervisor");
+
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", &good);
+        }
+        assert!(hvf_supervisor_launch_support_available());
+
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", dir.path().join("missing"));
+        }
+        assert!(!hvf_supervisor_launch_support_available());
+
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
+        }
+    }
+
+    #[test]
+    fn invalid_supervisor_override_hides_proxy_capabilities() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
+        }
+        let caps = HvfBackend.capabilities();
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
+        }
+        assert!(!caps.no_guest_nic);
+        assert!(!caps.host_vsock_proxy);
+        assert!(!caps.virtiofs_root);
+    }
+
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn valid_supervisor_override_advertises_proxy_capabilities() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let good = dir.path().join("mvm-hvf-supervisor");
+        std::fs::write(&good, b"stub").expect("stub supervisor");
+
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", &good);
+        }
+        let caps = HvfBackend.capabilities();
+        let available = HvfBackend.is_available().expect("availability probe");
+        // SAFETY: test-only env mutation.
+        unsafe {
+            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
+        }
+        assert!(available);
+        assert!(caps.no_guest_nic);
+        assert!(caps.host_vsock_proxy);
+        assert!(caps.virtiofs_root);
     }
 
     #[test]
@@ -784,8 +899,12 @@ mod tests {
 
     #[test]
     fn supervisor_path_env_must_point_at_a_file() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
         // SAFETY: single-threaded test mutation of a process env var.
-        unsafe { std::env::set_var("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor") };
+        unsafe { std::env::set_var("MVM_HVF_SUPERVISOR_PATH", dir.path()) };
         let r = resolve_supervisor_path();
         unsafe { std::env::remove_var("MVM_HVF_SUPERVISOR_PATH") };
         assert!(r.is_err());

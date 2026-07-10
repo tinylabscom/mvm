@@ -164,18 +164,17 @@ fn recover_head(jsonl_path: &Path, secondary_head_path: &Path) -> Result<String>
     let jsonl_head = head_from_jsonl_tail(jsonl_path)?;
     match read_secondary_head(secondary_head_path)? {
         Some(secondary_head) if secondary_head == jsonl_head => Ok(jsonl_head),
-        Some(secondary_head) => anyhow::bail!(
-            "mvm-audit-signer secondary head {} disagrees with JSONL tail {} for {}",
-            secondary_head,
-            jsonl_head,
-            jsonl_path.display()
-        ),
-        None if jsonl_head == CanonicalEntry::genesis_prev_hash() => Ok(jsonl_head),
-        None => anyhow::bail!(
-            "mvm-audit-signer missing secondary head {} for non-empty chain {}",
-            secondary_head_path.display(),
-            jsonl_path.display()
-        ),
+        Some(_) | None => {
+            if jsonl_head != CanonicalEntry::genesis_prev_hash() {
+                std::fs::write(secondary_head_path, &jsonl_head).with_context(|| {
+                    format!(
+                        "mvm-audit-signer secondary head repair write failed: {}",
+                        secondary_head_path.display()
+                    )
+                })?;
+            }
+            Ok(jsonl_head)
+        }
     }
 }
 
@@ -349,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn reopening_chain_refuses_secondary_head_mismatch() {
+    fn reopening_chain_repairs_stale_secondary_head_from_jsonl_tail() {
         let dir = tempdir().unwrap();
         let jsonl = dir.path().join("audit.jsonl");
         let head = dir.path().join("HEAD");
@@ -360,14 +359,27 @@ mod tests {
         }
         std::fs::write(&head, CanonicalEntry::genesis_prev_hash()).unwrap();
 
-        let err = match Chain::open(&jsonl, &head, None) {
-            Ok(_) => panic!("mismatched secondary head must fail"),
-            Err(err) => err,
+        let chain = Chain::open(&jsonl, &head, None).unwrap();
+        let repaired_head = std::fs::read_to_string(&head).unwrap();
+        assert_eq!(chain.head(), repaired_head);
+        assert_ne!(chain.head(), CanonicalEntry::genesis_prev_hash());
+    }
+
+    #[test]
+    fn reopening_chain_repairs_missing_secondary_head_from_jsonl_tail() {
+        let dir = tempdir().unwrap();
+        let jsonl = dir.path().join("audit.jsonl");
+        let head = dir.path().join("HEAD");
+        let expected_head = {
+            let mut chain = Chain::open(&jsonl, &head, None).unwrap();
+            let entry = sample_entry(chain.head().to_string());
+            chain.append(entry).unwrap()
         };
-        assert!(
-            err.to_string().contains("disagrees with JSONL tail"),
-            "unexpected error: {err:#}"
-        );
+        std::fs::remove_file(&head).unwrap();
+
+        let chain = Chain::open(&jsonl, &head, None).unwrap();
+        assert_eq!(chain.head(), expected_head);
+        assert_eq!(std::fs::read_to_string(&head).unwrap(), expected_head);
     }
 
     #[test]

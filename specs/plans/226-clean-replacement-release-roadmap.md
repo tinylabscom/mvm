@@ -106,6 +106,16 @@ fallback + macOS-13-25 backend; `passt` remains untouched (Linux only).
         (`machine run -d --image ...` and `machine start` on an image-backed
         machine), closing the remaining stored-lifecycle fallback onto the
         legacy NIC path.
+  - [x] 2026-07-09 HVF availability follow-up landed: the macOS OCI
+        `--allow-host` selector no longer keys HVF proxy support off the
+        parent `mvmctl` process being entitled to call `hv_vm_create`.
+        Instead, the backend advertises `{ no_guest_nic, host_vsock_proxy,
+        virtiofs_root }` only when the detached `mvm-hvf-supervisor` workload
+        path is actually launchable on this host, and explicit
+        `--hypervisor hvf` validation now fails closed early when that helper
+        path is unavailable. That preserves the pre-pull/pre-boot refusal
+        ordering from the activation slice while allowing the real HVF helper
+        path to serve OCI `--allow-host` on macOS.
   - [x] 2026-07-08 gvproxy-specific test retirement landed: the remaining
         gvproxy-only bridge witnesses are removed from
         `crates/mvm-hostd/src/supervisor/gateway_bridge.rs`, and the dedicated

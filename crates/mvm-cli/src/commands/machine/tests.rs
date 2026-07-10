@@ -1562,7 +1562,7 @@ fn create_requires_dev_profile_when_manifest_declares_ssh_agent() {
 }
 
 #[test]
-fn machine_start_preflight_redacts_host_paths_and_surfaces_policy() {
+fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
     let spec = MachineSpec {
         schema_version: MACHINE_SPEC_SCHEMA_VERSION,
         name: "web".to_string(),
@@ -1585,24 +1585,16 @@ fn machine_start_preflight_redacts_host_paths_and_surfaces_policy() {
         health_check: None,
     };
 
-    let summary = machine_start_preflight_summary(
-        &spec,
-        Some(Path::new("/tmp/web.receipt.json")),
-        Some("hvf"),
-    )
-    .expect("preflight summary");
-    assert_eq!(
-        summary.invocation.network_posture,
-        "allow-list:api.example.com:443"
-    );
-    assert_eq!(summary.invocation.egress_enforcement, "hvf:l4-host-port");
-    assert_eq!(summary.invocation.auth.mode, "none");
-    assert_eq!(summary.invocation.volumes.len(), 1);
-    assert_eq!(summary.invocation.volumes[0].kind, "dir_share");
-    assert!(!summary.invocation.volumes[0].host_path_sha256.is_empty());
-    assert_eq!(summary.invocation.volumes[0].guest_path, "/work");
-    assert!(!summary.invocation.volumes[0].read_only);
-    assert_eq!(summary.invocation.init.command_count, 1);
+    let summary = machine_start_receipt_input(&spec, "hvf").expect("receipt input");
+    assert_eq!(summary.network_posture, "allow-list:api.example.com:443");
+    assert_eq!(summary.egress_enforcement, "hvf:l4-host-port");
+    assert_eq!(summary.auth.mode, "none");
+    assert_eq!(summary.volumes.len(), 1);
+    assert_eq!(summary.volumes[0].kind, "dir_share");
+    assert!(!summary.volumes[0].host_path_sha256.is_empty());
+    assert_eq!(summary.volumes[0].guest_path, "/work");
+    assert!(!summary.volumes[0].read_only);
+    assert_eq!(summary.init.command_count, 1);
     let json = serde_json::to_string(&summary).expect("summary json");
     assert!(!json.contains("/Users/example/src"));
     assert!(json.contains("allow-list:api.example.com:443"));
