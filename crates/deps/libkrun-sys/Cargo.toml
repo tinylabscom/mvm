@@ -9,6 +9,9 @@ homepage.workspace = true
 authors.workspace = true
 build = "build.rs"
 
+[lib]
+doctest = false
+
 # ── What this crate is ─────────────────────────────────────────────
 #
 # Thin Rust bindings + a safe wrapper around Red Hat libkrun's C API.

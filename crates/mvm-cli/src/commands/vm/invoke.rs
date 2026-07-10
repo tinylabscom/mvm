@@ -823,7 +823,9 @@ mod tests {
     fn admit_entrypoint_boot_admits_sealed_images_even_without_secrets() {
         use mvm_build::builder_vm::GuestSidecar;
 
+        let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
+        env.set("MVM_DATA_DIR", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
         let mut sidecar = GuestSidecar::for_oci_run("audit-probe");
@@ -833,7 +835,7 @@ mod tests {
 
         let lowered_secrets = LoweredPlanSecrets::default();
         let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof", "firecracker")
+            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof-sealed", "firecracker")
                 .cpus(1)
                 .mem_mib(256)
                 .lowered_secrets(&lowered_secrets)

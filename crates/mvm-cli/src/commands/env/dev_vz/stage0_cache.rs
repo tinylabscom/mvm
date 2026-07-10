@@ -189,13 +189,21 @@ pub(super) fn stage0_bootstrap_in_flight_at(builder_vm: &std::path::Path) -> boo
     if !builder_vm.is_dir() {
         return false;
     }
-    // Only a successfully-acquired lock proves nobody else holds it. Treat both
-    // "held" (Ok(None)) and an I/O error as "assume in flight" — repair is the
-    // destructive path, so fail safe toward refusing.
-    !matches!(
-        FileLock::try_acquire(&builder_vm.join("stage0")),
-        Ok(Some(_))
-    )
+    let lock_anchor = builder_vm.join("stage0");
+    // A just-dropped `flock(2)` can briefly race with a same-process re-check
+    // under heavy parallel test and helper load. Accept the first successful
+    // acquisition; only after a few consecutive "still held" / I/O outcomes do
+    // we fail safe to "in flight" for the destructive repair path.
+    for attempt in 0..4 {
+        match FileLock::try_acquire(&lock_anchor) {
+            Ok(Some(_guard)) => return false,
+            Ok(None) | Err(_) if attempt < 3 => {
+                std::thread::sleep(std::time::Duration::from_millis(2));
+            }
+            Ok(None) | Err(_) => return true,
+        }
+    }
+    true
 }
 
 /// Outcome of [`sweep_orphaned_stage0_staging_dirs`]:
