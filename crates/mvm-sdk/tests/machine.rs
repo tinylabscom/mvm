@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Write,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
@@ -27,17 +28,24 @@ impl FakeCli {
     fn new(exit_code: i32) -> Self {
         let dir = TempDir::new().expect("create fake cli dir");
         let bin = dir.path().join("mvmctl");
+        let staging_bin = dir.path().join("mvmctl.tmp");
         let argv_path = dir.path().join("argv.txt");
         let script = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > {}\nprintf 'fake stdout\\n'\nprintf 'fake stderr\\n' >&2\nexit {exit_code}\n",
             shell_quote(&argv_path),
         );
-        fs::write(&bin, script).expect("write fake mvmctl");
-        let mut perms = fs::metadata(&bin)
+        let mut staging = fs::File::create(&staging_bin).expect("create fake mvmctl");
+        staging
+            .write_all(script.as_bytes())
+            .expect("write fake mvmctl");
+        staging.sync_all().expect("sync fake mvmctl");
+        drop(staging);
+        let mut perms = fs::metadata(&staging_bin)
             .expect("fake mvmctl metadata")
             .permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&bin, perms).expect("chmod fake mvmctl");
+        fs::set_permissions(&staging_bin, perms).expect("chmod fake mvmctl");
+        fs::rename(&staging_bin, &bin).expect("publish fake mvmctl");
         Self {
             _dir: dir,
             bin,

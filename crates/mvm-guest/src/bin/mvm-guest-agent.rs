@@ -3941,11 +3941,17 @@ mod tests {
 
     fn write_hook_script(dir: &StdPath, name: &str, body: &str) -> PathBuf {
         let p = dir.join(name);
-        let mut f = fs::File::create(&p).expect("create hook script");
+        let staging = dir.join(format!("{name}.tmp"));
+        let mut f = fs::File::create(&staging).expect("create hook script");
         f.write_all(body.as_bytes()).expect("write hook body");
-        let mut perms = fs::metadata(&p).expect("hook metadata").permissions();
+        f.sync_all().expect("sync hook body");
+        drop(f);
+        let mut perms = fs::metadata(&staging)
+            .expect("hook metadata")
+            .permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&p, perms).expect("chmod hook");
+        fs::set_permissions(&staging, perms).expect("chmod hook");
+        fs::rename(&staging, &p).expect("publish hook");
         p
     }
 
