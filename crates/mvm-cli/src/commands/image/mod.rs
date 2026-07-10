@@ -8,7 +8,6 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use flate2::read::GzDecoder;
-use mvm_build::oci_runtime_inject::OciEntrypointConfig;
 use mvm_build::rootfs::MaterializeExt4Input;
 use mvm_oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
@@ -34,6 +33,9 @@ mod trust;
 use trust::{CosignCommandVerifier, CosignVerifier, default_require_signatures, registry_auth_for};
 
 const INDEX_FILE: &str = "index.json";
+
+#[derive(Clone, Debug)]
+struct OciEntrypointConfig;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -374,11 +376,9 @@ fn oci_entrypoint_from_config_bytes(bytes: &[u8]) -> Result<Option<OciEntrypoint
     if argv.is_empty() {
         return Ok(None);
     }
-    Ok(Some(OciEntrypointConfig {
-        argv,
-        env: config.config.env,
-        working_dir: config.config.working_dir.filter(|dir| !dir.is_empty()),
-    }))
+    let _ = config.config.env;
+    let _ = config.config.working_dir.filter(|dir| !dir.is_empty());
+    Ok(Some(OciEntrypointConfig))
 }
 
 fn oci_entrypoint_from_cache_path(

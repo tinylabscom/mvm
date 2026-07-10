@@ -188,7 +188,7 @@ fn vsock_egress_backend() -> Option<String> {
 
 fn backend_supports_image_vsock_egress(backend: &str) -> bool {
     let caps = AnyBackend::from_hypervisor(backend).capabilities();
-    caps.vsock && caps.no_guest_nic && caps.host_vsock_proxy
+    caps.vsock && caps.no_routable_guest_nic && caps.host_vsock_proxy
 }
 
 #[test]

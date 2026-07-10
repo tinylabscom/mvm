@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::guest_agent_build::GuestRuntimeBinaryBytes;
-use crate::oci_runtime_inject::{MvmRuntimeBinaries, OciEntrypointConfig};
+use crate::oci_runtime_inject::MvmRuntimeBinaries;
 use crate::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
 };
