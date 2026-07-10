@@ -426,6 +426,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
 
 ## Planning updates
 
+- [x] Advanced
+      [`plans/219-agent-verb-grant-delivery.md`](plans/219-agent-verb-grant-delivery.md)
+      live validation on the Linux/KVM host. The Firecracker restricted-grant
+      proof booted `mvm219-fc-grant` with `--agent-verb ping --agent-verb
+      run-entrypoint`; direct agent RPC over `runtime/v.sock` returned
+      `ProtocolHelloAck`, `Ping -> Pong`, and unlisted `UpdateIdleTimeout ->
+      VerbNotAuthorized`. The true grant-less regression proof used a
+      dev-profile boot (`mvm219-fc-devnone`) with no serialized
+      `agent_verbs`, no `verb-grant.json`, and `UpdateIdleTimeoutAck`.
+      `mvmctl trust audit verify --tenant local` passed. The pass found and
+      fixed the host-signer public-key format mismatch (raw 32-byte file vs
+      string config-drive content). Remaining Plan 219 gates: macOS HVF/Vz
+      live proof, manifest/flake `RunEntrypoint` success, live caller-side
+      `verb_denied` emission, full-suite checks, and ADR-103 acceptance.
 - [x] Started
       [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md)
       to turn the post-Plan-221 rootfs follow-up into an execution plan. It
@@ -4159,3 +4173,12 @@ here so execution doesn't guess:
 > the feature-forwards and the lint's `INTERNAL` allowlist name specific
 > sub-crates, so any P3 crate merge/rename must update both in the same change
 > (mechanical). Net, it de-risks the simplification.
+
+### Plan 219 — Agent verb grant delivery — UNIT DELIVERY LANDED
+
+Issue #1381 follow-on now has the unit-testable path wired:
+
+- [x] Core delivery seams: `VerbGrantEnvelope` cmdline encode/decode, `verb-grant.json` sidecar mint from admitted `ExecutionPlan.agent_verbs`, backend `mvm.verb_grant=` append, and chain-signed `verb_denied` audit entry are implemented and targeted-test green.
+- [x] Config-drive trust anchor: grant-eligible starts attach `host-signer.pub` in `VmStartConfig.config_files`; mkGuest and OCI init stage it at `/run/mvm/host-signer.pub`; the guest pins grants against that file and ignores `VerbGrantEnvelope.pubkey_hex` for trust.
+- [ ] Live proof remains: Vz/macOS and Firecracker/Linux boot validation that `/run/mvm/host-signer.pub` + `/run/mvm/verb-grant.json` exist before agent fork, listed verbs pass, unlisted ProdSafe verbs return `VerbNotAuthorized`, `verb_denied` verifies, and `agent_verbs = None` remains no-token/no-grant.
+- [ ] ADR-103 remains Proposed until maintainer acceptance after live proof.
