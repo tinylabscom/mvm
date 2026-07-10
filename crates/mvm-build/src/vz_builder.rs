@@ -3521,12 +3521,20 @@ mod tests {
         .expect("spawn detached shell");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(1);
-        while !sid_file.exists() && std::time::Instant::now() < deadline {
+        let child_sid = loop {
+            if std::time::Instant::now() >= deadline {
+                panic!("timed out waiting for detached child session id");
+            }
+            match std::fs::read_to_string(&sid_file) {
+                Ok(contents) if !contents.trim().is_empty() => break contents,
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => panic!("read detached child session id: {e}"),
+            }
             thread::sleep(Duration::from_millis(10));
-        }
+        };
 
-        let child_sid = std::fs::read_to_string(&sid_file)
-            .expect("read detached child session id")
+        let child_sid = child_sid
             .trim()
             .parse::<i32>()
             .expect("parse detached child session id");
