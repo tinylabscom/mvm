@@ -231,7 +231,7 @@ change converges to a fresh machine.
 
 **If that wasn't what you wanted** (e.g. a typo'd `--image`): the machine's own
 rootfs is ephemeral, so just re-run with the right config. Durable data should
-live in a `--volume` host share, which lives on the host and survives the
+live in a `--mount` host share, which lives on the host and survives the
 recreate. To keep two configs side by side, give them different `--name`s.
 
 **To reconnect without changing anything**, run `mvmctl machine run --name X`
@@ -263,7 +263,7 @@ mvmctl dev shell -- ip link show tap0
 
 ### Can't access project files inside microVM
 
-The Firecracker microVM has an **isolated filesystem**. Use `mvmctl dev shell` to access the dev VM where your home directory is mounted, or pass volumes with `--volume`.
+The Firecracker microVM has an **isolated filesystem**. Use `mvmctl dev shell` to access the dev VM where your home directory is mounted, or pass host shares with `--mount`.
 
 ## Performance Issues
 

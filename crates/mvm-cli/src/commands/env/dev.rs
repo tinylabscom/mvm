@@ -111,12 +111,12 @@ pub(in crate::commands) enum DevAction {
         /// Start the dev VM without attaching an interactive shell.
         #[arg(long, conflicts_with = "shell")]
         no_shell: bool,
-        /// Attach a custom volume (repeatable). Appends to `MVM_VOLUMES`.
+        /// Attach a custom mount (repeatable). Appends to `MVM_VOLUMES`.
         /// `host:/guest` shares a host dir (virtio-fs); `host:/guest:SIZE`
         /// attaches an ext4 disk image. Read-only by default — append
         /// `:rw` to grant writes. Guest path must be under /data, /work,
         /// or /mnt (system mounts stay read-only).
-        #[arg(long, short = 'v', value_parser = clap_volume_spec)]
+        #[arg(long = "mount", visible_alias = "volume", value_parser = clap_volume_spec)]
         volume: Vec<String>,
         /// Emit a machine-readable JSON result after boot instead of text.
         /// Implies non-interactive (`--no-shell`); chrome goes to stderr.
@@ -161,9 +161,9 @@ pub(in crate::commands) enum DevAction {
         /// Open an interactive shell after rebuilding.
         #[arg(long, short = 's')]
         shell: bool,
-        /// Attach a custom volume (repeatable). Appends to `MVM_VOLUMES`.
+        /// Attach a custom mount (repeatable). Appends to `MVM_VOLUMES`.
         /// See `mvmctl dev up --help` for the spec grammar.
-        #[arg(long, short = 'v', value_parser = clap_volume_spec)]
+        #[arg(long = "mount", visible_alias = "volume", value_parser = clap_volume_spec)]
         volume: Vec<String>,
     },
     /// Import a dev image from local files (air-gapped install).
@@ -221,11 +221,11 @@ fn bail_no_dev_backend() -> Result<()> {
 }
 
 /// Resolve the dev VM's custom volumes: `MVM_VOLUMES` env baseline +
-/// `--volume` flags, parsed and validated (reserved-mount + encryption
+/// `--mount` flags, parsed and validated (reserved-mount + encryption
 /// gates) into backend-agnostic [`VmVolume`]s. The dev VM is the
 /// dev-tier builder (not the hardened workload tier), so these are a
 /// host-side convenience — but the same path-safety validation still
-/// applies (a stray `-v ~/.mvm/keys:/x` must not silently expose host
+/// applies (a stray `--mount ~/.mvm/keys:/x` must not silently expose host
 /// secrets to the builder).
 fn resolve_dev_volumes(flag: &[String]) -> Result<Vec<VmVolume>> {
     let volumes: Vec<VmVolume> = merge_volume_specs(flag)
@@ -244,12 +244,12 @@ fn resolve_dev_volumes(flag: &[String]) -> Result<Vec<VmVolume>> {
 /// Custom dev volumes are wired for the libkrun dev VM only. The Vz
 /// builder VM (which wires its own `/dev/vdb` overlay + `/work` share)
 /// and the native-Linux dev path don't thread them yet — warn loudly
-/// rather than silently dropping the user's `-v` request.
+/// rather than silently dropping the user's `--mount` request.
 fn warn_dev_volumes_unsupported(volumes: &[VmVolume], backend: &str) {
     if !volumes.is_empty() {
         ui::warn(&format!(
             "Ignoring {} custom volume(s): the {backend} dev backend doesn't support \
-             --volume yet (libkrun does).",
+             --mount yet (libkrun does).",
             volumes.len()
         ));
     }

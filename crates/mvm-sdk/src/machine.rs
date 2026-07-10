@@ -341,7 +341,7 @@ impl MachineRunBuilder {
         let image = require_option(&self.image, "image")?;
         require_non_empty_slice(&self.command, "command")?;
         validate_strings(&self.allow_hosts, "--allow-host")?;
-        validate_strings(&self.volumes, "--volume")?;
+        validate_strings(&self.volumes, "--mount")?;
         validate_strings(&self.env, "--env")?;
 
         let mut args = vec!["run".to_string(), "--image".to_string(), image.to_string()];
@@ -354,7 +354,7 @@ impl MachineRunBuilder {
         }
         append_optional(&mut args, "--memory", self.memory.as_deref())?;
         append_optional(&mut args, "--profile", self.profile.as_deref())?;
-        append_repeated(&mut args, "--volume", &self.volumes);
+        append_repeated(&mut args, "--mount", &self.volumes);
         append_repeated(&mut args, "--env", &self.env);
         if let Some(timeout) = self.timeout {
             args.extend(["--timeout".to_string(), timeout.to_string()]);

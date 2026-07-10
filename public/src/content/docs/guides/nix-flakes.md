@@ -330,8 +330,8 @@ chmod 0400 ~/.config/mvm/secrets/anthropic
 cd my-claude-code-vm
 mvmctl machine build
 mvmctl machine run --manifest . --profile dev \
-  --volume "$PWD:/workspace:rw" \
-  --volume "$HOME/.config/mvm/secrets:/mnt/secrets"
+  --mount "$PWD:/workspace:rw" \
+  --mount "$HOME/.config/mvm/secrets:/mnt/secrets"
 ```
 
 Inside the guest, your workload can read the file you mounted under

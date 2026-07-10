@@ -19,18 +19,19 @@ echo '{"gateway": {"port": 8080}}' > /tmp/my-config/app.json
 echo 'API_KEY_REF=openai-api-key' > /tmp/my-secrets/app.env
 
 mvmctl machine run --manifest my-app \
-    --volume /tmp/my-config:/mnt/config \
-    --volume /tmp/my-secrets:/mnt/secrets
+    --mount /tmp/my-config:/mnt/config \
+    --mount /tmp/my-secrets:/mnt/secrets
 ```
 
-The `--volume` (`-v` for short) flag uses the format `host_dir:/guest/path`:
+The `--mount` flag uses the format `host_dir:/guest/path`. `--volume` remains
+accepted as a compatibility alias, but `-v` is global verbosity:
 
 | Guest path | Drive | Permissions | Purpose |
 |---|---|---|---|
 | `/mnt/config` | `/dev/vdb` | Read-only (0444) | Application configuration |
 | `/mnt/secrets` | `/dev/vdc` | Read-only (0400) | File-shaped secret material |
 
-Every file in the host directory is written to the corresponding drive image. For persistent volumes with explicit size, use the 3-part format: `--volume host:/guest/path:size`.
+Every file in the host directory is written to the corresponding drive image. For persistent mounts with explicit size, use the 3-part format: `--mount host:/guest/path:size`.
 
 ## Library API
 
@@ -94,8 +95,8 @@ worked LLM-agent example showing the pattern end-to-end.
 ```bash
 mvmctl machine build --flake ./openclaw
 mvmctl machine run --flake ./openclaw --name oc -d \
-    --volume nix/examples/openclaw/config:/mnt/config \
-    --volume nix/examples/openclaw/secrets:/mnt/secrets
+    --mount nix/examples/openclaw/config:/mnt/config \
+    --mount nix/examples/openclaw/secrets:/mnt/secrets
 mvmctl machine forward oc -p 3000:3000
 ```
 
@@ -121,8 +122,8 @@ ANTHROPIC_API_KEY_REF=anthropic-api-key
 EOF
 
 mvmctl machine run --flake ./openclaw --name oc -d \
-    --volume /tmp/oc-config:/mnt/config \
-    --volume /tmp/oc-secrets:/mnt/secrets
+    --mount /tmp/oc-config:/mnt/config \
+    --mount /tmp/oc-secrets:/mnt/secrets
 mvmctl machine forward oc -p 3000:3000
 ```
 
@@ -141,8 +142,8 @@ and readiness boundary.
 ```bash
 mvmctl machine build --flake ./openclaw --snapshot
 mvmctl machine run --flake ./openclaw --name oc -d \
-    --volume nix/examples/openclaw/config:/mnt/config \
-    --volume nix/examples/openclaw/secrets:/mnt/secrets
+    --mount nix/examples/openclaw/config:/mnt/config \
+    --mount nix/examples/openclaw/secrets:/mnt/secrets
 mvmctl machine forward oc -p 3000:3000
 ```
 
@@ -170,19 +171,19 @@ keys:
 ```bash
 # Production gateway with prod Anthropic key
 mvmctl machine run --manifest openclaw --name oc-prod \
-    --volume ./prod/config:/mnt/config \
-    --volume ./prod/secrets:/mnt/secrets
+    --mount ./prod/config:/mnt/config \
+    --mount ./prod/secrets:/mnt/secrets
 mvmctl machine forward oc-prod -p 3000:3000
 
 # Staging gateway with test key
 mvmctl machine run --manifest openclaw --name oc-staging \
-    --volume ./staging/config:/mnt/config \
-    --volume ./staging/secrets:/mnt/secrets
+    --mount ./staging/config:/mnt/config \
+    --mount ./staging/secrets:/mnt/secrets
 mvmctl machine forward oc-staging -p 3001:3000
 
 # Dev gateway with no key (localhost-only testing)
 mvmctl machine run --manifest openclaw --name oc-dev \
-    --volume ./dev/config:/mnt/config
+    --mount ./dev/config:/mnt/config
 mvmctl machine forward oc-dev -p 3002:3000
 ```
 

@@ -91,7 +91,6 @@ fn test_cleanup_defaults() {
         env_group::EnvCmd::Cleanup(cleanup::Args {
             keep,
             all,
-            verbose,
             cache,
             state,
             nuclear,
@@ -101,7 +100,6 @@ fn test_cleanup_defaults() {
         }) => {
             assert_eq!(keep, None);
             assert!(!all);
-            assert!(!verbose);
             assert!(!cache);
             assert!(!state);
             assert!(!nuclear);
@@ -123,7 +121,6 @@ fn test_cleanup_keep_flag() {
         env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, Some(9));
             assert!(!args.all);
-            assert!(!args.verbose);
         }
         _ => panic!("Expected Cleanup command"),
     }
@@ -139,7 +136,6 @@ fn test_cleanup_all_flag() {
         env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, None);
             assert!(args.all);
-            assert!(!args.verbose);
         }
         _ => panic!("Expected Cleanup command"),
     }
@@ -148,6 +144,7 @@ fn test_cleanup_all_flag() {
 #[test]
 fn test_cleanup_verbose_flag() {
     let cli = Cli::try_parse_from(["mvmctl", "env", "cleanup", "--verbose"]).unwrap();
+    assert_eq!(cli.verbose, 1);
     let Commands::Env(eg) = cli.command else {
         panic!("expected env group")
     };
@@ -155,7 +152,6 @@ fn test_cleanup_verbose_flag() {
         env_group::EnvCmd::Cleanup(args) => {
             assert_eq!(args.keep, None);
             assert!(!args.all);
-            assert!(args.verbose);
         }
         _ => panic!("Expected Cleanup command"),
     }
@@ -895,7 +891,7 @@ fn test_run_volume_dir_inject() {
         "run",
         "--image",
         "alpine:latest",
-        "--volume",
+        "--mount",
         "/tmp/config:/mnt/config",
         "--volume",
         "/tmp/secrets:/mnt/secrets",
@@ -924,7 +920,7 @@ fn test_run_volume_persistent() {
         "run",
         "--image",
         "alpine:latest",
-        "--volume",
+        "--mount",
         "/data:/mnt/data:4G",
         "--",
         "sh",
@@ -3045,7 +3041,7 @@ fn run_transient_with_manifest_and_resources() {
 
 #[test]
 fn run_transient_with_add_dir_and_env() {
-    // `machine run` uses `--volume` for directory shares (not `--add-dir`) and
+    // `machine run` uses `--mount` for directory shares (not `--add-dir`) and
     // `--env` for environment variables.
     let cli = Cli::try_parse_from([
         "mvmctl",
@@ -3053,7 +3049,7 @@ fn run_transient_with_add_dir_and_env() {
         "run",
         "--image",
         "alpine:latest",
-        "--volume",
+        "--mount",
         "/tmp:/work",
         "--volume",
         "/etc:/host-etc",
@@ -3488,6 +3484,21 @@ fn test_dev_up_json_flag_parses() {
         Commands::Dev(dev::Args {
             action: Some(DevAction::Up { json, .. }),
         }) => assert!(json),
+        _ => panic!("Expected Dev Up command"),
+    }
+}
+
+#[test]
+fn test_dev_up_verbose_is_global_not_mount() {
+    let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "-v", "--json"]).unwrap();
+    assert_eq!(cli.verbose, 1);
+    match cli.command {
+        Commands::Dev(dev::Args {
+            action: Some(DevAction::Up { volume, json, .. }),
+        }) => {
+            assert!(json);
+            assert!(volume.is_empty());
+        }
         _ => panic!("Expected Dev Up command"),
     }
 }
@@ -4029,6 +4040,65 @@ fn top_level_help_hides_infra() {
             "infra command `{hidden}` must be hidden from top-level help but was found"
         );
     }
+}
+
+#[test]
+fn machine_run_verbose_after_options_is_not_guest_argv() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "-vvv",
+        "--allow-host",
+        "google.com",
+        "--",
+        "ps",
+        "aux",
+    ])
+    .expect("machine run verbosity must parse before trailing guest argv");
+
+    assert_eq!(cli.verbose, 3);
+    let Commands::Machine(machine_args) = cli.command else {
+        panic!("expected machine command")
+    };
+    let machine::MachineAction::Run(args) = machine_args.action else {
+        panic!("expected machine run")
+    };
+    assert_eq!(args.allow_host, vec!["google.com"]);
+    assert_eq!(args.argv, vec!["ps", "aux"]);
+}
+
+#[test]
+fn debug_alias_parses_before_and_after_machine_run() {
+    let cli = Cli::try_parse_from(["mvmctl", "--debug", "doctor"])
+        .expect("root --debug alias must parse before subcommand");
+    assert_eq!(cli.verbose, 1);
+
+    let cli = Cli::try_parse_from(["mvmctl", "doctor", "--debug"])
+        .expect("root --debug alias must parse after subcommand");
+    assert_eq!(cli.verbose, 1);
+
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "run",
+        "--image",
+        "alpine:latest",
+        "--debug",
+        "--",
+        "true",
+    ])
+    .expect("machine run --debug alias must parse before trailing guest argv");
+    assert_eq!(cli.verbose, 1);
+    let Commands::Machine(machine_args) = cli.command else {
+        panic!("expected machine command")
+    };
+    let machine::MachineAction::Run(args) = machine_args.action else {
+        panic!("expected machine run")
+    };
+    assert_eq!(args.argv, vec!["true"]);
 }
 
 #[test]

@@ -142,7 +142,7 @@ def _machine_run_argv(
         argv.extend(["--memory", _require_non_empty_str(memory, "memory")])
     if profile is not None:
         argv.extend(["--profile", _require_non_empty_str(profile, "profile")])
-    _append_repeated(argv, "--volume", volumes)
+    _append_repeated(argv, "--mount", volumes)
     _append_repeated(argv, "--env", env)
     if timeout is not None:
         argv.extend(["--timeout", str(timeout)])

@@ -54,7 +54,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec and actively enforced by the host-agent daemon's probe loop |
 | `mvmctl machine run --cpus N --memory SIZE` | vCPU count and memory (supports 512M, 4G, etc.) |
 | `mvmctl machine run -e KEY=VALUE` | Inject an environment variable (repeatable; gated by `--profile`) |
-| `mvmctl machine run --volume host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`) |
+| `mvmctl machine run -v/-vv/-vvv` | Increase global logging (`info`/`debug`/`trace`) without passing the flag through to guest argv; `RUST_LOG` still overrides the generated filter |
+| `mvmctl machine run --mount host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`; `--volume` remains a compatibility alias) |
 | `mvmctl machine run --profile <p>` | Security posture: `restrictive`, `standard` (default), `dev`, `permissive` |
 | `mvmctl machine run --net` | Enable broad dev-tier outbound egress (default is deny-all) |
 | `mvmctl machine run --allow-host HOST[:PORT]` | Allow egress only to these hosts (repeatable; PORT defaults to 443; wins over `--net`) |
@@ -359,7 +360,7 @@ flag:
 - **Transient** (default): boot a fresh microVM from an OCI image, run the
   command, tear the VM down. Routes into the same code path as
   `mvmctl run --image`, inheriting **deny-all networking by default**, opt-in
-  egress via `--net` / `--allow-host`, and the same `--profile`, `--volume`,
+  egress via `--net` / `--allow-host`, and the same `--profile`, `--mount`,
   `--receipt`, `--json`, and `--dry-run` semantics.
 - **Foreground interactive** (`-t`/`--tty`, with `-i` accepted so `-it`
   parses): boot a fresh transient VM, run the requested argv attached to a PTY,
@@ -409,7 +410,8 @@ host agent, so it only applies to backends where that agent is reachable.
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
 explicit `machine create`/`start` lifecycle make a long-lived machine.
-`--volume` host shares work on every run mode. The syntax is
+`--mount` host shares work on every run mode (`--volume` remains accepted as a
+compatibility alias). The syntax is
 `HOST:/GUEST[:MODE]` (`MODE` defaults to `ro`; `rw` needs `--profile dev` or
 `permissive`). Persistent machine specs canonicalize host paths to absolute
 paths so later reconnects re-mount the same share regardless of your working
@@ -425,7 +427,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run --image <ref> -- <cmd>...` | Boot an OCI image, run `<cmd>` with no network, tear down |
 | `mvmctl machine run --net --image <ref> -- <cmd>...` | Boot with dev-tier outbound networking enabled |
 | `mvmctl machine run --image <ref> --allow-host <host[:port]> -- <cmd>...` | Boot with egress narrowed to the listed TCP host/port entries (`<host>` alone defaults to `:443`) |
-| `mvmctl machine run --image <ref> --profile dev --volume .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
+| `mvmctl machine run --image <ref> --profile dev --mount .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
 | `mvmctl machine run --image <ref> --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
 | `mvmctl machine run --image <ref> --dry-run -- <cmd>` | Validate and explain the run plan without booting a VM |
 | `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary |
@@ -795,7 +797,7 @@ All commands accept these global options:
 |--------|-------------|
 | `--log-format <human\|json>` | Log format: human (default) or json (structured) |
 | `--fc-version <VERSION>` | Override Firecracker version (e.g., v1.14.0) |
-| `--verbose` (alias `--debug`) | Show verbose `[mvm]` progress messages. Implied when `RUST_LOG` is set. |
+| `-v`, `-vv`, `-vvv`, `--verbose`, `--debug` | Increase global log verbosity (`info`/`debug`/`trace`). The flag may be placed before or after subcommands, including after `machine run` options before `-- <argv>`. `RUST_LOG` overrides the generated filter. |
 
 ## Environment Variables
 
@@ -826,7 +828,7 @@ All commands accept these global options:
 | `MVM_OCI_POLICY` | OCI production policy TOML used by `mvmctl image pull --prod` and `mvmctl run --image --prod` | `$MVM_DATA_DIR/oci-policy.toml` |
 | `MVM_OCI_BEARER_TOKEN_<HOST>` | Bearer token for one OCI registry host (`ghcr.io` -> `MVM_OCI_BEARER_TOKEN_GHCR_IO`) | Unset |
 | `MVM_OCI_BEARER_TOKEN` | Global fallback bearer token for OCI registry pulls | Unset |
-| `RUST_LOG` | Logging level (e.g., `debug`, `mvm=trace`) | `info` |
+| `RUST_LOG` | Logging filter (e.g., `debug`, `mvm=trace`). Overrides `-v` / `--verbose`. | Unset |
 | `MVM_CACHE_DIR` | Override cache directory | `~/.cache/mvm` |
 | `MVM_CONFIG_DIR` | Override config directory | XDG default |
 | `MVM_STATE_DIR` | Override state directory | XDG default |

@@ -41,9 +41,6 @@ pub(in crate::commands) struct Args {
     /// Remove all in-VM cached build revisions
     #[arg(long)]
     pub all: bool,
-    /// Print each cached in-VM build path that gets removed
-    #[arg(long)]
-    pub verbose: bool,
 
     /// Also wipe `~/.cache/mvm` (Stage 0 staging, builder VM artifacts).
     /// All cache contents are regenerable; the next `dev up` rebuilds them.
@@ -94,7 +91,7 @@ impl Tier {
     }
 }
 
-pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
+pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     let tier = pick_tier(&args);
 
     let keep_count = if args.all { 0 } else { args.keep.unwrap_or(5) };
@@ -128,7 +125,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     let _ = shell::run_in_vm("sudo rm -rf /tmp/* /var/tmp/* 2>/dev/null");
 
     let report = mvm_build::dev_build::cleanup_old_dev_builds(keep_count)?;
-    if args.verbose {
+    if cli.verbose > 0 {
         if report.removed_paths.is_empty() {
             ui::info("No cached build paths removed.");
         } else {
@@ -592,7 +589,6 @@ mod tests {
         let args = Args {
             keep: None,
             all: false,
-            verbose: false,
             cache: true,
             state: true,
             nuclear: true,
@@ -608,7 +604,6 @@ mod tests {
         let args = Args {
             keep: None,
             all: false,
-            verbose: false,
             cache: false,
             state: false,
             nuclear: false,
