@@ -24,7 +24,8 @@ Design doc: `specs/notes/buildtime-aux-helper-compilation-design.md`.
 
 ## File Structure
 
-- `crates/mvm-cli/build_aux_helpers.rs` — **new** pure module: which helpers to build for a given host, and the skip policy. No I/O; fully unit-tested.
+- `crates/mvm-cli/build_aux_helpers.rs` — **new** pure module: which helpers to build for a given host, and the skip policy. No I/O.
+- `crates/mvm-cli/tests/build_aux_helpers.rs` — **new** integration-test shim (mirrors `tests/build_embed_mode.rs`): `#[path]`-includes the build-script module and runs its tests. Build-script modules' inline `#[cfg(test)]` are invisible to `cargo test`, so tests for `build_aux_helpers.rs` must live in a `tests/` shim to execute.
 - `crates/mvm-cli/build.rs` — **modify**: include the new module, probe libkrun, run the native builds into a dedicated target dir, always emit `MVM_AUX_BIN_DIR`, add `rerun-if-changed`.
 - `crates/mvm-cli/src/commands/mod.rs` — **modify**: bridge the baked `MVM_AUX_BIN_DIR` into the process env at startup (`apply_startup_env`), plus a pure decision helper + test.
 - `crates/mvm-backend/src/aux_bin.rs` — **rewrite** to resolve-only: new `AuxBin { bin, env_var }`, `resolve()`, a pure candidate-ordering fn, precise missing-helper error. Delete `build_in_workspace`, the mtime auto-rebuild, and `helper_binaries_need_rebuild`.
@@ -39,14 +40,15 @@ Design doc: `specs/notes/buildtime-aux-helper-compilation-design.md`.
 
 **Files:**
 - Create: `crates/mvm-cli/build_aux_helpers.rs`
+- Create: `crates/mvm-cli/tests/build_aux_helpers.rs` (integration-test shim — build-script modules' inline `#[cfg(test)]` don't run under `cargo test`; mirror `tests/build_embed_mode.rs`)
 - Modify: `crates/mvm-cli/build.rs`
-- Test: `crates/mvm-cli/build_aux_helpers.rs` (inline `#[cfg(test)]`)
+- Test command: `cargo test -p mvm-cli --test build_aux_helpers`
 
 **Interfaces:**
 - Produces: env var `MVM_AUX_BIN_DIR` (via `cargo:rustc-env`) pointing at `OUT_DIR/aux-helper-target/<profile>`, always emitted (even when the build is skipped) so `env!("MVM_AUX_BIN_DIR")` compiles in mvm-cli. Helper binaries land at `<MVM_AUX_BIN_DIR>/<bin>`.
 - Produces (for Task tests): `build_aux_helpers::aux_helper_specs(target_os, target_arch, libkrun_present, skip) -> Vec<AuxHelperSpec>` and `build_aux_helpers::should_skip_aux_helpers(skip_env: Option<&str>) -> bool`.
 
-- [ ] **Step 1: Write the failing test** — create `crates/mvm-cli/build_aux_helpers.rs` with the module and tests:
+- [ ] **Step 1: Write the failing test** — create `crates/mvm-cli/build_aux_helpers.rs` with the module below. Put the `#[cfg(test)] mod tests` cases in the `tests/` shim (Step 2), NOT inline — a build-script module's inline tests never run under `cargo test`. The module (functions only):
 
 ```rust
 //! Pure selection logic for the native per-VM host helpers that mvm-cli's build
@@ -156,10 +158,24 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run the test to verify it fails** — the module isn't wired into the build-script crate graph yet, so it won't be discovered:
+Put the five tests in the shim `crates/mvm-cli/tests/build_aux_helpers.rs` (not an inline `#[cfg(test)]` mod — those don't run for a build-script module), mirroring `tests/build_embed_mode.rs`:
 
-Run: `cargo test -p mvm-cli --lib aux_helper 2>&1 | tail -5`
-Expected: no such tests run (0 filtered/matched) — the file exists but is not compiled anywhere.
+```rust
+#[path = "../build_aux_helpers.rs"]
+mod build_aux_helpers;
+
+use build_aux_helpers::{AuxHelperSpec, aux_helper_specs, should_skip_aux_helpers};
+
+fn bins(specs: &[AuxHelperSpec]) -> Vec<&str> {
+    specs.iter().map(|s| s.bin).collect()
+}
+// …the five #[test] fns from Step 1, referencing the imported items directly.
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+Run: `cargo test -p mvm-cli --test build_aux_helpers 2>&1 | tail -5`
+Expected: compile error / no functions — `aux_helper_specs` not defined yet.
 
 - [ ] **Step 3: Wire the module into build.rs and add the build step** — at the very top of `crates/mvm-cli/build.rs`, next to the existing `#[path = "build_embed_mode.rs"] mod build_embed_mode;`, add:
 
@@ -269,7 +285,7 @@ fn libkrun_header_present() -> bool {
 
 - [ ] **Step 4: Run the module tests to verify they pass**
 
-Run: `cargo test -p mvm-cli --lib aux_helper 2>&1 | tail -15`
+Run: `cargo test -p mvm-cli --test build_aux_helpers 2>&1 | tail -15`
 Expected: the five `build_aux_helpers` tests run and PASS.
 
 - [ ] **Step 5: Verify a real build produces the helpers and emits the env** — on this macOS/aarch64 host:
