@@ -128,14 +128,11 @@ test-cargo:
 #      gvproxy-orphan hang.
 e2e-core-demo:
     cargo build --bin mvmctl
-    # Plan 121 D2 folded the supervisor bin into mvm-vm-host; build the
-    # cfg-gated [[bin]] by crate + bin name (it is no longer its own crate).
-    cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
     MVM_E2E_SMOKE=1 MVM_BUILDER_BACKEND=libkrun cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
 
-# Build the per-VM host helper bins `mvmctl` spawns. `cargo run` builds only
-# `mvmctl`; the backend resolves these alongside the exe / in `target/` and also
-# self-builds them on the first `machine run`, so this is just the explicit route.
+# Build the per-VM host helper bins explicitly. mvmctl's build script already
+# compiles them during `cargo build`/`cargo run`; this is the manual route for
+# a targeted rebuild or CI.
 build-supervisors:
     cargo build -p mvm-hostd --bin mvm-substitution-endpoint
     cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
