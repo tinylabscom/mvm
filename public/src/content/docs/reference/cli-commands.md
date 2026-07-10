@@ -61,6 +61,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --allow-host HOST[:PORT]` | Allow egress only to these hosts (repeatable; PORT defaults to 443; wins over `--net`) |
 | `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
 | `mvmctl machine run --flake <ref> --flake-profile <variant>` | Flake package variant (e.g. worker, gateway) |
+| `mvmctl machine session start <template> --agent-verb <verb>` | Boot a prod session with an explicit ProdSafe agent-verb allow-list instead of the computed sealed-image default. Repeatable; refused with `--dev` |
 | `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
 | `mvmctl machine stop [name...]` | Stop one or more VMs by name, or `--all` |
 | `mvmctl ls` | List running VMs (aliases: `ps`, `status`) |

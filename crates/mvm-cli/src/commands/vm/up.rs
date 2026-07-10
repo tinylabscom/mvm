@@ -11,6 +11,7 @@ use mvm_backend::backend::AnyBackend;
 use mvm_backend::image;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::naming::validate_vm_name;
+use mvm_core::security::{AgentProfile, SecurityPolicy};
 
 use super::super::env::dev_vz::ensure_workload_kernel;
 use super::audit_chain::{AuditEmitter, default_audit_dir};
@@ -56,6 +57,8 @@ impl mvm_core::plan::BundleResolver for InMemoryBundleResolver {
 }
 
 use super::readiness::record_vm_readiness;
+
+pub(super) const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
 
 /// Build a `PlanArtifact` pin from a verified bundle archive.
 /// Pulls the 64-byte signature out of the `manifest.sig` entry,
@@ -608,18 +611,71 @@ pub(super) fn admit_plan_for_boot(
     }))
 }
 
-fn attach_host_signer_pubkey_config(
+pub(super) fn guest_profile_for_boot(
+    is_dev_mode: bool,
+    rootfs_path: &std::path::Path,
+) -> AgentProfile {
+    if is_dev_mode || !super::agent_verbs::image_is_sealed(rootfs_path) {
+        AgentProfile::Dev
+    } else {
+        AgentProfile::SealedProd
+    }
+}
+
+fn security_policy_for_profile(profile: AgentProfile) -> SecurityPolicy {
+    match profile {
+        AgentProfile::SealedProd => SecurityPolicy::default(),
+        AgentProfile::Dev => SecurityPolicy::dev_defaults(),
+        AgentProfile::Builder => SecurityPolicy {
+            profile: AgentProfile::Builder,
+            ..SecurityPolicy::default()
+        },
+    }
+}
+
+pub(super) fn attach_guest_security_policy_config(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    profile: AgentProfile,
+) -> Result<()> {
+    let content = serde_json::to_string(&security_policy_for_profile(profile))
+        .context("serializing guest security policy for config drive")?;
+    start_config
+        .config_files
+        .retain(|f| f.name != SECURITY_POLICY_FILENAME);
+    start_config
+        .config_files
+        .push(mvm_core::vm_backend::VmFile {
+            name: SECURITY_POLICY_FILENAME.to_string(),
+            content,
+            mode: 0o444,
+        });
+    Ok(())
+}
+
+pub(super) fn attach_guest_boot_config_for_plan(
+    start_config: &mut mvm_core::vm_backend::VmStartConfig,
+    plan: &mvm_core::plan::ExecutionPlan,
+    host_signer_public_path: &std::path::Path,
+    profile: AgentProfile,
+) -> Result<()> {
+    attach_host_signer_pubkey_config_for_plan(start_config, plan, host_signer_public_path)?;
+    attach_guest_security_policy_config(start_config, profile)
+}
+
+pub(super) fn attach_guest_boot_config(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     admission: &AdmissionContext,
+    profile: AgentProfile,
 ) -> Result<()> {
-    attach_host_signer_pubkey_config_for_plan(
+    attach_guest_boot_config_for_plan(
         start_config,
         &admission.admitted.plan,
         &admission.host_signer_public_path,
+        profile,
     )
 }
 
-fn attach_host_signer_pubkey_config_for_plan(
+pub(super) fn attach_host_signer_pubkey_config_for_plan(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     plan: &mvm_core::plan::ExecutionPlan,
     host_signer_public_path: &std::path::Path,
@@ -736,6 +792,7 @@ fn untrusted_transient_admit_in(
             tenant_id: c.admitted.plan.tenant.0.clone(),
             plan_json,
             bundle_json: None,
+            config_files: vec![],
         }))
     }
 }
@@ -945,7 +1002,7 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
-pub(super) fn persists_plan_before_start(hypervisor: &str) -> bool {
+pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
     matches!(hypervisor, "firecracker" | "vz" | "libkrun" | "hvf")
 }
 
@@ -1321,7 +1378,8 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     if let Some(ctx) = admission.as_ref() {
         thread_tenant_id(&mut start_config, &ctx.admitted);
         populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
-        attach_host_signer_pubkey_config(&mut start_config, ctx)?;
+        let guest_profile = guest_profile_for_boot(profile == "dev", rootfs_path);
+        attach_guest_boot_config(&mut start_config, ctx, guest_profile)?;
         if persists_plan_before_start(backend_name) {
             stash_plan_for_bridge(&start_config)?;
         }
@@ -1585,6 +1643,42 @@ mod host_signer_pubkey_config_tests {
         attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
 
         assert!(start_config.config_files.is_empty());
+    }
+
+    #[test]
+    fn attaches_sealed_security_policy_for_prod_boots() {
+        let mut start_config = VmStartConfig::default();
+
+        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
+
+        let file = start_config
+            .config_files
+            .iter()
+            .find(|file| file.name == SECURITY_POLICY_FILENAME)
+            .expect("security policy file attached");
+        let policy: SecurityPolicy =
+            serde_json::from_str(&file.content).expect("parse security policy");
+        assert_eq!(policy.profile, AgentProfile::SealedProd);
+        assert!(policy.require_auth);
+        assert!(!policy.access.console);
+    }
+
+    #[test]
+    fn attaches_dev_security_policy_for_dev_boots() {
+        let mut start_config = VmStartConfig::default();
+
+        attach_guest_security_policy_config(&mut start_config, AgentProfile::Dev).unwrap();
+
+        let file = start_config
+            .config_files
+            .iter()
+            .find(|file| file.name == SECURITY_POLICY_FILENAME)
+            .expect("security policy file attached");
+        let policy: SecurityPolicy =
+            serde_json::from_str(&file.content).expect("parse security policy");
+        assert_eq!(policy.profile, AgentProfile::Dev);
+        assert!(!policy.require_auth);
+        assert!(policy.access.console);
     }
 }
 

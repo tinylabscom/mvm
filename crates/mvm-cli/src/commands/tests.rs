@@ -809,6 +809,22 @@ fn machine_run_entrypoint_from_workload_ir_parses() {
 }
 
 #[test]
+fn machine_run_entrypoint_agent_verbs_parse() {
+    let args = parse_machine_run(&[
+        "--manifest",
+        "tmpl",
+        "--entrypoint",
+        "--agent-verb",
+        "run-entrypoint",
+        "--agent-verb",
+        "ping",
+    ])
+    .unwrap();
+    assert!(args.entrypoint);
+    assert_eq!(args.agent_verb, vec!["run-entrypoint", "ping"]);
+}
+
+#[test]
 fn machine_run_entrypoint_attach_parses_and_requires_name() {
     // `--attach` dispatches into a running machine named by `--name`; it
     // reinterprets the target and so conflicts with a fresh source + boot flags.
@@ -3756,6 +3772,34 @@ fn test_session_start_ephemeral_parses() {
         group::VmCmd::Session(session::Args {
             command: session::Cmd::Start(a),
         }) => assert!(a.ephemeral),
+        _ => panic!("expected session start"),
+    }
+}
+
+#[test]
+fn test_session_start_agent_verbs_parse() {
+    let cli = Cli::try_parse_from([
+        "mvmctl",
+        "machine",
+        "session",
+        "start",
+        "tmpl",
+        "--agent-verb",
+        "ping",
+        "--agent-verb",
+        "run-entrypoint",
+    ])
+    .unwrap();
+    let Commands::Machine(mg) = cli.command else {
+        panic!("expected vm group")
+    };
+    let machine::MachineAction::Vm(vmg) = mg.action else {
+        panic!("expected Vm action under machine")
+    };
+    match vmg {
+        group::VmCmd::Session(session::Args {
+            command: session::Cmd::Start(a),
+        }) => assert_eq!(a.agent_verb, vec!["ping", "run-entrypoint"]),
         _ => panic!("expected session start"),
     }
 }

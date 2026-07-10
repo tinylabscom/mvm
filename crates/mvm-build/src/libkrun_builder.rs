@@ -1742,7 +1742,10 @@ fn source_checkout_exe_target_dir_with_effective<'a>(
     let profile = exe_dir.file_name()?.to_str()?;
     let target_dir = exe_dir.parent()?;
     let default_target_dir = workspace_root.join("target");
-    if target_dir == default_target_dir || target_dir == effective_target_dir {
+    if target_dir == default_target_dir
+        || target_dir == effective_target_dir
+        || matches!(profile, "debug" | "release")
+    {
         Some((target_dir, profile))
     } else {
         None
@@ -1830,15 +1833,17 @@ fn build_supervisor_in_workspace(
     );
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut cmd = Command::new(cargo);
-    cmd.current_dir(workspace_root).args([
-        "build",
-        "-p",
-        LIBKRUN_SUPERVISOR_PACKAGE,
-        "--bin",
-        LIBKRUN_SUPERVISOR_BIN,
-        "--features",
-        "libkrun-sys",
-    ]);
+    cmd.current_dir(workspace_root)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .args([
+            "build",
+            "-p",
+            LIBKRUN_SUPERVISOR_PACKAGE,
+            "--bin",
+            LIBKRUN_SUPERVISOR_BIN,
+            "--features",
+            "libkrun-sys",
+        ]);
     match profile {
         "debug" => {}
         "release" => {
@@ -3261,6 +3266,15 @@ mod tests {
         assert!(cmd.contains("cores = 0"));
         assert!(cmd.contains("auto-optimise-store = true"));
         assert!(cmd.contains("XDG_CACHE_HOME=/nix-store/.cache"));
+        assert!(
+            cmd.contains(
+                "export PATH=/usr/local/sbin:/usr/local/bin:/sbin:/usr/sbin:/bin:/usr/bin"
+            )
+        );
+        assert!(cmd.contains("NIX_BIN=/sbin/nix"));
+        assert!(cmd.contains("NIX_STORE_BIN=/sbin/nix-store"));
+        assert!(cmd.contains("\"$NIX_BIN\" build"));
+        assert!(cmd.contains("\"$NIX_STORE_BIN\" --add-root"));
         assert!(cmd.contains("printf '%s\\n' \"$NIX_OUT\" > /job/store-path"));
         // Legacy (no-override) mode never injects an mvm override.
         assert!(!cmd.contains("--override-input mvm"));
@@ -4151,6 +4165,19 @@ mod tests {
             .is_none(),
             "installed layouts must not be treated as source-checkout cargo target dirs"
         );
+    }
+
+    #[test]
+    fn source_checkout_exe_target_dir_accepts_standalone_debug_release_layouts() {
+        let root = Path::new("/repo/mvm");
+        let effective = root.join("target");
+        let exe_dir = Path::new("/tmp/mvm236-proof-target").join("debug");
+        let (target_dir, profile) =
+            source_checkout_exe_target_dir_with_effective(&exe_dir, root, &effective)
+                .expect("standalone debug target dir should still be treated as cargo output");
+
+        assert_eq!(target_dir, Path::new("/tmp/mvm236-proof-target"));
+        assert_eq!(profile, "debug");
     }
 
     /// A sibling build outranks `$PATH` when it is missing/newer/equal, but a

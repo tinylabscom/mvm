@@ -186,6 +186,12 @@ pub(in crate::commands) struct StartArgs {
     /// substrate's safe-default discipline).
     #[arg(long)]
     pub dev: bool,
+    /// Restrict the sealed prod session's granted ProdSafe verbs to
+    /// this explicit allow-list instead of the computed default.
+    /// Repeatable. Refused with `--dev`, which stays permissive by
+    /// contract.
+    #[arg(long = "agent-verb", value_name = "VERB")]
+    pub agent_verb: Vec<String>,
     /// vCPU count for the booted VM. Default 2.
     #[arg(long, default_value = "2")]
     pub cpus: u32,
@@ -234,6 +240,13 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
         Cmd::Console(a) => cmd_console(a),
         Cmd::Reap(a) => cmd_reap(cli, a),
     }
+}
+
+fn validate_start_args(args: &StartArgs) -> Result<()> {
+    if args.dev && !args.agent_verb.is_empty() {
+        bail!("--agent-verb is refused with --dev; dev sessions stay permissive by contract");
+    }
+    Ok(())
 }
 
 /// Iterate the session table, tear down VMs whose `idle_timeout_secs`
@@ -552,7 +565,11 @@ fn dispatch_update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> 
     let req = mvm_guest::vsock::GuestRequest::UpdateIdleTimeout { secs };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    match classify_update_idle_response(mvm_guest::vsock::call_unary(&mut stream, &req)?) {
+    let resp = mvm_guest::vsock::call_unary(&mut stream, &req).map_err(anyhow::Error::from);
+    if let Err(err) = &resp {
+        super::verb_audit::audit_verb_refusal(vm_name, err);
+    }
+    match classify_update_idle_response(resp?) {
         UpdateIdleOutcome::Applied {
             previous_secs,
             applied_secs,
@@ -942,6 +959,10 @@ fn rfc3339_now() -> String {
 /// the session lifecycle, no work yet.
 fn cmd_start(args: StartArgs) -> Result<()> {
     use mvm_core::session::{SessionMode, SessionRecord};
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    validate_start_args(&args)?;
 
     if args.idle_timeout == 0 {
         bail!("--idle-timeout must be > 0");
@@ -967,15 +988,98 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     } else {
         SessionMode::Prod
     };
+    let backend_name = mvm_backend::backend::AnyBackend::auto_select()
+        .name()
+        .to_string();
+    let admit_backend = backend_name.clone();
+    let cpus = args.cpus;
+    let mem_mib = u64::from(args.memory_mib);
+    let agent_verb_override = args.agent_verb.clone();
+    let is_dev = args.dev;
+    let admit_ctx: Rc<RefCell<Option<super::up::AdmissionContext>>> = Rc::new(RefCell::new(None));
+    let ctx_sink = Rc::clone(&admit_ctx);
+    let admit = move |rootfs: &std::path::Path,
+                      vm_name: &str|
+          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+        let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+            tenant: "local",
+            vm_name,
+            backend_name: &admit_backend,
+            rootfs_path: rootfs,
+            precomputed_image_sha256: None,
+            cpus,
+            mem_mib,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            secrets: vec![],
+            auth: mvm_core::plan::AuthPolicy::none(),
+            no_supervisor: false,
+            ledger: &ledger,
+            keys_dir: None,
+            audit_dir: None,
+            policy_dir: None,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: vec![],
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            agent_verb_override: agent_verb_override.clone(),
+            restrict_agent_verbs: !is_dev
+                && crate::commands::vm::agent_verbs::image_is_sealed(rootfs),
+        })?;
+        let Some(ctx) = ctx else { return Ok(None) };
+        let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
+        let guest_profile = super::up::guest_profile_for_boot(is_dev, rootfs);
+        super::up::attach_guest_boot_config_for_plan(
+            &mut start_config,
+            &ctx.admitted.plan,
+            &ctx.host_signer_public_path,
+            guest_profile,
+        )?;
+        let plan_json = serde_json::to_string(&ctx.admitted.signed)
+            .context("serializing admitted plan for session start")?;
+        let bundle_json = ctx
+            .policy_bundle
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .context("serializing admitted policy bundle for session start")?;
+        let tenant_id = ctx.admitted.plan.tenant.0.clone();
+        let config_files = start_config.config_files;
+        *ctx_sink.borrow_mut() = Some(ctx);
+        Ok(Some(crate::exec::SessionAuditSubstrate {
+            tenant_id,
+            plan_json,
+            bundle_json,
+            config_files,
+        }))
+    };
 
     ui::info(&format!(
         "session start: booting {mode} session for template '{template_id}'"
     ));
-    let vm =
-        crate::exec::boot_session_vm(&template_id, "session", args.cpus, args.memory_mib, None)
-            .context("Booting session VM")?;
+    let vm = match crate::exec::boot_session_vm(
+        &template_id,
+        "session",
+        args.cpus,
+        args.memory_mib,
+        Some(&admit),
+    ) {
+        Ok(vm) => {
+            let ctx = admit_ctx.borrow_mut().take();
+            super::up::emit_launched_if(&ctx, &backend_name);
+            vm
+        }
+        Err(e) => {
+            let ctx = admit_ctx.borrow_mut().take();
+            super::up::emit_failed_if(&ctx, "backend-start", &e);
+            return Err(e).context("Booting session VM");
+        }
+    };
 
     if !crate::exec::wait_for_agent(&vm.vm_name, 30) {
+        let err = anyhow::anyhow!("guest agent did not become reachable within 30s");
         // Roll back the boot — the agent never came up, so the VM is
         // unusable. Don't leave dead state in the session table.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -983,7 +1087,9 @@ fn cmd_start(args: StartArgs) -> Result<()> {
                 vm_name: vm.vm_name.clone(),
             })
         }));
-        anyhow::bail!("guest agent did not become reachable within 30s");
+        let ctx = admit_ctx.borrow_mut().take();
+        super::up::emit_failed_if(&ctx, "agent-wait", &err);
+        return Err(err);
     }
 
     let mut record = SessionRecord::new_running(&vm.vm_name, &template_id, mode);
@@ -1169,6 +1275,25 @@ mod tests {
         assert!(
             err.to_string().contains("ceiling"),
             "expected ceiling error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_start_args_refuses_agent_verbs_on_dev() {
+        let err = validate_start_args(&StartArgs {
+            manifest: "tmpl".into(),
+            dev: true,
+            agent_verb: vec!["ping".into()],
+            cpus: 2,
+            memory_mib: 512,
+            idle_timeout: mvm_core::session::DEFAULT_IDLE_TIMEOUT_SECS,
+            ephemeral: false,
+        })
+        .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("--agent-verb is refused with --dev"),
+            "expected explicit dev conflict error, got: {err}"
         );
     }
 

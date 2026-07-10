@@ -100,6 +100,11 @@ let
     in
     "${attrText} ${asString}";
 
+  deindent = text:
+    lib.concatStringsSep "\n" (
+      map (line: lib.removePrefix "    " line) (lib.splitString "\n" text)
+    );
+
 in
 { name
 , entrypoint
@@ -358,7 +363,7 @@ let
   #
   # PID 1 stays uid 0 (kernel mandate); both children run rootless
   # by default in production (see uids resolution above).
-  initScript = pkgs.writeScript "mvm-init" ''
+  initScript = pkgs.writeScript "mvm-init" (deindent ''
     #!/bin/sh
     # mvm /init — busybox PID 1.
 
@@ -425,6 +430,13 @@ let
     /bin/busybox ip link set lo up 2>/dev/null \
       || /bin/busybox ifconfig lo up 2>/dev/null \
       || echo "mvm-init: WARNING could not bring up loopback (no ip/ifconfig applet); guest-internal loopback (egress forward proxy, addon-dns) will be unreachable"
+
+    # Stage 2.45 — mount the optional config/secrets drives. The host uses a
+    # deterministic block order: vdb=config, vdc=secrets. These mounts are
+    # best-effort and read-only; guests without one or both drives keep booting.
+    /bin/busybox mkdir -p /mnt/config /mnt/secrets
+    [ ! -b /dev/vdb ] || /bin/busybox mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdb /mnt/config || true
+    [ ! -b /dev/vdc ] || /bin/busybox mount -t ext4 -o ro,noexec,nosuid,nodev /dev/vdc /mnt/secrets || true
 
     # Stage 2.3 — user-supplied volumes (`--volume` / MVM_VOLUMES).
     # The host (mvm_core::vm_backend::encode_user_volumes_cmdline) wrote
@@ -788,7 +800,7 @@ let
       echo "mvm: exit-report failed (code=$MVM_CODE); powering off anyway"
     /bin/busybox sync
     /bin/busybox poweroff -f
-  '';
+  '');
 
   # Render the entrypoint as a shell-sourced fragment. /init does
   # `. /etc/mvm/entrypoint`, so this is just a script.
@@ -832,10 +844,10 @@ let
   nameFile = pkgs.writeText "mvm-name" "${name}\n";
 
   # Verb-trust policy — baked into sealed images only (`isSealed`).
-  # Absent on dev images (withDevShell = true). Content is the
-  # measure-now stage: require_grant:false, grant_key_source from launch.
+  # Absent on dev images (withDevShell = true). Sealed images fail
+  # closed: control RPCs require a launch-provisioned grant.
   verbTrustFile = pkgs.writeText "mvm-verb-trust"
-    ''{"version":1,"require_grant":false,"grant_key_source":"launch_provisioned"}'';
+    ''{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}'';
 
   # ── mvm-guest-agent — production Rust binary
   #
@@ -980,6 +992,7 @@ let
     # there's no init=/init kernel param). We point both at our
     # custom init script so either path works.
     cp ${initScript} "$out/init"
+    ${pkgs.gnused}/bin/sed -i '1s/^ *//' "$out/init"
     chmod 0500 "$out/init"
     ln -sf /init "$out/sbin/init"
 
