@@ -108,10 +108,15 @@ only if the numbers force it.
   signed-credential broker (`host.secrets.v1`); the real, shipped mechanism is
   host-side egress substitution. Reconcile the numbered claims with the substitution
   path.
-- The implementation **must coordinate with the in-flight egress branches**
-  (`fix/host-http-forward-proxy`, `feat/guest-vsock-session-refactor`, the
-  vsock-egress-cutover line) rather than opening a competing branch — those touch the
-  same substitution/vsock code.
+- The implementation **must rebase onto the active tunnel-hardening work**, not open a
+  competing branch. The primary base is `feat/plan-236-2a-l3-forward`, which is
+  actively expanding `network_tunnel.rs` / `network_tunnel_spawn.rs` / `net_l3.rs`
+  (adds a no-guest-NIC claim + a legacy-workload-transport gate) — the exact
+  orchestration this unification reworks. It composes with that work (it locks in
+  vsock-only/no-NIC; this ADR unifies the host forwarder behind it), but the
+  unification lands only after it settles. The substitution/vsock edges also overlap
+  `fix/host-http-forward-proxy`, `feat/guest-vsock-session-refactor`, and the
+  vsock-egress-cutover line.
 
 ## Out of scope (for this ADR)
 
