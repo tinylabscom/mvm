@@ -1626,7 +1626,7 @@ mod tests {
         args.env.push("HTTP_PROXY=override".to_string());
         args.env.push("APP_MODE=dev".to_string());
 
-        let receipt = ReceiptInput::from_run_args(&args, "hvf").expect("receipt input");
+        let receipt = ReceiptInput::from_run_args(&args, "libkrun").expect("receipt input");
         let mut env_keys = std::collections::BTreeSet::from_iter(receipt.env_keys.clone());
         env_keys.extend(
             oci_vsock_proxy_env_for_capabilities(
