@@ -1,6 +1,6 @@
 # Plan 236 — Host-authority runtime roadmap
 
-**Status:** IN PROGRESS (GO; macOS verb-grant witness remains)  
+**Status:** IN PROGRESS (GO; macOS verb-grant witness remains)
 **Created:** 2026-07-09  
 **Goal:** turn `mvm`'s current security and architecture lead into a simpler,
 more competitive product by finishing the host-authority model, removing
@@ -42,11 +42,16 @@ re-pin envelopes to the currently pinned VM lineage (`predecessor_session_id` +
 replace the current VM's grant during `PostRestore`; focused guest/core/CLI
 tests plus green `cargo clippy --workspace --all-targets -- -D warnings` and
 host `cargo test --workspace` validation closed the cross-VM replay residual.
-Remaining honest blockers: the separate macOS live-proof of vsock-only
-verb-grant enforcement still needs to be captured. The earlier
-production/verity OCI seal-path blocker is now closed on
-`feat/plan-236-oci-seal-closeout`, including a signed BusyBox prod witness, so
-this replay-binding slice no longer carries that as an open dependency.
+The first Phase 2C CI/lint expansion also landed:
+`xtask check-vsock-only-egress` now guards the raw host-authority tunnel files
+(`network_tunnel_spawn`, guest tunnel/TUN code, and host tunnel/TUN code) in
+addition to the older vmm/HVF NIC-free path, so those converged runtime seams
+fail closed if a future change reintroduces `virtio-net`, `passt`, `gvproxy`,
+or similar guest-network/helper tokens there. Remaining honest blockers: the
+separate macOS live-proof of vsock-only verb-grant enforcement still needs to
+be captured. The earlier production/verity OCI seal-path blocker is now closed
+on `feat/plan-236-oci-seal-closeout`, including a signed BusyBox prod witness,
+so this roadmap no longer carries that as an open dependency.
 
 ## Thesis
 

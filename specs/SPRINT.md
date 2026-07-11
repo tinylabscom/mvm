@@ -724,6 +724,18 @@ plan 25 sequences the work into six independently-shippable workstreams.
       reuse bounded pump loops, strict size limits, and fail-closed relay
       behavior, but do not import the semantic DNS/TCP/UDP protocol or the
       host/guest return-path packet-synthesis model into the Phase 2 baseline.
+- [x] Advanced the Plan 236 Phase 2C CI/lint gate line on 2026-07-10 by
+      widening `xtask check-vsock-only-egress` over the new raw
+      host-authority tunnel files. The gate now covers the backend tunnel spawn
+      seam plus the guest and host tunnel/TUN runtime files, so those converged
+      paths fail closed if a future change reintroduces guest-NIC or legacy
+      helper tokens such as `virtio-net`, `passt`, or `gvproxy`. The xtask also
+      now has unit coverage for mixed file/directory guards and for skipping
+      comment-only mentions while still flagging code hits. Validation:
+      `cargo fmt --all`; `cargo test --offline -p xtask
+      check_vsock_only_egress -- --test-threads=1`; `cargo clippy --offline -p
+      xtask -- -D warnings`; `cargo run --offline -p xtask --
+      check-vsock-only-egress`.
 - [x] Refreshed the Plan 236 execution line on 2026-07-10 after `main` moved.
       The GO checker now compares against `origin/main` when available and
       treats the merged Plan 219 refresh (`#1605`) and merged port-handler
@@ -737,7 +749,6 @@ plan 25 sequences the work into six independently-shippable workstreams.
       refresh" as GO rather than requiring an artificial ahead-of-main delta.
       Plan 236's remaining blockers are therefore the honest live-proof and
       production-evidence gaps, not stale branch hygiene.
-<<<<<<< HEAD
 - [x] Started the shared cross-backend tunnel contract for Plan 236 Phase 2A in
       `mvm_core::protocol::network_tunnel`. The new core seam now pins a
       bounded whole-frame format for the guest-TUN ↔ host-worker path, typed
