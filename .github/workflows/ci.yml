@@ -145,6 +145,9 @@ jobs:
       - name: workload guest images bake no host/builder tools
         run: cargo run -p xtask -- check-guest-images-no-builder-tools
 
+      - name: OCI guest-binary name lists agree
+        run: cargo run -p xtask -- check-guest-binary-lists
+
       - name: no new builder shell-job dispatch sites
         run: cargo run -p xtask -- check-builder-shell-job-sites
 
