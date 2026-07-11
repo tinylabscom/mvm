@@ -345,7 +345,10 @@ fn encode_iface_name(iface: &str) -> Result<[libc::c_char; libc::IFNAMSIZ], Stri
     Ok(buf)
 }
 
+// `libc::TUNSETIFF` is `Ioctl`-typed, which is `u64` on gnu/64-bit but `i32`
+// on musl — the `as u64` normalizes it and is not redundant on every target.
 #[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_cast)]
 const TUNSETIFF_REQUEST: libc::Ioctl = target_ioctl_request(libc::TUNSETIFF as u64);
 
 #[cfg(target_os = "linux")]
@@ -393,6 +396,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[allow(clippy::unnecessary_cast)]
     fn tun_ioctl_request_fits_target_request_type() {
         assert_eq!(TUNSETIFF_REQUEST as u64, libc::TUNSETIFF as u64);
     }

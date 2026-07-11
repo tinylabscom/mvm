@@ -90,7 +90,10 @@ impl GuestTunDevice {
     }
 }
 
+// `libc::TUNSETIFF` is `Ioctl`-typed, which is `u64` on gnu/64-bit but `i32`
+// on musl — the `as u64` normalizes it and is not redundant on every target.
 #[cfg(target_os = "linux")]
+#[allow(clippy::unnecessary_cast)]
 const TUNSETIFF_REQUEST: libc::Ioctl = target_ioctl_request(libc::TUNSETIFF as u64);
 
 #[cfg(target_os = "linux")]
