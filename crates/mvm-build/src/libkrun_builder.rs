@@ -427,19 +427,9 @@ impl LibkrunBuilderVm {
         // powers off on a failed build too. Read the guest's terminal marker
         // from the console so a nix failure surfaces here with its own log
         // instead of as a downstream "rootfs.ext4 missing" error.
-        let console_str = console_log.to_string_lossy();
         let console = std::fs::read_to_string(&console_log).unwrap_or_default();
-        match stage0_console_halt_outcome(&console) {
-            Stage0HaltOutcome::CleanHalt => Ok(()),
-            Stage0HaltOutcome::BuildFailed => Err(BuilderVmError::NixBuildFailed(format!(
-                "nix build failed inside the Stage 0 guest; console log at {console_str}\n{}",
-                read_console_tail(&console_str, 20)
-            ))),
-            Stage0HaltOutcome::NoCleanHalt => Err(BuilderVmError::ExtractionFailed(format!(
-                "Stage 0 guest did not reach a clean halt; console log at {console_str}\n{}",
-                read_console_tail(&console_str, 20)
-            ))),
-        }
+        let console_log_path = console_log.to_string_lossy();
+        stage0_run_result(&console, &console_log_path)
     }
 
     /// Run an in-tree shell script inside the existing builder VM
@@ -2602,6 +2592,25 @@ fn stage0_console_halt_outcome(log: &str) -> Stage0HaltOutcome {
     }
 }
 
+/// Turn a Stage 0 console's terminal state into the caller's result,
+/// naming the console log path in both failure messages so an operator
+/// always knows where to look instead of hitting a downstream error that
+/// hides the real cause. Split out of the supervisor-wait call site so
+/// this message construction is unit-testable without spawning a VM.
+fn stage0_run_result(console: &str, console_log_path: &str) -> Result<(), BuilderVmError> {
+    match stage0_console_halt_outcome(console) {
+        Stage0HaltOutcome::CleanHalt => Ok(()),
+        Stage0HaltOutcome::BuildFailed => Err(BuilderVmError::NixBuildFailed(format!(
+            "nix build failed inside the Stage 0 guest; console log at {console_log_path}\n{}",
+            read_console_tail(console_log_path, 20)
+        ))),
+        Stage0HaltOutcome::NoCleanHalt => Err(BuilderVmError::ExtractionFailed(format!(
+            "Stage 0 guest did not reach a clean halt; console log at {console_log_path}\n{}",
+            read_console_tail(console_log_path, 20)
+        ))),
+    }
+}
+
 /// Render a Path as a `&str` or surface a clear error if it
 /// contains non-UTF-8 bytes. libkrun's C API takes
 /// `*const c_char`; rejecting non-UTF-8 here pins the failure
@@ -3818,6 +3827,28 @@ mod tests {
         assert_eq!(
             stage0_console_halt_outcome("kernel panic - not syncing\n"),
             Stage0HaltOutcome::NoCleanHalt
+        );
+    }
+
+    #[test]
+    fn stage0_run_result_build_failure_names_the_console_log_path() {
+        // Drive the same path a real Stage 0 build failure takes: the guest
+        // powered off cleanly but printed the build-failed marker, so the
+        // caller must not read the clean exit as success — and the resulting
+        // error must tell the operator exactly which console log to read.
+        let err = stage0_run_result(
+            "stage0-init: build failed: nix build exit 1\n",
+            "/tmp/mvm-stage0-test/console.log",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, BuilderVmError::NixBuildFailed(_)),
+            "expected NixBuildFailed, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("console log at /tmp/mvm-stage0-test/console.log"),
+            "error should name the console log path: {err}"
         );
     }
 

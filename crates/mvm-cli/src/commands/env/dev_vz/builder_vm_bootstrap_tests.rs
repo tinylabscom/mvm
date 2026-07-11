@@ -110,6 +110,26 @@ fn find_reusable_builder_kernel_detects_builder_image_vmlinux() {
 }
 
 #[test]
+fn reusable_builder_kernel_wins_over_build_even_when_source_build_requested() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().to_str().unwrap();
+    let arch = "aarch64";
+    let dir = tmp.path().join(format!("builder-vm/{arch}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let vmlinux = dir.join("vmlinux");
+    std::fs::write(&vmlinux, b"vmlinux").unwrap();
+
+    // A cold `--image` run in a source checkout requests a local build by
+    // default, but a builder kernel is already on disk from an earlier `dev
+    // up` / builder-image build. Reuse must win over that build request so
+    // the run never redundantly rebuilds a kernel it already has.
+    assert_eq!(
+        resolve_workload_kernel_bootstrap(cache, arch, false, true),
+        WorkloadKernelBootstrap::ReusableBuilder(vmlinux.to_str().unwrap().to_string())
+    );
+}
+
+#[test]
 #[cfg(feature = "builder-vm")]
 fn build_heartbeat_emits_while_alive_and_stops_on_drop() {
     use std::sync::Arc;

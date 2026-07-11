@@ -69,8 +69,8 @@ pub(in crate::commands) fn bootstrap_builder_vm_image() -> Result<()> {
                 // the Stage 0 build is otherwise silent for minutes and would read
                 // as a hang.
                 let verbose = mvm::ui::is_verbose();
-                let _heartbeat =
-                    (!verbose).then(|| BuildHeartbeat::start("Builder VM image build"));
+                let _heartbeat = (!verbose)
+                    .then(|| BuildHeartbeat::start("Preparing the builder VM (one-time setup)"));
                 bootstrap_builder_vm_image_via_root_dir_stage0(
                     &flake_dir,
                     &out_dir,
