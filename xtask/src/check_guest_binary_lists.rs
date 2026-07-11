@@ -32,17 +32,31 @@ pub fn run(workspace: &Path) -> Result<()> {
     let universe = guest_bin_universe(workspace)?;
 
     let lists = [
-        ("guest_agent_build.rs argv", extract_bin_flags(workspace, GUEST_AGENT_BUILD)?),
-        ("mvm-cli/build.rs argv", extract_bin_flags(workspace, CLI_BUILD_RS)?),
-        ("oci_runtime_inject.rs MvmRuntimeBinaries", extract_runtime_struct(workspace, OCI_INJECT)?),
-        ("image/mod.rs find() lookups", extract_find_calls(workspace, IMAGE_MOD)?),
+        (
+            "guest_agent_build.rs argv",
+            extract_bin_flags(workspace, GUEST_AGENT_BUILD)?,
+        ),
+        (
+            "mvm-cli/build.rs argv",
+            extract_bin_flags(workspace, CLI_BUILD_RS)?,
+        ),
+        (
+            "oci_runtime_inject.rs MvmRuntimeBinaries",
+            extract_runtime_struct(workspace, OCI_INJECT)?,
+        ),
+        (
+            "image/mod.rs find() lookups",
+            extract_find_calls(workspace, IMAGE_MOD)?,
+        ),
     ];
 
     // Every list must be non-empty — an empty extraction means a refactor moved
     // the list and this check silently stopped guarding it.
     for (label, set) in &lists {
         if set.is_empty() {
-            bail!("no guest binary names extracted from {label}; the list moved — update this check");
+            bail!(
+                "no guest binary names extracted from {label}; the list moved — update this check"
+            );
         }
     }
 
@@ -87,9 +101,13 @@ pub fn run(workspace: &Path) -> Result<()> {
 /// `mvm-guest-helpers` — the universe a listed guest binary must belong to.
 fn guest_bin_universe(workspace: &Path) -> Result<BTreeSet<String>> {
     let mut out = BTreeSet::new();
-    for crate_rel in ["crates/mvm-guest/Cargo.toml", "crates/mvm-guest-helpers/Cargo.toml"] {
+    for crate_rel in [
+        "crates/mvm-guest/Cargo.toml",
+        "crates/mvm-guest-helpers/Cargo.toml",
+    ] {
         let path = workspace.join(crate_rel);
-        let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+        let src =
+            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
         out.extend(parse_bin_names(&src));
     }
     Ok(out)
@@ -122,10 +140,7 @@ fn parse_bin_names(manifest: &str) -> BTreeSet<String> {
 fn extract_bin_flags(workspace: &Path, rel: &str) -> Result<BTreeSet<String>> {
     let src = read(workspace, rel)?;
     let re = Regex::new(r#""--bin"(?:\.to_string\(\))?\s*,\s*"(mvm-[a-z0-9-]+)""#).unwrap();
-    Ok(re
-        .captures_iter(&src)
-        .map(|c| c[1].to_string())
-        .collect())
+    Ok(re.captures_iter(&src).map(|c| c[1].to_string()).collect())
 }
 
 /// Guest binary names named in the `MvmRuntimeBinaries` struct field docs — each
@@ -166,7 +181,10 @@ mod tests {
         let manifest = std::env::var("CARGO_MANIFEST_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default());
-        manifest.parent().map(|p| p.to_path_buf()).unwrap_or(manifest)
+        manifest
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or(manifest)
     }
 
     #[test]
@@ -184,13 +202,17 @@ name = "mvm-oci-init"
         let bins = parse_bin_names(manifest);
         assert!(bins.contains("mvm-guest-agent"));
         assert!(bins.contains("mvm-oci-init"));
-        assert!(!bins.contains("mvm-guest"), "package name must not be a bin");
+        assert!(
+            !bins.contains("mvm-guest"),
+            "package name must not be a bin"
+        );
     }
 
     #[test]
     fn extract_bin_flags_handles_both_argv_forms() {
         // The plain build.rs form and the `.to_string()` guest_agent_build form.
-        let build_rs = r#"cmd.args(["zigbuild", "--bin", "mvm-oci-init", "--bin", "mvm-guest-agent"]);"#;
+        let build_rs =
+            r#"cmd.args(["zigbuild", "--bin", "mvm-oci-init", "--bin", "mvm-guest-agent"]);"#;
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.rs"), build_rs).unwrap();
         let got = extract_bin_flags(tmp.path(), "a.rs").unwrap();
@@ -223,7 +245,10 @@ name = "mvm-oci-init"
             "mvm-egress-client".to_string(),
             "mvm-verity-init".to_string(),
         ]);
-        assert_eq!(extract_bin_flags(&root, GUEST_AGENT_BUILD).unwrap(), expected);
+        assert_eq!(
+            extract_bin_flags(&root, GUEST_AGENT_BUILD).unwrap(),
+            expected
+        );
         assert_eq!(extract_bin_flags(&root, CLI_BUILD_RS).unwrap(), expected);
         assert_eq!(extract_runtime_struct(&root, OCI_INJECT).unwrap(), expected);
         assert_eq!(extract_find_calls(&root, IMAGE_MOD).unwrap(), expected);

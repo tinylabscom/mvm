@@ -210,9 +210,7 @@ impl GuestAgentBuildSpec {
     /// ambient `CARGO_TARGET_DIR` — [`build_guest_binaries`] pins the env to
     /// `target_dir`.
     pub fn output_dir(&self) -> PathBuf {
-        self.target_dir
-            .join(self.target_triple())
-            .join("release")
+        self.target_dir.join(self.target_triple()).join("release")
     }
 }
 
