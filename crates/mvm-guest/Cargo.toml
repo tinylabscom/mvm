@@ -53,6 +53,14 @@ path = "src/bin/mvm-verity-init.rs"
 name = "mvm-guest-netinit"
 path = "src/bin/mvm-guest-netinit.rs"
 
+# Long-lived guest-side packet-tunnel worker. When the shared
+# `mvm.network_tunnel=` cmdline token is present, `mvm-guest-netinit`
+# spawns this helper after boot-time route hardening so it can own the
+# TUN device + vsock session for the VM lifetime.
+[[bin]]
+name = "mvm-guest-netd"
+path = "src/bin/mvm-guest-netd.rs"
+
 # Static PID 1 injected into arbitrary OCI rootfs trees by `run --image`.
 # It performs the mvm boot/runtime setup with syscalls and direct process
 # spawns, so scratch/distroless images do not need `/bin/sh`, busybox, coreutils,

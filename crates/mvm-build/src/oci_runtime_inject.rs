@@ -11,7 +11,8 @@
 //! tree *before* it is sealed into `rootfs.ext4`, baking in:
 //!
 //! - `/init`, `/usr/local/bin/mvm-guest-agent`,
-//!   `/usr/local/bin/mvm-guest-netinit`, and
+//!   `/usr/local/bin/mvm-guest-netinit`,
+//!   `/usr/local/bin/mvm-guest-netd`, and
 //!   `/usr/local/bin/mvm-egress-client` — the cross-compiled guest binaries.
 //!   `/init` is a static Rust PID 1, not a shell script, so the source OCI image
 //!   does not need `/bin/sh`, busybox, coreutils, or its own init system.
@@ -48,6 +49,8 @@ pub struct MvmRuntimeBinaries {
     pub agent: PathBuf,
     /// Static guest netinit binary (`mvm-guest-netinit`).
     pub netinit: PathBuf,
+    /// Static guest network tunnel daemon (`mvm-guest-netd`).
+    pub netd: PathBuf,
     /// Static guest egress shim (`mvm-egress-client`).
     pub egress_client: PathBuf,
     /// Static OCI entrypoint runner (`mvm-oci-entrypoint`).
@@ -73,15 +76,21 @@ pub struct OciEntrypointConfig {
 /// Where the injected guest binaries land inside the rootfs.
 const AGENT_DEST: &str = "usr/local/bin/mvm-guest-agent";
 const NETINIT_DEST: &str = "usr/local/bin/mvm-guest-netinit";
+const NETD_DEST: &str = "usr/local/bin/mvm-guest-netd";
 const EGRESS_CLIENT_DEST: &str = "usr/local/bin/mvm-egress-client";
 const ENTRYPOINT_RUNNER_DEST: &str = "usr/lib/mvm/wrappers/oci-entrypoint";
 const ENTRYPOINT_MARKER_DEST: &str = "etc/mvm/entrypoint";
 const OCI_ENTRYPOINT_CONFIG_DEST: &str = "etc/mvm/oci-entrypoint.json";
+/// The measured verb-trust policy the guest agent reads at
+/// `/etc/mvm/verb-trust.json`. Written only into a sealed rootfs so the
+/// require-grant requirement is intrinsic to the dm-verity-hashed data,
+/// fail-closed even if the host omits the require-grant cmdline token.
+const VERB_TRUST_DEST: &str = "etc/mvm/verb-trust.json";
 
 /// Inject the mvm runtime into the OCI-unpacked `rootfs_dir`.
 ///
 /// Idempotent: re-running overwrites the injected files. Returns the
-/// paths created (the `/init` and the two binary destinations) so the
+/// paths created (the `/init` and the runtime binary destinations) so the
 /// caller can log/verify them.
 pub fn inject_mvm_runtime(
     rootfs_dir: &Path,
@@ -126,14 +135,30 @@ pub fn inject_mvm_runtime(
     write_file(&etc_mvm.join("variant"), variant, 0o644)?;
     write_file(&etc_mvm.join("name"), b"oci\n", 0o644)?;
 
+    // Bake the require-grant policy into the sealed rootfs so it rides inside
+    // the verity-hashed data — the guest ORs it with the cmdline token, so a
+    // host that forgets the token still lands fail-closed. Dev stays absent
+    // (permissive default).
+    if sealed {
+        let policy = mvm_core::plan::VerbTrustPolicy {
+            version: mvm_core::plan::VERB_TRUST_POLICY_VERSION,
+            require_grant: true,
+            grant_key_source: mvm_core::plan::GrantKeySource::LaunchProvisioned,
+        };
+        let policy_json = serde_json::to_vec(&policy).map_err(io::Error::other)?;
+        write_file(&rootfs_dir.join(VERB_TRUST_DEST), &policy_json, 0o444)?;
+    }
+
     // Baked guest binaries.
     let bin_dir = rootfs_dir.join("usr").join("local").join("bin");
     std::fs::create_dir_all(&bin_dir)?;
     let agent_dest = rootfs_dir.join(AGENT_DEST);
     let netinit_dest = rootfs_dir.join(NETINIT_DEST);
+    let netd_dest = rootfs_dir.join(NETD_DEST);
     let egress_client_dest = rootfs_dir.join(EGRESS_CLIENT_DEST);
     copy_exec(&bins.agent, &agent_dest)?;
     copy_exec(&bins.netinit, &netinit_dest)?;
+    copy_exec(&bins.netd, &netd_dest)?;
     copy_exec(&bins.egress_client, &egress_client_dest)?;
     let entrypoint_runner_dest = rootfs_dir.join(ENTRYPOINT_RUNNER_DEST);
     copy_file_with_mode(&bins.entrypoint_runner, &entrypoint_runner_dest, 0o555)?;
@@ -162,6 +187,7 @@ pub fn inject_mvm_runtime(
         init: init_dest,
         agent: agent_dest,
         netinit: netinit_dest,
+        netd: netd_dest,
         egress_client: egress_client_dest,
         entrypoint_runner: entrypoint_runner_dest,
         runtime_mount_point: runtime_dir,
@@ -174,6 +200,7 @@ pub struct InjectedPaths {
     pub init: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
+    pub netd: PathBuf,
     pub egress_client: PathBuf,
     pub entrypoint_runner: PathBuf,
     pub runtime_mount_point: PathBuf,
@@ -228,12 +255,14 @@ mod tests {
         let oci_init = dir.join("oci-init.bin");
         let agent = dir.join("agent.bin");
         let netinit = dir.join("netinit.bin");
+        let netd = dir.join("netd.bin");
         let egress_client = dir.join("egress-client.bin");
         let entrypoint_runner = dir.join("entrypoint-runner.bin");
         let verity_init = dir.join("verity-init.bin");
         std::fs::write(&oci_init, b"\x7fELF-oci-init").unwrap();
         std::fs::write(&agent, b"\x7fELF-agent").unwrap();
         std::fs::write(&netinit, b"\x7fELF-netinit").unwrap();
+        std::fs::write(&netd, b"\x7fELF-netd").unwrap();
         std::fs::write(&egress_client, b"\x7fELF-egress-client").unwrap();
         std::fs::write(&entrypoint_runner, b"\x7fELF-entrypoint-runner").unwrap();
         std::fs::write(&verity_init, b"\x7fELF-verity-init").unwrap();
@@ -241,6 +270,7 @@ mod tests {
             oci_init,
             agent,
             netinit,
+            netd,
             egress_client,
             entrypoint_runner,
             verity_init,
@@ -273,7 +303,13 @@ mod tests {
         // Binaries copied to the baked path, executable, content-equal.
         assert_eq!(std::fs::read(&injected.agent).unwrap(), b"\x7fELF-agent");
         assert!(is_executable(&injected.agent));
+        assert_eq!(
+            std::fs::read(&injected.netinit).unwrap(),
+            b"\x7fELF-netinit"
+        );
         assert!(is_executable(&injected.netinit));
+        assert_eq!(std::fs::read(&injected.netd).unwrap(), b"\x7fELF-netd");
+        assert!(is_executable(&injected.netd));
         assert_eq!(
             std::fs::read(&injected.egress_client).unwrap(),
             b"\x7fELF-egress-client"
@@ -325,6 +361,7 @@ mod tests {
         // A second inject (e.g. cache reuse) must not error on existing files.
         let second = inject_mvm_runtime(&root, &bins, None, false).expect("second inject");
         assert!(is_executable(&second.agent));
+        assert!(is_executable(&second.netd));
         assert!(is_executable(&second.egress_client));
         assert!(!root.join("etc/mvm/entrypoint").exists());
     }
@@ -357,6 +394,55 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(prod_root.join("etc/mvm/variant")).unwrap(),
             "prod\n"
+        );
+    }
+
+    #[test]
+    fn sealed_inject_bakes_require_grant_policy() {
+        // A `--prod` OCI run bakes `/etc/mvm/verb-trust.json` into the rootfs
+        // before the dm-verity seal, so require-grant is intrinsic to the
+        // measured image. The dev run must leave the file absent (permissive).
+        let tmp = tempfile::tempdir().unwrap();
+        let bins = fake_bins(tmp.path());
+
+        let dev_root = tmp.path().join("dev-rootfs");
+        std::fs::create_dir_all(&dev_root).unwrap();
+        inject_mvm_runtime(&dev_root, &bins, None, false).expect("dev inject");
+        assert!(
+            !dev_root.join("etc/mvm/verb-trust.json").exists(),
+            "dev inject must not bake a require-grant policy"
+        );
+
+        let prod_root = tmp.path().join("prod-rootfs");
+        std::fs::create_dir_all(&prod_root).unwrap();
+        inject_mvm_runtime(&prod_root, &bins, None, true).expect("prod inject");
+        let policy_path = prod_root.join("etc/mvm/verb-trust.json");
+        assert!(
+            policy_path.is_file(),
+            "sealed inject writes verb-trust.json"
+        );
+        assert_eq!(
+            std::fs::metadata(&policy_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444,
+            "verb-trust.json is read-only (0444)"
+        );
+        let policy: mvm_core::plan::VerbTrustPolicy =
+            serde_json::from_slice(&std::fs::read(&policy_path).unwrap())
+                .expect("verb-trust.json round-trips");
+        assert!(policy.require_grant);
+        assert_eq!(policy.version, mvm_core::plan::VERB_TRUST_POLICY_VERSION);
+        assert_eq!(
+            policy.grant_key_source,
+            mvm_core::plan::GrantKeySource::LaunchProvisioned
+        );
+        // Byte-for-byte identical to what mkGuest bakes for sealed block images.
+        assert_eq!(
+            std::fs::read(&policy_path).unwrap(),
+            br#"{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}"#
         );
     }
 

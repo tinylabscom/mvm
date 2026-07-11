@@ -214,15 +214,19 @@ fn persist_vsock_egress_marker(name: &str, enabled: bool) -> Result<()> {
 
 fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
+    let network_tunnel = config
+        .network_tunnel
+        .as_ref()
+        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline);
     let grants = crate::hvf_bootargs::grant_tokens(&config.name);
     // Nothing to add ⇒ let the boot path fall back to its built-in default.
-    if egress.is_none() && grants.is_empty() {
+    if egress.is_none() && network_tunnel.is_none() && grants.is_empty() {
         return None;
     }
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
     let mut cmdline = crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk);
-    for token in egress.into_iter().chain(grants) {
+    for token in egress.into_iter().chain(network_tunnel).chain(grants) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -900,6 +904,30 @@ mod tests {
         assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
         assert!(cmdline.contains("mvm.vsock_egress=1"));
+    }
+
+    #[test]
+    fn hvf_workload_cmdline_appends_network_tunnel_token_when_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            virtiofs_root: Some("/tmp/root".to_string()),
+            network_tunnel: Some(mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
+                guest_port: 5302,
+                session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
+                    tenant_id: "tenant-a".into(),
+                    vm_id: "vm-1".into(),
+                    boot_id: "boot-1".into(),
+                    session_nonce: "nonce-1".into(),
+                    requested_features: mvm_core::protocol::network_tunnel::TunnelFeatures::default(
+                    ),
+                    maximum_frame_size: 4096,
+                },
+            }),
+            ..Default::default()
+        };
+
+        let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
+        assert!(cmdline.contains("mvm.network_tunnel="));
     }
 
     #[test]

@@ -25,6 +25,7 @@ impl TopLevelCommand for Commands {
             Commands::Build(a) => build::group::run(cli, a, cfg),
             Commands::Manifest(a) => manifest::run(cli, a, cfg),
             Commands::Image(a) => image::run(cli, a, cfg),
+            Commands::Pack(a) => pack::run(cli, a, cfg),
             Commands::Machine(a) => machine::run(cli, a, cfg),
             Commands::Storage(a) => storage::run(cli, a, cfg),
             Commands::ShellInit(a) => env::shell_init::run(cli, a, cfg),

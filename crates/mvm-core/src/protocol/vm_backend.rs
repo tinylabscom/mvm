@@ -150,6 +150,12 @@ pub struct VmStartConfig {
     /// interactive access to a sealed prod guest regardless of this flag, so
     /// the extra listeners are inert there.
     pub dev_console: bool,
+    /// Optional packet-tunnel runtime session to wire as a standing guest-dials
+    /// vsock port. When present, backends that expose per-port host UDS sockets
+    /// map it into the runtime exactly once so the guest network agent and the
+    /// future host worker share one explicit launch-time tunnel identity and
+    /// socket contract.
+    pub network_tunnel: Option<crate::protocol::network_tunnel::TunnelRuntimeConfig>,
 }
 
 /// A host:guest port mapping, backend-agnostic.
@@ -268,6 +274,47 @@ pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
     Some(format!("mvm.secret_env={hex}"))
 }
 
+/// Encode the packet-tunnel runtime config as a single
+/// `mvm.network_tunnel=<hex(JSON)>` kernel-cmdline token. The JSON lives in the
+/// shared `mvm_core::protocol::network_tunnel` contract, and the hex encoding
+/// keeps the value a single space/newline-free token that `/proc/cmdline`
+/// round-trips for a sealed guest.
+pub fn encode_network_tunnel_cmdline(
+    config: &crate::protocol::network_tunnel::TunnelRuntimeConfig,
+) -> Option<String> {
+    config.validate().ok()?;
+    let json = serde_json::to_vec(config).ok()?;
+    let hex: String = json.iter().map(|b| format!("{b:02x}")).collect();
+    Some(format!("mvm.network_tunnel={hex}"))
+}
+
+/// Decode the hex value of a `mvm.network_tunnel=` cmdline token (the part
+/// after the `=`) into a validated [`TunnelRuntimeConfig`]. Unknown JSON fields
+/// and malformed hex fail closed.
+pub fn decode_network_tunnel_cmdline(
+    token_value_hex: &str,
+) -> anyhow::Result<crate::protocol::network_tunnel::TunnelRuntimeConfig> {
+    let bytes: Result<Vec<u8>, _> = (0..token_value_hex.len())
+        .step_by(2)
+        .map(|i| {
+            token_value_hex
+                .get(i..i + 2)
+                .ok_or_else(|| anyhow::anyhow!("odd-length hex"))
+                .and_then(|pair| {
+                    u8::from_str_radix(pair, 16)
+                        .map_err(|_| anyhow::anyhow!("non-hex byte at position {i}"))
+                })
+        })
+        .collect();
+    let bytes = bytes?;
+    let config: crate::protocol::network_tunnel::TunnelRuntimeConfig =
+        serde_json::from_slice(&bytes)?;
+    config
+        .validate()
+        .map_err(|e| anyhow::anyhow!("invalid tunnel runtime config: {e}"))?;
+    Ok(config)
+}
+
 /// Envelope carried in the `mvm.verb_grant=<hex(JSON)>` kernel-cmdline token.
 ///
 /// The host hex-encodes the JSON so the value is a single space/newline-free
@@ -286,6 +333,11 @@ pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
 pub struct VerbGrantEnvelope {
     pub pubkey_hex: String,
     pub plan_nonce_hex: String,
+    /// When present on a restore-time re-pin envelope, proves which pinned
+    /// grant lineage the new grant is replacing. Boot-time cmdline envelopes
+    /// leave both predecessor fields absent.
+    pub predecessor_session_id: Option<String>,
+    pub predecessor_plan_nonce_hex: Option<String>,
     pub grant: crate::plan::VerbGrant,
 }
 
@@ -1851,6 +1903,47 @@ mod tests {
     }
 
     #[test]
+    fn encode_network_tunnel_cmdline_round_trips_as_single_token() {
+        let config = crate::protocol::network_tunnel::TunnelRuntimeConfig {
+            guest_port: 5302,
+            session: crate::protocol::network_tunnel::TunnelSessionConfig {
+                tenant_id: "tenant-a".into(),
+                vm_id: "vm-1".into(),
+                boot_id: "boot-1".into(),
+                session_nonce: "nonce-1".into(),
+                requested_features: crate::protocol::network_tunnel::TunnelFeatures {
+                    ipv4: true,
+                    ..crate::protocol::network_tunnel::TunnelFeatures::default()
+                },
+                maximum_frame_size: 4096,
+            },
+        };
+        let token = encode_network_tunnel_cmdline(&config).unwrap();
+        assert!(token.starts_with("mvm.network_tunnel="));
+        assert!(!token.contains(' ') && !token.contains('\n'));
+
+        let hex = token.strip_prefix("mvm.network_tunnel=").unwrap();
+        let decoded = decode_network_tunnel_cmdline(hex).unwrap();
+        assert_eq!(decoded, config);
+    }
+
+    #[test]
+    fn encode_network_tunnel_cmdline_none_for_invalid_config() {
+        let config = crate::protocol::network_tunnel::TunnelRuntimeConfig {
+            guest_port: 0,
+            session: crate::protocol::network_tunnel::TunnelSessionConfig {
+                tenant_id: "tenant-a".into(),
+                vm_id: "vm-1".into(),
+                boot_id: "boot-1".into(),
+                session_nonce: "nonce-1".into(),
+                requested_features: crate::protocol::network_tunnel::TunnelFeatures::default(),
+                maximum_frame_size: 4096,
+            },
+        };
+        assert!(encode_network_tunnel_cmdline(&config).is_none());
+    }
+
+    #[test]
     fn encode_egress_ca_cmdline_hex_encodes_pem_as_single_token() {
         let pem = "-----BEGIN CERTIFICATE-----\nAB\n-----END CERTIFICATE-----\n";
         let got = encode_egress_ca_cmdline(pem).unwrap();
@@ -2260,6 +2353,8 @@ mod tests {
         let env = VerbGrantEnvelope {
             pubkey_hex: String::new(),
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant,
         };
         assert!(encode_verb_grant_cmdline(&env).is_none());
@@ -2297,6 +2392,8 @@ mod tests {
         let env = VerbGrantEnvelope {
             pubkey_hex: pubkey_hex.clone(),
             plan_nonce_hex: plan_nonce_hex.clone(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant: grant.clone(),
         };
 

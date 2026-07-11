@@ -11,6 +11,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/verify-release-assets.sh"
 TARGETS="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
 BUILDER_ARCHES="aarch64 x86_64"
+KERNEL_ARCHES="aarch64 x86_64"
 RUNTIME_ARCHES="aarch64 x86_64"
 
 sha256_of() {
@@ -38,6 +39,11 @@ build_valid_fixture() {
     sha256_of "$dir/mvmctl-$t.tar.gz" > "$dir/mvmctl-$t.tar.gz.sha256"
     printf 'bundle\n' > "$dir/mvmctl-$t.tar.gz.bundle"
     echo "$(sha256_of "$dir/mvmctl-$t.tar.gz")  mvmctl-$t.tar.gz" >> "$dir/checksums-sha256.txt"
+  done
+  for arch in $KERNEL_ARCHES; do
+    printf 'kernel-%s-workload\n' "$arch" > "$dir/vmlinux-$arch-workload"
+    : > "$dir/kernel-$arch-checksums-sha256.txt"
+    echo "$(sha256_of "$dir/vmlinux-$arch-workload")  vmlinux-$arch-workload" >> "$dir/kernel-$arch-checksums-sha256.txt"
   done
   printf '{"sbom":true}\n' > "$dir/sbom.cdx.json"
   printf 'bundle\n' > "$dir/sbom.cdx.json.bundle"
@@ -115,6 +121,24 @@ rm -rf "$d"
 d="$(build_valid_fixture)"
 printf 'tampered\n' > "$d/default-microvm-aarch64.pack-manifest.json"
 if run "$d"; then bad "checksum-mismatched runtime pack must fail"; else ok "checksum-mismatched runtime pack fails closed"; fi
+rm -rf "$d"
+
+# 9. Missing kernel checksums manifest → fail closed.
+d="$(build_valid_fixture)"
+rm -f "$d/kernel-aarch64-checksums-sha256.txt"
+if run "$d"; then bad "missing kernel checksums manifest must fail"; else ok "missing kernel checksums manifest fails closed"; fi
+rm -rf "$d"
+
+# 10. Workload kernel present but absent from per-arch kernel manifest → fail.
+d="$(build_valid_fixture)"
+: > "$d/kernel-x86_64-checksums-sha256.txt"
+if run "$d"; then bad "unlisted workload kernel must fail"; else ok "unlisted workload kernel fails closed"; fi
+rm -rf "$d"
+
+# 11. Workload kernel checksum mismatch → fail closed.
+d="$(build_valid_fixture)"
+printf 'tampered-kernel\n' > "$d/vmlinux-aarch64-workload"
+if run "$d"; then bad "checksum-mismatched workload kernel must fail"; else ok "checksum-mismatched workload kernel fails closed"; fi
 rm -rf "$d"
 
 echo "verify-release-assets pack-gate: $PASS passed, $FAILN failed"

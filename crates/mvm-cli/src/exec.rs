@@ -242,6 +242,14 @@ pub struct ExecRequest {
     pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
 }
 
+/// Mint a fresh 128-bit session identifier (hex) for a per-boot packet tunnel.
+/// The `boot_id` / `session_nonce` only need to be unpredictable and unique per
+/// boot; the host trusts itself, and both tunnel ends read the one value set on
+/// the launch config, so they agree by construction.
+fn fresh_tunnel_session_id() -> String {
+    format!("{:032x}", rand::random::<u128>())
+}
+
 pub(crate) fn select_exec_backend(
     image_requested: bool,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
@@ -884,6 +892,29 @@ fn run_inner(
         start_config.config_files.extend(sub.config_files);
         use_snapshot = false;
     }
+
+    // Enable the raw-L3 forwarding tunnel for an admitted allow-list egress
+    // policy on the vsock-only backend (no routable guest NIC). Set once here so
+    // the guest cmdline token and the host worker validate identical session
+    // identity — the backend reads this field for both. Deny-all / unrestricted
+    // postures and NIC-bearing backends carry no forwarding tunnel.
+    if start_config.network_tunnel.is_none()
+        && backend.capabilities().no_routable_guest_nic
+        && let Some(tunnel) = mvm_backend::network_tunnel_for_launch(
+            &start_config.network_policy,
+            mvm_backend::TunnelLaunchIdentity {
+                tenant_id: start_config
+                    .tenant_id
+                    .clone()
+                    .unwrap_or_else(|| "local".to_string()),
+                vm_id: vm_name.clone(),
+                boot_id: fresh_tunnel_session_id(),
+                session_nonce: fresh_tunnel_session_id(),
+            },
+        )
+    {
+        start_config.network_tunnel = Some(tunnel);
+    }
     let t_admitted = timing.then(std::time::Instant::now);
 
     // Reap dead/expired standbys before claiming/booting. There is no daemon, so
@@ -1086,6 +1117,7 @@ fn restore_via_snapshot(
         // Inherit the resolved egress policy so a restored transient VM
         // enforces the same posture as a cold-boot one.
         network_policy: start_config.network_policy.clone(),
+        network_tunnel: start_config.network_tunnel.clone(),
     };
     let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
         mvm::vm::template::lifecycle::current_revision_id_for_slot(template_id)?

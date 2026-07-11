@@ -14,8 +14,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 
+mod index;
+pub use index::{PackEntry, PackIndex, PackKey};
+
 use crate::arch::GuestArch;
-use crate::config::{pack_cache_dir, pack_dir};
+use crate::config::{mvm_cache_dir, pack_cache_dir, pack_dir};
 use crate::packs::{
     COSIGN_BUNDLE_FILE_NAME, KeylessTrust, LocalPackPolicy, PackBackend, PackKind, PackManifest,
     PackManifestError, PackRevocationChecker, PackTrustStore, PackVerifyError, Sha256Hex,
@@ -80,6 +83,18 @@ impl<'a> PackVerifyCtx<'a> {
         }
     }
 
+    /// The local policy every verification variant carries — in particular
+    /// `backend`, the concrete backend this host session is operating under.
+    /// Used to pin the single `(kind, arch, backend)` index slot a promoted
+    /// pack is recorded/activated against: a manifest's
+    /// `backend_compatibility` is a set (an eligibility check at resolve
+    /// time), not the one slot a given promotion applies to.
+    fn policy(&self) -> &LocalPackPolicy {
+        match self {
+            Self::Ed25519 { policy, .. } | Self::Keyless { policy, .. } => policy,
+        }
+    }
+
     fn verify(
         &self,
         manifest: &PackManifest,
@@ -127,6 +142,8 @@ pub enum PackCacheError {
     },
     #[error("pack declares a file with the reserved cache-sidecar name {0:?}")]
     ReservedFileName(String),
+    #[error("no promoted version {hash:?} recorded for pack key {key:?}")]
+    UnknownPackVersion { key: PackKey, hash: Sha256Hex },
 }
 
 fn io_at(path: &Path) -> impl Fn(std::io::Error) -> PackCacheError + '_ {
@@ -232,15 +249,105 @@ fn populate_and_rename(
     Ok(())
 }
 
-/// Scan promoted packs for one matching `(kind, arch, backend)` and re-verify it
-/// before returning. Returns `Ok(None)` when nothing compatible verifies — a
-/// poisoned or mismatched entry is skipped, never served.
+/// Path to the persisted pack index: `<cache_root>/packs/index.json`.
+/// `cache_root` is the top-level mvm cache dir (`mvm_cache_dir()`), the same
+/// root `pack_cache_dir()` nests `packs/` under.
+fn index_path(cache_root: &Path) -> PathBuf {
+    cache_root.join("packs").join("index.json")
+}
+
+/// Load the persisted pack index. Fail-open: a missing file or a corrupt one
+/// (unreadable, truncated, or no longer matching the schema) yields
+/// `PackIndex::default()` rather than an error — the index is a cache of
+/// which promoted pack is "active", and every entry it points at is
+/// re-verified before use, so losing it only costs the active-pointer
+/// shortcut, never correctness.
+pub fn load_index(cache_root: &Path) -> PackIndex {
+    let Ok(bytes) = std::fs::read(index_path(cache_root)) else {
+        return PackIndex::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+/// Persist the pack index. Writes to a `.tmp` sibling and `rename`s it onto
+/// the final path so a reader never observes a partially-written file.
+pub fn save_index(cache_root: &Path, index: &PackIndex) -> Result<(), PackCacheError> {
+    let path = index_path(cache_root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(io_at(parent))?;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(index).map_err(PackManifestError::Json)?;
+    std::fs::write(&tmp_path, bytes).map_err(io_at(&tmp_path))?;
+    std::fs::rename(&tmp_path, &path).map_err(io_at(&path))?;
+    Ok(())
+}
+
+/// Verify one candidate promoted-pack dir against the requested
+/// `(kind, arch, backend)`. Shared by the active-pointer lookup and the
+/// directory scan in [`resolve_pack`] so both paths apply the exact same
+/// checks: a readable manifest whose declared hash matches the dir's name, a
+/// compatible `(kind, arch, backend)`, and a successful re-verify against
+/// `ctx`. Returns `None` for any dir that isn't a valid, matching, verifying
+/// promoted pack — never distinguishing "not found" from "found but
+/// rejected" (callers that need that distinction use [`diagnose_pack`]).
+fn verify_candidate_pack_dir(
+    dir: &Path,
+    kind: &PackKind,
+    arch: GuestArch,
+    backend: &PackBackend,
+    ctx: &PackVerifyCtx<'_>,
+) -> Option<VerifiedPackDir> {
+    let manifest = read_manifest(dir)?;
+    // Defense in depth: a content-addressed dir must be named for the pack
+    // hash it holds. A name/content mismatch is observable-and-skipped rather
+    // than served under the wrong identity.
+    if dir.file_name()?.to_str() != Some(manifest.outputs.pack_hash.as_str()) {
+        return None;
+    }
+    if &manifest.kind != kind
+        || manifest.target_arch != arch
+        || !manifest.backend_compatibility.contains(backend)
+    {
+        return None;
+    }
+    // Re-verify every use: a promoted-then-tampered entry fails here and is
+    // skipped, so a poisoned pack is never handed back.
+    let verified = ctx.verify(&manifest, dir).ok()?;
+    Some(VerifiedPackDir {
+        root: dir.to_path_buf(),
+        verified,
+    })
+}
+
+/// Resolve the promoted pack for `(kind, arch, backend)`, preferring the
+/// active version recorded in the persisted index. Falls back to a directory
+/// scan (today's non-deterministic-order behavior) when there is no index,
+/// no active pointer for this key, or the active pack no longer verifies —
+/// so an index that is missing, stale, or pointing at a poisoned pack never
+/// makes a compatible pack unreachable. Returns `Ok(None)` when nothing
+/// compatible verifies anywhere — a poisoned or mismatched entry is skipped,
+/// never served.
 pub fn resolve_pack(
     kind: PackKind,
     arch: GuestArch,
     backend: PackBackend,
     ctx: &PackVerifyCtx<'_>,
 ) -> Result<Option<VerifiedPackDir>, PackCacheError> {
+    let cache_root = PathBuf::from(mvm_cache_dir());
+    let index = load_index(&cache_root);
+    let key = PackKey {
+        kind: kind.clone(),
+        arch,
+        backend: backend.clone(),
+    };
+    if let Some(hash) = index.active_for(&key)
+        && let Some(found) =
+            verify_candidate_pack_dir(&pack_dir(hash.as_str()), &kind, arch, &backend, ctx)
+    {
+        return Ok(Some(found));
+    }
+
     let root = pack_cache_dir();
     let entries = match std::fs::read_dir(&root) {
         Ok(entries) => entries,
@@ -256,31 +363,8 @@ pub fn resolve_pack(
         if !dir.is_dir() || name.to_str() == Some(QUARANTINE_DIR_NAME) {
             continue;
         }
-        // A dir with no sidecar, or an unreadable/undecodable one, is foreign
-        // content — skip it and keep scanning. Never let one damaged entry hide
-        // every valid pack that sorts after it.
-        let Some(manifest) = read_manifest(&dir) else {
-            continue;
-        };
-        // Defense in depth: a content-addressed dir must be named for the pack
-        // hash it holds. A name/content mismatch is observable-and-skipped rather
-        // than served under the wrong identity.
-        if name.to_str() != Some(manifest.outputs.pack_hash.as_str()) {
-            continue;
-        }
-        if manifest.kind != kind
-            || manifest.target_arch != arch
-            || !manifest.backend_compatibility.contains(&backend)
-        {
-            continue;
-        }
-        // Re-verify every use: a promoted-then-tampered entry fails here and is
-        // skipped, so a poisoned pack is never handed back.
-        if let Ok(verified) = ctx.verify(&manifest, &dir) {
-            return Ok(Some(VerifiedPackDir {
-                root: dir,
-                verified,
-            }));
+        if let Some(found) = verify_candidate_pack_dir(&dir, &kind, arch, &backend, ctx) {
+            return Ok(Some(found));
         }
     }
     Ok(None)
@@ -475,13 +559,143 @@ pub fn prune_expired_packs(
     for entry in list_cached_packs()? {
         if entry.expires_at < now {
             if !dry_run {
-                let dir = pack_dir(entry.pack_hash.as_str());
-                std::fs::remove_dir_all(&dir).map_err(io_at(&dir))?;
+                remove_pack_dir(&entry.pack_hash)?;
             }
             removed.push(entry.pack_hash);
         }
     }
     Ok(removed)
+}
+
+/// Delete a promoted pack's content-addressed directory. Shared by every
+/// prune path so the removal step (and its error mapping) is defined once.
+fn remove_pack_dir(hash: &Sha256Hex) -> Result<(), PackCacheError> {
+    let dir = pack_dir(hash.as_str());
+    std::fs::remove_dir_all(&dir).map_err(io_at(&dir))
+}
+
+/// Provenance the lifecycle facade records alongside a promoted pack.
+/// `promoted_at_unix` is supplied by the caller — `mvm-core` never reads the
+/// clock — so a mvm-cli call site computes "now" and passes it in.
+pub struct PackProvenanceInput {
+    pub channel: String,
+    pub release_version: String,
+    pub promoted_at_unix: u64,
+}
+
+/// One recorded pack version, as surfaced by [`list_versions`]: the
+/// [`PackEntry`] fields plus whether it is the active version for its key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackListEntry {
+    pub pack_hash: Sha256Hex,
+    pub key: PackKey,
+    pub channel: String,
+    pub release_version: String,
+    pub promoted_at_unix: u64,
+    pub active: bool,
+}
+
+/// Promote a staged pack (verify + place, as [`promote`] does) and record its
+/// provenance into the persisted index.
+///
+/// A manifest's `backend_compatibility` is a *set* used at resolve time to
+/// check eligibility (`resolve_pack`'s `.contains(backend)`); it is not the
+/// one `(kind, arch, backend)` index slot this particular promotion should be
+/// recorded/activated against — `PackIndex::record` upserts by `pack_hash`
+/// alone, so recording the same hash under more than one key would silently
+/// collapse into whichever key was recorded last. Instead this pins the
+/// single slot from `ctx`'s [`LocalPackPolicy`] (`policy.backend`, the
+/// concrete backend this host session is actually running), which is exactly
+/// the slot [`resolve_pack`] is queried against for that session. `arch`
+/// comes from the manifest since a verifying pack's `target_arch` already
+/// matches the policy's `host_arch`.
+pub fn promote_and_record(
+    staged_root: &Path,
+    manifest: &PackManifest,
+    prov: &PackProvenanceInput,
+    ctx: &PackVerifyCtx<'_>,
+) -> Result<VerifiedPackDir, PackCacheError> {
+    let promoted = promote(staged_root, manifest, ctx)?;
+
+    let cache_root = PathBuf::from(mvm_cache_dir());
+    let mut index = load_index(&cache_root);
+    index.record(PackEntry {
+        pack_hash: manifest.outputs.pack_hash.clone(),
+        key: PackKey {
+            kind: manifest.kind.clone(),
+            arch: manifest.target_arch,
+            backend: ctx.policy().backend.clone(),
+        },
+        channel: prov.channel.clone(),
+        release_version: prov.release_version.clone(),
+        promoted_at_unix: prov.promoted_at_unix,
+    });
+    save_index(&cache_root, &index)?;
+
+    Ok(promoted)
+}
+
+/// Point `key`'s active version at `hash`. Errs if `hash` was never recorded
+/// for `key` — the index only ever activates a version it already knows
+/// about.
+pub fn set_active_version(key: &PackKey, hash: &Sha256Hex) -> Result<(), PackCacheError> {
+    let cache_root = PathBuf::from(mvm_cache_dir());
+    let mut index = load_index(&cache_root);
+    if !index.set_active(key, hash) {
+        return Err(PackCacheError::UnknownPackVersion {
+            key: key.clone(),
+            hash: hash.clone(),
+        });
+    }
+    save_index(&cache_root, &index)?;
+    Ok(())
+}
+
+/// Every recorded pack version, optionally filtered by `kind`, flagged with
+/// whether it is the active version for its key.
+pub fn list_versions(filter: Option<PackKind>) -> Result<Vec<PackListEntry>, PackCacheError> {
+    let cache_root = PathBuf::from(mvm_cache_dir());
+    let index = load_index(&cache_root);
+    let out = index
+        .entries()
+        .iter()
+        .filter(|entry| filter.as_ref().is_none_or(|kind| entry.key.kind == *kind))
+        .map(|entry| PackListEntry {
+            pack_hash: entry.pack_hash.clone(),
+            key: entry.key.clone(),
+            channel: entry.channel.clone(),
+            release_version: entry.release_version.clone(),
+            promoted_at_unix: entry.promoted_at_unix,
+            active: index.active_for(&entry.key) == Some(&entry.pack_hash),
+        })
+        .collect();
+    Ok(out)
+}
+
+/// Reclaim non-active pack versions beyond the newest `keep_recent` per key
+/// (see [`PackIndex::prunable`]), deleting both the content-addressed
+/// directory and the index entry. Never removes a key's active hash. The
+/// candidate hash list is deduplicated before acting — defense in depth
+/// against a hash ever being recorded under more than one key, so a shared
+/// pack directory is removed (and reported) at most once rather than erroring
+/// on a second, already-gone directory. With `dry_run`, reports what would be
+/// removed without deleting anything.
+pub fn prune_versions(keep_recent: usize, dry_run: bool) -> Result<Vec<Sha256Hex>, PackCacheError> {
+    let cache_root = PathBuf::from(mvm_cache_dir());
+    let mut index = load_index(&cache_root);
+    let mut prunable = index.prunable(keep_recent);
+    prunable.sort_by(|a, b| a.as_str().cmp(b.as_str()));
+    prunable.dedup();
+
+    if !dry_run {
+        for hash in &prunable {
+            remove_pack_dir(hash)?;
+            index.remove(hash);
+        }
+        save_index(&cache_root, &index)?;
+    }
+
+    Ok(prunable)
 }
 
 fn new_quarantine_dir() -> Result<PathBuf, PackCacheError> {
@@ -1199,5 +1413,278 @@ mod tests {
         let packs = list_cached_packs().expect("list ok");
         assert_eq!(packs.len(), 1);
         assert_eq!(packs[0].pack_hash, manifest_future.outputs.pack_hash);
+    }
+
+    /// The `(kind, arch, backend)` slot every index test below records
+    /// against — matches what `policy()`/`resolve_pack` calls use.
+    fn builder_key() -> PackKey {
+        PackKey {
+            kind: PackKind::Builder,
+            arch: GuestArch::host(),
+            backend: PackBackend::Hvf,
+        }
+    }
+
+    fn entry_for(promoted: &VerifiedPackDir, channel: &str, promoted_at_unix: u64) -> PackEntry {
+        PackEntry {
+            pack_hash: promoted.verified.pack_hash.clone(),
+            key: builder_key(),
+            channel: channel.to_string(),
+            release_version: "v0.17.0".to_string(),
+            promoted_at_unix,
+        }
+    }
+
+    #[test]
+    fn resolve_prefers_active_pointer_over_scan_order() {
+        let (cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let (staged_a, manifest_a) = staged_builder_pack_bytes(b"kernel-a", b"image-a");
+        let (staged_b, manifest_b) = staged_builder_pack_bytes(b"kernel-b", b"image-b");
+        let promoted_a = promote(staged_a.path(), &manifest_a, &ctx).expect("promote a");
+        let promoted_b = promote(staged_b.path(), &manifest_b, &ctx).expect("promote b");
+
+        let mut ix = load_index(cache.path());
+        ix.record(entry_for(&promoted_a, "stable", 10));
+        ix.record(entry_for(&promoted_b, "stable", 20));
+        assert!(ix.set_active(&builder_key(), &promoted_b.verified.pack_hash));
+        save_index(cache.path(), &ix).expect("save index");
+
+        // Scan order is by directory name (pack hash), which need not put `b`
+        // first — the active pointer must win regardless.
+        let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("compatible pack found");
+        assert_eq!(found.verified.pack_hash, promoted_b.verified.pack_hash);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_scan_when_no_index() {
+        let (_cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let (staged, manifest) = staged_builder_pack();
+        promote(staged.path(), &manifest, &ctx).expect("promote");
+
+        // No `save_index` call at all — `index.json` never existed.
+        let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("compatible pack found via scan fallback");
+        assert_eq!(found.root, pack_dir(manifest.outputs.pack_hash.as_str()));
+    }
+
+    #[test]
+    fn resolve_falls_back_to_scan_when_index_is_corrupt() {
+        let (cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let (staged, manifest) = staged_builder_pack();
+        promote(staged.path(), &manifest, &ctx).expect("promote");
+
+        // A truncated / garbage `index.json` must not break resolution:
+        // `load_index` fails open and resolve re-verifies via the scan.
+        std::fs::write(index_path(cache.path()), b"{ not json").expect("write corrupt index");
+
+        let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("compatible pack found despite corrupt index");
+        assert_eq!(found.root, pack_dir(manifest.outputs.pack_hash.as_str()));
+    }
+
+    #[test]
+    fn resolve_falls_back_when_active_pack_is_corrupt() {
+        let (cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let (staged_a, manifest_a) = staged_builder_pack_bytes(b"kernel-a", b"image-a");
+        let (staged_b, manifest_b) = staged_builder_pack_bytes(b"kernel-b", b"image-b");
+        let promoted_a = promote(staged_a.path(), &manifest_a, &ctx).expect("promote a");
+        let promoted_b = promote(staged_b.path(), &manifest_b, &ctx).expect("promote b");
+
+        let mut ix = load_index(cache.path());
+        ix.record(entry_for(&promoted_a, "stable", 10));
+        ix.record(entry_for(&promoted_b, "stable", 20));
+        assert!(ix.set_active(&builder_key(), &promoted_b.verified.pack_hash));
+        save_index(cache.path(), &ix).expect("save index");
+
+        // Poison the active pack's promoted copy after the fact.
+        fs::write(
+            promoted_b.root.join("boot/kernel"),
+            b"poisoned-after-promote",
+        )
+        .expect("poison active pack");
+
+        let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("falls back to the other verified pack");
+        assert_eq!(found.verified.pack_hash, promoted_a.verified.pack_hash);
+    }
+
+    fn provenance(
+        channel: &str,
+        release_version: &str,
+        promoted_at_unix: u64,
+    ) -> PackProvenanceInput {
+        PackProvenanceInput {
+            channel: channel.to_string(),
+            release_version: release_version.to_string(),
+            promoted_at_unix,
+        }
+    }
+
+    #[test]
+    fn promote_and_record_makes_pack_resolvable_and_listed_active() {
+        let (_cache, _env) = isolated_cache();
+        let (staged, manifest) = staged_builder_pack();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let promoted = promote_and_record(
+            staged.path(),
+            &manifest,
+            &provenance("stable", "v0.17.0", 10),
+            &ctx,
+        )
+        .expect("promote_and_record");
+
+        // The production `mvm_cache_dir()` path is what both `promote_and_record`
+        // and `resolve_pack` use internally — this is the end-to-end guard that a
+        // cache-root/index-path mismatch would break.
+        let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("compatible pack found");
+        assert_eq!(found.verified.pack_hash, promoted.verified.pack_hash);
+
+        let versions = list_versions(Some(PackKind::Builder)).expect("list ok");
+        let hvf_entry = versions
+            .iter()
+            .find(|v| v.key.backend == PackBackend::Hvf)
+            .expect("hvf-key entry listed");
+        assert_eq!(hvf_entry.pack_hash, promoted.verified.pack_hash);
+        assert_eq!(hvf_entry.release_version, "v0.17.0");
+        assert!(hvf_entry.active, "sole promoted version must be active");
+    }
+
+    #[test]
+    fn set_active_version_errors_on_unknown_hash_and_switches_resolution() {
+        let (_cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let (staged_a, manifest_a) = staged_builder_pack_bytes(b"kernel-a", b"image-a");
+        let (staged_b, manifest_b) = staged_builder_pack_bytes(b"kernel-b", b"image-b");
+        let promoted_a = promote_and_record(
+            staged_a.path(),
+            &manifest_a,
+            &provenance("stable", "v0.17.0", 10),
+            &ctx,
+        )
+        .expect("promote a");
+        let promoted_b = promote_and_record(
+            staged_b.path(),
+            &manifest_b,
+            &provenance("stable", "v0.18.0", 20),
+            &ctx,
+        )
+        .expect("promote b");
+
+        // `a` promoted first, so it is the default active version.
+        let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("compatible pack found");
+        assert_eq!(found.verified.pack_hash, promoted_a.verified.pack_hash);
+
+        let unknown_hash = Sha256Hex::from_bytes(b"not-a-recorded-pack");
+        let err = set_active_version(&builder_key(), &unknown_hash)
+            .expect_err("unknown hash must be refused");
+        assert!(matches!(err, PackCacheError::UnknownPackVersion { .. }));
+
+        set_active_version(&builder_key(), &promoted_b.verified.pack_hash).expect("set active b");
+
+        let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
+            .expect("resolve ok")
+            .expect("compatible pack found");
+        assert_eq!(found.verified.pack_hash, promoted_b.verified.pack_hash);
+    }
+
+    #[test]
+    fn prune_versions_keeps_active_removes_oldest_and_dry_run_is_noop() {
+        let (_cache, _env) = isolated_cache();
+        let trust = trust_store();
+        let rev = good_revocation();
+        let policy = policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let (staged_a, manifest_a) = staged_builder_pack_bytes(b"kernel-a", b"image-a");
+        let (staged_b, manifest_b) = staged_builder_pack_bytes(b"kernel-b", b"image-b");
+        let (staged_c, manifest_c) = staged_builder_pack_bytes(b"kernel-c", b"image-c");
+        let promoted_a = promote_and_record(
+            staged_a.path(),
+            &manifest_a,
+            &provenance("stable", "v0.17.0", 10),
+            &ctx,
+        )
+        .expect("promote a");
+        let promoted_b = promote_and_record(
+            staged_b.path(),
+            &manifest_b,
+            &provenance("stable", "v0.18.0", 20),
+            &ctx,
+        )
+        .expect("promote b");
+        let promoted_c = promote_and_record(
+            staged_c.path(),
+            &manifest_c,
+            &provenance("stable", "v0.19.0", 30),
+            &ctx,
+        )
+        .expect("promote c");
+
+        // `a` (promoted first) is active; keep_recent=1 also keeps `c` (the
+        // newest by promoted_at_unix); `b` is neither, so it is prunable.
+        let dry = prune_versions(1, true).expect("dry-run prune ok");
+        assert_eq!(dry, vec![promoted_b.verified.pack_hash.clone()]);
+        assert!(promoted_a.root.exists());
+        assert!(promoted_b.root.exists(), "dry-run must not delete anything");
+        assert!(promoted_c.root.exists());
+
+        let removed = prune_versions(1, false).expect("prune ok");
+        assert_eq!(removed, vec![promoted_b.verified.pack_hash.clone()]);
+        assert!(promoted_a.root.exists(), "active pack dir must survive");
+        assert!(
+            !promoted_b.root.exists(),
+            "oldest non-active pack dir must be removed"
+        );
+        assert!(promoted_c.root.exists(), "newest pack dir must be kept");
+
+        let versions = list_versions(Some(PackKind::Builder)).expect("list ok");
+        assert!(
+            !versions
+                .iter()
+                .any(|v| v.pack_hash == promoted_b.verified.pack_hash),
+            "pruned entry must be gone from the index"
+        );
+        assert!(
+            versions
+                .iter()
+                .any(|v| v.pack_hash == promoted_a.verified.pack_hash && v.active)
+        );
     }
 }

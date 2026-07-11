@@ -45,6 +45,9 @@ pub(in crate::commands) enum BenchAction {
     MicrovmLaunch(MicrovmLaunchArgs),
     /// Measure held-live runtime-microvm supervisor/VMM footprint.
     MicrovmDensity(MicrovmDensityArgs),
+    /// Measure first-use cost: the in-guest build wall-clock for a
+    /// representative flake build inside the builder VM.
+    FirstUse(FirstUseArgs),
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -119,6 +122,25 @@ pub(in crate::commands) struct MicrovmDensityArgs {
     /// Maximum tolerated regression (percent) when `--baseline` is set.
     #[arg(long, default_value_t = 10.0)]
     pub max_regression_pct: f64,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct FirstUseArgs {
+    /// Number of measured first-use build runs.
+    #[arg(long, default_value_t = 5)]
+    pub runs: u32,
+    /// Flake to build in the builder VM for each measured run.
+    /// Defaults to the in-repo dev-shell flake used by `mvmctl dev up`.
+    #[arg(long)]
+    pub flake: Option<PathBuf>,
+    /// Also print the JSON report to stdout.
+    #[arg(long)]
+    pub json: bool,
+    /// Write the JSON report here. Default:
+    /// `~/.mvm/bench/first-use-<rfc3339>.json` plus a stable
+    /// `first-use-latest.json` copy.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -1225,6 +1247,38 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     match args.action {
         BenchAction::MicrovmLaunch(a) => run_microvm_launch(a),
         BenchAction::MicrovmDensity(a) => run_microvm_density(a),
+        BenchAction::FirstUse(a) => run_first_use(a),
+    }
+}
+
+fn run_first_use(args: FirstUseArgs) -> Result<()> {
+    // The pure substrate this command reports through —
+    // `bench_first_use::build_ms_from_boot_timings` (parse) and
+    // `summarize_build_samples` (aggregate, via this module's
+    // `summarize`/`percentile`) — is complete and unit-tested. The live
+    // probes (dev-up cold/warm + in-guest build) boot real VMs, so they
+    // are compiled only under `bench-first-use`; a stock build fails
+    // honestly rather than fabricate a number.
+    #[cfg(feature = "bench-first-use")]
+    {
+        super::bench_first_use::run_first_use_live(args)
+    }
+    #[cfg(not(feature = "bench-first-use"))]
+    {
+        let _ = (&args.json, &args.out);
+        bail!(
+            "bench first-use: this binary was built without the \
+             `bench-first-use` feature, so it cannot boot real VMs. \
+             Rebuild with `cargo build -p mvm-cli --features bench-first-use` \
+             on a dev host to measure {} requested run(s){}. The measurement \
+             substrate (build_ms parsing + aggregation into PhaseStats) is \
+             otherwise complete and unit-tested.",
+            args.runs,
+            args.flake
+                .as_ref()
+                .map(|f| format!(" against flake {}", f.display()))
+                .unwrap_or_default()
+        )
     }
 }
 
@@ -1240,7 +1294,7 @@ fn timestamp_for_report_path() -> String {
     mvm_core::time::utc_now().replace([':', '+', '.'], "-")
 }
 
-fn write_report_with_latest<T: Serialize>(
+pub(super) fn write_report_with_latest<T: Serialize>(
     report: &T,
     out: Option<PathBuf>,
     kind: &str,

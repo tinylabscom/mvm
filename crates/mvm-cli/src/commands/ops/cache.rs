@@ -541,6 +541,30 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 Err(e) => ui::warn(&format!("expired-pack sweep failed: {e}")),
             }
 
+            // Version-aware pack prune: reclaim non-active pack versions
+            // beyond the newest few per key, distinct from the expired-pack
+            // sweep above (which only removes packs whose trust metadata has
+            // lapsed). Keeps the active version plus the most recent
+            // runners-up so a rollback via `mvmctl pack activate` stays
+            // possible instead of every downloaded/built version
+            // accumulating forever.
+            match mvm_core::pack_cache::prune_versions(PACK_VERSION_KEEP_RECENT, dry_run) {
+                Ok(pruned) => {
+                    if !pruned.is_empty() {
+                        ui::info(&pack_version_prune_report(pruned.len(), dry_run));
+                        if !dry_run {
+                            mvm_core::audit_emit!(
+                                CachePrune,
+                                "source=pack_version_prune count={}",
+                                pruned.len()
+                            );
+                        }
+                        removed += pruned.len() as u64;
+                    }
+                }
+                Err(e) => ui::warn(&format!("pack version prune failed: {e}")),
+            }
+
             for entry in walkdir(path)? {
                 let entry_path = entry.path();
                 // Remove temp files (mvm-lima-*, .tmp)
@@ -827,6 +851,23 @@ pub(super) fn sweep_untagged_checkpoints(
         }
     }
     Ok(removed)
+}
+
+/// Number of non-active pack versions `mvmctl cache prune` keeps around per
+/// `(kind, arch, backend)` key, on top of whichever version is active. Kept as
+/// a named constant (not a literal at the call site) so the retention policy
+/// is documented in one place and a rollback via `mvmctl pack activate` stays
+/// possible for a little while after a newer version is promoted.
+const PACK_VERSION_KEEP_RECENT: usize = 2;
+
+/// User-facing summary line for the version-aware pack prune step, split out
+/// so the message format is unit-testable without exercising the pack cache.
+fn pack_version_prune_report(removed: usize, dry_run: bool) -> String {
+    if dry_run {
+        format!("(dry-run) Would remove {removed} old pack version(s).")
+    } else {
+        format!("Removed {removed} old pack version(s).")
+    }
 }
 
 /// Whole-second age of a file from its mtime, or `None` if it can't be
@@ -1341,5 +1382,24 @@ mod tests {
         let rows = cache_dir_breakdown(root);
         assert_eq!(rows[0].0, "ur-seed", "largest entry first");
         assert!(rows.iter().any(|(n, _)| n == "stage0"));
+    }
+
+    /// The version-aware pack prune step reports what it removed (or would
+    /// remove) in the same "would remove"/"removed" shape as the rest of
+    /// `cache prune`'s output.
+    #[test]
+    fn pack_version_prune_report_reflects_dry_run() {
+        assert_eq!(
+            pack_version_prune_report(3, true),
+            "(dry-run) Would remove 3 old pack version(s)."
+        );
+        assert_eq!(
+            pack_version_prune_report(3, false),
+            "Removed 3 old pack version(s)."
+        );
+        assert_eq!(
+            pack_version_prune_report(0, false),
+            "Removed 0 old pack version(s)."
+        );
     }
 }

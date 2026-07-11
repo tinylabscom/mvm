@@ -6,6 +6,10 @@ use crate::base::shell::{run_in_vm, run_in_vm_stdout, run_in_vm_visible, shell_q
 use crate::base::ui;
 use crate::image::RuntimeVolume;
 use crate::network_provider::BridgeTapNetworkProvider;
+use crate::network_tunnel_spawn::{
+    NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
+    spawn_network_tunnel_worker_if_configured,
+};
 use crate::{firecracker, network};
 use mvm_network::{NetHandle, NetworkProvider, NetworkSpec};
 
@@ -748,6 +752,8 @@ pub struct FlakeRunConfig {
     pub ports: Vec<crate::base::config::PortMapping>,
     /// Network policy controlling outbound traffic from this VM.
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
+    /// Optional shared guest-TUN ↔ host tunnel runtime config.
+    pub network_tunnel: Option<mvm_core::protocol::network_tunnel::TunnelRuntimeConfig>,
 }
 
 impl FlakeRunConfig {
@@ -928,6 +934,17 @@ fn run_configured_firecracker(
     // below fails before the VM is fully up. No-op without egress secrets.
     #[cfg(target_os = "linux")]
     let mut endpoint_guard = spawn_egress_endpoint(config)?;
+    let mut tunnel_guard =
+        spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
+            state_dir: &mvm_core::config::vm_state_dir(&config.name),
+            runtime_config: config.network_tunnel.as_ref(),
+            listener: config
+                .network_tunnel
+                .as_ref()
+                .map(|tunnel| NetworkTunnelListener::Vsock(tunnel.guest_port)),
+            network_policy: Some(&config.network_policy),
+            vm_name: &config.name,
+        })?;
 
     // Configure VM via Firecracker API
     configure_flake_microvm(config, abs_dir, abs_socket)?;
@@ -1001,6 +1018,7 @@ fn run_configured_firecracker(
     tap_guard.defuse();
     #[cfg(target_os = "linux")]
     endpoint_guard.defuse();
+    tunnel_guard.defuse();
 
     ui::banner(&[
         &format!("MicroVM '{}' is running!", config.name),
@@ -1614,6 +1632,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
         &mvm_core::config::vm_state_dir(name),
         name,
     );
+    reap_network_tunnel_worker(&mvm_core::config::vm_state_dir(name));
     #[cfg(target_os = "linux")]
     if let Err(e) = crate::egress_redirect::teardown_by_name(name) {
         warn!(vm = %name, "remove egress redirect table: {e}");
@@ -2411,6 +2430,10 @@ pub fn configure_flake_microvm_with_drives_dir(
         Some(token) => format!("{boot_args} {token}"),
         None => boot_args,
     };
+    let boot_args = match network_tunnel_cmdline_token(config) {
+        Some(token) => format!("{boot_args} {token}"),
+        None => boot_args,
+    };
 
     // FC's x86_64 loader needs an uncompressed ELF `vmlinux`, but the
     // published default-microvm x86_64 kernel is a bzImage (named `vmlinux`),
@@ -3024,6 +3047,13 @@ fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
     Ok(())
 }
 
+fn network_tunnel_cmdline_token(config: &FlakeRunConfig) -> Option<String> {
+    config
+        .network_tunnel
+        .as_ref()
+        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline)
+}
+
 /// The `mvm.egress_ca=<hex>` kernel-cmdline token for `vm_name`,
 /// or `None` when the VM has no staged intermediate (no secrets / no https leg).
 /// Reads the **cert** from the per-VM `egress-intermediate.json` sidecar (the key
@@ -3502,6 +3532,32 @@ mod tests {
         );
     }
 
+    #[test]
+    fn network_tunnel_cmdline_token_round_trips_shared_config() {
+        let mut config = baseline_run_config(None);
+        config.network_tunnel = Some(mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
+            guest_port: 5302,
+            session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
+                tenant_id: "tenant-a".to_string(),
+                vm_id: "vm-1".to_string(),
+                boot_id: "boot-1".to_string(),
+                session_nonce: "nonce-1".to_string(),
+                requested_features: mvm_core::protocol::network_tunnel::TunnelFeatures {
+                    ipv4: true,
+                    ..mvm_core::protocol::network_tunnel::TunnelFeatures::default()
+                },
+                maximum_frame_size: 4096,
+            },
+        });
+
+        let token = network_tunnel_cmdline_token(&config).expect("valid tunnel config encodes");
+        let hex = token
+            .strip_prefix("mvm.network_tunnel=")
+            .expect("cmdline token prefix");
+        let decoded = mvm_core::vm_backend::decode_network_tunnel_cmdline(hex).unwrap();
+        assert_eq!(decoded, config.network_tunnel.unwrap());
+    }
+
     fn baseline_run_config(mem_initial: Option<u32>) -> FlakeRunConfig {
         FlakeRunConfig {
             name: "v".to_string(),
@@ -3525,6 +3581,7 @@ mod tests {
             secret_files: Vec::new(),
             ports: Vec::new(),
             network_policy: mvm_core::network_policy::NetworkPolicy::default(),
+            network_tunnel: None,
         }
     }
 
@@ -4489,6 +4546,8 @@ mod tests {
         let envelope = VerbGrantEnvelope {
             pubkey_hex,
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant,
         };
         let json = serde_json::to_vec(&envelope).unwrap();

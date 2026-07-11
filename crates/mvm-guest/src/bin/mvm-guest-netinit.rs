@@ -47,6 +47,67 @@
 //! [`Report`]: mvm_guest::netinit::Report
 
 #[cfg(target_os = "linux")]
+mod linux {
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    const NETD_FALLBACK: &str = "/usr/local/bin/mvm-guest-netd";
+    const NETD_OVERLAY: &str = "/mvm/runtime/netd";
+
+    pub fn maybe_spawn_tunnel_netd() -> Result<(), String> {
+        let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+        if !mvm_guest::network_tunnel::cmdline_requests_network_tunnel(&cmdline) {
+            return Ok(());
+        }
+        let Some(path) = resolve_exec([NETD_OVERLAY, NETD_FALLBACK]) else {
+            return Err(
+                "tunnel runtime requested but no guest netd binary is available".to_string(),
+            );
+        };
+        spawn_required_one(&path, "guest-netd")
+    }
+
+    fn resolve_exec<const N: usize>(candidates: [&str; N]) -> Option<PathBuf> {
+        candidates
+            .into_iter()
+            .map(PathBuf::from)
+            .find(|p| is_executable(p))
+    }
+
+    fn is_executable(path: &Path) -> bool {
+        path.is_file()
+            && std::fs::metadata(path)
+                .map(|m| {
+                    use std::os::unix::fs::PermissionsExt;
+                    m.permissions().mode() & 0o111 != 0
+                })
+                .unwrap_or(false)
+    }
+
+    fn spawn_required_one(path: &Path, label: &str) -> Result<(), String> {
+        let mut child = Command::new(path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|e| format!("spawn {label} at {}: {e}", path.display()))?;
+
+        std::thread::sleep(Duration::from_millis(200));
+        match child
+            .try_wait()
+            .map_err(|e| format!("poll {label} startup at {}: {e}", path.display()))?
+        {
+            Some(status) => Err(format!("{label} exited during startup with {status}")),
+            None => {
+                eprintln!("mvm-guest-netinit: spawned {label} pid={}", child.id());
+                Ok(())
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn main() {
     // Bring the guest network up FIRST — eth0 link-up → DHCP → static fallback —
     // before layering the mandatory-deny blackhole routes on top. The workload
@@ -57,7 +118,10 @@ fn main() {
     // (e.g. a network:None workload with no eth0) logs and continues to the
     // blackhole install — a no-egress guest is degraded, not a hard failure.
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    if let Err(e) = mvm_guest::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.2")
+    if mvm_guest::network_tunnel::cmdline_requests_network_tunnel(&cmdline) {
+        eprintln!("mvm-guest-netinit: tunnel runtime requested; skipping legacy eth0 bring-up");
+    } else if let Err(e) =
+        mvm_guest::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.2")
     {
         eprintln!(
             "mvm-guest-netinit: guest network bring-up failed: {e} \
@@ -76,6 +140,11 @@ fn main() {
             std::process::exit(2);
         }
     };
+
+    if let Err(e) = linux::maybe_spawn_tunnel_netd() {
+        eprintln!("mvm-guest-netinit: {e}");
+        std::process::exit(1);
+    }
 
     // Write the report as a single line to stdout, prefixed with
     // the canonical marker so the host-side console-scrape can

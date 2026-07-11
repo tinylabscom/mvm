@@ -111,6 +111,45 @@ fn explain_with_json_flag_parses() {
     );
 }
 
+/// `pack --help` advertises all five lifecycle subcommands.
+#[test]
+fn pack_help_lists_all_subcommands() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["pack", "--help"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pack --help must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = String::from_utf8_lossy(&out.stdout);
+    for verb in ["list", "rollback", "prune", "download", "update"] {
+        assert!(help.contains(verb), "help is missing '{verb}':\n{help}");
+    }
+}
+
+/// `pack list --json` parses and exits cleanly on a fresh/empty pack cache.
+#[test]
+fn pack_list_json_parses_cleanly() {
+    #[allow(deprecated)]
+    let out = Command::cargo_bin("mvmctl")
+        .unwrap()
+        .args(["pack", "list", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "pack list --json must exit 0, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let _: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("pack list --json must emit valid JSON");
+}
+
 #[test]
 fn machine_reconfigure_help_lists_patch_flags() {
     #[allow(deprecated)]

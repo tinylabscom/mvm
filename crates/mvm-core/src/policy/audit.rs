@@ -136,6 +136,13 @@ pub enum LocalAuditKind {
     /// from `~/.cache/mvm`. Pure read-only `cache info` is not
     /// audited; the prune verb is, because it deletes host bytes.
     CachePrune,
+    /// `mvmctl pack rollback` / `pack download` / `pack update` changed
+    /// the attested-pack cache: retargeted a key's active version, or
+    /// fetched and (for `update`) activated a new one. Distinct from
+    /// `CachePrune`, which only ever removes bytes; this kind covers
+    /// additions and pointer swaps. Detail carries `op=<verb>` plus the
+    /// pack key and version affected.
+    PackCacheChange,
     /// `mvmctl cleanup` ran a host-side tier sweep
     /// (`--cache` / `--state` / `--nuclear`). The detail field carries
     /// the tier name, byte count freed, and number of top-level paths

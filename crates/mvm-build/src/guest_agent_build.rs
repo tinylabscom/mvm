@@ -44,6 +44,7 @@ pub struct GuestAgentLayout {
     pub oci_init: PathBuf,
     pub agent: PathBuf,
     pub netinit: PathBuf,
+    pub netd: PathBuf,
     pub egress_client: PathBuf,
     pub entrypoint_runner: PathBuf,
     pub verity_init: PathBuf,
@@ -55,6 +56,7 @@ pub struct GuestRuntimeBinaryPaths<'a> {
     pub oci_init: &'a Path,
     pub agent: &'a Path,
     pub netinit: &'a Path,
+    pub netd: &'a Path,
     pub egress_client: &'a Path,
     pub entrypoint_runner: &'a Path,
     pub verity_init: &'a Path,
@@ -66,6 +68,7 @@ pub struct GuestRuntimeBinaryBytes<'a> {
     pub oci_init: &'a [u8],
     pub agent: &'a [u8],
     pub netinit: &'a [u8],
+    pub netd: &'a [u8],
     pub egress_client: &'a [u8],
     pub entrypoint_runner: &'a [u8],
     pub verity_init: &'a [u8],
@@ -80,16 +83,21 @@ pub struct GuestRuntimeBinaryBytes<'a> {
 const AGENT_VARIANT: &str = "dev-shell";
 
 impl GuestAgentLayout {
-    pub fn under(cache_root: &Path, version: &str, arch: GuestArch) -> Self {
+    /// `cache_key` names the cache generation: the mvmctl `version` for an
+    /// embedded/shipped build (content is fixed by the version), or a guest
+    /// source fingerprint (`source_cache_key`) for a contributor checkout so a
+    /// local edit lands in its own cache dir and never reuses a stale agent.
+    pub fn under(cache_root: &Path, cache_key: &str, arch: GuestArch) -> Self {
         let dir = cache_root
             .join("guest-agent")
-            .join(version)
+            .join(cache_key)
             .join(arch.to_string())
             .join(AGENT_VARIANT);
         Self {
             oci_init: dir.join("mvm-oci-init"),
             agent: dir.join("mvm-guest-agent"),
             netinit: dir.join("mvm-guest-netinit"),
+            netd: dir.join("mvm-guest-netd"),
             egress_client: dir.join("mvm-egress-client"),
             entrypoint_runner: dir.join("mvm-oci-entrypoint"),
             verity_init: dir.join("mvm-verity-init"),
@@ -101,6 +109,7 @@ impl GuestAgentLayout {
         self.oci_init.is_file()
             && self.agent.is_file()
             && self.netinit.is_file()
+            && self.netd.is_file()
             && self.egress_client.is_file()
             && self.entrypoint_runner.is_file()
             && self.verity_init.is_file()
@@ -111,6 +120,7 @@ impl GuestAgentLayout {
             oci_init: self.oci_init.clone(),
             agent: self.agent.clone(),
             netinit: self.netinit.clone(),
+            netd: self.netd.clone(),
             egress_client: self.egress_client.clone(),
             entrypoint_runner: self.entrypoint_runner.clone(),
             verity_init: self.verity_init.clone(),
@@ -134,15 +144,21 @@ pub struct GuestAgentBuildSpec {
     /// Workspace root (dir containing `Cargo.toml`, `crates/`).
     pub workspace_root: PathBuf,
     pub arch: GuestArch,
+    /// Cargo target dir for the cross-compile. Cache-scoped, deliberately NOT
+    /// `<workspace_root>/target`: a source-checkout guest build must never write
+    /// into the invoking source tree (mirrors `mvm-cli/build.rs`'s OUT_DIR
+    /// target). Set as `CARGO_TARGET_DIR` for the `cargo zigbuild` process.
+    pub target_dir: PathBuf,
     /// Override the cargo binary (tests). `None` ⇒ `cargo` on `$PATH`.
     pub cargo: Option<PathBuf>,
 }
 
 impl GuestAgentBuildSpec {
-    pub fn new(workspace_root: PathBuf, arch: GuestArch) -> Self {
+    pub fn new(workspace_root: PathBuf, arch: GuestArch, target_dir: PathBuf) -> Self {
         Self {
             workspace_root,
             arch,
+            target_dir,
             cargo: None,
         }
     }
@@ -173,6 +189,8 @@ impl GuestAgentBuildSpec {
             "--bin".to_string(),
             "mvm-guest-netinit".to_string(),
             "--bin".to_string(),
+            "mvm-guest-netd".to_string(),
+            "--bin".to_string(),
             "mvm-oci-init".to_string(),
             "--bin".to_string(),
             "mvm-oci-entrypoint".to_string(),
@@ -187,42 +205,149 @@ impl GuestAgentBuildSpec {
         ]
     }
 
-    /// Paths the build drops the binaries at under the workspace target
-    /// dir.
+    /// Paths the build drops the binaries at, under the cache-scoped
+    /// `target_dir` (never the source tree's `target/`). Independent of any
+    /// ambient `CARGO_TARGET_DIR` — [`build_guest_binaries`] pins the env to
+    /// `target_dir`.
     pub fn output_dir(&self) -> PathBuf {
-        std::env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.workspace_root.join("target"))
-            .join(self.target_triple())
-            .join("release")
+        self.target_dir.join(self.target_triple()).join("release")
     }
 }
 
-/// Resolve the guest binaries for `(version, arch)`, building + caching
-/// them from `workspace_root` on a cache miss.
+/// The cache-scoped cargo target dir for the guest cross-compile under
+/// `cache_root`. Kept off the source tree so a contributor's `run --image`
+/// guest build never writes into any checkout's `target/`.
+pub fn guest_build_target_dir(cache_root: &Path) -> PathBuf {
+    cache_root.join("guest-agent-build").join("target")
+}
+
+/// True when `dir` is the root of an mvm source checkout: it carries a top-level
+/// `Cargo.toml` and the `crates/mvm-guest/` crate. That pair uniquely names the
+/// workspace root — the guest crate exists nowhere else in the tree.
+pub fn is_source_workspace_root(dir: &Path) -> bool {
+    dir.join("Cargo.toml").is_file() && dir.join("crates/mvm-guest").is_dir()
+}
+
+/// Walk up from `start`, returning the first ancestor that is a source
+/// workspace root, else `None`. Pure — no ambient state.
+pub fn source_workspace_from(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|d| is_source_workspace_root(d))
+        .map(Path::to_path_buf)
+}
+
+/// The mvm source workspace to cross-compile the guest binaries from, or `None`
+/// for a shipped binary with no checkout (→ the caller uses the embedded bytes).
+///
+/// Resolution: the invoking process's `current_dir` first (so a contributor
+/// running from any worktree/clone builds THAT tree's guest sources, not the
+/// checkout mvmctl happened to be compiled in), walking up to the root; then the
+/// compile-time `CARGO_MANIFEST_DIR` ancestor (preserves an in-place `cargo run`
+/// whose cwd isn't the root); else `None`.
+pub fn detect_source_workspace() -> Option<PathBuf> {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(ws) = source_workspace_from(&cwd)
+    {
+        return Some(ws);
+    }
+    source_workspace_from(Path::new(env!("CARGO_MANIFEST_DIR")))
+}
+
+/// Cache-key segment for a source-checkout guest build: a `src-` prefixed
+/// fingerprint of the guest crate sources. A changed guest source ⇒ a changed
+/// key ⇒ a fresh build, so a contributor's local edit is never served a stale
+/// version+arch-cached agent. The `src-` prefix keeps it from ever colliding
+/// with a version-keyed (shipped-binary) cache entry.
+pub fn source_cache_key(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
+    Ok(format!("src-{}", guest_source_fingerprint(workspace_root)?))
+}
+
+/// A stable content fingerprint over the guest crate sources compiled into the
+/// runtime binaries (`mvm-guest` + `mvm-guest-helpers`): each crate's
+/// `Cargo.toml` plus every file under its `src/`. Hashes workspace-relative
+/// paths and bytes in sorted order so the digest is deterministic.
+pub fn guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
+    use sha2::{Digest, Sha256};
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for crate_rel in ["crates/mvm-guest", "crates/mvm-guest-helpers"] {
+        let crate_dir = workspace_root.join(crate_rel);
+        let manifest = crate_dir.join("Cargo.toml");
+        if manifest.is_file() {
+            files.push(manifest);
+        }
+        collect_source_files(&crate_dir.join("src"), &mut files)?;
+    }
+    files.sort();
+
+    let mut h = Sha256::new();
+    for f in &files {
+        let rel = f.strip_prefix(workspace_root).unwrap_or(f);
+        h.update(rel.to_string_lossy().as_bytes());
+        h.update([0u8]);
+        h.update(std::fs::read(f)?);
+        h.update([0u8]);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
+/// Collect every regular file under `dir` (recursively) into `out`. Skips a
+/// `target` directory defensively; absent `dir` is a no-op.
+fn collect_source_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), GuestAgentBuildError> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            for entry in std::fs::read_dir(&path)? {
+                stack.push(entry?.path());
+            }
+        } else if meta.is_file() {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// Resolve the guest binaries for `(cache_key, arch)`, building + caching them
+/// from `workspace_root` on a cache miss. For a source checkout the caller
+/// passes a [`source_cache_key`], so a changed guest source misses the cache and
+/// rebuilds instead of serving a stale agent. The cross-compile writes to a
+/// cache-scoped target dir, never into `workspace_root/target`.
 pub fn resolve_or_build_guest_binaries(
     cache_root: &Path,
-    version: &str,
+    cache_key: &str,
     arch: GuestArch,
     workspace_root: &Path,
 ) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
-    let layout = GuestAgentLayout::under(cache_root, version, arch);
+    let layout = GuestAgentLayout::under(cache_root, cache_key, arch);
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
-    let spec = GuestAgentBuildSpec::new(workspace_root.to_path_buf(), arch);
+    let spec = GuestAgentBuildSpec::new(
+        workspace_root.to_path_buf(),
+        arch,
+        guest_build_target_dir(cache_root),
+    );
     let built = build_guest_binaries(&spec)?;
     install_into_cache(
         GuestRuntimeBinaryPaths {
             oci_init: &built.0,
             agent: &built.1,
             netinit: &built.2,
-            egress_client: &built.3,
-            entrypoint_runner: &built.4,
-            verity_init: &built.5,
+            netd: &built.3,
+            egress_client: &built.4,
+            entrypoint_runner: &built.5,
+            verity_init: &built.6,
         },
         cache_root,
-        version,
+        cache_key,
         arch,
     )
 }
@@ -233,14 +358,15 @@ pub fn resolve_or_build_guest_binaries(
 pub fn install_into_cache(
     src: GuestRuntimeBinaryPaths<'_>,
     cache_root: &Path,
-    version: &str,
+    cache_key: &str,
     arch: GuestArch,
 ) -> Result<MvmRuntimeBinaries, GuestAgentBuildError> {
-    let layout = GuestAgentLayout::under(cache_root, version, arch);
+    let layout = GuestAgentLayout::under(cache_root, cache_key, arch);
     std::fs::create_dir_all(&layout.dir)?;
     install_one(src.oci_init, &layout.oci_init)?;
     install_one(src.agent, &layout.agent)?;
     install_one(src.netinit, &layout.netinit)?;
+    install_one(src.netd, &layout.netd)?;
     install_one(src.egress_client, &layout.egress_client)?;
     install_one(src.entrypoint_runner, &layout.entrypoint_runner)?;
     install_one(src.verity_init, &layout.verity_init)?;
@@ -251,10 +377,10 @@ pub fn install_into_cache(
 /// Lets a caller check the cache without triggering a source-checkout build.
 pub fn cached_guest_binaries(
     cache_root: &Path,
-    version: &str,
+    cache_key: &str,
     arch: GuestArch,
 ) -> Option<MvmRuntimeBinaries> {
-    let layout = GuestAgentLayout::under(cache_root, version, arch);
+    let layout = GuestAgentLayout::under(cache_root, cache_key, arch);
     layout.is_complete().then(|| layout.binaries())
 }
 
@@ -272,6 +398,7 @@ pub fn install_prebuilt_guest_binaries(
     write_exec(&layout.oci_init, bytes.oci_init)?;
     write_exec(&layout.agent, bytes.agent)?;
     write_exec(&layout.netinit, bytes.netinit)?;
+    write_exec(&layout.netd, bytes.netd)?;
     write_exec(&layout.egress_client, bytes.egress_client)?;
     write_exec(&layout.entrypoint_runner, bytes.entrypoint_runner)?;
     write_exec(&layout.verity_init, bytes.verity_init)?;
@@ -294,13 +421,29 @@ fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
     Ok(())
 }
 
+/// The seven built guest binary paths, in the order `oci_init, agent, netinit,
+/// netd, egress_client, entrypoint_runner, verity_init`.
+type BuiltGuestBinaries = (
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+);
+
 /// Run `cargo zigbuild` for the spec, returning the built binary paths.
 pub fn build_guest_binaries(
     spec: &GuestAgentBuildSpec,
-) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf), GuestAgentBuildError> {
+) -> Result<BuiltGuestBinaries, GuestAgentBuildError> {
     let argv = spec.argv();
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
+    // Pin the cargo target dir to the cache-scoped dir so the cross-compile
+    // never writes into the invoking source tree's `target/` — the guest-build
+    // worktree-hygiene contract. Overrides any inherited CARGO_TARGET_DIR.
+    cmd.env("CARGO_TARGET_DIR", &spec.target_dir);
     // Pin RUSTC to the rustup toolchain when available — a Homebrew
     // `rustc` earlier on `$PATH` carries no cross-target std and fails
     // the musl build with E0463.
@@ -325,6 +468,7 @@ pub fn build_guest_binaries(
     let oci_init = dir.join("mvm-oci-init");
     let agent = dir.join("mvm-guest-agent");
     let netinit = dir.join("mvm-guest-netinit");
+    let netd = dir.join("mvm-guest-netd");
     let egress_client = dir.join("mvm-egress-client");
     let entrypoint_runner = dir.join("mvm-oci-entrypoint");
     let verity_init = dir.join("mvm-verity-init");
@@ -332,6 +476,7 @@ pub fn build_guest_binaries(
         &oci_init,
         &agent,
         &netinit,
+        &netd,
         &egress_client,
         &entrypoint_runner,
         &verity_init,
@@ -344,6 +489,7 @@ pub fn build_guest_binaries(
         oci_init,
         agent,
         netinit,
+        netd,
         egress_client,
         entrypoint_runner,
         verity_init,
@@ -399,6 +545,7 @@ mod tests {
                 oci_init: b"fake-oci-init-elf",
                 agent: b"fake-agent-elf",
                 netinit: b"fake-netinit-elf",
+                netd: b"fake-netd-elf",
                 egress_client: b"fake-egress-client-elf",
                 entrypoint_runner: b"fake-entrypoint-runner-elf",
                 verity_init: b"fake-verity-init-elf",
@@ -411,6 +558,7 @@ mod tests {
         assert!(bins.oci_init.is_file());
         assert!(bins.agent.is_file());
         assert!(bins.netinit.is_file());
+        assert!(bins.netd.is_file());
         assert!(bins.egress_client.is_file());
         assert!(bins.entrypoint_runner.is_file());
         assert!(bins.verity_init.is_file());
@@ -471,6 +619,7 @@ mod tests {
         assert_eq!(l.oci_init, l.dir.join("mvm-oci-init"));
         assert_eq!(l.agent, l.dir.join("mvm-guest-agent"));
         assert_eq!(l.netinit, l.dir.join("mvm-guest-netinit"));
+        assert_eq!(l.netd, l.dir.join("mvm-guest-netd"));
         assert_eq!(l.egress_client, l.dir.join("mvm-egress-client"));
         assert_eq!(l.entrypoint_runner, l.dir.join("mvm-oci-entrypoint"));
         assert_eq!(l.verity_init, l.dir.join("mvm-verity-init"));
@@ -478,36 +627,52 @@ mod tests {
 
     #[test]
     fn build_argv_targets_musl_with_dev_shell_and_both_bins() {
-        let mut env = TestEnv::new();
-        env.remove("CARGO_TARGET_DIR");
-        let spec = GuestAgentBuildSpec::new(PathBuf::from("/ws"), GuestArch::Aarch64);
+        let spec = GuestAgentBuildSpec::new(
+            PathBuf::from("/ws"),
+            GuestArch::Aarch64,
+            PathBuf::from("/cache/guest-agent-build/target"),
+        );
         let argv = spec.argv();
         assert_eq!(argv[0], "cargo");
         assert_eq!(argv[1], "zigbuild");
         assert!(argv.contains(&"aarch64-unknown-linux-musl".to_string()));
         assert!(argv.contains(&"mvm-guest-agent".to_string()));
         assert!(argv.contains(&"mvm-guest-netinit".to_string()));
+        assert!(argv.contains(&"mvm-guest-netd".to_string()));
         assert!(argv.contains(&"mvm-oci-init".to_string()));
         assert!(argv.contains(&"mvm-oci-entrypoint".to_string()));
         assert!(argv.contains(&"mvm-verity-init".to_string()));
         assert!(argv.contains(&"mvm-egress-client".to_string()));
         assert!(argv.contains(&"mvm-guest-helpers".to_string()));
         assert!(argv.contains(&"mvm-guest/dev-shell".to_string()));
-        // output_dir is under the target triple's release dir.
-        assert_eq!(
-            spec.output_dir(),
-            PathBuf::from("/ws/target/aarch64-unknown-linux-musl/release")
-        );
     }
 
     #[test]
-    fn output_dir_honors_cargo_target_dir_override() {
+    fn output_dir_is_cache_scoped_never_the_source_tree() {
+        // The cross-compile output dir hangs off the explicit cache-scoped
+        // target_dir, NOT the workspace `target/`, and is independent of any
+        // ambient CARGO_TARGET_DIR — so a source-checkout guest build can never
+        // write into the invoking source tree.
         let mut env = TestEnv::new();
-        env.set("CARGO_TARGET_DIR", "/tmp/custom-target");
-        let spec = GuestAgentBuildSpec::new(PathBuf::from("/ws"), GuestArch::Aarch64);
+        env.set("CARGO_TARGET_DIR", "/tmp/ambient-should-be-ignored");
+        let spec = GuestAgentBuildSpec::new(
+            PathBuf::from("/ws"),
+            GuestArch::Aarch64,
+            PathBuf::from("/cache/guest-agent-build/target"),
+        );
         assert_eq!(
             spec.output_dir(),
-            PathBuf::from("/tmp/custom-target/aarch64-unknown-linux-musl/release")
+            PathBuf::from("/cache/guest-agent-build/target/aarch64-unknown-linux-musl/release")
+        );
+        // Never under the workspace source tree.
+        assert!(!spec.output_dir().starts_with("/ws/target"));
+    }
+
+    #[test]
+    fn guest_build_target_dir_is_under_cache_root() {
+        assert_eq!(
+            guest_build_target_dir(Path::new("/c")),
+            PathBuf::from("/c/guest-agent-build/target")
         );
     }
 
@@ -518,12 +683,14 @@ mod tests {
         let oci_init_src = tmp.path().join("i");
         let agent_src = tmp.path().join("a");
         let netinit_src = tmp.path().join("n");
+        let netd_src = tmp.path().join("d");
         let egress_client_src = tmp.path().join("e");
         let entrypoint_runner_src = tmp.path().join("r");
         let verity_init_src = tmp.path().join("v");
         std::fs::write(&oci_init_src, b"INIT").unwrap();
         std::fs::write(&agent_src, b"AGENT").unwrap();
         std::fs::write(&netinit_src, b"NETINIT").unwrap();
+        std::fs::write(&netd_src, b"NETD").unwrap();
         std::fs::write(&egress_client_src, b"EGRESS").unwrap();
         std::fs::write(&entrypoint_runner_src, b"RUNNER").unwrap();
         std::fs::write(&verity_init_src, b"VERITY").unwrap();
@@ -534,6 +701,7 @@ mod tests {
                 oci_init: &oci_init_src,
                 agent: &agent_src,
                 netinit: &netinit_src,
+                netd: &netd_src,
                 egress_client: &egress_client_src,
                 entrypoint_runner: &entrypoint_runner_src,
                 verity_init: &verity_init_src,
@@ -545,6 +713,7 @@ mod tests {
         .expect("install");
         assert_eq!(std::fs::read(&installed.oci_init).unwrap(), b"INIT");
         assert_eq!(std::fs::read(&installed.agent).unwrap(), b"AGENT");
+        assert_eq!(std::fs::read(&installed.netd).unwrap(), b"NETD");
         assert_eq!(std::fs::read(&installed.egress_client).unwrap(), b"EGRESS");
         assert_eq!(
             std::fs::read(&installed.entrypoint_runner).unwrap(),
@@ -573,6 +742,7 @@ mod tests {
                 oci_init: &tmp.path().join("missing-oci-init"),
                 agent: &tmp.path().join("missing-agent"),
                 netinit: &tmp.path().join("missing-netinit"),
+                netd: &tmp.path().join("missing-netd"),
                 egress_client: &tmp.path().join("missing-egress-client"),
                 entrypoint_runner: &tmp.path().join("missing-entrypoint-runner"),
                 verity_init: &tmp.path().join("missing-verity-init"),
@@ -583,5 +753,136 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, GuestAgentBuildError::OutputMissing(_)));
+    }
+
+    /// Build a minimal fake source checkout under `root`: a workspace `Cargo.toml`
+    /// plus a `crates/mvm-guest/{Cargo.toml,src/main.rs}` carrying `agent_body`.
+    fn make_fake_checkout(root: &Path, agent_body: &str) {
+        std::fs::create_dir_all(root.join("crates/mvm-guest/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/mvm-guest-helpers/src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), b"[workspace]\n").unwrap();
+        std::fs::write(root.join("crates/mvm-guest/Cargo.toml"), b"[package]\n").unwrap();
+        std::fs::write(root.join("crates/mvm-guest/src/main.rs"), agent_body).unwrap();
+        std::fs::write(
+            root.join("crates/mvm-guest-helpers/Cargo.toml"),
+            b"[package]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("crates/mvm-guest-helpers/src/lib.rs"), b"").unwrap();
+    }
+
+    #[test]
+    fn is_source_workspace_root_requires_guest_crate_and_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty dir is not a workspace root.
+        assert!(!is_source_workspace_root(tmp.path()));
+        make_fake_checkout(tmp.path(), "fn main() {}");
+        assert!(is_source_workspace_root(tmp.path()));
+    }
+
+    #[test]
+    fn source_workspace_from_walks_up_to_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_fake_checkout(tmp.path(), "fn main() {}");
+        // Canonicalize: tempdir on macOS is under a `/var → /private/var` symlink.
+        let root = std::fs::canonicalize(tmp.path()).unwrap();
+        // From a nested subdir the walk finds the root.
+        let nested = root.join("crates/mvm-guest/src");
+        assert_eq!(source_workspace_from(&nested), Some(root.clone()));
+        // From the root itself, the root.
+        assert_eq!(source_workspace_from(&root), Some(root));
+    }
+
+    #[test]
+    fn source_workspace_from_none_for_non_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(source_workspace_from(tmp.path()), None);
+    }
+
+    #[test]
+    fn detect_source_workspace_resolves_this_repo() {
+        // Running under nextest, cwd is `crates/mvm-build`; the walk up finds the
+        // real workspace root, and it carries the guest crate.
+        let ws = detect_source_workspace().expect("this is a source checkout");
+        assert!(ws.join("crates/mvm-guest").is_dir());
+        assert!(ws.join("Cargo.toml").is_file());
+    }
+
+    #[test]
+    fn fingerprint_changes_with_guest_source_and_is_stable() {
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let c = tempfile::tempdir().unwrap();
+        make_fake_checkout(a.path(), "fn main() { println!(\"v1\"); }");
+        make_fake_checkout(b.path(), "fn main() { println!(\"v2\"); }");
+        make_fake_checkout(c.path(), "fn main() { println!(\"v1\"); }");
+
+        let fa = guest_source_fingerprint(a.path()).unwrap();
+        let fb = guest_source_fingerprint(b.path()).unwrap();
+        let fc = guest_source_fingerprint(c.path()).unwrap();
+        // A changed guest source yields a different fingerprint.
+        assert_ne!(fa, fb, "source edit must change the fingerprint");
+        // Identical source yields an identical fingerprint (a real cache hit).
+        assert_eq!(fa, fc, "identical source must fingerprint identically");
+        // The digest is lowercase hex.
+        assert_eq!(fa.len(), 64);
+        assert!(fa.bytes().all(|x| x.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn source_cache_key_is_src_prefixed() {
+        let tmp = tempfile::tempdir().unwrap();
+        make_fake_checkout(tmp.path(), "fn main() {}");
+        let key = source_cache_key(tmp.path()).unwrap();
+        assert!(key.starts_with("src-"), "key must be src-prefixed: {key}");
+    }
+
+    #[test]
+    fn source_build_never_hits_a_stale_version_arch_cache() {
+        // Reproduces the bug: a prior shipped-binary run populated the version+arch
+        // cache with a STALE agent. A contributor's source checkout keys the cache
+        // on the guest source content instead, so its lookup targets a different
+        // dir and can never be served that stale entry.
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::Aarch64;
+        let version = env!("CARGO_PKG_VERSION");
+
+        // Populate the version+arch cache (the embedded/shipped path).
+        install_prebuilt_guest_binaries(
+            GuestRuntimeBinaryBytes {
+                oci_init: b"STALE",
+                agent: b"STALE",
+                netinit: b"STALE",
+                netd: b"STALE",
+                egress_client: b"STALE",
+                entrypoint_runner: b"STALE",
+                verity_init: b"STALE",
+            },
+            cache.path(),
+            version,
+            arch,
+        )
+        .unwrap();
+        assert!(
+            cached_guest_binaries(cache.path(), version, arch).is_some(),
+            "version+arch cache is populated (stale)"
+        );
+
+        // A source checkout resolves to a src-fingerprint key, whose cache dir is
+        // empty — no stale hit.
+        let ws = tempfile::tempdir().unwrap();
+        make_fake_checkout(ws.path(), "fn main() { /* edited */ }");
+        let key = source_cache_key(ws.path()).unwrap();
+        assert_ne!(key, version, "source key must differ from the version key");
+        assert!(
+            cached_guest_binaries(cache.path(), &key, arch).is_none(),
+            "source-keyed lookup must not return the stale version+arch entry"
+        );
+
+        // And an edit produces yet another distinct key — never colliding.
+        let ws2 = tempfile::tempdir().unwrap();
+        make_fake_checkout(ws2.path(), "fn main() { /* different edit */ }");
+        let key2 = source_cache_key(ws2.path()).unwrap();
+        assert_ne!(key, key2, "distinct guest sources yield distinct keys");
     }
 }

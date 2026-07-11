@@ -55,10 +55,15 @@ vendoring in the no-guest-NIC builder path could fail with host-generated
 `403`s even after the helper issue was fixed. Those hosts are now admitted and
 the fresh `/private/tmp/m236h2` rerun stays alive in the real workload-build
 path instead of reproducing the old immediate crate-fetch failure. The
-remaining macOS blockers are now narrower still: the published `v0.17.0`
-`kernel-aarch64-checksums-sha256.txt` manifest is still missing for the OCI
-download path, and the full sealed HVF/libkrun witness is still in progress
-rather than captured end-to-end.
+remaining macOS blockers are now narrower still: installed-binary
+`--kernel-pin` boots no longer fail closed purely because the workload kernel
+cache is cold — they now route through the same verified
+`download_kernel(..., "workload", ...)` path that `mvmctl build kernel build
+--source download` already uses. The remaining OCI download blocker is now
+purely external release state: the published `v0.17.0`
+`kernel-aarch64-checksums-sha256.txt` manifest is still missing, and the full
+sealed HVF/libkrun witness is still in progress rather than captured
+end-to-end.
 
 ---
 
@@ -153,7 +158,7 @@ Because delivery is the cmdline (Fork 2), the grant is minted where the *other* 
 - [x] **Step 3: Run both** — expect FAIL.
 - [x] **Step 4: Implement** the mint-at-stash and the backend token builder + the four append sites.
 - [x] **Step 5: Run** `cargo nextest run -p mvm-cli stash_plan verb_grant && cargo nextest run -p mvm-backend verb_grant_cmdline_token && cargo build -p mvm-cli -p mvm-backend` — expect PASS + builds. **Verified 2026-07-04:** `cargo test -p mvm-hostd verb_grant`, `cargo test -p mvm-backend verb_grant_cmdline_token`, `cargo test -p mvm-cli host_signer_pubkey_config_tests`, and `cargo check -p mvm-cli -p mvm-guest -p mvm-build`.
-- [ ] **Step 6 (live-boot validation — NOT unit-tested):** that the appended token actually rides each backend's real cmdline and is decoded by the guest (5c) end-to-end — i.e. a plan with `agent_verbs` produces a booted agent whose `boot_state.verb_grant` is `Some` and which returns `VerbNotAuthorized` for an unlisted `ProdSafe` verb — is a **full end-to-end boot** check. Unit tests cover encode+mint+read in isolation; only a live boot exercises cmdline-assembly → kernel → `/proc/cmdline` → `/init` decode → agent pin → refusal. Validate on Vz/HVF (macOS) and Firecracker (Linux). **Stronger Firecracker proof 2026-07-10:** Linux Firecracker now covers the rebuilt sealed `require_grant:true` image, pre-service grant staging, restricted refusal, allow-listed `UpdateIdleTimeoutAck`, the grant-less regression, and a sealed function-workload `RunEntrypoint` success witness (`examples/python/hello-app` compiled to `/tmp/plan219-hello-app`, admitted with `ping` + `run-entrypoint`, returned `"hello ari"` on host `88.99.197.234`). **macOS narrowing 2026-07-10:** the stale `mvm-libkrun-supervisor` source-checkout resolver bug is fixed, the builder-VM egress allowlist now admits the missing crates.io hosts (`crates.io`, `index.crates.io`, `static.crates.io`), and the fresh manifest-backed HVF build stays alive in the real workload-build path instead of failing immediately on helper/config drift or crate-host denial. macOS HVF/libkrun proof still remains open because the full sealed witness is not yet captured and the OCI download path is still blocked on the missing published workload-kernel checksum manifest.
+- [ ] **Step 6 (live-boot validation — NOT unit-tested):** that the appended token actually rides each backend's real cmdline and is decoded by the guest (5c) end-to-end — i.e. a plan with `agent_verbs` produces a booted agent whose `boot_state.verb_grant` is `Some` and which returns `VerbNotAuthorized` for an unlisted `ProdSafe` verb — is a **full end-to-end boot** check. Unit tests cover encode+mint+read in isolation; only a live boot exercises cmdline-assembly → kernel → `/proc/cmdline` → `/init` decode → agent pin → refusal. Validate on Vz/HVF (macOS) and Firecracker (Linux). **Stronger Firecracker proof 2026-07-10:** Linux Firecracker now covers the rebuilt sealed `require_grant:true` image, pre-service grant staging, restricted refusal, allow-listed `UpdateIdleTimeoutAck`, the grant-less regression, and a sealed function-workload `RunEntrypoint` success witness (`examples/python/hello-app` compiled to `/tmp/plan219-hello-app`, admitted with `ping` + `run-entrypoint`, returned `"hello ari"` on host `88.99.197.234`). **macOS narrowing 2026-07-10 / 2026-07-11:** the stale `mvm-libkrun-supervisor` source-checkout resolver bug is fixed, the builder-VM egress allowlist now admits the missing crates.io hosts (`crates.io`, `index.crates.io`, `static.crates.io`), and installed-binary `--kernel-pin` now reuses the existing verified workload-kernel download path on a cold cache instead of failing with "not yet supported." macOS HVF/libkrun proof still remains open because the full sealed witness is not yet captured and the OCI download path still depends on the missing published workload-kernel checksum manifest.
 - [x] **Step 7: Commit** `feat: mint verb-grant sidecar and carry it on every workload backend's cmdline`.
 
 ---

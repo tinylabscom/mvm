@@ -20,6 +20,7 @@ mod check_duplicate_majors;
 mod check_forbidden_deps;
 mod check_guest_agent_in_all_images;
 mod check_guest_agent_runtime_free;
+mod check_guest_binary_lists;
 mod check_guest_images_no_builder_tools;
 mod check_kernel_config_budget;
 mod check_kernel_pin_freshness;
@@ -114,6 +115,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_guest_images_no_builder_tools::run(&workspace)
         }
+        Some("check-guest-binary-lists") => {
+            let workspace = workspace_root();
+            check_guest_binary_lists::run(&workspace)
+        }
         Some("check-no-overclaim") => {
             let workspace = workspace_root();
             check_no_overclaim::run(&workspace)
@@ -174,7 +179,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-no-overclaim, check-spec-numbers, check-two-surfaces, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-spec-numbers, check-two-surfaces, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -224,6 +229,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-guest-images-no-builder-tools     assert mkGuest never bakes mvmctl / mvm-builderd into workload guest images"
+            );
+            eprintln!(
+                "  check-guest-binary-lists                assert the four OCI guest-binary name lists agree and name real [[bin]]s"
             );
             eprintln!(
                 "  check-runtime-overlay-version           Plan 124 C: assert the runtime-overlay flake's overlayVersion matches the workspace version"

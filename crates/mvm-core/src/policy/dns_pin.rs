@@ -205,6 +205,41 @@ impl DnsPinRegistry {
     }
 }
 
+/// Resolve a [`NetworkPolicy`]'s host-allowlist entries to their IP sets so
+/// `host:port` rules gate on concrete addresses (the admission-time pin).
+///
+/// A literal IP needs no lookup and pins to itself; a hostname is resolved via
+/// the host resolver once. An unresolvable host pins an **empty** IP set so the
+/// downstream projection fails CLOSED (deny) rather than widening. An
+/// unrestricted policy has no host rules and yields an empty registry — an
+/// IP-pinning gate can only ever admit explicitly pinned destinations.
+///
+/// This performs blocking DNS I/O for hostname rules; call it once at admission
+/// time, not on a hot path.
+///
+/// [`NetworkPolicy`]: crate::policy::network_policy::NetworkPolicy
+pub fn resolve_network_policy_pins(
+    policy: &crate::policy::network_policy::NetworkPolicy,
+) -> DnsPinRegistry {
+    use std::net::ToSocketAddrs;
+    let mut reg = DnsPinRegistry::new();
+    let Some(rules) = policy.resolve_rules() else {
+        return reg; // unrestricted: no host rules to pin
+    };
+    for hp in rules {
+        let ips: Vec<IpAddr> = if let Ok(ip) = hp.host.parse::<IpAddr>() {
+            vec![ip]
+        } else {
+            (hp.host.as_str(), 0u16)
+                .to_socket_addrs()
+                .map(|addrs| addrs.map(|sa| sa.ip()).collect())
+                .unwrap_or_default()
+        };
+        reg.add(DnsPin::new(hp.host, ips, Duration::hours(24)));
+    }
+    reg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,5 +470,33 @@ mod tests {
         let reg = DnsPinRegistry::default();
         assert!(reg.is_empty());
         assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn resolve_pins_literal_ip_allowlist_pins_to_itself() {
+        use crate::policy::network_policy::{HostPort, NetworkPolicy};
+        // A literal-IP allow-list needs no DNS: each host pins to itself.
+        let policy = NetworkPolicy::allow_list(vec![
+            HostPort::new("93.184.216.34", 443),
+            HostPort::new("1.1.1.1", 53),
+        ]);
+        let reg = resolve_network_policy_pins(&policy);
+        assert_eq!(reg.len(), 2);
+        assert_eq!(
+            reg.lookup("93.184.216.34").unwrap().ips,
+            vec!["93.184.216.34".parse::<IpAddr>().unwrap()]
+        );
+        assert_eq!(
+            reg.lookup("1.1.1.1").unwrap().ips,
+            vec!["1.1.1.1".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn resolve_pins_deny_all_and_unrestricted_yield_empty_registry() {
+        use crate::policy::network_policy::NetworkPolicy;
+        // deny-all has an empty rule set; unrestricted has no host rules at all.
+        assert!(resolve_network_policy_pins(&NetworkPolicy::deny_all()).is_empty());
+        assert!(resolve_network_policy_pins(&NetworkPolicy::unrestricted()).is_empty());
     }
 }

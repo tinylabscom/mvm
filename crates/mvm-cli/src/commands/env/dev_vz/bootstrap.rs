@@ -723,7 +723,7 @@ pub(in crate::commands) mod attested_builder_pack {
     use mvm_core::arch::GuestArch;
     use mvm_core::config::mvm_keys_dir;
     #[cfg(feature = "manifest-verify")]
-    use mvm_core::pack_cache::promote;
+    use mvm_core::pack_cache::{PackProvenanceInput, promote_and_record};
     use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, resolve_pack};
     #[cfg(feature = "manifest-verify")]
     use mvm_core::pack_trust::resolve_pack_download_base;
@@ -771,9 +771,9 @@ pub(in crate::commands) mod attested_builder_pack {
     /// revoked?". An empty config (no publishers) trusts no key and allows no
     /// channel, so every promoted pack fails verification and the caller falls
     /// back to the download — fail-open on availability, never on trust.
-    struct HostPackVerifyInputs {
-        policy: LocalPackPolicy,
-        trust: PackTrustConfig,
+    pub(in crate::commands) struct HostPackVerifyInputs {
+        pub(in crate::commands) policy: LocalPackPolicy,
+        pub(in crate::commands) trust: PackTrustConfig,
     }
 
     /// Load the on-disk trust config, folding both the absent and the malformed
@@ -795,7 +795,7 @@ pub(in crate::commands) mod attested_builder_pack {
         }
     }
 
-    fn host_pack_verify_inputs(arch: GuestArch) -> HostPackVerifyInputs {
+    pub(in crate::commands) fn host_pack_verify_inputs(arch: GuestArch) -> HostPackVerifyInputs {
         let trust = load_host_pack_trust();
         HostPackVerifyInputs {
             policy: LocalPackPolicy {
@@ -854,7 +854,16 @@ pub(in crate::commands) mod attested_builder_pack {
                     manifest_path.display()
                 )
             })?;
-        match promote(staging, &manifest, ctx) {
+        // `v{version}` matches the release tag `fetch_release_builder_pack_staging`
+        // builds its download base URL from, so the recorded version always
+        // names the exact release this pack came from.
+        let release_version = format!("v{}", env!("CARGO_PKG_VERSION"));
+        let prov = PackProvenanceInput {
+            channel: manifest.trust.channel_identity.clone(),
+            release_version,
+            promoted_at_unix: chrono::Utc::now().timestamp() as u64,
+        };
+        match promote_and_record(staging, &manifest, &prov, ctx) {
             Ok(dir) => Ok(Some(dir)),
             Err(error) => {
                 ui::warn(&format!(
@@ -882,7 +891,9 @@ pub(in crate::commands) mod attested_builder_pack {
     /// fetch entirely, and the caller falls back to the local cache or the
     /// builder VM instead of treating it as an error.
     #[cfg(feature = "manifest-verify")]
-    fn fetch_release_builder_pack_staging(arch: &str) -> Result<Option<tempfile::TempDir>> {
+    pub(in crate::commands) fn fetch_release_builder_pack_staging(
+        arch: &str,
+    ) -> Result<Option<tempfile::TempDir>> {
         let trust = load_host_pack_trust();
         let version = env!("CARGO_PKG_VERSION");
         let default_base =

@@ -215,6 +215,7 @@ impl Commands {
             Commands::Prepare(_) => "prepare",
             Commands::Manifest(_) => "manifest",
             Commands::Image(_) => "image",
+            Commands::Pack(_) => "pack",
             // `machine <sub>`: folded advanced ops (pause/snapshot/set-ttl/…)
             // keep their per-op verb; native lifecycle verbs report `machine`.
             Commands::Machine(a) => a.action.verb_name(),

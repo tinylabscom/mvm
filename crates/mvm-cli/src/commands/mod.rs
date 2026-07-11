@@ -10,6 +10,7 @@ mod image;
 mod machine;
 mod manifest;
 mod ops;
+mod pack;
 /// Supervisor warm-pool: the `mvmctl pool warm/status` command + the launch glue
 /// (`try_warm_claim`/`replenish_after_launch`) the transient `machine run` path
 /// (`crate::exec::run_inner`) calls to claim a warm standby (auto-named,
@@ -50,7 +51,7 @@ pub(in crate::commands) struct Cli {
     /// Highest priority — beats `MVM_BUILDER_BACKEND`
     /// env and the platform-default auto-detect (macOS 26+ Apple
     /// Silicon → hvf; everywhere else → libkrun).
-    #[arg(long, global = true, value_parser = ["libkrun", "vz", "qemu", "hvf"])]
+    #[arg(long, global = true, value_parser = ["libkrun", "qemu", "hvf"])]
     pub builder: Option<String>,
 
     /// Where the builder VM's kernel comes from when its image is
@@ -102,6 +103,9 @@ pub(in crate::commands) enum Commands {
     /// Explain a run after the fact from the chain-signed audit log
     #[command(display_order = 7)]
     Explain(vm::explain::Args),
+    /// Manage the versioned pack cache (list/rollback/prune/download/update)
+    #[command(display_order = 8)]
+    Pack(pack::Args),
     /// SDK transport surface (`run --mode live/plan`). Hidden: the user-facing
     /// transient-run role folded into `machine run`; `run` survives only as the
     /// SDK Sandbox launcher the Python/TS SDKs shell to, so it stays hidden

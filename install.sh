@@ -137,10 +137,10 @@ $SUDO install -m 0755 "$SRC/mvmctl" "$INSTALL_DIR/mvmctl"
 # them — installing only mvmctl strands them. copy-if-exists: the bundled set
 # differs by platform (macOS ships the supervisors + bridge + endpoint; Linux
 # ships the bridge + endpoint).
-# No codesigning here: the vz/hvf/libkrun supervisors self-sign with the
+# No codesigning here: the hvf/libkrun supervisors self-sign with the
 # required entitlements on first spawn (ensure_signed); mvm-bridge and the
 # substitution endpoint need no entitlement.
-for hostbin in mvm-bridge mvm-vz-supervisor mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
+for hostbin in mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitution-endpoint; do
   if [ -f "$SRC/$hostbin" ]; then
     $SUDO install -m 0755 "$SRC/$hostbin" "$INSTALL_DIR/$hostbin"
     say "Installed: $INSTALL_DIR/$hostbin"
@@ -172,19 +172,20 @@ case ":$PATH:" in
   *) say "Add to PATH:  export PATH=\"$INSTALL_DIR:\$PATH\"" ;;
 esac
 
-# Pre-fetch the builder VM image so the first `mvmctl dev up` is fast instead
-# of paying a one-time download/build on the hot path. Opt out with
-# MVM_SKIP_BUILDER_PREFETCH=1 (bandwidth-limited, headless, or CI installs).
+# Pre-fetch the builder VM + dev images so the first `mvmctl dev up` is fast
+# instead of paying a one-time download/build on the hot path. Opt out with
+# MVM_SKIP_BUILDER_PREFETCH=1 (bandwidth-limited, headless, or CI installs);
+# `mvmctl bootstrap` also honors the finer MVM_SKIP_DEV_IMAGE_PREFETCH knob.
 # Non-fatal: a failure just defers the fetch to first `dev up`.
 if [ "${MVM_SKIP_BUILDER_PREFETCH:-}" != "1" ]; then
-  say "Pre-fetching the builder VM image so your first 'dev up' is instant (skip with MVM_SKIP_BUILDER_PREFETCH=1)..."
+  say "Pre-fetching the builder VM + dev images so your first 'dev up' is instant (skip with MVM_SKIP_BUILDER_PREFETCH=1)..."
   if "$INSTALL_DIR/mvmctl" bootstrap; then
-    say "Builder VM image ready."
+    say "Builder VM + dev images ready."
   else
-    warn "builder-image prefetch failed — 'mvmctl dev up' will fetch it on first run, or re-run 'mvmctl bootstrap'."
+    warn "image prefetch failed — 'mvmctl dev up' will fetch on first run, or re-run 'mvmctl bootstrap'."
   fi
 else
-  say "Skipping builder-image prefetch — run 'mvmctl bootstrap' before your first 'dev up' for a fast start."
+  say "Skipping image prefetch — run 'mvmctl bootstrap' before your first 'dev up' for a fast start."
 fi
 
 say "Run 'mvmctl doctor' to check your host."

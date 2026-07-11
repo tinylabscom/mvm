@@ -750,4 +750,51 @@ mod attested_builder_pack_tests {
 
         promote_staged_builder_pack(staging.path(), &ctx).expect_err("missing manifest must error");
     }
+
+    /// A verifying staged pack must land in the version index — active for its
+    /// key — stamped with the release tag `promote_staged_builder_pack` derives
+    /// from the running binary's own version (the same `v{version}` form
+    /// `fetch_release_builder_pack_staging` builds its download base URL
+    /// from). Covers the recording half of the download acceleration path this
+    /// module exists for; the pure-facade recording behavior itself is proven
+    /// independently by `mvm_core::pack_cache`'s own `promote_and_record` tests.
+    #[cfg(feature = "manifest-verify")]
+    #[test]
+    fn promote_staged_builder_pack_records_release_version_and_active() {
+        let cache = TempDir::new().expect("cache tempdir");
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", cache.path());
+
+        let staged = TempDir::new().expect("staged pack tempdir");
+        write_valid_builder_artifacts(staged.path());
+        let key = signing_key();
+        let manifest = builder_pack_manifest(staged.path(), &key);
+        std::fs::write(
+            staged.path().join("pack-manifest.json"),
+            manifest.canonical_bytes().expect("canonical bytes"),
+        )
+        .expect("write staged manifest");
+
+        let trust = trust_store(&key);
+        let rev = good_revocations();
+        let policy = hvf_policy();
+        let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
+
+        let promoted = promote_staged_builder_pack(staged.path(), &ctx)
+            .expect("promote should not error")
+            .expect("staged pack must verify and be promoted");
+
+        let versions =
+            mvm_core::pack_cache::list_versions(Some(PackKind::Builder)).expect("list_versions ok");
+        let entry = versions
+            .iter()
+            .find(|v| v.pack_hash == promoted.verified.pack_hash)
+            .expect("promoted pack must be recorded in the version index");
+        assert_eq!(
+            entry.release_version,
+            format!("v{}", env!("CARGO_PKG_VERSION")),
+            "recorded version must match the release tag the fetch URL is built from"
+        );
+        assert!(entry.active, "the sole promoted version must be active");
+    }
 }

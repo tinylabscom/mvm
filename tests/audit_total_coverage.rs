@@ -133,6 +133,11 @@ const BENCH_SUB: &[(&str, AuditPosture)] = &[
         "microvm-density",
         AuditPosture::Emits("plan.admitted+plan.launched+VmStart+VmStop"),
     ),
+    // `first-use` is a measurement orchestrator: it spawns `mvmctl dev up` /
+    // `mvmctl machine build` as child processes and times them. Those children
+    // emit their own audit entries under the `dev` / `machine` postures; the
+    // bench command itself performs no direct auditable mutation.
+    ("first-use", AuditPosture::ReadOnly),
 ];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[
@@ -172,6 +177,18 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("ls", AuditPosture::ReadOnly),
     ("inspect", AuditPosture::ReadOnly),
     ("rm", AuditPosture::Emits("CachePrune")),
+];
+
+// `mvmctl pack` — the versioned attested-pack cache lifecycle
+// (list/rollback/prune/download/update). `rollback`/`download`/`update`
+// mutate the cache (pointer swap or new version fetched) and share
+// `PackCacheChange`; `prune` removes bytes so it reuses `CachePrune`.
+const PACK_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("rollback", AuditPosture::Emits("PackCacheChange")),
+    ("prune", AuditPosture::Emits("CachePrune")),
+    ("download", AuditPosture::Emits("PackCacheChange")),
+    ("update", AuditPosture::Emits("PackCacheChange")),
 ];
 
 // Plan 200 — beginner machine UX. `machine run` translates into the same
@@ -413,6 +430,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("__ssh-agent-proxy", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
+    ("pack", AuditPosture::DelegatesToSub(PACK_SUB)),
     // Plan 200 — beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.
@@ -598,6 +616,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "CheckpointRestored",
         "NetworkCreate",
         "NetworkRemove",
+        "PackCacheChange",
         "PoolWarm",
         "RegistryReconcile",
         "SecretGet",

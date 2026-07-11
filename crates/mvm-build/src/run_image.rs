@@ -25,6 +25,7 @@ pub struct PrebuiltGuestBinaries<'a> {
     pub oci_init: &'a [u8],
     pub agent: &'a [u8],
     pub netinit: &'a [u8],
+    pub netd: &'a [u8],
     pub egress_client: &'a [u8],
     pub entrypoint_runner: &'a [u8],
     pub verity_init: &'a [u8],
@@ -259,35 +260,37 @@ fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) 
     Ok(initrd_path)
 }
 
-/// Resolve the guest-agent binaries: cache hit → source-checkout cross-compile
-/// → embedded prebuilt bytes.
+/// Resolve the guest-agent binaries: source-checkout cross-compile (content-keyed
+/// cache) → version+arch cache hit → embedded prebuilt bytes.
+///
+/// A source checkout is resolved from the *invoking* process's working dir (not
+/// the checkout mvmctl was compiled in), so a contributor building from any
+/// worktree/clone gets THAT tree's guest sources. Its cache is keyed on the
+/// guest source content, so a local edit always rebuilds instead of serving a
+/// stale, same-version cached agent — the bug that broke local guest-change
+/// validation. A shipped binary with no checkout falls through to the version+arch
+/// cache and the embedded bytes.
 fn resolve_guest_binaries(
     cache_root: &Path,
     prebuilt: Option<PrebuiltGuestBinaries<'_>>,
 ) -> Result<MvmRuntimeBinaries> {
     let arch = mvm_core::arch::GuestArch::host();
-    let version = env!("CARGO_PKG_VERSION");
 
+    if let Some(ws) = crate::guest_agent_build::detect_source_workspace() {
+        let cache_key = crate::guest_agent_build::source_cache_key(&ws)
+            .context("fingerprint guest sources for the build cache")?;
+        return crate::guest_agent_build::resolve_or_build_guest_binaries(
+            cache_root, &cache_key, arch, &ws,
+        )
+        .context("build guest agent binaries from the source checkout");
+    }
+
+    // Shipped mvmctl: the embedded bytes are fixed by this version, so a
+    // version+arch cache is correct here.
+    let version = env!("CARGO_PKG_VERSION");
     if let Some(cached) = crate::guest_agent_build::cached_guest_binaries(cache_root, version, arch)
     {
         return Ok(cached);
-    }
-
-    // A source checkout cross-compiles fresh, so contributors editing `mvm-guest`
-    // get their local changes. `CARGO_MANIFEST_DIR` is baked at this crate's
-    // compile time and points at `crates/mvm-build`; on a shipped binary that
-    // path doesn't exist on the end-user's host — which is exactly how we detect
-    // "not a source checkout" and fall through to the embedded bytes.
-    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent());
-    if let Some(ws) = workspace_root
-        && ws.join("crates/mvm-guest").is_dir()
-    {
-        return crate::guest_agent_build::resolve_or_build_guest_binaries(
-            cache_root, version, arch, ws,
-        )
-        .context("build guest agent binaries from the source checkout");
     }
 
     if let Some(p) = prebuilt {
@@ -296,6 +299,7 @@ fn resolve_guest_binaries(
                 oci_init: p.oci_init,
                 agent: p.agent,
                 netinit: p.netinit,
+                netd: p.netd,
                 egress_client: p.egress_client,
                 entrypoint_runner: p.entrypoint_runner,
                 verity_init: p.verity_init,
