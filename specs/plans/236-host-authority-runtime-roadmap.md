@@ -1,6 +1,6 @@
 # Plan 236 — Host-authority runtime roadmap
 
-**Status:** IN PROGRESS (GO; macOS verb-grant witness remains)  
+**Status:** IN PROGRESS (GO; macOS verb-grant witness remains)
 **Created:** 2026-07-09  
 **Goal:** turn `mvm`'s current security and architecture lead into a simpler,
 more competitive product by finishing the host-authority model, removing
@@ -72,11 +72,16 @@ follow-up separately binds host-signed re-pin envelopes to the currently
 pinned VM lineage (`predecessor_session_id` + `predecessor_plan_nonce_hex`), so
 a genuinely host-signed sibling grant cannot replace the current VM's grant
 during `PostRestore`; focused guest/core/CLI tests plus green host
-`cargo test --workspace` validation closed the cross-VM replay residual. That
-means the honest remaining blockers are no longer "missing production OCI seal
-code", "missing workload-kernel checksum manifest for the witness path", or the
-restore-time grant replay binding; the remaining blocker is the macOS
-vsock-only verb-grant enforcement witness.
+`cargo test --workspace` validation closed the cross-VM replay residual. The
+first Phase 2C CI/lint expansion also landed: `xtask check-vsock-only-egress`
+now guards the raw host-authority tunnel files (`network_tunnel_spawn`, guest
+tunnel/TUN code, and host tunnel/TUN code) in addition to the older vmm/HVF
+NIC-free path, so those converged runtime seams fail closed if a future change
+reintroduces `virtio-net`, `passt`, `gvproxy`, or similar guest-network/helper
+tokens there. That means the honest remaining blockers are no longer "missing
+production OCI seal code", "missing workload-kernel checksum manifest for the
+witness path", or the restore-time grant replay binding; the remaining blocker
+is the macOS vsock-only verb-grant enforcement witness.
 
 ## Thesis
 
