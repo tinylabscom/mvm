@@ -1481,11 +1481,26 @@ pub(super) fn resolve_pinned_kernel(
     arch: &str,
     source_checkout: bool,
 ) -> anyhow::Result<String> {
-    resolve_pinned_kernel_with(
-        cache_dir,
-        arch,
-        source_checkout,
-        crate::update::download_kernel,
+    resolve_pinned_kernel_with(cache_dir, arch, source_checkout, download_published_kernel)
+}
+
+#[cfg(feature = "builder-vm")]
+fn download_published_kernel(
+    arch: &str,
+    variant: &str,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    crate::update::download_kernel(arch, variant, dest)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn download_published_kernel(
+    _arch: &str,
+    _variant: &str,
+    _dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "kernel-pin: downloading published workload kernels requires mvm-cli's builder-vm feature"
     )
 }
 
