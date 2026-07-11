@@ -81,6 +81,11 @@ const EGRESS_CLIENT_DEST: &str = "usr/local/bin/mvm-egress-client";
 const ENTRYPOINT_RUNNER_DEST: &str = "usr/lib/mvm/wrappers/oci-entrypoint";
 const ENTRYPOINT_MARKER_DEST: &str = "etc/mvm/entrypoint";
 const OCI_ENTRYPOINT_CONFIG_DEST: &str = "etc/mvm/oci-entrypoint.json";
+/// The measured verb-trust policy the guest agent reads at
+/// `/etc/mvm/verb-trust.json`. Written only into a sealed rootfs so the
+/// require-grant requirement is intrinsic to the dm-verity-hashed data,
+/// fail-closed even if the host omits the require-grant cmdline token.
+const VERB_TRUST_DEST: &str = "etc/mvm/verb-trust.json";
 
 /// Inject the mvm runtime into the OCI-unpacked `rootfs_dir`.
 ///
@@ -129,6 +134,20 @@ pub fn inject_mvm_runtime(
     let variant: &[u8] = if sealed { b"prod\n" } else { b"dev\n" };
     write_file(&etc_mvm.join("variant"), variant, 0o644)?;
     write_file(&etc_mvm.join("name"), b"oci\n", 0o644)?;
+
+    // Bake the require-grant policy into the sealed rootfs so it rides inside
+    // the verity-hashed data — the guest ORs it with the cmdline token, so a
+    // host that forgets the token still lands fail-closed. Dev stays absent
+    // (permissive default).
+    if sealed {
+        let policy = mvm_core::plan::VerbTrustPolicy {
+            version: mvm_core::plan::VERB_TRUST_POLICY_VERSION,
+            require_grant: true,
+            grant_key_source: mvm_core::plan::GrantKeySource::LaunchProvisioned,
+        };
+        let policy_json = serde_json::to_vec(&policy).map_err(io::Error::other)?;
+        write_file(&rootfs_dir.join(VERB_TRUST_DEST), &policy_json, 0o444)?;
+    }
 
     // Baked guest binaries.
     let bin_dir = rootfs_dir.join("usr").join("local").join("bin");
@@ -375,6 +394,55 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(prod_root.join("etc/mvm/variant")).unwrap(),
             "prod\n"
+        );
+    }
+
+    #[test]
+    fn sealed_inject_bakes_require_grant_policy() {
+        // A `--prod` OCI run bakes `/etc/mvm/verb-trust.json` into the rootfs
+        // before the dm-verity seal, so require-grant is intrinsic to the
+        // measured image. The dev run must leave the file absent (permissive).
+        let tmp = tempfile::tempdir().unwrap();
+        let bins = fake_bins(tmp.path());
+
+        let dev_root = tmp.path().join("dev-rootfs");
+        std::fs::create_dir_all(&dev_root).unwrap();
+        inject_mvm_runtime(&dev_root, &bins, None, false).expect("dev inject");
+        assert!(
+            !dev_root.join("etc/mvm/verb-trust.json").exists(),
+            "dev inject must not bake a require-grant policy"
+        );
+
+        let prod_root = tmp.path().join("prod-rootfs");
+        std::fs::create_dir_all(&prod_root).unwrap();
+        inject_mvm_runtime(&prod_root, &bins, None, true).expect("prod inject");
+        let policy_path = prod_root.join("etc/mvm/verb-trust.json");
+        assert!(
+            policy_path.is_file(),
+            "sealed inject writes verb-trust.json"
+        );
+        assert_eq!(
+            std::fs::metadata(&policy_path)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o444,
+            "verb-trust.json is read-only (0444)"
+        );
+        let policy: mvm_core::plan::VerbTrustPolicy =
+            serde_json::from_slice(&std::fs::read(&policy_path).unwrap())
+                .expect("verb-trust.json round-trips");
+        assert!(policy.require_grant);
+        assert_eq!(policy.version, mvm_core::plan::VERB_TRUST_POLICY_VERSION);
+        assert_eq!(
+            policy.grant_key_source,
+            mvm_core::plan::GrantKeySource::LaunchProvisioned
+        );
+        // Byte-for-byte identical to what mkGuest bakes for sealed block images.
+        assert_eq!(
+            std::fs::read(&policy_path).unwrap(),
+            br#"{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}"#
         );
     }
 
