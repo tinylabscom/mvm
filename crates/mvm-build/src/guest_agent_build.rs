@@ -305,10 +305,22 @@ fn install_one(src: &Path, dst: &Path) -> Result<(), GuestAgentBuildError> {
     Ok(())
 }
 
+/// The seven built guest binary paths, in the order `oci_init, agent, netinit,
+/// netd, egress_client, entrypoint_runner, verity_init`.
+type BuiltGuestBinaries = (
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+    PathBuf,
+);
+
 /// Run `cargo zigbuild` for the spec, returning the built binary paths.
 pub fn build_guest_binaries(
     spec: &GuestAgentBuildSpec,
-) -> Result<(PathBuf, PathBuf, PathBuf, PathBuf, PathBuf, PathBuf), GuestAgentBuildError> {
+) -> Result<BuiltGuestBinaries, GuestAgentBuildError> {
     let argv = spec.argv();
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
