@@ -10,7 +10,10 @@ fn bins(specs: &[AuxHelperSpec]) -> Vec<&str> {
 #[test]
 fn substitution_endpoint_builds_on_every_host() {
     let specs = aux_helper_specs("linux", "x86_64", false, false);
-    assert_eq!(bins(&specs), vec!["mvm-substitution-endpoint"]);
+    assert_eq!(
+        bins(&specs),
+        vec!["mvm-substitution-endpoint", "mvm-network-tunnel-worker"]
+    );
 }
 
 #[test]
