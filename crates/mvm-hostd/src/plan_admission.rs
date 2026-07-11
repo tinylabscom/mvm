@@ -429,6 +429,8 @@ fn mint_verb_grant_sidecar(
     let envelope = VerbGrantEnvelope {
         pubkey_hex,
         plan_nonce_hex,
+        predecessor_session_id: None,
+        predecessor_plan_nonce_hex: None,
         grant,
     };
     let envelope_json = serde_json::to_vec(&envelope).context("serialize VerbGrantEnvelope")?;

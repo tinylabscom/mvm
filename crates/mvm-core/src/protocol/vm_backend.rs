@@ -333,6 +333,11 @@ pub fn decode_network_tunnel_cmdline(
 pub struct VerbGrantEnvelope {
     pub pubkey_hex: String,
     pub plan_nonce_hex: String,
+    /// When present on a restore-time re-pin envelope, proves which pinned
+    /// grant lineage the new grant is replacing. Boot-time cmdline envelopes
+    /// leave both predecessor fields absent.
+    pub predecessor_session_id: Option<String>,
+    pub predecessor_plan_nonce_hex: Option<String>,
     pub grant: crate::plan::VerbGrant,
 }
 
@@ -2348,6 +2353,8 @@ mod tests {
         let env = VerbGrantEnvelope {
             pubkey_hex: String::new(),
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant,
         };
         assert!(encode_verb_grant_cmdline(&env).is_none());
@@ -2385,6 +2392,8 @@ mod tests {
         let env = VerbGrantEnvelope {
             pubkey_hex: pubkey_hex.clone(),
             plan_nonce_hex: plan_nonce_hex.clone(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant: grant.clone(),
         };
 

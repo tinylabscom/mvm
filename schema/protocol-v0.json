@@ -3535,6 +3535,19 @@
         "plan_nonce_hex": {
           "type": "string"
         },
+        "predecessor_plan_nonce_hex": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "predecessor_session_id": {
+          "description": "When present on a restore-time re-pin envelope, proves which pinned grant lineage the new grant is replacing. Boot-time cmdline envelopes leave both predecessor fields absent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "pubkey_hex": {
           "type": "string"
         }

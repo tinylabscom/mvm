@@ -957,7 +957,13 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
     // resumed the VMM with a zero VMGenID token before returning; this is the
     // real token + grant delivery, mirroring the Vz fork path and
     // `warm_restore_instance_from_path`'s own post-restore signal.
-    if let Some(grant_env) = read_grant_envelope_for(&p.child_vm_name) {
+    if let Some(mut grant_env) = read_grant_envelope_for(&p.child_vm_name) {
+        if let Some(parent_vm_name) = p.store.read_meta(p.checkpoint).ok().map(|m| m.vm_name)
+            && let Some((session_id, plan_nonce)) = grant_predecessor_from_vm_name(&parent_vm_name)
+        {
+            grant_env.predecessor_session_id = Some(session_id);
+            grant_env.predecessor_plan_nonce_hex = Some(plan_nonce.as_hex().to_string());
+        }
         match mvm_backend::microvm::resolve_running_vm_dir(&p.child_vm_name) {
             Ok(vm_dir) => {
                 let vsock_path_str = mvm_backend::microvm::firecracker_vsock_uds_path(&vm_dir);
@@ -1165,6 +1171,14 @@ fn read_grant_envelope_for(
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
     let bytes = std::fs::read(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+fn grant_predecessor_from_vm_name(vm_name: &str) -> Option<(String, mvm_core::plan::Nonce)> {
+    let envelope = read_grant_envelope_for(vm_name)?;
+    Some((
+        envelope.grant.session_id,
+        mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex).ok()?,
+    ))
 }
 
 /// Read the parent checkpoint's source VM plan and return (cpus, mem_mib).
@@ -1624,6 +1638,8 @@ mod tests {
         let envelope = VerbGrantEnvelope {
             pubkey_hex: "aa".repeat(32),
             plan_nonce_hex: "bb".repeat(16),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant,
         };
         let json = serde_json::to_vec(&envelope).unwrap();
@@ -1634,6 +1650,41 @@ mod tests {
         let got = result.unwrap();
         assert_eq!(got.pubkey_hex, envelope.pubkey_hex);
         assert_eq!(got.plan_nonce_hex, envelope.plan_nonce_hex);
+    }
+
+    #[test]
+    fn grant_predecessor_from_vm_name_reads_session_and_nonce() {
+        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
+
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let vm_name = "test-fork-grant-predecessor";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let nonce = mvm_core::plan::Nonce::from_bytes([7u8; 16]);
+        let envelope = VerbGrantEnvelope {
+            pubkey_hex: "aa".repeat(32),
+            plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
+            grant: mvm_core::plan::VerbGrant {
+                session_id: "parent-session".into(),
+                plan_nonce: nonce.clone(),
+                not_after: chrono::Utc::now() + chrono::Duration::hours(1),
+                verbs: vec![],
+                sig: vec![0u8; 64],
+            },
+        };
+        let json = serde_json::to_vec(&envelope).unwrap();
+        std::fs::write(state_dir.join("verb-grant.json"), &json).unwrap();
+
+        let (session_id, predecessor_nonce) =
+            grant_predecessor_from_vm_name(vm_name).expect("must read predecessor");
+        assert_eq!(session_id, "parent-session");
+        assert_eq!(predecessor_nonce, nonce);
     }
 
     // ── vm_full fork: --cpus/--memory refused ────────────────────────────────
