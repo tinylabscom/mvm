@@ -351,7 +351,11 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(closed, vec![conn_id], "host-closed conn id must be surfaced once");
+        assert_eq!(
+            closed,
+            vec![conn_id],
+            "host-closed conn id must be surfaced once"
+        );
         // Drained: a second take is empty (not re-reported).
         assert!(bridge.take_host_closed().is_empty());
         assert!(!bridge.is_agent_stream(conn_id), "conn removed on close");
