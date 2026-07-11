@@ -49,4 +49,10 @@ pub mod network_tunnel;
 pub mod parent_death;
 pub mod plan_admission;
 pub mod run;
+/// macOS userspace TCP/IP egress for the packet tunnel: terminate admitted
+/// guest TCP flows in an in-process `smoltcp` stack and bridge each to an
+/// ordinary host socket. macOS has no unprivileged kernel NAT; Linux uses the
+/// [`host_tun`] kernel-TUN path instead.
+#[cfg(target_os = "macos")]
+pub mod smoltcp_egress;
 pub mod supervisor;

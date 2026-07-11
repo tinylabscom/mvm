@@ -363,6 +363,29 @@ pub enum TunnelAuditEvent {
         bytes: usize,
         interface_name: String,
     },
+    /// A userspace TCP flow to an admitted destination was accepted and bridged
+    /// to a host socket (the macOS userspace-stack egress path).
+    TcpFlowOpened {
+        flow_id: u32,
+        dst: Ipv4Addr,
+        dst_port: u16,
+    },
+    /// A bridged userspace TCP flow closed, with the byte counts spliced each
+    /// way.
+    TcpFlowClosed {
+        flow_id: u32,
+        dst: Ipv4Addr,
+        dst_port: u16,
+        guest_to_host_bytes: u64,
+        host_to_guest_bytes: u64,
+    },
+    /// A userspace TCP connection was refused before any host socket opened
+    /// because the gate denied its destination.
+    TcpFlowDenied {
+        dst: Ipv4Addr,
+        dst_port: u16,
+        reason: L3DropReason,
+    },
     SessionClosed {
         outcome: TunnelWorkerOutcome,
         stats: TunnelWorkerStats,
@@ -565,6 +588,13 @@ where
 
     pub fn audit(&self) -> &A {
         &self.audit
+    }
+
+    /// The negotiated maximum frame size — the upper bound on a single packet
+    /// this session will carry in either direction.
+    pub fn negotiated_frame_size(&self) -> usize {
+        usize::try_from(self.config.expected_session.maximum_frame_size)
+            .expect("u32 frame size always fits usize on supported targets")
     }
 
     pub fn bootstrap(
@@ -1222,6 +1252,142 @@ where
         )?;
         Ok(TunnelWorkerOutcome::PacketPathFailed)
     }
+
+    /// Block up to `timeout_ms` for the guest session fd to become readable. A
+    /// negative timeout blocks indefinitely. A poll-driven egress loop (the
+    /// macOS userspace stack) uses this so its own timers still fire while no
+    /// guest frame is pending.
+    pub fn poll_guest_readable(&self, timeout_ms: i32) -> Result<bool, TunnelWorkerError> {
+        let mut fds = [libc::pollfd {
+            fd: self.session.stream.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        // SAFETY: `fds` is one valid pollfd for the lifetime of the call.
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), 1, timeout_ms) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                return Ok(false);
+            }
+            return Err(TunnelWorkerError::transport(anyhow::Error::new(err)));
+        }
+        if (fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
+            return Err(TunnelWorkerError::Transport(format!(
+                "guest tunnel session poll failed with revents=0x{:x}",
+                fds[0].revents
+            )));
+        }
+        Ok((fds[0].revents & libc::POLLIN) != 0)
+    }
+
+    /// Read exactly one frame from the guest session and classify it for a
+    /// poll-driven egress loop. Callers must confirm readability first
+    /// (`poll_guest_readable`) so this doesn't block mid-loop.
+    ///
+    /// A packet frame is accounted against the per-session quota; a spent quota
+    /// tells the guest to stop (fail closed) and yields
+    /// [`GuestSessionEvent::Closed`]. A shutdown control frame also yields
+    /// `Closed`; benign control frames yield [`GuestSessionEvent::Control`].
+    pub fn read_guest_session_event(&mut self) -> Result<GuestSessionEvent, TunnelWorkerError> {
+        let frame = self
+            .session
+            .read_frame()
+            .map_err(TunnelWorkerError::transport)?;
+        match frame.header.frame_type {
+            FrameType::Packet => {
+                let payload_len =
+                    u64::try_from(frame.payload.len()).expect("packet length always fits u64");
+                if let Some(outcome) =
+                    self.account_and_check_quota(frame.header.sequence, payload_len)?
+                {
+                    return Ok(GuestSessionEvent::Closed(outcome));
+                }
+                Ok(GuestSessionEvent::Packet {
+                    flow_id: frame.header.flow_id,
+                    sequence: frame.header.sequence,
+                    payload: frame.payload,
+                })
+            }
+            other => match self.handle_control(other, &frame.payload)? {
+                Some(outcome) => Ok(GuestSessionEvent::Closed(outcome)),
+                None => Ok(GuestSessionEvent::Control),
+            },
+        }
+    }
+
+    /// Frame one host-origin IPv4 packet back to the guest. Reverse bytes count
+    /// against the same per-session quota as guest egress; a spent quota tells
+    /// the guest to stop and returns the outcome without delivering the packet.
+    pub fn send_guest_packet(
+        &mut self,
+        flow_id: u32,
+        sequence: u64,
+        payload: Vec<u8>,
+    ) -> Result<Option<TunnelWorkerOutcome>, TunnelWorkerError> {
+        let payload_len = u64::try_from(payload.len()).expect("packet length always fits u64");
+        if let Some(outcome) = self.account_and_check_quota(sequence, payload_len)? {
+            return Ok(Some(outcome));
+        }
+        let bytes = payload.len();
+        self.session
+            .send_packet(0, flow_id, sequence, payload)
+            .map_err(TunnelWorkerError::transport)?;
+        self.stats.host_packets_delivered = self.stats.host_packets_delivered.saturating_add(1);
+        self.stats.host_bytes_delivered =
+            self.stats.host_bytes_delivered.saturating_add(payload_len);
+        self.record_audit(TunnelAuditEvent::PacketDeliveredToGuest {
+            flow_id,
+            sequence,
+            bytes,
+            interface_name: "mvm-smoltcp".to_string(),
+        })?;
+        Ok(None)
+    }
+
+    /// Record one tunnel audit event from a poll-driven egress loop.
+    pub fn record_tunnel_audit(
+        &mut self,
+        event: TunnelAuditEvent,
+    ) -> Result<(), TunnelWorkerError> {
+        self.record_audit(event)
+    }
+
+    /// Tell the guest to stop on a host-side egress failure (Error + Shutdown),
+    /// yielding [`TunnelWorkerOutcome::PacketPathFailed`].
+    pub fn close_for_host_error(
+        &mut self,
+        detail: String,
+    ) -> Result<TunnelWorkerOutcome, TunnelWorkerError> {
+        self.close_for_packet_path_failure(detail)
+    }
+
+    /// Record the terminal `SessionClosed` audit event with final stats.
+    pub fn record_session_closed(
+        &mut self,
+        outcome: TunnelWorkerOutcome,
+    ) -> Result<(), TunnelWorkerError> {
+        self.record_audit(TunnelAuditEvent::SessionClosed {
+            outcome,
+            stats: self.stats,
+        })
+    }
+}
+
+/// One event pulled from the guest session inside a poll-driven egress loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuestSessionEvent {
+    /// A raw guest IPv4 packet payload, with its framing coordinates.
+    Packet {
+        flow_id: u32,
+        sequence: u64,
+        payload: Vec<u8>,
+    },
+    /// The session ended (guest shutdown or a spent quota); stop with this
+    /// outcome.
+    Closed(TunnelWorkerOutcome),
+    /// A benign control frame (heartbeat/credit) — keep looping.
+    Control,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]

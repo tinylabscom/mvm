@@ -140,6 +140,12 @@ impl L3ForwardPolicy {
         }
     }
 
+    /// Every admitted `(dst_ip, dst_port)` pair. The macOS userspace stack
+    /// derives its listening ports from these.
+    pub fn admitted_ipv4_endpoints(&self) -> impl Iterator<Item = (Ipv4Addr, u16)> + '_ {
+        self.allow_ip_port.iter().copied()
+    }
+
     /// The admitted policy this gate was built from.
     pub fn policy(&self) -> &NetworkPolicy {
         &self.policy
