@@ -623,10 +623,14 @@ plan 25 sequences the work into six independently-shippable workstreams.
       builder path through host-generated `403`s. Focused `mvm-build`
       tests/clippy are green after admitting those hosts, and a fresh
       `/private/tmp/m236h2` rerun now stays alive in the real workload-build
-      path instead of reproducing the old immediate failure. Remaining macOS
-      blockers: the full sealed HVF/libkrun witness is still not captured
-      end-to-end, and the OCI download path is still blocked on the missing
-      published `v0.17.0` workload-kernel checksum manifest.
+      path instead of reproducing the old immediate failure. A further
+      follow-up on 2026-07-11 removed one more local hard-stop: installed
+      binary `--kernel-pin` boots now reuse the existing verified workload
+      kernel download path on a cold cache instead of erroring out as "not yet
+      supported." Remaining macOS blockers are now strictly the external
+      release-asset gap plus live proof: the full sealed HVF/libkrun witness
+      is still not captured end-to-end, and the OCI download path still needs
+      the published `v0.17.0` workload-kernel checksum manifest.
 - [x] Started
       [`plans/238-streamed-ext4-materialization-and-oracles.md`](plans/238-streamed-ext4-materialization-and-oracles.md)
       to turn the post-Plan-221 rootfs follow-up into an execution plan. It
