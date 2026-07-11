@@ -2407,9 +2407,13 @@ fn handle_client(
             if let Some(env) = grant_envelope.as_ref() {
                 match boot_state.host_signer_key() {
                     Some(anchor) => {
-                        if let Some(g) =
-                            mvm_guest::vsock::re_pin_verb_grant(env, &anchor, chrono::Utc::now())
-                        {
+                        let (_, current_grant) = boot_state.grant_state();
+                        if let Some(g) = mvm_guest::vsock::re_pin_verb_grant(
+                            env,
+                            current_grant.as_ref(),
+                            &anchor,
+                            chrono::Utc::now(),
+                        ) {
                             boot_state.set_verb_grant(g);
                         }
                     }
@@ -4347,6 +4351,8 @@ mod tests {
         mvm_core::protocol::vm_backend::VerbGrantEnvelope {
             pubkey_hex,
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant: g,
         }
     }
@@ -4362,7 +4368,12 @@ mod tests {
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
         match bs.host_signer_key() {
-            Some(anchor) => match mvm_guest::vsock::re_pin_verb_grant(env, &anchor, now) {
+            Some(anchor) => match mvm_guest::vsock::re_pin_verb_grant(
+                env,
+                bs.grant_state().1.as_ref(),
+                &anchor,
+                now,
+            ) {
                 Some(g) => {
                     bs.set_verb_grant(g);
                     true
@@ -4444,13 +4455,18 @@ mod tests {
         }
         bs.set_verb_grant(signed_grant(&["update-idle-timeout"]));
 
-        // Fresh child session/nonce, unequal to any boot value, widened verbs.
-        let fork_env = envelope_signed_by(
+        let current = bs.grant_state().1.expect("boot grant pinned");
+
+        // Fresh child session/nonce, unequal to the current grant, widened
+        // verbs, but explicitly linked back to the currently pinned grant.
+        let mut fork_env = envelope_signed_by(
             &anchor,
             "child-session",
             mvm_core::plan::Nonce::from_bytes([66u8; 16]),
             &["run-entrypoint", "update-idle-timeout"],
         );
+        fork_env.predecessor_session_id = Some(current.session_id.clone());
+        fork_env.predecessor_plan_nonce_hex = Some(current.plan_nonce.as_hex().to_string());
         assert!(
             apply_post_restore_repin(&bs, &fork_env, chrono::Utc::now()),
             "host-signed fork envelope must re-pin"

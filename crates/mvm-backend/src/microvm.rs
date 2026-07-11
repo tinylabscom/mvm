@@ -4546,6 +4546,8 @@ mod tests {
         let envelope = VerbGrantEnvelope {
             pubkey_hex,
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant,
         };
         let json = serde_json::to_vec(&envelope).unwrap();

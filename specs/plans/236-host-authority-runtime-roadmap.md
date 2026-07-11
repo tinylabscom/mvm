@@ -36,12 +36,16 @@ deny-all workload spawns no endpoint and fails closed, matching libkrun
 negative-path matrix surfaced a real bypass — `re_pin_verb_grant` verified the
 resume envelope against its own embedded key — fixed by verifying against the
 boot-pinned host-signer anchor with a shared verification core (closes the
-self-forgery bypass). Remaining honest blockers: baking the sealed-image
-verb-trust policy needs a production/verity OCI seal path that does not exist
-yet (dev-only today); the macOS live-proof of vsock-only enforcement awaits the
-workload-kernel checksum manifest; and binding restore-time authority to a
-per-VM identity (cross-VM replay of a genuinely host-signed grant) is a tracked
-follow-up.
+self-forgery bypass). The restore/fork follow-up now also binds host-signed
+re-pin envelopes to the currently pinned VM lineage (`predecessor_session_id` +
+`predecessor_plan_nonce_hex`), so a genuinely host-signed sibling grant cannot
+replace the current VM's grant during `PostRestore`; focused guest/core/CLI
+tests plus green `cargo clippy --workspace --all-targets -- -D warnings` and
+host `cargo test --workspace` validation closed the cross-VM replay residual.
+Remaining honest blockers: baking the sealed-image verb-trust policy needs a
+production/verity OCI seal path that does not exist yet (dev-only today); and
+the macOS live-proof of vsock-only enforcement awaits the workload-kernel
+checksum manifest.
 
 ## Thesis
 

@@ -733,6 +733,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
       refresh" as GO rather than requiring an artificial ahead-of-main delta.
       Plan 236's remaining blockers are therefore the honest live-proof and
       production-evidence gaps, not stale branch hygiene.
+<<<<<<< HEAD
 - [x] Started the shared cross-backend tunnel contract for Plan 236 Phase 2A in
       `mvm_core::protocol::network_tunnel`. The new core seam now pins a
       bounded whole-frame format for the guest-TUN ↔ host-worker path, typed
@@ -846,6 +847,15 @@ plan 25 sequences the work into six independently-shippable workstreams.
       bounded readiness-driven pumping rather than semantic flow synthesis.
       Focused validation is green with `cargo test -p mvm-guest network_tunnel --lib`
       and `cargo clippy -p mvm-guest --all-targets -- -D warnings`.
+- [x] Closed the remaining Plan 236 restore-time replay residual on
+      2026-07-10. `PostRestore` verb-grant re-pin now requires predecessor
+      lineage matching the currently pinned grant (`session_id` + plan nonce),
+      and the Firecracker fork path stamps that lineage into the host-signed
+      envelope before delivery. Validation is green with focused `mvm-guest`,
+      `mvm-core`, and `mvm-cli` tests, `cargo clippy --workspace --all-targets
+      -- -D warnings`, and a host `cargo test --workspace` rerun; after the
+      separate OCI seal closeout, the remaining Plan 236 blocker is the macOS
+      verb-grant live witness path.
 - [x] Started
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream A: `mvm_core::packs` now defines strict typed manifests for
