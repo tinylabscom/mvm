@@ -15,6 +15,7 @@
 //!   --vmlinux <path> --rootfs <path> --arch <x86_64|aarch64> \
 //!   --channel <name> --signing-key <hex-file> --out-dir <dir> \
 //!   --sbom <path> --revocation-channel <url> \
+//!   [--closure <nar-path>] \
 //!   [--builder-identity <s>] [--build-env <s>] \
 //!   [--valid-days <n>] [--mirror-identity <s>] [--sbom-uri <url>]
 //!
@@ -24,6 +25,7 @@
 //!   --vmlinux <path> --rootfs <path> --arch <x86_64|aarch64> \
 //!   --channel <name> --keyless --identity <SAN> --out-dir <dir> \
 //!   --sbom <path> --revocation-channel <url> \
+//!   [--closure <nar-path>] \
 //!   [--builder-identity <s>] [--build-env <s>] \
 //!   [--valid-days <n>] [--mirror-identity <s>] [--sbom-uri <url>]
 //! ```
@@ -38,7 +40,11 @@
 //! field with a real published location (e.g. a release download URL); the
 //! sha256 is always computed from the local `--sbom` file regardless. Without
 //! it, the `uri` falls back to a `file://` path of the local SBOM file, which
-//! is only meaningful on the machine that produced the pack.
+//! is only meaningful on the machine that produced the pack. `--closure`
+//! optionally bundles a seeded Nix store closure NAR (a `nix-store --export`
+//! of the dev-shell toolchain) into a builder pack; omitting it produces a
+//! pack exactly as before this flag existed, and is only accepted with the
+//! default builder kind (a runtime pack never carries one).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -82,12 +88,15 @@ fn usage() {
          \x20 --channel <name> --out-dir <dir> \\\n\
          \x20 --sbom <path> --revocation-channel <url> \\\n\
          \x20 (--signing-key <hex-file> | --keyless --identity <SAN>) \\\n\
+         \x20 [--closure <nar-path>] \\\n\
          \x20 [--builder-identity <s>] [--build-env <s>] \\\n\
          \x20 [--valid-days <n>] [--mirror-identity <s>] [--sbom-uri <url>]\n\
          \n\
          --kind defaults to builder; --kind runtime additionally needs \
          --verity and --roothash (the workload rootfs's dm-verity tree + root \
          hash) and is keyless-only (--keyless --identity).\n\
+         --closure optionally bundles a seeded Nix store closure NAR into a \
+         builder pack (default kind only); omitting it is unchanged behavior.\n\
          --sbom-uri overrides the manifest's SBOM reference uri with a \
          published location (e.g. a release download URL) instead of the \
          default file:// path of the local --sbom file; the sha256 is \
@@ -150,6 +159,7 @@ fn run(rest: &[String]) -> Result<(), String> {
     let params = BuildBuilderPackParams {
         vmlinux: parsed.vmlinux,
         rootfs: parsed.rootfs,
+        closure: parsed.closure,
         target_arch: parsed.arch,
         channel: parsed.channel,
         builder_identity: parsed.builder_identity,
@@ -211,6 +221,9 @@ struct ParsedArgs {
     roothash: Option<PathBuf>,
     /// `--kind runtime`. A runtime pack is keyless-only (no ed25519 producer).
     runtime: bool,
+    /// Optional seeded Nix store closure NAR (`--closure`). Only accepted for
+    /// the default builder kind; `None` when the flag is absent.
+    closure: Option<PathBuf>,
     arch: GuestArch,
     channel: String,
     signing_key: Option<PathBuf>,
@@ -244,6 +257,10 @@ fn parse_args(rest: &[String]) -> Result<ParsedArgs, String> {
                 .to_string(),
         );
     }
+    let closure = optional(rest, "closure").map(PathBuf::from);
+    if runtime && closure.is_some() {
+        return Err("--closure is only accepted for the default builder kind".to_string());
+    }
     // Both kinds carry a rootfs; a runtime pack additionally carries the
     // dm-verity hash tree + root hash so the launch can boot it verity-sealed.
     let rootfs = PathBuf::from(required(rest, "rootfs")?);
@@ -261,6 +278,7 @@ fn parse_args(rest: &[String]) -> Result<ParsedArgs, String> {
         verity,
         roothash,
         runtime,
+        closure,
         arch: required(rest, "arch")?
             .parse::<GuestArch>()
             .map_err(|e| e.to_string())?,
@@ -453,6 +471,24 @@ mod tests {
         assert_eq!(parsed.builder_identity, "mvm-builder-pack-tool");
         assert_eq!(parsed.valid_days, 365);
         assert_eq!(parsed.mirror_identity, None);
+        // --closure is absent by default.
+        assert_eq!(parsed.closure, None);
+    }
+
+    #[test]
+    fn closure_flag_is_parsed_when_given() {
+        let mut a = full_args();
+        a.extend(args(&[("closure", "/tmp/nix-closure.nar")]));
+        let parsed = parse_args(&a).expect("parse");
+        assert_eq!(parsed.closure, Some(PathBuf::from("/tmp/nix-closure.nar")));
+    }
+
+    #[test]
+    fn closure_flag_on_runtime_kind_is_error() {
+        let mut a = runtime_args();
+        a.extend(args(&[("closure", "/tmp/nix-closure.nar")]));
+        let err = parse_args(&a).expect_err("closure rejected on runtime kind");
+        assert!(err.contains("closure"), "got: {err}");
     }
 
     /// `full_args()` minus `--signing-key`, plus `--keyless --identity <SAN>`.

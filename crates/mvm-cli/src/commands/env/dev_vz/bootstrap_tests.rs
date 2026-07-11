@@ -601,6 +601,7 @@ mod attested_builder_pack_tests {
         BuildBuilderPackParams {
             vmlinux,
             rootfs,
+            closure: None,
             target_arch: GuestArch::host(),
             channel: "stable".to_string(),
             builder_identity: "release-ci".to_string(),
