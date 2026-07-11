@@ -1,7 +1,12 @@
 //! Dev environment lifecycle helpers + bundled image fetching, builder-VM
 //! image bootstrap, Stage 0, and dev-cache inspection.
 
-mod bootstrap;
+// `pub(in crate::commands)`: the `attested_builder_pack` release-fetch +
+// verification-context helpers are reused by `commands::pack` (a sibling of
+// `env`, not a descendant of `dev_vz`) to implement `mvmctl pack
+// download/update builder` over the same trust construction, rather than
+// forking a second copy.
+pub(in crate::commands) mod bootstrap;
 #[cfg(test)]
 mod bootstrap_tests;
 #[cfg(test)]

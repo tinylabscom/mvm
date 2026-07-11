@@ -174,6 +174,18 @@ const IMAGE_SUB: &[(&str, AuditPosture)] = &[
     ("rm", AuditPosture::Emits("CachePrune")),
 ];
 
+// `mvmctl pack` — the versioned attested-pack cache lifecycle
+// (list/rollback/prune/download/update). `rollback`/`download`/`update`
+// mutate the cache (pointer swap or new version fetched) and share
+// `PackCacheChange`; `prune` removes bytes so it reuses `CachePrune`.
+const PACK_SUB: &[(&str, AuditPosture)] = &[
+    ("list", AuditPosture::ReadOnly),
+    ("rollback", AuditPosture::Emits("PackCacheChange")),
+    ("prune", AuditPosture::Emits("CachePrune")),
+    ("download", AuditPosture::Emits("PackCacheChange")),
+    ("update", AuditPosture::Emits("PackCacheChange")),
+];
+
 // Plan 200 — beginner machine UX. `machine run` translates into the same
 // transient-runner path as top-level `run`, so it shares `run`'s
 // `InteractiveOrControl` posture (it streams guest output; the admitted
@@ -413,6 +425,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("__ssh-agent-proxy", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),
     ("image", AuditPosture::DelegatesToSub(IMAGE_SUB)),
+    ("pack", AuditPosture::DelegatesToSub(PACK_SUB)),
     // Plan 200 — beginner microVM workflows.
     ("machine", AuditPosture::DelegatesToSub(MACHINE_SUB)),
     // Operational surfaces.
@@ -598,6 +611,7 @@ fn audit_posture_emits_entries_reference_known_audit_kinds() {
         "CheckpointRestored",
         "NetworkCreate",
         "NetworkRemove",
+        "PackCacheChange",
         "PoolWarm",
         "RegistryReconcile",
         "SecretGet",
