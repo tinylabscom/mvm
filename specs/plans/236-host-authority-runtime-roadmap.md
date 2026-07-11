@@ -44,7 +44,16 @@ test --workspace`), so the old "production/verity OCI seal path does not
 exist" statement is no longer true on that branch. Remaining honest blockers
 are the live-proof closeout for that new production seal path, the macOS
 vsock-only enforcement witness, and binding restore-time authority to a per-VM
-identity (cross-VM replay of a genuinely host-signed grant).
+identity (cross-VM replay of a genuinely host-signed grant). The branch now
+also carries the missing live-proof harness for the new OCI path:
+`tests/oci_image_runner_smoke.rs` adds a macOS-only disabled-by-default
+`run --image --prod` witness that requires a signed digest-pinned ref, `cosign`
+on `PATH`, and an admitted OCI policy, then asserts the booted image left real
+`rootfs.verity` + `rootfs.roothash` sidecars in the OCI cache. Focused host
+validation for that harness is green (`cargo test --test
+oci_image_runner_smoke -- --nocapture`, `cargo clippy --test
+oci_image_runner_smoke -- -D warnings`); the missing piece is the
+environment-backed live run itself, not the test surface.
 
 ## Thesis
 

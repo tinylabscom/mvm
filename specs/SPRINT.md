@@ -177,6 +177,19 @@ plan 25 sequences the work into six independently-shippable workstreams.
       and `cargo test --workspace`. Remaining Plan 236 blocker in this lane is
       now live production proof of the new seal path rather than a missing code
       path.
+- [x] 2026-07-11 Plan 236 production OCI verity live-proof harness:
+      `tests/oci_image_runner_smoke.rs` now includes a disabled-by-default
+      macOS witness for `mvmctl run --image --prod`, not just the existing dev
+      OCI smoke. The new test requires
+      `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`, a signed digest-pinned registry ref
+      in `MVM_OCI_IMAGE_RUNNER_PROD_REF`, `cosign` on `PATH`, and an admitted
+      OCI policy (`MVM_OCI_POLICY` or `$MVM_DATA_DIR/oci-policy.toml`), then
+      asserts that the successful boot left real `rootfs.verity` +
+      `rootfs.roothash` sidecars in the OCI cache. Focused validation is green
+      with `cargo test --test oci_image_runner_smoke -- --nocapture` and
+      `cargo clippy --test oci_image_runner_smoke -- -D warnings`. The
+      remaining blocker is the host environment for the real live run: this box
+      still lacks `cosign` and an OCI prod policy file.
 - [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
       source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
       builds the builder VM just to obtain a workload kernel. The resolver now
