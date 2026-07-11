@@ -37,10 +37,10 @@ use mvm_guest::probes::{self, ProbeEntry, ProbeOutputFormat, ProbeResult};
 use mvm_guest::runtime_config::{self, ConcurrencyConfig};
 use mvm_guest::vsock::{
     BootTimingReport, ComponentState, EntrypointEvent, FsChange, FsChangeKind, GUEST_AGENT_PORT,
-    GuestRequest, GuestResponse, HOST_SIGNER_PUBKEY_PATH, ReadinessReport, RunEntrypointError,
-    TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant, is_verb_trust_baseline,
-    launch_requires_grant, load_host_signer_verifying_key, load_pinned_verb_grant,
-    load_verb_trust_policy, trust_decision,
+    GuestRequest, GuestResponse, HOST_CID, HOST_SIGNER_PUBKEY_PATH, ReadinessReport,
+    RunEntrypointError, TrustDecision, VERB_TRUST_POLICY_PATH, enforce_verb_grant,
+    is_verb_trust_baseline, launch_requires_grant, load_host_signer_verifying_key,
+    load_pinned_verb_grant, load_verb_trust_policy, trust_decision,
 };
 use mvm_guest::worker_pool::{DispatchError, DispatchOutcome, WorkerPool};
 use mvm_guest::worker_protocol::WorkerOutcome;
@@ -255,6 +255,17 @@ unsafe extern "C" {
     fn listen(sockfd: i32, backlog: i32) -> i32;
     fn accept(sockfd: i32, addr: *mut core::ffi::c_void, addrlen: *mut u32) -> i32;
     fn close(fd: i32) -> i32;
+}
+
+/// Whether an accepted vsock peer may drive the control port. Only the host
+/// (`HOST_CID`, `VMADDR_CID_HOST` = 2) is authorized: every legitimate control
+/// connection is host-initiated over the backend's vsock transport (vhost-vsock,
+/// libkrun, or the in-house VMM), all of which present the host as CID 2. A
+/// guest-local process connecting over loopback vsock presents `VMADDR_CID_LOCAL`
+/// (1) or the guest's own CID, never 2 — so this gate rejects it before any frame
+/// is read, closing the in-guest injection surface into the agent.
+fn peer_cid_is_authorized(cid: u32) -> bool {
+    cid == HOST_CID
 }
 
 // ============================================================================
@@ -2407,9 +2418,13 @@ fn handle_client(
             if let Some(env) = grant_envelope.as_ref() {
                 match boot_state.host_signer_key() {
                     Some(anchor) => {
-                        if let Some(g) =
-                            mvm_guest::vsock::re_pin_verb_grant(env, &anchor, chrono::Utc::now())
-                        {
+                        let (_, current_grant) = boot_state.grant_state();
+                        if let Some(g) = mvm_guest::vsock::re_pin_verb_grant(
+                            env,
+                            current_grant.as_ref(),
+                            &anchor,
+                            chrono::Utc::now(),
+                        ) {
                             boot_state.set_verb_grant(g);
                         }
                     }
@@ -3361,8 +3376,27 @@ fn main() {
         {
             apply_reload();
         }
-        // SAFETY: null addr pointers are allowed for accept when peer addr is not needed.
-        let cfd = unsafe { accept(fd, std::ptr::null_mut(), std::ptr::null_mut()) };
+        // Accept into a `sockaddr_vm` so the peer CID is captured: the control
+        // port is host-only, and a guest-local workload on a loopback-capable
+        // kernel could otherwise dial it and inject any GuestRequest.
+        let mut peer = SockAddrVm {
+            svm_family: 0,
+            svm_reserved1: 0,
+            svm_port: 0,
+            svm_cid: 0,
+            svm_zero: [0; 4],
+        };
+        let mut peer_len = size_of::<SockAddrVm>() as u32;
+        // SAFETY: `peer` is a fully-owned, correctly-sized `sockaddr_vm`; the
+        // kernel writes at most `peer_len` bytes and updates it to the actual
+        // length.
+        let cfd = unsafe {
+            accept(
+                fd,
+                &mut peer as *mut SockAddrVm as *mut core::ffi::c_void,
+                &mut peer_len,
+            )
+        };
         if cfd < 0 {
             // Most common reason: EINTR from a signal. Re-check the
             // flag immediately so a SIGTERM that landed mid-accept
@@ -3373,6 +3407,23 @@ fn main() {
             }
             // Same fast-path for SIGHUP — apply the reload on the
             // next iteration's compare_exchange.
+            continue;
+        }
+        // Fail closed: reject unless the kernel filled a full AF_VSOCK address
+        // whose peer CID is the host. A truncated/unfamiliar address leaves the
+        // peer unknown, so it is treated as unauthorized.
+        let peer_known =
+            peer_len >= size_of::<SockAddrVm>() as u32 && peer.svm_family == AF_VSOCK as u16;
+        if !peer_known || !peer_cid_is_authorized(peer.svm_cid) {
+            eprintln!(
+                "mvm-guest-agent: rejecting control connection from non-host peer (cid={}, family={})",
+                peer.svm_cid, peer.svm_family
+            );
+            // SAFETY: `cfd` is the just-accepted connection fd, not yet wrapped
+            // in an owning type; close takes no pointers.
+            unsafe {
+                close(cfd);
+            }
             continue;
         }
         // Stamp first-accept timing once. Idempotent inside
@@ -3404,6 +3455,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Only the host CID (2) may drive the control port.
+    #[test]
+    fn peer_cid_gate_authorizes_only_host() {
+        // VMADDR_CID_HOST — every backend presents the host as this CID.
+        assert!(peer_cid_is_authorized(HOST_CID));
+        assert!(peer_cid_is_authorized(2));
+    }
+
+    /// Guest-local and hypervisor CIDs are rejected — these are the CIDs a
+    /// loopback/guest-local connection to the agent port would present.
+    #[test]
+    fn peer_cid_gate_rejects_non_host() {
+        const VMADDR_CID_HYPERVISOR: u32 = 0;
+        const VMADDR_CID_LOCAL: u32 = 1;
+        const GUEST_CID: u32 = 3; // the guest's own CID under the in-house VMM
+        assert!(!peer_cid_is_authorized(VMADDR_CID_HYPERVISOR));
+        assert!(!peer_cid_is_authorized(VMADDR_CID_LOCAL));
+        assert!(!peer_cid_is_authorized(GUEST_CID));
+        assert!(!peer_cid_is_authorized(VMADDR_CID_ANY));
+        for cid in [4u32, 42, 5252, u32::MAX - 1] {
+            assert!(!peer_cid_is_authorized(cid), "cid {cid} must be rejected");
+        }
+    }
 
     /// The detached-workload handler actually spawns the argv, redirects its
     /// stdout to the console target, and the reaper reports the exit code — the
@@ -4347,6 +4422,8 @@ mod tests {
         mvm_core::protocol::vm_backend::VerbGrantEnvelope {
             pubkey_hex,
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant: g,
         }
     }
@@ -4362,7 +4439,12 @@ mod tests {
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
         match bs.host_signer_key() {
-            Some(anchor) => match mvm_guest::vsock::re_pin_verb_grant(env, &anchor, now) {
+            Some(anchor) => match mvm_guest::vsock::re_pin_verb_grant(
+                env,
+                bs.grant_state().1.as_ref(),
+                &anchor,
+                now,
+            ) {
                 Some(g) => {
                     bs.set_verb_grant(g);
                     true
@@ -4444,13 +4526,18 @@ mod tests {
         }
         bs.set_verb_grant(signed_grant(&["update-idle-timeout"]));
 
-        // Fresh child session/nonce, unequal to any boot value, widened verbs.
-        let fork_env = envelope_signed_by(
+        let current = bs.grant_state().1.expect("boot grant pinned");
+
+        // Fresh child session/nonce, unequal to the current grant, widened
+        // verbs, but explicitly linked back to the currently pinned grant.
+        let mut fork_env = envelope_signed_by(
             &anchor,
             "child-session",
             mvm_core::plan::Nonce::from_bytes([66u8; 16]),
             &["run-entrypoint", "update-idle-timeout"],
         );
+        fork_env.predecessor_session_id = Some(current.session_id.clone());
+        fork_env.predecessor_plan_nonce_hex = Some(current.plan_nonce.as_hex().to_string());
         assert!(
             apply_post_restore_repin(&bs, &fork_env, chrono::Utc::now()),
             "host-signed fork envelope must re-pin"

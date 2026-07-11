@@ -20,6 +20,7 @@ ASSETS_DIR=""
 TARGETS="aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu"
 # Keep in lockstep with the release.yml `builder-vm-image` matrix.
 BUILDER_ARCHES="aarch64 x86_64"
+KERNEL_ARCHES="aarch64 x86_64"
 RUNTIME_ARCHES="aarch64 x86_64"
 DO_COSIGN=0
 EXPECT_VERSION=""
@@ -29,6 +30,7 @@ while [ $# -gt 0 ]; do
     --assets-dir)     ASSETS_DIR="$2"; shift 2 ;;
     --targets)        TARGETS="$2"; shift 2 ;;
     --builder-arches) BUILDER_ARCHES="$2"; shift 2 ;;
+    --kernel-arches)  KERNEL_ARCHES="$2"; shift 2 ;;
     --runtime-arches) RUNTIME_ARCHES="$2"; shift 2 ;;
     --cosign)         DO_COSIGN=1; shift ;;
     # Assert the packaged binary reports this version. Only the target that
@@ -133,6 +135,27 @@ for target in $TARGETS; do
     fi
     rm -rf "$tmp"
   fi
+done
+
+# Slim workload-kernel release assets are consumed directly by
+# `mvmctl build kernel build --source download`, and installed-binary
+# cold-cache `--kernel-pin` now reuses that same verified fetch path. So a
+# release is incomplete unless each declared kernel arch ships both the
+# workload `vmlinux` asset and the matching per-arch checksums manifest entry.
+for arch in $KERNEL_ARCHES; do
+  workload_kernel="$ASSETS_DIR/vmlinux-${arch}-workload"
+  kernel_checks="$ASSETS_DIR/kernel-${arch}-checksums-sha256.txt"
+
+  [ -f "$workload_kernel" ] || { fail "[$arch] workload kernel missing: vmlinux-${arch}-workload"; continue; }
+  [ -f "$kernel_checks" ] || { fail "[$arch] kernel checksums manifest missing: kernel-${arch}-checksums-sha256.txt"; continue; }
+
+  want=$(awk -v n="vmlinux-${arch}-workload" '$2 == n { print $1 }' "$kernel_checks" | head -1)
+  if [ -z "$want" ]; then
+    fail "[$arch] vmlinux-${arch}-workload not listed in kernel-${arch}-checksums-sha256.txt"
+    continue
+  fi
+  got=$(sha256_of "$workload_kernel")
+  [ "$want" = "$got" ] || fail "[$arch] workload kernel sha256 mismatch: recorded=$want actual=$got"
 done
 
 # The SBOM ships signed alongside the binaries on every release.

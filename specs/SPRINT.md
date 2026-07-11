@@ -858,6 +858,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
       bounded readiness-driven pumping rather than semantic flow synthesis.
       Focused validation is green with `cargo test -p mvm-guest network_tunnel --lib`
       and `cargo clippy -p mvm-guest --all-targets -- -D warnings`.
+- [x] Closed the remaining Plan 236 restore-time replay residual on
+      2026-07-10. `PostRestore` verb-grant re-pin now requires predecessor
+      lineage matching the currently pinned grant (`session_id` + plan nonce),
+      and the Firecracker fork path stamps that lineage into the host-signed
+      envelope before delivery. Validation is green with focused `mvm-guest`,
+      `mvm-core`, and `mvm-cli` tests, `cargo clippy --workspace --all-targets
+      -- -D warnings`, and a host `cargo test --workspace` rerun; after the
+      OCI prod closeout on `feat/plan-236-oci-seal-closeout`, the remaining
+      Plan 236 blocker is the separate macOS verb-grant live witness rather
+      than the seal path itself.
 - [x] Started
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream A: `mvm_core::packs` now defines strict typed manifests for

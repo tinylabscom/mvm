@@ -1620,13 +1620,20 @@ fn verify_envelope_with_anchor(
 /// the sole invariant is that the grant is signed by the host-signer anchor.
 pub fn re_pin_verb_grant(
     envelope: &mvm_core::protocol::vm_backend::VerbGrantEnvelope,
+    current_grant: Option<&mvm_core::plan::VerbGrant>,
     host_signer_key: &ed25519_dalek::VerifyingKey,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<mvm_core::plan::VerbGrant> {
-    // Residual limitation: the host-signer anchor is host-global, so this proves
-    // host authorship but does not by itself bind the grant to THIS VM's
-    // identity — a genuinely host-signed grant issued for another VM would still
-    // pass signature verification here. Cross-VM replay is a separate follow-up.
+    if let Some(current) = current_grant {
+        let predecessor_session = envelope.predecessor_session_id.as_deref()?;
+        let predecessor_nonce_hex = envelope.predecessor_plan_nonce_hex.as_deref()?;
+        if predecessor_session != current.session_id
+            || predecessor_nonce_hex != current.plan_nonce.as_hex()
+        {
+            eprintln!("mvm-guest-agent: PostRestore grant lineage mismatch, refusing re-pin");
+            return None;
+        }
+    }
     verify_envelope_with_anchor(envelope, host_signer_key, now)
 }
 
@@ -7339,6 +7346,8 @@ mod rpc_client_tests {
         let envelope = VerbGrantEnvelope {
             pubkey_hex: pubkey_hex.clone(),
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant,
         };
         let grant_path = dir.join("verb-grant.json");
@@ -7394,6 +7403,8 @@ mod rpc_client_tests {
         let envelope = VerbGrantEnvelope {
             pubkey_hex: attacker_pubkey_hex,
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant,
         };
         let grant_path = dir.path().join("verb-grant.json");
@@ -7590,7 +7601,7 @@ mod rpc_client_tests {
             &["run-entrypoint", "update-idle-timeout"],
             now + chrono::Duration::minutes(10),
         );
-        let result = re_pin_verb_grant(&envelope, &host.verifying_key(), now);
+        let result = re_pin_verb_grant(&envelope, None, &host.verifying_key(), now);
         let grant = result.expect("valid host-signed envelope must yield Some from re_pin");
         assert_eq!(grant.session_id, "sess-repin");
         assert!(grant.permits("run-entrypoint"));
@@ -7615,7 +7626,7 @@ mod rpc_client_tests {
             &["ping"],
             now + chrono::Duration::minutes(10),
         );
-        let result = re_pin_verb_grant(&envelope, &anchor.verifying_key(), now);
+        let result = re_pin_verb_grant(&envelope, None, &anchor.verifying_key(), now);
         assert!(
             result.is_none(),
             "grant not signed by the boot-pinned anchor must return None"
@@ -7783,6 +7794,8 @@ mod rpc_client_tests {
         VerbGrantEnvelope {
             pubkey_hex,
             plan_nonce_hex: nonce.as_hex().to_string(),
+            predecessor_session_id: None,
+            predecessor_plan_nonce_hex: None,
             grant,
         }
     }
@@ -7805,7 +7818,7 @@ mod rpc_client_tests {
         // the ONLY reason to reject is the elapsed validity window.
         let later = issued + chrono::Duration::minutes(6);
         assert!(
-            re_pin_verb_grant(&envelope, &signer.verifying_key(), later).is_none(),
+            re_pin_verb_grant(&envelope, None, &signer.verifying_key(), later).is_none(),
             "an expired envelope must not re-pin at restore"
         );
     }
@@ -7833,7 +7846,7 @@ mod rpc_client_tests {
         // Anchor matches the signer, so rejection is purely the broken signature
         // over the tampered (widened) verb set.
         assert!(
-            re_pin_verb_grant(&envelope, &signer.verifying_key(), now).is_none(),
+            re_pin_verb_grant(&envelope, None, &signer.verifying_key(), now).is_none(),
             "verbs appended after signing must fail signature verification and not re-pin"
         );
     }
@@ -7883,7 +7896,7 @@ mod rpc_client_tests {
         // self-attested pubkey), the non-host-signed envelope is rejected
         // outright — no grant, and certainly no widening to the boot-forbidden
         // verb.
-        let result = re_pin_verb_grant(&evil_env, &host.verifying_key(), now);
+        let result = re_pin_verb_grant(&evil_env, Some(&pinned), &host.verifying_key(), now);
         assert!(
             result.is_none(),
             "SECURITY: a PostRestore envelope self-signed by a non-host key must \
@@ -7891,30 +7904,67 @@ mod rpc_client_tests {
         );
     }
 
-    /// KNOWN RESIDUAL (documenting). The host-signer anchor is host-global, so a
-    /// grant genuinely signed by the host but issued for a DIFFERENT VM's
-    /// session/nonce still passes signature verification at re-pin: re-pin binds
-    /// to host authorship, not to this VM's identity. This test pins that
-    /// behaviour so the residual is explicit rather than hidden; binding a grant
-    /// to a specific VM identity is a separate follow-up.
+    /// A host-signed grant for a sibling VM must not re-pin over this VM's
+    /// current grant unless it proves lineage from the grant already pinned in
+    /// the snapshot.
     #[test]
-    fn re_pin_verb_grant_cross_vm_host_signed_currently_passes() {
+    fn re_pin_verb_grant_cross_vm_host_signed_requires_matching_lineage() {
         let host = ed25519_dalek::SigningKey::from_bytes(&[44u8; 32]);
+        let current_nonce = mvm_core::plan::Nonce::from_bytes([46u8; 16]);
         let other_vm_nonce = mvm_core::plan::Nonce::from_bytes([45u8; 16]);
         let now = chrono::Utc::now();
+        let current = self_signed_envelope(
+            &host,
+            "current-vm-session",
+            &current_nonce,
+            &["update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        )
+        .grant;
         // Host-signed, but for some other VM's session/nonce.
-        let envelope = self_signed_envelope(
+        let mut envelope = self_signed_envelope(
             &host,
             "some-other-vm-session",
             &other_vm_nonce,
             &["run-entrypoint"],
             now + chrono::Duration::minutes(10),
         );
-        let result = re_pin_verb_grant(&envelope, &host.verifying_key(), now);
+        envelope.predecessor_session_id = Some("sibling-vm-session".into());
+        envelope.predecessor_plan_nonce_hex = Some(other_vm_nonce.as_hex().to_string());
+        let result = re_pin_verb_grant(&envelope, Some(&current), &host.verifying_key(), now);
         assert!(
-            result.is_some(),
-            "residual: a host-signed grant for another VM currently re-pins — \
-             signature verification is host-global, not VM-bound"
+            result.is_none(),
+            "a host-signed grant for another VM must not re-pin when its \
+             predecessor lineage does not match the currently pinned grant"
         );
+    }
+
+    #[test]
+    fn re_pin_verb_grant_matching_lineage_allows_host_signed_rotation() {
+        let host = ed25519_dalek::SigningKey::from_bytes(&[47u8; 32]);
+        let current_nonce = mvm_core::plan::Nonce::from_bytes([48u8; 16]);
+        let next_nonce = mvm_core::plan::Nonce::from_bytes([49u8; 16]);
+        let now = chrono::Utc::now();
+        let current = self_signed_envelope(
+            &host,
+            "parent-vm-session",
+            &current_nonce,
+            &["update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        )
+        .grant;
+        let mut envelope = self_signed_envelope(
+            &host,
+            "child-vm-session",
+            &next_nonce,
+            &["run-entrypoint", "update-idle-timeout"],
+            now + chrono::Duration::minutes(10),
+        );
+        envelope.predecessor_session_id = Some(current.session_id.clone());
+        envelope.predecessor_plan_nonce_hex = Some(current.plan_nonce.as_hex().to_string());
+        let result = re_pin_verb_grant(&envelope, Some(&current), &host.verifying_key(), now);
+        let grant = result.expect("matching lineage must allow a host-signed grant rotation");
+        assert_eq!(grant.session_id, "child-vm-session");
+        assert!(grant.permits("run-entrypoint"));
     }
 }
