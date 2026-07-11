@@ -51,7 +51,7 @@ pub(in crate::commands) struct Cli {
     /// Highest priority — beats `MVM_BUILDER_BACKEND`
     /// env and the platform-default auto-detect (macOS 26+ Apple
     /// Silicon → hvf; everywhere else → libkrun).
-    #[arg(long, global = true, value_parser = ["libkrun", "vz", "qemu", "hvf"])]
+    #[arg(long, global = true, value_parser = ["libkrun", "qemu", "hvf"])]
     pub builder: Option<String>,
 
     /// Where the builder VM's kernel comes from when its image is
