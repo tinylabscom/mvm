@@ -509,10 +509,11 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
                 });
                 stack.push(path);
             } else if ft.is_file() {
-                let data = std::fs::read(&path).map_err(|source| RootfsError::PureWalk {
-                    path: path.clone(),
-                    source,
-                })?;
+                let data =
+                    read_file_for_guest_image(&path).map_err(|source| RootfsError::PureWalk {
+                        path: path.clone(),
+                        source,
+                    })?;
                 let xattrs = collect_guest_xattrs(&path);
                 out.push(mvm_ext4::Node::File {
                     path: guest_path,
@@ -524,6 +525,43 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
         }
     }
     Ok(out)
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn read_file_for_guest_image(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(bytes),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let metadata = std::fs::symlink_metadata(path)?;
+                let original_mode = metadata.permissions().mode();
+                let widened_mode = original_mode | 0o400;
+                if widened_mode == original_mode {
+                    return Err(err);
+                }
+
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(widened_mode))?;
+                let read_result = std::fs::read(path);
+                let restore_result =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(original_mode));
+                match (read_result, restore_result) {
+                    (Ok(bytes), Ok(())) => Ok(bytes),
+                    (Ok(_), Err(restore_err)) => Err(restore_err),
+                    (Err(read_err), Ok(())) => Err(read_err),
+                    (Err(read_err), Err(_restore_err)) => Err(read_err),
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                Err(err)
+            }
+        }
+        Err(err) => Err(err),
+    }
 }
 
 /// The name of the first extended attribute on `path` that the pure writer can't
@@ -747,6 +785,38 @@ mod tests {
 
         assert_eq!(std::fs::read(&out_path).unwrap(), dense);
         assert_eq!(materialized.size_bytes, dense.len() as u64);
+    }
+
+    #[cfg(all(feature = "pure-mkfs", unix))]
+    #[test]
+    fn collect_nodes_reads_owner_unreadable_files_without_changing_guest_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(src.path().join("etc")).unwrap();
+        let shadow = src.path().join("etc/shadow");
+        std::fs::write(&shadow, b"root:*:19793:0:99999:7:::\n").unwrap();
+        std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o0)).unwrap();
+
+        let nodes = collect_nodes(src.path()).expect("collect nodes");
+        let node = nodes
+            .into_iter()
+            .find_map(|node| match node {
+                mvm_ext4::Node::File {
+                    path, mode, data, ..
+                } if path == "/etc/shadow" => Some((mode, data)),
+                _ => None,
+            })
+            .expect("shadow file node");
+
+        assert_eq!(node.0, 0);
+        assert_eq!(node.1, b"root:*:19793:0:99999:7:::\n");
+        let restored_mode = std::fs::symlink_metadata(&shadow)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777;
+        assert_eq!(restored_mode, 0);
     }
 
     #[cfg(feature = "pure-mkfs")]

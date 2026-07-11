@@ -393,7 +393,7 @@ mod linux {
 
         let seed_store = Path::new(NIX_TARGET).join("store");
         let expected_marker = stage0_nix_store_marker(&seed_store)?;
-        if persistent_nix_store_matches(&expected_marker) {
+        if persistent_nix_store_matches(&expected_marker)? {
             eprintln!(
                 "stage0-init: reusing persistent Stage 0 Nix store at {STAGE0_NIX_STORE_DEV}"
             );
@@ -494,10 +494,24 @@ mod linux {
         Ok(sectors / 8)
     }
 
-    fn persistent_nix_store_matches(expected_marker: &str) -> bool {
-        Path::new(STAGE0_NIX_STORE_MOUNT).join("store").is_dir()
-            && std::fs::read_to_string(STAGE0_NIX_STORE_MARKER)
-                .is_ok_and(|marker| marker == expected_marker)
+    fn persistent_nix_store_matches(expected_marker: &str) -> Result<bool, String> {
+        let mounted_store = Path::new(STAGE0_NIX_STORE_MOUNT).join("store");
+        if !mounted_store.is_dir() {
+            return Ok(false);
+        }
+        if !std::fs::read_to_string(STAGE0_NIX_STORE_MARKER)
+            .is_ok_and(|marker| marker == expected_marker)
+        {
+            return Ok(false);
+        }
+        if !seed_store_has_required_runtime(&mounted_store)? {
+            eprintln!(
+                "stage0-init: persistent Stage 0 store marker matches but the reused seed \
+                 runtime is incomplete; re-seeding the store"
+            );
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     fn persistent_nix_store_matches_seed(seed_store: &Path) -> Result<bool, String> {
@@ -1001,9 +1015,9 @@ mod linux {
 
     /// Glob the seed store for a `*-<pkg>-*/bin/<bin>` executable. Store
     /// paths are hash-prefixed, so we discover rather than hardcode.
-    fn find_seed_bin(bin: &str) -> Result<PathBuf, String> {
-        let store = Path::new("/nix/store");
-        let entries = std::fs::read_dir(store).map_err(|e| format!("read /nix/store: {e}"))?;
+    fn find_seed_bin_in(store: &Path, bin: &str) -> Result<PathBuf, String> {
+        let entries =
+            std::fs::read_dir(store).map_err(|e| format!("read {}: {e}", store.display()))?;
         for e in entries.flatten() {
             let cand = e.path().join("bin").join(bin);
             if cand.is_file() {
@@ -1015,10 +1029,14 @@ mod linux {
         ))
     }
 
+    fn find_seed_bin(bin: &str) -> Result<PathBuf, String> {
+        find_seed_bin_in(Path::new("/nix/store"), bin)
+    }
+
     /// Find the seed's CA bundle (`nss-cacert`) for `NIX_SSL_CERT_FILE`.
-    fn find_seed_cacert() -> Result<PathBuf, String> {
-        let store = Path::new("/nix/store");
-        let entries = std::fs::read_dir(store).map_err(|e| format!("read /nix/store: {e}"))?;
+    fn find_seed_cacert_in(store: &Path) -> Result<PathBuf, String> {
+        let entries =
+            std::fs::read_dir(store).map_err(|e| format!("read {}: {e}", store.display()))?;
         for e in entries.flatten() {
             let name = e.file_name();
             if name.to_string_lossy().contains("nss-cacert") {
@@ -1029,6 +1047,14 @@ mod linux {
             }
         }
         Err("seed store has no nss-cacert ca-bundle.crt".into())
+    }
+
+    fn find_seed_cacert() -> Result<PathBuf, String> {
+        find_seed_cacert_in(Path::new("/nix/store"))
+    }
+
+    fn seed_store_has_required_runtime(store: &Path) -> Result<bool, String> {
+        Ok(find_seed_bin_in(store, "nix").is_ok() && find_seed_cacert_in(store).is_ok())
     }
 
     /// `uname -m` via libc (no coreutils in the seed). aarch64 / x86_64.
@@ -1319,6 +1345,31 @@ mod linux {
             assert_eq!(
                 resolver_seed(false, &conf).unwrap(),
                 b"nameserver 10.10.0.53\n"
+            );
+        }
+
+        #[test]
+        fn seed_store_runtime_check_requires_nix_and_cacert() {
+            let root = tempfile::tempdir().expect("tempdir");
+            let store = root.path().join("store");
+            std::fs::create_dir_all(store.join("abc-nix/bin")).expect("seed nix dir");
+            std::fs::write(store.join("abc-nix/bin/nix"), b"#!/bin/sh\n").expect("seed nix bin");
+            std::fs::create_dir_all(store.join("def-nss-cacert/etc/ssl/certs"))
+                .expect("seed cacert dir");
+            std::fs::write(
+                store.join("def-nss-cacert/etc/ssl/certs/ca-bundle.crt"),
+                b"dummy cert",
+            )
+            .expect("seed cacert bundle");
+            assert!(
+                super::seed_store_has_required_runtime(&store).expect("runtime check"),
+                "store with nix + cacert should be reusable"
+            );
+
+            std::fs::remove_file(store.join("abc-nix/bin/nix")).expect("remove nix");
+            assert!(
+                !super::seed_store_has_required_runtime(&store).expect("runtime check"),
+                "store missing nix must be re-seeded"
             );
         }
 

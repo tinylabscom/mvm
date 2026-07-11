@@ -95,18 +95,152 @@ pub fn inject_and_materialize(
 /// a seal failure rolls the initramfs back. So a roothash never lands before its
 /// initramfs, and neither is ever left without the other.
 fn seal_and_assemble_verity(rootfs_ext4: &Path, verity_init_bin: &Path) -> Result<()> {
+    seal_and_assemble_verity_with(rootfs_ext4, verity_init_bin, seal_run_rootfs_for_runtime)
+}
+
+fn seal_and_assemble_verity_with(
+    rootfs_ext4: &Path,
+    verity_init_bin: &Path,
+    seal_rootfs: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
     let initrd_path = assemble_and_write_verity_initrd(rootfs_ext4, verity_init_bin)?;
 
-    match seal_run_rootfs_with_verity(rootfs_ext4) {
+    match seal_rootfs(rootfs_ext4) {
         Ok(_) => Ok(()),
         Err(e) => {
             // Roll the initramfs back so the artifact set is all-or-nothing —
             // an initrd hinting at a sealed boot must not outlive a failed seal.
             let _ = std::fs::remove_file(&initrd_path);
-            Err(anyhow::Error::new(e))
-                .with_context(|| format!("dm-verity seal {}", rootfs_ext4.display()))
+            Err(e).with_context(|| format!("dm-verity seal {}", rootfs_ext4.display()))
         }
     }
+}
+
+fn seal_run_rootfs_for_runtime(rootfs_ext4: &Path) -> Result<()> {
+    seal_run_rootfs_for_runtime_with(
+        rootfs_ext4,
+        seal_run_rootfs_with_verity,
+        seal_run_rootfs_with_verity_builder_vm,
+    )
+}
+
+fn seal_run_rootfs_for_runtime_with(
+    rootfs_ext4: &Path,
+    seal_local: impl FnOnce(&Path) -> std::result::Result<VeritySealedRootfs, OciUnpackError>,
+    seal_builder_vm: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    match seal_local(rootfs_ext4) {
+        Ok(_) => Ok(()),
+        Err(OciUnpackError::HostUnsupported { .. }) => seal_builder_vm(rootfs_ext4),
+        Err(e) => Err(anyhow::Error::new(e)),
+    }
+}
+
+#[cfg(feature = "builder-vm")]
+fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
+    use crate::builder_backend_select::BuilderBackendChoice;
+    use crate::libkrun_builder::{BuilderShellJob, LibkrunBuilderVm};
+    use crate::qemu_builder::QemuBuilderVm;
+
+    let artifact_out = rootfs_ext4
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", rootfs_ext4.display()))?
+        .to_path_buf();
+    let script = verity_seal_script(rootfs_ext4)?;
+    let shell_job = BuilderShellJob {
+        work_dir: artifact_out.clone(),
+        artifact_out,
+        script,
+        extra_disks: vec![],
+    };
+
+    let selected = crate::builder_backend_select::resolve_choice();
+    let explicit = crate::builder_backend_select::resolve_env_override().is_some();
+    crate::builder_backend_select::run_with_builder_fallback(selected, explicit, |choice| {
+        match choice {
+            BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
+                LibkrunBuilderVm::default()
+                    .run_shell_script(&shell_job)
+                    .map(|_| ())
+            }
+            BuilderBackendChoice::Qemu => QemuBuilderVm::new()
+                .run_shell_script(&shell_job)
+                .map(|_| ()),
+        }
+    })?;
+    Ok(())
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn seal_run_rootfs_with_verity_builder_vm(rootfs_ext4: &Path) -> Result<()> {
+    anyhow::bail!(
+        "dm-verity sealing for {} requires the `builder-vm` feature on hosts without local veritysetup support",
+        rootfs_ext4.display()
+    )
+}
+
+#[cfg(any(test, feature = "builder-vm"))]
+fn verity_seal_script(rootfs_ext4: &Path) -> Result<String> {
+    let rootfs_name = rootfs_ext4
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "rootfs path has no UTF-8 file name: {}",
+                rootfs_ext4.display()
+            )
+        })?;
+    let stem = rootfs_ext4
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "rootfs path has no UTF-8 file stem: {}",
+                rootfs_ext4.display()
+            )
+        })?;
+    let sidecar_name = format!("{stem}.verity");
+    let roothash_name = format!("{stem}.roothash");
+    Ok(format!(
+        r#"#!/bin/sh
+set -eu
+
+ROOTFS="/out/{rootfs_name}"
+VERITY="/out/{sidecar_name}"
+ROOTHASH="/out/{roothash_name}"
+
+rm -f "$VERITY" "$ROOTHASH"
+veritysetup_out="$(
+  veritysetup format \
+    --data-block-size={data_block_size} \
+    --hash-block-size={hash_block_size} \
+    --salt={salt} \
+    --uuid={uuid} \
+    --hash={algorithm} \
+    "$ROOTFS" \
+    "$VERITY"
+)"
+roothash="$(
+  printf '%s\n' "$veritysetup_out" \
+    | sed -n 's/^Root hash:[[:space:]]*//p' \
+    | tr 'A-F' 'a-f' \
+    | head -n1
+)"
+[ -n "$roothash" ] || {{
+  echo "veritysetup format succeeded but produced no Root hash: line" >&2
+  exit 1
+}}
+printf '%s\n' "$roothash" > "$ROOTHASH"
+"#,
+        rootfs_name = rootfs_name,
+        sidecar_name = sidecar_name,
+        roothash_name = roothash_name,
+        data_block_size = crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE,
+        hash_block_size = crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE,
+        salt = crate::oci_to_rootfs::MVM_VERITY_PINNED_SALT,
+        uuid = crate::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID,
+        algorithm = crate::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM,
+    ))
 }
 
 /// Assemble the verity initramfs from `verity_init_bin` and write it to
@@ -419,6 +553,154 @@ mod tests {
             !tmp.path().join("rootfs.initrd").exists(),
             "initrd must be rolled back on a failed seal"
         );
+    }
+
+    #[test]
+    fn verity_seal_script_uses_pinned_paths_and_parameters() {
+        let script = verity_seal_script(Path::new("/tmp/build/rootfs.ext4")).expect("script");
+        assert!(script.contains("ROOTFS=\"/out/rootfs.ext4\""));
+        assert!(script.contains("VERITY=\"/out/rootfs.verity\""));
+        assert!(script.contains("ROOTHASH=\"/out/rootfs.roothash\""));
+        assert!(script.contains("veritysetup format"));
+        assert!(script.contains(&format!(
+            "--data-block-size={}",
+            crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE
+        )));
+        assert!(script.contains(&format!(
+            "--hash-block-size={}",
+            crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE
+        )));
+        assert!(script.contains(&format!(
+            "--salt={}",
+            crate::oci_to_rootfs::MVM_VERITY_PINNED_SALT
+        )));
+        assert!(script.contains(&format!(
+            "--uuid={}",
+            crate::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID
+        )));
+        assert!(script.contains(&format!(
+            "--hash={}",
+            crate::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM
+        )));
+    }
+
+    #[test]
+    fn seal_and_assemble_verity_with_rolls_back_on_callback_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"ext4-bytes").unwrap();
+        let verity_init_bin = tmp.path().join("mvm-verity-init");
+        std::fs::write(&verity_init_bin, b"\x7fELF-fake-verity-init").unwrap();
+
+        let err = seal_and_assemble_verity_with(&rootfs, &verity_init_bin, |_rootfs| {
+            anyhow::bail!("synthetic seal failure")
+        })
+        .expect_err("failure must roll back initrd");
+        assert!(err.to_string().contains("dm-verity seal"));
+        assert!(!tmp.path().join("rootfs.verity").exists());
+        assert!(!tmp.path().join("rootfs.roothash").exists());
+        assert!(!tmp.path().join("rootfs.initrd").exists());
+    }
+
+    #[test]
+    fn seal_and_assemble_verity_with_keeps_initrd_when_callback_writes_sidecars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"ext4-bytes").unwrap();
+        let verity_init_bin = tmp.path().join("mvm-verity-init");
+        std::fs::write(&verity_init_bin, b"\x7fELF-fake-verity-init").unwrap();
+
+        seal_and_assemble_verity_with(&rootfs, &verity_init_bin, |rootfs| {
+            let dir = rootfs.parent().expect("rootfs parent");
+            std::fs::write(dir.join("rootfs.verity"), b"verity-tree")?;
+            std::fs::write(dir.join("rootfs.roothash"), b"abcd\n")?;
+            Ok(())
+        })
+        .expect("success keeps all artifacts");
+
+        assert!(tmp.path().join("rootfs.verity").is_file());
+        assert!(tmp.path().join("rootfs.roothash").is_file());
+        assert!(tmp.path().join("rootfs.initrd").is_file());
+    }
+
+    #[test]
+    fn seal_run_rootfs_for_runtime_with_falls_back_on_host_unsupported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"ext4-bytes").unwrap();
+        let builder_called = std::cell::Cell::new(false);
+
+        seal_run_rootfs_for_runtime_with(
+            &rootfs,
+            |_rootfs| {
+                Err(OciUnpackError::HostUnsupported {
+                    operation: "veritysetup",
+                    reason: "test host lacks local verity support",
+                })
+            },
+            |_rootfs| {
+                builder_called.set(true);
+                Ok(())
+            },
+        )
+        .expect("host unsupported should fall back to the builder VM");
+
+        assert!(builder_called.get());
+    }
+
+    #[test]
+    fn seal_run_rootfs_for_runtime_with_keeps_local_success_local() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"ext4-bytes").unwrap();
+        let builder_called = std::cell::Cell::new(false);
+
+        seal_run_rootfs_for_runtime_with(
+            &rootfs,
+            |rootfs| {
+                Ok(VeritySealedRootfs {
+                    rootfs_path: rootfs.to_path_buf(),
+                    sidecar_path: rootfs.with_extension("verity"),
+                    roothash_path: rootfs.with_extension("roothash"),
+                    roothash: "abcd".repeat(16),
+                    algorithm: crate::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM.to_string(),
+                    data_block_size: crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE,
+                })
+            },
+            |_rootfs| {
+                builder_called.set(true);
+                Ok(())
+            },
+        )
+        .expect("local seal success should not need the builder VM");
+
+        assert!(!builder_called.get());
+    }
+
+    #[test]
+    fn seal_run_rootfs_for_runtime_with_propagates_non_host_unsupported_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let rootfs = tmp.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"ext4-bytes").unwrap();
+        let builder_called = std::cell::Cell::new(false);
+
+        let err = seal_run_rootfs_for_runtime_with(
+            &rootfs,
+            |_rootfs| {
+                Err(OciUnpackError::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "stat rootfs: missing",
+                )))
+            },
+            |_rootfs| {
+                builder_called.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("non-host-unsupported errors must surface");
+
+        assert!(err.to_string().contains("stat rootfs"));
+        assert!(!builder_called.get());
     }
 
     #[cfg(target_os = "linux")]

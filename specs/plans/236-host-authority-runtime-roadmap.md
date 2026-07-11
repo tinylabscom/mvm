@@ -36,22 +36,52 @@ deny-all workload spawns no endpoint and fails closed, matching libkrun
 negative-path matrix surfaced a real bypass — `re_pin_verb_grant` verified the
 resume envelope against its own embedded key — fixed by verifying against the
 boot-pinned host-signer anchor with a shared verification core (closes the
-self-forgery bypass). The restore/fork follow-up now also binds host-signed
-re-pin envelopes to the currently pinned VM lineage (`predecessor_session_id` +
-`predecessor_plan_nonce_hex`), so a genuinely host-signed sibling grant cannot
-replace the current VM's grant during `PostRestore`; focused guest/core/CLI
-tests plus green `cargo clippy --workspace --all-targets -- -D warnings` and
-host `cargo test --workspace` validation closed the cross-VM replay residual.
-The first Phase 2C CI/lint expansion also landed:
-`xtask check-vsock-only-egress` now guards the raw host-authority tunnel files
-(`network_tunnel_spawn`, guest tunnel/TUN code, and host tunnel/TUN code) in
-addition to the older vmm/HVF NIC-free path, so those converged runtime seams
-fail closed if a future change reintroduces `virtio-net`, `passt`, `gvproxy`,
-or similar guest-network/helper tokens there. Remaining honest blockers: the
-separate macOS live-proof of vsock-only verb-grant enforcement still needs to
-be captured. The earlier production/verity OCI seal-path blocker is now closed
-on `feat/plan-236-oci-seal-closeout`, including a signed BusyBox prod witness,
-so this roadmap no longer carries that as an open dependency.
+self-forgery bypass). The remaining sealed-image trust blocker is now narrower:
+the OCI `--prod` run path gained a real builder-VM dm-verity seal fallback on
+the active closeout branch, with focused fallback tests plus green host
+validation (`cargo clippy --workspace --all-targets -- -D warnings`, `cargo
+test --workspace`), so the old "production/verity OCI seal path does not
+exist" statement is no longer true. The branch also carries the missing
+live-proof harness for the new OCI path: `tests/oci_image_runner_smoke.rs`
+adds a macOS-only disabled-by-default `run --image --prod` witness that
+synthesizes a temporary Chainguard policy when the reviewer supplies a signed
+Chainguard digest but does not provide `MVM_OCI_POLICY`; the test still
+requires an explicit `MVM_OCI_IMAGE_RUNNER_PROD_REF` because the public
+witness-image search turned up real runtime-edge cases instead of one
+universal default. While wiring that proof, the OCI resolver also fixed a real
+production bug: `linux/arm64/v8` hosts now accept valid `linux/arm64`
+image-index entries that omit the optional variant field. The witness asserts
+the booted image left real `rootfs.verity` + `rootfs.roothash` sidecars in the
+OCI cache. Follow-up closeout then fixed three more real compatibility gaps the
+witness exposed before boot: allow-listed pseudo-device nodes from signed OCI
+layers are now accepted on non-Linux hosts (skipped during host unpack because
+the rootfs pipeline drops device nodes and the guest mounts devtmpfs), the
+pure ext4 collector can temporarily read owner-unreadable files like
+`/etc/shadow` without changing the guest-visible mode bits, and the libkrun
+builder shell-job path now applies the same disconnected/vsock-only networking
+transform as the regular builder path. The same live proof exposed one more
+real Stage 0 runtime bug: a matching persistent seed-store marker could still
+reuse an incomplete seed runtime and then die later with missing `bin/nix` /
+CA bundle content, so `stage0-init` now validates that reused seed runtime and
+re-seeds it automatically when it is incomplete. With those fixes in place, the
+macOS prod witness is now green on a signed Chainguard BusyBox digest when the
+source checkout forces the local workload-kernel build path
+(`--kernel-source compile`) and the test resolves the runtime-selected
+manifest digest before checking the cached verity sidecars. The restore/fork
+follow-up separately binds host-signed re-pin envelopes to the currently
+pinned VM lineage (`predecessor_session_id` + `predecessor_plan_nonce_hex`), so
+a genuinely host-signed sibling grant cannot replace the current VM's grant
+during `PostRestore`; focused guest/core/CLI tests plus green host
+`cargo test --workspace` validation closed the cross-VM replay residual. The
+first Phase 2C CI/lint expansion also landed: `xtask check-vsock-only-egress`
+now guards the raw host-authority tunnel files (`network_tunnel_spawn`, guest
+tunnel/TUN code, and host tunnel/TUN code) in addition to the older vmm/HVF
+NIC-free path, so those converged runtime seams fail closed if a future change
+reintroduces `virtio-net`, `passt`, `gvproxy`, or similar guest-network/helper
+tokens there. That means the honest remaining blockers are no longer "missing
+production OCI seal code", "missing workload-kernel checksum manifest for the
+witness path", or the restore-time grant replay binding; the remaining blocker
+is the macOS vsock-only verb-grant enforcement witness.
 
 ## Thesis
 

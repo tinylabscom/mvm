@@ -32,6 +32,22 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-11 Plan 236 OCI `--prod` live witness closeout: the
+      source-checkout prod harness now forces `--kernel-source compile` so the
+      local witness does not depend on a release-published workload-kernel
+      checksum manifest, resolves the pulled manifest digest from runtime
+      output before checking cached verity sidecars, and proves the signed
+      Chainguard BusyBox witness leaves real `rootfs.verity` +
+      `rootfs.roothash` cache outputs after a green macOS HVF boot. The same
+      witness exposed one more real runtime bug and this slice fixed it:
+      `stage0-init` no longer trusts a persistent seed-store marker by itself;
+      it now verifies the reused seed runtime still contains the required
+      `nix` and CA bundle and re-seeds automatically if the store is
+      incomplete. Validation is green with `cargo check --workspace`, `cargo
+      clippy --workspace --all-targets -- -D warnings`, `cargo test
+      --workspace`, the focused `mvm-build` shell-context and Stage 0 tests,
+      and the live signed-image witness under
+      `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`.
 - [x] 2026-07-10 Plan 237 Phase 0 first PR: the shared guest network helper
       used by OCI guest init now casts ioctl requests through the target musl
       `libc::Ioctl` type, stale cached OCI image records can re-materialize
@@ -242,6 +258,59 @@ plan 25 sequences the work into six independently-shippable workstreams.
       2026-07-10 refresh, the stale prerequisite-branch blocker is cleared by
       dedicated Codex refresh worktrees rather than left on their original
       stale branches.
+- [x] 2026-07-10 Plan 236 production OCI verity-seal closeout slice:
+      `crates/mvm-build/src/run_image.rs` now routes the sealed OCI `--prod`
+      dm-verity step through the existing builder-shell-job boundary when the
+      host cannot run `veritysetup` locally, so macOS and other non-Linux
+      hosts no longer stop at the old `HostUnsupported` gap. The branch keeps
+      the all-or-nothing `rootfs.initrd` + `rootfs.verity`/`rootfs.roothash`
+      contract, generates a pinned builder-side `veritysetup format` script,
+      and adds focused fallback-path tests proving local success stays local,
+      `HostUnsupported` falls back, and genuine local errors still surface.
+      Validation is green on the host with `cargo fmt --all`, focused
+      `mvm-build` run-image tests, `cargo clippy --workspace --all-targets -- -D warnings`,
+      and `cargo test --workspace`. Remaining Plan 236 blocker in this lane is
+      now live production proof of the new seal path rather than a missing code
+      path.
+- [x] 2026-07-11 Plan 236 production OCI verity live-proof harness:
+      `tests/oci_image_runner_smoke.rs` now includes a disabled-by-default
+      macOS witness for `mvmctl run --image --prod`, not just the existing dev
+      OCI smoke. The new test requires
+      `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`, `cosign` on `PATH`, and an explicit
+      signed digest-pinned `MVM_OCI_IMAGE_RUNNER_PROD_REF`; when that ref is a
+      Chainguard image, the test can synthesize a temporary OCI policy if
+      `MVM_OCI_POLICY` is unset. While closing out that witness the OCI pull
+      path also fixed a real arm64 production bug: `linux/arm64/v8` hosts now
+      accept valid image-index entries that omit the optional `variant` field.
+      The witness then asserts that the successful boot left real `rootfs.verity` +
+      `rootfs.roothash` sidecars in the OCI cache. Focused validation is green
+      with `cargo test --test oci_image_runner_smoke -- --nocapture` and
+      `cargo clippy --test oci_image_runner_smoke -- -D warnings`. The
+      remaining blocker is the real live run on a suitable signed digest-pinned
+      image: public Chainguard candidates uncovered honest runtime refusals
+      (device nodes / layer format), so the branch no longer pretends one
+      baked-in public image is universal proof.
+- [x] 2026-07-11 Plan 236 OCI prod witness compatibility hardening:
+      continuing the same `feat/plan-236-oci-seal-closeout` lane exposed and
+      fixed three more real blockers before boot. `mvm-oci` now accepts the
+      standard pseudo-device nodes OCI images carry (`dev/console`,
+      `dev/null`, `dev/zero`, `dev/random`, `dev/urandom`) on non-Linux hosts
+      by recording them as skipped instead of refusing the layer outright;
+      `mvm-build`'s pure ext4 collector now temporarily widens owner-read
+      permission to read guest files such as `/etc/shadow` and then restores
+      the exact original mode; and the libkrun builder shell-job path now
+      applies the same disconnected/vsock-only networking mode as the ordinary
+      builder path, closing the accidental guest-NIC config the verity seal job
+      was still booting. Focused validation is green with
+      `cargo test -p mvm-oci allowlisted_device_nodes_are_skipped_on_non_linux_hosts`,
+      `cargo test -p mvm-oci --test hermetic_registry platform_manifest_fetch_accepts_arm64_without_variant_for_v8_request`,
+      `cargo clippy -p mvm-oci --all-targets -- -D warnings`,
+      `cargo test -p mvm-build collect_nodes_reads_owner_unreadable_files_without_changing_guest_mode --features pure-mkfs`,
+      `cargo test -p mvm-build --lib builder_shell_krun_context_keeps_shell_jobs_nicless --features 'builder-vm pure-mkfs'`,
+      and `cargo clippy -p mvm-build --lib --tests --features pure-mkfs -- -D warnings`.
+      The remaining prod-smoke failure is now external release availability:
+      the hash-verified workload-kernel download stops on a 404 for
+      `https://github.com/tinylabscom/mvm/releases/download/v0.17.0/kernel-aarch64-checksums-sha256.txt`.
 - [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
       source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
       builds the builder VM just to obtain a workload kernel. The resolver now

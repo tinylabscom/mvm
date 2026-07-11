@@ -495,28 +495,19 @@ impl LibkrunBuilderVm {
         })?;
         let console_log = vm_state_dir.join("console.log");
 
-        let mut krun = krun_context_for_image(&vm_name, &image)?
-            .with_resources(self.vcpus, self.memory_mib)
-            .with_console_output(path_to_str(&console_log, "console_log")?)
-            .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
-            .add_disk(
-                "nix-store",
-                path_to_str(nix_store_lock.path(), "nix_store_img")?,
-                false,
-            )
-            .add_virtio_fs("work", path_to_str(&job.work_dir, "work_dir")?)
-            .add_virtio_fs("out", path_to_str(&job.artifact_out, "artifact_out")?)
-            .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
-            .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
-
-        for disk in &job.extra_disks {
-            krun = krun.add_disk(
-                disk.id.as_str(),
-                path_to_str(&disk.path, "extra_disk")?,
-                disk.read_only,
-            );
-        }
-
+        let mut krun = builder_shell_krun_context(&BuilderShellKrunContextParams {
+            vm_name: &vm_name,
+            image: &image,
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            console_log: &console_log,
+            vm_state_dir: &vm_state_dir,
+            nix_store_img: nix_store_lock.path(),
+            work_dir: &job.work_dir,
+            artifact_out: &job.artifact_out,
+            job_dir: &job_dir,
+            extra_disks: &job.extra_disks,
+        })?;
         krun = krun.add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
 
         let cfg = SupervisorConfig {
@@ -693,6 +684,48 @@ impl LibkrunBuilderVm {
         }
         Ok(())
     }
+}
+
+struct BuilderShellKrunContextParams<'a> {
+    vm_name: &'a str,
+    image: &'a BuilderVmImage,
+    vcpus: u8,
+    memory_mib: u32,
+    console_log: &'a Path,
+    vm_state_dir: &'a Path,
+    nix_store_img: &'a Path,
+    work_dir: &'a Path,
+    artifact_out: &'a Path,
+    job_dir: &'a Path,
+    extra_disks: &'a [BuilderExtraDisk],
+}
+
+fn builder_shell_krun_context(
+    params: &BuilderShellKrunContextParams<'_>,
+) -> Result<KrunContext, BuilderVmError> {
+    let mut krun = krun_context_for_image(params.vm_name, params.image)?
+        .with_resources(params.vcpus, params.memory_mib)
+        .with_console_output(path_to_str(params.console_log, "console_log")?)
+        .with_vsock_socket_dir(path_to_str(params.vm_state_dir, "vm_state_dir")?)
+        .add_disk(
+            "nix-store",
+            path_to_str(params.nix_store_img, "nix_store_img")?,
+            false,
+        )
+        .add_virtio_fs("work", path_to_str(params.work_dir, "work_dir")?)
+        .add_virtio_fs("out", path_to_str(params.artifact_out, "artifact_out")?)
+        .add_virtio_fs("job", path_to_str(params.job_dir, "job_dir")?)
+        .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
+
+    for disk in params.extra_disks {
+        krun = krun.add_disk(
+            disk.id.as_str(),
+            path_to_str(&disk.path, "extra_disk")?,
+            disk.read_only,
+        );
+    }
+
+    Ok(apply_networking_mode(krun, params.vm_state_dir))
 }
 
 /// Reject a path that isn't UTF-8 representable. Internal helper —
@@ -4107,6 +4140,48 @@ mod tests {
             }
             other => panic!("builder networking must be disconnected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn builder_shell_krun_context_keeps_shell_jobs_nicless() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        // On Linux page_aligned_kernel() stats the kernel (macOS short-circuits),
+        // so the file must exist with a page-aligned length or the build errors.
+        let kernel_path = temp.path().join("vmlinux");
+        std::fs::write(&kernel_path, vec![0u8; host_page_size() as usize])
+            .expect("write page-aligned builder kernel");
+        let image = BuilderVmImage::Rootfs {
+            kernel_path,
+            rootfs_path: temp.path().join("rootfs.ext4"),
+            cmdline: String::new(),
+        };
+        let extra_disk = temp.path().join("extra.img");
+        let krun = builder_shell_krun_context(&BuilderShellKrunContextParams {
+            vm_name: "builder-shell",
+            image: &image,
+            vcpus: DEFAULT_VCPUS,
+            memory_mib: DEFAULT_MEMORY_MIB,
+            console_log: &temp.path().join("console.log"),
+            vm_state_dir: temp.path(),
+            nix_store_img: &temp.path().join("nix-store.img"),
+            work_dir: temp.path(),
+            artifact_out: temp.path(),
+            job_dir: temp.path(),
+            extra_disks: &[BuilderExtraDisk {
+                id: "extra".to_string(),
+                path: extra_disk,
+                read_only: true,
+            }],
+        })
+        .expect("shell context");
+
+        assert!(
+            matches!(
+                krun.networking,
+                libkrun_sys::NetworkingMode::Disconnected { .. }
+            ),
+            "shell jobs must stay on the disconnected/vsock-only path"
+        );
     }
 
     #[test]

@@ -64,9 +64,13 @@
 //!   xattr unpacking remains disabled so every attribute passes through
 //!   this allow-list before touching the host filesystem.
 //! - **Device nodes** — tar character-device entries are
-//!   materialized only when they are exactly `dev/null`, `dev/zero`,
-//!   `dev/random`, or `dev/urandom` with the Linux standard major/minor
-//!   numbers. Every other character or block device is refused with
+//!   accepted only when they are standard pseudo-devices that the
+//!   runtime already expects (`dev/console`, `dev/null`, `dev/zero`,
+//!   `dev/random`, `dev/urandom`) with their Linux standard
+//!   major/minor numbers. On Linux they are materialized exactly; on
+//!   non-Linux hosts they are skipped because the later ext4/rootfs
+//!   pipeline drops device nodes and the guest mounts devtmpfs anyway.
+//!   Every other character or block device is refused with
 //!   [`RefusalReason::DeviceNodeRefused`].
 //! - **Setuid/setgid bits** — regular-file mode bits `0o4000`
 //!   and `0o2000` are preserved by default with an audit annotation
@@ -163,6 +167,7 @@ const SETID_MODE_BITS: u32 = 0o6000;
 /// Character-device allow-list, expressed as tar-relative paths plus
 /// Linux major/minor pairs.
 const ALLOWED_DEVICE_NODES: &[AllowedDeviceNode] = &[
+    AllowedDeviceNode::new(b"dev/console", 5, 1),
     AllowedDeviceNode::new(b"dev/null", 1, 3),
     AllowedDeviceNode::new(b"dev/zero", 1, 5),
     AllowedDeviceNode::new(b"dev/random", 1, 8),
@@ -292,6 +297,9 @@ pub struct UnpackReport {
     pub xattrs_written: u64,
     /// Allow-listed character device nodes materialized.
     pub device_nodes_written: u64,
+    /// Allow-listed pseudo-device nodes accepted but intentionally
+    /// skipped on hosts that cannot or should not materialize them.
+    pub device_nodes_skipped: u64,
     /// Regular files whose setuid/setgid bits were preserved.
     pub setid_entries_preserved: u64,
     /// Pax xattrs intentionally dropped by policy or because the
@@ -638,7 +646,7 @@ impl<'a> Rooted<'a> {
         entry: &tar::Entry<R>,
         rel: &Path,
         raw_path: &[u8],
-    ) -> Result<(), RefusalReason> {
+    ) -> Result<DeviceNodeAction, RefusalReason> {
         use rustix::fs::{FileType, Mode, makedev, mknodat};
         use std::os::fd::AsFd;
 
@@ -660,7 +668,8 @@ impl<'a> Rooted<'a> {
             Mode::from_raw_mode(0o666),
             makedev(allowed.major, allowed.minor),
         )
-        .map_err(|_| RefusalReason::MalformedHeader)
+        .map_err(|_| RefusalReason::MalformedHeader)?;
+        Ok(DeviceNodeAction::Materialized)
     }
 
     fn materialize_hardlink(
@@ -1010,7 +1019,7 @@ impl<'a> Rooted<'a> {
         entry: &tar::Entry<R>,
         rel: &Path,
         raw_path: &[u8],
-    ) -> Result<(), RefusalReason> {
+    ) -> Result<DeviceNodeAction, RefusalReason> {
         materialize_device_node(entry, &self.root.join(rel), raw_path)
     }
 
@@ -1316,10 +1325,15 @@ pub fn unpack_layer<R: Read>(
             }
             tar::EntryType::Char | tar::EntryType::Block => {
                 match rooted.materialize_device_node(&entry, &rel_path, &raw_path) {
-                    Ok(()) => {
+                    #[cfg(target_os = "linux")]
+                    Ok(DeviceNodeAction::Materialized) => {
                         report.device_nodes_written += 1;
                         apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
                         current_layer_paths.insert(rel_path.clone());
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    Ok(DeviceNodeAction::Skipped) => {
+                        report.device_nodes_skipped += 1;
                     }
                     Err(refuse) => report.refused.push(RefusedEntry {
                         raw_path: raw_path.clone(),
@@ -1397,7 +1411,7 @@ fn materialize_device_node<R: Read>(
     entry: &tar::Entry<R>,
     target: &Path,
     raw_path: &[u8],
-) -> Result<(), RefusalReason> {
+) -> Result<DeviceNodeAction, RefusalReason> {
     let major = entry
         .header()
         .device_major()
@@ -1444,8 +1458,8 @@ fn classify_device_node(
 fn create_allowed_device_node(
     _target: &Path,
     _allowed: AllowedDeviceNode,
-) -> Result<(), RefusalReason> {
-    Err(RefusalReason::DeviceNodeRefused)
+) -> Result<DeviceNodeAction, RefusalReason> {
+    Ok(DeviceNodeAction::Skipped)
 }
 
 fn is_allowlisted_xattr(name: &[u8]) -> bool {
@@ -1701,6 +1715,13 @@ fn write_symlink(link_target_bytes: Option<&[u8]>, target: &Path) -> Result<(), 
 enum HardlinkAction {
     Linked,
     Copied,
+}
+
+enum DeviceNodeAction {
+    #[cfg(target_os = "linux")]
+    Materialized,
+    #[cfg(not(target_os = "linux"))]
+    Skipped,
 }
 
 /// Materialize a tar hardlink entry at `target`.
@@ -2790,6 +2811,29 @@ mod tests {
         assert_eq!(report.device_nodes_written, 0);
         assert_eq!(report.refused.len(), 1, "{:?}", report.refused);
         assert_eq!(report.refused[0].reason, RefusalReason::SymlinkInParent);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn allowlisted_device_nodes_are_skipped_on_non_linux_hosts() {
+        let tar_bytes = build_tar(|b| {
+            add_device_node(b, "dev/console", tar::EntryType::Char, 5, 1);
+            add_device_node(b, "dev/null", tar::EntryType::Char, 1, 3);
+        });
+
+        let tmp = TempDir::new().unwrap();
+        let report = unpack_layer(
+            Cursor::new(tar_bytes),
+            tmp.path(),
+            &UnpackOptions::default(),
+        )
+        .expect("unpack ok");
+
+        assert_eq!(report.device_nodes_written, 0);
+        assert_eq!(report.device_nodes_skipped, 2);
+        assert!(report.refused.is_empty(), "{:?}", report.refused);
+        assert!(!tmp.path().join("dev/console").exists());
+        assert!(!tmp.path().join("dev/null").exists());
     }
 
     #[cfg(target_os = "linux")]
