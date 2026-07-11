@@ -30,27 +30,37 @@
 
 #![cfg(unix)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(target_os = "macos")]
+use std::path::PathBuf;
 use std::process::Command;
 
+#[cfg(target_os = "macos")]
 use serde::Deserialize;
 
 const ENABLE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_SMOKE";
 const IMAGE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_REF";
 const DEFAULT_IMAGE: &str = "docker.io/library/alpine:3.20";
+#[cfg(target_os = "macos")]
 const PROD_ENABLE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_PROD_SMOKE";
+#[cfg(target_os = "macos")]
 const PROD_IMAGE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_PROD_REF";
+#[cfg(target_os = "macos")]
 const PROD_DEFAULT_POLICY_REGISTRY: &str = "cgr.dev";
+#[cfg(target_os = "macos")]
 const PROD_DEFAULT_POLICY_IDENTITY: &str =
     "https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main";
+#[cfg(target_os = "macos")]
 const PROD_DEFAULT_POLICY_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
 struct OciCacheIndex {
     #[serde(default)]
     images: Vec<CachedOciImage>,
 }
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
 struct CachedOciImage {
     resolved_digest: String,
@@ -58,6 +68,7 @@ struct CachedOciImage {
     rootfs_path: Option<String>,
 }
 
+#[cfg(target_os = "macos")]
 fn mvm_data_dir() -> PathBuf {
     std::env::var_os("MVM_DATA_DIR")
         .map(PathBuf::from)
@@ -65,6 +76,7 @@ fn mvm_data_dir() -> PathBuf {
         .expect("MVM_DATA_DIR or HOME must be set")
 }
 
+#[cfg(target_os = "macos")]
 fn mvm_cache_dir() -> PathBuf {
     std::env::var_os("MVM_CACHE_DIR")
         .map(PathBuf::from)
@@ -86,10 +98,12 @@ fn mvmctl_with_target_path() -> Command {
     cmd
 }
 
+#[cfg(target_os = "macos")]
 fn digest_from_reference(image_ref: &str) -> Option<&str> {
     image_ref.split_once('@').map(|(_, digest)| digest)
 }
 
+#[cfg(target_os = "macos")]
 fn resolved_digest_from_run_output(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let line = line.trim();
@@ -103,12 +117,14 @@ fn resolved_digest_from_run_output(output: &str) -> Option<String> {
     })
 }
 
+#[cfg(target_os = "macos")]
 fn prod_policy_path() -> PathBuf {
     std::env::var_os("MVM_OCI_POLICY")
         .map(PathBuf::from)
         .unwrap_or_else(|| mvm_data_dir().join("oci-policy.toml"))
 }
 
+#[cfg(target_os = "macos")]
 fn default_prod_policy_text() -> String {
     format!(
         "allowed_registries = [\"{PROD_DEFAULT_POLICY_REGISTRY}\"]\n\n\
@@ -118,6 +134,7 @@ fn default_prod_policy_text() -> String {
     )
 }
 
+#[cfg(target_os = "macos")]
 fn ensure_prod_policy() -> PathBuf {
     let policy_path = prod_policy_path();
     if policy_path.is_file() {
@@ -133,6 +150,7 @@ fn ensure_prod_policy() -> PathBuf {
     fallback
 }
 
+#[cfg(target_os = "macos")]
 fn prod_rootfs_path_for_digest(digest: &str) -> Option<PathBuf> {
     let index_path = mvm_cache_dir().join("oci/index.json");
     let index_bytes = std::fs::read(index_path).ok()?;
