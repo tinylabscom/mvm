@@ -1805,14 +1805,15 @@ mod resolve_pinned_kernel_tests {
     #[test]
     fn installed_binary_without_cache_fetches_the_published_kernel() {
         let tmp = tempfile::tempdir().unwrap();
-        let result = resolve_pinned_kernel_with(tmp.path(), "x86_64", false, |arch, variant, dest| {
-            assert_eq!(arch, "x86_64");
-            assert_eq!(variant, "workload");
-            std::fs::create_dir_all(dest.parent().expect("cache parent")).unwrap();
-            std::fs::write(dest, b"downloaded-vmlinux").unwrap();
-            Ok(())
-        })
-        .unwrap();
+        let result =
+            resolve_pinned_kernel_with(tmp.path(), "x86_64", false, |arch, variant, dest| {
+                assert_eq!(arch, "x86_64");
+                assert_eq!(variant, "workload");
+                std::fs::create_dir_all(dest.parent().expect("cache parent")).unwrap();
+                std::fs::write(dest, b"downloaded-vmlinux").unwrap();
+                Ok(())
+            })
+            .unwrap();
         let expected =
             mvm_build::kernel_fetch::cached_kernel_path(tmp.path(), "x86_64", "workload");
         assert_eq!(result, expected.display().to_string());
@@ -1827,7 +1828,10 @@ mod resolve_pinned_kernel_tests {
         })
         .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("kernel-pin:"), "expected kernel-pin context in: {msg}");
+        assert!(
+            msg.contains("kernel-pin:"),
+            "expected kernel-pin context in: {msg}"
+        );
         assert!(
             msg.contains("simulated download failure"),
             "expected download failure detail in: {msg}"
