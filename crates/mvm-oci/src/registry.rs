@@ -399,7 +399,10 @@ mod tests {
             .parse()
             .expect("reference parses");
 
-        assert_eq!(registry_api_host(&reference.registry), "registry-1.docker.io");
+        assert_eq!(
+            registry_api_host(&reference.registry),
+            "registry-1.docker.io"
+        );
     }
 
     #[test]
