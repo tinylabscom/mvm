@@ -1,6 +1,6 @@
 # Plan 236 — Host-authority runtime roadmap
 
-**Status:** IN PROGRESS (Phase 2A refresh active; broad prerequisite line still NO-GO)  
+**Status:** IN PROGRESS (GO; macOS verb-grant witness remains)  
 **Created:** 2026-07-09  
 **Goal:** turn `mvm`'s current security and architecture lead into a simpler,
 more competitive product by finishing the host-authority model, removing
@@ -24,7 +24,7 @@ delta. That means the broad branch-staleness blocker is cleared; the remaining
 honest production-readiness blockers for Plan 236 are live-proof and closeout
 evidence, not stale prerequisite worktrees.
 
-**Execution progress (2026-07-10):** the gate turned `GO` and the Phase 1 →
+**Execution progress (2026-07-10 / 2026-07-11):** the gate turned `GO` and the Phase 1 →
 Phase 2A pivot largely landed on `main`. Shipped: §1 delivers the host-signer
 verb-grant anchor over the kernel cmdline to the vsock-only backends
 (libkrun/HVF), so sealed guests pin and *selectively* enforce plan-bound grants
@@ -42,10 +42,11 @@ re-pin envelopes to the currently pinned VM lineage (`predecessor_session_id` +
 replace the current VM's grant during `PostRestore`; focused guest/core/CLI
 tests plus green `cargo clippy --workspace --all-targets -- -D warnings` and
 host `cargo test --workspace` validation closed the cross-VM replay residual.
-Remaining honest blockers: baking the sealed-image verb-trust policy needs a
-production/verity OCI seal path that does not exist yet (dev-only today); and
-the macOS live-proof of vsock-only enforcement awaits the workload-kernel
-checksum manifest.
+Remaining honest blockers: the separate macOS live-proof of vsock-only
+verb-grant enforcement still needs to be captured. The earlier
+production/verity OCI seal-path blocker is now closed on
+`feat/plan-236-oci-seal-closeout`, including a signed BusyBox prod witness, so
+this replay-binding slice no longer carries that as an open dependency.
 
 ## Thesis
 

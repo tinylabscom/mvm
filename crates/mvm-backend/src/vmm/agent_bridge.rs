@@ -341,13 +341,17 @@ mod tests {
 
         // Host drops its side.
         drop(client);
-        // The next drain observes EOF, closes the stream, and records it.
-        let _ = bridge.drain_host();
-        assert_eq!(
-            bridge.take_host_closed(),
-            vec![conn_id],
-            "host-closed conn id must be surfaced once"
-        );
+        // The host-side EOF is asynchronous, so poll until the bridge records it.
+        let mut closed = Vec::new();
+        for _ in 0..200 {
+            let _ = bridge.drain_host();
+            closed = bridge.take_host_closed();
+            if !closed.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(closed, vec![conn_id], "host-closed conn id must be surfaced once");
         // Drained: a second take is empty (not re-reported).
         assert!(bridge.take_host_closed().is_empty());
         assert!(!bridge.is_agent_stream(conn_id), "conn removed on close");

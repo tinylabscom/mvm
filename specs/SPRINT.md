@@ -854,8 +854,9 @@ plan 25 sequences the work into six independently-shippable workstreams.
       envelope before delivery. Validation is green with focused `mvm-guest`,
       `mvm-core`, and `mvm-cli` tests, `cargo clippy --workspace --all-targets
       -- -D warnings`, and a host `cargo test --workspace` rerun; after the
-      separate OCI seal closeout, the remaining Plan 236 blocker is the macOS
-      verb-grant live witness path.
+      OCI prod closeout on `feat/plan-236-oci-seal-closeout`, the remaining
+      Plan 236 blocker is the separate macOS verb-grant live witness rather
+      than the seal path itself.
 - [x] Started
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream A: `mvm_core::packs` now defines strict typed manifests for
