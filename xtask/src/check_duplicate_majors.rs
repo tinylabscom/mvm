@@ -32,6 +32,9 @@ const ALLOWLIST: &[&str] = &[
     "base64",
     "bitflags",
     "cpufeatures",
+    // logging facade pulled transitively by smoltcp's heapless; the second
+    // major is benign — there is no defmt consumer in the build.
+    "defmt",
     "der-parser",
     "event-listener",
     "getrandom",

@@ -169,6 +169,13 @@ fn main() -> Result<()> {
     let audit = JsonlAuditSink::open(&config.audit_jsonl_path)?;
     let (stream, cleanup_uds_path) = listener.accept()?;
     let packet_policy = config.worker.packet_policy.clone();
+    // The macOS userspace stack needs the admitted gate; grab it before the
+    // worker consumes the config (the outer match moves `interface_name`).
+    #[cfg(target_os = "macos")]
+    let macos_l3_gate = match &config.worker.packet_policy {
+        TunnelPacketPolicy::L3Forward { gate, .. } => Some(gate.clone()),
+        _ => None,
+    };
     let mut worker = HostTunnelWorker::new(stream, audit, config.worker)
         .context("create host network tunnel worker")?;
     worker
@@ -205,10 +212,33 @@ fn main() -> Result<()> {
                 }
                 result.context("run host network tunnel L3 forward")?;
             }
-            #[cfg(not(target_os = "linux"))]
+            #[cfg(target_os = "macos")]
+            {
+                // macOS has no unprivileged kernel NAT; terminate admitted guest
+                // TCP flows in an in-process userspace stack and bridge each to a
+                // host socket. `interface_name` is unused here — no OS device.
+                let _ = interface_name;
+                let gate = macos_l3_gate
+                    .as_ref()
+                    .expect("matched an l3_forward policy above");
+                let mut egress = mvm_hostd::smoltcp_egress::SmoltcpEgress::new(
+                    gate,
+                    mvm_hostd::smoltcp_egress::EgressConfig {
+                        mtu: worker.negotiated_frame_size().min(1500),
+                        ..mvm_hostd::smoltcp_egress::EgressConfig::default()
+                    },
+                )
+                .context("create macOS userspace TCP egress stack")?;
+                egress
+                    .run(&mut worker)
+                    .context("run macOS userspace TCP egress")?;
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
             {
                 let _ = interface_name;
-                anyhow::bail!("l3_forward host TUN egress is only supported on Linux");
+                anyhow::bail!(
+                    "l3_forward host egress is only supported on Linux (kernel TUN) and macOS (userspace stack)"
+                );
             }
         }
         TunnelPacketPolicy::L3Forward {
