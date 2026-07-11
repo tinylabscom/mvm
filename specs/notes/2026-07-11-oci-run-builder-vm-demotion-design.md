@@ -189,3 +189,22 @@ WS1→WS3 fix the reported bug and the DX. WS4→WS6 complete the vision.
   coordinate the descope so we don't strand merged pieces.
 - **Release asset availability.** The end-user download path is only as good as
   the release job actually publishing the kernel asset per arch.
+
+## Phasing (agreed 2026-07-11) — 2 phases, 3 PRs
+
+- **PR 1 — the plan.** The implementation plan doc; no code.
+- **PR 2 — Phase 1: kernel-cheap `machine run --image`.** WS1 (land
+  `fix/stage0-homeless-shelter-purity`) + WS2 (reuse-or-build-once-and-cache
+  kernel; `--image` never triggers a redundant full builder-image build) + **WS3
+  (build logging/inspection — first-class, not polish)**. Confirm working
+  end-to-end before Phase 2.
+- **PR 3 — Phase 2: remove `mvmctl dev`.** WS6. **Hard gate:** ships only once
+  Phase 1's logging/inspection is *proven* able to diagnose a builder-VM build
+  failure from its logs — that inspection capability is the reason `dev` can go.
+
+### Deferred follow-ups (outside the 3-PR scope)
+
+- **WS4 — end-user prebuilt-kernel download / release asset.** Contributor path
+  (build-once) is what Phase 1 fixes; the installed-user download is separate.
+- **WS5 — builder audited-egress cutover.** Hand off to Plan 236's existing
+  builder no-guest-NIC / host-brokered-egress work; do not duplicate it here.
