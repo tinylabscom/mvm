@@ -195,6 +195,27 @@ plan 25 sequences the work into six independently-shippable workstreams.
       image: public Chainguard candidates uncovered honest runtime refusals
       (device nodes / layer format), so the branch no longer pretends one
       baked-in public image is universal proof.
+- [x] 2026-07-11 Plan 236 OCI prod witness compatibility hardening:
+      continuing the same `feat/plan-236-oci-seal-closeout` lane exposed and
+      fixed three more real blockers before boot. `mvm-oci` now accepts the
+      standard pseudo-device nodes OCI images carry (`dev/console`,
+      `dev/null`, `dev/zero`, `dev/random`, `dev/urandom`) on non-Linux hosts
+      by recording them as skipped instead of refusing the layer outright;
+      `mvm-build`'s pure ext4 collector now temporarily widens owner-read
+      permission to read guest files such as `/etc/shadow` and then restores
+      the exact original mode; and the libkrun builder shell-job path now
+      applies the same disconnected/vsock-only networking mode as the ordinary
+      builder path, closing the accidental guest-NIC config the verity seal job
+      was still booting. Focused validation is green with
+      `cargo test -p mvm-oci allowlisted_device_nodes_are_skipped_on_non_linux_hosts`,
+      `cargo test -p mvm-oci --test hermetic_registry platform_manifest_fetch_accepts_arm64_without_variant_for_v8_request`,
+      `cargo clippy -p mvm-oci --all-targets -- -D warnings`,
+      `cargo test -p mvm-build collect_nodes_reads_owner_unreadable_files_without_changing_guest_mode --features pure-mkfs`,
+      `cargo test -p mvm-build --lib builder_shell_krun_context_keeps_shell_jobs_nicless --features 'builder-vm pure-mkfs'`,
+      and `cargo clippy -p mvm-build --lib --tests --features pure-mkfs -- -D warnings`.
+      The remaining prod-smoke failure is now external release availability:
+      the hash-verified workload-kernel download stops on a 404 for
+      `https://github.com/tinylabscom/mvm/releases/download/v0.17.0/kernel-aarch64-checksums-sha256.txt`.
 - [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
       source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
       builds the builder VM just to obtain a workload kernel. The resolver now

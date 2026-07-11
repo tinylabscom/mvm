@@ -495,28 +495,19 @@ impl LibkrunBuilderVm {
         })?;
         let console_log = vm_state_dir.join("console.log");
 
-        let mut krun = krun_context_for_image(&vm_name, &image)?
-            .with_resources(self.vcpus, self.memory_mib)
-            .with_console_output(path_to_str(&console_log, "console_log")?)
-            .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
-            .add_disk(
-                "nix-store",
-                path_to_str(nix_store_lock.path(), "nix_store_img")?,
-                false,
-            )
-            .add_virtio_fs("work", path_to_str(&job.work_dir, "work_dir")?)
-            .add_virtio_fs("out", path_to_str(&job.artifact_out, "artifact_out")?)
-            .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
-            .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
-
-        for disk in &job.extra_disks {
-            krun = krun.add_disk(
-                disk.id.as_str(),
-                path_to_str(&disk.path, "extra_disk")?,
-                disk.read_only,
-            );
-        }
-
+        let mut krun = builder_shell_krun_context(
+            &vm_name,
+            &image,
+            self.vcpus,
+            self.memory_mib,
+            &console_log,
+            &vm_state_dir,
+            nix_store_lock.path(),
+            &job.work_dir,
+            &job.artifact_out,
+            &job_dir,
+            &job.extra_disks,
+        )?;
         krun = krun.add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
 
         let cfg = SupervisorConfig {
@@ -693,6 +684,40 @@ impl LibkrunBuilderVm {
         }
         Ok(())
     }
+}
+
+fn builder_shell_krun_context(
+    vm_name: &str,
+    image: &BuilderVmImage,
+    vcpus: u8,
+    memory_mib: u32,
+    console_log: &Path,
+    vm_state_dir: &Path,
+    nix_store_img: &Path,
+    work_dir: &Path,
+    artifact_out: &Path,
+    job_dir: &Path,
+    extra_disks: &[BuilderExtraDisk],
+) -> Result<KrunContext, BuilderVmError> {
+    let mut krun = krun_context_for_image(vm_name, image)?
+        .with_resources(vcpus, memory_mib)
+        .with_console_output(path_to_str(console_log, "console_log")?)
+        .with_vsock_socket_dir(path_to_str(vm_state_dir, "vm_state_dir")?)
+        .add_disk("nix-store", path_to_str(nix_store_img, "nix_store_img")?, false)
+        .add_virtio_fs("work", path_to_str(work_dir, "work_dir")?)
+        .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?)
+        .add_virtio_fs("job", path_to_str(job_dir, "job_dir")?)
+        .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
+
+    for disk in extra_disks {
+        krun = krun.add_disk(
+            disk.id.as_str(),
+            path_to_str(&disk.path, "extra_disk")?,
+            disk.read_only,
+        );
+    }
+
+    Ok(apply_networking_mode(krun, vm_state_dir))
 }
 
 /// Reject a path that isn't UTF-8 representable. Internal helper —
@@ -4107,6 +4132,43 @@ mod tests {
             }
             other => panic!("builder networking must be disconnected, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn builder_shell_krun_context_keeps_shell_jobs_nicless() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let image = BuilderVmImage::Rootfs {
+            kernel_path: temp.path().join("vmlinux"),
+            rootfs_path: temp.path().join("rootfs.ext4"),
+            cmdline: String::new(),
+        };
+        let extra_disk = temp.path().join("extra.img");
+        let krun = builder_shell_krun_context(
+            "builder-shell",
+            &image,
+            DEFAULT_VCPUS,
+            DEFAULT_MEMORY_MIB,
+            &temp.path().join("console.log"),
+            temp.path(),
+            &temp.path().join("nix-store.img"),
+            temp.path(),
+            temp.path(),
+            temp.path(),
+            &[BuilderExtraDisk {
+                id: "extra".to_string(),
+                path: extra_disk,
+                read_only: true,
+            }],
+        )
+        .expect("shell context");
+
+        assert!(
+            matches!(
+                krun.networking,
+                libkrun_sys::NetworkingMode::Disconnected { .. }
+            ),
+            "shell jobs must stay on the disconnected/vsock-only path"
+        );
     }
 
     #[test]

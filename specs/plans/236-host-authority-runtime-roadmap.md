@@ -60,7 +60,20 @@ validation for that harness is green (`cargo test --test
 oci_image_runner_smoke -- --nocapture`, `cargo clippy --test
 oci_image_runner_smoke -- -D warnings`); the missing piece is now the
 environment-backed live run on a suitable signed digest-pinned image, not the
-test surface or the arm64 index matcher.
+test surface or the arm64 index matcher. Follow-up closeout on
+`feat/plan-236-oci-seal-closeout` then fixed three more real compatibility
+gaps the witness exposed before boot: allow-listed pseudo-device nodes from
+signed OCI layers are now accepted on non-Linux hosts (skipped during host
+unpack because the rootfs pipeline drops device nodes and the guest mounts
+devtmpfs), the pure ext4 collector can temporarily read owner-unreadable files
+like `/etc/shadow` without changing the guest-visible mode bits, and the
+libkrun builder shell-job path now applies the same disconnected/vsock-only
+networking transform as the regular builder path. After those fixes, the live
+`--prod` witness advances through verity sealing and fails on an external
+release-readiness gap instead of a host-authority/runtime bug: the
+version-matched workload-kernel checksum manifest for `v0.17.0`
+(`kernel-aarch64-checksums-sha256.txt`) is still 404 from GitHub Releases, so
+the hash-verified kernel download refuses to proceed.
 
 ## Thesis
 
