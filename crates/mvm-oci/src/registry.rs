@@ -3,6 +3,10 @@ use crate::reference::ImageReference;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
 use secrecy::{ExposeSecret, SecretString};
 
+const DOCKER_HUB_REGISTRY: &str = "docker.io";
+const DOCKER_HUB_LEGACY_REGISTRY: &str = "index.docker.io";
+const DOCKER_HUB_REGISTRY_API_HOST: &str = "registry-1.docker.io";
+
 #[derive(Debug, Clone, Default)]
 pub enum ClientProtocol {
     #[default]
@@ -244,26 +248,22 @@ impl RegistryClient {
     }
 
     fn endpoint(&self, reference: &ImageReference, path: &str) -> String {
+        let host = registry_api_host(&reference.registry);
         let scheme = match &self.config.protocol {
             ClientProtocol::Https => "https",
             ClientProtocol::Http => "http",
             ClientProtocol::HttpsExcept(exceptions) => {
-                if exceptions.iter().any(|entry| entry == &reference.registry) {
+                if exceptions
+                    .iter()
+                    .any(|entry| entry == host || entry == &reference.registry)
+                {
                     "http"
                 } else {
                     "https"
                 }
             }
         };
-        format!("{scheme}://{}{}", endpoint_host(reference), path)
-    }
-}
-
-fn endpoint_host(reference: &ImageReference) -> &str {
-    if reference.registry == "docker.io" {
-        "registry-1.docker.io"
-    } else {
-        &reference.registry
+        format!("{scheme}://{host}{path}")
     }
 }
 
@@ -284,6 +284,13 @@ fn manifest_path(reference: &ImageReference) -> String {
 
 fn blob_path(reference: &ImageReference, digest: &str) -> String {
     format!("/v2/{}/blobs/{digest}", reference.repository)
+}
+
+fn registry_api_host(registry: &str) -> &str {
+    match registry {
+        DOCKER_HUB_REGISTRY | DOCKER_HUB_LEGACY_REGISTRY => DOCKER_HUB_REGISTRY_API_HOST,
+        other => other,
+    }
 }
 
 #[derive(Debug)]
@@ -337,6 +344,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn docker_hub_endpoint_uses_registry_api_host() {
+        let client = RegistryClient::new(ClientConfig::default(), RegistryAuthConfig::Anonymous);
+        let reference = "alpine"
+            .parse::<ImageReference>()
+            .expect("docker hub reference parses");
+
+        let endpoint = client.endpoint(&reference, "/v2/library/alpine/manifests/latest");
+
+        assert_eq!(reference.registry, "docker.io");
+        assert_eq!(
+            endpoint,
+            "https://registry-1.docker.io/v2/library/alpine/manifests/latest"
+        );
+    }
+
+    #[test]
+    fn docker_hub_endpoint_exception_matches_canonical_registry() {
+        let client = RegistryClient::new(
+            ClientConfig {
+                protocol: ClientProtocol::HttpsExcept(vec!["docker.io".to_string()]),
+            },
+            RegistryAuthConfig::Anonymous,
+        );
+        let reference = "alpine"
+            .parse::<ImageReference>()
+            .expect("docker hub reference parses");
+
+        let endpoint = client.endpoint(&reference, "/v2/library/alpine/manifests/latest");
+
+        assert_eq!(
+            endpoint,
+            "http://registry-1.docker.io/v2/library/alpine/manifests/latest"
+        );
+    }
+
+    #[test]
     fn parse_bearer_challenge_extracts_realm_service_and_scope() {
         let parsed = parse_auth_challenge(Some(
             r#"Bearer realm="https://auth.example/token",service="registry.example",scope="repository:library/alpine:pull""#,
@@ -356,7 +399,10 @@ mod tests {
             .parse()
             .expect("reference parses");
 
-        assert_eq!(endpoint_host(&reference), "registry-1.docker.io");
+        assert_eq!(
+            registry_api_host(&reference.registry),
+            "registry-1.docker.io"
+        );
     }
 
     #[test]
@@ -365,6 +411,6 @@ mod tests {
             .parse()
             .expect("reference parses");
 
-        assert_eq!(endpoint_host(&reference), "ghcr.io");
+        assert_eq!(registry_api_host(&reference.registry), "ghcr.io");
     }
 }

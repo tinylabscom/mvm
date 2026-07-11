@@ -613,7 +613,7 @@ the semantic protocol).**
 
 ---
 
-- [ ] **T1 — Host L3 packet inspector + policy gate (drop-only, no egress yet).**
+- [x] **T1 — Host L3 packet inspector + policy gate (drop-only, no egress yet).**
   - Files: create `crates/mvm-hostd/src/network_tunnel/l3_forward.rs`; modify
     `crates/mvm-hostd/src/network_tunnel.rs` to add
     `TunnelPacketPolicy::L3Forward(L3ForwardPolicy)` beside `DropAll`, and route
@@ -628,7 +628,7 @@ the semantic protocol).**
     `l3_gate_drops_unparseable_packet_and_audits`; run — fail; implement;
     run — pass; commit `feat(net-tunnel): raw-L3 packet policy gate`.
 
-- [ ] **T2 — Forward admitted packets through a real host TUN + kernel NAT (Linux).**
+- [x] **T2 — Forward admitted packets through a real host TUN + kernel NAT (Linux).**
   - The worker already forwards guest packets into a `host_tun::PacketDevice`
     (`worker_can_forward_guest_packets_into_host_packet_path` uses a fake device).
     Swap the fake for a real `HostTunDevice::open_named`, and stand up the
@@ -647,7 +647,7 @@ the semantic protocol).**
     `nat_rule_shape_masquerades_tunnel_link` (assert the composed rule string; no
     live net), `denied_packet_never_reaches_host_tun`; implement; commit.
 
-- [ ] **T3 — Reverse path: host TUN replies framed back to the guest + limits.**
+- [x] **T3 — Reverse path: host TUN replies framed back to the guest + limits.**
   - Read reply IPv4 packets off the host TUN (`HostTunPacketPath` read side) and
     frame them to the guest as `FrameType::Packet` via the worker's `send_packet`.
     Because the kernel handles the flows, TCP, UDP, ICMP, and DNS all return
@@ -657,7 +657,7 @@ the semantic protocol).**
     `reverse_path_respects_worker_limits`,
     `reverse_path_quota_exhaustion_shuts_down`; implement; commit.
 
-- [ ] **T4 — Guest config: default route + admission pins as `/etc/hosts`.**
+- [x] **T4 — Guest config: default route + admission pins as `/etc/hosts`.**
   - No live DNS resolver, no synthetic DNS, no dynamic pinning. Resolution is
     host-authored at admission: the host resolves each allowlisted hostname to its
     real IPs (the `DnsPinRegistry`) and hands the guest those `host→IP` pairs, which
@@ -679,7 +679,7 @@ the semantic protocol).**
     `apply_network_config_installs_default_route_and_hosts_block`,
     `apply_network_config_hosts_block_is_idempotent`; implement; commit.
 
-- [ ] **T5 — Production caller: populate `VmStartConfig.network_tunnel`.**
+- [x] **T5 — Production caller: populate `VmStartConfig.network_tunnel`.**
   - Files: the admitted workload launch path building `VmStartConfig`
     (`crates/mvm-backend/src/workload_runner/runner.rs` + the `mvmctl` machine/up
     caller). Today all four `Some(...)` sites are `#[cfg(test)]`
@@ -697,7 +697,7 @@ the semantic protocol).**
     `deny_all_policy_launch_config_stays_drop_all`,
     `worker_config_json_carries_policy_and_pins_no_tls`; implement; commit.
 
-- [ ] **T6 — No-MITM / no-semantic-protocol guard + lifecycle.**
+- [x] **T6 — No-MITM / no-semantic-protocol guard + lifecycle.**
   - Test/lint witness: the tunnel data plane links **no** TLS-MITM surface
     (`TlsTransform`, `egress_ca`, `stream_transform`) and does **not** depend on
     the `mvm-net` semantic protocol / synthetic DNS map. Confirm the forwarding
@@ -723,18 +723,29 @@ the semantic protocol).**
     (no guest NIC / no helper drift / host-mediated egress under admitted policy)
     and record the live evidence line here.
 
-**macOS host forwarding (separate task, not in this slice).** `HostTunDevice` is
-Linux-only, so this slice does **not** fix the original macOS/HVF `bad address`
-repro. A follow-up must add a macOS host-forwarding path (`utun` character device
-+ pf NAT anchor, both available to unprivileged processes) behind the same
-`host_tun::PacketDevice` seam so the worker/policy code is unchanged. File it as
-a Phase 2A follow-up before claiming macOS workload egress.
+**macOS host forwarding — LANDED (userspace `smoltcp`, not `utun`+pf).** The Linux
+path (`HostTunDevice` + kernel NAT) needs `CAP_NET_ADMIN`, and a macOS `utun`+pf
+equivalent needs **root** (`pfctl`) — which would force `sudo machine run`. So
+macOS forwards in a userspace TCP/IP stack instead
+(`mvm_hostd::smoltcp_egress`, `#[cfg(macos)]`): admitted guest flows are
+terminated in `smoltcp` and bridged to ordinary *unprivileged* host sockets,
+behind the same worker/gate/audit seam (Linux path untouched). Shipped: TCP
+(PR #1639), UDP (PR #1647), ICMP echo via an unprivileged ping socket (PR #1650).
+This closes the original macOS/HVF `bad address` repro end to end (DNS via the
+`/etc/hosts` pins + echo relay), no root. Dev-grade; production hardening (perf,
+non-loopback ICMP) remains follow-up.
 
-**Deferred (tracked, not in this slice):** macOS host forwarding (above);
-host-side destination-bound secret egress (narrow host-authority model, not
-MITM — Phase 3/P1); IPv6 forwarding (`TunnelFeatures::ipv6`), after the IPv4 path
-is proven; per-flow `Credit` backpressure consumption (frames exist, nothing
-consumes them yet).
+**Landed:** the Phase 2A raw-L3 egress data plane shipped across five merged PRs —
+Linux host-TUN + kernel NAT (#1634), macOS smoltcp TCP/UDP/ICMP (#1639/#1647/
+#1650), and the gate packet-parser fuzz target (#1643).
+
+**Deferred (tracked, not in this slice):** the **live workload egress witness**
+(needs a Linux + libkrun host — none currently available; the three "Add live
+workload witnesses" boxes above stay unchecked until a real workload run captures
+the audit witness); host-side destination-bound secret egress (narrow
+host-authority model, not MITM — Phase 3/P1); IPv6 forwarding
+(`TunnelFeatures::ipv6`), after the IPv4 path is proven; per-flow `Credit`
+backpressure consumption (frames exist, nothing consumes them yet).
 
 ### Phase 2B — builder path
 
