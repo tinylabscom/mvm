@@ -81,6 +81,17 @@ if [[ "${#WAVES[@]}" -eq 0 ]]; then
   exit 66
 fi
 
+MAX_WAVE=0
+for wave in "${WAVES[@]}"; do
+  if ! [[ "${wave}" =~ ^[0-9]+$ ]] || [[ "${wave}" -lt 1 ]]; then
+    echo "refusing: invalid wave size ${wave}" >&2
+    exit 70
+  fi
+  if [[ "${wave}" -gt "${MAX_WAVE}" ]]; then
+    MAX_WAVE="${wave}"
+  fi
+done
+
 mkdir -p "${DATA_DIR}" "${CACHE_DIR}" "${TARGET_DIR}"
 DATA_DIR="$(cd "${DATA_DIR}" && pwd)"
 CACHE_DIR="$(cd "${CACHE_DIR}" && pwd)"
@@ -93,6 +104,17 @@ for generated_dir in "${DATA_DIR}" "${CACHE_DIR}" "${TARGET_DIR}"; do
       ;;
   esac
 done
+
+# macOS sockaddr_un paths are short; fail before the expensive prepull if the
+# generated VM names would make the HVF agent socket impossible to bind.
+longest_vm_name="${RUN_ID}-w${MAX_WAVE}-$(printf "%03d" "${MAX_WAVE}")"
+longest_agent_socket="${DATA_DIR}/vms/${longest_vm_name}/hvf-agent.sock"
+if [[ "${#longest_agent_socket}" -ge 104 ]]; then
+  echo "refusing: HVF agent socket path would exceed macOS Unix socket length:" >&2
+  echo "  ${longest_agent_socket}" >&2
+  echo "choose a shorter MVM_HVF_DENSITY_OUT_DIR or MVM_HVF_DENSITY_DATA_DIR, for example /tmp/p237d" >&2
+  exit 65
+fi
 
 run_env=(
   env
@@ -324,11 +346,6 @@ cleanup_wave() {
 } >"${SUMMARY}"
 
 for wave in "${WAVES[@]}"; do
-  if ! [[ "${wave}" =~ ^[0-9]+$ ]] || [[ "${wave}" -lt 1 ]]; then
-    echo "refusing: invalid wave size ${wave}" >&2
-    exit 70
-  fi
-
   wave_dir="${OUT_DIR}/wave-${wave}"
   mkdir -p "${wave_dir}"
   : >"${wave_dir}/launches.tsv"
