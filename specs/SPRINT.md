@@ -163,6 +163,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
       2026-07-10 refresh, the stale prerequisite-branch blocker is cleared by
       dedicated Codex refresh worktrees rather than left on their original
       stale branches.
+- [x] 2026-07-10 Plan 236 production OCI verity-seal closeout slice:
+      `crates/mvm-build/src/run_image.rs` now routes the sealed OCI `--prod`
+      dm-verity step through the existing builder-shell-job boundary when the
+      host cannot run `veritysetup` locally, so macOS and other non-Linux
+      hosts no longer stop at the old `HostUnsupported` gap. The branch keeps
+      the all-or-nothing `rootfs.initrd` + `rootfs.verity`/`rootfs.roothash`
+      contract, generates a pinned builder-side `veritysetup format` script,
+      and adds focused fallback-path tests proving local success stays local,
+      `HostUnsupported` falls back, and genuine local errors still surface.
+      Validation is green on the host with `cargo fmt --all`, focused
+      `mvm-build` run-image tests, `cargo clippy --workspace --all-targets -- -D warnings`,
+      and `cargo test --workspace`. Remaining Plan 236 blocker in this lane is
+      now live production proof of the new seal path rather than a missing code
+      path.
 - [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
       source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
       builds the builder VM just to obtain a workload kernel. The resolver now

@@ -36,12 +36,15 @@ deny-all workload spawns no endpoint and fails closed, matching libkrun
 negative-path matrix surfaced a real bypass — `re_pin_verb_grant` verified the
 resume envelope against its own embedded key — fixed by verifying against the
 boot-pinned host-signer anchor with a shared verification core (closes the
-self-forgery bypass). Remaining honest blockers: baking the sealed-image
-verb-trust policy needs a production/verity OCI seal path that does not exist
-yet (dev-only today); the macOS live-proof of vsock-only enforcement awaits the
-workload-kernel checksum manifest; and binding restore-time authority to a
-per-VM identity (cross-VM replay of a genuinely host-signed grant) is a tracked
-follow-up.
+self-forgery bypass). The remaining sealed-image trust blocker is now narrower:
+the OCI `--prod` run path gained a real builder-VM dm-verity seal fallback on
+the active closeout branch, with focused fallback tests plus green host
+validation (`cargo clippy --workspace --all-targets -- -D warnings`, `cargo
+test --workspace`), so the old "production/verity OCI seal path does not
+exist" statement is no longer true on that branch. Remaining honest blockers
+are the live-proof closeout for that new production seal path, the macOS
+vsock-only enforcement witness, and binding restore-time authority to a per-VM
+identity (cross-VM replay of a genuinely host-signed grant).
 
 ## Thesis
 
