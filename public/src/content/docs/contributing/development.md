@@ -6,8 +6,8 @@ description: Getting started as a contributor to mvm.
 ## Prerequisites
 
 - **Rust 1.85+** (Edition 2024) — install via [rustup](https://rustup.rs)
-- **macOS Apple Silicon or Linux** — macOS for development via Vz (26+) or libkrun (pre-26); Linux for native `/dev/kvm`. Intel Macs are not a supported local microVM host.
-- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; `crates/mvm-cli/build.rs` uses them to cross-compile the embedded host-VM binaries (`mvm-host-vm-init`, `mvm-egress-proxy`) as static `aarch64-unknown-linux-musl`. End-users running a downloaded `mvmctl` don't need them.
+- **macOS Apple Silicon or Linux** — macOS for development via HVF (26+) or libkrun (pre-26); Linux for native `/dev/kvm`. Intel Macs are not a supported local microVM host.
+- **`zig` + `cargo-zigbuild`** — source-checkout contributors only; needed when a source build has to produce Linux helper binaries on demand, or when building a release artifact with `release-artifact-bootstrap`. End-users running a downloaded `mvmctl` don't need them.
 - **Nix** — not needed on the host. Nix evaluation and `nix build` run inside the builder VM.
 
 ### Do I need to install libkrun?
@@ -29,7 +29,7 @@ for anything missing — run it first and follow what it says.
 ### Getting started
 
 ```bash
-# Install zig + cargo-zigbuild if building from a source checkout (see above)
+# Install zig + cargo-zigbuild if exercising source-checkout runtime builds
 brew install zig && cargo install cargo-zigbuild
 
 git clone https://github.com/tinylabscom/mvm.git

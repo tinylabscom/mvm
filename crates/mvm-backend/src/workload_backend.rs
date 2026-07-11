@@ -65,8 +65,9 @@ impl WorkloadBackend for LibkrunBackend {
 impl WorkloadBackend for HvfBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         // Proxy-aware substitution over the vsock gateway: the guest dials the
-        // egress port, the hvf VMM's bridge enforces claim-10 then relays to
-        // the per-VM endpoint (claims 12/13). No transparent :80/:443 terminator.
+        // egress port, and the VMM relays bytes to the per-VM endpoint that owns
+        // claim-10 enforcement and claims 12/13. No transparent :80/:443
+        // terminator.
         EgressSubstitutionTransport::VsockUdsChannel
     }
 }

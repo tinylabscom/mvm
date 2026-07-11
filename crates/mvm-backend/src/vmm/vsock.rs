@@ -313,9 +313,35 @@ mod tests {
     use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
 
     fn dev() -> VsockShared {
-        let mut ram = vec![0u8; 0x1000];
+        let ram = vec![0u8; 0x1000].leak();
         // SAFETY: leaked for the test.
         unsafe { VsockShared::new(49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
+    }
+
+    fn configure_rx_buffers(d: &mut VsockShared, caps: &[usize]) -> Vec<u64> {
+        let base = 0x4000_0000;
+        let desc = base + 0x100;
+        let avail = base + 0x200;
+        let used = base + 0x300;
+        let mut buffers = Vec::new();
+        d.queues[RX] = Queue {
+            num: caps.len() as u32,
+            ready: 1,
+            desc,
+            avail,
+            used,
+            last_avail: 0,
+        };
+        d.mem.wr_u16(avail + 2, caps.len() as u16);
+        for (i, cap) in caps.iter().enumerate() {
+            let buf = base + 0x400 + (i as u64 * 0x100);
+            buffers.push(buf);
+            let da = desc + (i as u64 * 16);
+            d.mem.write_bytes(da, &buf.to_le_bytes());
+            d.mem.write_bytes(da + 8, &(*cap as u32).to_le_bytes());
+            d.mem.wr_u16(avail + 4 + (i as u64 * 2), i as u16);
+        }
+        buffers
     }
 
     #[test]
@@ -348,6 +374,40 @@ mod tests {
         assert_eq!(h2.op, OP_RW);
         assert_eq!(h2.len, 9);
         assert_eq!(h2.buf_alloc, 4096);
+    }
+
+    #[test]
+    fn flush_rx_splits_large_stream_payload_across_guest_buffers() {
+        let mut d = dev();
+        let buffers = configure_rx_buffers(&mut d, &[HDR_LEN + 6, HDR_LEN + 4]);
+        let hdr = Hdr {
+            src_cid: HOST_CID,
+            dst_cid: GUEST_CID,
+            src_port: mvm_guest::vsock::EGRESS_PORT,
+            dst_port: 1500,
+            len: 10,
+            typ: TYPE_STREAM,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: HOST_BUF_ALLOC,
+            fwd_cnt: 12,
+        };
+        d.pending_rx.push((hdr, b"abcdefghij".to_vec()));
+
+        assert!(d.flush_rx());
+        assert!(d.pending_rx.is_empty());
+
+        let first = d.mem.read_bytes(buffers[0], HDR_LEN + 6);
+        let first_hdr = Hdr::from_bytes(&first[..HDR_LEN]);
+        assert_eq!(first_hdr.op, OP_RW);
+        assert_eq!(first_hdr.len, 6);
+        assert_eq!(&first[HDR_LEN..], b"abcdef");
+
+        let second = d.mem.read_bytes(buffers[1], HDR_LEN + 4);
+        let second_hdr = Hdr::from_bytes(&second[..HDR_LEN]);
+        assert_eq!(second_hdr.op, OP_RW);
+        assert_eq!(second_hdr.len, 4);
+        assert_eq!(&second[HDR_LEN..], b"ghij");
     }
 
     #[test]

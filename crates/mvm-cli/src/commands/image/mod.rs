@@ -353,7 +353,30 @@ const OCI_RUNTIME_EPOCH: u32 = 6;
 /// Cheap and build-free (no agent cross-compile) so it can gate the cache-hit
 /// path without forcing a rebuild on hosts that only have a warm rootfs cache.
 fn oci_runtime_tag() -> String {
-    format!("{}.{}", env!("CARGO_PKG_VERSION"), OCI_RUNTIME_EPOCH)
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    for name in [
+        "mvm-oci-init",
+        "mvm-oci-entrypoint",
+        "mvm-guest-agent",
+        "mvm-guest-netinit",
+        "mvm-guest-netd",
+        "mvm-egress-client",
+        "mvm-verity-init",
+    ] {
+        hasher.update(name.as_bytes());
+        hasher.update(b"=");
+        let sha = crate::host_binaries::embedded::EMBEDDED
+            .iter()
+            .find(|bin| bin.name == name)
+            .map(|bin| bin.sha256_hex)
+            .unwrap_or("missing");
+        hasher.update(sha.as_bytes());
+        hasher.update(b"\n");
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    format!("{}-guest-{}", env!("CARGO_PKG_VERSION"), &digest[..16])
 }
 
 fn oci_tree_key(identity: &str) -> String {
@@ -2199,6 +2222,20 @@ mod tests {
             err.to_string()
                 .contains("requires a digest-pinned reference"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn runtime_tag_includes_guest_runtime_hash() {
+        let tag = oci_runtime_tag();
+        assert!(
+            tag.starts_with(concat!(env!("CARGO_PKG_VERSION"), "-guest-")),
+            "unexpected runtime tag: {tag}"
+        );
+        assert_eq!(
+            tag.rsplit_once("-guest-").unwrap().1.len(),
+            16,
+            "runtime tag should carry a short guest-runtime digest"
         );
     }
 

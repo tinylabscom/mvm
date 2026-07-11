@@ -377,6 +377,45 @@ plan 25 sequences the work into six independently-shippable workstreams.
       mvm-oci --tests -- -D warnings`; `MVM_SKIP_EMBED_BINARIES=1 cargo run
       --release -- machine run --image alpine -it -- /bin/sh` reached the
       Alpine shell.
+- [x] 2026-07-09 OCI vsock-egress HTTP proxy compatibility: `mvm-egress-client`
+      now accepts HTTP proxy requests alongside SOCKS5 on its loopback port.
+      `HTTP_PROXY`/`HTTPS_PROXY` point to that HTTP proxy while `ALL_PROXY`
+      remains SOCKS5H. Absolute-form `https://...` requests are forwarded over
+      the existing vsock egress stream to a host-side HTTP-forward mode that
+      reuses `EgressGate`, disables host environment proxies, pins reqwest DNS
+      to the admitted IP, and uses host TLS instead of adding guest TLS.
+      Source-checkout `cargo run --release` builds now keep embedded helper
+      binaries stubbed by default; packaged release artifacts opt into real
+      embedding through `release-artifact-bootstrap`, so shipped `mvmctl`
+      remains self-contained while source builds avoid build-script zigbuild in
+      the user-facing compile path.
+      A same-day live HVF BusyBox HTTPS proof for the HTTP-forward path is
+      recorded on the rebased `main` line; this branch's remaining proof is
+      post-rebase validation of the relay-trait and build-hot-path deltas.
+      Validation so far: `cargo fmt --all`; build-mode unit test via
+      `rustc --test`; `cargo build --release -p mvmctl --bin mvmctl` and
+      `cargo run --release -- --version` with no build-script zigbuild;
+      release-feature compile/clippy under `MVM_SKIP_EMBED_BINARIES=1`;
+      focused host/guest/CLI tests; touched-crate clippy.
+      2026-07-09 transport follow-up (Plan 245): the HVF-side backend now depends on a
+      small `GuestEndpointRelay` trait at the UDS byte-relay seam instead of
+      concrete `SubstitutionBridge` method names. The trait covers only guest
+      bytes, endpoint drains, closes, and active-state checks; host policy,
+      raw egress, HTTP parsing, reqwest/TLS, and allowlist enforcement remain
+      in `mvm-hostd`. Validation for this refactor: `cargo fmt --all --check`;
+      `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p
+      mvm-backend vsock_egress_bridge::substitution_bridge --lib`; `...
+      cargo test -p mvm-backend vmm::vsock --lib`; `... cargo test -p
+      mvm-guest-helpers egress_client --lib`; `... cargo test -p mvm-hostd
+      http_forward --lib`; `... cargo clippy -p mvm-backend --lib --tests
+      -- -D warnings`; `RUSTC=/Users/auser/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
+      CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target-rustup
+      /Users/auser/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo
+      zigbuild --release --target aarch64-unknown-linux-musl -p mvm-guest
+      --bin mvm-oci-init`. No HVF
+      artifact rebuild or BusyBox HTTPS smoke was needed for this trait-only
+      slice because reserved-frame dispatch and host HTTP/raw egress behavior
+      were not changed.
 - [x] 2026-07-08 Plan 213 §I builder-pack revocation consumer: the installed
       attested builder-pack path now refreshes a signed
       `pack-revocations.json` from the `revocations` release, caches it under

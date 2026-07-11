@@ -1,7 +1,6 @@
-//! The single host-side vsock egress bridge: the one place the claim-10 gate and
-//! claims-12/13 substitution are enforced, for every backend. Promoted out of the
-//! hvf VMM device model so it is backend-agnostic and one implementation
-//! serves all backends.
+//! Shared host-side vsock egress support. Policy enforcement lives in the host
+//! endpoint/gate; the backend relay code only moves bytes between guest streams
+//! and the per-VM endpoint socket.
 
 pub mod egress_gate;
 pub(crate) mod substitution_bridge;

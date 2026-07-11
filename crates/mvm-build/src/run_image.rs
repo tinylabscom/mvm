@@ -118,10 +118,10 @@ impl<'a> InjectAndMaterializeRequestBuilder<'a> {
 /// (see [`seal_and_assemble_verity`]) — and the sidecar is written `sealed`, so
 /// the runtime routes the block+ext4 verity boot and refuses interactive access.
 ///
-/// Guest binaries resolve in order: a cache hit, then a source-checkout
-/// cross-compile (contributors get their local edits), then the `prebuilt`
-/// bytes embedded in the host binary (the shipped-mvmctl end-user path). A
-/// caller with no embedded binaries passes `None`.
+/// Guest binaries resolve by build mode: shipped binaries with non-empty
+/// `prebuilt` bytes install those exact embedded helpers first, while source
+/// builds with embedded stubs compile the invoking checkout through the
+/// content-keyed guest cache. A caller with no embedded binaries passes `None`.
 pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
     let InjectAndMaterializeRequest {
         cache_root,
@@ -349,40 +349,22 @@ fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) 
     Ok(initrd_path)
 }
 
-/// Resolve the guest-agent binaries: source-checkout cross-compile (content-keyed
-/// cache) → version+arch cache hit → embedded prebuilt bytes.
+/// Resolve the guest-agent binaries.
 ///
-/// A source checkout is resolved from the *invoking* process's working dir (not
-/// the checkout mvmctl was compiled in), so a contributor building from any
-/// worktree/clone gets THAT tree's guest sources. Its cache is keyed on the
-/// guest source content, so a local edit always rebuilds instead of serving a
-/// stale, same-version cached agent — the bug that broke local guest-change
-/// validation. A shipped binary with no checkout falls through to the version+arch
-/// cache and the embedded bytes.
+/// A shipped mvmctl with embedded bytes installs those exact helpers first, so
+/// stale same-version cache entries cannot override the released runtime. A
+/// source build has embedded stubs (`prebuilt = None`) and resolves the
+/// *invoking* checkout's guest sources through a content-keyed cache, so local
+/// edits rebuild instead of serving a stale version+arch entry. A no-checkout
+/// caller without embedded helpers can still use a complete version+arch cache.
 pub fn resolve_guest_binaries(
     cache_root: &Path,
     prebuilt: Option<PrebuiltGuestBinaries<'_>>,
 ) -> Result<MvmRuntimeBinaries> {
     let arch = mvm_core::arch::GuestArch::host();
 
-    if let Some(ws) = crate::guest_agent_build::detect_source_workspace() {
-        let cache_key = crate::guest_agent_build::source_cache_key(&ws)
-            .context("fingerprint guest sources for the build cache")?;
-        return crate::guest_agent_build::resolve_or_build_guest_binaries(
-            cache_root, &cache_key, arch, &ws,
-        )
-        .context("build guest agent binaries from the source checkout");
-    }
-
-    // Shipped mvmctl: the embedded bytes are fixed by this version, so a
-    // version+arch cache is correct here.
-    let version = env!("CARGO_PKG_VERSION");
-    if let Some(cached) = crate::guest_agent_build::cached_guest_binaries(cache_root, version, arch)
-    {
-        return Ok(cached);
-    }
-
     if let Some(p) = prebuilt {
+        let version = env!("CARGO_PKG_VERSION");
         return crate::guest_agent_build::install_prebuilt_guest_binaries(
             GuestRuntimeBinaryBytes {
                 oci_init: p.oci_init,
@@ -398,6 +380,21 @@ pub fn resolve_guest_binaries(
             arch,
         )
         .context("install the embedded guest agent binaries");
+    }
+
+    if let Some(ws) = crate::guest_agent_build::detect_source_workspace() {
+        let cache_key = crate::guest_agent_build::source_cache_key(&ws)
+            .context("fingerprint guest sources for the build cache")?;
+        return crate::guest_agent_build::resolve_or_build_guest_binaries(
+            cache_root, &cache_key, arch, &ws,
+        )
+        .context("build guest agent binaries from the source checkout");
+    }
+
+    let version = env!("CARGO_PKG_VERSION");
+    if let Some(cached) = crate::guest_agent_build::cached_guest_binaries(cache_root, version, arch)
+    {
+        return Ok(cached);
     }
 
     anyhow::bail!(
@@ -550,6 +547,45 @@ pub fn select_root_strategy(s: RootStrategySelection) -> RootStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_core::arch::GuestArch;
+
+    #[test]
+    fn embedded_guest_binaries_overwrite_stale_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        let arch = GuestArch::host();
+        let version = env!("CARGO_PKG_VERSION");
+        crate::guest_agent_build::install_prebuilt_guest_binaries(
+            GuestRuntimeBinaryBytes {
+                oci_init: b"stale-init",
+                agent: b"stale-agent",
+                netinit: b"stale-netinit",
+                netd: b"stale-netd",
+                egress_client: b"stale-egress",
+                entrypoint_runner: b"stale-entrypoint",
+                verity_init: b"stale-verity-init",
+            },
+            cache.path(),
+            version,
+            arch,
+        )
+        .unwrap();
+
+        let bins = resolve_guest_binaries(
+            cache.path(),
+            Some(PrebuiltGuestBinaries {
+                oci_init: b"fresh-init",
+                agent: b"fresh-agent",
+                netinit: b"fresh-netinit",
+                netd: b"fresh-netd",
+                egress_client: b"fresh-egress",
+                entrypoint_runner: b"fresh-entrypoint",
+                verity_init: b"fresh-verity-init",
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read(bins.egress_client).unwrap(), b"fresh-egress");
+    }
 
     #[cfg(not(target_os = "linux"))]
     #[test]

@@ -15,8 +15,9 @@
 //! source-checkout build ([`resolve_or_build_guest_binaries`]) is only
 //! reachable with the workspace + zig; a **shipped mvmctl** embeds these
 //! binaries at build time (`crates/mvm-cli/build.rs`) and installs the embedded
-//! bytes via [`install_prebuilt_guest_binaries`]. The resolution order —
-//! cache → source checkout → embedded — lives in `run_image::inject_and_materialize`.
+//! bytes via [`install_prebuilt_guest_binaries`]. The resolution order lives in
+//! `run_image::inject_and_materialize`: embedded release bytes win for shipped
+//! binaries, while source builds use an invoking-checkout content-keyed cache.
 
 use mvm_core::arch::GuestArch;
 use sha2::{Digest, Sha256};

@@ -63,7 +63,14 @@ use kernel::format_compile_elapsed;
 pub(crate) use kernel::{KernelVariant, build_kernel_via_stage0};
 #[cfg(feature = "builder-vm")]
 use stage0_cache::Stage0FailureStage;
-#[cfg(any(feature = "release-artifact-bootstrap", test))]
+#[cfg(any(
+    all(
+        feature = "release-artifact-bootstrap",
+        feature = "builder-vm",
+        feature = "manifest-verify"
+    ),
+    test
+))]
 use stage0_cache::builder_vm_artifact_names;
 #[cfg(feature = "release-artifact-bootstrap")]
 use stage0_cache::download_builder_vm_image;

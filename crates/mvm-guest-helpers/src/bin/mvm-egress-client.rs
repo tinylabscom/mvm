@@ -11,6 +11,13 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     let listen = std::env::var("MVM_EGRESS_LISTEN").unwrap_or_else(|_| "127.0.0.1:1080".into());
     let addr: std::net::SocketAddr = match listen.parse() {
         Ok(a) => a,
