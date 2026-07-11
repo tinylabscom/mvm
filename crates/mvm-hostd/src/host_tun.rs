@@ -265,10 +265,10 @@ pub fn install_egress_teardown_on_stop_signal(interface_name: String) {
             // SAFETY: `set` and `sig` are valid; sigwait blocks until one of the
             // blocked stop signals is delivered, returning its number in `sig`.
             let rc = unsafe { libc::sigwait(&set, &mut sig) };
-            if rc == 0 {
-                if let Err(err) = teardown_host_tun_egress(&interface_name) {
-                    tracing::warn!(%interface_name, error = %err, "stop-signal host TUN egress teardown failed");
-                }
+            if rc == 0
+                && let Err(err) = teardown_host_tun_egress(&interface_name)
+            {
+                tracing::warn!(%interface_name, error = %err, "stop-signal host TUN egress teardown failed");
             }
             // Whatever stopped us is going away; a clean status keeps a waiter
             // from treating the graceful stop as a crash.
