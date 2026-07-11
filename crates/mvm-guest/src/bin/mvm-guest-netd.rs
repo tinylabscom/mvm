@@ -6,6 +6,8 @@
 
 #[cfg(target_os = "linux")]
 fn main() {
+    use mvm_guest::guest_tun::PacketDevice;
+
     let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
     let Some(mut tunnel) =
         mvm_guest::network_tunnel::bootstrap_from_cmdline(&cmdline, "mvm-guest-netd/1", 10, 1)

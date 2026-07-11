@@ -8,7 +8,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 
-use anyhow::{Context, Result, bail};
+#[cfg(not(target_os = "linux"))]
+use anyhow::bail;
+use anyhow::{Context, Result};
 use mvm_core::protocol::network_tunnel::host_tun_nat_table_name;
 
 /// Blocking packet device abstraction used by host-side tunnel forwarding.

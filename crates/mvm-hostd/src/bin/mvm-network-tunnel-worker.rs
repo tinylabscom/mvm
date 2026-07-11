@@ -11,6 +11,7 @@ use std::fs::File;
 use std::io::{BufWriter, Read, Write};
 #[cfg(target_os = "linux")]
 use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
@@ -37,9 +38,18 @@ enum ListenerConfig {
     Vsock { port: u32 },
 }
 
-trait ReadWrite: Read + Write {}
+// The forwarding loops poll the session fd alongside the TUN fd, so the stream
+// must expose its raw fd. Both concrete streams (`UnixStream` and the vsock
+// `File`) are `AsRawFd`; thread that through the boxed trait object.
+trait ReadWrite: Read + Write + AsRawFd {}
 
-impl<T> ReadWrite for T where T: Read + Write {}
+impl<T> ReadWrite for T where T: Read + Write + AsRawFd {}
+
+impl AsRawFd for Box<dyn ReadWrite> {
+    fn as_raw_fd(&self) -> RawFd {
+        (**self).as_raw_fd()
+    }
+}
 
 struct JsonlAuditSink {
     writer: BufWriter<File>,

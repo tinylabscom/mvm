@@ -13,7 +13,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 
-use anyhow::{Context, Result, bail};
+#[cfg(not(target_os = "linux"))]
+use anyhow::bail;
+use anyhow::{Context, Result};
 
 /// Blocking packet device abstraction used by the tunnel relay helpers.
 pub trait PacketDevice {
