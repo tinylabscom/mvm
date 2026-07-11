@@ -36,7 +36,10 @@ deny-all workload spawns no endpoint and fails closed, matching libkrun
 negative-path matrix surfaced a real bypass — `re_pin_verb_grant` verified the
 resume envelope against its own embedded key — fixed by verifying against the
 boot-pinned host-signer anchor with a shared verification core (closes the
-self-forgery bypass). The remaining sealed-image trust blocker is now narrower:
+self-forgery bypass). The same July 10 closeout slice also made builder
+transport truth explicit in `mvmctl doctor` and aligned the shared builder
+selector, advisory health marker, and Stage 0-lowering prose/tests with the
+post-qemu-demotion contract. The remaining sealed-image trust blocker is now narrower:
 the OCI `--prod` run path gained a real builder-VM dm-verity seal fallback on
 the active closeout branch, with focused fallback tests plus green host
 validation (`cargo clippy --workspace --all-targets -- -D warnings`, `cargo
@@ -762,7 +765,7 @@ backpressure consumption (frames exist, nothing consumes them yet).
 - [ ] Promote the no-guest-NIC vsock-only data plane into a claim with witnesses.
 - [ ] Add CI/lint gates against new guest-NIC attach points and legacy helper
   spawn sites.
-- [ ] Add `doctor` reporting that distinguishes:
+- [x] Add `doctor` reporting that distinguishes:
   - workload transport truth
   - builder transport truth
   - unsupported legacy paths

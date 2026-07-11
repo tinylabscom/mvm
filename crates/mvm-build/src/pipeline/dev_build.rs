@@ -635,10 +635,10 @@ fn dev_build_via_builder_vm_uncached(
     // now auto-detect qemu by default; macOS 26 Apple Silicon auto-detects the
     // hvf builder; other hosts stay on libkrun.
     //
-    // Auto-fallback: an auto-detected libkrun that fails to create its VM on
-    // Linux (libkrun rc -22 / `KVM_SET_USER_MEMORY_REGION`) transparently
-    // retries the build on the qemu builder; a genuine build error surfaces
-    // unchanged. An explicit `--builder`/`MVM_BUILDER_BACKEND` opts out.
+    // Auto-fallback: macOS auto-detect may retry hvf on the shared libkrun
+    // builder path, but Linux auto libkrun now stays libkrun-only even on a
+    // VMM-level failure. A genuine build error surfaces unchanged, and an
+    // explicit `--builder`/`MVM_BUILDER_BACKEND` stays single-backend.
     use crate::builder_backend_select as bbs;
     let selected = bbs::resolve_choice();
     let explicit = bbs::resolve_env_override().is_some();

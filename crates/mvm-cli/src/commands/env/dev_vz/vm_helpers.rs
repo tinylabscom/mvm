@@ -57,10 +57,13 @@ pub(in crate::commands) struct ReapOutcome {
 /// => leak, SIGTERM'd, unless `protected` for that phase.
 ///
 /// Then an ephemeral per-job builder dir with no live owner is removed
-/// (cache-prune semantics). A managed dir is never auto-removed: the
-/// persistent dev builder's dir is its warm Nix store and a named
-/// workload's dir is restartable state. Both are torn down only by
-/// explicit `dev down` / `stop` / manual removal, not by routine prune.
+/// (cache-prune semantics). That is intentionally whole-dir removal, not
+/// per-file cleanup: every per-run evidence sidecar under the dir
+/// (including `builder-egress-runtime.json`) disappears atomically with the
+/// dead builder state. A managed dir is never auto-removed: the persistent
+/// dev builder's dir is its warm Nix store and a named workload's dir is
+/// restartable state. Both are torn down only by explicit `dev down` /
+/// `stop` / manual removal, not by routine prune.
 pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<ReapOutcome> {
     reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ true, dry_run)
 }

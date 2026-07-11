@@ -1114,11 +1114,11 @@ pub(super) fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)>
 
 /// Backend attempt order for the dev-image / default-microvm builds. Delegates
 /// to the shared [`mvm_build::builder_backend_select::builder_attempt_order`]
-/// (one policy: auto Vz→libkrun, auto libkrun→qemu on Linux, explicit→single)
-/// so this CLI loop and the `mvm-build` build paths can't drift. The live
-/// platform supplies `is_linux_native`, and the per-host builder-health cache
-/// supplies whether libkrun should be skipped (a prior failed attempt left a
-/// marker — see [`mvm_build::builder_health`]).
+/// (one policy: auto HVF→libkrun on macOS, auto libkrun stays libkrun-only,
+/// explicit override stays single-backend) so this CLI loop and the
+/// `mvm-build` build paths can't drift. The live platform supplies
+/// `is_linux_native`, and the per-host builder-health cache stays advisory only
+/// now that qemu is explicit dev/test-only rather than an automatic fallback.
 #[cfg(feature = "builder-vm")]
 pub(super) fn builder_backend_attempt_order(
     selected: mvm_build::builder_backend_select::BuilderBackendChoice,

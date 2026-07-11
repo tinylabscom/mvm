@@ -121,7 +121,10 @@ pub use mock::MockBackend;
 /// Derive a workload's packet-tunnel launch config from its egress policy. The
 /// admitted launch path (`mvmctl`) calls this to enable the L3 forwarding tunnel
 /// for an allow-list policy on the vsock-only backend.
-pub use network_tunnel_spawn::{TunnelLaunchIdentity, network_tunnel_for_launch};
+pub use network_tunnel_spawn::{
+    NETWORK_TUNNEL_AUDIT_JSONL, NETWORK_TUNNEL_HOST_IFACE_FILE, NETWORK_TUNNEL_WORKER_PID_FILE,
+    TunnelLaunchIdentity, network_tunnel_for_launch,
+};
 pub use qemu::QemuBackend;
 pub use workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 

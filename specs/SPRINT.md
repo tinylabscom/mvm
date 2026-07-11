@@ -76,6 +76,31 @@ plan 25 sequences the work into six independently-shippable workstreams.
       bindings crate. Validation: `cargo fmt --all`; `cargo check --workspace`;
       `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test
       --workspace`.
+- [x] 2026-07-10 Builder relay runtime evidence cleanup contract: the dead
+      ephemeral-builder reaper already removed whole state dirs under
+      `~/.cache/mvm/builder-vm/vms/`, so `builder-egress-runtime.json` was
+      being cleaned up implicitly with the rest of the per-run evidence. This
+      slice makes that contract explicit in `vm_helpers.rs` and adds a focused
+      `mvm-cli` regression that stages a real runtime sidecar under a dead
+      builder dir and proves the sweep removes it with the directory instead of
+      leaving stale host-evidence files behind. Validation: `cargo fmt --all`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo test --offline -p mvm-cli --lib
+      dead_pids_get_their_dirs_swept -- --test-threads=1`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --offline -p mvm-cli --lib --
+      -D warnings`.
+- [x] 2026-07-10 Plan 236 tunnel-worker doctor state: `mvmctl doctor` now
+      reports the workload packet-tunnel worker from the host-owned runtime
+      artifacts under `~/.mvm/vms/` instead of leaving the new host-authority
+      path opaque. The line is informational and distinguishes `absent`, live
+      `drop_all`, live `l3_forward (<host-tun-iface>)`, and `stale` leftovers
+      from the persisted pid/audit/interface files shared with the backend
+      tunnel-worker spawn path. Validation: `cargo fmt --all`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo test --offline -p mvm-cli --lib
+      network_tunnel_worker_summary -- --test-threads=1`;
+      `cargo test --offline -p mvm-backend --lib network_tunnel_spawn --
+      --test-threads=1`; `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --offline -p
+      mvm-cli --lib -- -D warnings`; `cargo clippy --offline -p mvm-backend
+      --lib -- -D warnings`.
 - [x] 2026-07-10 Plan 236 Phase 2A runtime-owned tunnel worker subprocess:
       the shared packet-tunnel port is now backed by a real per-VM host helper
       instead of just launch-time socket plumbing. `mvm-network-tunnel-worker`
@@ -818,6 +843,52 @@ plan 25 sequences the work into six independently-shippable workstreams.
       check_vsock_only_egress -- --test-threads=1`; `cargo clippy --offline -p
       xtask -- -D warnings`; `cargo run --offline -p xtask --
       check-vsock-only-egress`.
+- [x] Landed the remaining Plan 236 Phase 2C `doctor` transport-truth line on
+      2026-07-10. `mvmctl doctor` now exposes `builder transport` alongside
+      the workload tunnel-worker state: HVF is reported as the vsock-only
+      builder path with no guest NIC or DHCP/bootstrap dependency, libkrun is
+      called out as the remaining legacy guest-network bootstrap exception,
+      and qemu is marked as an unsupported legacy builder fallback rather than
+      being implied to satisfy the production architecture. Validation:
+      `cargo fmt --all`; `MVM_SKIP_EMBED_BINARIES=1 cargo test --offline -p
+      mvm-cli --lib builder_transport_check -- --test-threads=1`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --offline -p mvm-cli --lib --
+      -D warnings`.
+- [x] Tightened the Plan 236 Phase 2B builder-selection truth surface on
+      2026-07-10. The dev-vm Stage 0/default-microvm helper in
+      `dev_vz/stage0_cache.rs` no longer narrates an old Linux
+      libkrun→qemu auto-fallback that the shared selector already removed, and
+      the local `mvm-cli` tests now pin the current contract directly: auto
+      libkrun stays libkrun-only, qemu stays explicit-only, and the only
+      remaining automatic handoff is HVF→libkrun. Validation:
+      `cargo fmt --all`; `MVM_SKIP_EMBED_BINARIES=1 cargo test --offline -p
+      mvm-cli --lib builder_backend_attempt_order_tests -- --test-threads=1`;
+      `MVM_SKIP_EMBED_BINARIES=1 cargo clippy --offline -p mvm-cli --lib --
+      -D warnings`.
+- [x] Tightened the Plan 236 Phase 2B builder-health marker contract on
+      2026-07-10. `mvm-build::builder_health` no longer claims a fresh
+      libkrun-failure marker will skip straight to qemu; it now documents the
+      real post-cutover behavior instead: the marker is advisory-only evidence,
+      qemu stays explicit dev/test-only, and auto libkrun still re-attempts
+      libkrun unless the shared selector itself changes. A feature-gated
+      `mvm-build` unit test now pins that a fresh marker does not alter the
+      auto-libkrun attempt order. Validation: `cargo fmt --all`; `cargo test
+      --offline -p mvm-build --features builder-vm --lib
+      marker_is_advisory_only_for_auto_libkrun_selection -- --test-threads=1`;
+      `cargo clippy --offline -p mvm-build --features builder-vm --lib --
+      -D warnings`.
+- [x] Tightened the shared Plan 236 Phase 2B Stage 0 selector contract on
+      2026-07-10. `mvm-build` now exposes one helper for the "chosen builder
+      backend" → "concrete Stage 0 driver" lowering and tests the real
+      invariant directly: `hvf` still lowers to libkrun until an HVF-specific
+      Stage 0 exists, while explicit qemu stays qemu. The nearby `dev_build`
+      single-shot fallback comment now also matches the selector instead of
+      describing the pre-cutover Linux libkrun→qemu retry story. Validation:
+      `cargo fmt --all`; `cargo test --offline -p mvm-build --features
+      builder-vm --lib
+      stage0_choice_keeps_hvf_lowered_to_libkrun_and_qemu_explicit --
+      --test-threads=1`; `cargo clippy --offline -p mvm-build --features
+      builder-vm --lib -- -D warnings`.
 - [x] Refreshed the Plan 236 execution line on 2026-07-10 after `main` moved.
       The GO checker now compares against `origin/main` when available and
       treats the merged Plan 219 refresh (`#1605`) and merged port-handler
