@@ -665,13 +665,20 @@ the semantic protocol).**
   - Steps: failing tests `l3_data_plane_has_no_mitm_or_semantic_protocol_symbols`,
     `worker_stop_tears_down_nat_and_host_tun`; assert; commit.
 
-- [ ] **T7 — Live workload witness (Linux/Firecracker — ticks the Phase 2A boxes).**
+- [x] **T7 — Live workload witness (Linux/Firecracker — ticks the Phase 2A boxes).** *(harness written; live run NOT yet performed)*
   - New `crates/mvm-cli/tests/tunnel_net_e2e.rs`, gate `MVM_TUNNEL_NET_SMOKE=1`,
     keep-failed-VM + fixed scratch (reuse the return-path harness *shape*). Run on
     the **Linux KVM host** (host TUN is Linux-only): a Firecracker workload with
     `--allow-host google.com` resolves **real** DNS, `ping` echoes over the
     tunnel, and `wget https://<host>` **succeeds with real end-to-end TLS**
     (no MITM). Capture `network-tunnel.audit.jsonl` as the witness.
+  - Also added `crates/mvm-hostd/tests/host_tun_nat_live.rs` (gate
+    `MVM_TUNNEL_HOST_TUN_LIVE=1` + root): a no-VM Linux witness that opens the
+    real host TUN, installs the masquerade NAT, injects a crafted IPv4/UDP packet,
+    and asserts teardown removes the table.
+  - **Live execution still needs a Linux + libkrun host and has not yet been run;
+    the three Phase 2A "Add live workload witnesses" boxes stay unchecked until a
+    real workload egress run captures the audit witness.**
   - On green, check the three Phase 2A "Add live workload witnesses" boxes
     (no guest NIC / no helper drift / host-mediated egress under admitted policy)
     and record the live evidence line here.
