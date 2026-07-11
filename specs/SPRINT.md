@@ -32,6 +32,29 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-11 Plan 246 Phase 1 closed out (cold `--image` run UX): the
+      workload-kernel resolver now builds/reuses the kernel locally for every
+      source checkout instead of 404-ing on a download (only an explicit
+      `MVM_KERNEL_SOURCE=download` opts back into downloading); the host-side
+      supervisor rebuild and in-guest nix stream now capture combined output
+      to a log file by default (`-v` still streams live), with the log path
+      echoed next to the build heartbeat; a genuine Stage 0 guest build
+      failure now surfaces `BuilderVmError::NixBuildFailed`/`ExtractionFailed`
+      naming the console log path instead of masking behind a clean guest
+      exit; and the `--image` bootstrap heartbeat now reads "Preparing the
+      builder VM (one-time setup)" instead of the confusing "Builder VM image
+      build" label. New lock-in tests: `stage0_run_result_build_failure_names_the_console_log_path`
+      (mvm-build, drives the extracted pure Stage 0 result-construction
+      function) and `reusable_builder_kernel_wins_over_build_even_when_source_build_requested`
+      (mvm-cli, proves a cold OCI run reuses an on-disk builder kernel rather
+      than redundantly rebuilding one even when a source build was
+      requested). Validation: `cargo nextest run -p mvm-build --features
+      builder-vm` (842/842), `cargo nextest run -p mvm-cli` (1298/1298),
+      `cargo nextest run --workspace -E 'not package(mvm-backend)'`, `cargo
+      clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all --
+      --check`. Remaining: the manual fresh-cache `machine run --image` boot
+      confirmation (Phase 1 exit gate) and Phase 2 (remove `mvmctl dev`) stay
+      open.
 - [x] 2026-07-10 Plan 237 Phase 0 first PR: the shared guest network helper
       used by OCI guest init now casts ioctl requests through the target musl
       `libc::Ioctl` type, stale cached OCI image records can re-materialize
