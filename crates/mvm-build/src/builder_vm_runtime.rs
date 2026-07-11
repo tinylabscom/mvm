@@ -671,9 +671,11 @@ fn drain_appended(file: &mut std::fs::File, sink: &mut impl std::io::Write) -> b
 /// Verbose iff `RUST_LOG` is set. `mvm-build` sits *below* `mvm-backend`, so it
 /// can't call `ui::is_verbose()`; the CLI defines verbose as `-v` OR a user-set
 /// `RUST_LOG` and exports `RUST_LOG` on `-v`, so `RUST_LOG`'s presence is the
-/// equivalent signal at this layer.
+/// equivalent signal at this layer. Crate-visible: both the nix-stream
+/// streamer here and the host-side supervisor rebuild in `libkrun_builder`
+/// read the same signal.
 #[cfg(feature = "builder-vm")]
-fn verbose_from_env() -> bool {
+pub(crate) fn verbose_from_env() -> bool {
     std::env::var_os("RUST_LOG").is_some()
 }
 

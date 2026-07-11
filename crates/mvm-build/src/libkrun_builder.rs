@@ -79,6 +79,7 @@ use crate::builder_vm_runtime::{
     NixStoreImageLock, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
     builder_vm_timeout, finalize_flake_job, finalize_install_job, read_job_result,
     shell_job_exit_error, stage_job_dir, stage_shell_job_dir, supervisor_exit_error,
+    verbose_from_env,
 };
 
 /// Default vCPU count for the builder VM. Nix builds are
@@ -1623,6 +1624,11 @@ const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
     "crates/mvm-hostd/src",
 ];
 
+/// File name for the captured rebuild log, written under `target_dir`
+/// alongside the compiled binaries so it can't outlive the build it
+/// describes.
+const SUPERVISOR_BUILD_LOG_FILENAME: &str = "mvm-supervisor-build.log";
+
 /// Locate the `mvm-libkrun-supervisor` binary. Mirrors the resolver in
 /// `mvm-backend::libkrun::resolve_supervisor_path` (kept local rather than
 /// re-exported to keep the dep graph flat). Order: env override → next to
@@ -1844,9 +1850,18 @@ fn build_supervisor_in_workspace(
     target_dir: &Path,
     profile: &str,
 ) -> Result<PathBuf, BuilderVmError> {
-    eprintln!(
-        "[mvm] building {LIBKRUN_SUPERVISOR_BIN} for this source checkout so the supervisor matches mvmctl"
-    );
+    let log_path = target_dir.join(SUPERVISOR_BUILD_LOG_FILENAME);
+    let verbose = verbose_from_env();
+    if verbose {
+        eprintln!(
+            "[mvm] building {LIBKRUN_SUPERVISOR_BIN} for this source checkout so the supervisor matches mvmctl"
+        );
+    } else {
+        eprintln!(
+            "[mvm] building {LIBKRUN_SUPERVISOR_BIN} for this source checkout so the supervisor matches mvmctl — logs: {}",
+            log_path.display()
+        );
+    }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir(workspace_root)
@@ -1869,16 +1884,7 @@ fn build_supervisor_in_workspace(
             cmd.args(["--profile", other]);
         }
     }
-    let status = cmd.status().map_err(|e| {
-        BuilderVmError::LibkrunUnavailable(format!(
-            "spawn cargo build for {LIBKRUN_SUPERVISOR_BIN}: {e}"
-        ))
-    })?;
-    if !status.success() {
-        return Err(BuilderVmError::LibkrunUnavailable(format!(
-            "cargo build for {LIBKRUN_SUPERVISOR_BIN} failed with status {status}"
-        )));
-    }
+    run_logged(cmd, &log_path, verbose)?;
     let built = supervisor_path_in_target_dir(target_dir, profile);
     if built.is_file() {
         Ok(built)
@@ -1888,6 +1894,60 @@ fn build_supervisor_in_workspace(
             built.display()
         )))
     }
+}
+
+/// Run `cmd` to completion, keeping its raw output out of the terminal
+/// unless `verbose`. The host cargo rebuild this backs streams a
+/// `Compiling …` / `Building [===]` wall of text that otherwise
+/// interleaves with the CLI's own progress output — quiet mode redirects
+/// both stdout and stderr to `log_path` instead, and a failing command
+/// surfaces the log's tail inline so the operator isn't left guessing
+/// which file to open. `verbose` opts back into live streaming, matching
+/// the previous terminal-inheriting behavior.
+fn run_logged(mut cmd: Command, log_path: &Path, verbose: bool) -> Result<(), BuilderVmError> {
+    if verbose {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                BuilderVmError::LibkrunUnavailable(format!(
+                    "create log directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let stdout_file = std::fs::File::create(log_path).map_err(|e| {
+            BuilderVmError::LibkrunUnavailable(format!(
+                "create log file {}: {e}",
+                log_path.display()
+            ))
+        })?;
+        let stderr_file = stdout_file.try_clone().map_err(|e| {
+            BuilderVmError::LibkrunUnavailable(format!(
+                "clone log file handle for {}: {e}",
+                log_path.display()
+            ))
+        })?;
+        cmd.stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
+    }
+
+    let status = cmd
+        .status()
+        .map_err(|e| BuilderVmError::LibkrunUnavailable(format!("spawn {cmd:?}: {e}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    if verbose {
+        return Err(BuilderVmError::LibkrunUnavailable(format!(
+            "{cmd:?} failed with status {status}"
+        )));
+    }
+    let log_path_str = log_path.to_string_lossy();
+    Err(BuilderVmError::LibkrunUnavailable(format!(
+        "{cmd:?} failed with status {status}; full log at {log_path_str}\n{}",
+        read_console_tail(&log_path_str, 20)
+    )))
 }
 
 fn supervisor_path_in_target_dir(target_dir: &Path, profile: &str) -> PathBuf {
@@ -3683,6 +3743,52 @@ mod tests {
         assert_eq!(tail, "c\nd");
         // Missing file → empty, never panics.
         assert_eq!(read_console_tail("/nonexistent/console.log", 5), "");
+    }
+
+    /// `sh -c <script>` as an owned `Command`. `Command::args` returns
+    /// `&mut Command` for chaining, but `run_logged` takes ownership, so
+    /// callers build it in two steps.
+    fn sh_command(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script]);
+        cmd
+    }
+
+    #[test]
+    fn run_logged_quiet_captures_combined_output_to_file_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A nested path exercises parent-dir creation rather than an
+        // already-existing tempdir.
+        let log = tmp.path().join("nested").join("build.log");
+        let cmd = sh_command("echo out-line; echo err-line 1>&2");
+        run_logged(cmd, &log, false).unwrap();
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(body.contains("out-line"), "stdout captured: {body}");
+        assert!(body.contains("err-line"), "stderr captured: {body}");
+    }
+
+    #[test]
+    fn run_logged_quiet_failure_returns_err_carrying_log_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        let cmd = sh_command("echo boom-marker; exit 7");
+        let err = run_logged(cmd, &log, false).unwrap_err();
+        assert!(
+            err.to_string().contains("boom-marker"),
+            "error carries the log tail: {err}"
+        );
+    }
+
+    #[test]
+    fn run_logged_verbose_success_never_touches_the_log_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        let cmd = sh_command("exit 0");
+        run_logged(cmd, &log, true).unwrap();
+        assert!(
+            !log.exists(),
+            "verbose mode streams live and captures nothing"
+        );
     }
 
     #[test]
