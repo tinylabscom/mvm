@@ -1255,23 +1255,31 @@ fn run_first_use(args: FirstUseArgs) -> Result<()> {
     // The pure substrate this command reports through —
     // `bench_first_use::build_ms_from_boot_timings` (parse) and
     // `summarize_build_samples` (aggregate, via this module's
-    // `summarize`/`percentile`) — is complete and unit-tested. What's
-    // missing is the live probe that boots a builder VM, runs a real
-    // flake build, and produces the `boot-timings.json` samples that
-    // feed it. Fail honestly rather than fabricate a number.
-    let _ = (&args.json, &args.out);
-    bail!(
-        "bench first-use: no live builder-VM probe is wired yet, so \
-         {} requested run(s){} cannot be measured. The measurement \
-         substrate (build_ms parsing + aggregation into PhaseStats) is \
-         complete and unit-tested; only the live probe that drives a \
-         real builder-VM build remains.",
-        args.runs,
-        args.flake
-            .as_ref()
-            .map(|f| format!(" against flake {}", f.display()))
-            .unwrap_or_default()
-    )
+    // `summarize`/`percentile`) — is complete and unit-tested. The live
+    // probes (dev-up cold/warm + in-guest build) boot real VMs, so they
+    // are compiled only under `bench-first-use`; a stock build fails
+    // honestly rather than fabricate a number.
+    #[cfg(feature = "bench-first-use")]
+    {
+        super::bench_first_use::run_first_use_live(args)
+    }
+    #[cfg(not(feature = "bench-first-use"))]
+    {
+        let _ = (&args.json, &args.out);
+        bail!(
+            "bench first-use: this binary was built without the \
+             `bench-first-use` feature, so it cannot boot real VMs. \
+             Rebuild with `cargo build -p mvm-cli --features bench-first-use` \
+             on a dev host to measure {} requested run(s){}. The measurement \
+             substrate (build_ms parsing + aggregation into PhaseStats) is \
+             otherwise complete and unit-tested.",
+            args.runs,
+            args.flake
+                .as_ref()
+                .map(|f| format!(" against flake {}", f.display()))
+                .unwrap_or_default()
+        )
+    }
 }
 
 fn default_report_path(kind: &str, stamp: &str) -> PathBuf {
@@ -1286,7 +1294,7 @@ fn timestamp_for_report_path() -> String {
     mvm_core::time::utc_now().replace([':', '+', '.'], "-")
 }
 
-fn write_report_with_latest<T: Serialize>(
+pub(super) fn write_report_with_latest<T: Serialize>(
     report: &T,
     out: Option<PathBuf>,
     kind: &str,

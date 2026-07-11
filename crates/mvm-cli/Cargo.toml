@@ -102,6 +102,12 @@ libkrun-sys = ["libkrun-sys/libkrun-sys"]
 # Pure test/codegate marker — mvm-cli spawns the supervisor as a
 # subprocess and does not link libkrun itself.
 libkrun-live = []
+# Opt-in lane for the `ops bench first-use` live probes: boots the dev VM
+# (cold/warm `dev up`) and drives real in-guest builder-VM builds to read
+# `boot-timings.json`. Off by default so `cargo build`/`cargo test
+# --workspace` on stock CI stays VM-free — mirrors `libkrun-live`. Enable on
+# a dev host to measure real first-use latency numbers.
+bench-first-use = []
 # Structural enforcement of the "no prebuilt builder VM artifact
 # until release" invariant (see AGENTS.md / CLAUDE.md). When off — the default
 # for every contributor build — `download_builder_vm_image` and its helpers
