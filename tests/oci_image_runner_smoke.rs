@@ -33,6 +33,10 @@ const IMAGE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_REF";
 const DEFAULT_IMAGE: &str = "docker.io/library/alpine:3.20";
 const PROD_ENABLE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_PROD_SMOKE";
 const PROD_IMAGE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_PROD_REF";
+const PROD_DEFAULT_POLICY_REGISTRY: &str = "cgr.dev";
+const PROD_DEFAULT_POLICY_IDENTITY: &str =
+    "https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main";
+const PROD_DEFAULT_POLICY_ISSUER: &str = "https://token.actions.githubusercontent.com";
 
 #[derive(Debug, Deserialize)]
 struct OciCacheIndex {
@@ -83,6 +87,30 @@ fn prod_policy_path() -> PathBuf {
     std::env::var_os("MVM_OCI_POLICY")
         .map(PathBuf::from)
         .unwrap_or_else(|| mvm_data_dir().join("oci-policy.toml"))
+}
+
+fn default_prod_policy_text() -> String {
+    format!(
+        "allowed_registries = [\"{PROD_DEFAULT_POLICY_REGISTRY}\"]\n\n\
+         [[cosign]]\n\
+         certificate_identity = \"{PROD_DEFAULT_POLICY_IDENTITY}\"\n\
+         certificate_oidc_issuer = \"{PROD_DEFAULT_POLICY_ISSUER}\"\n"
+    )
+}
+
+fn ensure_prod_policy() -> PathBuf {
+    let policy_path = prod_policy_path();
+    if policy_path.is_file() {
+        return policy_path;
+    }
+
+    let fallback = std::env::temp_dir().join(format!(
+        "mvm-oci-prod-policy-{}-{}.toml",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("smoke")
+    ));
+    std::fs::write(&fallback, default_prod_policy_text()).expect("write fallback prod OCI policy");
+    fallback
 }
 
 fn prod_rootfs_path_for_digest(digest: &str) -> Option<PathBuf> {
@@ -144,22 +172,15 @@ fn run_image_prod_boots_with_cached_verity_sidecars() {
         eprintln!("[oci_image_runner_prod_smoke] skipped - cosign is not on PATH");
         return;
     }
-    let policy_path = prod_policy_path();
-    if !policy_path.is_file() {
-        eprintln!(
-            "[oci_image_runner_prod_smoke] skipped - OCI prod policy missing at {}",
-            policy_path.display()
-        );
-        return;
-    }
+    let policy_path = ensure_prod_policy();
 
     let image_ref = match std::env::var(PROD_IMAGE_VAR) {
         Ok(value) => value,
         Err(_) => {
             eprintln!(
                 "[oci_image_runner_prod_smoke] skipped - set {PROD_IMAGE_VAR} to a signed, \
-                 digest-pinned registry ref admitted by {}",
-                policy_path.display()
+                 digest-pinned registry ref; when the ref is a Chainguard image, this test can \
+                 synthesize a temporary OCI policy if MVM_OCI_POLICY is unset"
             );
             return;
         }
@@ -170,6 +191,7 @@ fn run_image_prod_boots_with_cached_verity_sidecars() {
     let marker = format!("oci-prod-smoke-marker-{}", std::process::id());
 
     let output = mvmctl_with_target_path()
+        .env("MVM_OCI_POLICY", &policy_path)
         .args([
             "run",
             "--image",

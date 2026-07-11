@@ -15,7 +15,7 @@
 
 use crate::OciError;
 use crate::layer::LayerDescriptor;
-use crate::manifest_types::OciManifest;
+use crate::manifest_types::{OciManifest, PlatformDescriptor};
 use crate::reference::ImageReference;
 use crate::registry::{ClientConfig, RegistryAuthConfig, RegistryClient};
 use async_trait::async_trait;
@@ -72,6 +72,24 @@ impl LinuxPlatform {
                 variant: None,
             }
         }
+    }
+}
+
+pub(crate) fn matches_linux_platform(
+    candidate: &PlatformDescriptor,
+    requested: &LinuxPlatform,
+) -> bool {
+    if candidate.os != "linux" || candidate.architecture != requested.architecture {
+        return false;
+    }
+    match (
+        candidate.variant.as_deref(),
+        requested.variant.as_deref(),
+        requested.architecture.as_str(),
+    ) {
+        (actual, wanted, _) if actual == wanted => true,
+        (None, Some("v8"), "arm64") => true,
+        _ => false,
     }
 }
 
@@ -195,11 +213,10 @@ impl OciManifestFetcher {
             .manifests
             .iter()
             .find(|entry| {
-                entry.platform.as_ref().is_some_and(|p| {
-                    p.os == "linux"
-                        && p.architecture == platform.architecture
-                        && p.variant.as_deref() == platform.variant.as_deref()
-                })
+                entry
+                    .platform
+                    .as_ref()
+                    .is_some_and(|p| matches_linux_platform(p, platform))
             })
             .ok_or_else(|| {
                 let wanted = match &platform.variant {

@@ -181,15 +181,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `tests/oci_image_runner_smoke.rs` now includes a disabled-by-default
       macOS witness for `mvmctl run --image --prod`, not just the existing dev
       OCI smoke. The new test requires
-      `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`, a signed digest-pinned registry ref
-      in `MVM_OCI_IMAGE_RUNNER_PROD_REF`, `cosign` on `PATH`, and an admitted
-      OCI policy (`MVM_OCI_POLICY` or `$MVM_DATA_DIR/oci-policy.toml`), then
-      asserts that the successful boot left real `rootfs.verity` +
+      `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`, `cosign` on `PATH`, and an explicit
+      signed digest-pinned `MVM_OCI_IMAGE_RUNNER_PROD_REF`; when that ref is a
+      Chainguard image, the test can synthesize a temporary OCI policy if
+      `MVM_OCI_POLICY` is unset. While closing out that witness the OCI pull
+      path also fixed a real arm64 production bug: `linux/arm64/v8` hosts now
+      accept valid image-index entries that omit the optional `variant` field.
+      The witness then asserts that the successful boot left real `rootfs.verity` +
       `rootfs.roothash` sidecars in the OCI cache. Focused validation is green
       with `cargo test --test oci_image_runner_smoke -- --nocapture` and
       `cargo clippy --test oci_image_runner_smoke -- -D warnings`. The
-      remaining blocker is the host environment for the real live run: this box
-      still lacks `cosign` and an OCI prod policy file.
+      remaining blocker is the real live run on a suitable signed digest-pinned
+      image: public Chainguard candidates uncovered honest runtime refusals
+      (device nodes / layer format), so the branch no longer pretends one
+      baked-in public image is universal proof.
 - [x] 2026-07-09 OCI `--image` workload-kernel cold-cache behavior:
       source-checkout `machine run --image ...` no longer bootstraps Stage 0 or
       builds the builder VM just to obtain a workload kernel. The resolver now

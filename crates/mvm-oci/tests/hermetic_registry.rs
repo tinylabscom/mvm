@@ -302,6 +302,66 @@ async fn platform_manifest_fetch_follows_matching_linux_index_entry() {
 }
 
 #[tokio::test]
+async fn platform_manifest_fetch_accepts_arm64_without_variant_for_v8_request() {
+    let reg = HermeticRegistry::start().await;
+    let layer_bytes = b"linux-arm64-layer-without-variant";
+    let (child_manifest_bytes, expected_layer_digest) =
+        minimal_image_manifest(layer_bytes, LAYER_MEDIA);
+    let child_digest = reg
+        .register_manifest_with_digest_path(
+            "library/alpine",
+            "child-no-variant",
+            MANIFEST_MEDIA,
+            &child_manifest_bytes,
+        )
+        .await;
+    let index = serde_json::json!({
+        "schemaVersion": 2,
+        "mediaType": "application/vnd.oci.image.index.v1+json",
+        "manifests": [
+            {
+                "mediaType": MANIFEST_MEDIA,
+                "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "size": 1,
+                "platform": { "os": "linux", "architecture": "amd64" }
+            },
+            {
+                "mediaType": MANIFEST_MEDIA,
+                "digest": child_digest,
+                "size": child_manifest_bytes.len(),
+                "platform": { "os": "linux", "architecture": "arm64" }
+            }
+        ]
+    });
+    let index_bytes = serde_json::to_vec(&index).expect("index serializes");
+    reg.register_manifest_with_digest_path(
+        "library/alpine",
+        "3.21",
+        "application/vnd.oci.image.index.v1+json",
+        &index_bytes,
+    )
+    .await;
+
+    let fetcher = OciManifestFetcher::with_config(client_config_for(&reg));
+    let image = reg.image_ref("library/alpine", "3.21");
+    let fetched = fetcher
+        .fetch_linux_platform_manifest(
+            &image,
+            &LinuxPlatform {
+                architecture: "arm64".to_string(),
+                variant: Some("v8".to_string()),
+            },
+        )
+        .await
+        .expect("fetch platform manifest");
+    let layers = fetched.layers().expect("platform manifest layers");
+
+    assert_eq!(fetched.digest, child_digest);
+    assert_eq!(layers.len(), 1);
+    assert_eq!(layers[0].digest, expected_layer_digest);
+}
+
+#[tokio::test]
 async fn layer_fetch_happy_path_verifies_digest_and_byte_count() {
     let reg = HermeticRegistry::start().await;
     let layer_bytes: Vec<u8> = (0..4096u32).map(|i| (i & 0xff) as u8).collect();

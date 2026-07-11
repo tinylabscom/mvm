@@ -17,7 +17,7 @@ use std::io::Read;
 use serde::Deserialize;
 
 use crate::layer::LayerDescriptor;
-use crate::manifest::LinuxPlatform;
+use crate::manifest::{LinuxPlatform, matches_linux_platform};
 use crate::manifest_types::OciManifest;
 use crate::{OciError, verify_sha256_digest};
 
@@ -238,11 +238,9 @@ fn select_manifest_digest(
         ));
     }
     if let Some(matched) = image_manifests.iter().find(|entry| {
-        entry.platform.as_ref().is_some_and(|p| {
-            p.os == "linux"
-                && p.architecture == platform.architecture
-                && p.variant.as_deref() == platform.variant.as_deref()
-        })
+        entry.platform
+            .as_ref()
+            .is_some_and(|p| matches_linux_platform(p, platform))
     }) {
         return Ok(matched.digest.clone());
     }
@@ -478,6 +476,36 @@ mod tests {
         };
         let err = read(&f.build()).unwrap_err().to_string();
         assert!(err.contains("architecture"), "got {err}");
+    }
+
+    #[test]
+    fn arm64_v8_matches_archive_manifest_without_variant() {
+        let index = br#"{
+            "schemaVersion":2,
+            "mediaType":"application/vnd.oci.image.index.v1+json",
+            "manifests":[
+                {
+                    "mediaType":"application/vnd.oci.image.manifest.v1+json",
+                    "digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "size":1,
+                    "platform":{"os":"linux","architecture":"amd64"}
+                },
+                {
+                    "mediaType":"application/vnd.oci.image.manifest.v1+json",
+                    "digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                    "size":1,
+                    "platform":{"os":"linux","architecture":"arm64"}
+                }
+            ]
+        }"#;
+        let platform = LinuxPlatform {
+            architecture: "arm64".to_string(),
+            variant: Some("v8".to_string()),
+        };
+
+        let picked =
+            select_manifest_digest(index, &platform).expect("arm64 index entry without variant");
+        assert_eq!(picked, "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
     }
 
     #[test]

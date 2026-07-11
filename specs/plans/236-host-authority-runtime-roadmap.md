@@ -47,13 +47,20 @@ vsock-only enforcement witness, and binding restore-time authority to a per-VM
 identity (cross-VM replay of a genuinely host-signed grant). The branch now
 also carries the missing live-proof harness for the new OCI path:
 `tests/oci_image_runner_smoke.rs` adds a macOS-only disabled-by-default
-`run --image --prod` witness that requires a signed digest-pinned ref, `cosign`
-on `PATH`, and an admitted OCI policy, then asserts the booted image left real
+`run --image --prod` witness that now synthesizes a temporary Chainguard
+policy when the reviewer supplies a signed Chainguard digest but does not
+provide `MVM_OCI_POLICY`; the test still requires an explicit
+`MVM_OCI_IMAGE_RUNNER_PROD_REF` because the public witness-image search turned
+up real runtime-edge cases instead of one universal default. While wiring that
+proof, the OCI resolver also fixed a real production bug: `linux/arm64/v8`
+hosts now accept valid `linux/arm64` image-index entries that omit the
+optional variant field. The witness asserts the booted image left real
 `rootfs.verity` + `rootfs.roothash` sidecars in the OCI cache. Focused host
 validation for that harness is green (`cargo test --test
 oci_image_runner_smoke -- --nocapture`, `cargo clippy --test
-oci_image_runner_smoke -- -D warnings`); the missing piece is the
-environment-backed live run itself, not the test surface.
+oci_image_runner_smoke -- -D warnings`); the missing piece is now the
+environment-backed live run on a suitable signed digest-pinned image, not the
+test surface or the arm64 index matcher.
 
 ## Thesis
 
