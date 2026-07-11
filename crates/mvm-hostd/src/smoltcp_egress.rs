@@ -13,17 +13,20 @@
 //! stack's gateway address mirrors the Linux TUN path (`10.240.0.1/30`, guest
 //! `10.240.0.2`).
 //!
-//! Scope: TCP and UDP forward. TCP terminates each guest flow and splices it to
-//! a host `TcpStream`; UDP bridges each admitted guest 4-tuple to a connected
-//! host `UdpSocket`, reaping idle flows on a timeout (UDP has no close). DNS
-//! already works via the guest `/etc/hosts` injection (the tunnel hands the
-//! guest pin-consistent entries), so no resolver is needed here. ICMP echo is
-//! still dropped — see the `follow-up:` note on `ingest_guest_packet`.
+//! Scope: TCP, UDP, and ICMP-echo forward. TCP terminates each guest flow and
+//! splices it to a host `TcpStream`; UDP bridges each admitted guest 4-tuple to
+//! a connected host `UdpSocket`, reaping idle flows on a timeout (UDP has no
+//! close). An admitted guest ICMP echo request is relayed via an unprivileged
+//! host ping socket (macOS grants `SOCK_DGRAM`/`IPPROTO_ICMP` without root); the
+//! host waits for the reply and synthesizes an echo reply back to the guest, so
+//! `ping <admitted-host>` works. DNS already works via the guest `/etc/hosts`
+//! injection (the tunnel hands the guest pin-consistent entries), so no resolver
+//! is needed here.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -45,6 +48,21 @@ use crate::network_tunnel::{
 const IP_PROTO_TCP: u8 = 6;
 /// IPv4 protocol number for UDP.
 const IP_PROTO_UDP: u8 = 17;
+/// IPv4 protocol number for ICMP.
+const IP_PROTO_ICMP: u8 = 1;
+/// ICMP type for an echo request (the `ping` probe).
+const ICMP_ECHO_REQUEST: u8 = 8;
+/// ICMP type for an echo reply.
+const ICMP_ECHO_REPLY: u8 = 0;
+/// Minimum IPv4 header length (no options).
+const IPV4_MIN_HEADER_LEN: usize = 20;
+/// Bytes of an ICMP echo header preceding its payload (type, code, checksum,
+/// identifier, sequence).
+const ICMP_ECHO_HEADER_LEN: usize = 8;
+/// Default TTL for host-synthesized reply packets handed back to the guest.
+const REPLY_TTL: u8 = 64;
+/// Scratch buffer for a host ICMP reply read off a ping socket.
+const ICMP_REPLY_MAX: usize = 1500;
 /// Upper bound on datagrams moved per UDP socket per service iteration, in each
 /// direction, so one busy flow can't starve the loop.
 const UDP_BATCH_PER_ITER: usize = 64;
@@ -85,6 +103,10 @@ pub struct EgressConfig {
     /// A UDP flow with no traffic either way for longer than this is reaped
     /// (UDP has no close signal, so idle timeout is the only reclaim path).
     pub udp_idle_timeout: Duration,
+    /// An in-flight ICMP echo with no reply within this window is reaped and
+    /// dropped (host unreachable or reply lost). The host ping socket is
+    /// non-blocking, so this only bounds how long a pending echo is retained.
+    pub icmp_reply_timeout: Duration,
     /// Bound on the blocking host `connect()` for a newly admitted flow.
     pub host_connect_timeout: Duration,
     /// Upper bound on how long a loop iteration waits for a guest frame, so the
@@ -103,6 +125,7 @@ impl Default for EgressConfig {
             udp_buffer_bytes: 64 * 1024,
             udp_packet_slots: 32,
             udp_idle_timeout: Duration::from_secs(30),
+            icmp_reply_timeout: Duration::from_secs(5),
             host_connect_timeout: Duration::from_secs(10),
             idle_poll_timeout: Duration::from_millis(100),
         }
@@ -241,6 +264,30 @@ struct UdpFlow {
     last_activity: std::time::Instant,
 }
 
+/// One admitted, in-flight guest ICMP echo request relayed to an unprivileged
+/// host ping socket. The socket is connected to the pinned destination and read
+/// non-blocking each iteration; on the first echo reply the host synthesizes a
+/// reply carrying the guest's original identifier/sequence/payload and frames it
+/// back. Held until the reply arrives or the reply timeout elapses. One socket
+/// per in-flight echo makes reply attribution unambiguous, so macOS rewriting
+/// the datagram socket's identifier is irrelevant.
+struct IcmpEcho {
+    /// Connected host ping socket; closed on drop.
+    socket: OwnedFd,
+    dst: Ipv4Addr,
+    /// The guest source address the synthesized reply is framed back to.
+    guest_src: Ipv4Addr,
+    /// The guest's original echo identifier, echoed in the synthesized reply.
+    ident: u16,
+    /// The guest's original echo sequence, echoed in the synthesized reply.
+    sequence: u16,
+    /// The guest's original echo payload, echoed back verbatim.
+    payload: Vec<u8>,
+    flow_id: u32,
+    /// When the request was sent to the host, driving reply-timeout reaping.
+    sent_at: std::time::Instant,
+}
+
 /// Userspace TCP/UDP egress stack: terminates admitted guest flows and bridges
 /// each to a host socket.
 pub struct SmoltcpEgress {
@@ -258,6 +305,13 @@ pub struct SmoltcpEgress {
     udp_ports: HashMap<u16, SocketHandle>,
     /// Established bridged UDP flows, keyed by the guest 4-tuple.
     udp_flows: HashMap<UdpFlowKey, UdpFlow>,
+    /// In-flight ICMP echoes awaiting a host reply. These never touch the
+    /// `smoltcp` stack — the stack has no ICMP socket — they relay directly
+    /// through host ping sockets.
+    icmp_echoes: Vec<IcmpEcho>,
+    /// Synthesized IPv4/ICMP echo replies queued for the guest, drained beside
+    /// the stack's own TX packets.
+    icmp_replies: VecDeque<Vec<u8>>,
     /// Distinct admitted destination ports the stack listens on.
     listen_ports: Vec<u16>,
     next_flow_id: u32,
@@ -316,6 +370,8 @@ impl SmoltcpEgress {
             flows: HashMap::new(),
             udp_ports: HashMap::new(),
             udp_flows: HashMap::new(),
+            icmp_echoes: Vec::new(),
+            icmp_replies: VecDeque::new(),
             listen_ports: ports,
             next_flow_id: 0,
             next_tx_sequence: 0,
@@ -420,26 +476,25 @@ impl SmoltcpEgress {
             .is_some_and(|flag| flag.load(Ordering::Relaxed))
     }
 
-    /// Wait a short slice when flows are active (to move bytes promptly) and up
-    /// to the idle timeout otherwise (so timers still fire).
+    /// Wait a short slice when flows or in-flight echoes are active (to move
+    /// bytes / collect replies promptly) and up to the idle timeout otherwise
+    /// (so timers still fire).
     fn iteration_timeout_ms(&self) -> i32 {
-        let timeout = if self.flows.is_empty() {
-            self.config.idle_poll_timeout
-        } else {
+        let active = !self.flows.is_empty() || !self.icmp_echoes.is_empty();
+        let timeout = if active {
             Duration::from_millis(5)
+        } else {
+            self.config.idle_poll_timeout
         };
         i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX)
     }
 
     /// Gate one guest packet and, if admitted, hand it to the stack. A denied
     /// destination is audited and dropped — no socket is opened. Admitted TCP
-    /// and UDP packets are served by their bound sockets; an admitted ICMP echo
-    /// reaches the stack but no ICMP socket serves it yet, so it is silently
-    /// dropped by `smoltcp`.
-    ///
-    /// follow-up: relay admitted ICMP echo via an unprivileged host ping socket
-    /// and frame the reply back; until then it must never be silently forwarded
-    /// to an unadmitted destination (the gate already guarantees that here).
+    /// and UDP packets are served by their bound sockets. An admitted ICMP echo
+    /// request is intercepted here (the stack has no ICMP socket) and relayed via
+    /// an unprivileged host ping socket; its reply is synthesized back to the
+    /// guest, so `ping <admitted-host>` works.
     fn ingest_guest_packet<S, A>(
         &mut self,
         worker: &mut HostTunnelWorker<S, A>,
@@ -451,6 +506,12 @@ impl SmoltcpEgress {
         S: Read + Write + AsRawFd,
         A: TunnelAuditSink,
     {
+        // ICMP echo requests can't be served by the stack (no ICMP socket);
+        // relay admitted ones directly and synthesize the reply. Non-echo ICMP
+        // falls through to the generic gate below and is dropped by the stack.
+        if let Some(echo) = parse_icmp_echo_request(&payload) {
+            return self.relay_icmp_echo(worker, echo);
+        }
         let bytes = payload.len();
         match self.gate.decide_packet(&payload) {
             L3Decision::Allow => {
@@ -468,6 +529,62 @@ impl SmoltcpEgress {
         }
     }
 
+    /// Gate an admitted ICMP echo request, open a host ping socket, send the
+    /// probe, and register the in-flight echo. A denied destination or an
+    /// in-flight-echo cap hit opens no socket and is audited via
+    /// `IcmpEchoDenied`. A host-socket/send failure is not a gate denial, so it
+    /// is logged and the echo dropped (mirroring a failed TCP host connect).
+    fn relay_icmp_echo<S, A>(
+        &mut self,
+        worker: &mut HostTunnelWorker<S, A>,
+        echo: IcmpEchoRequest,
+    ) -> Result<(), TunnelWorkerError>
+    where
+        S: Read + Write + AsRawFd,
+        A: TunnelAuditSink,
+    {
+        if let L3Decision::Drop(reason) = self.gate.decide(echo.dst, IP_PROTO_ICMP, None) {
+            return worker.record_tunnel_audit(TunnelAuditEvent::IcmpEchoDenied {
+                dst: echo.dst,
+                reason,
+            });
+        }
+        // Bound in-flight echoes alongside TCP/UDP flows against the flow cap.
+        if self.flows.len() + self.udp_flows.len() + self.icmp_echoes.len() >= self.config.max_flows
+        {
+            return worker.record_tunnel_audit(TunnelAuditEvent::IcmpEchoDenied {
+                dst: echo.dst,
+                reason: L3DropReason::PortNotAllowed,
+            });
+        }
+        let socket = match open_host_icmp(echo.dst) {
+            Ok(socket) => socket,
+            Err(err) => {
+                tracing::warn!(dst = %echo.dst, error = %err, "smoltcp egress icmp host socket failed");
+                return Ok(());
+            }
+        };
+        if let Err(err) =
+            send_host_icmp(socket.as_raw_fd(), echo.ident, echo.sequence, &echo.payload)
+        {
+            tracing::warn!(dst = %echo.dst, error = %err, "smoltcp egress icmp host send failed");
+            return Ok(());
+        }
+        let flow_id = self.next_flow_id;
+        self.next_flow_id = self.next_flow_id.wrapping_add(1);
+        self.icmp_echoes.push(IcmpEcho {
+            socket,
+            dst: echo.dst,
+            guest_src: echo.src,
+            ident: echo.ident,
+            sequence: echo.sequence,
+            payload: echo.payload,
+            flow_id,
+            sent_at: std::time::Instant::now(),
+        });
+        Ok(())
+    }
+
     /// Promote accepted listeners into bridges and splice established flows.
     fn service_flows<S, A>(
         &mut self,
@@ -480,7 +597,53 @@ impl SmoltcpEgress {
         self.promote_accepted_listeners(worker)?;
         self.pump_established_flows(worker)?;
         self.service_udp_flows(worker)?;
+        self.service_icmp_echoes(worker)?;
         self.replenish_listeners();
+        Ok(())
+    }
+
+    /// Read each in-flight echo's host ping socket non-blocking. On the first
+    /// echo reply, synthesize an IPv4/ICMP echo reply carrying the guest's
+    /// original identifier/sequence/payload, queue it for the guest, and audit
+    /// `IcmpEchoRelayed`. Echoes with no reply within the timeout are reaped and
+    /// dropped (logged, not gate-denied). The host socket closes on drop.
+    fn service_icmp_echoes<S, A>(
+        &mut self,
+        worker: &mut HostTunnelWorker<S, A>,
+    ) -> Result<(), TunnelWorkerError>
+    where
+        S: Read + Write + AsRawFd,
+        A: TunnelAuditSink,
+    {
+        let now = std::time::Instant::now();
+        let timeout = self.config.icmp_reply_timeout;
+        // Take ownership so the reply queue / audit sink can be touched without a
+        // borrow conflict; survivors go back at the end.
+        let echoes = std::mem::take(&mut self.icmp_echoes);
+        let mut kept: Vec<IcmpEcho> = Vec::with_capacity(echoes.len());
+        for echo in echoes {
+            if recv_icmp_echo_reply(echo.socket.as_raw_fd()) {
+                let reply = build_icmp_echo_reply(
+                    echo.dst,
+                    echo.guest_src,
+                    echo.ident,
+                    echo.sequence,
+                    &echo.payload,
+                );
+                self.icmp_replies.push_back(reply);
+                worker.record_tunnel_audit(TunnelAuditEvent::IcmpEchoRelayed {
+                    flow_id: echo.flow_id,
+                    dst: echo.dst,
+                })?;
+                continue;
+            }
+            if now.duration_since(echo.sent_at) >= timeout {
+                tracing::warn!(dst = %echo.dst, "smoltcp egress icmp echo reply timed out");
+                continue;
+            }
+            kept.push(echo);
+        }
+        self.icmp_echoes = kept;
         Ok(())
     }
 
@@ -886,6 +1049,15 @@ impl SmoltcpEgress {
         S: Read + Write + AsRawFd,
         A: TunnelAuditSink,
     {
+        // Synthesized ICMP echo replies (host-forwarded, not stack-emitted) frame
+        // back through the same guest packet path as the stack's TX packets.
+        while let Some(reply) = self.icmp_replies.pop_front() {
+            let sequence = self.next_tx_sequence;
+            self.next_tx_sequence = self.next_tx_sequence.wrapping_add(1);
+            if let Some(outcome) = worker.send_guest_packet(0, sequence, reply)? {
+                return Ok(Some(outcome));
+            }
+        }
         while let Some(packet) = self.device.pop_host_packet() {
             let sequence = self.next_tx_sequence;
             self.next_tx_sequence = self.next_tx_sequence.wrapping_add(1);
@@ -920,6 +1092,177 @@ fn open_host_udp(dst: Ipv4Addr, dst_port: u16) -> std::io::Result<UdpSocket> {
     socket.connect(SocketAddr::new(IpAddr::V4(dst), dst_port))?;
     socket.set_nonblocking(true)?;
     Ok(socket)
+}
+
+/// A parsed guest ICMP echo request: its addresses and the fields echoed back.
+struct IcmpEchoRequest {
+    src: Ipv4Addr,
+    dst: Ipv4Addr,
+    ident: u16,
+    sequence: u16,
+    payload: Vec<u8>,
+}
+
+/// Bounds-checked parse of an IPv4 ICMP echo request. Returns `None` for
+/// anything that isn't a well-formed IPv4 packet carrying an ICMP echo request
+/// (type 8, code 0) — every other packet (short, wrong version, non-ICMP,
+/// non-echo) falls through to the generic gate and is handled there.
+fn parse_icmp_echo_request(packet: &[u8]) -> Option<IcmpEchoRequest> {
+    if packet.len() < IPV4_MIN_HEADER_LEN || packet[0] >> 4 != 4 {
+        return None;
+    }
+    let header_len = usize::from(packet[0] & 0x0f) * 4;
+    if header_len < IPV4_MIN_HEADER_LEN || packet.len() < header_len {
+        return None;
+    }
+    if packet[9] != IP_PROTO_ICMP {
+        return None;
+    }
+    let icmp = &packet[header_len..];
+    if icmp.len() < ICMP_ECHO_HEADER_LEN || icmp[0] != ICMP_ECHO_REQUEST || icmp[1] != 0 {
+        return None;
+    }
+    Some(IcmpEchoRequest {
+        src: Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]),
+        dst: Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]),
+        ident: u16::from_be_bytes([icmp[4], icmp[5]]),
+        sequence: u16::from_be_bytes([icmp[6], icmp[7]]),
+        payload: icmp[ICMP_ECHO_HEADER_LEN..].to_vec(),
+    })
+}
+
+/// Open a non-blocking, unprivileged host ICMP socket connected to `dst`. macOS
+/// grants `SOCK_DGRAM`/`IPPROTO_ICMP` without root; `connect` fixes the peer so
+/// stray replies from other hosts are rejected and `send`/`recv` suffice.
+fn open_host_icmp(dst: Ipv4Addr) -> std::io::Result<OwnedFd> {
+    // SAFETY: standard socket(2); the raw fd is immediately owned so it is closed
+    // on every return path.
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: `fd` is a fresh, valid, owned descriptor.
+    let owned = unsafe { OwnedFd::from_raw_fd(fd) };
+    // SAFETY: F_GETFL/F_SETFL on an owned fd; errors are surfaced, not ignored.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
+    addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+    addr.sin_family = libc::AF_INET as u8;
+    addr.sin_addr.s_addr = u32::from(dst).to_be();
+    // SAFETY: `addr` is a fully initialized sockaddr_in of the passed length.
+    let rc = unsafe {
+        libc::connect(
+            fd,
+            &addr as *const libc::sockaddr_in as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t,
+        )
+    };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(owned)
+}
+
+/// Send one ICMP echo request on a connected host ping socket. The kernel may
+/// rewrite the identifier and recompute the checksum on this datagram socket;
+/// the reply is attributed by socket, not by identifier, so that is harmless.
+fn send_host_icmp(fd: RawFd, ident: u16, sequence: u16, payload: &[u8]) -> std::io::Result<()> {
+    let mut msg = vec![0_u8; ICMP_ECHO_HEADER_LEN + payload.len()];
+    msg[0] = ICMP_ECHO_REQUEST;
+    msg[4..6].copy_from_slice(&ident.to_be_bytes());
+    msg[6..8].copy_from_slice(&sequence.to_be_bytes());
+    msg[ICMP_ECHO_HEADER_LEN..].copy_from_slice(payload);
+    let checksum = internet_checksum(&msg);
+    msg[2..4].copy_from_slice(&checksum.to_be_bytes());
+    // SAFETY: `msg` is a valid, initialized buffer of the passed length.
+    let n = unsafe { libc::send(fd, msg.as_ptr() as *const libc::c_void, msg.len(), 0) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Non-blocking read of a host ping socket: `true` iff an ICMP echo reply is
+/// available. macOS delivers the datagram with its IPv4 header intact, so the
+/// header is skipped before inspecting the ICMP type. Other payloads (WouldBlock,
+/// a non-echo-reply message) return `false`, leaving the echo in flight.
+fn recv_icmp_echo_reply(fd: RawFd) -> bool {
+    let mut buf = [0_u8; ICMP_REPLY_MAX];
+    // SAFETY: `buf` is a valid, writable buffer of the passed length.
+    let n = unsafe { libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0) };
+    if n <= 0 {
+        return false;
+    }
+    let datagram = &buf[..n as usize];
+    // Datagram carries the IPv4 header on macOS; skip it to reach the ICMP type.
+    let icmp = match datagram.first() {
+        Some(first) if first >> 4 == 4 => {
+            let header_len = usize::from(first & 0x0f) * 4;
+            if header_len < IPV4_MIN_HEADER_LEN || datagram.len() < header_len {
+                return false;
+            }
+            &datagram[header_len..]
+        }
+        _ => datagram,
+    };
+    matches!(icmp.first(), Some(&ICMP_ECHO_REPLY))
+}
+
+/// Build a complete IPv4/ICMP echo reply packet with valid IPv4 and ICMP
+/// checksums, sourced from the pinged host and destined for the guest, echoing
+/// the guest's original identifier, sequence, and payload.
+fn build_icmp_echo_reply(
+    host: Ipv4Addr,
+    guest: Ipv4Addr,
+    ident: u16,
+    sequence: u16,
+    payload: &[u8],
+) -> Vec<u8> {
+    let icmp_len = ICMP_ECHO_HEADER_LEN + payload.len();
+    let total_len = IPV4_MIN_HEADER_LEN + icmp_len;
+    let mut packet = vec![0_u8; total_len];
+    // IPv4 header.
+    packet[0] = 0x45; // version 4, IHL 5 (no options)
+    packet[2..4].copy_from_slice(&(total_len as u16).to_be_bytes());
+    packet[8] = REPLY_TTL;
+    packet[9] = IP_PROTO_ICMP;
+    packet[12..16].copy_from_slice(&host.octets());
+    packet[16..20].copy_from_slice(&guest.octets());
+    let ip_checksum = internet_checksum(&packet[..IPV4_MIN_HEADER_LEN]);
+    packet[10..12].copy_from_slice(&ip_checksum.to_be_bytes());
+    // ICMP echo reply.
+    let icmp = &mut packet[IPV4_MIN_HEADER_LEN..];
+    icmp[0] = ICMP_ECHO_REPLY;
+    icmp[4..6].copy_from_slice(&ident.to_be_bytes());
+    icmp[6..8].copy_from_slice(&sequence.to_be_bytes());
+    icmp[ICMP_ECHO_HEADER_LEN..].copy_from_slice(payload);
+    let icmp_checksum = internet_checksum(&packet[IPV4_MIN_HEADER_LEN..]);
+    packet[IPV4_MIN_HEADER_LEN + 2..IPV4_MIN_HEADER_LEN + 4]
+        .copy_from_slice(&icmp_checksum.to_be_bytes());
+    packet
+}
+
+/// One's-complement internet checksum over a byte slice whose own checksum field
+/// is pre-zeroed.
+fn internet_checksum(bytes: &[u8]) -> u16 {
+    let mut sum: u32 = 0;
+    let mut chunks = bytes.chunks_exact(2);
+    for chunk in &mut chunks {
+        sum += u32::from(u16::from_be_bytes([chunk[0], chunk[1]]));
+    }
+    if let [last] = chunks.remainder() {
+        sum += u32::from(u16::from_be_bytes([*last, 0]));
+    }
+    while sum >> 16 != 0 {
+        sum = (sum & 0xffff) + (sum >> 16);
+    }
+    !(sum as u16)
 }
 
 /// Splice one bridged flow both ways: guest socket ⇄ host stream. Bounded by
@@ -1671,6 +2014,218 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, TunnelAuditEvent::UdpFlowOpened { .. })),
             "no UDP flow may open for a denied destination"
+        );
+    }
+
+    /// Build a raw IPv4/ICMP echo request from the guest to `dst`.
+    fn ipv4_icmp_echo_request(
+        src: Ipv4Addr,
+        dst: Ipv4Addr,
+        ident: u16,
+        sequence: u16,
+        payload: &[u8],
+    ) -> Vec<u8> {
+        let mut icmp = vec![0_u8; ICMP_ECHO_HEADER_LEN + payload.len()];
+        icmp[0] = ICMP_ECHO_REQUEST;
+        icmp[4..6].copy_from_slice(&ident.to_be_bytes());
+        icmp[6..8].copy_from_slice(&sequence.to_be_bytes());
+        icmp[ICMP_ECHO_HEADER_LEN..].copy_from_slice(payload);
+        let ck = internet_checksum(&icmp);
+        icmp[2..4].copy_from_slice(&ck.to_be_bytes());
+
+        let total = IPV4_MIN_HEADER_LEN + icmp.len();
+        let mut packet = vec![0_u8; total];
+        packet[0] = 0x45;
+        packet[2..4].copy_from_slice(&(total as u16).to_be_bytes());
+        packet[8] = 64;
+        packet[9] = IP_PROTO_ICMP;
+        packet[12..16].copy_from_slice(&src.octets());
+        packet[16..20].copy_from_slice(&dst.octets());
+        let ip_ck = internet_checksum(&packet[..IPV4_MIN_HEADER_LEN]);
+        packet[10..12].copy_from_slice(&ip_ck.to_be_bytes());
+        packet[IPV4_MIN_HEADER_LEN..].copy_from_slice(&icmp);
+        packet
+    }
+
+    /// End-to-end: a guest ICMP echo request to the pinned loopback destination
+    /// is relayed by the host `SmoltcpEgress` through an unprivileged ping socket
+    /// (the loopback kernel replies) and a synthesized echo reply frames back to
+    /// the guest with matching identifier, sequence, and payload — proving
+    /// `ping <admitted-host>` works on the macOS userspace stack.
+    #[test]
+    fn admitted_icmp_echo_reaches_pinned_host_and_replies() {
+        const IDENT: u16 = 0xBEEF;
+        const SEQUENCE: u16 = 7;
+        const PAYLOAD: &[u8] = b"icmp-echo-over-smoltcp";
+        let guest_ip = Ipv4Addr::new(10, 240, 0, 2);
+        let dst = Ipv4Addr::new(127, 0, 0, 1);
+
+        // Pin 127.0.0.1 (admitted on some port; ICMP is gated on dst IP alone).
+        let gate = gate_for("server.test", 443, &["127.0.0.1"]);
+        let (guest_raw, host_raw) = UnixStream::pair().unwrap();
+
+        let host_gate = gate.clone();
+        let host = std::thread::spawn(move || {
+            let mut worker = HostTunnelWorker::new(
+                host_raw,
+                NoopTunnelAuditSink,
+                worker_config(host_gate.clone()),
+            )
+            .unwrap();
+            worker.bootstrap(1, 2, 3).unwrap();
+            let mut egress = SmoltcpEgress::new(&host_gate, EgressConfig::default()).unwrap();
+            let outcome = egress.run(&mut worker).unwrap();
+            assert!(matches!(
+                outcome,
+                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
+            ));
+        });
+
+        let mut session =
+            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+        session.negotiate(hello(), 1).unwrap();
+        session.recv_network_config().unwrap();
+        session.recv_control().unwrap();
+
+        let request = ipv4_icmp_echo_request(guest_ip, dst, IDENT, SEQUENCE, PAYLOAD);
+        session.send_packet(0, 0, 0, request).unwrap();
+
+        let fd = session.as_raw_fd();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut reply: Option<Vec<u8>> = None;
+        while std::time::Instant::now() < deadline {
+            if poll_readable(fd, 50)
+                && let Ok(frame) = session.recv_packet()
+                && let Some(echo) = parse_icmp_echo_reply(&frame.payload)
+            {
+                reply = Some(echo);
+                break;
+            }
+        }
+
+        let echo = reply.expect("an echo reply must frame back to the guest");
+        // ICMP starts after the 20-byte IPv4 header of the synthesized reply.
+        let icmp = &echo[IPV4_MIN_HEADER_LEN..];
+        assert_eq!(icmp[0], ICMP_ECHO_REPLY, "type must be echo reply");
+        assert_eq!(
+            u16::from_be_bytes([icmp[4], icmp[5]]),
+            IDENT,
+            "identifier must match the request"
+        );
+        assert_eq!(
+            u16::from_be_bytes([icmp[6], icmp[7]]),
+            SEQUENCE,
+            "sequence must match the request"
+        );
+        assert_eq!(
+            &icmp[ICMP_ECHO_HEADER_LEN..],
+            PAYLOAD,
+            "payload must echo the request"
+        );
+        // The reply is sourced from the pinged host, destined for the guest.
+        assert_eq!(&echo[12..16], &dst.octets(), "reply source is the host");
+        assert_eq!(&echo[16..20], &guest_ip.octets(), "reply dest is the guest");
+
+        session
+            .send_control(
+                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
+                0,
+                0,
+                1,
+            )
+            .unwrap();
+        host.join().unwrap();
+    }
+
+    /// Recognize a synthesized IPv4/ICMP echo reply frame (validating the IPv4
+    /// header the way the guest stack would before matching it).
+    fn parse_icmp_echo_reply(packet: &[u8]) -> Option<Vec<u8>> {
+        if packet.len() < IPV4_MIN_HEADER_LEN || packet[0] >> 4 != 4 {
+            return None;
+        }
+        let header_len = usize::from(packet[0] & 0x0f) * 4;
+        if header_len < IPV4_MIN_HEADER_LEN || packet.len() < header_len {
+            return None;
+        }
+        if packet[9] != IP_PROTO_ICMP {
+            return None;
+        }
+        let icmp = &packet[header_len..];
+        if icmp.len() < ICMP_ECHO_HEADER_LEN || icmp[0] != ICMP_ECHO_REPLY {
+            return None;
+        }
+        Some(packet.to_vec())
+    }
+
+    /// A denied (unpinned) ICMP echo destination opens no host ping socket and is
+    /// audited as an `IcmpEchoDenied`, with no `IcmpEchoRelayed`.
+    #[test]
+    fn denied_icmp_echo_opens_no_host_socket() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct SharedAudit(Arc<Mutex<Vec<TunnelAuditEvent>>>);
+        impl TunnelAuditSink for SharedAudit {
+            type Error = std::convert::Infallible;
+            fn record(&mut self, event: TunnelAuditEvent) -> Result<(), Self::Error> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+
+        let guest_ip = Ipv4Addr::new(10, 240, 0, 2);
+        // Guest targets 127.0.0.1, but the gate pins a DIFFERENT address.
+        let dst = Ipv4Addr::new(127, 0, 0, 1);
+        let gate = gate_for("server.test", 443, &["10.13.13.13"]);
+        let audit = SharedAudit::default();
+        let events = audit.0.clone();
+        let (guest_raw, host_raw) = UnixStream::pair().unwrap();
+
+        let host_gate = gate.clone();
+        let host = std::thread::spawn(move || {
+            let mut worker =
+                HostTunnelWorker::new(host_raw, audit, worker_config(host_gate.clone())).unwrap();
+            worker.bootstrap(1, 2, 3).unwrap();
+            let mut egress = SmoltcpEgress::new(&host_gate, EgressConfig::default()).unwrap();
+            egress.run(&mut worker).unwrap();
+        });
+
+        let mut session =
+            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+        session.negotiate(hello(), 1).unwrap();
+        session.recv_network_config().unwrap();
+        session.recv_control().unwrap();
+
+        let request = ipv4_icmp_echo_request(guest_ip, dst, 0x1111, 1, b"denied");
+        session.send_packet(0, 0, 0, request).unwrap();
+
+        std::thread::sleep(Duration::from_millis(200));
+        session
+            .send_control(
+                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
+                0,
+                0,
+                1,
+            )
+            .unwrap();
+        host.join().unwrap();
+
+        let recorded = events.lock().unwrap();
+        assert!(
+            recorded.iter().any(|e| matches!(
+                e,
+                TunnelAuditEvent::IcmpEchoDenied {
+                    reason: L3DropReason::UnpinnedDst,
+                    ..
+                }
+            )),
+            "a denied ICMP echo must be audited as IcmpEchoDenied"
+        );
+        assert!(
+            !recorded
+                .iter()
+                .any(|e| matches!(e, TunnelAuditEvent::IcmpEchoRelayed { .. })),
+            "no echo may be relayed for a denied destination"
         );
     }
 }

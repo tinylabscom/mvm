@@ -411,6 +411,13 @@ pub enum TunnelAuditEvent {
         dst_port: u16,
         reason: L3DropReason,
     },
+    /// An admitted guest ICMP echo request round-tripped: the host relayed it via
+    /// an unprivileged ping socket, received the reply, and framed a synthesized
+    /// echo reply back to the guest (the macOS userspace-stack egress path).
+    IcmpEchoRelayed { flow_id: u32, dst: Ipv4Addr },
+    /// A guest ICMP echo request was refused before any host socket opened — the
+    /// gate denied its destination, or the in-flight-echo cap was hit.
+    IcmpEchoDenied { dst: Ipv4Addr, reason: L3DropReason },
     SessionClosed {
         outcome: TunnelWorkerOutcome,
         stats: TunnelWorkerStats,
