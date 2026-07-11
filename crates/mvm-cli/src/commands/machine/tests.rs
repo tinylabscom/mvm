@@ -197,7 +197,6 @@ fn is_oci_proxy_env_key(key: &str) -> bool {
             | "all_proxy"
             | "HTTP_PROXY"
             | "HTTPS_PROXY"
-            | "all_proxy"
             | "NO_PROXY"
             | "http_proxy"
             | "https_proxy"

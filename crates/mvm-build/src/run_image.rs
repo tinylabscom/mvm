@@ -584,7 +584,19 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(std::fs::read(bins.oci_init).unwrap(), b"fresh-init");
+        assert_eq!(std::fs::read(bins.agent).unwrap(), b"fresh-agent");
+        assert_eq!(std::fs::read(bins.netinit).unwrap(), b"fresh-netinit");
+        assert_eq!(std::fs::read(bins.netd).unwrap(), b"fresh-netd");
         assert_eq!(std::fs::read(bins.egress_client).unwrap(), b"fresh-egress");
+        assert_eq!(
+            std::fs::read(bins.entrypoint_runner).unwrap(),
+            b"fresh-entrypoint"
+        );
+        assert_eq!(
+            std::fs::read(bins.verity_init).unwrap(),
+            b"fresh-verity-init"
+        );
     }
 
     #[cfg(not(target_os = "linux"))]

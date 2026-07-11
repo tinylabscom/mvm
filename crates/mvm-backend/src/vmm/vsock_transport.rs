@@ -367,7 +367,8 @@ mod tests {
             core.mem.write_bytes(desc_addr, &buf.to_le_bytes());
             core.mem
                 .write_bytes(desc_addr + 8, &(*cap as u32).to_le_bytes());
-            core.mem.wr_u16(avail + 4 + (index as u64 * 2), index as u16);
+            core.mem
+                .wr_u16(avail + 4 + (index as u64 * 2), index as u16);
         }
         buffers
     }

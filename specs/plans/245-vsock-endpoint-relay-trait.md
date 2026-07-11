@@ -25,9 +25,15 @@
   - `cargo fmt --all --check`
   - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p mvm-backend vsock_egress_bridge::substitution_bridge --lib`
   - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p mvm-backend vmm::vsock --lib`
+  - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p mvm-backend vmm::vsock_transport --lib`
   - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p mvm-guest-helpers egress_client --lib`
   - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p mvm-hostd http_forward --lib`
-  - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo clippy -p mvm-backend --lib --tests -- -D warnings`
+  - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p mvm-build embedded_guest_binaries_overwrite_stale_cache`
+  - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p mvm-cli --test build_embed_mode`
+  - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p mvm-cli runtime_tag --lib`
+  - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo clippy -p mvm-backend -p mvm-build -p mvm-cli --all-targets -- -D warnings`
   - `RUSTC=/Users/auser/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target-rustup /Users/auser/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo zigbuild --release --target aarch64-unknown-linux-musl -p mvm-guest --bin mvm-oci-init`
+  - `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-release-target cargo run --release -- --version`
+  - `MVM_EMBED_ZIG=/tmp/mvm-ziglang-0.13.0/ziglang/zig CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-release-embed-target cargo build --release -p mvmctl --bin mvmctl --features host,user,template-registry-s3,release-artifact-bootstrap`
 - [x] No HVF artifact rebuild / BusyBox HTTPS smoke needed for this trait-only slice because reserved-frame dispatch and host HTTP/raw egress behavior were not changed; only the backend relay interface changed.
 - [x] Update `specs/SPRINT.md` and `specs/REFACTOR-STATUS.md` in the same change.

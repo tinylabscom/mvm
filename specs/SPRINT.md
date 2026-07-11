@@ -390,32 +390,37 @@ plan 25 sequences the work into six independently-shippable workstreams.
       remains self-contained while source builds avoid build-script zigbuild in
       the user-facing compile path.
       A same-day live HVF BusyBox HTTPS proof for the HTTP-forward path is
-      recorded on the rebased `main` line; this branch's remaining proof is
-      post-rebase validation of the relay-trait and build-hot-path deltas.
-      Validation so far: `cargo fmt --all`; build-mode unit test via
-      `rustc --test`; `cargo build --release -p mvmctl --bin mvmctl` and
-      `cargo run --release -- --version` with no build-script zigbuild;
-      release-feature compile/clippy under `MVM_SKIP_EMBED_BINARIES=1`;
-      focused host/guest/CLI tests; touched-crate clippy.
-      2026-07-09 transport follow-up (Plan 245): the HVF-side backend now depends on a
-      small `GuestEndpointRelay` trait at the UDS byte-relay seam instead of
-      concrete `SubstitutionBridge` method names. The trait covers only guest
-      bytes, endpoint drains, closes, and active-state checks; host policy,
-      raw egress, HTTP parsing, reqwest/TLS, and allowlist enforcement remain
-      in `mvm-hostd`. Validation for this refactor: `cargo fmt --all --check`;
-      `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p
-      mvm-backend vsock_egress_bridge::substitution_bridge --lib`; `...
-      cargo test -p mvm-backend vmm::vsock --lib`; `... cargo test -p
-      mvm-guest-helpers egress_client --lib`; `... cargo test -p mvm-hostd
-      http_forward --lib`; `... cargo clippy -p mvm-backend --lib --tests
+      recorded on the rebased `main` line. Post-rebase validation for the
+      remaining relay-trait and build-hot-path deltas is now green:
+      `cargo fmt --all --check`; `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target
+      cargo test -p mvm-cli --test build_embed_mode`; `...
+      cargo test -p mvm-cli runtime_tag --lib`; `...
+      cargo test -p mvm-build embedded_guest_binaries_overwrite_stale_cache`;
+      `... cargo clippy -p mvm-backend -p mvm-build -p mvm-cli --all-targets
       -- -D warnings`; `RUSTC=/Users/auser/.rustup/toolchains/stable-aarch64-apple-darwin/bin/rustc
       CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target-rustup
       /Users/auser/.rustup/toolchains/stable-aarch64-apple-darwin/bin/cargo
       zigbuild --release --target aarch64-unknown-linux-musl -p mvm-guest
-      --bin mvm-oci-init`. No HVF
-      artifact rebuild or BusyBox HTTPS smoke was needed for this trait-only
-      slice because reserved-frame dispatch and host HTTP/raw egress behavior
-      were not changed.
+      --bin mvm-oci-init`; `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-release-target
+      cargo run --release -- --version`; and
+      `MVM_EMBED_ZIG=/tmp/mvm-ziglang-0.13.0/ziglang/zig
+      CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-release-embed-target
+      cargo build --release -p mvmctl --bin mvmctl --features
+      host,user,template-registry-s3,release-artifact-bootstrap`.
+      2026-07-09 transport follow-up (Plan 245): the HVF-side backend now
+      depends on a small `GuestEndpointRelay` trait at the UDS byte-relay seam
+      instead of concrete `SubstitutionBridge` method names. The trait covers
+      only guest bytes, endpoint drains, closes, and active-state checks; host
+      policy, raw egress, HTTP parsing, reqwest/TLS, and allowlist enforcement
+      remain in `mvm-hostd`. Validation for this refactor:
+      `CARGO_TARGET_DIR=/tmp/mvm-host-http-forward-proxy-target cargo test -p
+      mvm-backend vsock_egress_bridge::substitution_bridge --lib`; `...
+      cargo test -p mvm-backend vmm::vsock --lib`; `... cargo test -p
+      mvm-backend vmm::vsock_transport --lib`; `... cargo test -p
+      mvm-guest-helpers egress_client --lib`; `... cargo test -p mvm-hostd
+      http_forward --lib`. No additional HVF artifact rebuild or BusyBox HTTPS
+      smoke was needed for this trait-only slice because reserved-frame
+      dispatch and host HTTP/raw egress behavior were not changed.
 - [x] 2026-07-08 Plan 213 §I builder-pack revocation consumer: the installed
       attested builder-pack path now refreshes a signed
       `pack-revocations.json` from the `revocations` release, caches it under
