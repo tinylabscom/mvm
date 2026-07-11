@@ -634,6 +634,11 @@ path: string
 export interface VerbGrantEnvelope {
 grant: VerbGrant
 plan_nonce_hex: string
+predecessor_plan_nonce_hex?: (string | null)
+/**
+ * When present on a restore-time re-pin envelope, proves which pinned grant lineage the new grant is replacing. Boot-time cmdline envelopes leave both predecessor fields absent.
+ */
+predecessor_session_id?: (string | null)
 pubkey_hex: string
 }
 /**

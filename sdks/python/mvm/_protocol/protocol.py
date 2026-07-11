@@ -1423,6 +1423,8 @@ class VerbGrantEnvelope:
     grant: VerbGrant
     plan_nonce_hex: str
     pubkey_hex: str
+    predecessor_plan_nonce_hex: Optional[str] = None
+    predecessor_session_id: Optional[str] = None
 
 
 @dataclass
