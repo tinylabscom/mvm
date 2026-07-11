@@ -386,6 +386,31 @@ pub enum TunnelAuditEvent {
         dst_port: u16,
         reason: L3DropReason,
     },
+    /// A userspace UDP flow to an admitted destination was accepted: the first
+    /// guest datagram of a 4-tuple opened a host UDP socket bridged to it (the
+    /// macOS userspace-stack egress path).
+    UdpFlowOpened {
+        flow_id: u32,
+        dst: Ipv4Addr,
+        dst_port: u16,
+    },
+    /// A bridged userspace UDP flow was reaped (idle timeout), with the byte
+    /// counts relayed each way.
+    UdpFlowClosed {
+        flow_id: u32,
+        dst: Ipv4Addr,
+        dst_port: u16,
+        guest_to_host_bytes: u64,
+        host_to_guest_bytes: u64,
+    },
+    /// A guest UDP datagram was refused before any host socket opened — the gate
+    /// denied its destination, or a resource cap (flow count / datagram size)
+    /// was hit.
+    UdpFlowDenied {
+        dst: Ipv4Addr,
+        dst_port: u16,
+        reason: L3DropReason,
+    },
     SessionClosed {
         outcome: TunnelWorkerOutcome,
         stats: TunnelWorkerStats,
