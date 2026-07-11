@@ -238,7 +238,8 @@ fn select_manifest_digest(
         ));
     }
     if let Some(matched) = image_manifests.iter().find(|entry| {
-        entry.platform
+        entry
+            .platform
             .as_ref()
             .is_some_and(|p| matches_linux_platform(p, platform))
     }) {
@@ -505,7 +506,10 @@ mod tests {
 
         let picked =
             select_manifest_digest(index, &platform).expect("arm64 index entry without variant");
-        assert_eq!(picked, "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+        assert_eq!(
+            picked,
+            "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        );
     }
 
     #[test]

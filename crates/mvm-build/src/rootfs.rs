@@ -509,10 +509,11 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
                 });
                 stack.push(path);
             } else if ft.is_file() {
-                let data = read_file_for_guest_image(&path).map_err(|source| RootfsError::PureWalk {
-                    path: path.clone(),
-                    source,
-                })?;
+                let data =
+                    read_file_for_guest_image(&path).map_err(|source| RootfsError::PureWalk {
+                        path: path.clone(),
+                        source,
+                    })?;
                 let xattrs = collect_guest_xattrs(&path);
                 out.push(mvm_ext4::Node::File {
                     path: guest_path,
@@ -801,9 +802,9 @@ mod tests {
         let node = nodes
             .into_iter()
             .find_map(|node| match node {
-                mvm_ext4::Node::File { path, mode, data, .. } if path == "/etc/shadow" => {
-                    Some((mode, data))
-                }
+                mvm_ext4::Node::File {
+                    path, mode, data, ..
+                } if path == "/etc/shadow" => Some((mode, data)),
                 _ => None,
             })
             .expect("shadow file node");

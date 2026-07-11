@@ -1331,6 +1331,7 @@ pub fn unpack_layer<R: Read>(
                         apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
                         current_layer_paths.insert(rel_path.clone());
                     }
+                    #[cfg(not(target_os = "linux"))]
                     Ok(DeviceNodeAction::Skipped) => {
                         report.device_nodes_skipped += 1;
                     }
@@ -1719,6 +1720,7 @@ enum HardlinkAction {
 enum DeviceNodeAction {
     #[cfg(target_os = "linux")]
     Materialized,
+    #[cfg(not(target_os = "linux"))]
     Skipped,
 }
 
