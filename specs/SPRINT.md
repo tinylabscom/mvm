@@ -737,7 +737,6 @@ plan 25 sequences the work into six independently-shippable workstreams.
       refresh" as GO rather than requiring an artificial ahead-of-main delta.
       Plan 236's remaining blockers are therefore the honest live-proof and
       production-evidence gaps, not stale branch hygiene.
-<<<<<<< HEAD
 - [x] Started the shared cross-backend tunnel contract for Plan 236 Phase 2A in
       `mvm_core::protocol::network_tunnel`. The new core seam now pins a
       bounded whole-frame format for the guest-TUN ↔ host-worker path, typed
