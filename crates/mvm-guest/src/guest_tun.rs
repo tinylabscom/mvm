@@ -141,6 +141,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[allow(clippy::unnecessary_cast)]
     fn tun_ioctl_request_fits_target_request_type() {
         assert_eq!(TUNSETIFF_REQUEST as u64, libc::TUNSETIFF as u64);
     }

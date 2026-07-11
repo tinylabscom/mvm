@@ -775,6 +775,7 @@ nameserver 10.0.0.3
 
     #[cfg(target_os = "linux")]
     #[test]
+    #[allow(clippy::unnecessary_cast)]
     fn network_ioctl_requests_fit_target_request_type() {
         assert_eq!(SIOCSIFADDR_REQUEST as u64, libc::SIOCSIFADDR as u64);
         assert_eq!(SIOCSIFNETMASK_REQUEST as u64, libc::SIOCSIFNETMASK as u64);
