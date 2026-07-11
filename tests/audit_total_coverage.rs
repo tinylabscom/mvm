@@ -133,6 +133,11 @@ const BENCH_SUB: &[(&str, AuditPosture)] = &[
         "microvm-density",
         AuditPosture::Emits("plan.admitted+plan.launched+VmStart+VmStop"),
     ),
+    // `first-use` is a measurement orchestrator: it spawns `mvmctl dev up` /
+    // `mvmctl machine build` as child processes and times them. Those children
+    // emit their own audit entries under the `dev` / `machine` postures; the
+    // bench command itself performs no direct auditable mutation.
+    ("first-use", AuditPosture::ReadOnly),
 ];
 
 const NETWORK_SUB: &[(&str, AuditPosture)] = &[
