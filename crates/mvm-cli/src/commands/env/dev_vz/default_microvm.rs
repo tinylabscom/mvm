@@ -369,94 +369,58 @@ fn download_default_microvm_image(
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "builder-vm"))]
 mod tests {
     use super::*;
 
-    #[test]
-    fn source_checkout_cold_cache_builds_never_downloads() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = tmp.path().to_str().unwrap();
-        // No cached kernel, no reusable builder kernel, source checkout, non-prod:
-        // must BUILD locally (hermeticity) — must NOT be Download.
-        let got = resolve_workload_kernel_bootstrap(
-            cache, "aarch64", false, /* source_build_requested= */ true,
-        );
-        assert!(
-            matches!(got, WorkloadKernelBootstrap::Build(_)),
-            "got {got:?}"
-        );
+    /// Run `f` with `MVM_KERNEL_SOURCE` set to `value` (or unset when `None`),
+    /// restoring the prior value afterwards even if `f` panics. The env var is
+    /// process-global, so the restore has to survive a failing assertion inside
+    /// `f` — otherwise one test's mutation leaks into the next.
+    fn with_kernel_source_env(value: Option<&str>, f: impl FnOnce()) {
+        // SAFETY: the test harness runs a crate's tests in one process; this
+        // env var is only read by the resolver under test, and the guard
+        // serialises save/mutate/restore around `f`.
+        let prev = std::env::var_os("MVM_KERNEL_SOURCE");
+        unsafe {
+            match value {
+                Some(v) => std::env::set_var("MVM_KERNEL_SOURCE", v),
+                None => std::env::remove_var("MVM_KERNEL_SOURCE"),
+            }
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MVM_KERNEL_SOURCE", v),
+                None => std::env::remove_var("MVM_KERNEL_SOURCE"),
+            }
+        }
+        if let Err(payload) = result {
+            std::panic::resume_unwind(payload);
+        }
     }
 
-    #[test]
-    fn installed_build_cold_cache_downloads() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache = tmp.path().to_str().unwrap();
-        // Installed binary (source_build_requested=false): Download is correct.
-        let got = resolve_workload_kernel_bootstrap(cache, "aarch64", false, false);
-        assert!(
-            matches!(got, WorkloadKernelBootstrap::Download(_)),
-            "got {got:?}"
-        );
-    }
-
-    // The two tests above pin `resolve_workload_kernel_bootstrap`'s own
-    // branching given an already-decided `source_build_requested`. The
-    // decision itself is made by `workload_kernel_source_build_requested`,
-    // so that's what needs direct coverage of the checkout-vs-installed and
-    // override semantics.
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn workload_kernel_source_build_requested_defaults_to_build_for_source_checkout() {
-        // SAFETY: single-threaded test phase per crate; this env var
-        // isn't read elsewhere in this test binary.
-        let prev = std::env::var_os("MVM_KERNEL_SOURCE");
-        unsafe {
-            std::env::remove_var("MVM_KERNEL_SOURCE");
-        }
-
-        let source_checkout = workload_kernel_source_build_requested(true);
-        let installed_binary = workload_kernel_source_build_requested(false);
-
-        // Restore before any assertion so a panic doesn't strand the
-        // env var.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_KERNEL_SOURCE", v),
-                None => std::env::remove_var("MVM_KERNEL_SOURCE"),
-            }
-        }
-
-        assert!(
-            source_checkout,
-            "a source checkout must build the workload kernel locally by default"
-        );
-        assert!(
-            !installed_binary,
-            "an installed binary has no local checkout to build from"
-        );
+        with_kernel_source_env(None, || {
+            assert!(
+                workload_kernel_source_build_requested(true),
+                "a source checkout must build the workload kernel locally by default"
+            );
+            assert!(
+                !workload_kernel_source_build_requested(false),
+                "an installed binary has no local checkout to build from"
+            );
+        });
     }
 
-    #[cfg(feature = "builder-vm")]
     #[test]
     fn workload_kernel_source_build_requested_honors_explicit_download_override() {
-        let prev = std::env::var_os("MVM_KERNEL_SOURCE");
-        unsafe {
-            std::env::set_var("MVM_KERNEL_SOURCE", "download");
-        }
-
-        let got = workload_kernel_source_build_requested(true);
-
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("MVM_KERNEL_SOURCE", v),
-                None => std::env::remove_var("MVM_KERNEL_SOURCE"),
-            }
-        }
-
-        assert!(
-            !got,
-            "an explicit download override must still win over the source-checkout default"
-        );
+        with_kernel_source_env(Some("download"), || {
+            assert!(
+                !workload_kernel_source_build_requested(true),
+                "an explicit download override must still win over the source-checkout default"
+            );
+        });
     }
 }

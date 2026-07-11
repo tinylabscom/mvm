@@ -50,7 +50,7 @@ fn cold_cache_downloads_instead_of_building_locally() {
 }
 
 #[test]
-fn source_checkout_cold_cache_downloads_by_default() {
+fn resolve_routes_to_download_when_build_not_requested() {
     let tmp = tempfile::tempdir().unwrap();
     let cache = tmp.path().to_str().unwrap();
     let arch = "aarch64";
