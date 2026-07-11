@@ -4145,8 +4145,13 @@ mod tests {
     #[test]
     fn builder_shell_krun_context_keeps_shell_jobs_nicless() {
         let temp = tempfile::tempdir().expect("tempdir");
+        // On Linux page_aligned_kernel() stats the kernel (macOS short-circuits),
+        // so the file must exist with a page-aligned length or the build errors.
+        let kernel_path = temp.path().join("vmlinux");
+        std::fs::write(&kernel_path, vec![0u8; host_page_size() as usize])
+            .expect("write page-aligned builder kernel");
         let image = BuilderVmImage::Rootfs {
-            kernel_path: temp.path().join("vmlinux"),
+            kernel_path,
             rootfs_path: temp.path().join("rootfs.ext4"),
             cmdline: String::new(),
         };
