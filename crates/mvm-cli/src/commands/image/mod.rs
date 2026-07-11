@@ -1907,6 +1907,24 @@ mod tests {
         unpacked
     }
 
+    fn seed_guest_runtime_cache(cache_root: &Path) {
+        use mvm_build::guest_agent_build::GuestAgentLayout;
+        use mvm_core::arch::GuestArch;
+
+        let guest_layout =
+            GuestAgentLayout::under(cache_root, env!("CARGO_PKG_VERSION"), GuestArch::host());
+        std::fs::create_dir_all(&guest_layout.dir).expect("create guest cache dir");
+        for path in [
+            &guest_layout.oci_init,
+            &guest_layout.agent,
+            &guest_layout.netinit,
+            &guest_layout.egress_client,
+            &guest_layout.entrypoint_runner,
+        ] {
+            std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("seed guest runtime cache");
+        }
+    }
+
     fn fake_runtime_materialize(
         _cache_root: &Path,
         unpacked_root: &Path,
@@ -2233,6 +2251,7 @@ mod tests {
         );
         write_minimal_config(tmp.path());
         create_unpacked_root(tmp.path(), digest);
+        seed_guest_runtime_cache(tmp.path());
 
         let resolved = resolve_or_pull_run_image_with(
             tmp.path(),
@@ -2368,9 +2387,6 @@ mod tests {
     #[cfg(feature = "pure-mkfs")]
     #[test]
     fn resolve_run_image_reseals_cached_rootfs_when_verity_sidecars_are_missing() {
-        use mvm_build::guest_agent_build::GuestAgentLayout;
-        use mvm_core::arch::GuestArch;
-
         let tmp = tempfile::tempdir().expect("tempdir");
         let digest = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
         let mut image = sample_image("docker.io/library/alpine:3.20", digest, "blobs/a");
@@ -2391,18 +2407,7 @@ mod tests {
             .join(sha256_hex(digest).expect("hex digest key"));
         std::fs::create_dir_all(unpacked.join("etc")).expect("create unpacked tree");
         std::fs::write(unpacked.join("etc/hostname"), b"box\n").expect("write unpacked file");
-        let guest_layout =
-            GuestAgentLayout::under(tmp.path(), env!("CARGO_PKG_VERSION"), GuestArch::host());
-        std::fs::create_dir_all(&guest_layout.dir).expect("create guest cache dir");
-        for path in [
-            &guest_layout.oci_init,
-            &guest_layout.agent,
-            &guest_layout.netinit,
-            &guest_layout.egress_client,
-            &guest_layout.entrypoint_runner,
-        ] {
-            std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("seed guest runtime cache");
-        }
+        seed_guest_runtime_cache(tmp.path());
 
         let resolved =
             resolve_or_pull_run_image(tmp.path(), "docker.io/library/alpine:3.20", false)

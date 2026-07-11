@@ -1554,9 +1554,12 @@ fn machine_start_receipt_input_redacts_host_paths_and_surfaces_policy() {
         health_check: None,
     };
 
-    let summary =
-        machine_start_preflight_summary(&spec, None, Some(Path::new("/tmp/web.receipt.json")))
-            .expect("preflight summary");
+    let summary = machine_start_preflight_summary(
+        &spec,
+        Some("libkrun"),
+        Some(Path::new("/tmp/web.receipt.json")),
+    )
+    .expect("preflight summary");
     assert_eq!(
         summary.invocation.network_posture,
         "allow-list:api.example.com:443"
