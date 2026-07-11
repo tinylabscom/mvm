@@ -283,7 +283,7 @@ etherparse = "0.20"
 # terminates guest tunnel flows in this in-process stack and bridges each
 # admitted flow to an ordinary host socket. Pure-Rust, no_std/heapless,
 # upstream-fuzzed; std + IPv4 + TCP only. Consumed only under cfg(macos).
-smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp"] }
+smoltcp = { version = "0.13", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "socket-tcp", "socket-udp"] }
 # Plan 74 W2 — mvm-guest-netinit installs kernel blackhole routes
 # for `MANDATORY_DENY_RANGES` inside every microVM. rtnetlink wraps
 # the AF_NETLINK socket and the RTM_NEWROUTE message construction;

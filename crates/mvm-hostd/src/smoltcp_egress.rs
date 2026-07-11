@@ -2,9 +2,9 @@
 //!
 //! The guest hands the host raw IPv4 packets over the network tunnel. On Linux
 //! admitted packets are injected into a kernel TUN + NAT. macOS has no
-//! unprivileged kernel NAT, so the host instead terminates the guest's TCP
-//! flows in an in-process `smoltcp` stack and bridges each admitted flow to an
-//! ordinary host socket — no root, no utun.
+//! unprivileged kernel NAT, so the host instead terminates the guest's TCP and
+//! UDP flows in an in-process `smoltcp` stack and bridges each admitted flow to
+//! an ordinary host socket — no root, no utun.
 //!
 //! Admission is unchanged: every guest packet is gated by
 //! [`L3ForwardPolicy::decide_packet`] before it reaches the stack, exactly like
@@ -13,14 +13,16 @@
 //! stack's gateway address mirrors the Linux TUN path (`10.240.0.1/30`, guest
 //! `10.240.0.2`).
 //!
-//! Scope: TCP only. DNS already works via the guest `/etc/hosts` injection
-//! (the tunnel hands the guest pin-consistent entries), so no resolver is
-//! needed here. UDP and ICMP are dropped + audited for now — see the
-//! `follow-up:` notes below.
+//! Scope: TCP and UDP forward. TCP terminates each guest flow and splices it to
+//! a host `TcpStream`; UDP bridges each admitted guest 4-tuple to a connected
+//! host `UdpSocket`, reaping idle flows on a timeout (UDP has no close). DNS
+//! already works via the guest `/etc/hosts` injection (the tunnel hands the
+//! guest pin-consistent entries), so no resolver is needed here. ICMP echo is
+//! still dropped — see the `follow-up:` note on `ingest_guest_packet`.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, SocketAddrV4, TcpStream, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,10 +30,10 @@ use std::time::Duration;
 
 use smoltcp::iface::{Config, Interface, SocketHandle, SocketSet};
 use smoltcp::phy::{Device, DeviceCapabilities, Medium, RxToken, TxToken};
-use smoltcp::socket::tcp;
 use smoltcp::socket::tcp::State;
+use smoltcp::socket::{tcp, udp};
 use smoltcp::time::Instant;
-use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, Ipv4Address};
+use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address};
 
 use crate::net_l3::{L3Decision, L3DropReason, L3ForwardPolicy};
 use crate::network_tunnel::{
@@ -41,6 +43,15 @@ use crate::network_tunnel::{
 
 /// IPv4 protocol number for TCP.
 const IP_PROTO_TCP: u8 = 6;
+/// IPv4 protocol number for UDP.
+const IP_PROTO_UDP: u8 = 17;
+/// Upper bound on datagrams moved per UDP socket per service iteration, in each
+/// direction, so one busy flow can't starve the loop.
+const UDP_BATCH_PER_ITER: usize = 64;
+/// Largest UDP payload a host reply buffer holds. Datagrams the host server
+/// sends larger than the tunnel MTU are framed and dropped downstream by the
+/// device (fail closed), so this only bounds the scratch buffer.
+const UDP_DATAGRAM_MAX: usize = 65_507;
 /// Userspace-stack gateway address + prefix, matching the Linux TUN gateway so
 /// the guest sees identical addressing on both host platforms. The guest lives
 /// at `10.240.0.2` inside the same `/30`.
@@ -67,6 +78,13 @@ pub struct EgressConfig {
     pub tcp_rx_buffer_bytes: usize,
     /// Per-flow `smoltcp` transmit-ring size.
     pub tcp_tx_buffer_bytes: usize,
+    /// Per-admitted-port `smoltcp` UDP payload-ring size, each direction.
+    pub udp_buffer_bytes: usize,
+    /// Number of datagram slots in each per-port UDP metadata ring.
+    pub udp_packet_slots: usize,
+    /// A UDP flow with no traffic either way for longer than this is reaped
+    /// (UDP has no close signal, so idle timeout is the only reclaim path).
+    pub udp_idle_timeout: Duration,
     /// Bound on the blocking host `connect()` for a newly admitted flow.
     pub host_connect_timeout: Duration,
     /// Upper bound on how long a loop iteration waits for a guest frame, so the
@@ -82,6 +100,9 @@ impl Default for EgressConfig {
             mtu: 1500,
             tcp_rx_buffer_bytes: 64 * 1024,
             tcp_tx_buffer_bytes: 64 * 1024,
+            udp_buffer_bytes: 64 * 1024,
+            udp_packet_slots: 32,
+            udp_idle_timeout: Duration::from_secs(30),
             host_connect_timeout: Duration::from_secs(10),
             idle_poll_timeout: Duration::from_millis(100),
         }
@@ -196,18 +217,47 @@ struct HostBridge {
     host_to_guest_bytes: u64,
 }
 
-/// Userspace TCP egress stack: terminates admitted guest flows and bridges each
-/// to a host socket.
+/// A guest UDP 4-tuple. The guest source lives behind the tunnel; the host
+/// bridges each distinct tuple to its own connected host socket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct UdpFlowKey {
+    guest: SocketAddrV4,
+    dst: SocketAddrV4,
+}
+
+/// One admitted guest UDP flow bridged to a connected host `UdpSocket`. Unlike
+/// TCP there is no stream — datagrams relay statelessly and the flow is reaped
+/// once idle past the configured timeout.
+struct UdpFlow {
+    socket: UdpSocket,
+    dst: Ipv4Addr,
+    dst_port: u16,
+    /// The guest source endpoint replies are framed back to.
+    guest: IpEndpoint,
+    flow_id: u32,
+    guest_to_host_bytes: u64,
+    host_to_guest_bytes: u64,
+    /// Wall-clock of the last datagram either way; drives idle reaping.
+    last_activity: std::time::Instant,
+}
+
+/// Userspace TCP/UDP egress stack: terminates admitted guest flows and bridges
+/// each to a host socket.
 pub struct SmoltcpEgress {
     gate: L3ForwardPolicy,
     config: EgressConfig,
     device: TunnelDevice,
     iface: Interface,
     sockets: SocketSet<'static>,
-    /// Listening sockets, keyed by handle → the port they listen on.
+    /// Listening TCP sockets, keyed by handle → the port they listen on.
     listeners: HashMap<SocketHandle, u16>,
-    /// Established bridged flows, keyed by their `smoltcp` socket handle.
+    /// Established bridged TCP flows, keyed by their `smoltcp` socket handle.
     flows: HashMap<SocketHandle, HostBridge>,
+    /// One bound `smoltcp` UDP socket per admitted port, keyed by port. These
+    /// persist for the session and demultiplex every guest tuple to that port.
+    udp_ports: HashMap<u16, SocketHandle>,
+    /// Established bridged UDP flows, keyed by the guest 4-tuple.
+    udp_flows: HashMap<UdpFlowKey, UdpFlow>,
     /// Distinct admitted destination ports the stack listens on.
     listen_ports: Vec<u16>,
     next_flow_id: u32,
@@ -264,13 +314,44 @@ impl SmoltcpEgress {
             sockets: SocketSet::new(Vec::new()),
             listeners: HashMap::new(),
             flows: HashMap::new(),
+            udp_ports: HashMap::new(),
+            udp_flows: HashMap::new(),
             listen_ports: ports,
             next_flow_id: 0,
             next_tx_sequence: 0,
             stop: None,
         };
+        egress.open_udp_listeners();
         egress.replenish_listeners();
         Ok(egress)
+    }
+
+    /// Bind one persistent `smoltcp` UDP socket per admitted port. `any_ip`
+    /// accepts the concrete destination; the datagram's `local_address` metadata
+    /// carries which pinned dst the guest targeted, so a single socket per port
+    /// serves every admitted destination on it.
+    fn open_udp_listeners(&mut self) {
+        let ports = self.listen_ports.clone();
+        for port in ports {
+            if self.udp_ports.contains_key(&port) {
+                continue;
+            }
+            let mut socket = udp::Socket::new(
+                udp::PacketBuffer::new(
+                    vec![udp::PacketMetadata::EMPTY; self.config.udp_packet_slots],
+                    vec![0_u8; self.config.udp_buffer_bytes],
+                ),
+                udp::PacketBuffer::new(
+                    vec![udp::PacketMetadata::EMPTY; self.config.udp_packet_slots],
+                    vec![0_u8; self.config.udp_buffer_bytes],
+                ),
+            );
+            if socket.bind(port).is_err() {
+                continue;
+            }
+            let handle = self.sockets.add(socket);
+            self.udp_ports.insert(port, handle);
+        }
     }
 
     /// Attach a shared stop flag; when set, the loop tells the guest to stop and
@@ -351,10 +432,14 @@ impl SmoltcpEgress {
     }
 
     /// Gate one guest packet and, if admitted, hand it to the stack. A denied
-    /// destination is audited and dropped — no socket is opened.
+    /// destination is audited and dropped — no socket is opened. Admitted TCP
+    /// and UDP packets are served by their bound sockets; an admitted ICMP echo
+    /// reaches the stack but no ICMP socket serves it yet, so it is silently
+    /// dropped by `smoltcp`.
     ///
-    /// follow-up: UDP and ICMP to an admitted destination are dropped + audited
-    /// here (TCP-only first slice); they must never be silently forwarded.
+    /// follow-up: relay admitted ICMP echo via an unprivileged host ping socket
+    /// and frame the reply back; until then it must never be silently forwarded
+    /// to an unadmitted destination (the gate already guarantees that here).
     fn ingest_guest_packet<S, A>(
         &mut self,
         worker: &mut HostTunnelWorker<S, A>,
@@ -394,6 +479,7 @@ impl SmoltcpEgress {
     {
         self.promote_accepted_listeners(worker)?;
         self.pump_established_flows(worker)?;
+        self.service_udp_flows(worker)?;
         self.replenish_listeners();
         Ok(())
     }
@@ -455,7 +541,7 @@ impl SmoltcpEgress {
         S: Read + Write + AsRawFd,
         A: TunnelAuditSink,
     {
-        if self.flows.len() >= self.config.max_flows {
+        if self.flows.len() + self.udp_flows.len() >= self.config.max_flows {
             // At the flow cap: reset rather than exceed the bound.
             self.sockets.get_mut::<tcp::Socket>(handle).abort();
             self.sockets.remove(handle);
@@ -541,9 +627,231 @@ impl SmoltcpEgress {
         Ok(())
     }
 
-    /// Ensure each admitted port has one live listener, up to the flow cap.
+    /// Relay UDP both ways and reap idle flows.
+    fn service_udp_flows<S, A>(
+        &mut self,
+        worker: &mut HostTunnelWorker<S, A>,
+    ) -> Result<(), TunnelWorkerError>
+    where
+        S: Read + Write + AsRawFd,
+        A: TunnelAuditSink,
+    {
+        self.pump_udp_guest_to_host(worker)?;
+        self.pump_udp_host_to_guest();
+        self.reap_idle_udp_flows(worker)?;
+        Ok(())
+    }
+
+    /// Drain each per-port UDP socket and relay admitted datagrams out the
+    /// matching connected host socket, opening a flow on the first datagram of a
+    /// tuple. Denied destinations and cap hits are audited and dropped without
+    /// opening a host socket.
+    fn pump_udp_guest_to_host<S, A>(
+        &mut self,
+        worker: &mut HostTunnelWorker<S, A>,
+    ) -> Result<(), TunnelWorkerError>
+    where
+        S: Read + Write + AsRawFd,
+        A: TunnelAuditSink,
+    {
+        let ports: Vec<(u16, SocketHandle)> =
+            self.udp_ports.iter().map(|(&p, &h)| (p, h)).collect();
+        for (port, handle) in ports {
+            // Drain into an owned batch first so the socket borrow is released
+            // before we touch flow state / host sockets.
+            let mut batch: Vec<(IpEndpoint, Ipv4Addr, Vec<u8>)> = Vec::new();
+            {
+                let socket = self.sockets.get_mut::<udp::Socket>(handle);
+                while batch.len() < UDP_BATCH_PER_ITER {
+                    match socket.recv() {
+                        Ok((data, meta)) => {
+                            let Some(dst) = meta.local_address.and_then(ipv4_of) else {
+                                continue;
+                            };
+                            batch.push((meta.endpoint, dst, data.to_vec()));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+            for (guest, dst, data) in batch {
+                self.relay_guest_datagram(worker, port, guest, dst, data)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Gate + relay one guest datagram, creating the flow on first sight.
+    fn relay_guest_datagram<S, A>(
+        &mut self,
+        worker: &mut HostTunnelWorker<S, A>,
+        port: u16,
+        guest: IpEndpoint,
+        dst: Ipv4Addr,
+        data: Vec<u8>,
+    ) -> Result<(), TunnelWorkerError>
+    where
+        S: Read + Write + AsRawFd,
+        A: TunnelAuditSink,
+    {
+        // Per-flow datagram-size cap (fail closed on oversize).
+        if data.len() > self.config.max_flow_buffer_bytes {
+            return worker.record_tunnel_audit(TunnelAuditEvent::UdpFlowDenied {
+                dst,
+                dst_port: port,
+                reason: L3DropReason::PortNotAllowed,
+            });
+        }
+        // Defence in depth: re-gate even though ingest already admitted it.
+        if let L3Decision::Drop(reason) = self.gate.decide(dst, IP_PROTO_UDP, Some(port)) {
+            return worker.record_tunnel_audit(TunnelAuditEvent::UdpFlowDenied {
+                dst,
+                dst_port: port,
+                reason,
+            });
+        }
+        let Some(guest_v4) = ipv4_of(guest.addr) else {
+            return Ok(());
+        };
+        let key = UdpFlowKey {
+            guest: SocketAddrV4::new(guest_v4, guest.port),
+            dst: SocketAddrV4::new(dst, port),
+        };
+        if !self.udp_flows.contains_key(&key) {
+            if self.flows.len() + self.udp_flows.len() >= self.config.max_flows {
+                return worker.record_tunnel_audit(TunnelAuditEvent::UdpFlowDenied {
+                    dst,
+                    dst_port: port,
+                    reason: L3DropReason::PortNotAllowed,
+                });
+            }
+            let socket = match open_host_udp(dst, port) {
+                Ok(socket) => socket,
+                Err(err) => {
+                    // Host unreachable is not a gate denial; record for
+                    // observability and drop the datagram.
+                    tracing::warn!(%dst, dst_port = port, error = %err, "smoltcp egress udp host connect failed");
+                    return Ok(());
+                }
+            };
+            let flow_id = self.next_flow_id;
+            self.next_flow_id = self.next_flow_id.wrapping_add(1);
+            self.udp_flows.insert(
+                key,
+                UdpFlow {
+                    socket,
+                    dst,
+                    dst_port: port,
+                    guest,
+                    flow_id,
+                    guest_to_host_bytes: 0,
+                    host_to_guest_bytes: 0,
+                    last_activity: std::time::Instant::now(),
+                },
+            );
+            worker.record_tunnel_audit(TunnelAuditEvent::UdpFlowOpened {
+                flow_id,
+                dst,
+                dst_port: port,
+            })?;
+        }
+        let flow = self.udp_flows.get_mut(&key).expect("udp flow present");
+        match flow.socket.send(&data) {
+            Ok(n) => {
+                flow.guest_to_host_bytes = flow.guest_to_host_bytes.saturating_add(n as u64);
+                flow.last_activity = std::time::Instant::now();
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(err) => {
+                tracing::warn!(%dst, dst_port = port, error = %err, "smoltcp egress udp host send failed");
+            }
+        }
+        Ok(())
+    }
+
+    /// Read replies off each flow's host socket and frame them back into the
+    /// per-port UDP socket, sourced from the pinned dst so the guest sees the
+    /// reply as coming from where it sent.
+    fn pump_udp_host_to_guest(&mut self) {
+        let mut scratch = vec![0_u8; UDP_DATAGRAM_MAX];
+        let keys: Vec<UdpFlowKey> = self.udp_flows.keys().copied().collect();
+        for key in keys {
+            let Some(&handle) = self.udp_ports.get(&key.dst.port()) else {
+                continue;
+            };
+            let mut replies: Vec<Vec<u8>> = Vec::new();
+            {
+                let flow = self.udp_flows.get_mut(&key).expect("udp flow present");
+                while replies.len() < UDP_BATCH_PER_ITER {
+                    match flow.socket.recv(&mut scratch) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            flow.host_to_guest_bytes =
+                                flow.host_to_guest_bytes.saturating_add(n as u64);
+                            flow.last_activity = std::time::Instant::now();
+                            replies.push(scratch[..n].to_vec());
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(_) => break,
+                    }
+                }
+            }
+            if replies.is_empty() {
+                continue;
+            }
+            let guest = self.udp_flows.get(&key).expect("udp flow present").guest;
+            let dst_addr = IpAddress::Ipv4(*key.dst.ip());
+            let socket = self.sockets.get_mut::<udp::Socket>(handle);
+            for reply in replies {
+                let mut meta = udp::UdpMetadata::from(guest);
+                meta.local_address = Some(dst_addr);
+                // Buffer-full is the only failure and simply drops the reply
+                // (fail closed); the guest retransmits at the app layer.
+                let _ = socket.send_slice(&reply, meta);
+            }
+        }
+    }
+
+    /// Reap UDP flows idle past the configured timeout, auditing each close with
+    /// its relayed byte counts.
+    fn reap_idle_udp_flows<S, A>(
+        &mut self,
+        worker: &mut HostTunnelWorker<S, A>,
+    ) -> Result<(), TunnelWorkerError>
+    where
+        S: Read + Write + AsRawFd,
+        A: TunnelAuditSink,
+    {
+        let now = std::time::Instant::now();
+        let timeout = self.config.udp_idle_timeout;
+        let expired: Vec<UdpFlowKey> = self
+            .udp_flows
+            .iter()
+            .filter(|(_, flow)| now.duration_since(flow.last_activity) >= timeout)
+            .map(|(key, _)| *key)
+            .collect();
+        for key in expired {
+            let flow = self.udp_flows.remove(&key).expect("udp flow present");
+            worker.record_tunnel_audit(TunnelAuditEvent::UdpFlowClosed {
+                flow_id: flow.flow_id,
+                dst: flow.dst,
+                dst_port: flow.dst_port,
+                guest_to_host_bytes: flow.guest_to_host_bytes,
+                host_to_guest_bytes: flow.host_to_guest_bytes,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Ensure each admitted port has one live TCP listener, up to the flow cap.
+    /// The persistent per-port UDP sockets are excluded from the count so they
+    /// never crowd out TCP listeners.
     fn replenish_listeners(&mut self) {
-        let total = self.sockets.iter().count();
+        let total = self
+            .sockets
+            .iter()
+            .count()
+            .saturating_sub(self.udp_ports.len());
         if total >= self.config.max_flows {
             return;
         }
@@ -603,6 +911,15 @@ fn ipv4_of(addr: IpAddress) -> Option<Ipv4Addr> {
         IpAddr::V4(v4) => Some(v4),
         IpAddr::V6(_) => None,
     }
+}
+
+/// Open a nonblocking host UDP socket connected to the admitted destination.
+/// `connect` fixes the peer so stray datagrams from other hosts are rejected.
+fn open_host_udp(dst: Ipv4Addr, dst_port: u16) -> std::io::Result<UdpSocket> {
+    let socket = UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0))?;
+    socket.connect(SocketAddr::new(IpAddr::V4(dst), dst_port))?;
+    socket.set_nonblocking(true)?;
+    Ok(socket)
 }
 
 /// Splice one bridged flow both ways: guest socket ⇄ host stream. Bounded by
@@ -1120,6 +1437,240 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, TunnelAuditEvent::TcpFlowOpened { .. })),
             "no TCP flow may open for a denied destination"
+        );
+    }
+
+    /// End-to-end: a guest smoltcp UDP socket sends a datagram through the host
+    /// `SmoltcpEgress` to a real OS UDP echo server at the pinned destination
+    /// and receives the echoed reply — proving one admitted UDP flow bridged to
+    /// a connected host socket in both directions.
+    #[test]
+    fn admitted_udp_flow_reaches_host_server_and_replies() {
+        const REQUEST: &[u8] = b"udp-ping-over-smoltcp";
+        const RESPONSE: &[u8] = b"udp-pong-from-host";
+
+        // Real OS UDP echo server at the pinned destination.
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let server_port = server_sock.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut buf = [0_u8; 1024];
+            let (n, peer) = server_sock.recv_from(&mut buf).unwrap();
+            assert_eq!(&buf[..n], REQUEST);
+            server_sock.send_to(RESPONSE, peer).unwrap();
+        });
+
+        let gate = gate_for("server.test", server_port, &["127.0.0.1"]);
+        let (guest_raw, host_raw) = UnixStream::pair().unwrap();
+
+        let host_gate = gate.clone();
+        let host = std::thread::spawn(move || {
+            let mut worker = HostTunnelWorker::new(
+                host_raw,
+                NoopTunnelAuditSink,
+                worker_config(host_gate.clone()),
+            )
+            .unwrap();
+            worker.bootstrap(1, 2, 3).unwrap();
+            let mut egress = SmoltcpEgress::new(&host_gate, EgressConfig::default()).unwrap();
+            let outcome = egress.run(&mut worker).unwrap();
+            assert!(matches!(
+                outcome,
+                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
+            ));
+        });
+
+        // Guest: negotiate, then a smoltcp UDP socket that speaks to the pinned
+        // destination over the tunnel.
+        let mut session =
+            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+        session.negotiate(hello(), 1).unwrap();
+        session.recv_network_config().unwrap();
+        session.recv_control().unwrap();
+
+        let mut guest_dev = TunnelDevice::new(1500);
+        let mut gcfg = IfaceConfig::new(HardwareAddress::Ip);
+        gcfg.random_seed = 0xC0FF_EE01;
+        let mut giface = GuestIface::new(gcfg, &mut guest_dev, Instant::now());
+        giface.update_ip_addrs(|addrs| {
+            let _ = addrs.push(WireCidr::new(
+                IpAddress::Ipv4(WireV4::new(10, 240, 0, 2)),
+                30,
+            ));
+        });
+        giface
+            .routes_mut()
+            .add_default_ipv4_route(WireV4::new(10, 240, 0, 1))
+            .unwrap();
+
+        let mut gsockets = GuestSockets::new(Vec::new());
+        let client = gsockets.add(udp::Socket::new(
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0_u8; 16 * 1024]),
+            udp::PacketBuffer::new(vec![udp::PacketMetadata::EMPTY; 8], vec![0_u8; 16 * 1024]),
+        ));
+        gsockets
+            .get_mut::<udp::Socket>(client)
+            .bind(49_152)
+            .unwrap();
+        let dst = IpEndpoint {
+            addr: IpAddress::Ipv4(WireV4::new(127, 0, 0, 1)),
+            port: server_port,
+        };
+
+        let mut sent = false;
+        let mut received = Vec::new();
+        let mut tx_seq = 0_u64;
+        let fd = session.as_raw_fd();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+
+        loop {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "udp flow did not complete"
+            );
+            giface.poll(Instant::now(), &mut guest_dev, &mut gsockets);
+
+            while let Some(pkt) = guest_dev.pop_host_packet() {
+                session.send_packet(0, 0, tx_seq, pkt).unwrap();
+                tx_seq += 1;
+            }
+
+            if poll_readable(fd, 5)
+                && let Ok(frame) = session.recv_packet()
+            {
+                guest_dev.push_guest_packet(frame.payload);
+            }
+
+            let socket = gsockets.get_mut::<udp::Socket>(client);
+            if socket.can_send() && !sent {
+                socket.send_slice(REQUEST, dst).unwrap();
+                sent = true;
+            }
+            while socket.can_recv() {
+                match socket.recv() {
+                    Ok((data, _meta)) => received.extend_from_slice(data),
+                    Err(_) => break,
+                }
+            }
+            if received.len() >= RESPONSE.len() {
+                break;
+            }
+        }
+
+        assert_eq!(received, RESPONSE);
+
+        session
+            .send_control(
+                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
+                0,
+                0,
+                tx_seq,
+            )
+            .unwrap();
+
+        host.join().unwrap();
+        server.join().unwrap();
+    }
+
+    /// A denied (unpinned) UDP destination opens no host socket and is audited
+    /// as a drop, with no `UdpFlowOpened`.
+    #[test]
+    fn denied_udp_destination_opens_no_host_socket() {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone, Default)]
+        struct SharedAudit(Arc<Mutex<Vec<TunnelAuditEvent>>>);
+        impl TunnelAuditSink for SharedAudit {
+            type Error = std::convert::Infallible;
+            fn record(&mut self, event: TunnelAuditEvent) -> Result<(), Self::Error> {
+                self.0.lock().unwrap().push(event);
+                Ok(())
+            }
+        }
+
+        // A UDP server exists, but the gate pins a DIFFERENT address, so the
+        // guest's destination is unadmitted.
+        let server_sock = UdpSocket::bind("127.0.0.1:0").unwrap();
+        server_sock
+            .set_read_timeout(Some(Duration::from_millis(400)))
+            .unwrap();
+        let server_port = server_sock.local_addr().unwrap().port();
+        let never_received = Arc::new(AtomicBool::new(true));
+        let flag = never_received.clone();
+        let server = std::thread::spawn(move || {
+            let mut buf = [0_u8; 1024];
+            let start = std::time::Instant::now();
+            while start.elapsed() < Duration::from_secs(2) {
+                if server_sock.recv_from(&mut buf).is_ok() {
+                    flag.store(false, Ordering::Relaxed);
+                    return;
+                }
+            }
+        });
+
+        // Pin an address the guest will NOT target (guest targets 127.0.0.1).
+        let gate = gate_for("server.test", server_port, &["10.13.13.13"]);
+        let audit = SharedAudit::default();
+        let events = audit.0.clone();
+        let (guest_raw, host_raw) = UnixStream::pair().unwrap();
+
+        let host_gate = gate.clone();
+        let host = std::thread::spawn(move || {
+            let mut worker =
+                HostTunnelWorker::new(host_raw, audit, worker_config(host_gate.clone())).unwrap();
+            worker.bootstrap(1, 2, 3).unwrap();
+            let mut egress = SmoltcpEgress::new(&host_gate, EgressConfig::default()).unwrap();
+            egress.run(&mut worker).unwrap();
+        });
+
+        let mut session =
+            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+        session.negotiate(hello(), 1).unwrap();
+        session.recv_network_config().unwrap();
+        session.recv_control().unwrap();
+
+        // A hand-built IPv4/UDP datagram to the unadmitted destination.
+        let mut dgram = vec![0_u8; 28];
+        dgram[0] = 0x45; // v4, IHL 5
+        dgram[9] = IP_PROTO_UDP;
+        dgram[16..20].copy_from_slice(&Ipv4Addr::new(127, 0, 0, 1).octets());
+        dgram[20..22].copy_from_slice(&49_152_u16.to_be_bytes()); // src port
+        dgram[22..24].copy_from_slice(&server_port.to_be_bytes()); // dst port
+        dgram[24..26].copy_from_slice(&8_u16.to_be_bytes()); // udp length
+        session.send_packet(0, 0, 0, dgram).unwrap();
+
+        std::thread::sleep(Duration::from_millis(200));
+        session
+            .send_control(
+                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
+                0,
+                0,
+                1,
+            )
+            .unwrap();
+
+        host.join().unwrap();
+        server.join().unwrap();
+
+        assert!(
+            never_received.load(Ordering::Relaxed),
+            "no host socket may relay a datagram for a denied destination"
+        );
+        let recorded = events.lock().unwrap();
+        assert!(
+            recorded.iter().any(|e| matches!(
+                e,
+                TunnelAuditEvent::PacketL3Dropped {
+                    reason: L3DropReason::UnpinnedDst,
+                    ..
+                }
+            )),
+            "a denied UDP destination must be audited as an L3 drop"
+        );
+        assert!(
+            !recorded
+                .iter()
+                .any(|e| matches!(e, TunnelAuditEvent::UdpFlowOpened { .. })),
+            "no UDP flow may open for a denied destination"
         );
     }
 }
