@@ -33,6 +33,17 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
     // locally (a source checkout never downloads mvm-release artifacts).
     // Cache-gated, so it is a fast no-op when the image is already present.
     super::dev_vz::bootstrap_builder_vm_image()?;
+    // Also pre-acquire the dev-shell image so the first `mvmctl dev up` doesn't
+    // pay a download/build on the hot path. Non-fatal + cache-gated, mirroring
+    // the builder-image prefetch above.
+    if dev_image_prefetch_enabled(std::env::var("MVM_SKIP_DEV_IMAGE_PREFETCH").ok().as_deref()) {
+        match super::dev_vz::ensure_dev_image() {
+            Ok(_) => ui::success("Dev image ready."),
+            Err(e) => ui::warn(&format!(
+                "dev-image prefetch failed ({e}); the first 'dev up' will fetch it. Skip with MVM_SKIP_DEV_IMAGE_PREFETCH=1."
+            )),
+        }
+    }
     ui::success("\nBootstrap complete! Run 'mvmctl dev' to enter the development environment.");
     Ok(())
 }
@@ -55,4 +66,23 @@ pub(super) fn run_steps(production: bool) -> Result<()> {
     // setup path.
     run_setup_steps(false, 8, 16)?;
     Ok(())
+}
+
+/// Whether to prefetch the dev-shell image during bootstrap. On by default so
+/// the first `dev up` is instant; opt out with `MVM_SKIP_DEV_IMAGE_PREFETCH=1`
+/// (bandwidth-limited or headless installs).
+fn dev_image_prefetch_enabled(skip_env: Option<&str>) -> bool {
+    !matches!(skip_env, Some("1"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::dev_image_prefetch_enabled;
+
+    #[test]
+    fn dev_image_prefetch_on_by_default_off_with_flag() {
+        assert!(dev_image_prefetch_enabled(None));
+        assert!(dev_image_prefetch_enabled(Some("0")));
+        assert!(!dev_image_prefetch_enabled(Some("1")));
+    }
 }

@@ -1,12 +1,12 @@
 //! `mvmctl prepare` — report whether the host default runtime pack is ready
 //! for instant launch, and why not when it isn't.
 //!
-//! Scope is deliberately narrow: only the host default runtime pack cache is
-//! diagnosed here (the same cache `machine run`'s default launch path
-//! consults). An arbitrary `mvmctl prepare <image-or-flake>` that resolves,
-//! downloads, and builds a pack on demand needs the content-addressed pack
-//! download cache and a builder-side prepare path, neither of which exists
-//! yet — so this command takes no positional input.
+//! Scope is deliberately narrow and read-only: only the host default runtime
+//! pack cache is diagnosed here (the same cache `machine run`'s default launch
+//! path consults). Acquiring packs — resolve, download, verify, activate — is a
+//! separate, side-effecting concern that lives in `mvmctl pack download`/`update`
+//! (over the content-addressed pack cache) and the install-time `mvmctl bootstrap`
+//! prefetch; this command only reports readiness and takes no positional input.
 
 use anyhow::Result;
 use clap::Args as ClapArgs;
