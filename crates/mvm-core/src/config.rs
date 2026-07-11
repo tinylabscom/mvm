@@ -455,7 +455,13 @@ pub fn vsock_socket_filename(port: u32) -> String {
 /// resolver (the console transport, the dev-VM connect path) must use them
 /// so they cannot drift.
 pub fn vm_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
-    vm_state_dir(name).join(vsock_socket_filename(port))
+    vm_vsock_port_socket_at(&vm_state_dir(name), port)
+}
+
+/// Same as [`vm_vsock_port_socket`] when the caller already has the per-VM
+/// state dir and only needs the port-specific socket path.
+pub fn vm_vsock_port_socket_at(state_dir: &std::path::Path, port: u32) -> std::path::PathBuf {
+    state_dir.join(vsock_socket_filename(port))
 }
 
 /// The Apple-Container cross-process vsock proxy socket:
@@ -1031,6 +1037,10 @@ mod tests {
         // so they cannot drift again.
         assert_eq!(
             vm_state_dir("foo").join(vsock_socket_filename(5252)),
+            vm_vsock_port_socket("foo", 5252)
+        );
+        assert_eq!(
+            vm_vsock_port_socket_at(&vm_state_dir("foo"), 5252),
             vm_vsock_port_socket("foo", 5252)
         );
         // The hvf VMM's substitution-endpoint socket sits at the state-dir

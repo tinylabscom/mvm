@@ -25,11 +25,18 @@ pub(crate) fn aux_helper_specs(
     if skip {
         return Vec::new();
     }
-    let mut specs = vec![AuxHelperSpec {
-        package: "mvm-hostd",
-        bin: "mvm-substitution-endpoint",
-        features: &[],
-    }];
+    let mut specs = vec![
+        AuxHelperSpec {
+            package: "mvm-hostd",
+            bin: "mvm-substitution-endpoint",
+            features: &[],
+        },
+        AuxHelperSpec {
+            package: "mvm-hostd",
+            bin: "mvm-network-tunnel-worker",
+            features: &[],
+        },
+    ];
     if target_os == "macos" && target_arch == "aarch64" {
         specs.push(AuxHelperSpec {
             package: "mvm-vm-host",
@@ -53,4 +60,31 @@ pub(crate) fn aux_helper_specs(
 /// explicit escape hatch skips them.
 pub(crate) fn should_skip_aux_helpers(skip_env: Option<&str>) -> bool {
     matches!(skip_env, Some("1"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hostd_helpers_include_substitution_endpoint_and_tunnel_worker() {
+        let specs = aux_helper_specs("macos", "aarch64", false, false);
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.bin == "mvm-substitution-endpoint")
+        );
+        assert!(
+            specs
+                .iter()
+                .any(|spec| spec.bin == "mvm-network-tunnel-worker")
+        );
+    }
+
+    #[test]
+    fn skip_flag_disables_every_aux_helper() {
+        assert!(aux_helper_specs("macos", "aarch64", true, true).is_empty());
+        assert!(should_skip_aux_helpers(Some("1")));
+        assert!(!should_skip_aux_helpers(None));
+    }
 }

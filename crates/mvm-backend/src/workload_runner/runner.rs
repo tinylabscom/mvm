@@ -19,13 +19,17 @@ use mvm_core::vm_backend::{
 
 use crate::driver::{RunningVm, VmmDriver};
 use crate::egress_shared::decode_plan_secrets_from_state;
+use crate::network_tunnel_spawn::{
+    NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
+    spawn_network_tunnel_worker_if_configured,
+};
 use crate::substitution_spawn::{
     EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
     spawn_substitution_endpoint,
 };
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::spec_map::{
-    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, workload_spec,
+    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, network_tunnel_socket, workload_spec,
 };
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
@@ -88,20 +92,22 @@ pub struct WorkloadLaunchInputs<'a> {
 struct StandingSockets {
     agent: PathBuf,
     exit: PathBuf,
+    network_tunnel: Option<(u32, PathBuf)>,
     console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
     console_data: Vec<(u32, PathBuf)>,
 }
 
-fn standing_sockets(state_dir: &Path, dev_console: bool) -> StandingSockets {
+fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets {
     StandingSockets {
         // Single source of truth shared with the host-side resolver so the
         // guest agent bridge can't drift out of the host's reach.
         agent: mvm_core::config::vm_inhouse_agent_socket_at(state_dir),
         exit: state_dir.join("workload.exit"),
+        network_tunnel: network_tunnel_socket(state_dir, config),
         console_log: state_dir.join("console.log"),
-        console_data: console_data_sockets(state_dir, dev_console),
+        console_data: console_data_sockets(state_dir, config.dev_console),
     }
 }
 
@@ -128,6 +134,19 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
         // A secret-free workload speaks raw TCP; a secret-bearing one speaks the
         // WireRequest substitution protocol so the real secret never enters the guest.
         let raw_egress = inputs.secrets.is_empty();
+        let mut tunnel_guard =
+            spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
+                state_dir: &state_dir,
+                runtime_config: inputs.config.network_tunnel.as_ref(),
+                listener: inputs.config.network_tunnel.as_ref().map(|tunnel| {
+                    NetworkTunnelListener::Uds(mvm_core::config::vm_vsock_port_socket_at(
+                        &state_dir,
+                        tunnel.guest_port,
+                    ))
+                }),
+                network_policy: Some(&inputs.config.network_policy),
+                vm_name: &inputs.config.name,
+            })?;
 
         let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {
             vm_name: &inputs.config.name,
@@ -139,20 +158,23 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
             raw_egress,
         })?;
 
-        let socks = standing_sockets(&state_dir, inputs.config.dev_console);
+        let socks = standing_sockets(&state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
             sockets: WorkloadSockets {
                 agent: &socks.agent,
                 egress_gateway: &egress_uds,
                 exit: &socks.exit,
+                network_tunnel: socks.network_tunnel,
                 console_data: socks.console_data,
             },
             cmdline: inputs.cmdline.clone(),
             console_log: socks.console_log,
         });
 
-        self.driver.boot(&spec)
+        let vm = self.driver.boot(&spec)?;
+        tunnel_guard.defuse();
+        Ok(vm)
     }
 }
 
@@ -215,6 +237,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
         // decrypted-secret process can't outlive the guest. Idempotent + a no-op
         // when the VM spawned none.
         reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
+        reap_network_tunnel_worker(&vm_state_dir(&id.0));
         self.driver.attach(id)?.kill()
     }
 

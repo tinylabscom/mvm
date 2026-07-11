@@ -60,6 +60,85 @@ plan 25 sequences the work into six independently-shippable workstreams.
       bindings crate. Validation: `cargo fmt --all`; `cargo check --workspace`;
       `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test
       --workspace`.
+- [x] 2026-07-10 Plan 236 Phase 2A runtime-owned tunnel worker subprocess:
+      the shared packet-tunnel port is now backed by a real per-VM host helper
+      instead of just launch-time socket plumbing. `mvm-network-tunnel-worker`
+      binds either the per-VM UDS or a host AF_VSOCK listener, reuses the
+      shared `HELLO` / `HELLO_ACK` / `CONFIG` bootstrap plus
+      `HostTunnelWorker`, appends JSONL audit events, and exits with the VM
+      via backend-owned spawn/reap. `mvm-backend` now derives the first
+      host-authored `mvm-net0` config plus an initial bounded `CREDIT` grant,
+      selects the listener transport per-backend, spawns the worker fail-closed when
+      `VmStartConfig.network_tunnel` is present, and reaps it from the HVF
+      workload runner, the libkrun stop path, and the Firecracker stop path.
+      Firecracker also now carries the shared tunnel config in
+      `FlakeRunConfig`, appends the shared `mvm.network_tunnel=` cmdline token,
+      and starts the same worker on a host AF_VSOCK listener for the configured
+      guest port. Validation:
+      `cargo fmt --all`; `cargo test -p mvm-core network_tunnel --lib -- --test-threads=1`;
+      `cargo test -p mvm-guest network_tunnel --lib -- --test-threads=1`;
+      `cargo test -p mvm-hostd network_tunnel --lib -- --test-threads=1`;
+      `cargo test -p mvm-backend network_tunnel_spawn --lib -- --test-threads=1`;
+      `cargo test -p mvm-backend network_tunnel_cmdline_token_round_trips_shared_config --lib -- --test-threads=1`;
+      `cargo clippy -p mvm-core --all-targets -- -D warnings`;
+      `cargo clippy -p mvm-guest --all-targets -- -D warnings`;
+      `cargo clippy -p mvm-hostd --all-targets -- -D warnings`;
+      `cargo clippy -p mvm-backend --all-targets -- -D warnings`;
+      `cargo clippy -p mvm-cli --all-targets -- -D warnings`.
+- [x] 2026-07-10 Plan 236 Phase 2A guest tunnel runtime tightening:
+      tunnel-enabled boots no longer try to bring up legacy `eth0`, and the
+      guest packet loop now treats host control frames as control frames rather
+      than packet corruption. `mvm-guest-netinit` detects the shared
+      `mvm.network_tunnel=` cmdline token and skips the old `eth0` bring-up on
+      the raw tunnel path, while `mvm_guest::network_tunnel` now ignores
+      host `HEARTBEAT` frames, exits cleanly on host `SHUTDOWN` instead of
+      failing with a packet-frame decode error, and keeps one pending guest
+      packet instead of draining the TUN indefinitely once send credit is
+      exhausted. A later host `CREDIT` update replenishes that bounded budget
+      and lets the pending packet flush without any semantic TCP/DNS/UDP
+      flow translation. Validation:
+      `cargo fmt --all`; `cargo test -p mvm-guest network_tunnel --lib -- --test-threads=1`;
+      `cargo clippy -p mvm-guest --all-targets -- -D warnings`.
+- [x] 2026-07-10 Plan 236 Phase 2A host default-deny tunnel worker: `mvm_hostd::network_tunnel::HostTunnelWorker` now owns the first host-side runtime loop for the shared packet-tunnel contract. It accepts the validated shared bootstrap, counts guest packets/bytes, applies explicit host-owned `DropAll` policy, records bootstrap/drop/close audit events, and fails closed with shared `ERROR` + `SHUTDOWN` frames on quota exhaustion instead of leaving the host path as an inert socket placeholder. Verified with `cargo test -p mvm-hostd network_tunnel --lib -- --test-threads=1` and `cargo clippy -p mvm-hostd --all-targets -- -D warnings`.
+- [x] 2026-07-10 Plan 236 Phase 2A host TUN packet-device seam:
+      `mvm-hostd` now has a dedicated host-owned `/dev/net/tun` helper rather
+      than leaving future L3 forwarding to backend-specific launcher code.
+      `mvm_hostd::host_tun::HostTunDevice` validates interface names before
+      any syscall, binds a named Linux TUN with the target ioctl type, and
+      exposes blocking packet read/write plus raw-fd access for later admitted
+      forwarders. This keeps the host packet-device boundary reusable across
+      HVF, libkrun, Firecracker, and later WHP instead of duplicating TUN
+      open/bind logic per backend. Verified with `cargo test -p mvm-hostd
+      host_tun --lib -- --test-threads=1` and `cargo clippy -p mvm-hostd
+      --all-targets -- -D warnings`.
+- [x] 2026-07-10 Plan 236 Phase 2A pluggable host packet-path worker seam:
+      `mvm_hostd::network_tunnel::HostTunnelWorker` no longer hard-codes
+      "drop packets or nothing". It now supports a pluggable host packet path
+      while preserving the shared bootstrap, quotas, audit trail, and
+      fail-closed control behavior. The default `run_until_shutdown()` path is
+      still explicit `DropAll`, but `run_until_shutdown_with_packet_path()`
+      now lets a later admitted forwarder reuse the same host-owned worker
+      loop. `HostTunPacketPath<D>` is the first concrete adapter: it writes
+      guest packets into a host-owned TUN device, records forwarded-packet
+      audit/stats, and treats short writes or device errors as explicit host
+      failures (`ERROR internal` + `SHUTDOWN host_error`) instead of silent
+      truncation. Verified with `cargo test -p mvm-core network_tunnel --lib
+      -- --test-threads=1`; `cargo test -p mvm-hostd network_tunnel --lib --
+      --test-threads=1`; `cargo test -p mvm-guest network_tunnel --lib --
+      --test-threads=1`; `cargo clippy -p mvm-core --all-targets -- -D warnings`;
+      and `cargo clippy -p mvm-hostd --all-targets -- -D warnings`.
+- [x] 2026-07-10 Plan 236 Phase 2A host bidirectional TUN relay loop:
+      `mvm_hostd::network_tunnel::HostTunnelWorker` now has the first real
+      host-side poll loop that watches both the guest tunnel session fd and a
+      host-owned packet device fd. `run_blocking_tun_relay_loop()` reuses the
+      same bootstrap, quotas, audit, and explicit shutdown behavior while
+      relaying packets in both directions through `HostTunPacketPath`. That
+      gives the architecture its first concrete host→guest return-path
+      substrate without reintroducing a guest NIC, bridge, or semantic DNS/TCP
+      flow translation. Verified with `cargo fmt --all`; `cargo test -p
+      mvm-core network_tunnel --lib -- --test-threads=1`; `cargo test -p
+      mvm-hostd network_tunnel --lib -- --test-threads=1`; and `cargo clippy
+      -p mvm-hostd --all-targets -- -D warnings`.
 - [x] 2026-07-10 libkrun supervisor source-checkout stale-helper guard:
       source-checkout `target/<profile>/mvmctl` now refuses to fall through to
       an arbitrary `mvm-libkrun-supervisor` on `$PATH` when no same-checkout
@@ -635,6 +714,12 @@ plan 25 sequences the work into six independently-shippable workstreams.
       agent-verb grant delivery, and vsock-only egress cutover. It also marks
       the broad transparent-network branch as exploratory input rather than the
       default architecture line.
+- [x] Reviewed the `vsock-transparent-net-return-path` worktree on 2026-07-10
+      and folded the design conclusion back into Plan 236. The review
+      reinforces the current raw L3 tunnel direction rather than changing it:
+      reuse bounded pump loops, strict size limits, and fail-closed relay
+      behavior, but do not import the semantic DNS/TCP/UDP protocol or the
+      host/guest return-path packet-synthesis model into the Phase 2 baseline.
 - [x] Refreshed the Plan 236 execution line on 2026-07-10 after `main` moved.
       The GO checker now compares against `origin/main` when available and
       treats the merged Plan 219 refresh (`#1605`) and merged port-handler
@@ -648,6 +733,119 @@ plan 25 sequences the work into six independently-shippable workstreams.
       refresh" as GO rather than requiring an artificial ahead-of-main delta.
       Plan 236's remaining blockers are therefore the honest live-proof and
       production-evidence gaps, not stale branch hygiene.
+- [x] Started the shared cross-backend tunnel contract for Plan 236 Phase 2A in
+      `mvm_core::protocol::network_tunnel`. The new core seam now pins a
+      bounded whole-frame format for the guest-TUN ↔ host-worker path, typed
+      control payloads (`HELLO`, `HELLO_ACK`, `CONFIG`, `CREDIT`,
+      `HEARTBEAT`, `ERROR`, `SHUTDOWN`), session-bound identity fields
+      (`tenant_id`, `vm_id`, `boot_id`, `session_nonce`), and fail-closed
+      config/payload validation. The design is intentionally backend-agnostic:
+      it does not assume HVF-only transport behavior and is meant to be reused
+      by Firecracker, libkrun, HVF, and future backends that implement the
+      same host-authority vsock/UDS data plane. Validation for this slice is
+      green with `cargo test -p mvm-core network_tunnel --lib` and
+      `cargo clippy -p mvm-core --all-targets -- -D warnings`.
+- [x] Added the guest-side blocking tunnel-session helper for Plan 236 Phase 2A
+      in `mvm_guest::network_tunnel`. It reuses the existing guest→host
+      AF_VSOCK dial path, negotiates the shared `HELLO` / `HELLO_ACK`, and
+      exchanges typed control frames plus packet frames on the shared
+      fail-closed contract. This is still transport plumbing, not the final TUN
+      agent, but it gives Firecracker, libkrun, HVF, and future backends one
+      guest-side session abstraction instead of another backend-shaped framing
+      fork. Validation for this slice is green with
+      `cargo test -p mvm-guest network_tunnel --lib` and
+      `cargo clippy -p mvm-guest --all-targets -- -D warnings`.
+- [x] Added the host-side blocking tunnel-session helper for Plan 236 Phase 2A
+      in `mvm_hostd::network_tunnel`. It validates the first guest `HELLO`
+      against host-owned VM/session identity, emits the matching `HELLO_ACK`,
+      and reuses the same fail-closed control/packet framing for both session
+      negotiation and later backend packet pumps. That keeps the backend
+      adapters thin and backend-agnostic: Firecracker, libkrun, HVF, and
+      future backends such as WHP can all share the same host-side identity
+      gate instead of reimplementing it. Validation for this slice is green
+      with `cargo test -p mvm-hostd network_tunnel --lib` and
+      `cargo clippy -p mvm-hostd --all-targets -- -D warnings`.
+- [x] Threaded explicit launch-time tunnel config through the shared runtime
+      path for Plan 236 Phase 2A. The shared contract now exposes
+      `TunnelSessionConfig` / `TunnelRuntimeConfig`, `VmStartConfig` carries
+      the optional tunnel runtime carrier, the workload-role standing-vsock map
+      can expose that guest-dials tunnel socket without backend-specific
+      re-derivation, and `mvm_hostd::network_tunnel` can derive
+      `ExpectedTunnelSession` from the same shared session config. This is
+      still plumbing rather than the live packet pump, but it removes another
+      backend-specific integration seam ahead of Firecracker/HVF/libkrun
+      worker wiring. Validation for this slice is green with
+      `cargo test -p mvm-core network_tunnel --lib`,
+      `cargo test -p mvm-backend workload_runner::spec_map --lib`,
+      `cargo test -p mvm-hostd network_tunnel --lib`, and
+      `cargo clippy -p mvm-core -p mvm-backend -p mvm-hostd -p mvm-guest --all-targets -- -D warnings`.
+- [x] Extended that Phase 2A tunnel runtime carrier through the sealed-boot
+      cmdline handoff and guest bootstrap. `mvm_core::vm_backend` now exposes
+      `mvm.network_tunnel=<hex(JSON)>` encode/decode helpers, the HVF and
+      libkrun workload cmdline builders emit that token when the optional tunnel
+      runtime config is present, and `mvm_guest::network_tunnel` can recover
+      the runtime config from `/proc/cmdline` and build the validated guest
+      `HELLO` for the shared handshake. This still stops short of the live TUN
+      pump, but it removes another per-backend metadata gap before the guest
+      network agent lands. Validation for this slice is green with
+      `cargo test -p mvm-core encode_network_tunnel_cmdline --lib`,
+      `cargo test -p mvm-guest network_tunnel --lib`,
+      `cargo test -p mvm-backend hvf_workload_cmdline_appends_network_tunnel_token_when_configured --lib`,
+      `cargo test -p mvm-backend build_supervisor_config_appends_network_tunnel_cmdline_token --lib`, and
+      `cargo clippy -p mvm-core -p mvm-guest -p mvm-backend --all-targets -- -D warnings`.
+- [x] Added the first guest-side tunnel network-config application helper for
+      Plan 236 Phase 2A. `mvm_guest::network_tunnel` can now receive the host
+      `CONFIG` frame as a typed `TunnelNetworkConfig`, and `mvm_guest::guest_net`
+      now exposes one Linux-only `configure_tunnel_guest_network` entry point
+      that reuses the existing ioctl-based guest bring-up path for MTU, static
+      IPv4, route, and resolver staging. This still stops short of the live
+      TUN packet pump, but it moves the shared contract into concrete guest
+      runtime behavior without introducing a Firecracker-only path. Focused
+      validation is green with `cargo test -p mvm-guest guest_net --lib`,
+      `cargo test -p mvm-guest network_tunnel --lib`, and
+      `cargo clippy -p mvm-guest --all-targets -- -D warnings`.
+- [x] Extended that Phase 2A tunnel wiring into the first full shared bootstrap
+      exchange. `mvm_guest::network_tunnel` now exposes
+      `bootstrap_over_stream` / `bootstrap_from_cmdline` to complete
+      `HELLO` / `HELLO_ACK` / `CONFIG` and retain the live session plus
+      host-authored guest config, while `mvm_hostd::network_tunnel` now exposes
+      `send_network_config` / `accept_bootstrap` so backend adapters can reuse
+      one host-owned bootstrap sequence. This is still before the live TUN
+      packet pump, but it means Firecracker, HVF, libkrun, and future backends
+      such as WHP can all share the same bootstrap control flow instead of
+      inventing backend-specific `CONFIG` delivery. Focused validation is green
+      with `cargo test -p mvm-guest network_tunnel --lib`,
+      `cargo test -p mvm-hostd network_tunnel --lib`, and
+      `cargo clippy -p mvm-guest -p mvm-hostd --all-targets -- -D warnings`.
+- [x] Added the first guest-side TUN abstraction for Plan 236 Phase 2A.
+      `mvm_guest::guest_tun` can now open `/dev/net/tun`, bind the
+      host-authored interface name with `TUNSETIFF`, and exchange raw packets
+      via blocking `Read` / `Write`, while
+      `mvm_guest::network_tunnel::BootstrappedGuestTunnel::prepare_tun_device`
+      ties that device open to the shared `CONFIG`-application step. This is
+      still before the live packet pump, but it is the first real guest data
+      plane primitive for the backend-agnostic vsock-only tunnel path. Focused
+      validation is green with `cargo test -p mvm-guest guest_tun --lib`,
+      `cargo test -p mvm-guest network_tunnel --lib`, and
+      `cargo clippy -p mvm-guest --all-targets -- -D warnings`.
+- [x] Added the first bounded guest packet-relay helpers for Plan 236 Phase 2A.
+      `mvm_guest::network_tunnel::BootstrappedGuestTunnel` can now pump one
+      packet from the guest TUN into the tunnel session and one packet from the
+      tunnel session back into the guest TUN, reusing a generic packet-device
+      trait so the logic is testable without a real `/dev/net/tun`. Both
+      directions enforce the negotiated frame size and fail closed on oversize
+      payloads or short writes instead of silently truncating traffic. Focused
+      validation is green with `cargo test -p mvm-guest network_tunnel --lib`
+      and `cargo clippy -p mvm-guest --all-targets -- -D warnings`.
+- [x] Added the first blocking guest tunnel pump-loop substrate for Plan 236
+      Phase 2A. `mvm_guest::network_tunnel::BootstrappedGuestTunnel` now has a
+      testable `pump_ready` tick plus a Linux-only `run_blocking_packet_loop`
+      that polls the guest TUN fd and tunnel session fd together. This is still
+      not wired into a booted guest worker, but it is the first real runtime
+      loop model for the raw L3 tunnel path and keeps the design aligned with
+      bounded readiness-driven pumping rather than semantic flow synthesis.
+      Focused validation is green with `cargo test -p mvm-guest network_tunnel --lib`
+      and `cargo clippy -p mvm-guest --all-targets -- -D warnings`.
 - [x] Started
       [`plans/213-attested-fast-first-boot-packs.md`](plans/213-attested-fast-first-boot-packs.md)
       Workstream A: `mvm_core::packs` now defines strict typed manifests for

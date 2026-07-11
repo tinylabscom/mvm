@@ -8,6 +8,7 @@ pub mod host_audit;
 pub mod host_cost;
 pub mod host_signer;
 pub mod host_time;
+pub mod network_tunnel;
 #[allow(clippy::module_inception)]
 pub mod protocol;
 pub mod routing;
