@@ -38,7 +38,12 @@ resume envelope against its own embedded key — fixed by verifying against the
 boot-pinned host-signer anchor with a shared verification core (closes the
 self-forgery bypass). Remaining honest blockers: baking the sealed-image
 verb-trust policy needs a production/verity OCI seal path that does not exist
-yet (dev-only today); the macOS live-proof of vsock-only enforcement awaits the
+yet, and the first Phase 2C CI/lint expansion also landed:
+`xtask check-vsock-only-egress` now guards the raw host-authority tunnel files
+(`network_tunnel_spawn`, guest tunnel/TUN code, and host tunnel/TUN code) in
+addition to the older vmm/HVF NIC-free path, so those converged runtime seams
+fail closed if a future change reintroduces `virtio-net`, `passt`, `gvproxy`,
+or similar guest-network/helper tokens there. The macOS live-proof of vsock-only enforcement awaits the
 workload-kernel checksum manifest; and binding restore-time authority to a
 per-VM identity (cross-VM replay of a genuinely host-signed grant) is a tracked
 follow-up.
