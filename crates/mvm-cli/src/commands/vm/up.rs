@@ -1481,6 +1481,38 @@ pub(super) fn resolve_pinned_kernel(
     arch: &str,
     source_checkout: bool,
 ) -> anyhow::Result<String> {
+    resolve_pinned_kernel_with(cache_dir, arch, source_checkout, download_published_kernel)
+}
+
+#[cfg(feature = "builder-vm")]
+fn download_published_kernel(
+    arch: &str,
+    variant: &str,
+    dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    crate::update::download_kernel(arch, variant, dest)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn download_published_kernel(
+    _arch: &str,
+    _variant: &str,
+    _dest: &std::path::Path,
+) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "kernel-pin: downloading published workload kernels requires mvm-cli's builder-vm feature"
+    )
+}
+
+fn resolve_pinned_kernel_with<F>(
+    cache_dir: &std::path::Path,
+    arch: &str,
+    source_checkout: bool,
+    download_kernel: F,
+) -> anyhow::Result<String>
+where
+    F: Fn(&str, &str, &std::path::Path) -> anyhow::Result<()>,
+{
     use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
     match resolve_kernel(cache_dir, arch, "workload", source_checkout) {
         KernelResolution::Cached(p) => Ok(p.display().to_string()),
@@ -1491,11 +1523,13 @@ pub(super) fn resolve_pinned_kernel(
                 p.display()
             )
         }
-        KernelResolution::NeedsFetch(_) => {
-            anyhow::bail!(
-                "kernel-pin: fetching pre-built workload kernels is not yet supported on \
-                 installed binaries; build from source or omit --kernel-pin"
-            )
+        KernelResolution::NeedsFetch(p) => {
+            download_kernel(arch, "workload", &p).map_err(|err| {
+                anyhow::anyhow!(
+                    "kernel-pin: downloading the published workload kernel for {arch} failed: {err:#}"
+                )
+            })?;
+            Ok(p.display().to_string())
         }
     }
 }
@@ -1784,13 +1818,38 @@ mod resolve_pinned_kernel_tests {
     }
 
     #[test]
-    fn installed_binary_without_cache_returns_err_about_fetch_not_supported() {
+    fn installed_binary_without_cache_fetches_the_published_kernel() {
         let tmp = tempfile::tempdir().unwrap();
-        let err = resolve_pinned_kernel(tmp.path(), "x86_64", false).unwrap_err();
+        let result =
+            resolve_pinned_kernel_with(tmp.path(), "x86_64", false, |arch, variant, dest| {
+                assert_eq!(arch, "x86_64");
+                assert_eq!(variant, "workload");
+                std::fs::create_dir_all(dest.parent().expect("cache parent")).unwrap();
+                std::fs::write(dest, b"downloaded-vmlinux").unwrap();
+                Ok(())
+            })
+            .unwrap();
+        let expected =
+            mvm_build::kernel_fetch::cached_kernel_path(tmp.path(), "x86_64", "workload");
+        assert_eq!(result, expected.display().to_string());
+        assert_eq!(std::fs::read(expected).unwrap(), b"downloaded-vmlinux");
+    }
+
+    #[test]
+    fn installed_binary_without_cache_surfaces_download_failures() {
+        let tmp = tempfile::tempdir().unwrap();
+        let err = resolve_pinned_kernel_with(tmp.path(), "x86_64", false, |_, _, _| {
+            anyhow::bail!("simulated download failure")
+        })
+        .unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("not yet supported"),
-            "expected fetch-unsupported note in: {msg}"
+            msg.contains("kernel-pin:"),
+            "expected kernel-pin context in: {msg}"
+        );
+        assert!(
+            msg.contains("simulated download failure"),
+            "expected download failure detail in: {msg}"
         );
     }
 }
