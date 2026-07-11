@@ -45,6 +45,9 @@ pub(in crate::commands) enum BenchAction {
     MicrovmLaunch(MicrovmLaunchArgs),
     /// Measure held-live runtime-microvm supervisor/VMM footprint.
     MicrovmDensity(MicrovmDensityArgs),
+    /// Measure first-use cost: the in-guest build wall-clock for a
+    /// representative flake build inside the builder VM.
+    FirstUse(FirstUseArgs),
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -119,6 +122,25 @@ pub(in crate::commands) struct MicrovmDensityArgs {
     /// Maximum tolerated regression (percent) when `--baseline` is set.
     #[arg(long, default_value_t = 10.0)]
     pub max_regression_pct: f64,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct FirstUseArgs {
+    /// Number of measured first-use build runs.
+    #[arg(long, default_value_t = 5)]
+    pub runs: u32,
+    /// Flake to build in the builder VM for each measured run.
+    /// Defaults to the in-repo dev-shell flake used by `mvmctl dev up`.
+    #[arg(long)]
+    pub flake: Option<PathBuf>,
+    /// Also print the JSON report to stdout.
+    #[arg(long)]
+    pub json: bool,
+    /// Write the JSON report here. Default:
+    /// `~/.mvm/bench/first-use-<rfc3339>.json` plus a stable
+    /// `first-use-latest.json` copy.
+    #[arg(long)]
+    pub out: Option<PathBuf>,
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -1225,7 +1247,31 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     match args.action {
         BenchAction::MicrovmLaunch(a) => run_microvm_launch(a),
         BenchAction::MicrovmDensity(a) => run_microvm_density(a),
+        BenchAction::FirstUse(a) => run_first_use(a),
     }
+}
+
+fn run_first_use(args: FirstUseArgs) -> Result<()> {
+    // The pure substrate this command reports through —
+    // `bench_first_use::build_ms_from_boot_timings` (parse) and
+    // `summarize_build_samples` (aggregate, via this module's
+    // `summarize`/`percentile`) — is complete and unit-tested. What's
+    // missing is the live probe that boots a builder VM, runs a real
+    // flake build, and produces the `boot-timings.json` samples that
+    // feed it. Fail honestly rather than fabricate a number.
+    let _ = (&args.json, &args.out);
+    bail!(
+        "bench first-use: no live builder-VM probe is wired yet, so \
+         {} requested run(s){} cannot be measured. The measurement \
+         substrate (build_ms parsing + aggregation into PhaseStats) is \
+         complete and unit-tested; only the live probe that drives a \
+         real builder-VM build remains.",
+        args.runs,
+        args.flake
+            .as_ref()
+            .map(|f| format!(" against flake {}", f.display()))
+            .unwrap_or_default()
+    )
 }
 
 fn default_report_path(kind: &str, stamp: &str) -> PathBuf {
