@@ -1,6 +1,6 @@
 # Plan 236 — Host-authority runtime roadmap
 
-**Status:** IN PROGRESS (Phase 2A refresh active; broad prerequisite line still NO-GO)  
+**Status:** IN PROGRESS (GO; sealed-image OCI prod closeout active)  
 **Created:** 2026-07-09  
 **Goal:** turn `mvm`'s current security and architecture lead into a simpler,
 more competitive product by finishing the host-authority model, removing
@@ -24,7 +24,7 @@ delta. That means the broad branch-staleness blocker is cleared; the remaining
 honest production-readiness blockers for Plan 236 are live-proof and closeout
 evidence, not stale prerequisite worktrees.
 
-**Execution progress (2026-07-10):** the gate turned `GO` and the Phase 1 →
+**Execution progress (2026-07-10 / 2026-07-11):** the gate turned `GO` and the Phase 1 →
 Phase 2A pivot largely landed on `main`. Shipped: §1 delivers the host-signer
 verb-grant anchor over the kernel cmdline to the vsock-only backends
 (libkrun/HVF), so sealed guests pin and *selectively* enforce plan-bound grants
@@ -68,12 +68,18 @@ unpack because the rootfs pipeline drops device nodes and the guest mounts
 devtmpfs), the pure ext4 collector can temporarily read owner-unreadable files
 like `/etc/shadow` without changing the guest-visible mode bits, and the
 libkrun builder shell-job path now applies the same disconnected/vsock-only
-networking transform as the regular builder path. After those fixes, the live
-`--prod` witness advances through verity sealing and fails on an external
-release-readiness gap instead of a host-authority/runtime bug: the
-version-matched workload-kernel checksum manifest for `v0.17.0`
-(`kernel-aarch64-checksums-sha256.txt`) is still 404 from GitHub Releases, so
-the hash-verified kernel download refuses to proceed.
+networking transform as the regular builder path. The same live proof exposed
+one more real Stage 0 runtime bug: a matching persistent seed-store marker
+could still reuse an incomplete seed runtime and then die later with missing
+`bin/nix` / CA bundle content, so `stage0-init` now validates that reused seed
+runtime and re-seeds it automatically when it is incomplete. With those fixes
+in place, the macOS prod witness is now green on a signed Chainguard BusyBox
+digest when the source checkout forces the local workload-kernel build path
+(`--kernel-source compile`) and the test resolves the runtime-selected
+manifest digest before checking the cached verity sidecars. That means the
+honest remaining blockers are no longer "missing production OCI seal code" or
+"missing workload-kernel checksum manifest for the witness path"; they are the
+remaining macOS verb-grant witness and the restore-time grant replay binding.
 
 ## Thesis
 

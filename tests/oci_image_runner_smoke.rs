@@ -20,6 +20,13 @@
 //!
 //! The marker echoed by the in-guest command proves the command actually
 //! ran inside the guest, not on the host.
+//!
+//! For source-checkout runs of the prod witness we explicitly force
+//! `--kernel-source compile` so the test can prove the OCI prod path before the
+//! version-matched published workload-kernel assets are available on GitHub
+//! Releases. That override exercises the real CLI/kernel bootstrap path rather
+//! than stubbing the kernel, while installed binaries still rely on the
+//! published hash-verified downloads.
 
 #![cfg(unix)]
 
@@ -81,6 +88,19 @@ fn mvmctl_with_target_path() -> Command {
 
 fn digest_from_reference(image_ref: &str) -> Option<&str> {
     image_ref.split_once('@').map(|(_, digest)| digest)
+}
+
+fn resolved_digest_from_run_output(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let line = line.trim();
+        if !line.starts_with("[mvm] Using OCI image ") {
+            return None;
+        }
+        let start = line.rfind('(')? + 1;
+        let end = line.rfind(')')?;
+        let digest = line.get(start..end)?.trim();
+        digest.starts_with("sha256:").then(|| digest.to_string())
+    })
 }
 
 fn prod_policy_path() -> PathBuf {
@@ -185,13 +205,14 @@ fn run_image_prod_boots_with_cached_verity_sidecars() {
             return;
         }
     };
-    let digest = digest_from_reference(&image_ref)
+    let pinned_digest = digest_from_reference(&image_ref)
         .expect("prod OCI smoke requires a digest-pinned reference")
         .to_string();
     let marker = format!("oci-prod-smoke-marker-{}", std::process::id());
 
     let output = mvmctl_with_target_path()
         .env("MVM_OCI_POLICY", &policy_path)
+        .args(["--kernel-source", "compile"])
         .args([
             "run",
             "--image",
@@ -216,8 +237,11 @@ fn run_image_prod_boots_with_cached_verity_sidecars() {
         "guest did not echo the prod marker {marker:?}.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 
-    let rootfs_path =
-        prod_rootfs_path_for_digest(&digest).expect("prod OCI cache must record a rootfs path");
+    let resolved_digest = resolved_digest_from_run_output(&stdout)
+        .or_else(|| resolved_digest_from_run_output(&stderr))
+        .unwrap_or(pinned_digest);
+    let rootfs_path = prod_rootfs_path_for_digest(&resolved_digest)
+        .expect("prod OCI cache must record a rootfs path");
     assert!(
         rootfs_path.is_file(),
         "prod OCI rootfs is missing at {}",

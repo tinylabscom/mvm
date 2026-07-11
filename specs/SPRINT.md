@@ -32,6 +32,22 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-11 Plan 236 OCI `--prod` live witness closeout: the
+      source-checkout prod harness now forces `--kernel-source compile` so the
+      local witness does not depend on a release-published workload-kernel
+      checksum manifest, resolves the pulled manifest digest from runtime
+      output before checking cached verity sidecars, and proves the signed
+      Chainguard BusyBox witness leaves real `rootfs.verity` +
+      `rootfs.roothash` cache outputs after a green macOS HVF boot. The same
+      witness exposed one more real runtime bug and this slice fixed it:
+      `stage0-init` no longer trusts a persistent seed-store marker by itself;
+      it now verifies the reused seed runtime still contains the required
+      `nix` and CA bundle and re-seeds automatically if the store is
+      incomplete. Validation is green with `cargo check --workspace`, `cargo
+      clippy --workspace --all-targets -- -D warnings`, `cargo test
+      --workspace`, the focused `mvm-build` shell-context and Stage 0 tests,
+      and the live signed-image witness under
+      `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`.
 - [x] 2026-07-10 Plan 237 Phase 0 first PR: the shared guest network helper
       used by OCI guest init now casts ioctl requests through the target musl
       `libc::Ioctl` type, stale cached OCI image records can re-materialize

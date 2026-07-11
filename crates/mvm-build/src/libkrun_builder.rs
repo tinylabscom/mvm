@@ -495,19 +495,19 @@ impl LibkrunBuilderVm {
         })?;
         let console_log = vm_state_dir.join("console.log");
 
-        let mut krun = builder_shell_krun_context(
-            &vm_name,
-            &image,
-            self.vcpus,
-            self.memory_mib,
-            &console_log,
-            &vm_state_dir,
-            nix_store_lock.path(),
-            &job.work_dir,
-            &job.artifact_out,
-            &job_dir,
-            &job.extra_disks,
-        )?;
+        let mut krun = builder_shell_krun_context(&BuilderShellKrunContextParams {
+            vm_name: &vm_name,
+            image: &image,
+            vcpus: self.vcpus,
+            memory_mib: self.memory_mib,
+            console_log: &console_log,
+            vm_state_dir: &vm_state_dir,
+            nix_store_img: nix_store_lock.path(),
+            work_dir: &job.work_dir,
+            artifact_out: &job.artifact_out,
+            job_dir: &job_dir,
+            extra_disks: &job.extra_disks,
+        })?;
         krun = krun.add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
 
         let cfg = SupervisorConfig {
@@ -686,30 +686,38 @@ impl LibkrunBuilderVm {
     }
 }
 
-fn builder_shell_krun_context(
-    vm_name: &str,
-    image: &BuilderVmImage,
+struct BuilderShellKrunContextParams<'a> {
+    vm_name: &'a str,
+    image: &'a BuilderVmImage,
     vcpus: u8,
     memory_mib: u32,
-    console_log: &Path,
-    vm_state_dir: &Path,
-    nix_store_img: &Path,
-    work_dir: &Path,
-    artifact_out: &Path,
-    job_dir: &Path,
-    extra_disks: &[BuilderExtraDisk],
+    console_log: &'a Path,
+    vm_state_dir: &'a Path,
+    nix_store_img: &'a Path,
+    work_dir: &'a Path,
+    artifact_out: &'a Path,
+    job_dir: &'a Path,
+    extra_disks: &'a [BuilderExtraDisk],
+}
+
+fn builder_shell_krun_context(
+    params: &BuilderShellKrunContextParams<'_>,
 ) -> Result<KrunContext, BuilderVmError> {
-    let mut krun = krun_context_for_image(vm_name, image)?
-        .with_resources(vcpus, memory_mib)
-        .with_console_output(path_to_str(console_log, "console_log")?)
-        .with_vsock_socket_dir(path_to_str(vm_state_dir, "vm_state_dir")?)
-        .add_disk("nix-store", path_to_str(nix_store_img, "nix_store_img")?, false)
-        .add_virtio_fs("work", path_to_str(work_dir, "work_dir")?)
-        .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?)
-        .add_virtio_fs("job", path_to_str(job_dir, "job_dir")?)
+    let mut krun = krun_context_for_image(params.vm_name, params.image)?
+        .with_resources(params.vcpus, params.memory_mib)
+        .with_console_output(path_to_str(params.console_log, "console_log")?)
+        .with_vsock_socket_dir(path_to_str(params.vm_state_dir, "vm_state_dir")?)
+        .add_disk(
+            "nix-store",
+            path_to_str(params.nix_store_img, "nix_store_img")?,
+            false,
+        )
+        .add_virtio_fs("work", path_to_str(params.work_dir, "work_dir")?)
+        .add_virtio_fs("out", path_to_str(params.artifact_out, "artifact_out")?)
+        .add_virtio_fs("job", path_to_str(params.job_dir, "job_dir")?)
         .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
 
-    for disk in extra_disks {
+    for disk in params.extra_disks {
         krun = krun.add_disk(
             disk.id.as_str(),
             path_to_str(&disk.path, "extra_disk")?,
@@ -717,7 +725,7 @@ fn builder_shell_krun_context(
         );
     }
 
-    Ok(apply_networking_mode(krun, vm_state_dir))
+    Ok(apply_networking_mode(krun, params.vm_state_dir))
 }
 
 /// Reject a path that isn't UTF-8 representable. Internal helper —
@@ -4143,23 +4151,23 @@ mod tests {
             cmdline: String::new(),
         };
         let extra_disk = temp.path().join("extra.img");
-        let krun = builder_shell_krun_context(
-            "builder-shell",
-            &image,
-            DEFAULT_VCPUS,
-            DEFAULT_MEMORY_MIB,
-            &temp.path().join("console.log"),
-            temp.path(),
-            &temp.path().join("nix-store.img"),
-            temp.path(),
-            temp.path(),
-            temp.path(),
-            &[BuilderExtraDisk {
+        let krun = builder_shell_krun_context(&BuilderShellKrunContextParams {
+            vm_name: "builder-shell",
+            image: &image,
+            vcpus: DEFAULT_VCPUS,
+            memory_mib: DEFAULT_MEMORY_MIB,
+            console_log: &temp.path().join("console.log"),
+            vm_state_dir: temp.path(),
+            nix_store_img: &temp.path().join("nix-store.img"),
+            work_dir: temp.path(),
+            artifact_out: temp.path(),
+            job_dir: temp.path(),
+            extra_disks: &[BuilderExtraDisk {
                 id: "extra".to_string(),
                 path: extra_disk,
                 read_only: true,
             }],
-        )
+        })
         .expect("shell context");
 
         assert!(
