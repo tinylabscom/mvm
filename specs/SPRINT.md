@@ -178,15 +178,21 @@ plan 25 sequences the work into six independently-shippable workstreams.
       warnings`. Local repair: rebuilt matching release
       `target/release/mvm-libkrun-supervisor` and normal release
       `target/release/mvmctl`.
-> **Plan 242 final state (2026-07-10):** the readonly guest-runtime overlay
+> **Plan 242 final state (2026-07-11):** the readonly guest-runtime overlay
 > rollout is complete and PR-ready. Guest-executed runtime binaries now live in
 > the shared read-only cache artifact under
 > `~/.cache/mvm/runtime-overlay/<version>/<arch>/`; host-executed binaries stay
 > outside it. Every admitted backend/tier either mounts that artifact read-only
 > with real proof or refuses the unsupported path fail-closed. Stopped VMs pick
 > up updated version-matched overlays on restart; running VMs keep the runtime
-> they booted with. Older Plan 242 bullets below are retained as execution log,
-> not active status.
+> they booted with. The current ship candidate is exact head
+> `96900bc8ebf74d19afd4e3ff9bb10d619561df0f`: host `cargo check --workspace
+> --offline`, `cargo clippy --workspace --all-targets --offline -- -D
+> warnings`, and `cargo test --workspace --offline` are green, and the
+> Linux/KVM `cargo test -p mvm-build --lib --offline` witness has been rerun
+> on `88.99.197.234` from a fresh source snapshot of that exact head. PR
+> `#1613` is mergeable and waiting only on fresh required GitHub checks. Older
+> Plan 242 bullets below are retained as execution log, not active status.
 - [x] 2026-07-08 Plan 213 §D `mvm prepare` + precise not-instant reasons
       (runtime-pack scope): `mvm_core::pack_cache::diagnose_pack` re-scans the
       promoted-pack cache like `resolve_pack` but surfaces the first captured
