@@ -83,7 +83,10 @@ pub(super) fn resolve_workload_kernel_bootstrap(
 fn workload_kernel_source_build_requested(source_checkout: bool) -> bool {
     #[cfg(feature = "builder-vm")]
     {
-        source_checkout && matches!(resolve_kernel_source(), Some(KernelSource::Compile))
+        // A source checkout builds the kernel locally by default; the
+        // hermeticity rule forbids depending on a published artifact. Only an
+        // explicit opt-out downloads (test/CI escape hatch).
+        source_checkout && !matches!(resolve_kernel_source(), Some(KernelSource::Download))
     }
     #[cfg(not(feature = "builder-vm"))]
     {
@@ -364,4 +367,96 @@ fn download_default_microvm_image(
 
     ui::success("Default microVM image downloaded, hash-verified, and cached.");
     Ok((kernel_path.to_string(), rootfs_path.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_checkout_cold_cache_builds_never_downloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().to_str().unwrap();
+        // No cached kernel, no reusable builder kernel, source checkout, non-prod:
+        // must BUILD locally (hermeticity) — must NOT be Download.
+        let got = resolve_workload_kernel_bootstrap(
+            cache, "aarch64", false, /* source_build_requested= */ true,
+        );
+        assert!(
+            matches!(got, WorkloadKernelBootstrap::Build(_)),
+            "got {got:?}"
+        );
+    }
+
+    #[test]
+    fn installed_build_cold_cache_downloads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().to_str().unwrap();
+        // Installed binary (source_build_requested=false): Download is correct.
+        let got = resolve_workload_kernel_bootstrap(cache, "aarch64", false, false);
+        assert!(
+            matches!(got, WorkloadKernelBootstrap::Download(_)),
+            "got {got:?}"
+        );
+    }
+
+    // The two tests above pin `resolve_workload_kernel_bootstrap`'s own
+    // branching given an already-decided `source_build_requested`. The
+    // decision itself is made by `workload_kernel_source_build_requested`,
+    // so that's what needs direct coverage of the checkout-vs-installed and
+    // override semantics.
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn workload_kernel_source_build_requested_defaults_to_build_for_source_checkout() {
+        // SAFETY: single-threaded test phase per crate; this env var
+        // isn't read elsewhere in this test binary.
+        let prev = std::env::var_os("MVM_KERNEL_SOURCE");
+        unsafe {
+            std::env::remove_var("MVM_KERNEL_SOURCE");
+        }
+
+        let source_checkout = workload_kernel_source_build_requested(true);
+        let installed_binary = workload_kernel_source_build_requested(false);
+
+        // Restore before any assertion so a panic doesn't strand the
+        // env var.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MVM_KERNEL_SOURCE", v),
+                None => std::env::remove_var("MVM_KERNEL_SOURCE"),
+            }
+        }
+
+        assert!(
+            source_checkout,
+            "a source checkout must build the workload kernel locally by default"
+        );
+        assert!(
+            !installed_binary,
+            "an installed binary has no local checkout to build from"
+        );
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn workload_kernel_source_build_requested_honors_explicit_download_override() {
+        let prev = std::env::var_os("MVM_KERNEL_SOURCE");
+        unsafe {
+            std::env::set_var("MVM_KERNEL_SOURCE", "download");
+        }
+
+        let got = workload_kernel_source_build_requested(true);
+
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("MVM_KERNEL_SOURCE", v),
+                None => std::env::remove_var("MVM_KERNEL_SOURCE"),
+            }
+        }
+
+        assert!(
+            !got,
+            "an explicit download override must still win over the source-checkout default"
+        );
+    }
 }
