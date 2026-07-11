@@ -1,7 +1,8 @@
 # Blog draft — "Hello anna": what it takes to prove a downloaded CLI boots a microVM in one command
 
-**Status:** Continuous draft of the opening arc (hook → grounding → process topology → the boot bug), tightened + one diagram/table per section (mermaid roadmap, backend table, process topology, device-model table). Sections 4–11 still outlined below. Not published.
+**Status:** Continuous draft of the opening arc (hook → grounding → process topology → the boot bug). Revised 2026-07-10: sharper problem statement + explicit "why we're writing this" up front; §3 (the boot bug) rebuilt as a narrative with a proper landing + bridge into §4. Sections 4–11 still outlined below. Not published.
 **Source:** Synthesized from the macOS-26 bring-up + release-packaging work (PRs #1300, #1302, #1303, #1307, #1309, #1367, #1369).
+**Fact-check before publish:** the draft narrates vz (Virtualization.framework) as the macOS 26+ backend, which was true during the June bring-up; vz has since been removed (Plan 226 — HVF is now the macOS 26+ backend, libkrun the fallback). Decide whether to tell the vz story explicitly in the past tense ("our then-newest backend") or re-verify the PCI/MMIO table against HVF and update.
 
 *(alt subtitles: "The iceberg under `mvmctl run`" / "Every layer between a one-liner and a running guest")*
 
@@ -15,9 +16,13 @@ The command is six words long:
 mvmctl run --image alpine -- echo "Hello anna"
 ```
 
-Type it, wait a beat, `Hello anna` prints — and in that beat a real Linux VM booted from a container image, ran your command, and vanished. The promise is that those six words are all you hold in your head.
+Type it, wait a beat, and `Hello anna` prints. In that beat a real Linux virtual machine booted from a container image, ran your command behind a hardware isolation boundary, and vanished. No Dockerfile, no VM console to babysit, nothing to clean up. The promise is that those six words are all you ever hold in your head.
 
-This post is about everything underneath them, and a harder version of the promise: that they work for someone who *downloaded* the tool — a stranger on a clean machine, not you with the source checked out and a warm cache. That single change of audience breaks most of the free scaffolding your dev machine quietly provides, and it touches nearly every layer:
+This post is about the question hiding inside that promise: **true for whom?**
+
+Two very different people can type that command. One is us — a developer with the source tree checked out, a warm build cache, helper binaries sitting in `target/` exactly where the tooling looks for them, and a machine that has quietly accumulated every dependency the project ever needed. The other is the person we actually built this for: a stranger on a clean laptop who read the README, downloaded a tarball, and typed six words. For months the command worked flawlessly for the first person — and we had no way of knowing whether it worked for the second at all.
+
+That gap sounds like a packaging chore. It isn't. Your dev machine is a set of training wheels you can't feel, and taking them off breaks assumptions at nearly every layer of the stack:
 
 ```mermaid
 flowchart TD
@@ -28,9 +33,11 @@ flowchart TD
   E --> F["guest runs your image → Hello anna"]
 ```
 
-None of that elaborateness is accidental — and it's the lens for the whole post. **mvm is security-first.** You reach for a microVM to run code you don't fully trust behind a *hardware* isolation boundary, not a shared kernel you're hoping holds. From that one posture a cascade follows: the smallest kernel that still boots (every driver is attack surface), a confined network sidecar that default-denies egress and audits it, a download you can actually verify (signed, reproducible). The download problem is hard largely *because* the bar is high — a lower bar ships one fat binary and calls it done. (A second problem rides along, saved for later: how do you *prove* all this works without cutting a real, irreversible release?)
+We're writing this post because we just spent weeks closing that gap, and almost none of the work was where we expected it to be. The bugs weren't in a packaging script. They were in a kernel config, a binary-resolution ladder, a code-signing step, a cache reaper, and a hash that two versions of the same tool computed differently. If you ship a CLI that does anything more ambitious than transform stdin — and especially one that spawns helper processes — you will meet some version of every one of these. This is the map we wish we'd had.
 
-We'll walk the layers roughly in that order. First, some grounding for anyone new to mvm.
+One more piece of context before the descent, because it explains why the stack is this deep in the first place. **mvm is security-first.** You reach for a microVM to run code you don't fully trust behind a *hardware* isolation boundary, not a shared kernel you're hoping holds. From that one posture a cascade follows: the smallest kernel that still boots (every driver is attack surface), a confined network sidecar that default-denies egress and audits what it allows, a download you can actually verify (signed, reproducible). The download problem is hard largely *because* the bar is high — a lower bar ships one fat binary and calls it done. (A second problem rides along, saved for the back half of the post: how do you *prove* all of this works without cutting a real, irreversible release?)
+
+We'll walk the layers roughly top to bottom. First, some grounding for anyone new to mvm.
 
 ### First, some grounding: what is mvm?
 
@@ -64,25 +71,31 @@ From a source checkout you never notice: every binary sits in `target/` where th
 
 ### The guest has to actually boot
 
-Those helpers all assume a guest that actually came up. Before packaging or signing matters, that blunt fact has to hold — and the hypervisors don't hand the guest its devices the same way. virtio is just the device *protocol*; it rides a *bus* the kernel has to probe:
+Everything above — supervisor, bridge, agent — presumes a guest that actually came up. Before packaging or signing or trust can even matter, that blunt fact has to hold. Here's the story of the week it didn't.
+
+mvm ships **one guest kernel**, shared by every backend, and it is deliberately tiny. That's the security posture again: a hostile workload runs on this kernel, so every compiled-in driver is attack surface, and anything not needed gets cut. During one of those slimming passes, PCI support looked like an easy win. The note in the diff even explained why: *"libkrun and Firecracker attach virtio devices over MMIO."* Which is true. The missing clause was *"…and vz attaches them over PCI."*
+
+Here's the one piece of plumbing you need to follow the story: virtio is the *protocol* a guest uses to talk to its virtual disk, network, console, and vsock — but those devices have to sit on a *bus* for the kernel to discover them, and different hypervisors put them on different buses:
 
 | Backend | virtio bus | Guest kernel needs |
 |---|---|---|
 | libkrun, Firecracker | **MMIO** | `CONFIG_VIRTIO_MMIO` |
 | vz (Apple) | **PCI** | `CONFIG_PCI` + `CONFIG_VIRTIO_PCI` |
 
-We ship one slimmed kernel config for all three — and slimming is the security posture again: a hostile guest runs on this kernel, so every built-in driver is attack surface. A subtraction pass dropped `PCI`/`VIRTIO_PCI` with a half-true note in the diff — *"libkrun and Firecracker use MMIO"* — missing the clause *"…and vz uses PCI."* The bug was the *cost* of a security decision.
+So the slimmed kernel booted perfectly on two of our three backends. On vz, it booted into a void. The hypervisor reported the VM as running — and by its lights it was. But the console log was zero bytes, because the console is itself a virtio device the kernel could no longer see. No disk. No vsock. No agent. A machine that is alive and completely unreachable is a genuinely eerie thing to debug: nothing crashed, nothing errored, nothing logged, because the thing that would have logged was on the bus the kernel couldn't probe.
 
-So the kernel booted fine on two backends and, on vz, into a void: no virtio-console (**console log: 0 bytes**), no disk, no vsock. "Running" to the hypervisor, unreachable to us. Worse, it surfaced as *two* unrelated-looking bugs — a builder VM "hang" and a workload VM "agent timeout" — from one missing symbol. Nothing failed to compile; the kernel even passed its size budget (it was *smaller*, which was the point).
+It got worse before it got better. Remember that both of mvm's recurring VMs — the builder VM that makes images and the workload VM that runs yours — boot this same shared kernel. So one missing config symbol surfaced as *two* apparently unrelated bugs, in different subsystems, with different symptoms: a builder-VM "hang" and a workload-VM "agent timeout." Nothing had failed to compile. The kernel even passed its size budget — it was *smaller*, which had been the whole point.
 
-Three lines fixed it (`PCI`, `PCI_MSI`, `VIRTIO_PCI` back). The proof was the console going from empty to boring:
+The fix was three lines: `PCI`, `PCI_MSI`, and `VIRTIO_PCI` restored. The proof was the console going from empty to boring:
 
 ```
 EXT4-fs (vdb): mounted filesystem       ← virtio-block, over PCI
 mvm-guest-agent: control plane ready     ← virtio-vsock, over PCI
 ```
 
-The lesson: a shared artifact serving backends with different *invisible* contracts is a landmine — the "MMIO-only, dead weight" comment was a claim about *all* consumers and was wrong about one. A shared kernel change isn't "done" when it compiles and fits the budget; it's done when it has **booted, once, on every backend that consumes it.**
+Two lessons came out of that week, one general and one specific. The general one: a shared artifact serving consumers with different *invisible* contracts is a landmine, because a comment like "MMIO-only, dead weight" is a claim about *all* consumers that only has to be wrong about one of them. The specific one hardened into a rule we now hold ourselves to: a change to the shared kernel isn't done when it compiles and fits the size budget — it's done when it has **booted, once, on every backend that consumes it.**
+
+And booting is only the entry fee. A guest that comes up still needs the host-side constellation from the previous section — the supervisor, the bridge — to exist on the user's machine at all. For someone running from a source checkout, they always do. For someone who downloaded a tarball, they didn't: the release shipped `mvmctl` alone, and the helpers it spawns were never packaged. That's the next layer down.
 
 > **Still to draft (in this same continuous voice):** §4 packaging & binary resolution · §5 trust/signing/supply-chain · §6 warm-pool state & lifecycle · §7 reproducible builds · §8 the platform matrix · §9 proving it without shipping · §10 the two habits · §11 close. Outline below.
 
