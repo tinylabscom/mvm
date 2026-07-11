@@ -56,6 +56,9 @@ fn parse_owned_run(argv: &[String]) -> Result<MachineRunArgs, clap::Error> {
     })
 }
 
+const SDK_RUN_EGRESS_BACKEND: &str = "libkrun";
+const SDK_RUN_EGRESS_ENFORCEMENT: &str = "libkrun:l4-host-port";
+
 fn sdk_machine_fixture(name: &str) -> Vec<String> {
     std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -155,7 +158,10 @@ fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecurityS
         summary.receipt_network_posture,
         summary.preflight_network_posture
     );
-    assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
+    assert_eq!(
+        summary.receipt_egress_enforcement,
+        SDK_RUN_EGRESS_ENFORCEMENT
+    );
     assert_eq!(summary.preflight_command, summary.receipt_command);
     assert!(summary.preflight_command.contains("argv_len=3"));
     assert!(!summary.preflight_command.contains("echo ok"));
@@ -852,7 +858,9 @@ fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
         .expect("sdk args parse as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run, "hvf", "hvf",
+        &run,
+        SDK_RUN_EGRESS_BACKEND,
+        SDK_RUN_EGRESS_BACKEND,
     )
     .expect("CLI receipt input accepts SDK args");
 
@@ -865,7 +873,10 @@ fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
         summary.receipt_network_posture,
         summary.preflight_network_posture
     );
-    assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
+    assert_eq!(
+        summary.receipt_egress_enforcement,
+        SDK_RUN_EGRESS_ENFORCEMENT
+    );
 }
 
 #[test]
@@ -892,7 +903,9 @@ fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
         .expect("sdk args parse as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run, "hvf", "hvf",
+        &run,
+        SDK_RUN_EGRESS_BACKEND,
+        SDK_RUN_EGRESS_BACKEND,
     )
     .expect("CLI receipt input accepts SDK args");
 
@@ -924,7 +937,9 @@ fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture(
         .expect("Python/TypeScript SDK fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run, "hvf", "hvf",
+        &run,
+        SDK_RUN_EGRESS_BACKEND,
+        SDK_RUN_EGRESS_BACKEND,
     )
     .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 
@@ -937,7 +952,10 @@ fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture(
         summary.receipt_network_posture,
         summary.preflight_network_posture
     );
-    assert_eq!(summary.receipt_egress_enforcement, "hvf:l4-host-port");
+    assert_eq!(
+        summary.receipt_egress_enforcement,
+        SDK_RUN_EGRESS_ENFORCEMENT
+    );
 }
 
 #[test]
@@ -947,7 +965,9 @@ fn python_typescript_machine_run_fixture_matches_cli_admission_and_receipt_input
         .expect("Python/TypeScript SDK fixture parses as CLI machine run")
         .into_run_args();
     let summary = super::super::vm::exec::test_run_security_summary_with_preflight_backend(
-        &run, "hvf", "hvf",
+        &run,
+        SDK_RUN_EGRESS_BACKEND,
+        SDK_RUN_EGRESS_BACKEND,
     )
     .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
 

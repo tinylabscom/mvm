@@ -118,6 +118,10 @@ pub fn build_verity_initrd_bytes(verity_init: &[u8]) -> Result<Vec<u8>, GuestAge
     enc.finish().map_err(GuestAgentBuildError::Io)
 }
 
+pub fn assemble_verity_initramfs(verity_init: &[u8]) -> Result<Vec<u8>, GuestAgentBuildError> {
+    build_verity_initrd_bytes(verity_init)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

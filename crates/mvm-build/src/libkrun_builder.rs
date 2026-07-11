@@ -4199,6 +4199,8 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
 
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn align_up_rounds_to_next_multiple() {
         assert_eq!(align_up(0, 4096), 0);
@@ -4389,6 +4391,7 @@ mod tests {
 
     #[test]
     fn resolve_networking_mode_always_resolves_to_vsock_direct() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         env.remove("MVM_NETWORKING");
         env.remove("MVM_GATEWAY_BIN");
@@ -4967,6 +4970,7 @@ mod tests {
 
     #[test]
     fn ensure_builder_vm_image_requires_cmdline_txt() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.remove("MVM_CACHE_DIR");
@@ -4990,6 +4994,7 @@ mod tests {
 
     #[test]
     fn ensure_builder_vm_image_refuses_stale_manifest_capabilities() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.remove("MVM_CACHE_DIR");
@@ -5023,6 +5028,7 @@ mod tests {
 
     #[test]
     fn ensure_builder_vm_image_refuses_old_manifest_contract_version() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.remove("MVM_CACHE_DIR");
@@ -5079,6 +5085,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "linux"))]
     fn ensure_builder_vm_image_accepts_current_manifest_capabilities() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.remove("MVM_CACHE_DIR");
@@ -5126,6 +5133,7 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn ensure_builder_vm_image_refuses_rootfs_builder_cache_on_linux_native() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("XDG_CACHE_HOME", scratch.path());
@@ -5166,6 +5174,7 @@ mod tests {
     fn ensure_builder_vm_image_auto_bootstraps_missing_cache_via_helper() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.remove("MVM_CACHE_DIR");
@@ -5234,6 +5243,7 @@ mod tests {
 
     #[test]
     fn ensure_builder_vm_image_seeds_missing_cache_from_default_cache() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("HOME", scratch.path());
@@ -5313,6 +5323,7 @@ mod tests {
     fn ensure_builder_vm_image_skips_stale_default_cache_and_auto_bootstraps() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("HOME", scratch.path());
@@ -5408,6 +5419,7 @@ mod tests {
 
     #[test]
     fn builder_vm_bootstrap_helper_target_dir_is_dedicated() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         env.remove("CARGO_TARGET_DIR");
 
@@ -5420,6 +5432,7 @@ mod tests {
 
     #[test]
     fn builder_vm_bootstrap_helper_target_dir_honors_cargo_target_dir() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         env.set("CARGO_TARGET_DIR", "shared-target");
 
@@ -5479,6 +5492,7 @@ mod tests {
         let helper = dir.path().join("mvmctl-helper");
         std::fs::write(&helper, b"#!/bin/sh\n").unwrap();
 
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         env.set(
             BUILDER_VM_BOOTSTRAP_BIN_ENV,
@@ -5494,6 +5508,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let missing = dir.path().join("missing-helper");
 
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         env.set(
             BUILDER_VM_BOOTSTRAP_BIN_ENV,
@@ -6516,6 +6531,7 @@ mod tests {
 
     #[test]
     fn source_checkout_supervisor_build_uses_target_root_before_path() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         let target_root = tmp.path().join("target-root");
@@ -6552,6 +6568,7 @@ mod tests {
             libkrun_sys::is_available(),
             "libkrun runtime must be installed on the host"
         );
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let bootstrap_cache = if std::env::var_os("MVM_CACHE_DIR").is_some() {
             None

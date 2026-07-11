@@ -3070,6 +3070,7 @@ fn install_egress_redirect(config: &FlakeRunConfig) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn network_tunnel_cmdline_token(config: &FlakeRunConfig) -> Option<String> {
     config
         .network_tunnel

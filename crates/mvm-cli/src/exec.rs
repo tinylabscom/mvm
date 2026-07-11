@@ -372,14 +372,6 @@ pub struct ExecRequest {
     pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
 }
 
-/// Mint a fresh 128-bit session identifier (hex) for a per-boot packet tunnel.
-/// The `boot_id` / `session_nonce` only need to be unpredictable and unique per
-/// boot; the host trusts itself, and both tunnel ends read the one value set on
-/// the launch config, so they agree by construction.
-fn fresh_tunnel_session_id() -> String {
-    format!("{:032x}", rand::random::<u128>())
-}
-
 pub(crate) fn select_exec_backend(
     image_requested: bool,
     network_policy: &mvm_core::network_policy::NetworkPolicy,

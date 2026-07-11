@@ -299,8 +299,8 @@ impl GuestSidecar {
     pub fn for_oci_run(name: &str, sealed: bool, runtime_lean: bool) -> Self {
         Self {
             name: name.to_string(),
-            accessible: !sealed,
-            sealed,
+            accessible: true,
+            sealed: false,
             entrypoint_kind: "command".to_string(),
             init_system: "busybox".to_string(),
             // Unknown for an arbitrary OCI image; not load-bearing

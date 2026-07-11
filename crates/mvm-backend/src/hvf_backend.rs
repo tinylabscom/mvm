@@ -303,10 +303,6 @@ fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
 
 fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
-    let network_tunnel = config
-        .network_tunnel
-        .as_ref()
-        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline);
     let grants = crate::hvf_bootargs::grant_tokens(&config.name);
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
