@@ -36,7 +36,42 @@ The seeded closure is a **builder-pack artifact imported only into the builder V
 
 S3.1 → S3.2 → S3.3 gets a live hvf end-to-end on this Mac (build the pack with a small closure, prepare, boot the hvf builder, confirm the seeded closure is imported and a build that would have fetched it is now fast). S3.4 wires the real dev-shell closure into releases. S3.5 extends parity. Re-run the SP4 bench (`ops bench first-use`) before/after to quantify the win against the ~153 s baseline.
 
+## Live validation (2026-07-11, Linux/qemu builder)
+
+The full chain was booted end-to-end on a real qemu builder VM with a
+102 MB, 61-path test closure staged at `nix-closure.nar`:
+
+- Host resolved the NAR, staged it into its own read-only share dir, and
+  attached it to the VM as the `closure-seed` virtio-fs share.
+- Guest mounted `/closure-seed`, and `mvm-host-vm-init` imported the NAR:
+  `importing seeded closure /closure-seed/nix-closure.nar (<hash>)`, no
+  fail-open warning.
+- The content-keyed marker `/nix-store/.seed-closure-imported` was stamped
+  with the closure hash (so an unchanged closure is a no-op next boot), and
+  the closure's store paths (glibc, bash, …) are present in the persistent
+  Nix store.
+
+Two bugs the unit tests missed were caught by the live boot and fixed:
+
+1. **Import ran before the mount.** The import call sat inside
+   `setup_nix_store` (Track A), which completes before the virtio-fs join /
+   disk-transport staging that mounts `/closure-seed` — so it read an
+   unmounted path and silently imported nothing. Moved to after both mount
+   paths.
+2. **Mount point not baked.** The builder rootfs boots read-only, so the
+   guest can't `mkdir /closure-seed` at runtime (`create /closure-seed:
+   Read-only file system`). It's now pre-created in `mkGuest` alongside
+   `/work`, `/out`, `/job`, `/mvm-bins`.
+
+**hvf (disk-transport) parity** shares the same guest import + baked mount
+point; its host-side attach (NAR as a tar entry on the input disk) is
+unit-tested but not yet live-booted — the dev Mac's Stage 0 store is
+degraded (corrupt store + `/homeless-shelter` purity), which fails the
+builder base-image rebuild before the hvf builder boots. Live hvf boot is
+pending a clean macOS Stage 0 environment.
+
 ## Deferred / not here
 
 - Warm-builder-snapshot capture (adjacent warm-start work) — SP3 leaves the seam; capturing the seeded store into a snapshot is separate.
 - A core/extended closure split — only if SP4 shows prepare-time cost is painful.
+- Live hvf disk-transport boot (blocked on the dev Mac's Stage 0 rot; the mechanism is unit-tested and shares the validated guest path).
