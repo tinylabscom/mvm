@@ -141,7 +141,8 @@ host-shell-in-a-VM primitive (the builder protocol is job-shaped — `BuilderJob
 - `mvmctl build validate` (`nix flake check`) — the cleanest user-visible crash.
 - `machine run --mount HOST:GUEST` (`mkfs.ext4` + `mount`, `image.rs::build_dir_image_ro`).
 - `machine forward` (`resolve.rs:12` firecracker process check).
-- `template/lifecycle.rs:847` `nix hash path` + `update_fod_hash` (`--update-hash`).
+- `template/lifecycle.rs` `nix hash path` (flake.lock) + `update_fod_hash` (`--update-hash`).
+- `template/lifecycle.rs::vm_exec` (used by `template_init`, `mvmctl template init`) — same host-path-through-a-VM bug class as W2a; either delete if `template_init` stays dead or `std::fs` it. (Flagged in the W1–W3 final review.)
 
 # Self-review notes
 - **Coverage:** W1→T1, W2→T2+T3, W3→T4, proof→T5; W4 deferred. The three broken common commands (`bootstrap`, `machine run --flake`, `machine build`) are fixed by T2+T4.
