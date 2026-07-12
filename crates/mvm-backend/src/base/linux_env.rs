@@ -351,8 +351,7 @@ fn guest_exec_gate(available: bool, limitation: &str) -> Result<()> {
 pub fn guest_exec_unavailable_error(limitation: &str) -> anyhow::Error {
     anyhow::anyhow!(
         "{limitation}. This macOS tier has no Linux builder to run it against \
-         — run it on Linux or in CI, or start a persistent libkrun builder \
-         manually as a workaround."
+         — run it on Linux or in CI."
     )
 }
 
@@ -533,7 +532,6 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("ext4 reader"), "missing limitation: {msg}");
         assert!(msg.contains("Linux"), "missing Linux workaround: {msg}");
-        assert!(msg.contains("libkrun"), "missing libkrun workaround: {msg}");
     }
 
     #[test]
