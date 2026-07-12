@@ -166,23 +166,6 @@ fn validate_legacy_template_name(id: &str) -> Result<()> {
     validate_template_name(id).with_context(|| format!("Invalid template name: {id:?}"))
 }
 
-/// Run a shell command in the VM and check its exit code.
-/// Returns an error with stderr context if the command fails.
-fn vm_exec(script: &str) -> Result<()> {
-    let out = shell::run_in_vm(script)?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let first_line = script.lines().next().unwrap_or(script);
-        return Err(anyhow!(
-            "Command failed (exit {}): {}\n  command: {}",
-            out.status.code().unwrap_or(-1),
-            stderr,
-            first_line,
-        ));
-    }
-    Ok(())
-}
-
 #[instrument(skip_all, fields(template_id = %spec.template_id))]
 pub fn template_create(spec: &TemplateSpec) -> Result<()> {
     validate_legacy_template_name(&spec.template_id)?;
@@ -241,17 +224,6 @@ pub fn template_delete(id: &str, force: bool) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && force => Ok(()),
         Err(e) => Err(e).with_context(|| format!("Failed to delete template {}", id)),
     }
-}
-
-/// Initialize an on-disk template directory layout (empty artifacts, no spec).
-/// Safe to call multiple times; existing contents are preserved.
-#[instrument(skip_all, fields(template_id = id))]
-pub fn template_init(id: &str) -> Result<()> {
-    let dir = template_dir(id);
-    let artifacts = format!("{}/artifacts/revisions", dir);
-    vm_exec(&format!("mkdir -p {dir} {artifacts}"))
-        .with_context(|| format!("Failed to initialize template directory {}", dir))?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
