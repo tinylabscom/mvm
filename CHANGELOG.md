@@ -2,6 +2,20 @@
 
 All notable changes to mvm are documented in this file.
 
+## [0.18.0] — Unreleased
+
+### Added
+- **runtime**: Roll out the readonly guest-runtime overlay as a first-class
+  release surface. Guest-executed runtime binaries are now published as a
+  version-matched artifact under `~/.cache/mvm/runtime-overlay/<version>/<arch>/`
+  and consumed read-only by admitted overlay-backed backends.
+
+### Changed
+- **runtime**: Document the runtime-overlay operational contract explicitly for
+  release verification and operator rollout: running VMs do not hot-remount,
+  stopped VMs pick up the new version on restart, and Linux rootfs-backed
+  libkrun builder use remains fail-closed.
+
 ## [0.17.0] — 2026-07-08
 
 ### Removed
@@ -1350,7 +1364,8 @@ has a tracking pointer; none is silently broken.
   See [`MIGRATING-FROM-V1.md`](MIGRATING-FROM-V1.md) §"Feature parity
   status" for the per-feature delta.
 
-[Unreleased]: https://github.com/tinylabscom/mvm/compare/v0.16.1...HEAD
+[Unreleased]: https://github.com/tinylabscom/mvm/compare/v0.18.0...HEAD
+[0.18.0]: https://github.com/tinylabscom/mvm/compare/v0.17.0...v0.18.0
 [0.16.1]: https://github.com/tinylabscom/mvm/compare/v0.16.0...v0.16.1
 [0.16.0]: https://github.com/tinylabscom/mvm/compare/v0.15.2...v0.16.0
 [0.15.2]: https://github.com/tinylabscom/mvm/compare/v0.15.1...v0.15.2

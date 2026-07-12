@@ -103,7 +103,7 @@ Overlay-backed workloads consume a separate readonly guest-runtime artifact from
 the same release. To verify it manually:
 
 ```bash
-VERSION=v0.17.0
+VERSION=v0.18.0
 ARCH=aarch64   # or x86_64
 
 curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.ext4"
