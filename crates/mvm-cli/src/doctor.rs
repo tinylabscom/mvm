@@ -522,7 +522,7 @@ fn builderd_daemon_check() -> Check {
 #[cfg(feature = "builder-vm")]
 fn builder_transport_check(plat: Platform) -> Check {
     use mvm_build::builder_backend_select::BuilderBackendChoice;
-    let choice = current_builder_backend_choice();
+    let choice = mvm_build::builder_backend_select::resolve_choice();
     let info = match choice {
         BuilderBackendChoice::Hvf => {
             "vsock-only host/guest transport; no builder guest NIC, no DHCP or gateway bootstrap"
