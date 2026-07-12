@@ -2,11 +2,12 @@
 //!
 //! On a host where libkrun can't create its builder VM — e.g. the
 //! `KVM_SET_USER_MEMORY_REGION` EINVAL defect on some Linux kernels —
-//! the auto-fallback would otherwise pay a doomed libkrun attempt on *every*
-//! build before switching to qemu. This records a short-lived marker so
-//! subsequent builds skip straight to the qemu builder. The marker self-heals
-//! after a TTL (a transient failure, or a libkrun upgrade, re-probes the next
-//! day), and an explicit `--builder libkrun` that succeeds clears it.
+//! the host still records that VMM-level failure. The marker is now
+//! **advisory only**: qemu remains explicit dev/test-only, so auto-selected
+//! libkrun no longer redirects onto qemu. Keeping the marker still matters for
+//! operator truth surfaces and future policy decisions, and it self-heals after
+//! a TTL (a transient failure, or a libkrun upgrade, re-probes the next day).
+//! An explicit `--builder libkrun` success clears it.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -14,9 +15,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::builder_backend_select::BuilderBackendChoice;
 
 /// How long a "libkrun builder unavailable" marker is honoured before it is
-/// treated as stale and re-probed. Long enough to spare a reliably-broken host
-/// the repeated doomed attempt across a dev session; short enough that a
-/// transient failure self-heals by the next day.
+/// treated as stale and re-probed. Long enough to preserve recent failure
+/// evidence across a dev session; short enough that a transient failure
+/// self-heals by the next day.
 const MARKER_TTL_SECS: u64 = 24 * 60 * 60;
 
 fn marker_path() -> PathBuf {
@@ -140,5 +141,23 @@ mod tests {
         std::fs::write(&path, "1").unwrap(); // unix ts 1 — ancient
         assert!(!libkrun_marked_unavailable());
         assert!(!path.exists(), "stale marker removed on read");
+    }
+
+    #[test]
+    fn marker_is_advisory_only_for_auto_libkrun_selection() {
+        let (_env, _scratch) = isolated_cache();
+        note_attempt_outcome(BuilderBackendChoice::Libkrun, false);
+
+        let order = crate::builder_backend_select::builder_attempt_order(
+            BuilderBackendChoice::Libkrun,
+            false,
+            true,
+            libkrun_marked_unavailable(),
+        );
+        assert_eq!(
+            order,
+            vec![BuilderBackendChoice::Libkrun],
+            "marker must not silently redirect auto libkrun onto qemu"
+        );
     }
 }

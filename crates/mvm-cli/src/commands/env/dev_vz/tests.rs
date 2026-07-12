@@ -22,6 +22,28 @@ mod builder_backend_attempt_order_tests {
     }
 
     #[test]
+    fn auto_libkrun_never_silently_falls_back_to_qemu() {
+        assert_eq!(
+            builder_backend_attempt_order(BuilderBackendChoice::Libkrun, false),
+            vec![BuilderBackendChoice::Libkrun]
+        );
+    }
+
+    #[test]
+    fn auto_hvf_keeps_only_the_shared_libkrun_handoff() {
+        let order = builder_backend_attempt_order(BuilderBackendChoice::Hvf, false);
+        assert!(
+            order == vec![BuilderBackendChoice::Hvf, BuilderBackendChoice::Libkrun]
+                || order == vec![BuilderBackendChoice::Hvf],
+            "expected hvf auto path to stay on the shared hvf/libkrun policy, got {order:?}"
+        );
+        assert!(
+            !order.contains(&BuilderBackendChoice::Qemu),
+            "qemu must stay explicit-only, got {order:?}"
+        );
+    }
+
+    #[test]
     fn delegates_to_shared_policy_for_live_platform() {
         use mvm_build::builder_backend_select::builder_attempt_order;
         let is_linux = matches!(
@@ -681,12 +703,20 @@ mod reap_orphans_tests {
         std::fs::create_dir_all(&vm).expect("mkdir");
         std::fs::write(vm.join("builder.pid"), "2147483646\n").expect("write pid");
         std::fs::write(vm.join("payload"), vec![0u8; 1024]).expect("write payload");
+        std::fs::write(
+            vm.join("builder-egress-runtime.json"),
+            br#"{"state":"bound","socket_path":"/tmp/vsock-5253.sock"}"#,
+        )
+        .expect("write builder egress runtime sidecar");
 
         let out = reap_orphaned_vm_helpers_at(&vms_root, BUILDER_SIDECARS, true, false, false)
             .expect("reap");
         assert_eq!(out.killed, 0, "no live PID, so nothing to kill");
         assert_eq!(out.removed_dirs, 1, "dir should be removed");
-        assert!(out.freed_bytes >= 1024, "payload size counted");
+        assert!(
+            out.freed_bytes >= 1024,
+            "payload and evidence sidecars should be counted"
+        );
         assert!(!vm.exists(), "dir should be gone");
     }
 

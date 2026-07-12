@@ -31,13 +31,13 @@ const LAUNCH_TUNNEL_FRAME_SIZE: u32 = 4096;
 /// name stays under `IFNAMSIZ` (16, so ≤15 usable bytes).
 const HOST_TUN_IFACE_PREFIX: &str = "mvmt";
 
-pub(crate) const NETWORK_TUNNEL_WORKER_PID_FILE: &str = "network-tunnel-worker.pid";
-pub(crate) const NETWORK_TUNNEL_AUDIT_JSONL: &str = "network-tunnel.audit.jsonl";
+pub const NETWORK_TUNNEL_WORKER_PID_FILE: &str = "network-tunnel-worker.pid";
+pub const NETWORK_TUNNEL_AUDIT_JSONL: &str = "network-tunnel.audit.jsonl";
 /// Records the per-VM host TUN interface the worker installed a NAT table for.
 /// Persisted at spawn so a later reap — including one after a SIGKILLed worker
 /// that never ran its own teardown — can remove the leaked NAT table without
 /// re-deriving the name from the VM.
-pub(crate) const NETWORK_TUNNEL_HOST_IFACE_FILE: &str = "network-tunnel-host-iface";
+pub const NETWORK_TUNNEL_HOST_IFACE_FILE: &str = "network-tunnel-host-iface";
 pub(crate) const NETWORK_TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]

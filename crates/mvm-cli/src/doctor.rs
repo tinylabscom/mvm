@@ -513,6 +513,120 @@ fn builderd_daemon_check() -> Check {
     }
 }
 
+/// The builder transport shape currently in effect on this host.
+///
+/// This makes the no-guest-NIC cutover status explicit instead of forcing an
+/// operator to infer it from the backend line plus the separate egress check.
+/// It also marks the remaining guest-NIC-based paths as legacy/unsupported for
+/// the production vsock-only architecture.
+#[cfg(feature = "builder-vm")]
+fn builder_transport_check(plat: Platform) -> Check {
+    use mvm_build::builder_backend_select::BuilderBackendChoice;
+    let choice = mvm_build::builder_backend_select::resolve_choice();
+    let info = match choice {
+        BuilderBackendChoice::Hvf => {
+            "vsock-only host/guest transport; no builder guest NIC, no DHCP or gateway bootstrap"
+                .to_string()
+        }
+        BuilderBackendChoice::Libkrun => {
+            if plat == Platform::Wsl2 {
+                "legacy guest-network bootstrap path on libkrun (DHCP/static fallback); no-guest-NIC builder cutover not landed on WSL2"
+                    .to_string()
+            } else {
+                "legacy guest-network bootstrap path on libkrun (DHCP/static fallback); still a builder networking exception, not the final vsock-only transport"
+                    .to_string()
+            }
+        }
+        BuilderBackendChoice::Qemu => {
+            "unsupported legacy builder path: qemu dev/test fallback with guest-network bootstrap; not part of the production vsock-only architecture"
+                .to_string()
+        }
+    };
+    Check {
+        name: "builder transport",
+        category: "platform",
+        ok: true,
+        info,
+    }
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn builder_transport_check(_plat: Platform) -> Check {
+    Check {
+        name: "builder transport",
+        category: "platform",
+        ok: true,
+        info: "n/a (mvm-cli built without `builder-vm` feature)".to_string(),
+    }
+}
+
+/// Summarize workload packet-tunnel worker state under `vms_root`.
+/// Reports running workers as either `drop_all` or `l3_forward(<iface>)`
+/// based on the persisted host-interface sidecar, flags stale artifacts when
+/// the pid is dead or malformed, and reports `absent` when nothing is staged.
+/// Informational: no tunnel worker is the normal state for a workload with no
+/// admitted forwarding tunnel.
+fn network_tunnel_worker_summary(vms_root: &std::path::Path) -> String {
+    let Ok(entries) = std::fs::read_dir(vms_root) else {
+        return "absent (no workload tunnel worker running)".to_string();
+    };
+    let mut running = Vec::new();
+    let mut stale = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let pid_file = dir.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE);
+        let audit_file = dir.join(mvm_backend::NETWORK_TUNNEL_AUDIT_JSONL);
+        let iface_file = dir.join(mvm_backend::NETWORK_TUNNEL_HOST_IFACE_FILE);
+        let pid_file_exists = pid_file.exists();
+        let pid = std::fs::read_to_string(&pid_file)
+            .ok()
+            .and_then(|s| s.trim().parse::<libc::pid_t>().ok());
+        let iface = std::fs::read_to_string(&iface_file)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let has_artifacts = pid_file_exists || audit_file.exists() || iface.is_some();
+        let mode = iface
+            .as_deref()
+            .map(|iface| format!("l3_forward ({iface})"))
+            .unwrap_or_else(|| "drop_all".to_string());
+        if let Some(pid) = pid.filter(|pid| pid_is_alive(*pid)) {
+            running.push(format!("{name}: {mode} (pid {pid})"));
+        } else if has_artifacts {
+            stale.push(format!("{name}: {mode}"));
+        }
+    }
+    running.sort();
+    stale.sort();
+    if running.is_empty() && stale.is_empty() {
+        return "absent (no workload tunnel worker running)".to_string();
+    }
+    let mut parts = Vec::new();
+    if !running.is_empty() {
+        parts.push(format!("{} active - {}", running.len(), running.join(", ")));
+    }
+    if !stale.is_empty() {
+        parts.push(format!("stale: {}", stale.join(", ")));
+    }
+    parts.join("; ")
+}
+
+/// Workload packet-tunnel worker state. Informational.
+fn network_tunnel_worker_check() -> Check {
+    Check {
+        name: "network tunnel worker",
+        category: "platform",
+        ok: true,
+        info: network_tunnel_worker_summary(
+            &std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms"),
+        ),
+    }
+}
+
 pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     // ── Prerequisites (user must install before bootstrap) ───────
     let mut checks = vec![
@@ -577,6 +691,8 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     checks.push(registry_drift_check());
     checks.push(host_agent_daemon_check());
     checks.push(builderd_daemon_check());
+    checks.push(builder_transport_check(plat));
+    checks.push(network_tunnel_worker_check());
 
     checks.push(disk_space_check(false));
 
@@ -3794,6 +3910,128 @@ mod tests {
         let s = builderd_daemon_summary(root.path());
         assert!(s.contains("bvz: ready"), "got {s:?}");
         handle.join().expect("server thread");
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_transport_check_reports_hvf_as_vsock_only() {
+        unsafe {
+            std::env::set_var("MVM_BUILDER_BACKEND", "hvf");
+        }
+        let c = builder_transport_check(Platform::MacOS);
+        unsafe {
+            std::env::remove_var("MVM_BUILDER_BACKEND");
+        }
+        assert_eq!(c.name, "builder transport");
+        assert_eq!(c.category, "platform");
+        assert!(c.ok);
+        assert!(c.info.contains("vsock-only"), "got {:?}", c.info);
+        assert!(c.info.contains("no builder guest NIC"), "got {:?}", c.info);
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_transport_check_reports_libkrun_as_legacy_guest_network() {
+        unsafe {
+            std::env::set_var("MVM_BUILDER_BACKEND", "libkrun");
+        }
+        let c = builder_transport_check(Platform::MacOS);
+        unsafe {
+            std::env::remove_var("MVM_BUILDER_BACKEND");
+        }
+        assert_eq!(c.name, "builder transport");
+        assert!(
+            c.info.contains("legacy guest-network bootstrap"),
+            "got {:?}",
+            c.info
+        );
+        assert!(c.info.contains("libkrun"), "got {:?}", c.info);
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn builder_transport_check_marks_qemu_as_unsupported_legacy() {
+        unsafe {
+            std::env::set_var("MVM_BUILDER_BACKEND", "qemu");
+        }
+        let c = builder_transport_check(Platform::LinuxNoKvm);
+        unsafe {
+            std::env::remove_var("MVM_BUILDER_BACKEND");
+        }
+        assert_eq!(c.name, "builder transport");
+        assert!(c.info.contains("unsupported legacy"), "got {:?}", c.info);
+        assert!(c.info.contains("qemu"), "got {:?}", c.info);
+    }
+
+    #[test]
+    fn network_tunnel_worker_check_is_informational_platform_check() {
+        let c = network_tunnel_worker_check();
+        assert_eq!(c.name, "network tunnel worker");
+        assert_eq!(c.category, "platform");
+        assert!(c.ok, "tunnel worker state is informational, never blocking");
+    }
+
+    #[test]
+    fn network_tunnel_worker_summary_absent_when_root_missing_or_empty() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(network_tunnel_worker_summary(&root.path().join("missing")).starts_with("absent"));
+        assert!(network_tunnel_worker_summary(root.path()).starts_with("absent"));
+        std::fs::create_dir_all(root.path().join("vm-no-tunnel")).unwrap();
+        assert!(network_tunnel_worker_summary(root.path()).starts_with("absent"));
+    }
+
+    #[test]
+    fn network_tunnel_worker_summary_reports_live_drop_all_and_l3_forward() {
+        let root = tempfile::tempdir().unwrap();
+        let drop_all = root.path().join("vm-drop");
+        std::fs::create_dir_all(&drop_all).unwrap();
+        std::fs::write(
+            drop_all.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+
+        let l3 = root.path().join("vm-l3");
+        std::fs::create_dir_all(&l3).unwrap();
+        std::fs::write(
+            l3.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
+            format!("{}\n", std::process::id()),
+        )
+        .unwrap();
+        std::fs::write(
+            l3.join(mvm_backend::NETWORK_TUNNEL_HOST_IFACE_FILE),
+            "mvmhtdeadbeef\n",
+        )
+        .unwrap();
+
+        let s = network_tunnel_worker_summary(root.path());
+        assert!(s.contains("2 active"), "got {s:?}");
+        assert!(s.contains("vm-drop: drop_all"), "got {s:?}");
+        assert!(s.contains("vm-l3: l3_forward (mvmhtdeadbeef)"), "got {s:?}");
+    }
+
+    #[test]
+    fn network_tunnel_worker_summary_reports_stale_artifacts() {
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("vm-stale");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(
+            stale.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
+            "2147483646\n",
+        )
+        .unwrap();
+        std::fs::write(
+            stale.join(mvm_backend::NETWORK_TUNNEL_HOST_IFACE_FILE),
+            "mvmhtstale00\n",
+        )
+        .unwrap();
+        std::fs::write(stale.join(mvm_backend::NETWORK_TUNNEL_AUDIT_JSONL), "").unwrap();
+
+        let s = network_tunnel_worker_summary(root.path());
+        assert!(
+            s.contains("stale: vm-stale: l3_forward (mvmhtstale00)"),
+            "got {s:?}"
+        );
     }
 
     #[test]

@@ -237,16 +237,28 @@ pub fn resolve_stage0_backend(verbose: bool) -> Box<dyn BuilderVm> {
 
 /// Stage 0 driver for an explicit `choice` — used by the auto-fallback loop to
 /// construct the next backend to try. QEMU when chosen; libkrun for everything
-/// else (hvf Stage 0 is a gap, and the "Stage 0 is libkrun even on
-/// hvf-default hosts" invariant holds — the Linux fallback order only ever
-/// yields libkrun→qemu, never hvf).
+/// else. HVF Stage 0 remains a gap, so even the macOS auto-detect path lowers
+/// to libkrun here; Linux auto libkrun stays libkrun-only and never silently
+/// redirects onto qemu.
 pub fn resolve_stage0_backend_for_choice(
     choice: BuilderBackendChoice,
     verbose: bool,
 ) -> Box<dyn BuilderVm> {
-    match choice {
+    match stage0_backend_choice(choice) {
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        _ => Box::new(LibkrunBuilderVm::default().with_verbose(verbose)),
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
+            Box::new(LibkrunBuilderVm::default().with_verbose(verbose))
+        }
+    }
+}
+
+/// Stage 0 currently has only two concrete driver targets: explicit qemu stays
+/// qemu; every other selection lowers to libkrun until an hvf-specific Stage 0
+/// implementation exists.
+fn stage0_backend_choice(choice: BuilderBackendChoice) -> BuilderBackendChoice {
+    match choice {
+        BuilderBackendChoice::Qemu => BuilderBackendChoice::Qemu,
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => BuilderBackendChoice::Libkrun,
     }
 }
 
@@ -787,6 +799,14 @@ mod tests {
         assert_eq!(builder_attempt_order(Hvf, true, false, false), vec![Hvf]);
         // Explicit qemu is a single attempt.
         assert_eq!(builder_attempt_order(Qemu, false, true, false), vec![Qemu]);
+    }
+
+    #[test]
+    fn stage0_choice_keeps_hvf_lowered_to_libkrun_and_qemu_explicit() {
+        use BuilderBackendChoice::*;
+        assert_eq!(stage0_backend_choice(Hvf), Libkrun);
+        assert_eq!(stage0_backend_choice(Libkrun), Libkrun);
+        assert_eq!(stage0_backend_choice(Qemu), Qemu);
     }
 
     #[test]
