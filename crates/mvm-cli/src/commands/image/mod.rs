@@ -356,6 +356,9 @@ fn oci_runtime_tag() -> String {
     use sha2::{Digest, Sha256};
 
     let mut hasher = Sha256::new();
+    hasher.update(b"epoch=");
+    hasher.update(OCI_RUNTIME_EPOCH.to_string().as_bytes());
+    hasher.update(b"\n");
     for name in [
         "mvm-oci-init",
         "mvm-oci-entrypoint",
