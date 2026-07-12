@@ -6288,7 +6288,10 @@ mod tests {
         let configured = apply_networking_mode(krun);
 
         assert!(
-            matches!(configured.networking, libkrun_sys::NetworkingMode::VsockDirect),
+            matches!(
+                configured.networking,
+                libkrun_sys::NetworkingMode::VsockDirect
+            ),
             "builder contexts must resolve to the direct-vsock networking mode"
         );
     }

@@ -29,10 +29,10 @@
 
 #![cfg(unix)]
 
+use mvm_backend::backend::AnyBackend;
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
-use mvm_backend::backend::AnyBackend;
 use std::process::Command;
 
 #[cfg(target_os = "macos")]
