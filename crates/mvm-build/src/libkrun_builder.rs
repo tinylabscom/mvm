@@ -539,7 +539,7 @@ fn prepare_builder_transport_disks(
 ) -> Result<(PathBuf, PathBuf), BuilderVmError> {
     let input_disk = vm_state_dir.join("input.img");
     let output_disk = vm_state_dir.join("output.img");
-    pack_input_disk(input_trees, &input_disk, BUILDER_INPUT_DISK_MIN).map_err(|e| {
+    pack_input_disk(input_trees, None, &input_disk, BUILDER_INPUT_DISK_MIN).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pack builder input disk {}: {e}",
             input_disk.display()
@@ -1026,7 +1026,7 @@ impl LibkrunBuilderVm {
         // Builder VMs are NIC-less: egress goes over the vsock relay below, so
         // the libkrun networking mode must be the disconnected sink — the
         // supervisor rejects anything else. Matches the Stage 0 path.
-        krun = apply_networking_mode(krun, &vm_state_dir);
+        krun = apply_networking_mode(krun);
 
         if builder_uses_vsock_egress(&image)
             && runtime_overlay.is_none()
@@ -1485,7 +1485,7 @@ impl BuilderVm for LibkrunBuilderVm {
         // Builder VMs are NIC-less: egress goes over the vsock relay below, so
         // the libkrun networking mode must be the disconnected sink — the
         // supervisor rejects anything else. Matches the Stage 0 path.
-        krun = apply_networking_mode(krun, &vm_state_dir);
+        krun = apply_networking_mode(krun);
 
         if builder_uses_vsock_egress(&image)
             && runtime_overlay.is_none()

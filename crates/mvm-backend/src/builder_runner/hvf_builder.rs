@@ -117,6 +117,7 @@ impl HvfBuilderVm {
                 work_src: &job.work_dir,
                 host_bin_dir: &host_bin_dir,
                 runtime_overlay: runtime_overlay.as_deref(),
+                closure_nar: None,
                 output_size: u64::from(self.output_mib) << 20,
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
