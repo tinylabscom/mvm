@@ -63,15 +63,29 @@ Two bugs the unit tests missed were caught by the live boot and fixed:
    Read-only file system`). It's now pre-created in `mkGuest` alongside
    `/work`, `/out`, `/job`, `/mvm-bins`.
 
-**hvf (disk-transport) parity** shares the same guest import + baked mount
-point; its host-side attach (NAR as a tar entry on the input disk) is
-unit-tested but not yet live-booted — the dev Mac's Stage 0 store is
-degraded (corrupt store + `/homeless-shelter` purity), which fails the
-builder base-image rebuild before the hvf builder boots. Live hvf boot is
-pending a clean macOS Stage 0 environment.
+## Live validation (2026-07-12, macOS/hvf disk-transport)
+
+The hvf disk-transport path was booted end-to-end on this Mac via the
+`hvf-rootfs-inject` (inject the current `mvm-host-vm-init` into a builder
+rootfs, no Stage 0) + `hvf-builder-transport` (boot the hvf builder with the
+NAR riding the input-disk tar) examples — sidestepping the degraded Stage 0
+base rebuild. Guest DBG confirmed the NAR extracted to
+`/run/builder-input/closure-seed/nix-closure.nar`, bind-mounted to
+`/closure-seed`, and `mvm-host-vm-init` ran the import with the same content
+hash the qemu run produced and no fail-open warning (`nix-store --import`
+exit 0). The persisted marker isn't host-checkable there — the example's
+nix-store scratch disk isn't synced on the trivial power-off — but the import
+execution + completion is the backend-agnostic code already proven end-to-end
+on qemu.
+
+A third bug the live boot caught and fixed: both host stagers named the NAR
+after the *source path's* file name rather than the fixed `CLOSURE_FILE`
+(`nix-closure.nar`) the guest imports, so any differently-named source made the
+import a silent no-op. `pack_input_disk` (disk) and `stage_closure_seed_dir`
+(virtio-fs) now derive the staged name from `CLOSURE_FILE`.
 
 ## Deferred / not here
 
 - Warm-builder-snapshot capture (adjacent warm-start work) — SP3 leaves the seam; capturing the seeded store into a snapshot is separate.
 - A core/extended closure split — only if SP4 shows prepare-time cost is painful.
-- Live hvf disk-transport boot (blocked on the dev Mac's Stage 0 rot; the mechanism is unit-tested and shares the validated guest path).
+- Real `machine build --builder hvf` closure boot (vs. the example harness) — blocked only by the dev Mac's Stage 0 rot (`/homeless-shelter` mid-invocation on a from-scratch rebuild), unrelated to SP3; the disk-transport delivery + import are already live-proven via the inject/transport examples.
