@@ -25,6 +25,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::builder_vm::{BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError};
 #[cfg(feature = "builder-vm")]
+use crate::builder_vm_runtime::CLOSURE_SEED_TAG;
+#[cfg(feature = "builder-vm")]
 use crate::libkrun_builder::{
     BuilderEndpointTransport, BuilderShellJob, BuilderShellResult, BuilderVsockEgressEndpoint,
     builder_runtime_overlay_attachment, cached_runtime_overlay_ext4,
@@ -594,7 +596,8 @@ fn run_build_qemu(
 fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, BuilderVmError> {
     use crate::builder_vm_runtime::{
         acquire_nix_store_image_lock, builder_vm_timeout, read_job_result_with_diagnostics,
-        shell_job_exit_error, stage_shell_job_dir,
+        stage_closure_seed_dir, stage_shell_job_dir,
+        shell_job_exit_error,
     };
     use crate::libkrun_builder::{
         BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
@@ -646,13 +649,26 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         );
     }
 
-    let shares = [
-        ("work", job.work_dir.as_path()),
-        ("out", job.artifact_out.as_path()),
-        ("job", job_dir.as_path()),
-    ];
+    // Attach the resolved builder image's seeded closure NAR, when it
+    // carries one, as a fourth read-only share — the same per-arch cache
+    // dir `ensure_builder_vm_image` just read the kernel/rootfs from.
+    let closure_nar =
+        crate::builder_pack::closure_nar_path(&builder_vm_cache_dir().join(host_arch_tag()));
+    let closure_share_dir = closure_nar
+        .as_deref()
+        .map(|nar| stage_closure_seed_dir(nar, &vm_state_dir))
+        .transpose()?;
+
+    let shares = qemu_shares_with_closure_seed(
+        vec![
+            ("work", job.work_dir.as_path()),
+            ("out", job.artifact_out.as_path()),
+            ("job", job_dir.as_path()),
+        ],
+        closure_share_dir.as_deref(),
+    );
     let mut virtiofsd = VirtiofsdGuard::default();
-    for (tag, dir) in shares {
+    for (tag, dir) in shares.iter().copied() {
         let sock = qemu_virtiofs_socket_path(&job_id, tag);
         virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
     }
@@ -708,7 +724,7 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         "-numa",
         "node,memdev=mem",
     ]);
-    for (tag, _) in shares {
+    for (tag, _) in shares.iter().copied() {
         let sock = qemu_virtiofs_socket_path(&job_id, tag);
         cmd.arg("-chardev")
             .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
@@ -796,7 +812,7 @@ fn run_build_qemu(
 ) -> Result<BuilderArtifacts, BuilderVmError> {
     use crate::builder_vm_runtime::{
         acquire_nix_store_image_lock, builder_vm_timeout, finalize_flake_job, finalize_install_job,
-        stage_job_dir,
+        stage_closure_seed_dir, stage_job_dir,
     };
     use crate::libkrun_builder::{
         BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
@@ -870,14 +886,27 @@ fn run_build_qemu(
     //    their sockets as a client at launch, so they must be ready). The
     //    guest mounts each by tag; `work`/`mvm-bins` are inputs it mounts
     //    read-only (`virtiofs_tag_is_read_only`), `out`/`job` read-write.
-    let shares = [
-        ("work", mounts.flake_src.as_path()),
-        ("out", mounts.artifact_out.as_path()),
-        ("job", job_dir.as_path()),
-        ("mvm-bins", mounts.host_bin_dir.as_path()),
-    ];
+    // Attach the resolved builder image's seeded closure NAR, when it
+    // carries one, as a fifth read-only share — the same per-arch cache
+    // dir `ensure_builder_vm_image` just read the kernel/rootfs from.
+    let closure_nar =
+        crate::builder_pack::closure_nar_path(&builder_vm_cache_dir().join(host_arch_tag()));
+    let closure_share_dir = closure_nar
+        .as_deref()
+        .map(|nar| stage_closure_seed_dir(nar, &vm_state_dir))
+        .transpose()?;
+
+    let shares = qemu_shares_with_closure_seed(
+        vec![
+            ("work", mounts.flake_src.as_path()),
+            ("out", mounts.artifact_out.as_path()),
+            ("job", job_dir.as_path()),
+            ("mvm-bins", mounts.host_bin_dir.as_path()),
+        ],
+        closure_share_dir.as_deref(),
+    );
     let mut virtiofsd = VirtiofsdGuard::default();
-    for (tag, dir) in shares {
+    for (tag, dir) in shares.iter().copied() {
         let sock = qemu_virtiofs_socket_path(&job_id, tag);
         virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
     }
@@ -936,7 +965,7 @@ fn run_build_qemu(
         "-numa",
         "node,memdev=mem",
     ]);
-    for (tag, _) in shares {
+    for (tag, _) in shares.iter().copied() {
         let sock = qemu_virtiofs_socket_path(&job_id, tag);
         cmd.arg("-chardev")
             .arg(format!("socket,id=vfs-{tag},path={}", sock.display()));
@@ -988,6 +1017,22 @@ fn qemu_virtiofs_socket_path(job_id: &str, tag: &str) -> PathBuf {
     // nested in worktrees, so keep QEMU virtiofs sockets under /tmp and rely
     // on VirtiofsdGuard to remove them.
     PathBuf::from(format!("/tmp/mvm-vfs-{job_id}-{tag}.sock"))
+}
+
+/// Append the closure-seed share to `base` iff `closure_share_dir` is
+/// `Some`, mirroring the libkrun path's `closure_seed_share`. Pulled out as
+/// its own pure step (no qemu/virtiofsd spawn) so the "attach a share iff
+/// the resolved image carries a closure" decision is unit-testable without
+/// booting anything.
+#[cfg(feature = "builder-vm")]
+fn qemu_shares_with_closure_seed<'a>(
+    mut base: Vec<(&'a str, &'a Path)>,
+    closure_share_dir: Option<&'a Path>,
+) -> Vec<(&'a str, &'a Path)> {
+    if let Some(dir) = closure_share_dir {
+        base.push((CLOSURE_SEED_TAG, dir));
+    }
+    base
 }
 
 /// Validate the caller's mount paths before launching QEMU. Mirrors
@@ -1257,6 +1302,30 @@ mod vsock_module_tests {
 
     #[cfg(feature = "builder-vm")]
     use crate::libkrun_builder::{BuilderExtraDisk, BuilderShellJob};
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn qemu_shares_omit_closure_seed_when_absent() {
+        let base = vec![("work", Path::new("/w")), ("out", Path::new("/o"))];
+        let shares = qemu_shares_with_closure_seed(base.clone(), None);
+        assert_eq!(shares, base);
+    }
+
+    #[cfg(feature = "builder-vm")]
+    #[test]
+    fn qemu_shares_append_closure_seed_when_present() {
+        let base = vec![("work", Path::new("/w")), ("out", Path::new("/o"))];
+        let closure_dir = Path::new("/vm-state/closure-seed");
+        let shares = qemu_shares_with_closure_seed(base, Some(closure_dir));
+        assert_eq!(
+            shares,
+            vec![
+                ("work", Path::new("/w")),
+                ("out", Path::new("/o")),
+                (CLOSURE_SEED_TAG, closure_dir),
+            ]
+        );
+    }
 
     #[test]
     fn cmdline_swaps_hvc0_for_serial_and_adds_qemu_markers() {

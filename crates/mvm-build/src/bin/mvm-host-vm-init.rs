@@ -137,8 +137,9 @@ fn main() -> ExitCode {
 #[cfg(any(target_os = "linux", test))]
 fn virtiofs_tag_is_read_only(tag: &str) -> bool {
     // `work` is the user's source; `mvm-bins` is the embedded host
-    // binaries. Both are inputs the guest must not write back.
-    tag == "work" || tag == "mvm-bins"
+    // binaries; `closure-seed` is the optional seeded Nix store closure
+    // NAR. All three are inputs the guest must not write back.
+    tag == "work" || tag == "mvm-bins" || tag == "closure-seed"
 }
 
 /// One user-supplied volume to mount, decoded from the `mvm.uvols=`
@@ -890,6 +891,7 @@ mod tests {
     fn virtiofs_tag_policy_marks_input_shares_read_only() {
         assert!(virtiofs_tag_is_read_only("work"));
         assert!(virtiofs_tag_is_read_only("mvm-bins"));
+        assert!(virtiofs_tag_is_read_only("closure-seed"));
         assert!(!virtiofs_tag_is_read_only("out"));
         assert!(!virtiofs_tag_is_read_only("job"));
     }
@@ -1192,11 +1194,16 @@ mod linux {
     /// `KrunContext::add_virtio_fs` declarations in
     /// `LibkrunBuilderVm::run_build`. Order doesn't matter; the
     /// guest mounts each by tag. `mvm-bins` is read-only (inputs).
+    /// `closure-seed` is only ever attached by the host when the
+    /// resolved builder image carries a seeded closure NAR — absent
+    /// otherwise, in which case the mount attempt below fails and logs
+    /// (best-effort, matching every other entry in this table).
     const VIRTIOFS_MOUNTS: &[(&str, &str)] = &[
         ("work", WORK_DIR),
         ("out", OUT_DIR),
         ("job", JOB_DIR),
         ("mvm-bins", HOST_BIN_DIR),
+        ("closure-seed", CLOSURE_SEED_DIR),
     ];
 
     /// Max stderr lines we capture into `/job/result`. Keeps
@@ -1567,6 +1574,19 @@ mod linux {
                 }
                 eprintln!("mvm-host-vm-init: runtime overlay mount warning (non-fatal): {e}");
             }
+        }
+        // Optional accelerator: a builder pack may carry a pre-fetched
+        // toolchain closure NAR. Import it into the persistent store once the
+        // store is set up (Track A) and its `/closure-seed` mount is in place —
+        // virtio-fs shares (Track B, joined above) for the libkrun/qemu VMMs,
+        // or the input-disk bind (staged just above) for the hvf VMM, which has
+        // no virtio-fs. Must run after staging so the NAR is actually visible;
+        // running it inside `setup_nix_store` would read `/closure-seed` before
+        // it is mounted and silently import nothing. Fail-open — the seed saves
+        // a fetch/eval, it is never a hard dependency, and the common case (no
+        // NAR attached) returns immediately without touching the filesystem.
+        if let Err(e) = import_seeded_closure() {
+            eprintln!("mvm-host-vm-init: import_seeded_closure warning (non-fatal): {e}");
         }
 
         // Fork the guest agent under setpriv so the builder/dev VM runs
@@ -2738,17 +2758,6 @@ mod linux {
         // the pre-fix substituter race.
         if let Err(e) = load_seeded_nix_db(timings, anchor) {
             eprintln!("mvm-host-vm-init: load_seeded_nix_db warning (non-fatal): {e}");
-        }
-
-        // Optional accelerator: a builder pack may carry a pre-fetched
-        // toolchain closure NAR. Import it into the persistent store if
-        // the host attached one and this exact content isn't already
-        // there. Fail-open like the DB load above — the seeded closure
-        // saves a fetch/eval, it is never a hard dependency, and the
-        // common case today (no NAR attached, until the host-side wiring
-        // lands) returns immediately without touching the filesystem.
-        if let Err(e) = import_seeded_closure() {
-            eprintln!("mvm-host-vm-init: import_seeded_closure warning (non-fatal): {e}");
         }
 
         Ok(())

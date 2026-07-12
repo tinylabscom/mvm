@@ -419,6 +419,21 @@ fn stage_closure(
     }
 }
 
+/// Resolve the optional seeded closure NAR alongside a resolved builder
+/// image's per-arch cache dir (`builder_vm_cache_dir()/<arch>/`), the same
+/// dir every builder backend reads `vmlinux`/`rootfs.ext4` from. `None` is
+/// the common case today — a pack without a closure leaves the dir exactly
+/// as it was before this field existed, and every builder backend boots
+/// unchanged.
+///
+/// Shared by every builder-image resolver (hvf, libkrun, qemu) so the "does
+/// this arch dir carry a seeded closure" check has one definition instead of
+/// drifting per backend.
+pub fn closure_nar_path(arch_dir: &Path) -> Option<PathBuf> {
+    let nar = arch_dir.join(CLOSURE_FILE);
+    nar.is_file().then_some(nar)
+}
+
 /// Stream a file through SHA-256 so an arbitrarily large rootfs is never held in
 /// memory. Returns the lowercase-hex digest as a validated [`Sha256Hex`].
 fn sha256_file(path: &Path) -> Result<Sha256Hex, BuilderPackError> {
@@ -706,6 +721,22 @@ mod tests {
         let verified = verify_pack_at(&manifest, out.path(), &policy, &config, &config)
             .expect("pack without closure still verifies");
         assert_eq!(verified.file_count, 2);
+    }
+
+    #[test]
+    fn closure_nar_path_is_none_when_absent() {
+        let dir = TempDir::new().expect("arch dir");
+        assert_eq!(closure_nar_path(dir.path()), None);
+    }
+
+    #[test]
+    fn closure_nar_path_resolves_when_present() {
+        let dir = TempDir::new().expect("arch dir");
+        fs::write(dir.path().join(CLOSURE_FILE), CLOSURE_BYTES).expect("write nar");
+        assert_eq!(
+            closure_nar_path(dir.path()),
+            Some(dir.path().join(CLOSURE_FILE))
+        );
     }
 
     #[test]

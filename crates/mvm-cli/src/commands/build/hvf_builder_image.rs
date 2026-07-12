@@ -47,10 +47,11 @@ fn is_cached(out_dir: &Path) -> bool {
 /// image, when the pack that placed `arch_dir` carried one. `None` is the
 /// common case today — no closure production is wired into the source-
 /// checkout build path yet, only the attested-pack materialize step
-/// (`copy_builder_pack_artifacts`) can place this file.
+/// (`copy_builder_pack_artifacts`) can place this file. Delegates to the
+/// shared resolver so the libkrun/qemu host wiring checks the identical
+/// condition.
 fn closure_nar_path(arch_dir: &Path) -> Option<PathBuf> {
-    let nar = arch_dir.join(mvm_build::builder_pack::CLOSURE_FILE);
-    nar.is_file().then_some(nar)
+    mvm_build::builder_pack::closure_nar_path(arch_dir)
 }
 
 /// Resolve the HVF-bootable builder image pair `(kernel, rootfs)`, plus an
