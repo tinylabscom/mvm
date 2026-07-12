@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -eu
+
+script_dir=$(
+    CDPATH= cd -- "$(dirname -- "$0")" >/dev/null 2>&1 && pwd
+)
+repo_root=$(
+    CDPATH= cd -- "${script_dir}/.." >/dev/null 2>&1 && pwd
+)
+
+# shellcheck source=/dev/null
+. "${repo_root}/scripts/dev-env.sh"
+
+exec cargo run --quiet -- "$@"

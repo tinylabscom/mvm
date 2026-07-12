@@ -59,7 +59,7 @@ run *ARGS:
 
 # Run mvmctl with the dev env set (worktree-local MVM_DATA_DIR).
 dev *ARGS:
-    bin/dev {{ARGS}}
+    sh ./bin/dev {{ARGS}}
 
 # Run cargo with the dev env set (worktree-local MVM_DATA_DIR /
 # MVM_CACHE_DIR / CARGO_TARGET_DIR).
