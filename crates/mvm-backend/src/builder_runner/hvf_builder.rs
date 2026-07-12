@@ -43,6 +43,10 @@ pub struct HvfBuilderVm {
     kernel: PathBuf,
     /// Builder rootfs whose baked `mvm-host-vm-init` speaks the disk transport.
     rootfs: PathBuf,
+    /// Optional seeded Nix store closure NAR, resolved alongside the builder
+    /// image when it carries one. `None` (the common case today) attaches no
+    /// closure-seed share at all.
+    closure_nar: Option<PathBuf>,
     nix_store_mib: u32,
     output_mib: u32,
     vcpus: u32,
@@ -55,6 +59,7 @@ impl HvfBuilderVm {
         Self {
             kernel,
             rootfs,
+            closure_nar: None,
             nix_store_mib: DEFAULT_NIX_STORE_MIB,
             output_mib: DEFAULT_OUTPUT_MIB,
             vcpus: DEFAULT_VCPUS,
@@ -133,6 +138,16 @@ impl HvfBuilderVm {
             job_dir: outcome.output_dir,
             vm_state_dir,
         })
+    }
+
+    /// Attach a seeded Nix store closure NAR resolved from the builder image.
+    /// Every `run_build` after this call packs the NAR onto the input disk
+    /// under `closure-seed/`; omitting this call (the default) attaches
+    /// nothing, so a builder image without a closure boots exactly as before
+    /// this seam existed.
+    pub fn with_closure_nar(mut self, closure_nar: Option<PathBuf>) -> Self {
+        self.closure_nar = closure_nar;
+        self
     }
 }
 
@@ -249,6 +264,7 @@ impl BuilderVm for HvfBuilderVm {
                 work_src: &mounts.flake_src,
                 host_bin_dir: &mounts.host_bin_dir,
                 runtime_overlay: runtime_overlay.as_deref(),
+                closure_nar: self.closure_nar.as_deref(),
                 output_size: u64::from(self.output_mib) << 20,
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
@@ -302,6 +318,15 @@ mod tests {
         let b = HvfBuilderVm::new("/k".into(), "/r".into()).with_resources(2, 2048);
         assert_eq!(b.vcpus, 2);
         assert_eq!(b.memory_mib, 2048);
+    }
+
+    #[test]
+    fn closure_nar_defaults_to_none_and_is_settable() {
+        let b = HvfBuilderVm::new("/k".into(), "/r".into());
+        assert_eq!(b.closure_nar, None);
+        let with_closure =
+            HvfBuilderVm::new("/k".into(), "/r".into()).with_closure_nar(Some("/nar".into()));
+        assert_eq!(with_closure.closure_nar, Some(PathBuf::from("/nar")));
     }
 
     #[test]

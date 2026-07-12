@@ -1143,12 +1143,21 @@ mod linux {
     /// from. **Contract with the host wiring:** a host that resolved a
     /// builder pack carrying a closure (`BuildBuilderPackParams.closure`
     /// / `builder_pack::CLOSURE_FILE` = `"nix-closure.nar"`) attaches it
-    /// here as a read-only share before boot — that host-side attach
-    /// isn't wired yet, so today this path is always absent and
-    /// [`import_seeded_closure`] returns immediately. The filename
-    /// mirrors `CLOSURE_FILE` on purpose; keep the two in sync if either
-    /// moves.
+    /// here as a read-only share before boot. Absent when the resolved
+    /// builder image carries no closure — the common case today — in
+    /// which case [`import_seeded_closure`] returns immediately. The
+    /// filename mirrors `CLOSURE_FILE` on purpose; keep the two in sync
+    /// if either moves.
     const CLOSURE_SEED_NAR: &str = "/closure-seed/nix-closure.nar";
+
+    /// Parent directory of [`CLOSURE_SEED_NAR`] — the mount point the host
+    /// attaches the seeded closure at, whichever transport it uses (the
+    /// `closure-seed` virtio-fs tag on libkrun/qemu, the `closure-seed/`
+    /// disk-transport tar entry on the hvf VMM). A separate literal from
+    /// `CLOSURE_SEED_NAR` (not derived from it), matching how the other
+    /// fixed-share consts below are each declared independently; keep the
+    /// two in sync if either moves.
+    const CLOSURE_SEED_DIR: &str = "/closure-seed";
 
     /// Content-keyed idempotency marker recording the sha256 of the
     /// closure NAR most recently imported into the persistent store.
@@ -2921,11 +2930,12 @@ mod linux {
     /// writable so `write_result` can drop `/job/result`.
     const DISK_INPUT_STAGE: &str = "/run/builder-input";
 
-    /// Populate `/job`, `/work`, `/mvm-bins` from the input disk and back `/out`
-    /// with a writable dir on the persistent nix-store disk. This is the
-    /// disk-transport equivalent of the virtio-fs shares, for the hvf VMM
-    /// (which has no virtio-fs). A tmpfs `/out` would be capped by guest RAM —
-    /// too small for a built rootfs — so `/out` lives on the big nix-store disk.
+    /// Populate `/job`, `/work`, `/mvm-bins`, and (when the host packed one)
+    /// `/closure-seed` from the input disk, and back `/out` with a writable
+    /// dir on the persistent nix-store disk. This is the disk-transport
+    /// equivalent of the virtio-fs shares, for the hvf VMM (which has no
+    /// virtio-fs). A tmpfs `/out` would be capped by guest RAM — too small
+    /// for a built rootfs — so `/out` lives on the big nix-store disk.
     fn stage_disk_transport_input(t: &crate::DiskTransport) -> Result<(), String> {
         std::fs::create_dir_all(DISK_INPUT_STAGE)
             .map_err(|e| format!("mkdir {DISK_INPUT_STAGE}: {e}"))?;
@@ -2939,10 +2949,15 @@ mod linux {
         if !status.success() {
             return Err(format!("tar x {} exited {:?}", t.input_dev, status.code()));
         }
+        // Each entry is best-effort: the host only packs `closure-seed` when
+        // the resolved builder image carries a seeded closure, so its absence
+        // here is the common case, not an error — `import_seeded_closure`
+        // already treats a missing `CLOSURE_SEED_NAR` as a silent no-op.
         for (name, target) in [
             ("job", JOB_DIR),
             ("work", WORK_DIR),
             ("mvm-bins", HOST_BIN_DIR),
+            ("closure-seed", CLOSURE_SEED_DIR),
         ] {
             let src = format!("{DISK_INPUT_STAGE}/{name}");
             if Path::new(&src).exists() {

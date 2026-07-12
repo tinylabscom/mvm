@@ -43,20 +43,37 @@ fn is_cached(out_dir: &Path) -> bool {
     out_dir.join("Image").is_file() && out_dir.join("rootfs.ext4").is_file()
 }
 
-/// Resolve the HVF-bootable builder image pair `(kernel, rootfs)`.
+/// The seeded Nix store closure NAR alongside the resolved base builder
+/// image, when the pack that placed `arch_dir` carried one. `None` is the
+/// common case today — no closure production is wired into the source-
+/// checkout build path yet, only the attested-pack materialize step
+/// (`copy_builder_pack_artifacts`) can place this file.
+fn closure_nar_path(arch_dir: &Path) -> Option<PathBuf> {
+    let nar = arch_dir.join(mvm_build::builder_pack::CLOSURE_FILE);
+    nar.is_file().then_some(nar)
+}
+
+/// Resolve the HVF-bootable builder image pair `(kernel, rootfs)`, plus an
+/// optional seeded Nix store closure NAR when the resolved builder image
+/// carries one.
 ///
-/// - Reads the base `vmlinux` + `rootfs.ext4` from `builder_vm_cache_dir()/<arch>/`
-///   (the same source the libkrun/vz builders use).
+/// - Reads the base `vmlinux` + `rootfs.ext4` (and optional `nix-closure.nar`)
+///   from `builder_vm_cache_dir()/<arch>/` (the same source the libkrun/vz
+///   builders use).
 /// - Injects `mvm-host-vm-init` into a copy of the base rootfs using the
 ///   vsock-less HVF patcher VM.
-/// - Caches the result under `builder_vm_cache_dir()/hvf/<key>/`.
+/// - Caches the baked kernel/rootfs pair under `builder_vm_cache_dir()/hvf/<key>/`.
+///   The closure NAR is not baked into the rootfs — it is attached at boot as
+///   a separate share — so it is resolved directly from `arch_dir` on every
+///   call, cache hit or miss.
 ///
-/// On cache hit the existing pair is returned without rebaking.
+/// On cache hit the existing kernel/rootfs pair is returned without rebaking.
 /// On any VMM-level failure returns `BuilderVmError::HvfVmmFailed` so the
 /// builder auto-detect fallback can retry libkrun.
-pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError> {
+pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>), BuilderVmError> {
     let arch = std::env::consts::ARCH;
     let arch_dir = builder_vm_cache_dir().join(arch);
+    let closure_nar = closure_nar_path(&arch_dir);
 
     let vmlinux = arch_dir.join("vmlinux");
     let base_rootfs = arch_dir.join("rootfs.ext4");
@@ -92,7 +109,11 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError>
     let out_dir = builder_vm_cache_dir().join("hvf").join(&key);
 
     if is_cached(&out_dir) {
-        return Ok((out_dir.join("Image"), out_dir.join("rootfs.ext4")));
+        return Ok((
+            out_dir.join("Image"),
+            out_dir.join("rootfs.ext4"),
+            closure_nar,
+        ));
     }
 
     // Bake into a staging directory; promote atomically so a partial bake
@@ -179,7 +200,11 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError>
         }
     }
 
-    Ok((out_dir.join("Image"), out_dir.join("rootfs.ext4")))
+    Ok((
+        out_dir.join("Image"),
+        out_dir.join("rootfs.ext4"),
+        closure_nar,
+    ))
 }
 
 #[cfg(test)]
@@ -227,6 +252,26 @@ mod tests {
             key1,
             hvf_image_cache_key(&k, &r, &h),
             "kernel change → new key"
+        );
+    }
+
+    #[test]
+    fn closure_nar_path_is_none_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(dir.path().join("rootfs.ext4"), b"rootfs").unwrap();
+        assert_eq!(closure_nar_path(dir.path()), None);
+    }
+
+    #[test]
+    fn closure_nar_path_resolves_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("vmlinux"), b"kernel").unwrap();
+        std::fs::write(dir.path().join("rootfs.ext4"), b"rootfs").unwrap();
+        std::fs::write(dir.path().join("nix-closure.nar"), b"nar").unwrap();
+        assert_eq!(
+            closure_nar_path(dir.path()),
+            Some(dir.path().join("nix-closure.nar"))
         );
     }
 
