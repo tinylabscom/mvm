@@ -82,13 +82,47 @@ stack at all). Deferred (see Performance).
 
 ## Performance
 
-Userspace TCP (`smoltcp`) is slower than kernel NAT (extra copies + a userspace TCP
-state machine). This is **accepted for simplicity and uniformity**, and is modest for
-the actual workload profile — dev/agent microVMs making API calls, pulling packages,
-and streaming model output, not a multi-Gbps proxy. The tradeoff is to be
-**benchmarked**, not asserted.
+Measured, not asserted. Benchmark on a Linux box (Intel i7-7700 @ 3.6 GHz; `smoltcp`
+0.13.1 over a real 1500-MTU TUN driven by a kernel-TCP sender), 2 GB bulk transfer +
+20k×64 B ping-pong.
 
-If a real throughput bottleneck ever appears, the escape hatch is **option C** (host
+Single flow, single core:
+
+| path | throughput (1 flow) | ping-pong RPS | p50 / p99 |
+|---|---|---|---|
+| kernel TCP (loopback ceiling*) | ~9.8 GB/s | 71.9k | 11 µs / 45 µs |
+| smoltcp / TUN, 64 KiB buffer | 0.81 GB/s (6.5 Gbit/s) | 65.7k | 13 µs / 52 µs |
+| smoltcp / TUN, 256 KiB buffer | 0.91 GB/s (7.3 Gbit/s) | — | — |
+
+Eight concurrent flows through **one** worker (the builder-egress shape — parallel nix
+fetches all funnel through a single per-VM worker):
+
+| path | aggregate throughput (8 flows) |
+|---|---|
+| kernel TCP (loopback, multi-core*) | ~95 Gbit/s |
+| smoltcp / TUN, 64 KiB, one worker thread | 6.4 Gbit/s |
+| smoltcp / TUN, 256 KiB, one worker thread | 6.9 Gbit/s |
+
+*Loopback ceilings are inflated by large-segment offload (64 KB segments, no 1500-MTU
+segmentation) and, for the multi-core row, by using every core; they bound, they do
+not represent a real 1500-MTU kernel-NAT path. The decisive figures are the
+**absolute** smoltcp numbers.
+
+Conclusion: the userspace-TCP tax is **negligible for every consumer at this tier**.
+Single-flow, smoltcp delivers 6.5–7.3 Gbit/s and lands within ~9 % of kernel RPS on
+request/response latency (+2 µs p50). Under eight concurrent flows the single-threaded
+worker holds a **steady ~6.5 Gbit/s aggregate** — it does not degrade or thrash, it
+simply caps at one core, and eight flows share that ceiling. That cap is the number
+that matters for the highest-demand consumer, the builder VM's parallel nix fetches:
+those are internet-bound (10s–100s of Mbps per connection), so aggregate builder egress
+sits far below the ~6.5 Gbit/s single-worker ceiling. dev/agent workloads clear it by
+a wider margin still — all of this on 2017-era silicon. A 256 KiB buffer buys ~12 %
+over the 64 KiB default.
+
+The one scenario where the single-worker cap bites is sustained aggregate egress above
+~6.5 Gbit/s per VM — e.g. a LAN-local binary cache at 10–25 GbE feeding a massive
+parallel closure, not a realistic internet-bound builder or workload. If that ever
+materializes, the escape hatch is **option C** (host
 kernel sockets via a socket-level vsock proxy / TSI): faster, still
 unprivileged/uniform/no-NAT, and a tighter fit for the invariant. Two constraints on
 that future path: it needs guest-side socket interception (feasible in the in-house
