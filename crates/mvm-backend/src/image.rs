@@ -747,14 +747,21 @@ ls -lh "$IMAGES_DIR/{name}.$(uname -m).elf"
 /// directory.
 ///
 /// Used by `mvmctl exec --add-dir host:guest` to share a host directory
-/// into a transient microVM without virtio-fs. The image is created inside
-/// the Linux build environment (Lima VM on macOS, host on Linux) and sized
-/// from the directory's actual contents plus headroom.
+/// into a transient microVM without virtio-fs. The image is built
+/// in-process with the memory-safe `mvm-ext4` writer — no builder/dev VM,
+/// no `mkfs`, no mount/copy/unmount — so `host_dir` is read directly by this
+/// process: any path the caller can read qualifies, with no "must be
+/// reachable inside the Linux build environment" caveat.
 ///
-/// `host_dir` must already be reachable inside the Linux build environment
-/// (Lima auto-mounts the host home; Linux passes paths through directly).
-/// `label` is used as the ext4 volume label (max 16 chars, ASCII).
-/// `dest_image_path` is where the resulting `.ext4` file is written.
+/// `label` is stamped into the ext4 superblock as the volume name, so it
+/// must be exactly what the guest passes to `mount LABEL={label}` (max 16
+/// chars, ASCII alphanumeric/dash). `dest_image_path` is where the
+/// resulting `.ext4` file is written; its size is computed exactly from
+/// `host_dir`'s contents, not estimated.
+///
+/// Fails closed if `host_dir` contains a device, FIFO, or socket special
+/// file — the ext4 writer has no node kind to represent them, and silently
+/// omitting one would leave the guest with less than what was shared.
 ///
 /// Returns the absolute image path on success.
 pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) -> Result<String> {
@@ -764,51 +771,31 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
     {
         anyhow::bail!("ext4 label '{label}' must be 1-16 ASCII alphanumeric/dash chars",);
     }
-    let parent = std::path::Path::new(dest_image_path)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let mkdir_parent = if parent.is_empty() {
-        String::new()
-    } else {
-        format!("mkdir -p {parent}")
-    };
 
-    // Compute size: directory content + 8 MiB headroom + 16 MiB minimum,
-    // rounded up to the next 4-MiB boundary so mkfs.ext4 is happy.
-    // We do this inside the Linux env so `du` sees the same view as `cp`.
-    let script = format!(
-        r#"
-        set -e
-        {mkdir_parent}
-        rm -f {dest}
-        SRC_KB=$(du -sk {src} 2>/dev/null | awk '{{print $1}}')
-        SIZE_MIB=$(( (SRC_KB / 1024) + 8 ))
-        if [ "$SIZE_MIB" -lt 16 ]; then SIZE_MIB=16; fi
-        SIZE_MIB=$(( ((SIZE_MIB + 3) / 4) * 4 ))
-        truncate -s "${{SIZE_MIB}}M" {dest}
-        mkfs.ext4 -q -L {label} {dest}
+    let nodes = mvm_build::rootfs::collect_nodes(
+        std::path::Path::new(host_dir),
+        mvm_build::rootfs::UnsupportedNodePolicy::Reject,
+    )
+    .with_context(|| format!("walking host directory '{host_dir}' for --add-dir"))?;
 
-        MOUNT_DIR=$(mktemp -d)
-        sudo mount {dest} "$MOUNT_DIR"
-        if [ -d {src} ]; then
-            sudo cp -aT {src} "$MOUNT_DIR" 2>/dev/null || true
-        else
-            sudo cp -a {src} "$MOUNT_DIR/" 2>/dev/null || true
-        fi
-        sudo umount "$MOUNT_DIR"
-        rmdir "$MOUNT_DIR"
-        chmod 0644 {dest}
-        "#,
-        mkdir_parent = mkdir_parent,
-        src = host_dir,
-        dest = dest_image_path,
-        label = label,
-    );
-
-    run_in_vm(&script).with_context(|| {
+    mvm_build::rootfs::materialize_ext4_pure_labeled(
+        &nodes,
+        std::path::Path::new(dest_image_path),
+        label.as_bytes(),
+    )
+    .with_context(|| {
         format!("building read-only ext4 image from '{host_dir}' at '{dest_image_path}'")
     })?;
+
+    // Normalize permissions the way the old mkfs-in-a-VM path's trailing
+    // `chmod 0644` did, regardless of the calling process's umask.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest_image_path, std::fs::Permissions::from_mode(0o644))
+            .with_context(|| format!("chmod 0644 '{dest_image_path}'"))?;
+    }
+
     Ok(dest_image_path.to_string())
 }
 
@@ -878,6 +865,77 @@ mod tests {
     fn build_dir_image_ro_rejects_empty_label() {
         let err = build_dir_image_ro("/tmp/x", "", "/tmp/x.ext4").unwrap_err();
         assert!(err.to_string().contains("ext4 label"));
+    }
+
+    /// `build_dir_image_ro` must materialize the ext4 image in-process (no
+    /// `run_in_vm`, no builder/dev VM) and stamp `label` into the superblock
+    /// as the ext4 volume name — the guest mounts this image with
+    /// `mount LABEL={label}`, so a wrong or missing label fails the guest
+    /// mount, not just this call.
+    #[test]
+    fn build_dir_image_ro_materializes_in_process_with_correct_label() {
+        let src = tempfile::tempdir().expect("tempdir");
+        std::fs::write(src.path().join("hello.txt"), b"hi\n").expect("write fixture file");
+        std::fs::create_dir(src.path().join("sub")).expect("mkdir sub");
+        std::fs::write(src.path().join("sub").join("nested.txt"), b"nested\n")
+            .expect("write nested fixture file");
+
+        let out_dir = tempfile::tempdir().expect("tempdir");
+        let dest = out_dir.path().join("extra.ext4");
+
+        let returned = build_dir_image_ro(
+            src.path().to_str().expect("utf8 tempdir path"),
+            "mvm-extra-0",
+            dest.to_str().expect("utf8 dest path"),
+        )
+        .expect("build_dir_image_ro must materialize in-process without a VM");
+        assert_eq!(returned, dest.to_string_lossy());
+
+        // Read the produced file back with the real ext4 reader already used
+        // elsewhere in this crate to validate boot artifacts (`artifacts::validate`)
+        // — an independent parser, not just a byte-offset echo of what we wrote.
+        let fs = ext4_view::Ext4::load_from_path(&dest).expect("produced file is a valid ext4 fs");
+        assert_eq!(
+            fs.label().to_str().expect("label is utf8"),
+            "mvm-extra-0",
+            "the guest's `mount LABEL=mvm-extra-0` depends on this exact label"
+        );
+        assert_eq!(
+            fs.read_to_string("/hello.txt").expect("read /hello.txt"),
+            "hi\n"
+        );
+        assert_eq!(
+            fs.read_to_string("/sub/nested.txt")
+                .expect("read /sub/nested.txt"),
+            "nested\n"
+        );
+    }
+
+    /// The old `cp -a`-in-a-VM path preserved special files (fifo/socket/
+    /// device) via `mknod`; the pure ext4 writer's `Node` enum has no variant
+    /// for them. Silently dropping one would leave the guest with less than
+    /// what the user asked to share, so this must fail closed instead.
+    #[cfg(unix)]
+    #[test]
+    fn build_dir_image_ro_rejects_a_socket_instead_of_silently_dropping_it() {
+        let src = tempfile::tempdir().expect("tempdir");
+        let sock_path = src.path().join("weird.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&sock_path).expect("bind a real test socket");
+
+        let out_dir = tempfile::tempdir().expect("tempdir");
+        let dest = out_dir.path().join("extra.ext4");
+
+        let err = build_dir_image_ro(
+            src.path().to_str().expect("utf8 tempdir path"),
+            "mvm-extra-1",
+            dest.to_str().expect("utf8 dest path"),
+        )
+        .expect_err("a directory containing a socket must fail closed, not silently diverge");
+        assert!(
+            format!("{err:#}").contains("cannot represent"),
+            "expected an unsupported-node-type error, got: {err:#}"
+        );
     }
 
     #[test]
