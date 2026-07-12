@@ -304,8 +304,7 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
                             Err(err)
                                 if matches!(
                                     err.kind(),
-                                    std::io::ErrorKind::WouldBlock
-                                        | std::io::ErrorKind::TimedOut
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
                                 ) =>
                             {
                                 break;

@@ -104,12 +104,12 @@ fn main() {
         );
     }
 
-// Guest runtime binaries for OCI rootfs injection (guest arch = host arch).
-// Embedded alongside the host bins so an end-user mvmctl with no source
-// checkout can inject the full OCI runtime set into a `run --image` rootfs.
-// Built in one cargo invocation; they ride the same `EMBEDDED` array and are
-// looked up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte stubs) — a stub
-// build can't materialize an OCI run, same as the host bins.
+    // Guest runtime binaries for OCI rootfs injection (guest arch = host arch).
+    // Embedded alongside the host bins so an end-user mvmctl with no source
+    // checkout can inject the full OCI runtime set into a `run --image` rootfs.
+    // Built in one cargo invocation; they ride the same `EMBEDDED` array and are
+    // looked up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte stubs) — a stub
+    // build can't materialize an OCI run, same as the host bins.
     if !skip_embed {
         run_guest_zigbuild(
             &workspace_root,
