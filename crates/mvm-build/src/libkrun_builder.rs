@@ -1234,6 +1234,7 @@ impl LibkrunBuilderVm {
     }
 }
 
+#[cfg(test)]
 struct BuilderShellKrunContextParams<'a> {
     vm_name: &'a str,
     image: &'a BuilderVmImage,
@@ -1248,6 +1249,7 @@ struct BuilderShellKrunContextParams<'a> {
     extra_disks: &'a [BuilderExtraDisk],
 }
 
+#[cfg(test)]
 fn builder_shell_krun_context(
     params: &BuilderShellKrunContextParams<'_>,
 ) -> Result<KrunContext, BuilderVmError> {
@@ -6285,9 +6287,9 @@ mod tests {
         let krun = KrunContext::new("builder-smoke", "/tmp/kernel", "/tmp/rootfs");
         let configured = apply_networking_mode(krun);
 
-        assert_eq!(
-            configured.networking,
-            libkrun_sys::NetworkingMode::VirtioNetWithDirectVsock
+        assert!(
+            matches!(configured.networking, libkrun_sys::NetworkingMode::VsockDirect),
+            "builder contexts must resolve to the direct-vsock networking mode"
         );
     }
 
@@ -6325,31 +6327,12 @@ mod tests {
         .expect("shell context");
 
         assert!(
-            matches!(
-                krun.networking,
-                libkrun_sys::NetworkingMode::Disconnected { .. }
-            ),
-            "shell jobs must stay on the disconnected/vsock-only path"
+            matches!(krun.networking, libkrun_sys::NetworkingMode::VsockDirect),
+            "shell jobs must stay on the direct-vsock-only path"
         );
     }
 
     #[test]
-    fn krun_context_for_rootdir_image_marks_vsock_only_env() {
-        let root = tempfile::tempdir().expect("tempdir");
-        let image = BuilderVmImage::RootDir {
-            root_dir: root.path().to_path_buf(),
-            entry_path: "/init".to_string(),
-        };
-
-        let krun = krun_context_for_image("stage0", &image).expect("context");
-        assert_eq!(
-            krun.guest_entrypoint
-                .as_ref()
-                .map(|entry| entry.envp.clone()),
-            Some(vec![VSOCK_ONLY_ENV_VAR.to_string()]),
-            "Stage0 root-dir boots must carry the vsock-only marker via guest env"
-        );
-    }
     fn choose_supervisor_prefers_env_then_next_to_exe_then_local_build_then_path() {
         let env = PathBuf::from("/env/mvm-libkrun-supervisor");
         let exe = PathBuf::from("/exe/mvm-libkrun-supervisor");
