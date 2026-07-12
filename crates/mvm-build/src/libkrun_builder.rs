@@ -83,6 +83,7 @@ use crate::builder_vm_runtime::{
     NixStoreImageLock, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
     builder_vm_timeout, finalize_flake_job, finalize_install_job, read_job_result_with_diagnostics,
     shell_job_exit_error, stage_job_dir, stage_shell_job_dir, supervisor_exit_error,
+    verbose_from_env,
 };
 use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
 
@@ -872,19 +873,9 @@ impl LibkrunBuilderVm {
         // powers off on a failed build too. Read the guest's terminal marker
         // from the console so a nix failure surfaces here with its own log
         // instead of as a downstream "rootfs.ext4 missing" error.
-        let console_str = console_log.to_string_lossy();
         let console = std::fs::read_to_string(&console_log).unwrap_or_default();
-        match stage0_console_halt_outcome(&console) {
-            Stage0HaltOutcome::CleanHalt => Ok(()),
-            Stage0HaltOutcome::BuildFailed => Err(BuilderVmError::NixBuildFailed(format!(
-                "nix build failed inside the Stage 0 guest; console log at {console_str}\n{}",
-                read_console_tail(&console_str, 20)
-            ))),
-            Stage0HaltOutcome::NoCleanHalt => Err(BuilderVmError::ExtractionFailed(format!(
-                "Stage 0 guest did not reach a clean halt; console log at {console_str}\n{}",
-                read_console_tail(&console_str, 20)
-            ))),
-        }
+        let console_log_path = console_log.to_string_lossy();
+        stage0_run_result(&console, &console_log_path)
     }
 
     /// Run an in-tree shell script inside the existing builder VM
@@ -2658,6 +2649,11 @@ const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
     "crates/mvm-hostd/src",
 ];
 
+/// File name for the captured rebuild log, written under `target_dir`
+/// alongside the compiled binaries so it can't outlive the build it
+/// describes.
+const SUPERVISOR_BUILD_LOG_FILENAME: &str = "mvm-supervisor-build.log";
+
 /// Locate the `mvm-libkrun-supervisor` binary. Mirrors the resolver in
 /// `mvm-backend::libkrun::resolve_supervisor_path` (kept local rather than
 /// re-exported to keep the dep graph flat). Order: env override → next to
@@ -2879,9 +2875,18 @@ fn build_supervisor_in_workspace(
     target_dir: &Path,
     profile: &str,
 ) -> Result<PathBuf, BuilderVmError> {
-    eprintln!(
-        "[mvm] building {LIBKRUN_SUPERVISOR_BIN} for this source checkout so the supervisor matches mvmctl"
-    );
+    let log_path = target_dir.join(SUPERVISOR_BUILD_LOG_FILENAME);
+    let verbose = verbose_from_env();
+    if verbose {
+        eprintln!(
+            "[mvm] building {LIBKRUN_SUPERVISOR_BIN} for this source checkout so the supervisor matches mvmctl"
+        );
+    } else {
+        eprintln!(
+            "[mvm] building {LIBKRUN_SUPERVISOR_BIN} for this source checkout so the supervisor matches mvmctl — logs: {}",
+            log_path.display()
+        );
+    }
     let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
     let mut cmd = Command::new(cargo);
     cmd.current_dir(workspace_root)
@@ -2904,16 +2909,7 @@ fn build_supervisor_in_workspace(
             cmd.args(["--profile", other]);
         }
     }
-    let status = cmd.status().map_err(|e| {
-        BuilderVmError::LibkrunUnavailable(format!(
-            "spawn cargo build for {LIBKRUN_SUPERVISOR_BIN}: {e}"
-        ))
-    })?;
-    if !status.success() {
-        return Err(BuilderVmError::LibkrunUnavailable(format!(
-            "cargo build for {LIBKRUN_SUPERVISOR_BIN} failed with status {status}"
-        )));
-    }
+    run_logged(cmd, &log_path, verbose)?;
     let built = supervisor_path_in_target_dir(target_dir, profile);
     if built.is_file() {
         Ok(built)
@@ -2923,6 +2919,60 @@ fn build_supervisor_in_workspace(
             built.display()
         )))
     }
+}
+
+/// Run `cmd` to completion, keeping its raw output out of the terminal
+/// unless `verbose`. The host cargo rebuild this backs streams a
+/// `Compiling …` / `Building [===]` wall of text that otherwise
+/// interleaves with the CLI's own progress output — quiet mode redirects
+/// both stdout and stderr to `log_path` instead, and a failing command
+/// surfaces the log's tail inline so the operator isn't left guessing
+/// which file to open. `verbose` opts back into live streaming, matching
+/// the previous terminal-inheriting behavior.
+fn run_logged(mut cmd: Command, log_path: &Path, verbose: bool) -> Result<(), BuilderVmError> {
+    if verbose {
+        cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
+    } else {
+        if let Some(parent) = log_path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                BuilderVmError::LibkrunUnavailable(format!(
+                    "create log directory {}: {e}",
+                    parent.display()
+                ))
+            })?;
+        }
+        let stdout_file = std::fs::File::create(log_path).map_err(|e| {
+            BuilderVmError::LibkrunUnavailable(format!(
+                "create log file {}: {e}",
+                log_path.display()
+            ))
+        })?;
+        let stderr_file = stdout_file.try_clone().map_err(|e| {
+            BuilderVmError::LibkrunUnavailable(format!(
+                "clone log file handle for {}: {e}",
+                log_path.display()
+            ))
+        })?;
+        cmd.stdout(Stdio::from(stdout_file))
+            .stderr(Stdio::from(stderr_file));
+    }
+
+    let status = cmd
+        .status()
+        .map_err(|e| BuilderVmError::LibkrunUnavailable(format!("spawn {cmd:?}: {e}")))?;
+    if status.success() {
+        return Ok(());
+    }
+    if verbose {
+        return Err(BuilderVmError::LibkrunUnavailable(format!(
+            "{cmd:?} failed with status {status}"
+        )));
+    }
+    let log_path_str = log_path.to_string_lossy();
+    Err(BuilderVmError::LibkrunUnavailable(format!(
+        "{cmd:?} failed with status {status}; full log at {log_path_str}\n{}",
+        read_console_tail(&log_path_str, 20)
+    )))
 }
 
 fn supervisor_path_in_target_dir(target_dir: &Path, profile: &str) -> PathBuf {
@@ -3823,6 +3873,25 @@ fn stage0_console_halt_outcome(log: &str) -> Stage0HaltOutcome {
         Stage0HaltOutcome::CleanHalt
     } else {
         Stage0HaltOutcome::NoCleanHalt
+    }
+}
+
+/// Turn a Stage 0 console's terminal state into the caller's result,
+/// naming the console log path in both failure messages so an operator
+/// always knows where to look instead of hitting a downstream error that
+/// hides the real cause. Split out of the supervisor-wait call site so
+/// this message construction is unit-testable without spawning a VM.
+fn stage0_run_result(console: &str, console_log_path: &str) -> Result<(), BuilderVmError> {
+    match stage0_console_halt_outcome(console) {
+        Stage0HaltOutcome::CleanHalt => Ok(()),
+        Stage0HaltOutcome::BuildFailed => Err(BuilderVmError::NixBuildFailed(format!(
+            "nix build failed inside the Stage 0 guest; console log at {console_log_path}\n{}",
+            read_console_tail(console_log_path, 20)
+        ))),
+        Stage0HaltOutcome::NoCleanHalt => Err(BuilderVmError::ExtractionFailed(format!(
+            "Stage 0 guest did not reach a clean halt; console log at {console_log_path}\n{}",
+            read_console_tail(console_log_path, 20)
+        ))),
     }
 }
 
@@ -5725,6 +5794,74 @@ mod tests {
         assert_eq!(read_console_tail("/nonexistent/console.log", 5), "");
     }
 
+    /// `sh -c <script>` as an owned `Command`. `Command::args` returns
+    /// `&mut Command` for chaining, but `run_logged` takes ownership, so
+    /// callers build it in two steps.
+    fn sh_command(script: &str) -> Command {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", script]);
+        cmd
+    }
+
+    #[test]
+    fn run_logged_quiet_captures_combined_output_to_file_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A nested path exercises parent-dir creation rather than an
+        // already-existing tempdir.
+        let log = tmp.path().join("nested").join("build.log");
+        let cmd = sh_command("echo out-line; echo err-line 1>&2");
+        run_logged(cmd, &log, false).unwrap();
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(body.contains("out-line"), "stdout captured: {body}");
+        assert!(body.contains("err-line"), "stderr captured: {body}");
+    }
+
+    #[test]
+    fn run_logged_quiet_failure_returns_err_carrying_log_tail() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        let cmd = sh_command("echo boom-marker; exit 7");
+        let err = run_logged(cmd, &log, false).unwrap_err();
+        assert!(
+            err.to_string().contains("boom-marker"),
+            "error carries the log tail: {err}"
+        );
+    }
+
+    #[test]
+    fn run_logged_verbose_success_never_touches_the_log_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        let cmd = sh_command("exit 0");
+        run_logged(cmd, &log, true).unwrap();
+        assert!(
+            !log.exists(),
+            "verbose mode streams live and captures nothing"
+        );
+    }
+
+    #[test]
+    fn run_logged_spawn_failure_returns_libkrun_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        let cmd = Command::new("/nonexistent/definitely-not-a-binary");
+        let err = run_logged(cmd, &log, false).unwrap_err();
+        assert!(
+            matches!(err, BuilderVmError::LibkrunUnavailable(_)),
+            "expected LibkrunUnavailable, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn run_logged_quiet_empty_output_produces_empty_log_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        let cmd = sh_command("exit 0");
+        run_logged(cmd, &log, false).unwrap();
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(body.is_empty(), "log file should be empty: {body:?}");
+    }
+
     #[test]
     fn stage0_guest_halt_completed_successfully_requires_done_marker_and_artifact() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5776,6 +5913,48 @@ mod tests {
         assert_eq!(
             stage0_console_halt_outcome("kernel panic - not syncing\n"),
             Stage0HaltOutcome::NoCleanHalt
+        );
+    }
+
+    #[test]
+    fn stage0_run_result_build_failure_names_the_console_log_path() {
+        // Drive the same path a real Stage 0 build failure takes: the guest
+        // powered off cleanly but printed the build-failed marker, so the
+        // caller must not read the clean exit as success — and the resulting
+        // error must tell the operator exactly which console log to read.
+        let err = stage0_run_result(
+            "stage0-init: build failed: nix build exit 1\n",
+            "/tmp/mvm-stage0-test/console.log",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, BuilderVmError::NixBuildFailed(_)),
+            "expected NixBuildFailed, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("console log at /tmp/mvm-stage0-test/console.log"),
+            "error should name the console log path: {err}"
+        );
+    }
+
+    #[test]
+    fn stage0_run_result_no_clean_halt_names_the_console_log_path() {
+        // No terminal marker at all (panic, kill, or truncated console) —
+        // the caller still needs to be pointed at the right console log.
+        let err = stage0_run_result(
+            "kernel panic - not syncing\n",
+            "/tmp/mvm-stage0-test/console.log",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, BuilderVmError::ExtractionFailed(_)),
+            "expected ExtractionFailed, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("console log at /tmp/mvm-stage0-test/console.log"),
+            "error should name the console log path: {err}"
         );
     }
 
