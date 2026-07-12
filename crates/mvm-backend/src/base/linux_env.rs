@@ -309,6 +309,53 @@ pub fn create_linux_env() -> Box<dyn LinuxEnv> {
     Box::new(NativeEnv)
 }
 
+/// Whether a `run_in_vm`-style guest op can reach a real Linux execution
+/// environment today.
+///
+/// True on native Linux and macOS 13-25, both of which [`create_linux_env`]
+/// resolves to [`NativeEnv`]. False only on macOS 26+ Apple Silicon, where
+/// [`create_linux_env`] hands back [`DevVmEnv`] and — since the dev-VM
+/// auto-start path was retired (see [`start_dev_daemon`]) — a `run_in_vm`
+/// call has nothing left to dispatch to. Guest ops that still need a Linux
+/// builder on that tier should check this and fail closed via
+/// [`require_guest_exec_available`] instead of attempting the doomed call.
+pub fn guest_exec_via_vm_available() -> bool {
+    !platform::current().is_vz_default_tier()
+}
+
+/// Fails closed with an actionable error naming `limitation` when
+/// [`guest_exec_via_vm_available`] is false; otherwise a no-op.
+///
+/// Callers hold a `run_in_vm`-backed op that has no builder to run against
+/// on the current tier; this lets them return an upfront, honest error
+/// instead of letting the call fail deep inside the vsock exec path.
+pub fn require_guest_exec_available(limitation: &str) -> Result<()> {
+    guest_exec_gate(guest_exec_via_vm_available(), limitation)
+}
+
+/// Pure decision behind [`require_guest_exec_available`], taking the
+/// availability bool directly so it (and callers' gates) can be
+/// unit-tested by forcing both branches, without faking the host's OS tier.
+fn guest_exec_gate(available: bool, limitation: &str) -> Result<()> {
+    if available {
+        return Ok(());
+    }
+    Err(guest_exec_unavailable_error(limitation))
+}
+
+/// Build the actionable error a gated guest op returns once
+/// [`guest_exec_via_vm_available`] is false. `limitation` is a short clause
+/// naming what the op needs (e.g. "needs an ext4 reader, which doesn't
+/// exist yet"); the workaround text is centralized here so it can't drift
+/// between call sites.
+pub fn guest_exec_unavailable_error(limitation: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{limitation}. This macOS tier has no Linux builder to run it against \
+         — run it on Linux or in CI, or start a persistent libkrun builder \
+         manually as a workaround."
+    )
+}
+
 /// Global default environment used by `shell.rs` free functions.
 static DEFAULT_ENV: OnceLock<Box<dyn LinuxEnv>> = OnceLock::new();
 
@@ -459,5 +506,40 @@ mod tests {
             .expect("sh");
         assert!(out.status.success(), "stderr: {:?}", out.stderr);
         assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "ok");
+    }
+
+    // ── guest_exec gating ───────────────────────────────────────────
+
+    #[test]
+    fn guest_exec_via_vm_available_is_negation_of_vz_default_tier() {
+        assert_eq!(
+            guest_exec_via_vm_available(),
+            !platform::current().is_vz_default_tier()
+        );
+    }
+
+    /// The gate's decision is forced through the same bool
+    /// [`guest_exec_via_vm_available`] feeds, so both branches are
+    /// covered without needing to fake the host's OS tier.
+    #[test]
+    fn guest_exec_gate_passes_when_available() {
+        assert!(guest_exec_gate(true, "irrelevant").is_ok());
+    }
+
+    #[test]
+    fn guest_exec_gate_fails_closed_naming_limitation_and_workaround() {
+        let err = guest_exec_gate(false, "needs an ext4 reader, which doesn't exist yet")
+            .expect_err("must fail closed when unavailable");
+        let msg = err.to_string();
+        assert!(msg.contains("ext4 reader"), "missing limitation: {msg}");
+        assert!(msg.contains("Linux"), "missing Linux workaround: {msg}");
+        assert!(msg.contains("libkrun"), "missing libkrun workaround: {msg}");
+    }
+
+    #[test]
+    fn require_guest_exec_available_matches_gate() {
+        let available = guest_exec_via_vm_available();
+        let result = require_guest_exec_available("doing a thing");
+        assert_eq!(result.is_ok(), available);
     }
 }

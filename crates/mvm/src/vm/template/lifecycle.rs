@@ -908,6 +908,8 @@ pub fn template_build_from_manifest(
         "if [ -f {flake}/flake.lock ]; then nix hash path {flake}/flake.lock; else echo ''; fi",
         flake = persisted.flake_ref
     ))
+    // On a tier with no Linux builder to run this against, the call itself
+    // errors here and silently degrades to the revision hash below.
     .unwrap_or_default()
     .trim()
     .to_string();
@@ -980,6 +982,10 @@ pub fn template_build_from_manifest(
 /// On failure, the original hash is restored.
 #[instrument(skip_all, fields(flake_ref))]
 fn update_fod_hash(flake_ref: &str) -> Result<()> {
+    crate::linux_env::require_guest_exec_available(
+        "recomputing the fixed-output-derivation hash needs a real 'nix build'",
+    )?;
+
     ui::info("Recomputing fixed-output derivation hash...");
 
     // Save original hash for recovery.
@@ -1587,6 +1593,25 @@ mod tests {
             created_at: "2026-06-16T00:00:00Z".to_string(),
             updated_at: "2026-06-16T00:00:00Z".to_string(),
         }
+    }
+
+    /// `update_fod_hash` needs a real Linux builder to run `nix build`
+    /// against; on the macOS 26+ tier (no builder to dispatch to) it must
+    /// fail closed with an actionable error up front rather than failing
+    /// deep inside a doomed `run_in_vm` call. Host-conditioned: only
+    /// asserts on the tier it actually applies to.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn update_fod_hash_fails_closed_on_vz_default_tier() {
+        if !mvm_core::platform::current().is_vz_default_tier() {
+            return;
+        }
+        let err = update_fod_hash("/nonexistent/flake")
+            .expect_err("must fail closed with no builder available");
+        assert!(
+            err.to_string().contains("fixed-output-derivation"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

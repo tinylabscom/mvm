@@ -37,6 +37,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         return render_typed_verdict(result, args.json);
     }
 
+    ensure_guest_exec_available()?;
+
     let script = format!("nix flake check {resolved}");
 
     if args.json {
@@ -106,5 +108,35 @@ fn render_typed_verdict(
         // The daemon was reachable but the typed exchange failed. Surface it
         // rather than silently doing host work — the opt-in was explicit.
         Err(e) => Err(anyhow::anyhow!("typed flake check failed: {e}")),
+    }
+}
+
+/// Guard the `run_in_vm` fallback below: `nix flake check` needs a real
+/// Linux builder, which the typed-daemon path above doesn't reach on every
+/// tier yet. Fails closed with an actionable error instead of letting
+/// `run_in_vm` fail deep inside a doomed vsock call.
+fn ensure_guest_exec_available() -> Result<()> {
+    mvm::linux_env::require_guest_exec_available("running 'nix flake check'")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Host-conditioned: only asserts on the tier it actually applies to
+    /// (macOS 26+, where there's no builder for the `run_in_vm` fallback to
+    /// dispatch to).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn ensure_guest_exec_available_fails_closed_on_vz_default_tier() {
+        if !mvm_core::platform::current().is_vz_default_tier() {
+            return;
+        }
+        let err =
+            ensure_guest_exec_available().expect_err("must fail closed with no builder available");
+        assert!(
+            err.to_string().contains("flake check"),
+            "unexpected message: {err}"
+        );
     }
 }

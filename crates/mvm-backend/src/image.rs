@@ -814,6 +814,10 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
 /// must be stopped before calling this — the kernel will refuse to mount
 /// an image still attached to a running Firecracker.
 pub fn rsync_image_to_host(image_path: &str, host_dir: &str) -> Result<()> {
+    crate::base::linux_env::require_guest_exec_available(
+        "writing '--add-dir :rw' changes back to the host needs an ext4 reader, which doesn't exist yet",
+    )?;
+
     let script = format!(
         r#"
         set -e
@@ -935,6 +939,25 @@ mod tests {
         assert!(
             format!("{err:#}").contains("cannot represent"),
             "expected an unsupported-node-type error, got: {err:#}"
+        );
+    }
+
+    /// `rsync_image_to_host` has no in-process ext4 reader yet, so on the
+    /// macOS 26+ tier (no builder to run the mount-and-rsync script against)
+    /// it must fail closed with an actionable error before ever touching
+    /// `run_in_vm` — not fail confusingly deep inside a doomed vsock call.
+    /// Host-conditioned: only asserts on the tier it actually applies to.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rsync_image_to_host_fails_closed_on_vz_default_tier() {
+        if !mvm_core::platform::current().is_vz_default_tier() {
+            return;
+        }
+        let err = rsync_image_to_host("/nonexistent.ext4", "/nonexistent-host-dir")
+            .expect_err("must fail closed with no builder available");
+        assert!(
+            err.to_string().contains("ext4 reader"),
+            "unexpected message: {err}"
         );
     }
 
