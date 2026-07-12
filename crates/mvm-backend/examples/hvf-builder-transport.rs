@@ -21,7 +21,9 @@ fn main() {
 
     let home = std::env::var("HOME").unwrap();
     let dev = format!("{home}/.mvm/dev/current");
-    let kernel = PathBuf::from(format!("{dev}/vmlinux"));
+    let kernel = PathBuf::from(
+        std::env::var("MVM_BUILDER_KERNEL").unwrap_or_else(|_| format!("{dev}/vmlinux")),
+    );
     // MVM_BUILDER_ROOTFS points at a rootfs with the current mvm-host-vm-init
     // baked in (e.g. the self-hosted-inject output); default is the dev image.
     let rootfs = PathBuf::from(
@@ -66,6 +68,11 @@ fn main() {
     // SAFETY: single-threaded example setup.
     unsafe { std::env::set_var("MVM_HVF_TIMEOUT", "180") };
 
+    // Optional seeded-closure NAR: when set, it rides the input disk to
+    // `/closure-seed/nix-closure.nar` and the guest init imports it.
+    let closure_nar_env = std::env::var("MVM_BUILDER_CLOSURE_NAR").ok();
+    let closure_nar = closure_nar_env.as_deref().map(std::path::Path::new);
+
     println!("booting the builder VM on HVF (disk transport, no nix)…");
     let runner = BuilderRunner::new(HvfDriver::new());
     let outcome = runner
@@ -78,7 +85,7 @@ fn main() {
             work_src: &work,
             host_bin_dir: &bins,
             runtime_overlay: None,
-            closure_nar: None,
+            closure_nar,
             output_size: 64 << 20,
             vcpus: 2,
             // Builder-appropriate RAM (a real nix build OOMs at 512 MiB);
