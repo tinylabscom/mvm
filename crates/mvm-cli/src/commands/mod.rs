@@ -84,9 +84,6 @@ pub(in crate::commands) enum Commands {
     /// Beginner microVM workflows (run an OCI image and more)
     #[command(display_order = 1)]
     Machine(machine::Args),
-    /// Manage the local dev VM
-    #[command(display_order = 2)]
-    Dev(env::dev::Args),
     /// Build-time commands (image, compile, validate, kernel)
     #[command(display_order = 3)]
     Build(build::group::Args),

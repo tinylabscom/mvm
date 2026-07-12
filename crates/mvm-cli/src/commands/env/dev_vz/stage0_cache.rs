@@ -66,7 +66,7 @@ fn extract_libkrunfw_kernel() -> Result<std::path::PathBuf> {
 
 /// Short prefix of the source fingerprint for audit
 /// `fingerprint_prefix=` field. 8 hex chars are enough to disambiguate
-/// against unrelated `dev up` runs without exposing the full digest.
+/// against unrelated build runs without exposing the full digest.
 #[cfg(feature = "builder-vm")]
 pub(super) fn stage0_fingerprint_prefix(source_fingerprint: &str) -> String {
     source_fingerprint.chars().take(8).collect::<String>()
@@ -120,7 +120,7 @@ pub(super) fn acquire_stage0_lock(out_dir: &str) -> Result<mvm_core::atomic_io::
     match FileLock::try_acquire(&lock_anchor) {
         Ok(Some(guard)) => Ok(guard),
         Ok(None) => anyhow::bail!(
-            "another `mvmctl dev up` (or any caller of Stage 0) is already bootstrapping the \
+            "another caller of Stage 0 is already bootstrapping the \
              builder VM image on this host (lock held at {}.lock). Wait for it to finish, or — \
              only if you are sure no other invocation is running, e.g. after a crash — delete the \
              lock file and retry.",
@@ -174,7 +174,7 @@ pub(super) fn validate_builder_vm_stage0_artifacts(dir: &std::path::Path) -> Res
 
 /// Whether a Stage 0 bootstrap is currently in flight on this host — i.e. the
 /// shared advisory lock at `~/.cache/mvm/builder-vm/stage0.lock` is held by a
-/// live `dev up`/`build`. Non-blocking: tries the lock and reports contention,
+/// live build. Non-blocking: tries the lock and reports contention,
 /// releasing immediately if it acquires. `cache repair` consults this before
 /// clearing the builder store so it never yanks the store from an active build.
 pub(in crate::commands) fn stage0_bootstrap_in_flight() -> bool {
@@ -257,7 +257,7 @@ pub(super) fn sweep_orphaned_stage0_staging_dirs_at(
     }
 
     // Try the Stage 0 advisory lock. The lock anchor is shared with the
-    // live `acquire_stage0_lock` callsite — when a `dev up` is in
+    // live `acquire_stage0_lock` callsite — when a build is in
     // progress, we want the pruner to skip the staging sweep rather
     // than race it. RAII drop releases the lock when this function
     // returns.
@@ -943,173 +943,6 @@ pub(super) fn builder_vm_artifact_names(arch: &str) -> BuilderVmArtifactNames {
         manifest: format!("builder-vm-{arch}.manifest.json"),
         checksums: format!("builder-vm-{arch}-checksums-sha256.txt"),
     }
-}
-
-/// Build the dev-shell image via the libkrun-backed builder VM.
-///
-/// Layer 1 (the builder VM image at `~/.cache/mvm/builder-vm/<arch>/`)
-/// is fetched via [`bootstrap_builder_vm_image`] on cache miss. The
-/// dev-shell image the user boots into via `mvmctl dev up` is built by
-/// `LibkrunBuilderVm::run_build` against the in-repo
-/// `nix/images/builder/` flake, inside a libkrun guest that mounts the
-/// workspace at `/work` and writes its artifacts back through a
-/// virtio-fs `/out` share.
-///
-/// On success returns the host-side paths to the produced `vmlinux`
-/// and `rootfs.ext4` in `out_dir`.
-///
-/// Caller is expected to have:
-///   - confirmed `libkrun_sys::is_available()` true,
-///   - confirmed `find_builder_vm_flake().is_ok()` (Layer 1 source is
-///     present in the workspace),
-///   - run [`prepare_dev_image_out_dir`] on `out_dir`.
-// Gated only on `builder-vm`.
-#[cfg(feature = "builder-vm")]
-pub(super) fn build_image_via_libkrun(out_dir: &str) -> Result<(String, String)> {
-    use mvm_build::builder_backend_select::{
-        resolve_choice, resolve_env_override, try_resolve_builder_backend_with_override,
-    };
-    use mvm_build::builder_vm::{BuilderJob, BuilderMounts, host_system_linux};
-
-    // Ensure Layer 1 (the builder VM image) is in
-    // `~/.cache/mvm/builder-vm/<arch>/`.
-    bootstrap_builder_vm_image()
-        .context("Stage 0 builder-VM image bootstrap (precondition for libkrun dispatch)")?;
-
-    // Workspace root for the `/work` virtio-fs share. `find_builder_vm_flake()`
-    // returns `<workspace>/nix/images/builder-vm`; the workspace itself is
-    // three levels up. The consolidated flake reads `MVM_WORKSPACE_PATH=/work`
-    // (set in the guest's `cmd.sh` by `LibkrunBuilderVm`) under
-    // `--impure`, so the flake's `builtins.path` import lands on the
-    // mount rather than the store-copied flake dir.
-    // `nix/images/builder/` was collapsed into `nix/images/builder-vm/`;
-    // the interactive dev-shell image is now `packages.<sys>.dev`.
-    let builder_flake = find_builder_vm_flake().context(
-        "builder-vm flake missing at nix/images/builder-vm/flake.nix; libkrun dispatch needs it as Layer 2 source",
-    )?;
-    let workspace_root = std::path::Path::new(&builder_flake)
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-        .ok_or_else(|| anyhow::anyhow!("Cannot derive workspace root from {builder_flake}"))?
-        .to_path_buf();
-
-    // Inside the guest, `/work` is the workspace mount. The builder-vm
-    // flake lives at `/work/nix/images/builder-vm` from the cmd.sh's
-    // perspective. `path:` forces Nix's filesystem flake fetcher (not
-    // the git fetcher, which would discover `/work/.git` and trip on
-    // worktree files whose `gitdir:` redirects point outside the
-    // mount). `packages.<sys>.dev` is the interactive (dev-shell) attr.
-    // Extract the embedded host-vm binaries to the host-bins cache dir
-    // and mount them at /mvm-bins inside the builder VM.
-    // The builder-vm flake's cmd.sh reads MVM_HOST_BIN_DIR=/mvm-bins to
-    // install the correct cross-compiled binaries into the rootfs.
-    let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir = crate::host_binaries::extract::ensure_boot_host_binaries(
-        std::path::Path::new(&host_bins_cache),
-    )?
-    .dir;
-
-    let job = BuilderJob::Flake {
-        flake_ref: "path:/work/nix/images/builder-vm".to_string(),
-        attr_path: format!("packages.{}.dev", host_system_linux()),
-    };
-    let mounts = BuilderMounts {
-        flake_src: workspace_root,
-        // libkrun keeps `/nix` on a persistent virtio-blk; no host
-        // bind-mount of `/nix/store` is used or wanted (would be a
-        // Darwin-x-Linux closure mismatch on macOS anyway).
-        host_nix_store: None,
-        artifact_out: std::path::PathBuf::from(out_dir),
-        host_bin_dir,
-        // The dev-image build already builds the in-repo builder-vm flake
-        // with the workspace mounted at /work; no user-flake override.
-        staged_user_flake: None,
-    };
-
-    // Source-checkout dev-image builds route through the selected
-    // builder backend. When Vz was chosen only
-    // by auto-detect (no explicit `--builder` / env override), allow
-    // a one-shot fallback to libkrun if Vz bring-up fails. This
-    // keeps `mvmctl dev up` usable on hosts where the platform-level
-    // Vz probe passes but the builder-VM path still trips a backend-
-    // specific runtime issue. Explicit `vz` overrides still fail
-    // loudly so operators can debug the backend they asked for.
-    let selected = resolve_choice();
-    let explicit_override = resolve_env_override().is_some();
-    let attempt_order = builder_backend_attempt_order(selected, explicit_override);
-    let mut used_backend = selected;
-    let mut last_error = None;
-    for (idx, choice) in attempt_order.iter().copied().enumerate() {
-        let backend = try_resolve_builder_backend_with_override(Some(choice));
-        let run_result = backend.and_then(|b| b.run_build(&job, &mounts));
-        match run_result {
-            Ok(_) => {
-                mvm_build::builder_health::note_attempt_outcome(choice, true);
-                used_backend = choice;
-                last_error = None;
-                break;
-            }
-            Err(err) => {
-                // Record only a VMM-level libkrun failure in the per-host health
-                // cache so the next dev-image build skips the doomed attempt; a
-                // genuine build error must not poison the cache.
-                if mvm_build::builder_backend_select::is_builder_vm_level_failure(&err) {
-                    mvm_build::builder_health::note_attempt_outcome(choice, false);
-                }
-                if idx + 1 < attempt_order.len() {
-                    ui::warn(&format!(
-                        "Auto-selected {} builder failed ({}); retrying with {}.",
-                        choice.name(),
-                        err,
-                        attempt_order[idx + 1].name(),
-                    ));
-                    prepare_dev_image_out_dir(out_dir)?;
-                }
-                last_error = Some(anyhow::anyhow!("{} builder VM: {err}", choice.name()));
-            }
-        }
-    }
-    if let Some(err) = last_error {
-        return Err(err);
-    }
-
-    // run_build wrote vmlinux + rootfs.ext4 into out_dir via the
-    // virtio-fs `/out` mount; the same files mvm-cli is about to
-    // hand back to the dev-up path.
-    let kernel = format!("{out_dir}/vmlinux");
-    let rootfs = format!("{out_dir}/rootfs.ext4");
-    if !std::path::Path::new(&kernel).exists() {
-        anyhow::bail!(
-            "{} builder VM exited cleanly but did not produce {kernel}",
-            used_backend.name()
-        );
-    }
-    if !std::path::Path::new(&rootfs).exists() {
-        anyhow::bail!(
-            "{} builder VM exited cleanly but did not produce {rootfs}",
-            used_backend.name()
-        );
-    }
-
-    // Fix A — persist the source fingerprint + artifact-digest + provenance
-    // sidecars so the next `dev up` fast-paths past the builder VM entirely
-    // (see the cache check in `ensure_dev_image`). Best-effort: a failed
-    // sidecar write must not fail an otherwise-good build — the next run
-    // just rebuilds. The fingerprint is recomputed here from the same flake
-    // dir the build read, so a fingerprint match later means an identical
-    // nix derivation, hence an identical image.
-    if let Ok(flake_dir) = find_builder_vm_flake()
-        && let Ok(fingerprint) = builder_vm_source_fingerprint(&flake_dir)
-        && let Err(e) = write_builder_vm_cache_sidecars(std::path::Path::new(out_dir), &fingerprint)
-    {
-        ui::warn(&format!(
-            "Dev image built, but writing cache sidecars failed ({e}); \
-             next `dev up` will rebuild instead of fast-pathing."
-        ));
-    }
-
-    Ok((kernel, rootfs))
 }
 
 /// Backend attempt order for the dev-image / default-microvm builds. Delegates

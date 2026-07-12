@@ -137,15 +137,6 @@ impl Commands {
     /// reserve that channel before reconcile-on-entry or other startup chrome.
     pub(super) fn emits_machine_readable_stdout(&self) -> bool {
         match self {
-            Commands::Dev(a) => match &a.action {
-                Some(super::env::dev::DevAction::Up { json, .. })
-                | Some(super::env::dev::DevAction::Down { json, .. })
-                | Some(super::env::dev::DevAction::Status { json }) => *json,
-                Some(super::env::dev::DevAction::Cache {
-                    action: super::env::dev::DevCacheAction::Inspect { json },
-                }) => *json,
-                _ => false,
-            },
             Commands::Ls(a) => a.json,
             Commands::Run(a) => a.json,
             Commands::SdkNoVm(_) => true,
@@ -191,7 +182,7 @@ impl Commands {
         matches!(
             self,
             // Lifecycle mutate/read on the local single-host path.
-            Commands::Run(_) | Commands::Dev(_)
+            Commands::Run(_)
         )
     }
 
@@ -207,7 +198,6 @@ impl Commands {
             Commands::Env(a) => a.action.verb_name(),
             Commands::Bootstrap(_) => "bootstrap",
             Commands::BuilderVmBootstrap(_) => "__builder-vm-bootstrap",
-            Commands::Dev(_) => "dev",
             Commands::Ls(_) => "ls",
             Commands::Explain(_) => "explain",
             Commands::Run(_) => "run",

@@ -1,19 +1,17 @@
-//! Environment lifecycle commands — bootstrap, setup, dev, and friends.
+//! Environment lifecycle commands — bootstrap, setup, doctor, and friends.
 //!
-//! These commands provision, inspect, and tear down the host-side
-//! development environment (Vz dev VM, Firecracker binary, shell init,
+//! These commands provision and inspect the host-side development
+//! environment (builder VM image, Firecracker binary, shell init,
 //! default network).
 
 pub(super) mod artifact_verify;
 pub(super) mod bootstrap;
 pub(super) mod cleanup;
 pub(super) mod completions;
-pub(super) mod dev;
 pub(super) mod dev_vz;
 pub(super) mod doctor;
 pub(super) mod group;
 pub(super) mod init;
-pub(super) mod linux_native;
 pub(super) mod setup;
 pub(super) mod shell_completion;
 pub(super) mod shell_init;

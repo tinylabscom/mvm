@@ -1,5 +1,5 @@
-//! Dev environment lifecycle helpers + bundled image fetching, builder-VM
-//! image bootstrap, Stage 0, and dev-cache inspection.
+//! Builder-VM image bootstrap, Stage 0, workload-kernel build, and
+//! bundled-image fetching helpers.
 
 // `pub(in crate::commands)`: the `attested_builder_pack` release-fetch +
 // verification-context helpers are reused by `commands::pack` (a sibling of
@@ -15,18 +15,16 @@ mod default_microvm;
 mod image_ops;
 mod kernel;
 mod stage0_cache;
-mod status;
 #[cfg(test)]
 mod tests;
 mod vm_helpers;
 
 use anyhow::{Context, Result};
-use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use super::artifact_verify::{
-    bump_verify_outcome, download_file, fetch_expected_hashes, url_exists, verify_artifact_hash,
-};
+#[cfg(feature = "release-artifact-bootstrap")]
+use super::artifact_verify::bump_verify_outcome;
+use super::artifact_verify::{download_file, fetch_expected_hashes, verify_artifact_hash};
 use crate::ui;
 #[cfg(all(test, feature = "builder-vm"))]
 use bootstrap::BuildHeartbeat;
@@ -46,17 +44,9 @@ use default_microvm::{
 pub(crate) use default_microvm::{
     ensure_default_microvm_image, ensure_workload_kernel, ensure_workload_verity_initrd,
 };
-pub use image_ops::cmd_dev_import_image;
-pub(in crate::commands) use image_ops::ensure_dev_image;
-#[cfg(test)]
-use image_ops::find_local_fallback_image;
 use image_ops::validate_dev_image_artifacts;
-use image_ops::{
-    BuilderVmCacheState, BuilderVmCacheStatusSummary, DevCacheInspectSummary, DevImageCacheSummary,
-    DevStatusImage, resolve_dev_status_image,
-};
 #[cfg(feature = "builder-vm")]
-use image_ops::{prepare_dev_image_out_dir, verify_stage0_rootfs_has_init};
+use image_ops::verify_stage0_rootfs_has_init;
 #[cfg(all(test, feature = "builder-vm"))]
 use kernel::format_compile_elapsed;
 #[cfg(feature = "builder-vm")]
@@ -71,24 +61,15 @@ pub(in crate::commands) use stage0_cache::{
     Stage0SweepOutcome, stage0_bootstrap_in_flight, sweep_orphaned_stage0_staging_dirs,
 };
 #[cfg(any(feature = "builder-vm", test))]
-use stage0_cache::{
-    acquire_stage0_lock, build_image_via_libkrun, builder_vm_source_cache_status,
-    builder_vm_source_fingerprint, stage0_fingerprint_prefix, unique_builder_vm_stage0_staging_dir,
-};
+use stage0_cache::{acquire_stage0_lock, unique_builder_vm_stage0_staging_dir};
 #[cfg(test)]
 use stage0_cache::{
-    builder_vm_source_cache_ready, fold_embedded_binary_identity,
-    is_orphan_stage0_staging_dir_name, stage0_bootstrap_in_flight_at,
+    builder_vm_source_cache_ready, builder_vm_source_cache_status, builder_vm_source_fingerprint,
+    fold_embedded_binary_identity, is_orphan_stage0_staging_dir_name,
+    stage0_bootstrap_in_flight_at, stage0_fingerprint_prefix,
     sweep_orphaned_stage0_staging_dirs_at, write_builder_vm_artifact_digest_manifest,
     write_builder_vm_source_cache_provenance, write_builder_vm_source_fingerprint,
 };
-use status::resolve_dev_cache_inspect_summary;
-pub(in crate::commands) use status::{
-    build_dev_down_json, build_dev_status_json, build_dev_status_json_linux_native,
-    build_dev_status_json_vmless, build_dev_up_json,
-};
-#[cfg(test)]
-use status::{builder_vm_cache_status_summary, dev_image_cache_summary};
 pub(in crate::commands) use vm_helpers::sweep_orphaned_vm_helpers_on_startup;
 #[cfg(test)]
 use vm_helpers::{
@@ -105,8 +86,6 @@ pub(in crate::commands) fn reap_orphaned_vm_helpers(
 ) -> Result<vm_helpers::ReapOutcome> {
     anyhow::bail!("builder helper reaping requires the `builder-vm` cargo feature")
 }
-
-pub(in crate::commands) const DEV_VM_NAME: &str = "mvm-dev";
 
 pub(super) fn builder_vm_host_arch() -> &'static str {
     bootstrap::builder_vm_host_arch()
@@ -142,10 +121,6 @@ fn stage0_failure_reason_summary(err: &anyhow::Error) -> String {
     stage0_cache::stage0_failure_reason_summary(err)
 }
 
-fn dev_cache_inspect_json(summary: &DevCacheInspectSummary) -> Result<String> {
-    status::dev_cache_inspect_json(summary)
-}
-
 const BUILDER_VM_SOURCE_FINGERPRINT_FILE: &str = ".mvm-source.sha256";
 const BUILDER_VM_ARTIFACT_DIGEST_FILE: &str = ".mvm-artifacts.sha256";
 const BUILDER_VM_PROVENANCE_FILE: &str = ".mvm-provenance.json";
@@ -166,37 +141,12 @@ const MVM_BUILDER_PACK_ENV: &str = "MVM_BUILDER_PACK";
 #[cfg(feature = "builder-vm")]
 const HOST_VM_INIT_ROOTFS_PATH: &str = "/sbin/mvm-host-vm-init";
 
-/// Inspect dev caches without booting, rebuilding, or exposing local
-/// artifact paths/digests.
-pub(super) fn cmd_dev_cache_inspect(json: bool) -> Result<()> {
-    let summary = resolve_dev_cache_inspect_summary();
-    if json {
-        println!("{}", dev_cache_inspect_json(&summary)?);
-        return Ok(());
-    }
-
-    ui::info("Dev cache:");
-    ui::info(&format!(
-        "  Dev image: {} (kernel: {}, rootfs: {})",
-        summary.dev_image.state, summary.dev_image.kernel, summary.dev_image.rootfs
-    ));
-    ui::info(&format!(
-        "  Builder:   {} cache {} (reason: {})",
-        summary.builder_cache.cache_kind,
-        summary.builder_cache.state.label(),
-        summary.builder_cache.reason_code
-    ));
-    Ok(())
-}
-
 /// Locate the builder-VM flake at `nix/images/builder-vm/flake.nix`.
 ///
-/// The consolidated flake produces both the headless builder VM
-/// (`packages.<sys>.default`) and the interactive
-/// dev-shell image (`packages.<sys>.dev`). Used by `ensure_dev_image`
-/// to detect a source checkout, and by `bootstrap_builder_vm_image`
-/// to locate Layer 1. Returns `Err` when not in a source checkout,
-/// signalling the caller to fall back to the published prebuilt.
+/// The flake produces the headless builder VM (`packages.<sys>.default`).
+/// Used by `bootstrap_builder_vm_image` to locate Layer 1 and to detect a
+/// source checkout. Returns `Err` when not in a source checkout, signalling
+/// the caller to fall back to the published prebuilt.
 fn find_builder_vm_flake() -> Result<String> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = std::path::Path::new(manifest_dir)

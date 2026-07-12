@@ -196,15 +196,6 @@ pub fn parse_volume_spec(spec: &str) -> Result<VolumeSpec> {
     }
 }
 
-/// Merge the `MVM_VOLUMES` env baseline with `--mount`/`--volume` flag values.
-/// Env entries come first; flag values are appended (the flag adds to
-/// the env, it does not replace it). See `mvm_core::config::mvm_volumes_env`.
-pub fn merge_volume_specs(flag_specs: &[String]) -> Vec<String> {
-    let mut out = mvm_core::config::mvm_volumes_env();
-    out.extend(flag_specs.iter().cloned());
-    out
-}
-
 /// Convert a parsed [`VolumeSpec`] into the backend-agnostic
 /// [`VmVolume`] carried by `VmStartConfig`.
 pub fn volume_spec_to_vm_volume(spec: &VolumeSpec) -> VmVolume {
@@ -261,14 +252,6 @@ pub fn materialize_disk_volume(v: &VmVolume) -> Result<()> {
         v.read_only,
     )
     .with_context(|| format!("materializing disk volume image '{}'", v.host))?;
-    Ok(())
-}
-
-/// Materialize every disk-image volume in `volumes` (dir shares skipped).
-pub fn materialize_disk_volumes(volumes: &[VmVolume]) -> Result<()> {
-    for v in volumes {
-        materialize_disk_volume(v)?;
-    }
     Ok(())
 }
 

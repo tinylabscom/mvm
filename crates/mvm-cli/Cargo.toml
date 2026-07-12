@@ -69,8 +69,8 @@ hex.workspace = true
 libc.workspace = true
 
 [features]
-# `builder-vm` is default so `mvmctl dev up` prefers the libkrun-backed
-# builder VM with a persistent /nix store. Runtime gating via
+# `builder-vm` is default so builds prefer the libkrun-backed builder VM
+# with a persistent /nix store. Runtime gating via
 # `libkrun_sys::is_available()` still falls back cleanly when libkrun
 # isn't installed on the host.
 default = ["builder-vm", "pure-mkfs"]

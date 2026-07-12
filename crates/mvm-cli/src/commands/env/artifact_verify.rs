@@ -47,29 +47,6 @@ pub(super) fn bump_verify_outcome(outcome: &str) {
     }
 }
 
-/// HEAD-probe a URL. Returns Ok(true) when the resource is reachable
-/// (HTTP 2xx), Ok(false) on 404, Err for transient failures.
-pub(super) fn url_exists(url: &str) -> Result<bool> {
-    let output = std::process::Command::new("curl")
-        .args(["-fSI", "-o", "/dev/null", "-w", "%{http_code}", url])
-        .output()
-        .context("Failed to run curl HEAD probe")?;
-    let code = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    match code.as_str() {
-        "200" | "302" => Ok(true),
-        "404" => Ok(false),
-        _ => {
-            // Other status (5xx, network error, redirect chain failure)
-            // — don't silently fall through to the unsigned path.
-            anyhow::bail!(
-                "HEAD probe of {url} returned status {code}; refusing to guess \
-                 whether the signed manifest is missing or transiently unavailable. \
-                 Retry, or investigate."
-            )
-        }
-    }
-}
-
 /// Download the per-release `sha256sum`-format checksum file and parse it
 /// into a `name -> hex-digest` map for the artifacts we plan to download.
 ///
