@@ -3801,6 +3801,28 @@ mod tests {
     }
 
     #[test]
+    fn run_logged_spawn_failure_returns_libkrun_unavailable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        let cmd = Command::new("/nonexistent/definitely-not-a-binary");
+        let err = run_logged(cmd, &log, false).unwrap_err();
+        assert!(
+            matches!(err, BuilderVmError::LibkrunUnavailable(_)),
+            "expected LibkrunUnavailable, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn run_logged_quiet_empty_output_produces_empty_log_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("build.log");
+        let cmd = sh_command("exit 0");
+        run_logged(cmd, &log, false).unwrap();
+        let body = std::fs::read_to_string(&log).unwrap();
+        assert!(body.is_empty(), "log file should be empty: {body:?}");
+    }
+
+    #[test]
     fn stage0_console_halt_outcome_distinguishes_success_failure_and_silence() {
         // Clean build: the terminal success marker is present.
         assert_eq!(
@@ -3844,6 +3866,26 @@ mod tests {
         assert!(
             matches!(err, BuilderVmError::NixBuildFailed(_)),
             "expected NixBuildFailed, got {err:?}"
+        );
+        assert!(
+            err.to_string()
+                .contains("console log at /tmp/mvm-stage0-test/console.log"),
+            "error should name the console log path: {err}"
+        );
+    }
+
+    #[test]
+    fn stage0_run_result_no_clean_halt_names_the_console_log_path() {
+        // No terminal marker at all (panic, kill, or truncated console) —
+        // the caller still needs to be pointed at the right console log.
+        let err = stage0_run_result(
+            "kernel panic - not syncing\n",
+            "/tmp/mvm-stage0-test/console.log",
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, BuilderVmError::ExtractionFailed(_)),
+            "expected ExtractionFailed, got {err:?}"
         );
         assert!(
             err.to_string()
