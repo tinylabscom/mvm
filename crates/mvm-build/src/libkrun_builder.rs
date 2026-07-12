@@ -1023,6 +1023,10 @@ impl LibkrunBuilderVm {
                 disk.read_only,
             );
         }
+        // Builder VMs are NIC-less: egress goes over the vsock relay below, so
+        // the libkrun networking mode must be the disconnected sink — the
+        // supervisor rejects anything else. Matches the Stage 0 path.
+        krun = apply_networking_mode(krun, &vm_state_dir);
 
         if builder_uses_vsock_egress(&image)
             && runtime_overlay.is_none()
@@ -1478,6 +1482,10 @@ impl BuilderVm for LibkrunBuilderVm {
                 path_to_str(&share_dir, "closure_seed_dir")?,
             );
         }
+        // Builder VMs are NIC-less: egress goes over the vsock relay below, so
+        // the libkrun networking mode must be the disconnected sink — the
+        // supervisor rejects anything else. Matches the Stage 0 path.
+        krun = apply_networking_mode(krun, &vm_state_dir);
 
         if builder_uses_vsock_egress(&image)
             && runtime_overlay.is_none()
