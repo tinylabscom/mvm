@@ -68,11 +68,13 @@ pub fn pack_input_disk(
                 .with_context(|| format!("archive '{}' from {}", tree.name, tree.src.display()))?;
         }
         if let Some(nar) = closure_nar {
+            // The guest imports a fixed path (`/closure-seed/<CLOSURE_FILE>`), so
+            // the tar entry name comes from `CLOSURE_FILE` regardless of what the
+            // source NAR happens to be called — otherwise a differently-named
+            // source silently lands the guest import a no-op.
             let name = format!(
                 "{CLOSURE_SEED_TAR_DIR}/{}",
-                nar.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "nix-closure.nar".to_string())
+                crate::builder_pack::CLOSURE_FILE
             );
             b.append_path_with_name(nar, &name)
                 .with_context(|| format!("archive closure NAR from {}", nar.display()))?;
@@ -186,7 +188,9 @@ mod tests {
         let job = dir.path().join("job");
         fs::create_dir_all(&job).unwrap();
         fs::write(job.join("cmd.sh"), b"#!/bin/sh\n").unwrap();
-        let nar = dir.path().join("nix-closure.nar");
+        // Source deliberately NOT named `nix-closure.nar` — the tar entry name
+        // must still come from `CLOSURE_FILE` so the guest finds it.
+        let nar = dir.path().join("some-source.nar");
         fs::write(&nar, b"pretend-nar-bytes").unwrap();
 
         let image = dir.path().join("input.img");

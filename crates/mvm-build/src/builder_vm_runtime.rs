@@ -116,13 +116,11 @@ pub fn stage_closure_seed_dir(
             share_dir.display()
         ))
     })?;
-    let file_name = closure_nar.file_name().ok_or_else(|| {
-        BuilderVmError::ExtractionFailed(format!(
-            "closure NAR path has no file name: {}",
-            closure_nar.display()
-        ))
-    })?;
-    let dest = share_dir.join(file_name);
+    // The guest mounts this share at `/closure-seed` and imports a fixed file
+    // name (`CLOSURE_FILE`), so stage the NAR under that name regardless of what
+    // the source path is called — a mismatched name would make the guest import
+    // a silent no-op.
+    let dest = share_dir.join(crate::builder_pack::CLOSURE_FILE);
     std::fs::copy(closure_nar, &dest).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "staging closure NAR {} -> {}: {e}",
@@ -2460,10 +2458,23 @@ mod tests {
     }
 
     #[test]
-    fn stage_closure_seed_dir_errors_on_a_source_with_no_file_name() {
+    fn stage_closure_seed_dir_uses_the_fixed_closure_file_name() {
+        // A source named something other than CLOSURE_FILE must still stage
+        // under CLOSURE_FILE — the guest imports that fixed name.
+        let src = tempfile::TempDir::new().unwrap();
+        let nar = src.path().join("some-other-name.nar");
+        std::fs::write(&nar, b"nar-bytes").unwrap();
+
         let vm_state_dir = tempfile::TempDir::new().unwrap();
-        let err = stage_closure_seed_dir(Path::new("/"), vm_state_dir.path())
-            .expect_err("root path has no file name");
-        assert!(matches!(err, BuilderVmError::ExtractionFailed(_)));
+        let share_dir = stage_closure_seed_dir(&nar, vm_state_dir.path()).expect("stage");
+
+        let entries: Vec<_> = std::fs::read_dir(&share_dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            entries,
+            vec![std::ffi::OsString::from(crate::builder_pack::CLOSURE_FILE)]
+        );
     }
 }
