@@ -12,12 +12,30 @@ use mvm::config;
 use mvm::shell;
 use mvm_backend::firecracker;
 
+/// True when this host provisions Firecracker as its workload backend, so
+/// `bootstrap` should install it, fetch its kernel/rootfs assets, and lay
+/// down the jailer/seccomp security baseline. Firecracker only runs on
+/// Linux KVM (see the workspace root docs' backend split); on macOS the
+/// workload backend is libkrun/HVF and none of this step applies —
+/// running it there previously crashed at the first Firecracker probe,
+/// which shells through a VM that no longer exists on macOS 26+.
+fn firecracker_provisioning_applies() -> bool {
+    cfg!(target_os = "linux")
+}
+
 pub(super) fn run_setup_steps(force: bool, _builder_cpus: u32, _builder_mem: u32) -> Result<()> {
+    if !firecracker_provisioning_applies() {
+        ui::info(
+            "Firecracker runs on Linux only \u{2014} skipping Firecracker asset provisioning.",
+        );
+        return Ok(());
+    }
+
     // Lima is gone; what remains here is the Firecracker asset
     // pipeline (kernel + rootfs + security baseline). The builder-VM
     // sizing args are kept on the signature so callers don't break,
     // but they're inert until direct-launch is wired up for the
-    // macOS / no-KVM path.
+    // no-KVM Linux path.
     let total = 4;
 
     // Step 1: Firecracker (+ jailer from same release tarball)
@@ -83,4 +101,33 @@ pub(super) fn setup_security_baseline() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn firecracker_provisioning_applies_on_linux() {
+        assert!(firecracker_provisioning_applies());
+    }
+
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn firecracker_provisioning_does_not_apply_off_linux() {
+        assert!(!firecracker_provisioning_applies());
+    }
+
+    // Firecracker is fetched over the network and `setup_security_baseline`
+    // mutates `/var/lib/mvm`, so this only runs for real off Linux, where
+    // the gate must make it a no-op. This is the exact call `mvmctl
+    // bootstrap` makes; before the platform gate it failed here on macOS
+    // 26+ because the first Firecracker probe shelled through the removed
+    // dev-VM path.
+    #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn run_setup_steps_is_a_no_op_off_linux() {
+        run_setup_steps(false, 1, 1).expect("must not provision Firecracker off Linux");
+    }
 }
