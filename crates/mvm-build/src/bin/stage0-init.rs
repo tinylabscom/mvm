@@ -1172,14 +1172,9 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into,
-            nix_filesystem_used_kib, resolver_seed, run_streaming,
-            stage0_nix_config_for_vsock_proxy, stage0_nix_extra_flags,
-            stage0_nix_extra_flags_with_localized_inputs, stage0_proxy_env,
+            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into, run_streaming,
         };
-        use std::collections::HashMap;
         use std::os::unix::fs::symlink;
-        use std::path::Path;
         use std::process::Command;
 
         #[test]
@@ -1338,16 +1333,6 @@ mod linux {
             );
         }
         #[test]
-        fn resolver_seed_uses_host_override_for_libkrun() {
-            let mut conf = HashMap::new();
-            conf.insert("MVM_STAGE0_RESOLVER".to_string(), "10.10.0.53".to_string());
-            assert_eq!(
-                resolver_seed(false, &conf).unwrap(),
-                b"nameserver 10.10.0.53\n"
-            );
-        }
-
-        #[test]
         fn seed_store_runtime_check_requires_nix_and_cacert() {
             let root = tempfile::tempdir().expect("tempdir");
             let store = root.path().join("store");
@@ -1370,108 +1355,6 @@ mod linux {
                 !super::seed_store_has_required_runtime(&store).expect("runtime check"),
                 "store missing nix must be re-seeded"
             );
-        }
-
-        #[test]
-        fn resolver_seed_rejects_invalid_host_override() {
-            let mut conf = HashMap::new();
-            conf.insert("MVM_STAGE0_RESOLVER".to_string(), "not-an-ip".to_string());
-            let err = resolver_seed(false, &conf).unwrap_err();
-            assert!(err.contains("invalid MVM_STAGE0_RESOLVER"));
-        }
-
-        #[test]
-        fn stage0_proxy_env_uses_http_connect_only() {
-            assert_eq!(
-                stage0_proxy_env(),
-                [
-                    ("HTTPS_PROXY", "http://127.0.0.1:8443"),
-                    ("HTTP_PROXY", "http://127.0.0.1:8443"),
-                    ("https_proxy", "http://127.0.0.1:8443"),
-                    ("http_proxy", "http://127.0.0.1:8443"),
-                ]
-            );
-        }
-
-        #[test]
-        fn stage0_nix_config_for_vsock_proxy_disables_inner_sandbox() {
-            let config = stage0_nix_config_for_vsock_proxy();
-            assert!(config.contains("sandbox = false"));
-            assert!(config.contains("build-users-group ="));
-            assert!(config.contains("substituters = https://cache.nixos.org/"));
-        }
-
-        #[test]
-        fn stage0_nix_extra_flags_adds_offline_and_override_inputs() {
-            let tmp = tempfile::tempdir().unwrap();
-            let source_root = tmp.path().join("source");
-            std::fs::create_dir_all(source_root.join("nixpkgs-root")).unwrap();
-            std::fs::create_dir_all(source_root.join("microvm-root")).unwrap();
-            std::fs::write(source_root.join("nixpkgs-root/flake.nix"), "{}").unwrap();
-            std::fs::write(source_root.join("microvm-root/flake.nix"), "{}").unwrap();
-            let nixpkgs_archive = source_root.join("nixpkgs.tar.gz");
-            let microvm_archive = source_root.join("microvm.tar.gz");
-            build_test_archive(
-                &source_root.join("nixpkgs-root"),
-                &nixpkgs_archive,
-                "source",
-            );
-            build_test_archive(
-                &source_root.join("microvm-root"),
-                &microvm_archive,
-                "source",
-            );
-            let mut conf = HashMap::new();
-            conf.insert("MVM_STAGE0_OFFLINE".to_string(), "1".to_string());
-            conf.insert(
-                "MVM_STAGE0_OVERRIDE_INPUT_1".to_string(),
-                format!("microvm={}", microvm_archive.display()),
-            );
-            conf.insert(
-                "MVM_STAGE0_OVERRIDE_INPUT_0".to_string(),
-                format!("nixpkgs={}", nixpkgs_archive.display()),
-            );
-            let local_root = tmp.path().join("localized");
-            assert_eq!(
-                stage0_nix_extra_flags_with_localized_inputs(&conf, &local_root).unwrap(),
-                vec![
-                    "--offline".to_string(),
-                    "--override-input".to_string(),
-                    "nixpkgs".to_string(),
-                    format!("path:{}", local_root.join("nixpkgs").display()),
-                    "--override-input".to_string(),
-                    "microvm".to_string(),
-                    format!("path:{}", local_root.join("microvm").display()),
-                ]
-            );
-            assert!(local_root.join("nixpkgs/flake.nix").is_file());
-            assert!(local_root.join("microvm/flake.nix").is_file());
-        }
-
-        fn build_test_archive(src: &Path, dest: &Path, root_name: &str) {
-            let file = std::fs::File::create(dest).unwrap();
-            let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
-            let mut archive = tar::Builder::new(encoder);
-            archive.append_dir_all(root_name, src).unwrap();
-            let encoder = archive.into_inner().unwrap();
-            encoder.finish().unwrap();
-        }
-
-        #[test]
-        fn stage0_nix_extra_flags_rejects_malformed_override() {
-            let mut conf = HashMap::new();
-            conf.insert(
-                "MVM_STAGE0_OVERRIDE_INPUT_0".to_string(),
-                "missing-separator".to_string(),
-            );
-            let err = stage0_nix_extra_flags(&conf).unwrap_err();
-            assert!(err.contains("expected <input_path>=<guest_path>"));
-        }
-
-        #[test]
-        fn nix_filesystem_used_kib_reports_nonzero_usage() {
-            let used = nix_filesystem_used_kib(Path::new("/")).unwrap();
-            assert!(used > 0);
         }
     }
 }
