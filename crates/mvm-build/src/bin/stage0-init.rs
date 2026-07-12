@@ -1172,9 +1172,14 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into, run_streaming,
+            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into,
+            nix_filesystem_used_kib, resolver_seed, run_streaming,
+            stage0_nix_config_for_vsock_proxy, stage0_nix_extra_flags,
+            stage0_nix_extra_flags_with_localized_inputs, stage0_proxy_env,
         };
+        use std::collections::HashMap;
         use std::os::unix::fs::symlink;
+        use std::path::Path;
         use std::process::Command;
 
         #[test]
