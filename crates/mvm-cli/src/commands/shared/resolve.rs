@@ -2,15 +2,13 @@
 
 use anyhow::{Context, Result};
 
-use mvm::config;
-use mvm::shell;
 use mvm_backend::firecracker;
+use mvm_backend::microvm;
 
 /// Resolve a VM name to its absolute directory path and verify the VM
 /// is running.
 pub fn resolve_running_vm(name: &str) -> Result<String> {
-    let abs_vms = shell::run_in_vm_stdout(&format!("echo {}", config::VMS_DIR))?;
-    let abs_dir = format!("{}/{}", abs_vms, name);
+    let abs_dir = microvm::resolve_running_vm_dir(name)?;
     let pid_file = format!("{}/fc.pid", abs_dir);
 
     if !firecracker::is_vm_running(&pid_file)? {
