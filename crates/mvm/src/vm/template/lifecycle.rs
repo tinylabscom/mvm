@@ -65,6 +65,101 @@ fn slot_sidecar_source(build_dir: &std::path::Path) -> Result<std::path::PathBuf
     )
 }
 
+/// Host-side artifact sources resolved from a finished dev build,
+/// ready to install into a template slot's revision directory.
+/// Bundled into a struct so [`install_revision_artifacts`] takes one
+/// argument per concern instead of one per file.
+struct RevisionArtifactSources {
+    kernel: std::path::PathBuf,
+    initrd: Option<std::path::PathBuf>,
+    rootfs: std::path::PathBuf,
+    sidecar: std::path::PathBuf,
+    /// OCI image tarball a flake's `mkGuest` emits via
+    /// `dockerTools.streamLayeredImage`. Best-effort: installed only
+    /// if this path exists.
+    oci_tarball: std::path::PathBuf,
+    fc_base_json: String,
+}
+
+/// Installs one dev build's resolved artifacts into a template
+/// slot's revision directory and repoints the slot's `current`
+/// symlink at it.
+///
+/// `sources` and `rev_dst` are both host paths — the finished build
+/// lives under the dev-build cache and the slot under the templates
+/// tree, both on the host filesystem — so this is a plain host-to-host
+/// file install, never a VM operation.
+fn install_revision_artifacts(
+    sources: &RevisionArtifactSources,
+    rev_dst: &std::path::Path,
+    current_symlink: &std::path::Path,
+    revision_hash: &str,
+) -> Result<()> {
+    std::fs::create_dir_all(rev_dst)
+        .with_context(|| format!("creating revision directory {}", rev_dst.display()))?;
+
+    copy_artifact(&sources.kernel, &rev_dst.join("vmlinux"))?;
+
+    if let Some(initrd) = &sources.initrd {
+        copy_artifact(initrd, &rev_dst.join("initrd"))?;
+    }
+
+    let rootfs_dst = rev_dst.join("rootfs.ext4");
+    copy_artifact(&sources.rootfs, &rootfs_dst)?;
+    // Nix store outputs are read-only; the running microVM needs to
+    // open the installed rootfs read-write.
+    make_owner_writable(&rootfs_dst)?;
+
+    copy_artifact(
+        &sources.sidecar,
+        &rev_dst.join(mvm_build::builder_vm::SIDECAR_FILENAME),
+    )?;
+
+    if sources.oci_tarball.is_file() {
+        copy_artifact(&sources.oci_tarball, &rev_dst.join("image.tar.gz"))?;
+    }
+
+    std::fs::write(rev_dst.join("fc-base.json"), &sources.fc_base_json)
+        .with_context(|| format!("writing {}/fc-base.json", rev_dst.display()))?;
+
+    relink_current(current_symlink, revision_hash)
+}
+
+/// `cp -a <src> <dst>` minus the VM shell hop: both paths are already
+/// host paths. `std::fs::copy` preserves the source's permission
+/// bits, matching `cp -a`'s mode-preserving behavior.
+fn copy_artifact(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {
+    std::fs::copy(src, dst)
+        .with_context(|| format!("copying {} to {}", src.display(), dst.display()))?;
+    Ok(())
+}
+
+/// `chmod u+w <path>`: adds the owner-write bit without disturbing
+/// the rest of the mode.
+fn make_owner_writable(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let metadata =
+        std::fs::metadata(path).with_context(|| format!("statting {}", path.display()))?;
+    let mut perms = metadata.permissions();
+    perms.set_mode(perms.mode() | 0o200);
+    std::fs::set_permissions(path, perms).with_context(|| format!("chmod u+w {}", path.display()))
+}
+
+/// Repoints `current_symlink` at `artifacts/revisions/<revision_hash>`
+/// — a relative target so the slot stays portable across host
+/// filesystems. Mirrors `ln -snf`: removes whatever is already at
+/// `current_symlink` first, since `symlink()` errors if the
+/// destination already exists.
+fn relink_current(current_symlink: &std::path::Path, revision_hash: &str) -> Result<()> {
+    if std::fs::symlink_metadata(current_symlink).is_ok() {
+        std::fs::remove_file(current_symlink)
+            .with_context(|| format!("removing existing symlink {}", current_symlink.display()))?;
+    }
+    let target = format!("artifacts/revisions/{revision_hash}");
+    std::os::unix::fs::symlink(&target, current_symlink)
+        .with_context(|| format!("linking {} -> {target}", current_symlink.display()))
+}
+
 use super::registry::TemplateRegistry;
 
 fn validate_legacy_template_name(id: &str) -> Result<()> {
@@ -762,44 +857,19 @@ pub fn template_build_from_manifest(
         ));
     }
 
-    // Store artifacts under the slot's revision directory.
+    // Store artifacts under the slot's revision directory. Both the
+    // finished dev build and the slot tree are host paths, so this is
+    // a plain filesystem install — see `install_revision_artifacts`.
     let slot_hash = &persisted.manifest_hash;
     let rev = &result.revision_hash;
     let rev_dst = slot_revision_dir(slot_hash, rev);
     ui::info("Storing artifacts in slot revision directory...");
-    shell::run_in_vm(&format!("mkdir -p {rev_dst}"))?;
     let kernel_src = slot_kernel_source(
         std::path::Path::new(&result.vmlinux_path),
         std::path::Path::new(&mvm_core::config::mvm_cache_dir()),
         GuestArch::host(),
     )?;
-    shell::run_in_vm(&format!("cp -a {} {rev_dst}/vmlinux", kernel_src.display()))?;
-    if let Some(initrd) = &result.initrd_path {
-        shell::run_in_vm(&format!("cp -a {} {rev_dst}/initrd", initrd))?;
-    }
-    shell::run_in_vm(&format!(
-        "cp -a {} {rev_dst}/rootfs.ext4 && chmod u+w {rev_dst}/rootfs.ext4",
-        result.rootfs_path
-    ))?;
     let sidecar_src = slot_sidecar_source(std::path::Path::new(&result.build_dir))?;
-    shell::run_in_vm(&format!(
-        "cp -a {} {rev_dst}/{}",
-        sidecar_src.display(),
-        mvm_build::builder_vm::SIDECAR_FILENAME
-    ))?;
-
-    // Copy the OCI image tarball (if the flake's `mkGuest` emits one
-    // via `dockerTools.streamLayeredImage`). When present, this is
-    // what `mvmctl manifest export-oci <template>` returns so users
-    // can `docker load` the mvm-built workload on a non-KVM host.
-    // Best-effort: the copy is gated on the artifact existing in the
-    // dev-build dir; flakes that don't emit `image.tar.gz` just don't
-    // get one in the slot, and `export-oci` errors with a clear
-    // "rebuild with the OCI output enabled" message.
-    let oci_src = format!("{}/image.tar.gz", result.build_dir);
-    shell::run_in_vm(&format!(
-        "if [ -e {oci_src} ]; then cp -a {oci_src} {rev_dst}/image.tar.gz; fi"
-    ))?;
 
     // Generate a minimal fc-base.json for reference. Same logic as
     // template_build: minimal guests (no initrd) need root= and init=
@@ -832,14 +902,32 @@ pub fn template_build_from_manifest(
         }
     });
     let fc_json = serde_json::to_string_pretty(&fc_config)?;
-    shell::run_in_vm(&format!(
-        "cat > {rev_dst}/fc-base.json << 'MVMEOF'\n{fc_json}\nMVMEOF"
-    ))?;
+
+    // OCI image tarball: present only when the flake's `mkGuest` emits
+    // one via `dockerTools.streamLayeredImage`. When present, this is
+    // what `mvmctl manifest export-oci <template>` returns so users
+    // can `docker load` the mvm-built workload on a non-KVM host.
+    // Best-effort: flakes that don't emit `image.tar.gz` just don't
+    // get one in the slot, and `export-oci` errors with a clear
+    // "rebuild with the OCI output enabled" message.
+    let oci_tarball = std::path::PathBuf::from(format!("{}/image.tar.gz", result.build_dir));
 
     // Update the slot's `current` symlink (relative target so the slot
     // is portable across host filesystems).
     let current_link = slot_current_symlink(slot_hash);
-    shell::run_in_vm(&format!("ln -snf artifacts/revisions/{rev} {current_link}"))?;
+    install_revision_artifacts(
+        &RevisionArtifactSources {
+            kernel: kernel_src,
+            initrd: result.initrd_path.as_ref().map(std::path::PathBuf::from),
+            rootfs: std::path::PathBuf::from(&result.rootfs_path),
+            sidecar: sidecar_src,
+            oci_tarball,
+            fc_base_json: fc_json,
+        },
+        std::path::Path::new(&rev_dst),
+        std::path::Path::new(&current_link),
+        rev,
+    )?;
 
     // Compute the actual flake.lock hash for accurate cache keys.
     // Pool builds delegate this; dev/manifest builds compute it inline.
@@ -887,11 +975,12 @@ pub fn template_build_from_manifest(
         snapshot: None,
         build_mode: Some(build_mode_label(mode).to_string()),
     };
+    // `rev_dst` (thus `rev_meta_path`) is a host path — this is a
+    // plain metadata write, not a VM operation.
     let rev_json = serde_json::to_string_pretty(&revision)?;
     let rev_meta_path = format!("{rev_dst}/revision.json");
-    shell::run_in_vm(&format!(
-        "cat > {rev_meta_path} << 'MVMEOF'\n{rev_json}\nMVMEOF"
-    ))?;
+    std::fs::write(&rev_meta_path, &rev_json)
+        .with_context(|| format!("writing {rev_meta_path}"))?;
 
     // Refresh the slot's persisted manifest record with the new
     // updated_at + provenance. Caller can pre-supply provenance via
@@ -1832,6 +1921,131 @@ mod tests {
 
         assert!(err.contains("flake build produced no runtime sidecar"));
         assert!(err.contains(mvm_build::builder_vm::SIDECAR_FILENAME));
+    }
+
+    // -----------------------------------------------------------------
+    // install_revision_artifacts (pure helper, no VM). This is the
+    // host-to-host copy that `template_build_from_manifest` used to
+    // wrongly shell through `run_in_vm` — both the build output and
+    // the slot's revision directory are host paths.
+    // -----------------------------------------------------------------
+
+    fn fake_sources(build: &std::path::Path) -> RevisionArtifactSources {
+        RevisionArtifactSources {
+            kernel: build.join("vmlinux"),
+            initrd: Some(build.join("initrd")),
+            rootfs: build.join("rootfs.ext4"),
+            sidecar: build.join(mvm_build::builder_vm::SIDECAR_FILENAME),
+            // Deliberately does not exist: exercises the best-effort
+            // "only install if present" path.
+            oci_tarball: build.join("image.tar.gz"),
+            fc_base_json: "{\"boot-source\":{}}".to_string(),
+        }
+    }
+
+    #[test]
+    fn install_revision_artifacts_copies_kernel_rootfs_and_relinks_current_without_a_vm() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("vmlinux"), b"K").unwrap();
+        std::fs::write(build.join("initrd"), b"I").unwrap();
+        std::fs::write(build.join("rootfs.ext4"), b"R").unwrap();
+        std::fs::write(build.join(mvm_build::builder_vm::SIDECAR_FILENAME), b"{}").unwrap();
+        // Nix store outputs are read-only; the helper must chmod the
+        // installed rootfs writable regardless.
+        std::fs::set_permissions(
+            build.join("rootfs.ext4"),
+            std::fs::Permissions::from_mode(0o444),
+        )
+        .unwrap();
+
+        let slot_dir = tmp.path().join("slot");
+        let rev_dst = slot_dir.join("artifacts").join("revisions").join("rev-1");
+        let current_link = slot_dir.join("current");
+        let sources = fake_sources(&build);
+
+        install_revision_artifacts(&sources, &rev_dst, &current_link, "rev-1").unwrap();
+
+        assert_eq!(std::fs::read(rev_dst.join("vmlinux")).unwrap(), b"K");
+        assert_eq!(std::fs::read(rev_dst.join("initrd")).unwrap(), b"I");
+        assert_eq!(std::fs::read(rev_dst.join("rootfs.ext4")).unwrap(), b"R");
+        assert_eq!(
+            std::fs::read(rev_dst.join(mvm_build::builder_vm::SIDECAR_FILENAME)).unwrap(),
+            b"{}"
+        );
+        assert_eq!(
+            std::fs::read(rev_dst.join("fc-base.json")).unwrap(),
+            sources.fc_base_json.as_bytes()
+        );
+        // Best-effort OCI tarball was never created by the test fixture.
+        assert!(!rev_dst.join("image.tar.gz").exists());
+
+        let rootfs_mode = std::fs::metadata(rev_dst.join("rootfs.ext4"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            rootfs_mode & 0o200,
+            0o200,
+            "installed rootfs must be owner-writable"
+        );
+
+        let target = std::fs::read_link(&current_link).unwrap();
+        assert_eq!(
+            target,
+            std::path::PathBuf::from("artifacts/revisions/rev-1")
+        );
+    }
+
+    #[test]
+    fn install_revision_artifacts_installs_oci_tarball_when_present() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("vmlinux"), b"K").unwrap();
+        std::fs::write(build.join("rootfs.ext4"), b"R").unwrap();
+        std::fs::write(build.join(mvm_build::builder_vm::SIDECAR_FILENAME), b"{}").unwrap();
+        std::fs::write(build.join("image.tar.gz"), b"OCI").unwrap();
+
+        let rev_dst = tmp.path().join("slot/artifacts/revisions/rev-1");
+        let current_link = tmp.path().join("slot/current");
+        let mut sources = fake_sources(&build);
+        sources.initrd = None;
+
+        install_revision_artifacts(&sources, &rev_dst, &current_link, "rev-1").unwrap();
+
+        assert_eq!(std::fs::read(rev_dst.join("image.tar.gz")).unwrap(), b"OCI");
+        assert!(!rev_dst.join("initrd").exists());
+    }
+
+    #[test]
+    fn install_revision_artifacts_overwrites_an_existing_current_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let build = tmp.path().join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("vmlinux"), b"K").unwrap();
+        std::fs::write(build.join("rootfs.ext4"), b"R").unwrap();
+        std::fs::write(build.join(mvm_build::builder_vm::SIDECAR_FILENAME), b"{}").unwrap();
+
+        let slot_dir = tmp.path().join("slot");
+        std::fs::create_dir_all(&slot_dir).unwrap();
+        let current_link = slot_dir.join("current");
+        std::os::unix::fs::symlink("artifacts/revisions/rev-0", &current_link).unwrap();
+
+        let rev_dst = slot_dir.join("artifacts").join("revisions").join("rev-1");
+        let mut sources = fake_sources(&build);
+        sources.initrd = None;
+
+        install_revision_artifacts(&sources, &rev_dst, &current_link, "rev-1").unwrap();
+
+        let target = std::fs::read_link(&current_link).unwrap();
+        assert_eq!(
+            target,
+            std::path::PathBuf::from("artifacts/revisions/rev-1")
+        );
     }
 
     // -----------------------------------------------------------------
