@@ -123,7 +123,8 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl build runtime-overlay build --force` | Refresh the cached overlay even when the matching cache entry already exists |
 | `mvmctl build runtime-overlay build --source build\|download\|auto` | Choose whether the overlay is assembled from the source checkout, downloaded from the published release, or resolved the same way ordinary required-overlay boots do |
 | Runtime overlay update model | Stopped VMs pick up the newer version-matched overlay on the next boot. Running VMs keep the overlay they booted with; mvm does not hot-remount a different runtime overlay into a live guest |
-| `just runtime-overlay-build [--force]` | Worktree-local convenience wrapper around `mvmctl build runtime-overlay build`; sources `scripts/dev-env.sh` first so cache/target state stays isolated per worktree |
+| `just runtime-overlay [--force]` | Preferred worktree-local convenience wrapper around `mvmctl build runtime-overlay build`; sources `scripts/dev-env.sh` first so cache/target state stays isolated per worktree |
+| `just runtime-overlay-build [--force]` | Compatibility alias for `just runtime-overlay` |
 | `mvmctl env cleanup` | Remove old dev-build artifacts and run Nix garbage collection |
 | `mvmctl env cleanup --all` | Remove all cached build revisions |
 | `mvmctl env cleanup --keep <N>` | Keep the N newest build revisions |
@@ -263,7 +264,8 @@ admission until their transports are wired.
 | `mvmctl build runtime-overlay build --source download` | Download the published runtime-overlay artifact for this version into the cache |
 | `mvmctl build runtime-overlay build --arch aarch64\|x86_64 --version <semver>` | Override the target architecture or the expected overlay version |
 | Runtime overlay update model | Running VMs keep the overlay they booted with; a changed overlay takes effect on the next boot of a stopped VM |
-| `just runtime-overlay-build` | Prebuild the overlay through the worktree-local dev environment so later required-overlay boots avoid rebuilding guest binaries on the hot path |
+| `just runtime-overlay` | Prebuild the overlay through the worktree-local dev environment so later required-overlay boots avoid rebuilding guest binaries on the hot path |
+| `just runtime-overlay-build` | Compatibility alias for `just runtime-overlay` |
 
 ## Networks
 

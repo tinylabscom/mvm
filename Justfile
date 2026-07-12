@@ -61,23 +61,34 @@ run *ARGS:
 dev *ARGS:
     bin/dev {{ARGS}}
 
+# Run cargo with the dev env set (worktree-local MVM_DATA_DIR /
+# MVM_CACHE_DIR / CARGO_TARGET_DIR).
+dev-cargo *ARGS:
+    bash -c 'source scripts/dev-env.sh && cargo {{ARGS}}'
+
 # Run cargo test --workspace with the dev env.
 dev-test:
-    bash -c 'source scripts/dev-env.sh && cargo test --workspace'
+    just dev-cargo test --workspace
 
 # Run clippy with the dev env.
 dev-clippy:
-    bash -c 'source scripts/dev-env.sh && cargo clippy --workspace -- -D warnings'
+    just dev-cargo clippy --workspace -- -D warnings
 
 # Run cargo check with the dev env.
 dev-check:
-    bash -c 'source scripts/dev-env.sh && cargo check --workspace'
+    just dev-cargo check --workspace
 
 # Prebuild or refresh the version-matched read-only runtime overlay once so
 # later required-overlay boots can reuse it without rebuilding guest binaries
 # on the hot path. Pass through extra args like `--force` or `--source download`.
+runtime-overlay *ARGS:
+    just dev build runtime-overlay build {{ARGS}}
+
+# Prebuild or refresh the version-matched read-only runtime overlay once so
+# later required-overlay boots can reuse it without rebuilding guest binaries
+# on the hot path. Kept as a compatibility alias for `just runtime-overlay`.
 runtime-overlay-build *ARGS:
-    bin/dev build runtime-overlay build {{ARGS}}
+    just runtime-overlay {{ARGS}}
 
 # ── Testing (nextest) ────────────────────────────────────────────────────
 
