@@ -561,7 +561,7 @@ fn run_model_build(_args: ModelBuildArgs) -> Result<()> {
     // Wiring NixMicrovmBuilder end-to-end here would require a running builder
     // VM, which is a larger slice. Delegate with a clear message.
     crate::ui::info(
-        "Use `mvmctl build` or `mvmctl dev` to build a microVM artifact.\n\
+        "Use `mvmctl build` to build a microVM artifact.\n\
          `mvmctl artifact model-build` is reserved for a future slice that \
          integrates directly with the artifact-model pipeline.",
     );

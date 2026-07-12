@@ -2036,14 +2036,14 @@ fn read_builder_vm_cache_manifest(
 ) -> Result<BuilderVmCacheManifest, BuilderVmError> {
     let body = std::fs::read_to_string(manifest_path).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
-            "{} missing or unreadable ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl dev up` to re-bootstrap.",
+            "{} missing or unreadable ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
             manifest_path.display(),
             arch_dir.display(),
         ))
     })?;
     serde_json::from_str(&body).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
-            "{} is malformed ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl dev up` to re-bootstrap.",
+            "{} is malformed ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
             manifest_path.display(),
             arch_dir.display(),
         ))
@@ -2367,7 +2367,7 @@ fn validate_builder_vm_image_cache(arch_dir: &Path) -> Result<String, BuilderVmE
     let cmdline = std::fs::read_to_string(&cmdline_path)
         .map_err(|e| {
             BuilderVmError::ExtractionFailed(format!(
-                "{} missing or unreadable ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl dev up` to re-bootstrap.",
+                "{} missing or unreadable ({e}). The builder VM cache is poisoned; delete {} and re-run `mvmctl bootstrap` to re-bootstrap.",
                 cmdline_path.display(),
                 arch_dir.display(),
             ))
@@ -2381,7 +2381,7 @@ fn validate_builder_vm_image_cache(arch_dir: &Path) -> Result<String, BuilderVmE
         || !manifest.vsock_egress_ready
     {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "builder VM cache at {} is stale: manifest.json must declare `cache_contract_version={}`, `runtime_overlay_ready=true`, and `vsock_egress_ready=true`. Delete {} and re-run `mvmctl dev up` to re-bootstrap a current vsock-only builder image.",
+            "builder VM cache at {} is stale: manifest.json must declare `cache_contract_version={}`, `runtime_overlay_ready=true`, and `vsock_egress_ready=true`. Delete {} and re-run `mvmctl bootstrap` to re-bootstrap a current vsock-only builder image.",
             arch_dir.display(),
             BUILDER_VM_CACHE_CONTRACT_VERSION,
             arch_dir.display(),

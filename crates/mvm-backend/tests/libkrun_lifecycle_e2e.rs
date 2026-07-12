@@ -75,7 +75,7 @@ fn libkrun_lifecycle_start_status_stop() {
     if !kernel.is_file() || !rootfs.is_file() {
         panic!(
             "MVM_LIBKRUN_E2E=1 was set but dev artifacts are missing at {}/{{vmlinux,rootfs.ext4}}. \
-             Build them with `mvmctl dev up` (once plan 72 lands a working builder VM) or copy in from another host.",
+             Build them with `mvmctl bootstrap` (once plan 72 lands a working builder VM) or copy in from another host.",
             dev_dir.display()
         );
     }

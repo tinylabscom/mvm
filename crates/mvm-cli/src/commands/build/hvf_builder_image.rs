@@ -64,7 +64,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError>
     if !vmlinux.is_file() {
         return Err(BuilderVmError::HvfVmmFailed {
             detail: format!(
-                "base builder-VM kernel not found at {}; run `mvmctl dev up` \
+                "base builder-VM kernel not found at {}; run `mvmctl bootstrap` \
                  with the libkrun builder to produce the base image first",
                 vmlinux.display()
             ),
@@ -73,7 +73,7 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf), BuilderVmError>
     if !base_rootfs.is_file() {
         return Err(BuilderVmError::HvfVmmFailed {
             detail: format!(
-                "base builder-VM rootfs not found at {}; run `mvmctl dev up` \
+                "base builder-VM rootfs not found at {}; run `mvmctl bootstrap` \
                  with the libkrun builder to produce the base image first",
                 base_rootfs.display()
             ),

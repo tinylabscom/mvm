@@ -573,7 +573,7 @@ fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
     }
     bail!(
         "qemu workload '{}' has no bootable kernel: the build produced no vmlinux \
-         ({:?}) and no cached builder kernel exists at {}. Run a build / `mvmctl dev up` \
+         ({:?}) and no cached builder kernel exists at {}. Run a build / `mvmctl bootstrap` \
          to populate the builder VM image first.",
         config.name,
         config.kernel_path,

@@ -438,7 +438,7 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
             fallback.is_file(),
             "firecracker workload has no bootable kernel: the build produced no \
              {kernel_path} and no cached builder kernel exists at {}. Run a build / \
-             `mvmctl dev up` to populate the builder VM image first.",
+             `mvmctl bootstrap` to populate the builder VM image first.",
             fallback.display()
         );
         fallback.display().to_string()

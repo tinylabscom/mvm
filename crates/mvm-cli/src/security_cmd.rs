@@ -137,10 +137,7 @@ fn collect_checks() -> Vec<PostureCheck> {
         detail: if cache_present {
             format!("verified prebuilt cached at {prebuilt_dir}")
         } else {
-            format!(
-                "no verified prebuilt for v{version}; run `mvmctl dev up` (network) or \
-                 `mvmctl dev import-image` (air-gapped) to populate"
-            )
+            format!("no verified prebuilt for v{version}; run `mvmctl bootstrap` to populate")
         },
     });
 

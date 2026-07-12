@@ -223,7 +223,7 @@ fn run_boot_check(
     if !builder_rootfs.is_file() {
         anyhow::bail!(
             "--boot-check needs the builder VM image, which isn't in the cache yet \
-             ({}). Run `mvmctl dev up` once to populate it, then retry.",
+             ({}). Run `mvmctl bootstrap` once to populate it, then retry.",
             builder_rootfs.display()
         );
     }
