@@ -601,6 +601,15 @@ fn mk_guest_eval_assertions_all_pass_when_nix_available() {
 /// 3. The mvmMeta passthru carries `overlayAware = true`. Without
 ///    this, admission-time gates can't enforce overlay-aware
 ///    rootfs as a precondition.
+/// 4. The default sealed image shape marks `runtimeLean = isSealed`, while
+///    callers can override that for non-mkGuest-PID1 roots such as the
+///    builder VM.
+/// 5. The baked agent/netinit copies are conditional on that flag.
+///    Without this, required-overlay boots can silently keep a
+///    rootfs fallback around.
+/// 6. The builder-vm flake opts into the runtime-lean builder rootfs and
+///    disables the mkGuest-only exit reporter, so Stage 0 does not rebuild
+///    unused guest runtime binaries into the builder image closure.
 #[test]
 fn mk_guest_carries_overlay_aware_contract() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
@@ -628,6 +637,57 @@ fn mk_guest_carries_overlay_aware_contract() {
         "mk-guest.nix mvmMeta passthru must declare `overlayAware = true` \
          (Plan 74 W1.4b / ADR-051). Admission-time gates read this to \
          refuse boot of cached pre-W1.4b templates."
+    );
+
+    assert!(
+        content.contains("if runtimeLeanOverride == null then isSealed else runtimeLeanOverride"),
+        "mk-guest.nix must default `runtimeLean` from the sealed-image posture \
+         while still allowing callers like the builder-vm flake to force a \
+         runtime-lean rootfs without pretending to be a sealed workload."
+    );
+    assert!(
+        content.contains("mvm\\.chain_init=") && content.contains("exec \"$MVM_CHAIN_INIT\""),
+        "mk-guest.nix /init must support the builder-only chained-init \
+         handoff so the builder image can bootstrap through the generic \
+         busybox /init path before entering mvm-host-vm-init."
+    );
+    assert!(
+        content.contains("initScript = pkgs.writeScript \"mvm-init\" (deindent ''\n    #!/bin/sh"),
+        "mk-guest.nix must still emit /init with the shebang at byte 0 after \
+         deindent strips the Nix-source indentation. A leading space before \
+         `#!/bin/sh` in the emitted script turns the built rootfs /init into \
+         an ENOEXEC script that panics the guest before chained init can run."
+    );
+
+    assert!(
+        content.contains("${if runtimeLean then \"\"")
+            && content.contains("runtimeLean = runtimeLean;"),
+        "mk-guest.nix must both conditionally skip the baked agent/netinit \
+         copy block for runtime-lean images and surface that fact through \
+         `passthru.mvm.runtimeLean`."
+    );
+
+    let builder_path = nix_dir()
+        .join("images")
+        .join("builder-vm")
+        .join("flake.nix");
+    let builder = fs::read_to_string(&builder_path)
+        .unwrap_or_else(|e| panic!("nix/images/builder-vm/flake.nix must be present: {e}"));
+    assert!(
+        builder.contains("runtimeLeanOverride = true;")
+            && builder.contains("bakeExitReport = false;"),
+        "builder-vm flake must force a runtime-lean rootfs and skip the \
+         mkGuest-only exit reporter so Stage 0 does not rebuild unused guest \
+         runtime binaries into the builder image closure."
+    );
+    assert!(
+        builder.contains(
+            "builderCmdline = \"console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\";"
+        ),
+        "builder-vm flake must bake the hardened builder rootfs cmdline \
+         (rootfstype=ext4 + rootwait + panic=-1 + loglevel=8 + chained \
+         builder init) so every backend starts from the same disk-builder \
+         boot contract."
     );
 }
 
@@ -668,6 +728,28 @@ fn mk_guest_installs_netinit_at_boot() {
          W1.4b overlay is mounted. Mirrors the agent-bin resolution \
          pattern; preserves the host-bake fallback for backends \
          that don't attach the overlay yet."
+    );
+
+    assert!(
+        content.contains("/mvm/runtime/egress-client"),
+        "mk-guest.nix /init must prefer the runtime-overlay path \
+         (`/mvm/runtime/egress-client`) for the vsock egress shim on \
+         overlay-backed boots."
+    );
+}
+
+#[test]
+fn shared_kernel_base_forces_hvc0_console_support() {
+    let path = nix_dir().join("images").join("kernel").join("base.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/kernel/base.nix must be present: {e}"));
+
+    assert!(
+        content.contains("\"VIRTIO_CONSOLE\"") && content.contains("\"HVC_DRIVER\""),
+        "the shared microVM kernel base must force both VIRTIO_CONSOLE and \
+         HVC_DRIVER when libkrun/vz workloads boot with `console=hvc0`; \
+         otherwise the kernel can boot silently even though the backend \
+         wires a virtio-console."
     );
 }
 
@@ -740,6 +822,65 @@ fn runtime_overlay_flake_stages_netinit_binary() {
          fall through to the no-defense path. Pinned exact-string \
          match (with the canonical column alignment) to catch a \
          drop or rename in one regression-shaped commit."
+    );
+}
+
+#[test]
+fn runtime_overlay_flake_stages_egress_client_binary() {
+    let path = nix_dir()
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+
+    assert!(
+        content.contains("cp ${egressClient}/bin/mvm-egress-client \"$staging/egress-client\""),
+        "runtime-overlay flake must stage `mvm-egress-client` at \
+         `/egress-client` inside the overlay ext4 so runtime-lean \
+         sealed boots can source the egress shim from the mounted \
+         runtime filesystem."
+    );
+}
+
+#[test]
+fn mk_guest_runtime_lean_skips_baked_egress_client_copy() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+
+    assert!(
+        content.contains("runtimeLean then \"\"")
+            && content
+                .contains("cp ${mvmEgressClientBinary} \"$out/usr/local/bin/mvm-egress-client\""),
+        "mk-guest.nix must gate the baked egress-client copy on the same \
+         runtime-lean split as the other runtime binaries."
+    );
+}
+
+#[test]
+fn mk_guest_accepts_compact_and_legacy_egress_ca_cmdline_tokens() {
+    let path = nix_dir().join("lib").join("mk-guest.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
+
+    assert!(
+        content.contains("mvm.egress_ca=pem:<body>"),
+        "mk-guest.nix must document the compact egress CA cmdline token so \
+         the sealed guest/runtime contract matches the host encoder."
+    );
+    assert!(
+        content.contains("/bin/busybox grep -q '^pem:'"),
+        "mk-guest.nix must detect the compact egress CA token format at boot."
+    );
+    assert!(
+        content.contains("-----BEGIN CERTIFICATE-----"),
+        "mk-guest.nix must reconstruct PEM armor for the compact egress CA token."
+    );
+    assert!(
+        content.contains("echo \"$MVM_EGRESS_CA_TOKEN\" | /bin/busybox sed 's/../\\\\x&/g'"),
+        "mk-guest.nix must keep the legacy hex-encoded egress CA decode path \
+         so older boots remain compatible during the token-format rollout."
     );
 }
 

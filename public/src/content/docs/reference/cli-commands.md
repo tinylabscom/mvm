@@ -24,7 +24,7 @@ verification under `trust`. Domains that already own their own subcommands
 |--------|----------|
 | Daily drivers (top-level) | `machine` (`run`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `dev`, `build`, `doctor`, `init`, `bootstrap` |
 | `vm <sub>` | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
-| `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel` |
+| `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay` |
 | `ops <sub>` | `metrics`, `bench`, `config`, `mcp` |
 | `env <sub>` | `bootstrap`, `cleanup`, `uninstall`, `update`, `sign` |
 | `trust <sub>` | `add`/`list`/`remove` (publishers), `attest`, `receipt`, `audit` |
@@ -54,12 +54,11 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --health-interval <secs> --health-timeout <secs> --health-retries <n> --health-start-period <secs>` | Tune the healthcheck cadence: seconds between checks (default `30`), per-check timeout (default `5`), consecutive failures before unhealthy (default `3`), and grace period after start before checks count (default `0`). Recorded on the machine spec and actively enforced by the host-agent daemon's probe loop |
 | `mvmctl machine run --cpus N --memory SIZE` | vCPU count and memory (supports 512M, 4G, etc.) |
 | `mvmctl machine run -e KEY=VALUE` | Inject an environment variable (repeatable; gated by `--profile`) |
-| `mvmctl machine run -v/-vv/-vvv` | Increase global logging (`info`/`debug`/`trace`) without passing the flag through to guest argv; `RUST_LOG` still overrides the generated filter |
-| `mvmctl machine run --mount host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`; `--volume` remains a compatibility alias) |
+| `mvmctl machine run --volume host:/guest[:mode]` | Share a host directory (mode defaults to `ro`; `rw` needs `--profile dev`/`permissive`) |
 | `mvmctl machine run --profile <p>` | Security posture: `restrictive`, `standard` (default), `dev`, `permissive` |
 | `mvmctl machine run --net` | Enable broad dev-tier outbound egress (default is deny-all) |
 | `mvmctl machine run --allow-host HOST[:PORT]` | Allow egress only to these hosts (repeatable; PORT defaults to 443; wins over `--net`) |
-| `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
+| `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `vz` (macOS 26+ opt-in, sunsetting), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
 | `mvmctl machine run --flake <ref> --flake-profile <variant>` | Flake package variant (e.g. worker, gateway) |
 | `mvmctl machine session start <template> --agent-verb <verb>` | Boot a prod session with an explicit ProdSafe agent-verb allow-list instead of the computed sealed-image default. Repeatable; refused with `--dev` |
 | `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
@@ -84,21 +83,20 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl bootstrap` | Prepare the environment: host tooling **and pre-fetch the builder VM image** so the first `dev up` is fast (no first-run download/build on the hot path). `install.sh` runs this automatically unless `MVM_SKIP_BUILDER_PREFETCH=1`. Idempotent — safe to re-run |
 | `mvmctl bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
 | `mvmctl env bootstrap` | Same as `mvmctl bootstrap` (the `env`-grouped form) |
-| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects the HVF builder on macOS 26+ Apple Silicon and retries with libkrun when the HVF builder path fails; native KVM is used on Linux. |
-| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects the HVF builder on macOS 26+ Apple Silicon and retries with libkrun when the HVF builder path fails; native KVM is used on Linux. |
+| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects the HVF builder on macOS 26+ Apple Silicon and retries with libkrun when the HVF builder path fails; native Linux hosts auto-detect the qemu builder for the default builder lane. |
 | `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
 | `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
 | `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
 | `mvmctl dev up --shell` (or `-s`) | Force opening an interactive shell after starting (the default behavior) |
 | `mvmctl dev up --no-shell` | Start the dev VM without attaching an interactive shell |
-| `mvmctl dev up --base <template[@revision]\|slot[@revision]\|bundle-sha>` | On macOS, boot the dev VM from a built template/manifest-slot revision or installed bundle instead of the default dev image. Unknown or unbuilt bases fail before launch; changing the base of an already-running or parked dev VM requires `mvmctl dev down` first. |
+| `mvmctl dev up --base <template[@revision]\|slot[@revision]\|bundle-sha>` | On the Vz backend, boot the dev VM from a built template/manifest-slot revision or installed bundle instead of the default dev image. Unknown or unbuilt bases fail before launch; changing the base of an already-running or parked dev VM requires `mvmctl dev down` first. |
 | `mvmctl dev down` | Stop the dev VM |
 | `mvmctl dev down --reset` | Also delete the cached dev image so the next `dev up` rebuilds from local source |
-| `mvmctl dev park` | Snapshot and stop the running dev VM so the next `dev up` restores from the parked state. Requires machine-state save/restore, currently unsupported on macOS pending HVF save/restore. |
+| `mvmctl dev park` | Vz only: snapshot and stop the running dev VM so the next `dev up` restores from the parked state |
 | `mvmctl dev shell` | Open a shell in the running dev VM |
 | `mvmctl dev shell --project ~/dir` | Open shell and cd into a project directory |
 | `mvmctl dev status` | Show dev environment backend, running state, cached image paths, and safe builder-cache readiness reason |
-| `mvmctl dev status --json` | Emit schema-versioned dev status JSON; pinned-base dev VMs include a `base` object with `id`, `revision`, and `rootfs_fingerprint`, while Linux-native hosts include typed KVM, Firecracker, and base-asset readiness labels |
+| `mvmctl dev status --json` | Emit schema-versioned dev status JSON; Vz pinned-base dev VMs include a `base` object with `id`, `revision`, and `rootfs_fingerprint`, while Linux-native hosts include typed KVM, Firecracker, and base-asset readiness labels |
 | `mvmctl dev cache inspect` | Inspect dev image and builder-cache readiness without rebuilding, booting, or printing local artifact paths |
 | `mvmctl dev cache inspect --json` | Emit the sanitized dev-cache inspection as structured JSON |
 | `mvmctl dev rebuild` | Stop, clear cache, and rebuild + restart the dev VM |
@@ -121,13 +119,11 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl build image --flake <ref> --watch` | Build and rebuild on flake.lock changes |
 | `mvmctl build image --json` | Output structured JSON events instead of human-readable output |
 | `mvmctl build image -o <path>` | Output path for the built .elf image |
-| `mvmctl build kernel build --which <builder\|workload\|workload-sizeopt>` | Compile one slim microVM kernel into the local cache and the builder VM's Nix store. Default: `builder` |
-| `mvmctl build kernel build --all` | Build both builder and workload kernels in one pass |
-| `mvmctl build kernel build --source <compile\|download\|auto>` | Kernel source mode: local Stage 0 compile (default), release-artifact download, or try download then fall back to compile |
-| `mvmctl build kernel build --arch <aarch64\|x86_64>` | Target architecture. Defaults to the host arch; non-host arches are supported only for `--source download` |
-| `mvmctl build kernel build --which workload-sizeopt` | Build the measured comparison workload variant with `CONFIG_CC_OPTIMIZE_FOR_SIZE=y` without replacing the default workload cache entry |
-| `mvmctl build kernel build --which workload --boot-check` | After building the default workload kernel, boot a throwaway VM on it and wait for the guest agent to answer over vsock. Requires a source checkout plus a populated builder-VM cache |
-| `mvmctl build kernel build` | When the local compile path runs, `mvmctl` also writes a resolved `config` sidecar and `kernel-metrics-<arch>.json` beside the cached kernel so the built-in (`=y`) symbol count is visible without a CI round-trip |
+| `mvmctl build runtime-overlay build` | Prebuild the version-matched read-only runtime overlay into `~/.cache/mvm/runtime-overlay/<version>/<arch>/` without booting a VM. This is the explicit “pay the guest-binary build debt once” command for required-overlay workflows |
+| `mvmctl build runtime-overlay build --force` | Refresh the cached overlay even when the matching cache entry already exists |
+| `mvmctl build runtime-overlay build --source build\|download\|auto` | Choose whether the overlay is assembled from the source checkout, downloaded from the published release, or resolved the same way ordinary required-overlay boots do |
+| Runtime overlay update model | Stopped VMs pick up the newer version-matched overlay on the next boot. Running VMs keep the overlay they booted with; mvm does not hot-remount a different runtime overlay into a live guest |
+| `just runtime-overlay-build [--force]` | Worktree-local convenience wrapper around `mvmctl build runtime-overlay build`; sources `scripts/dev-env.sh` first so cache/target state stays isolated per worktree |
 | `mvmctl env cleanup` | Remove old dev-build artifacts and run Nix garbage collection |
 | `mvmctl env cleanup --all` | Remove all cached build revisions |
 | `mvmctl env cleanup --keep <N>` | Keep the N newest build revisions |
@@ -258,6 +254,17 @@ admission until their transports are wired.
 
 > Plan 40 renamed this verb from `mvmctl flake check` to `mvmctl build validate`.
 
+## Runtime Overlay
+
+| Command | Description |
+|---------|-------------|
+| `mvmctl build runtime-overlay build` | Populate the local runtime-overlay cache at `~/.cache/mvm/runtime-overlay/<version>/<arch>/` for this `mvmctl` version and host architecture without booting a workload VM |
+| `mvmctl build runtime-overlay build --source build` | Build the overlay from the source checkout. Requires `nix/images/runtime-overlay/flake.nix` in the current checkout |
+| `mvmctl build runtime-overlay build --source download` | Download the published runtime-overlay artifact for this version into the cache |
+| `mvmctl build runtime-overlay build --arch aarch64\|x86_64 --version <semver>` | Override the target architecture or the expected overlay version |
+| Runtime overlay update model | Running VMs keep the overlay they booted with; a changed overlay takes effect on the next boot of a stopped VM |
+| `just runtime-overlay-build` | Prebuild the overlay through the worktree-local dev environment so later required-overlay boots avoid rebuilding guest binaries on the hot path |
+
 ## Networks
 
 | Command | Description |
@@ -326,7 +333,7 @@ claim 4); production guests run their baked entrypoint via `mvmctl machine run -
 |---------|-------------|
 | `mvmctl run -- <cmd>...` | Boot the bundled default microVM image, run `<cmd>`, exit |
 | `mvmctl run --manifest <name-or-path> -- <cmd>...` | Boot a registered manifest/template instead of the default |
-| `mvmctl run --image <ref> -- <cmd>...` | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its materialized `rootfs.ext4`, run `<cmd>`, exit |
+| `mvmctl run --image <ref> -- <cmd>...` | Pull or reuse a cached OCI image, emit signed audit-chain provenance for the resolved image, boot its prepared OCI rootfs (read-only virtiofs-root on capable dev-tier backends, otherwise block `rootfs.ext4`), run `<cmd>`, exit |
 | `mvmctl run --image <ref> --prod -- <cmd>...` | Production OCI-image policy: require `<ref>` to be digest-pinned and cosign-verified by the OCI policy before cache use or boot |
 | `mvmctl run --profile standard -- <cmd>` | Default profile: explicit env is allowed; host shares must be read-only |
 | `mvmctl run --profile restrictive -- <cmd>` | No env injection and no host directory shares |
@@ -368,7 +375,7 @@ flag:
 - **Transient** (default): boot a fresh microVM from an OCI image, run the
   command, tear the VM down. Routes into the same code path as
   `mvmctl run --image`, inheriting **deny-all networking by default**, opt-in
-  egress via `--net` / `--allow-host`, and the same `--profile`, `--mount`,
+  egress via `--net` / `--allow-host`, and the same `--profile`, `--volume`,
   `--receipt`, `--json`, and `--dry-run` semantics.
 - **Foreground interactive** (`-t`/`--tty`, with `-i` accepted so `-it`
   parses): boot a fresh transient VM, run the requested argv attached to a PTY,
@@ -418,8 +425,7 @@ host agent, so it only applies to backends where that agent is reachable.
 Identity and lifetime are separate: `--name <N>` names a foreground transient
 run but does not make it persistent. `-d`/`--detach`, `--up-json`, or the
 explicit `machine create`/`start` lifecycle make a long-lived machine.
-`--mount` host shares work on every run mode (`--volume` remains accepted as a
-compatibility alias). The syntax is
+`--volume` host shares work on every run mode. The syntax is
 `HOST:/GUEST[:MODE]` (`MODE` defaults to `ro`; `rw` needs `--profile dev` or
 `permissive`). Persistent machine specs canonicalize host paths to absolute
 paths so later reconnects re-mount the same share regardless of your working
@@ -435,7 +441,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run --image <ref> -- <cmd>...` | Boot an OCI image, run `<cmd>` with no network, tear down |
 | `mvmctl machine run --net --image <ref> -- <cmd>...` | Boot with dev-tier outbound networking enabled |
 | `mvmctl machine run --image <ref> --allow-host <host[:port]> -- <cmd>...` | Boot with egress narrowed to the listed TCP host/port entries (`<host>` alone defaults to `:443`) |
-| `mvmctl machine run --image <ref> --profile dev --mount .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
+| `mvmctl machine run --image <ref> --profile dev --volume .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
 | `mvmctl machine run --image <ref> --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
 | `mvmctl machine run --image <ref> --dry-run -- <cmd>` | Validate and explain the run plan without booting a VM |
 | `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary |
@@ -457,7 +463,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine start <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
 | `mvmctl machine start <name> --json` | Print a redacted JSON start summary instead of plain text |
 | `mvmctl machine start <name> --receipt <path>` | Write a signed machine-start receipt with effective policy plus the resolved digest and start timestamp |
-| `mvmctl machine restart <name>...` | Restart one or more named machines: stop if running, then start (same stop→start as a config-change recreate) |
+| `mvmctl machine restart <name>...` | Restart one or more named machines: stop if running, then start (same stop→start as a config-change recreate). This is also how a running machine picks up a newer version-matched runtime overlay. |
 | `mvmctl machine ls` (alias `ps`) | List persisted named machine specs |
 | `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
 | `mvmctl machine inspect <name>` | Show one persisted named machine spec |
@@ -481,6 +487,18 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine check-artifact <artifact.mvm> --key <pubkey>` | Verify with an explicit raw Ed25519 public key |
 | `mvmctl machine check-artifact <artifact.mvm> --json` | Print the verified artifact/admission preview as JSON |
 
+### Runtime overlay updates
+
+For overlay-backed guests, runtime updates happen on **start/restart**, not by
+live remounting inside a running VM:
+
+- `mvmctl machine start <name>` picks up the overlay version attached for that
+  boot.
+- `mvmctl machine restart <name>` is the normal way to move a running machine
+  onto a newer version-matched runtime overlay.
+- A running machine keeps the runtime overlay version it already booted with
+  until restart.
+
 ### `machine run` lifecycles in practice
 
 A transient run is the default and needs no flags — it boots, runs the command,
@@ -500,12 +518,13 @@ mvmctl machine run -it --image <dev-image> -- htop      # exits with htop, VM go
 ```
 
 For OCI `--image` runs that request outbound egress (`--net` or `--allow-host`),
-`mvmctl` selects only backends that can keep the guest NIC-less and proxy
-traffic over the host-vsock egress endpoint. On that path the injected guest
-`/init` starts `mvm-egress-client` and the runtime injects proxy env vars
-pointing at its loopback SOCKS listener automatically. Today that means `hvf`
-or `libkrun`; incapable backends are refused rather than silently falling back
-to a guest NIC. That makes TCP/HTTP clients work, but it does **not** add ICMP
+`mvmctl` selects only backends that can keep the guest NIC-less and route
+traffic through the host-side vsock mediation endpoint. On that path the
+injected guest `/init` starts `mvm-egress-client` and the runtime injects proxy
+env vars pointing at its loopback SOCKS listener automatically. Today that
+means `hvf` and `vz`; incapable backends are refused rather than silently
+falling back to a guest NIC. That makes TCP/HTTP clients work, but it does
+**not** add ICMP
 support: `ping` is not a valid smoke test for `--allow-host`.
 
 Naming a foreground run does not make it persistent; it only gives the transient
@@ -596,13 +615,13 @@ host registry records.
 
 ## Checkpoint
 
-`mvmctl machine save` / `mvmctl machine restore` are the first-class machine-state verbs. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk, restore verifies the sealed checkpoint content and resumes the same VM identity. Full-VM machine-state save/restore is currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore. `mvmctl machine checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl machine snapshot ls` / `mvmctl machine snapshot rm` remain for Firecracker sealed snapshots.
+`mvmctl machine save` / `mvmctl machine restore` are the first-class Vz machine-state verbs. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk through Vz `saveMachineStateToURL`, restore verifies the sealed checkpoint content and resumes the same VM identity. `mvmctl machine checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl machine snapshot ls` / `mvmctl machine snapshot rm` remain for Firecracker sealed snapshots.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl machine save <name> [--tag <tag>] [--json]` | Save a running VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier (currently unsupported on macOS pending HVF save/restore). |
+| `mvmctl machine save <name> [--tag <tag>] [--json]` | Save a running Vz VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
 | `mvmctl machine restore <checkpoint> [--json]` | Restore a previously saved `vm_full` checkpoint into the original VM identity after content verification. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
-| `mvmctl machine checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk); currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore. Records content hash in the audit chain. |
+| `mvmctl machine checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via Vz's `saveMachineStateToURL`. Records content hash in the audit chain. |
 | `mvmctl machine checkpoint restore <checkpoint> [--json]` | Restore a previously created `vm_full` checkpoint into the original VM identity. Re-hashes content against the recorded metadata before loading. |
 | `mvmctl machine checkpoint fork <checkpoint> [--new-id <name>] [--boot] [--json]` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). `vm_full` forks auto-boot; `fs_quick` forks boot only with `--boot`. |
 | `mvmctl machine checkpoint ls [--json]` | List checkpoints. |
@@ -703,7 +722,7 @@ The snapshot path activates only when *all* of the following hold:
   snapshot's recorded drive layout);
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (HVF, libkrun), vsock
+On macOS backends without Firecracker (HVF, Vz, libkrun), vsock
 snapshots return `os error 95` (EOPNOTSUPP); restore failures fall back
 to cold boot with a warning rather than aborting the exec. See the
 [Sandboxed Exec](/guides/exec/) guide for the full background.
@@ -807,7 +826,7 @@ All commands accept these global options:
 |--------|-------------|
 | `--log-format <human\|json>` | Log format: human (default) or json (structured) |
 | `--fc-version <VERSION>` | Override Firecracker version (e.g., v1.14.0) |
-| `-v`, `-vv`, `-vvv`, `--verbose`, `--debug` | Increase global log verbosity (`info`/`debug`/`trace`). The flag may be placed before or after subcommands, including after `machine run` options before `-- <argv>`. `RUST_LOG` overrides the generated filter. |
+| `--verbose` (alias `--debug`) | Show verbose `[mvm]` progress messages. Implied when `RUST_LOG` is set. |
 
 ## Environment Variables
 
@@ -818,7 +837,7 @@ All commands accept these global options:
 | `MVM_FC_ASSET_BASE` | S3 base URL for Firecracker assets | AWS default |
 | `MVM_FC_ASSET_ROOTFS` | Override rootfs filename | Auto-detected |
 | `MVM_FC_ASSET_KERNEL` | Override kernel filename | Auto-detected |
-| `MVM_BUILDER_MODE` | Builder transport: `auto`, `vsock`, or `ssh` | `auto` |
+| `MVM_BUILDER_MODE` | Builder execution mode: `host` (default) or `vsock`; `auto` is accepted as a legacy alias for `vsock` | `host` |
 | `MVM_TEMPLATE_REGISTRY_ENDPOINT` | S3-compatible endpoint URL for template push/pull | None |
 | `MVM_TEMPLATE_REGISTRY_BUCKET` | S3 bucket name for templates | None |
 | `MVM_TEMPLATE_REGISTRY_ACCESS_KEY_ID` | S3 access key ID | None |
@@ -838,7 +857,7 @@ All commands accept these global options:
 | `MVM_OCI_POLICY` | OCI production policy TOML used by `mvmctl image pull --prod` and `mvmctl run --image --prod` | `$MVM_DATA_DIR/oci-policy.toml` |
 | `MVM_OCI_BEARER_TOKEN_<HOST>` | Bearer token for one OCI registry host (`ghcr.io` -> `MVM_OCI_BEARER_TOKEN_GHCR_IO`) | Unset |
 | `MVM_OCI_BEARER_TOKEN` | Global fallback bearer token for OCI registry pulls | Unset |
-| `RUST_LOG` | Logging filter (e.g., `debug`, `mvm=trace`). Overrides `-v` / `--verbose`. | Unset |
+| `RUST_LOG` | Logging level (e.g., `debug`, `mvm=trace`) | `info` |
 | `MVM_CACHE_DIR` | Override cache directory | `~/.cache/mvm` |
 | `MVM_CONFIG_DIR` | Override config directory | XDG default |
 | `MVM_STATE_DIR` | Override state directory | XDG default |
@@ -847,7 +866,6 @@ All commands accept these global options:
 | `MVM_SRC` | Override the source repo path passed to `nix build` during dev builds | Workspace root |
 | `MVM_BUILDER_AGENT_BIN` | Override the path to the builder-agent binary baked into the builder VM image | Auto-detected from build closure |
 | `MVM_BUILDER_AGENT_PORT` | Vsock port the builder agent listens on | `54_321` |
-| `MVM_BUILDER_AUTHORIZED_KEY` | SSH public key authorized to drive the builder VM via SSH transport (vs vsock) | Unset |
 | `MVM_BUILDER_VM_TIMEOUT_SECS` | Wall-clock cap for one-shot libkrun builder VM runs before the supervisor is killed | `1800` |
 | `MVM_MCP_SESSION_IDLE` | MCP session idle timeout in seconds | `300` |
 | `MVM_MCP_SESSION_MAX` | MCP session maximum lifetime in seconds | `1800` |

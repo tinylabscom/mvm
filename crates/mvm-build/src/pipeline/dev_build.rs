@@ -631,8 +631,9 @@ fn dev_build_via_builder_vm_uncached(
     // The single-shot path honours the builder-backend selection
     // (`--builder` / `MVM_BUILDER_BACKEND` / auto-detect) instead of
     // hardcoding libkrun, so `mvmctl build` routes a steady-state build through
-    // the chosen VMM (QEMU on `MVM_BUILDER_BACKEND=qemu`). Default stays libkrun
-    // on Linux + macOS 13-25; macOS 26 Apple Silicon auto-detects the hvf builder.
+    // the chosen VMM (QEMU on `MVM_BUILDER_BACKEND=qemu`). Linux-native hosts
+    // now auto-detect qemu by default; macOS 26 Apple Silicon auto-detects the
+    // hvf builder; other hosts stay on libkrun.
     //
     // Auto-fallback: an auto-detected libkrun that fails to create its VM on
     // Linux (libkrun rc -22 / `KVM_SET_USER_MEMORY_REGION`) transparently

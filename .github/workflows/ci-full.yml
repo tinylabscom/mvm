@@ -216,12 +216,11 @@ jobs:
         # the mvm-cli rlib it links was already built by the workspace run.
         run: cargo nextest run -p xtask --features man
 
-      # Plan 98 Phase 3 §3.4 — Linux auto-detect assertion. The
-      # `auto_detect_default_for(false)` arm covers macOS 13-25, Linux,
-      # and Windows; pinning it here ensures the Linux path keeps
-      # picking libkrun even after a future refactor of the predicate
-      # (a regression would be a Vz-on-Linux pick which can't run).
-      - name: Assert auto-detect on Linux picks libkrun
+      # The `auto_detect_default_for(false)` arm now covers only the
+      # non-Linux, non-HVF fallback path (for example macOS 13-25 and
+      # Windows). Keep a focused witness here so that future predicate
+      # changes do not accidentally move those hosts off libkrun.
+      - name: Assert auto-detect still picks libkrun off Linux/HVF
         run: |
           cargo test -p mvm-build --features builder-vm --lib \
             builder_backend_select::tests::auto_detect_default_for_everything_else_picks_libkrun

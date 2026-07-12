@@ -197,36 +197,144 @@ fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Optio
     .then(|| "mvm.vsock_egress=1".to_string())
 }
 
-fn persist_vsock_egress_marker(name: &str, enabled: bool) -> Result<()> {
-    let marker = mvm_core::config::vm_vsock_egress_marker_path(name);
-    if enabled {
-        if let Some(parent) = marker.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create vsock egress marker dir {}", parent.display()))?;
+fn hvf_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
+    config
+        .verity_path
+        .as_deref()
+        .zip(config.roothash.as_deref())
+        .and_then(|_| {
+            Path::new(&config.rootfs_path)
+                .parent()
+                .map(|p| p.join("rootfs.initrd"))
+        })
+        .filter(|p| p.exists())
+}
+
+fn hvf_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
+    config
+        .initrd_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| hvf_verity_initrd_path(config))
+}
+
+fn hvf_verity_enabled(config: &VmStartConfig) -> bool {
+    config.verity_path.is_some()
+        && config.roothash.is_some()
+        && hvf_effective_initrd(config).is_some()
+}
+
+fn hvf_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
+    Some((
+        config.runtime_overlay_path.as_deref()?,
+        config.runtime_overlay_verity_path.as_deref()?,
+        config.runtime_overlay_roothash.as_deref()?,
+    ))
+}
+
+fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
+    if config.virtiofs_root.is_some() {
+        return Vec::new();
+    }
+
+    if hvf_verity_enabled(config) {
+        let mut disks = vec![
+            HvfDisk {
+                path: PathBuf::from(&config.rootfs_path),
+                read_only: true,
+                ephemeral: false,
+            },
+            HvfDisk {
+                path: PathBuf::from(
+                    config
+                        .verity_path
+                        .as_deref()
+                        .expect("verity-enabled boot must carry a verity sidecar"),
+                ),
+                read_only: true,
+                ephemeral: false,
+            },
+        ];
+        if let Some((overlay_path, overlay_verity_path, _)) = hvf_runtime_overlay(config) {
+            disks.push(HvfDisk {
+                path: PathBuf::from(overlay_path),
+                read_only: true,
+                ephemeral: false,
+            });
+            disks.push(HvfDisk {
+                path: PathBuf::from(overlay_verity_path),
+                read_only: true,
+                ephemeral: false,
+            });
         }
-        std::fs::write(&marker, b"1")
-            .with_context(|| format!("write vsock egress marker {}", marker.display()))?;
-    } else {
-        let _ = std::fs::remove_file(&marker);
+        return disks;
+    }
+
+    Some(config.rootfs_path.clone())
+        .filter(|p| !p.is_empty())
+        .map(|p| {
+            vec![HvfDisk {
+                path: PathBuf::from(p),
+                read_only: false,
+                ephemeral: true,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
+    if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
+        return Ok(());
+    }
+    if config.virtiofs_root.is_some() {
+        bail!("required-overlay hvf boots do not support virtiofs-root");
+    }
+    if !hvf_verity_enabled(config) {
+        bail!(
+            "required-overlay hvf boot requires verity metadata plus an initrd \
+             (`--initrd` or sibling rootfs.initrd)"
+        );
+    }
+    if hvf_runtime_overlay(config).is_none() {
+        bail!("required-overlay hvf boot requires the runtime overlay artifact triple");
     }
     Ok(())
 }
 
 fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
     let egress = vsock_egress_cmdline_token(config, state_dir);
-    let network_tunnel = config
-        .network_tunnel
-        .as_ref()
-        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline);
     let grants = crate::hvf_bootargs::grant_tokens(&config.name);
-    // Nothing to add ⇒ let the boot path fall back to its built-in default.
-    if egress.is_none() && network_tunnel.is_none() && grants.is_empty() {
-        return None;
-    }
     let virtiofs_root = config.virtiofs_root.is_some();
     let has_disk = !virtiofs_root && !config.rootfs_path.is_empty();
-    let mut cmdline = crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk);
-    for token in egress.into_iter().chain(network_tunnel).chain(grants) {
+    let verity_enabled = hvf_verity_enabled(config);
+    if egress.is_none()
+        && grants.is_empty()
+        && !verity_enabled
+        && config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
+    {
+        return None;
+    }
+    let mut cmdline = if verity_enabled {
+        crate::hvf_bootargs::default_verity_bootargs()
+    } else {
+        crate::hvf_bootargs::workload_bootargs(virtiofs_root, has_disk)
+    };
+    if let Some(verity_args) = crate::microvm::build_verity_cmdline_args(
+        config.roothash.as_deref(),
+        if verity_enabled {
+            hvf_runtime_overlay(config).map(|(_, _, roothash)| roothash)
+        } else {
+            None
+        },
+    ) {
+        cmdline.push(' ');
+        cmdline.push_str(&verity_args);
+    }
+    cmdline.push(' ');
+    cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
+        config.runtime_source_policy,
+    ));
+    for token in egress.into_iter().chain(grants) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
@@ -335,6 +443,7 @@ impl VmBackend for HvfBackend {
             .kernel_path
             .clone()
             .ok_or_else(|| anyhow!("hvf backend requires an arm64 kernel Image (kernel_path)"))?;
+        ensure_hvf_runtime_source_supported(config)?;
 
         let state_dir = vm_state_dir(&config.name);
         std::fs::create_dir_all(&state_dir)
@@ -343,10 +452,6 @@ impl VmBackend for HvfBackend {
         let console_log = state_dir.join("console.log");
         // Create/truncate the console capture file up front.
         let _ = crate::libkrun::open_console_capture(&console_log);
-        persist_vsock_egress_marker(
-            &config.name,
-            vsock_egress_cmdline_token(config, &state_dir).is_some(),
-        )?;
 
         // Clear any prior run's exit code so `wait` reads only this launch's.
         let workload_exit = state_dir.join("workload.exit");
@@ -376,23 +481,7 @@ impl VmBackend for HvfBackend {
         // virtiofs-root dev boot (Plan-223 tier gate): serve the unpacked+injected
         // tree read-only over virtio-fs; no block rootfs is attached.
         let virtiofs_root = config.virtiofs_root.clone().map(PathBuf::from);
-        // Single workload rootfs → one ephemeral (RAM-backed) writable disk: the
-        // guest mounts it `rw` but its writes must not persist to the base image.
-        // Skipped entirely on the virtiofs-root path.
-        let disks = if virtiofs_root.is_some() {
-            Vec::new()
-        } else {
-            Some(config.rootfs_path.clone())
-                .filter(|p| !p.is_empty())
-                .map(|p| {
-                    vec![HvfDisk {
-                        path: PathBuf::from(p),
-                        read_only: false,
-                        ephemeral: true,
-                    }]
-                })
-                .unwrap_or_default()
-        };
+        let disks = hvf_workload_disks(config);
         // A transient workload ends the VM by reporting its exit code over the
         // vsock exit port (the default — VM life = workload life); a persistent
         // (`-d`) VM ends on `stop`. MVM_HVF_TIMEOUT is only a backstop cap
@@ -425,7 +514,7 @@ impl VmBackend for HvfBackend {
             // otherwise keep the supervisor default (`init=/init`).
             cmdline: hvf_workload_cmdline(config, &state_dir),
             memory_mib: config.memory_mib,
-            initramfs: config.initrd_path.clone().map(PathBuf::from),
+            initramfs: hvf_effective_initrd(config),
             disks,
             virtiofs_root,
             vsock: true,
@@ -903,47 +992,112 @@ mod tests {
         let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
         assert!(cmdline.contains("rootfstype=virtiofs root=mvmroot"));
         assert!(cmdline.contains("init=/init"));
+        assert!(cmdline.contains("mvm.runtime_source_policy=rootfs_only"));
         assert!(cmdline.contains("mvm.vsock_egress=1"));
     }
 
     #[test]
-    fn hvf_workload_cmdline_appends_network_tunnel_token_when_configured() {
+    fn hvf_workload_cmdline_uses_verity_shape_and_runtime_overlay_tokens() {
         let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
         let config = VmStartConfig {
-            virtiofs_root: Some("/tmp/root".to_string()),
-            network_tunnel: Some(mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
-                guest_port: 5302,
-                session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
-                    tenant_id: "tenant-a".into(),
-                    vm_id: "vm-1".into(),
-                    boot_id: "boot-1".into(),
-                    session_nonce: "nonce-1".into(),
-                    requested_features: mvm_core::protocol::network_tunnel::TunnelFeatures::default(
-                    ),
-                    maximum_frame_size: 4096,
-                },
-            }),
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
             ..Default::default()
         };
-
         let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
-        assert!(cmdline.contains("mvm.network_tunnel="));
+        assert!(!cmdline.contains("root=/dev/vda"));
+        assert!(!cmdline.contains("init=/init"));
+        assert!(cmdline.contains("mvm.roothash="));
+        assert!(cmdline.contains("mvm.data=/dev/vda"));
+        assert!(cmdline.contains("mvm.hash=/dev/vdb"));
+        assert!(cmdline.contains("mvm.runtime_roothash="));
+        assert!(cmdline.contains("mvm.runtime_data=/dev/vdc"));
+        assert!(cmdline.contains("mvm.runtime_hash=/dev/vdd"));
+        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
     }
 
     #[test]
-    fn persist_vsock_egress_marker_writes_and_clears_marker() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+    fn hvf_workload_disks_use_read_only_verity_layout_with_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
 
-        persist_vsock_egress_marker("hvf-marker-vm", true).expect("write marker");
-        assert!(mvm_core::config::vm_vsock_egress_marker_path("hvf-marker-vm").is_file());
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            ..Default::default()
+        };
+        let disks = hvf_workload_disks(&config);
+        assert_eq!(disks.len(), 4);
+        assert!(disks.iter().all(|disk| disk.read_only));
+        assert!(disks.iter().all(|disk| !disk.ephemeral));
+        assert_eq!(disks[0].path, rootfs);
+        assert_eq!(disks[1].path, verity);
+        assert_eq!(disks[2].path, PathBuf::from("/tmp/runtime.ext4"));
+        assert_eq!(disks[3].path, PathBuf::from("/tmp/runtime.verity"));
+    }
 
-        persist_vsock_egress_marker("hvf-marker-vm", false).expect("clear marker");
-        assert!(!mvm_core::config::vm_vsock_egress_marker_path("hvf-marker-vm").exists());
+    #[test]
+    fn required_overlay_hvf_support_rejects_missing_overlay_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let err = ensure_hvf_runtime_source_supported(&config).unwrap_err();
+        assert!(err.to_string().contains("runtime overlay artifact triple"));
+    }
+
+    #[test]
+    fn required_overlay_hvf_support_rejects_missing_initrd() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let err = ensure_hvf_runtime_source_supported(&config).unwrap_err();
+        assert!(err.to_string().contains("rootfs.initrd"));
     }
 
     #[test]

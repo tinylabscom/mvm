@@ -15,6 +15,7 @@ impl TopLevelCommand for Commands {
         match self {
             Commands::Env(a) => env::group::run(cli, a, cfg),
             Commands::Bootstrap(a) => bootstrap::run(cli, a, cfg),
+            Commands::BuilderVmBootstrap(a) => bootstrap::run_builder_vm_bootstrap(cli, a, cfg),
             Commands::Dev(a) => env::dev::run(cli, a, cfg),
             Commands::Ls(a) => vm::ps::run(cli, a, cfg),
             Commands::Explain(a) => vm::explain::run(a),

@@ -57,7 +57,7 @@
   # - **No** `procps`-interactive / `less` — kept slim.
   # - `mvm-host-vm-init` mounted at `/sbin/mvm-host-vm-init` via
   #   `extraFiles`. The kernel cmdline (`cmdline.txt` output)
-  #   sets `init=/sbin/mvm-host-vm-init` so this becomes PID 1.
+  #   chains into it from the generic `/init` bootstrap.
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-25.11";
@@ -252,12 +252,14 @@
       # - `ro` — root is read-only; writes go to the persistent
       #   /nix-store virtio-blk at /dev/vdb.
       # - `rootfstype=ext4` — skip filesystem auto-detection.
-      # - `init=/sbin/mvm-host-vm-init` — the `mvm-host-vm-init` binary
-      #   as PID 1. Its install path (`/sbin/mvm-host-vm-init`) must
-      #   match the manifest in nix/lib/mvm-host-binaries.nix; the
-      #   binary is statically linked, so no dynamic loader is needed in
-      #   this rootfs.
-      builderCmdline = "console=hvc0 root=/dev/vda ro rootfstype=ext4 init=/sbin/mvm-host-vm-init";
+      # - `rootwait` — wait for virtio-blk root enumeration before mounting.
+      # - `panic=-1 loglevel=8` — reboot on panic and keep early boot verbose
+      #   enough that the host-side console capture has useful crash context.
+      # - `init=/init mvm.chain_init=/sbin/mvm-host-vm-init` — enter the
+      #   shell-known-good busybox /init first, then chain into
+      #   mvm-host-vm-init after the generic pseudofs/tmpfs bootstrap. The
+      #   target path must still match nix/lib/mvm-host-binaries.nix.
+      builderCmdline = "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init";
 
       # Extra packages for the interactive (dev) builder VM image.
       # Added on top of `builderPackages` when `interactive = true`.
@@ -293,9 +295,8 @@
         in
         (libFor { inherit system; }).mkGuest {
           name = "mvm-builder-vm";
-          # Skip the addon-dns bake. The builder VM's PID 1 is
-          # `mvm-host-vm-init` (set via `extraFiles` + the
-          # `init=/sbin/mvm-host-vm-init` kernel cmdline), so
+          # Skip the addon-dns bake. The builder VM chains from
+          # mkGuest's `/init` into `mvm-host-vm-init`, so
           # mkGuest's initScript-side addon-dns activation block
           # never runs and the binary would just sit unused at
           # /usr/local/bin/mvm-addon-dns. The win is in Stage 0:
@@ -303,9 +304,17 @@
           # run that competed with the kernel compile and pushed
           # the tmpfs-bound build into OOM territory.
           bakeAddonDns = false;
+          # The builder/dev VM chains into `mvm-host-vm-init` after the
+          # generic `/init` bootstrap, and the host always wires the runtime
+          # overlay into current builder images. Keep
+          # the rootfs lean: no baked guest agent / netinit / egress-client
+          # fallback, and no mkGuest-only exit reporter binary.
+          runtimeLeanOverride = true;
+          bakeExitReport = false;
           # mkGuest requires an entrypoint declaration. At runtime
-          # the kernel cmdline sets `init=/sbin/mvm-host-vm-init`,
-          # so mkGuest's entrypoint is vestigial — but we still
+          # the kernel cmdline sets `init=/init` and
+          # `mvm.chain_init=/sbin/mvm-host-vm-init`, so mkGuest's
+          # entrypoint is vestigial — but we still
           # need to declare one to satisfy the type contract.
           entrypoint.shell = "/bin/sh";
           packages = (builderPackages pkgs) ++ extraPkgs;
@@ -412,7 +421,10 @@
               "system": "${system}",
               "vmlinux":      { "sha256": "$kernel_sha", "size": $kernel_size },
               "rootfs_ext4":  { "sha256": "$rootfs_sha", "size": $rootfs_size },
-              "cmdline": "${builderCmdline}"
+              "cmdline": "${builderCmdline}",
+              "cache_contract_version": 3,
+              "runtime_overlay_ready": true,
+              "vsock_egress_ready": true
             }
             MANIFEST
           '';
@@ -451,6 +463,9 @@
             "system": "${system}",
             "rootfs_ext4": { "sha256": "$rootfs_sha", "size": $rootfs_size },
             "cmdline": "${builderCmdline}",
+            "cache_contract_version": 3,
+            "runtime_overlay_ready": true,
+            "vsock_egress_ready": true,
             "stage0_rootfs_only": true
           }
           MANIFEST

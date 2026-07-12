@@ -31,6 +31,83 @@ pub struct PrebuiltGuestBinaries<'a> {
     pub verity_init: &'a [u8],
 }
 
+pub struct InjectAndMaterializeRequest<'a> {
+    cache_root: &'a Path,
+    unpacked_root: &'a Path,
+    output: &'a Path,
+    label: &'a str,
+    profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
+    entrypoint: Option<&'a OciEntrypointConfig>,
+    prebuilt: Option<PrebuiltGuestBinaries<'a>>,
+    sealed: bool,
+}
+
+impl<'a> InjectAndMaterializeRequest<'a> {
+    pub fn builder(
+        cache_root: &'a Path,
+        unpacked_root: &'a Path,
+        output: &'a Path,
+        label: &'a str,
+    ) -> InjectAndMaterializeRequestBuilder<'a> {
+        InjectAndMaterializeRequestBuilder {
+            cache_root,
+            unpacked_root,
+            output,
+            label,
+            profile: crate::oci_runtime_inject::RuntimeInjectionProfile::RootfsOnly,
+            entrypoint: None,
+            prebuilt: None,
+            sealed: false,
+        }
+    }
+}
+
+pub struct InjectAndMaterializeRequestBuilder<'a> {
+    cache_root: &'a Path,
+    unpacked_root: &'a Path,
+    output: &'a Path,
+    label: &'a str,
+    profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
+    entrypoint: Option<&'a OciEntrypointConfig>,
+    prebuilt: Option<PrebuiltGuestBinaries<'a>>,
+    sealed: bool,
+}
+
+impl<'a> InjectAndMaterializeRequestBuilder<'a> {
+    pub fn profile(mut self, profile: crate::oci_runtime_inject::RuntimeInjectionProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    pub fn entrypoint(mut self, entrypoint: Option<&'a OciEntrypointConfig>) -> Self {
+        self.entrypoint = entrypoint;
+        self
+    }
+
+    pub fn prebuilt(mut self, prebuilt: Option<PrebuiltGuestBinaries<'a>>) -> Self {
+        self.prebuilt = prebuilt;
+        self
+    }
+
+    pub fn sealed(mut self, sealed: bool) -> Self {
+        self.sealed = sealed;
+        self
+    }
+
+    pub fn build(self) -> InjectAndMaterializeRequest<'a> {
+        InjectAndMaterializeRequest {
+            cache_root: self.cache_root,
+            unpacked_root: self.unpacked_root,
+            output: self.output,
+            label: self.label,
+            profile: self.profile,
+            entrypoint: self.entrypoint,
+            prebuilt: self.prebuilt,
+            sealed: self.sealed,
+        }
+    }
+}
+
 /// Inject the mvm runtime into `unpacked_root`, materialize it into `output` (a
 /// `rootfs.ext4` path), and write the overlay-aware guest sidecar beside it.
 /// `cache_root` holds the guest-agent binary cache; `label` names the image in
@@ -45,18 +122,26 @@ pub struct PrebuiltGuestBinaries<'a> {
 /// cross-compile (contributors get their local edits), then the `prebuilt`
 /// bytes embedded in the host binary (the shipped-mvmctl end-user path). A
 /// caller with no embedded binaries passes `None`.
-pub fn inject_and_materialize(
-    cache_root: &Path,
-    unpacked_root: &Path,
-    output: &Path,
-    label: &str,
-    entrypoint: Option<&OciEntrypointConfig>,
-    prebuilt: Option<PrebuiltGuestBinaries<'_>>,
-    sealed: bool,
-) -> Result<()> {
+pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
+    let InjectAndMaterializeRequest {
+        cache_root,
+        unpacked_root,
+        output,
+        label,
+        profile,
+        entrypoint,
+        prebuilt,
+        sealed,
+    } = request;
     let bins = resolve_guest_binaries(cache_root, prebuilt)?;
-    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed)
-        .context("inject mvm runtime into OCI rootfs")?;
+    crate::oci_runtime_inject::inject_mvm_runtime(
+        unpacked_root,
+        &bins,
+        entrypoint,
+        sealed,
+        profile,
+    )
+    .context("inject mvm runtime into OCI rootfs")?;
 
     // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
     let tree_size = unpacked_tree_size(unpacked_root)
@@ -79,9 +164,13 @@ pub fn inject_and_materialize(
     let rootfs_dir = output
         .parent()
         .ok_or_else(|| anyhow::anyhow!("rootfs path has no parent dir: {}", output.display()))?;
-    crate::builder_vm::GuestSidecar::for_oci_run(label, sealed)
-        .write_to_dir(rootfs_dir)
-        .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
+    crate::builder_vm::GuestSidecar::for_oci_run(
+        label,
+        sealed,
+        profile == crate::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean,
+    )
+    .write_to_dir(rootfs_dir)
+    .with_context(|| format!("write OCI sidecar in {}", rootfs_dir.display()))?;
     Ok(())
 }
 
@@ -249,7 +338,7 @@ printf '%s\n' "$roothash" > "$ROOTHASH"
 fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) -> Result<PathBuf> {
     let verity_init = std::fs::read(verity_init_bin)
         .with_context(|| format!("read mvm-verity-init binary {}", verity_init_bin.display()))?;
-    let initrd = crate::verity_initrd::assemble_verity_initramfs(&verity_init)
+    let initrd = crate::verity_initrd::build_verity_initrd_bytes(&verity_init)
         .context("assemble verity initramfs")?;
     let rootfs_dir = rootfs_ext4.parent().ok_or_else(|| {
         anyhow::anyhow!("rootfs path has no parent dir: {}", rootfs_ext4.display())
@@ -270,7 +359,7 @@ fn assemble_and_write_verity_initrd(rootfs_ext4: &Path, verity_init_bin: &Path) 
 /// stale, same-version cached agent — the bug that broke local guest-change
 /// validation. A shipped binary with no checkout falls through to the version+arch
 /// cache and the embedded bytes.
-fn resolve_guest_binaries(
+pub fn resolve_guest_binaries(
     cache_root: &Path,
     prebuilt: Option<PrebuiltGuestBinaries<'_>>,
 ) -> Result<MvmRuntimeBinaries> {
@@ -321,14 +410,14 @@ fn resolve_guest_binaries(
 ///
 /// Default: the pure in-process `mvm-ext4` writer. `MVM_MATERIALIZE_BUILDER_VM`
 /// (any value) routes back through the builder-VM `mkfs` path for parity /
-/// debugging. Verity is left off (no `rootfs.verity` / `rootfs.roothash`
-/// sidecars), so the run path's `verity_path`/`roothash = None` boot config is
-/// unchanged — this is a materialization *mechanism* choice, not a boot-semantics
-/// change.
+/// debugging. Both paths emit `rootfs.verity` + `rootfs.roothash` beside the
+/// image so block-backed OCI runs are sealed uniformly across backends.
 pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
+    let input = input.clone().with_verity();
+
     #[cfg(feature = "pure-mkfs")]
     if std::env::var_os("MVM_MATERIALIZE_BUILDER_VM").is_none() {
-        match crate::rootfs::materialize_ext4_pure(input) {
+        match crate::rootfs::materialize_ext4_pure(&input) {
             Ok(_) => return Ok(()),
             // Auto-fallback: the in-process writer structurally can't emit a
             // faithful image — too large / too fragmented / a directory over one
@@ -349,7 +438,7 @@ pub fn materialize_run_rootfs(input: &MaterializeExt4Input) -> Result<()> {
             }
         }
     }
-    materialize_run_rootfs_builder_vm(input)
+    materialize_run_rootfs_builder_vm(&input)
 }
 
 #[cfg(feature = "builder-vm")]
@@ -392,16 +481,16 @@ pub fn unpacked_tree_size(root: &Path) -> Result<u64> {
 /// `rootfs.roothash` (lowercase-hex root hash) files. Those are the exact sibling
 /// names the backend's boot-time sidecar probe reads to decide a sealed boot.
 ///
-/// Delegates to [`seal_with_verity`], which pins the 1024-byte data block size
-/// the verity initramfs requires. Do **not** reach for
-/// `materialize_ext4_pure(..).with_verity()` in this role: its 4096-byte data
-/// blocks disagree with the initramfs and the resulting image will not boot.
+/// Delegates to [`seal_with_verity`], which pins the 4096-byte data block size
+/// the verity initramfs expects. Do **not** swap in a different dm-verity
+/// geometry here: the initramfs probes the rootfs geometry at boot, so a
+/// mismatched sidecar will fail closed before `/init` pivots into the real
+/// rootfs.
 ///
 /// Linux-only at runtime. On macOS `veritysetup` is unavailable, so this returns
 /// [`OciUnpackError::HostUnsupported`] rather than a fabricated hash — the seal
-/// runs on Linux (or via the builder VM in a later slice). The `--prod` run path
-/// drives it through [`seal_and_assemble_verity`], which pairs it atomically with
-/// the verity initramfs so no roothash-without-initrd window is ever exposed.
+/// runs on Linux or via the builder VM when the host cannot execute
+/// `veritysetup` directly.
 pub fn seal_run_rootfs_with_verity(
     rootfs_ext4: &Path,
 ) -> Result<VeritySealedRootfs, OciUnpackError> {

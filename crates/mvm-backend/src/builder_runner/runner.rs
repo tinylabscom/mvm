@@ -11,10 +11,16 @@ use mvm_build::builder_disk_transport::{
     InputTree, create_output_disk, pack_input_disk, read_output_disk,
 };
 use mvm_core::config::vm_state_dir;
+use mvm_core::policy::RedactionPolicy;
+use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmStatus;
+use mvm_guest::vsock::EGRESS_PORT;
 
 use super::spec::{BuilderSpecInputs, builder_spec};
 use crate::driver::VmmDriver;
+use crate::substitution_spawn::{
+    EndpointGuard, EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
+};
 
 /// The minimum input-disk size; the disk grows past this to hold the packed
 /// `{job, work, mvm-bins}` tar (a few MiB of scripts + cross-compiled binaries).
@@ -42,6 +48,8 @@ pub struct BuilderBuild<'a> {
     pub work_src: &'a Path,
     /// Host mvm binaries → the guest's `/mvm-bins`.
     pub host_bin_dir: &'a Path,
+    /// Optional read-only runtime overlay ext4 for the builder guest.
+    pub runtime_overlay: Option<&'a Path>,
     /// Output disk size in bytes; must exceed the artifact tar (rootfs + sidecars).
     pub output_size: u64,
     pub vcpus: u32,
@@ -81,6 +89,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         let input_disk = state_dir.join("input.img");
         let output_disk = state_dir.join("output.img");
         let output_dir = state_dir.join("out");
+        let egress_socket = state_dir.join(mvm_core::config::vsock_socket_filename(EGRESS_PORT));
 
         // Pack {job, work, mvm-bins} onto the input disk; the guest extracts it.
         pack_input_disk(
@@ -110,11 +119,30 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
             nix_store: b.nix_store,
             input_disk: &input_disk,
             output_disk: &output_disk,
+            runtime_overlay: b.runtime_overlay,
             console_log: state_dir.join("console.log"),
             agent_socket: Some(state_dir.join("agent.sock")),
+            egress_socket: egress_socket.clone(),
             vcpus: b.vcpus,
             memory_mib: b.memory_mib,
         });
+
+        let builder_policy = NetworkPolicy::trusted_build_egress();
+        spawn_substitution_endpoint(SubstitutionSpawnParams {
+            vm_name: b.name,
+            state_dir: &state_dir,
+            tenant: "builder",
+            secrets: &[],
+            redaction: &RedactionPolicy::default(),
+            transport: EndpointTransport::Uds {
+                path: egress_socket,
+            },
+            terminator_listen: None,
+            tls_intermediate: None,
+            network_policy: Some(&builder_policy),
+            raw_egress: true,
+        })?;
+        let mut endpoint_guard = EndpointGuard::new(b.name);
 
         let vm = self.driver.boot(&spec)?;
         // A builder is run-to-completion: the guest powers off after the job, and
@@ -133,6 +161,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
 
         // The guest wrote a tar onto the output disk; extract it host-side.
         read_output_disk(&output_disk, &output_dir)?;
+        endpoint_guard.defuse();
         Ok(BuilderOutcome {
             stopped,
             output_dir,
@@ -171,6 +200,17 @@ mod tests {
         for f in [&kernel, &rootfs, &nix_store] {
             std::fs::write(f, b"x").unwrap();
         }
+        let stub = tmp.path().join("stub-endpoint.sh");
+        std::fs::write(
+            &stub,
+            "#!/bin/sh\ncat >/dev/null\necho 'builder ready'\nsleep 30\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        env.set("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub);
 
         // A run-to-completion builder: the mock VM reports Stopped so the
         // poll-until-off loop returns at once.
@@ -184,6 +224,7 @@ mod tests {
                 job_dir: &job,
                 work_src: &work,
                 host_bin_dir: &bins,
+                runtime_overlay: None,
                 output_size: 1 << 20,
                 vcpus: 2,
                 memory_mib: 1024,

@@ -151,6 +151,21 @@ fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
 }
 
+/// Default cache directory for build artifacts, images, and VM runtime state,
+/// ignoring `MVM_CACHE_DIR` overrides.
+///
+/// Resolution order:
+///   1. `$XDG_CACHE_HOME/mvm`
+///   2. `$HOME/.cache/mvm`
+pub fn default_mvm_cache_dir() -> String {
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return format!("{xdg}/mvm");
+    }
+    format!("{}/.cache/mvm", home_dir())
+}
+
 /// Cache directory for build artifacts, images, VM runtime state.
 ///
 /// Resolution order:
@@ -163,12 +178,7 @@ pub fn mvm_cache_dir() -> String {
     {
         return d;
     }
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        return format!("{xdg}/mvm");
-    }
-    format!("{}/.cache/mvm", home_dir())
+    default_mvm_cache_dir()
 }
 
 /// Config directory for user configuration files.
@@ -846,6 +856,14 @@ mod tests {
         env.set("XDG_CACHE_HOME", "/xdg/cache");
         assert_eq!(mvm_cache_dir(), "/xdg/cache/mvm");
         env.remove("XDG_CACHE_HOME");
+    }
+
+    #[test]
+    fn test_default_mvm_cache_dir_ignores_override() {
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", "/custom/cache");
+        env.set("XDG_CACHE_HOME", "/xdg/cache");
+        assert_eq!(default_mvm_cache_dir(), "/xdg/cache/mvm");
     }
 
     #[test]

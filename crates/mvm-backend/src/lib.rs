@@ -99,6 +99,8 @@ pub mod standby_pool;
 /// Shared per-VM substitution-endpoint spawn/reap helpers used by the
 /// QEMU + Firecracker launch paths (one impl, no drift).
 pub(crate) mod substitution_spawn;
+#[cfg(test)]
+pub(crate) mod test_support;
 /// Portable, hypervisor-agnostic VMM device model (guest memory, FDT, kernel
 /// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform
 /// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam.

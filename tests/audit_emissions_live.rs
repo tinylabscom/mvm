@@ -289,9 +289,30 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
-                    let mut buf = [0u8; 2048];
-                    let n = stream.read(&mut buf).unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(1)));
+                    let mut req_bytes = Vec::with_capacity(2048);
+                    let mut buf = [0u8; 512];
+                    loop {
+                        match stream.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                req_bytes.extend_from_slice(&buf[..n]);
+                                if req_bytes.windows(4).any(|window| window == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(err)
+                                if matches!(
+                                    err.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) =>
+                            {
+                                break;
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    let req = String::from_utf8_lossy(&req_bytes);
                     let path = req
                         .lines()
                         .next()
@@ -310,13 +331,16 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
                             );
                             let _ = stream.write_all(headers.as_bytes());
                             let _ = stream.write_all(body);
+                            let _ = stream.flush();
                         }
                         None => {
                             let _ = stream.write_all(
                                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
                             );
+                            let _ = stream.flush();
                         }
                     }
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
                 }
                 Err(_) => thread::sleep(std::time::Duration::from_millis(10)),
             }

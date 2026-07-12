@@ -685,6 +685,7 @@ mod tests {
     #[test]
     fn vsock_io_thread_services_host_under_sustained_mmio() {
         use super::super::vsock::{IrqLine, VirtioVsock};
+        use crate::test_support::error_chain_has_permission_denied;
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -706,7 +707,16 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("agent.sock");
-        dev.set_agent_socket(&sock).unwrap();
+        if let Err(err) = dev.set_agent_socket(&sock) {
+            if error_chain_has_permission_denied(&err) {
+                eprintln!(
+                    "skipping test: sandbox denied agent socket setup at {}: {err}",
+                    sock.display()
+                );
+                return;
+            }
+            panic!("agent socket setup failed at {}: {err}", sock.display());
+        }
         dev.start_io(Arc::new(CountIrq(AtomicU32::new(0))));
 
         // A host RPC client connects. No rx buffers are posted, so the framed

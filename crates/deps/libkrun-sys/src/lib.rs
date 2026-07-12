@@ -300,10 +300,11 @@ pub struct KrunContext {
     /// clients can find it.
     pub vsock_socket_dir: Option<String>,
     /// Networking backend for the guest. `Tsi` (default)
-    /// uses libkrun's built-in syscall-hijack TSI mode; `Passt`
-    /// attaches a virtio-net device backed by a unixstream socket
-    /// the caller has handed off to a passt child process. See
-    /// `NetworkingMode` for the trade-offs.
+    /// uses libkrun's built-in syscall-hijack TSI mode; `VsockDirect`
+    /// adds an explicit virtio-vsock device with no guest NIC and no
+    /// implicit TSI transport; `Passt` attaches a virtio-net device
+    /// backed by a unixstream socket the caller has handed off to a
+    /// passt child process. See `NetworkingMode` for the trade-offs.
     #[serde(default)]
     pub networking: NetworkingMode,
 }
@@ -321,6 +322,11 @@ fn default_kernel_format() -> KernelFormat {
 /// debugging and for runtime microVMs that legitimately don't need
 /// a network stack.
 ///
+/// `VsockDirect` is the no-NIC counterpart: add an explicit
+/// virtio-vsock device with zero TSI feature bits so the guest still
+/// gets AF_VSOCK but libkrun's implicit AF_INET/AF_UNIX transport is
+/// not enabled. This is the no-guest-NIC builder / direct-path shape.
+///
 /// `Passt` configures a real virtio-net device wired through a
 /// unixstream socket to a host-side passt child process. The guest
 /// sees a normal eth0 + DHCP + DNS. This is the production-ready
@@ -331,14 +337,9 @@ pub enum NetworkingMode {
     /// libkrun's built-in TSI backend (no virtio-net, no DHCP).
     #[default]
     Tsi,
-    /// virtio-net wired to a local sink socket with no host gateway. This
-    /// disables libkrun's implicit TSI path while providing no guest-usable
-    /// network route; guest AF_INET traffic is dropped unless the guest itself
-    /// routes over a separate channel such as host-bound vsock.
-    Disconnected {
-        /// MAC address for the guest's eth0.
-        mac: [u8; 6],
-    },
+    /// Explicit virtio-vsock device with no implicit TSI transport and
+    /// no virtio-net guest NIC.
+    VsockDirect,
     /// virtio-net via passt. The supervisor process (whichever links
     /// `libkrun-sys`) spawns a passt child inside `run_supervisor`,
     /// hands its socket fd to `krun_add_net_unixstream`, and reaps
@@ -545,14 +546,6 @@ impl KrunContext {
         self
     }
 
-    /// Switch the guest to a disconnected virtio-net device. This exists only
-    /// to suppress libkrun's implicit TSI bypass while keeping the guest
-    /// fail-closed to vsock-owned egress paths.
-    pub fn with_disconnected_net(mut self, mac: [u8; 6]) -> Self {
-        self.networking = NetworkingMode::Disconnected { mac };
-        self
-    }
-
     /// Switch the guest to passt-backed virtio-net. The supervisor
     /// process owns the passt child; we just declare the intent and
     /// the destination for passt's log file.
@@ -561,6 +554,13 @@ impl KrunContext {
             mac,
             scratch_dir: scratch_dir.into(),
         };
+        self
+    }
+
+    /// Switch the guest to an explicit virtio-vsock device with no
+    /// implicit TSI backend and no guest NIC.
+    pub fn with_vsock_direct(mut self) -> Self {
+        self.networking = NetworkingMode::VsockDirect;
         self
     }
 
@@ -696,14 +696,17 @@ pub fn start(ctx: &KrunContext) -> Result<(), Error> {
 /// and [`start_enter`] (configure + boot).
 ///
 /// Split into `configure_pre_net` (everything except networking) + a
-/// per-caller networking decision. `configure` itself is the TSI-only
-/// path used by the spike/smoke binaries; real
+/// per-caller networking decision. `configure` itself is the
+/// no-gateway path used by the spike/smoke binaries; real
 /// consumers go through `run_supervisor`, which owns a passt child
 /// process for the libkrun lifetime via `configure_with_passt`.
 #[cfg(feature = "libkrun-sys")]
 fn configure(ctx: &KrunContext) -> Result<sys::Context, Error> {
     let krun = configure_pre_net(ctx)?;
-    if !matches!(ctx.networking, NetworkingMode::Tsi) {
+    if !matches!(
+        ctx.networking,
+        NetworkingMode::Tsi | NetworkingMode::VsockDirect
+    ) {
         return Err(Error::Io {
             context: format!(
                 "{:?} requires the supervisor entry point; call \
@@ -720,54 +723,12 @@ fn configure(ctx: &KrunContext) -> Result<sys::Context, Error> {
 /// process lifetime so the gateway is reaped when the guest exits.
 #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
 pub enum GatewayHandle {
-    /// Not using a virtio-net backend — TSI is enabled implicitly.
+    /// Not using a virtio-net backend.
     None,
-    /// A sink socket that disables TSI without providing a host gateway.
-    Disconnected(DisconnectedNetHandle),
     /// passt child (Linux).
     Passt(passt::PasstHandle),
     /// Native gateway child (macOS / cross-platform fallback).
     NativeGateway(native_gateway::NativeGatewayHandle),
-}
-
-#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
-pub struct DisconnectedNetHandle {
-    _libkrun_socket: std::os::unix::net::UnixStream,
-    _drain_thread: std::thread::JoinHandle<()>,
-}
-
-#[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
-fn disconnected_net_handle(
-    mac: &[u8; 6],
-    krun: &sys::Context,
-) -> Result<DisconnectedNetHandle, Error> {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-
-    let (libkrun_socket, mut sink_socket) =
-        std::os::unix::net::UnixStream::pair().map_err(|e| Error::Io {
-            context: format!("creating disconnected virtio-net socketpair: {e}"),
-        })?;
-    krun.add_net_unixstream_fd(
-        libkrun_socket.as_raw_fd(),
-        mac,
-        sys::PASST_NET_FEATURES,
-        /* flags = */ 0,
-    )?;
-    let drain_thread = std::thread::spawn(move || {
-        let mut buf = [0_u8; 8192];
-        loop {
-            match sink_socket.read(&mut buf) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => break,
-            }
-        }
-    });
-    Ok(DisconnectedNetHandle {
-        _libkrun_socket: libkrun_socket,
-        _drain_thread: drain_thread,
-    })
 }
 
 /// configure() variant that owns the network-gateway child process
@@ -779,10 +740,7 @@ fn disconnected_net_handle(
 fn configure_with_gateway(ctx: &KrunContext) -> Result<(sys::Context, GatewayHandle), Error> {
     let krun = configure_pre_net(ctx)?;
     let handle = match &ctx.networking {
-        NetworkingMode::Tsi => GatewayHandle::None,
-        NetworkingMode::Disconnected { mac } => {
-            GatewayHandle::Disconnected(disconnected_net_handle(mac, &krun)?)
-        }
+        NetworkingMode::Tsi | NetworkingMode::VsockDirect => GatewayHandle::None,
         NetworkingMode::Passt { mac, scratch_dir } => {
             let handle =
                 passt::spawn(std::path::Path::new(scratch_dir)).map_err(|e| Error::Io {
@@ -887,37 +845,36 @@ pub enum BridgeFds {
 /// path (`LibkrunNativeGateway`) between libkrun and the gateway so the
 /// gateway audit bridge can splice every byte through itself.
 ///
-/// Refuses [`NetworkingMode::Tsi`] — TSI bypasses virtio-net
-/// entirely and violates the claim-10 no-bypass invariant. Callers
-/// that need TSI must use the legacy [`run_supervisor`] entry point.
+/// Refuses [`NetworkingMode::Tsi`] and [`NetworkingMode::VsockDirect`].
+/// The bridge path is defined only for virtio-net-backed guests today;
+/// callers that need a no-NIC direct path must use the legacy
+/// [`run_supervisor`] entry point.
 #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
 fn configure_with_gateway_for_bridge(
     ctx: &KrunContext,
     bridge_scratch_dir: &std::path::Path,
 ) -> Result<(sys::Context, GatewayHandle, BridgeFds), Error> {
-    // Claim-10 admission gate 2 — refuse TSI before any FFI call so
+    // Admission gate — refuse no-gateway modes before any FFI call so
     // the rejection is observable in unit tests that don't link
     // libkrun (configure_pre_net calls `sys::Context::new`, which
     // is real FFI). Moving the check up also avoids leaking a
     // `sys::Context` on the refusal path.
-    if matches!(ctx.networking, NetworkingMode::Tsi) {
+    if matches!(
+        ctx.networking,
+        NetworkingMode::Tsi | NetworkingMode::VsockDirect
+    ) {
         return Err(Error::Io {
-            context: "configure_with_gateway_for_bridge refuses NetworkingMode::Tsi: \
-                TSI bypasses virtio-net and violates the claim-10 no-bypass \
-                invariant (ADR-058). Use run_supervisor for legacy dev-mode VMs."
-                .to_string(),
+            context: format!(
+                "configure_with_gateway_for_bridge refuses {:?}: \
+                 bridge mode requires a virtio-net-backed gateway path. \
+                 Use run_supervisor for no-NIC direct VMs.",
+                ctx.networking
+            ),
         });
     }
     let krun = configure_pre_net(ctx)?;
     let (handle, bridge_fds) = match &ctx.networking {
-        NetworkingMode::Tsi => unreachable!("refused above"),
-        NetworkingMode::Disconnected { .. } => {
-            return Err(Error::Io {
-                context: "configure_with_gateway_for_bridge refuses NetworkingMode::Disconnected: \
-                    the disconnected sink path is vsock-only and has no bridge surface"
-                    .to_string(),
-            });
-        }
+        NetworkingMode::Tsi | NetworkingMode::VsockDirect => unreachable!("refused above"),
         NetworkingMode::Passt { mac, scratch_dir } => {
             let mut handle =
                 passt::spawn(std::path::Path::new(scratch_dir)).map_err(|e| Error::Io {
@@ -1111,8 +1068,8 @@ where
 }
 
 /// Every part of `configure` that doesn't touch the networking
-/// backend. Shared between the plain `configure` path
-/// (TSI-only) and `configure_with_passt`.
+/// backend. Shared between the plain `configure` path and
+/// `configure_with_gateway`.
 #[cfg(feature = "libkrun-sys")]
 fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
     validate_boot_config(ctx)?;
@@ -1171,6 +1128,10 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
     }
     for mount in &ctx.virtio_fs_mounts {
         krun.add_virtiofs(&mount.tag, Path::new(&mount.host_path))?;
+    }
+    if matches!(ctx.networking, NetworkingMode::VsockDirect) {
+        krun.disable_implicit_vsock()?;
+        krun.add_vsock(/* tsi_features = */ 0)?;
     }
     for &port in &ctx.vsock_ports {
         let socket = ctx.vsock_socket_path(port);
@@ -2630,12 +2591,43 @@ mod tests {
                     "error context must name Tsi: {context}"
                 );
                 assert!(
-                    context.contains("claim-10"),
-                    "error context must cite claim-10: {context}"
+                    context.contains("virtio-net-backed gateway path"),
+                    "error context must cite the bridge requirement: {context}"
                 );
             }
             other => panic!("expected Error::Io with Tsi message, got {other:?}"),
         }
+    }
+
+    #[cfg(all(feature = "libkrun-sys", target_family = "unix"))]
+    #[test]
+    fn configure_with_gateway_for_bridge_refuses_vsock_direct() {
+        let ctx = KrunContext::new("vm", "/k", "/r").with_vsock_direct();
+        let scratch = std::path::PathBuf::from("/tmp/mvm-bridge-test-vsock-direct-refusal");
+        let result = configure_with_gateway_for_bridge(&ctx, &scratch);
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => panic!("VsockDirect networking must be refused"),
+        };
+        match err {
+            Error::Io { context } => {
+                assert!(
+                    context.contains("VsockDirect"),
+                    "error context must name VsockDirect: {context}"
+                );
+                assert!(
+                    context.contains("virtio-net-backed gateway path"),
+                    "error context must cite the bridge requirement: {context}"
+                );
+            }
+            other => panic!("expected Error::Io with VsockDirect message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_vsock_direct_switches_networking_mode() {
+        let ctx = KrunContext::new("vm", "/k", "/r").with_vsock_direct();
+        assert!(matches!(ctx.networking, NetworkingMode::VsockDirect));
     }
 
     /// Assert that `install_paths()` is correctly wired to

@@ -123,6 +123,33 @@ fn build_produces_resolver_compatible_artifact() {
 }
 
 #[test]
+fn build_produces_verity_sidecar_matching_overlay_block_geometry() {
+    if skip_if_no_nix() {
+        return;
+    }
+    let Some(arch) = host_arch_or_skip_known() else {
+        return;
+    };
+
+    let workspace = workspace_root();
+    let out_dir = TempDir::new().expect("tempdir");
+    let result_link = out_dir.path().join("result");
+    let spec = OverlayBuildSpec::new(workspace, arch, result_link);
+
+    let artifact = build_overlay_with_nix(&spec).expect("nix build runtime-overlay");
+    let overlay_bytes = std::fs::read(&artifact.overlay_ext4).expect("read overlay.ext4");
+    let sidecar_bytes = std::fs::read(&artifact.sidecar).expect("read overlay.verity");
+    let data_blocks = overlay_bytes.len() as u64 / 4096;
+    let expected_sidecar_blocks = verity_tree_block_count(data_blocks, 4096);
+
+    assert_eq!(
+        sidecar_bytes.len() as u64,
+        expected_sidecar_blocks * 4096,
+        "overlay.verity must encode exactly the dm-verity hash tree for the 4 KiB-block overlay ext4"
+    );
+}
+
+#[test]
 fn build_is_byte_deterministic_for_same_workspace() {
     // The per-version cache hinges on byte-identical builds against
     // the same workspace producing the same roothash. Run the build
@@ -172,4 +199,19 @@ fn copy_file(src: &Path, dst: &Path) {
     std::fs::write(dst, bytes).unwrap_or_else(|e| {
         panic!("write {dst:?}: {e}");
     });
+}
+
+fn verity_tree_block_count(data_blocks: u64, hash_block_size: u64) -> u64 {
+    let digest_size = 32u64;
+    let hashes_per_block = hash_block_size / digest_size;
+    let mut level_hashes = data_blocks.max(1);
+    let mut total_blocks = 0u64;
+    loop {
+        let level_blocks = level_hashes.div_ceil(hashes_per_block).max(1);
+        total_blocks += level_blocks;
+        if level_blocks == 1 {
+            return total_blocks;
+        }
+        level_hashes = level_blocks;
+    }
 }

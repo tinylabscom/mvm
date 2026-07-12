@@ -122,6 +122,14 @@ pub fn admit_and_boot_local(
         cpus: req.cpus,
         memory_mib: req.mem_mib,
         tenant_id: Some(LOCAL_TENANT.to_string()),
+        runtime_source_policy: mvm_core::vm_backend::select_runtime_source_policy(
+            mvm_core::vm_backend::RuntimeSourcePolicySelection {
+                backend_name: None,
+                sealed: false,
+                root_strategy: None,
+                launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
+            },
+        ),
         // network_policy defaults to deny-all via VmStartConfig's Default.
         ..Default::default()
     };

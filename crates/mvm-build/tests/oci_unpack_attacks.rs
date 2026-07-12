@@ -292,6 +292,33 @@ fn preserves_setuid_bits_on_disk_in_staging() {
     // strip them — that would mask a hostile image's intent.
     use std::os::unix::fs::PermissionsExt;
 
+    let probe_dir = tempfile::tempdir().unwrap();
+    let probe_path = probe_dir.path().join("setuid-probe");
+    std::fs::write(&probe_path, b"probe").unwrap();
+    if let Err(err) = std::fs::set_permissions(&probe_path, std::fs::Permissions::from_mode(0o4755))
+    {
+        if matches!(
+            err.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+        ) {
+            eprintln!("skipping setuid-preservation staging test: {err}");
+            return;
+        }
+        panic!("setuid probe chmod failed: {err}");
+    }
+    let probe_mode = std::fs::metadata(&probe_path)
+        .expect("probe metadata")
+        .permissions()
+        .mode()
+        & 0o7777;
+    if probe_mode != 0o4755 {
+        eprintln!(
+            "skipping setuid-preservation staging test: host filesystem kept {:o} instead of 4755",
+            probe_mode
+        );
+        return;
+    }
+
     let mut b = Builder::new(Vec::new());
     add_directory(&mut b, "usr/bin", 0o755);
     add_file_with_mode(&mut b, "usr/bin/sudo", b"sudo binary", 0o4755);

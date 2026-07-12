@@ -31,6 +31,7 @@
 //! helper methods get their own unit tests.
 
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -609,6 +610,30 @@ pub fn read_job_result(job_dir: &Path) -> Result<JobResult, BuilderVmError> {
     })
 }
 
+/// Read and parse `<job_dir>/result`, enriching the missing-result failure with
+/// the builder VM's host-side log paths and short tails.
+///
+/// The libkrun/HVF/qemu live proof lanes all fail the same way when PID 1
+/// exits before finalization: `cmd.sh` exists, but `/job/result` never lands.
+/// Surfacing the VM state dir plus whatever `console.log` /
+/// `supervisor.{stdout,stderr}.log` captured keeps the next operator run from
+/// starting at a bare ENOENT.
+pub fn read_job_result_with_diagnostics(
+    job_dir: &Path,
+    vm_state_dir: &Path,
+) -> Result<JobResult, BuilderVmError> {
+    match read_job_result(job_dir) {
+        Ok(result) => Ok(result),
+        Err(BuilderVmError::NixBuildFailed(message)) => {
+            Err(BuilderVmError::NixBuildFailed(format!(
+                "{message}\n{}",
+                missing_job_result_diagnostics(job_dir, vm_state_dir)
+            )))
+        }
+        Err(err) => Err(err),
+    }
+}
+
 /// Stage a one-shot builder shell job.
 ///
 /// Shell jobs are not Nix builds, but they use the same `/job/cmd.sh`
@@ -649,6 +674,160 @@ pub fn read_last_bytes_of(path: &Path, max_bytes: u64) -> std::io::Result<String
     let mut buf = Vec::with_capacity(take as usize);
     file.read_to_end(&mut buf)?;
     Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn missing_job_result_diagnostics(job_dir: &Path, vm_state_dir: &Path) -> String {
+    let console_log = vm_state_dir.join("console.log");
+    let supervisor_stdout = vm_state_dir.join("supervisor.stdout.log");
+    let supervisor_stderr = vm_state_dir.join("supervisor.stderr.log");
+    let supervisor_lifecycle = vm_state_dir.join("supervisor.lifecycle.log");
+    let supervisor_config = vm_state_dir.join("supervisor-config.json");
+    let init_lifecycle = job_dir.join("mvm-host-vm-init.lifecycle.log");
+    let persistent_store_init_lifecycle =
+        diagnose_persistent_store_init_lifecycle(vm_state_dir, &supervisor_config);
+    format!(
+        "builder VM state dir: {}\nbuilder job dir: {}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        vm_state_dir.display(),
+        job_dir.display(),
+        diagnose_log_path("console.log", &console_log),
+        diagnose_log_path("supervisor.stdout.log", &supervisor_stdout),
+        diagnose_log_path("supervisor.stderr.log", &supervisor_stderr),
+        diagnose_log_path("supervisor.lifecycle.log", &supervisor_lifecycle),
+        diagnose_log_path("supervisor-config.json", &supervisor_config),
+        diagnose_log_path("mvm-host-vm-init.lifecycle.log", &init_lifecycle),
+        persistent_store_init_lifecycle,
+    )
+}
+
+#[derive(Deserialize)]
+struct SupervisorConfigDiskView {
+    krun: SupervisorConfigKrunView,
+}
+
+#[derive(Deserialize)]
+struct SupervisorConfigKrunView {
+    extra_disks: Vec<SupervisorConfigExtraDiskView>,
+}
+
+#[derive(Deserialize)]
+struct SupervisorConfigExtraDiskView {
+    id: String,
+    path: String,
+}
+
+fn diagnose_persistent_store_init_lifecycle(
+    vm_state_dir: &Path,
+    supervisor_config: &Path,
+) -> String {
+    let Some(image_path) = persistent_nix_store_image_from_supervisor_config(supervisor_config)
+    else {
+        return format!(
+            "persistent nix-store init lifecycle: unavailable (no nix-store disk in {})",
+            supervisor_config.display()
+        );
+    };
+    let Some(debugfs) = locate_debugfs() else {
+        return format!(
+            "persistent nix-store init lifecycle: unavailable (debugfs not installed; image {})",
+            image_path.display()
+        );
+    };
+    for guest_path in [
+        "/out/mvm-host-vm-init.lifecycle.log",
+        "/mvm-host-vm-init.lifecycle.log",
+    ] {
+        match debugfs_cat(&debugfs, &image_path, guest_path) {
+            Ok(Some(body)) => {
+                return format!(
+                    "persistent nix-store init lifecycle ({} via {}):\n{}",
+                    guest_path,
+                    image_path.display(),
+                    body.trim_end()
+                );
+            }
+            Ok(None) => continue,
+            Err(err) => {
+                return format!(
+                    "persistent nix-store init lifecycle: debugfs read failed for {} in {}: {}",
+                    guest_path,
+                    image_path.display(),
+                    err
+                );
+            }
+        }
+    }
+    format!(
+        "persistent nix-store init lifecycle: missing in {} (/out/... and /... checked; vm state dir {})",
+        image_path.display(),
+        vm_state_dir.display()
+    )
+}
+
+fn persistent_nix_store_image_from_supervisor_config(supervisor_config: &Path) -> Option<PathBuf> {
+    let body = std::fs::read_to_string(supervisor_config).ok()?;
+    let cfg: SupervisorConfigDiskView = serde_json::from_str(&body).ok()?;
+    cfg.krun
+        .extra_disks
+        .into_iter()
+        .find(|disk| disk.id == "nix-store")
+        .map(|disk| PathBuf::from(disk.path))
+}
+
+fn locate_debugfs() -> Option<PathBuf> {
+    for candidate in [
+        "/usr/sbin/debugfs",
+        "/sbin/debugfs",
+        "/usr/bin/debugfs",
+        "/bin/debugfs",
+    ] {
+        let path = Path::new(candidate);
+        if path.is_file() {
+            return Some(path.to_path_buf());
+        }
+    }
+    which::which("debugfs").ok()
+}
+
+fn debugfs_cat(debugfs: &Path, image: &Path, guest_path: &str) -> Result<Option<String>, String> {
+    let output = Command::new(debugfs)
+        .args(["-R", &format!("cat {guest_path}")])
+        .arg(image)
+        .output()
+        .map_err(|e| format!("spawn {}: {e}", debugfs.display()))?;
+    if output.status.success() {
+        return Ok(Some(String::from_utf8_lossy(&output.stdout).into_owned()));
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if stderr.contains("File not found") || stderr.contains("not found") {
+        return Ok(None);
+    }
+    Err(format!(
+        "status {:?}; stderr: {}",
+        output.status.code(),
+        stderr.trim()
+    ))
+}
+
+fn diagnose_log_path(label: &str, path: &Path) -> String {
+    if !path.exists() {
+        return format!("{label}: missing ({})", path.display());
+    }
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() == 0 => {
+            format!("{label}: present but empty ({})", path.display())
+        }
+        Ok(_) => match read_last_bytes_of(path, 4096) {
+            Ok(tail) => format!("{label}: {}\n{}", path.display(), tail.trim_end()),
+            Err(err) => format!(
+                "{label}: present but unreadable ({}): {err}",
+                path.display()
+            ),
+        },
+        Err(err) => format!(
+            "{label}: present but unreadable ({}): {err}",
+            path.display()
+        ),
+    }
 }
 
 /// Forward bytes newly appended to `file` to `sink`; returns true if any were
@@ -1394,6 +1573,71 @@ mod tests {
         let scratch = tempfile::TempDir::new().unwrap();
         let err = read_job_result(scratch.path()).unwrap_err();
         assert!(matches!(err, BuilderVmError::NixBuildFailed(_)));
+    }
+
+    #[test]
+    fn read_job_result_with_diagnostics_includes_vm_logs_on_missing_result() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let vm_state_dir = scratch.path().join("vm-state");
+        let persistent_store_image = scratch.path().join("nix-store.img");
+        std::fs::create_dir_all(&vm_state_dir).unwrap();
+        std::fs::write(vm_state_dir.join("console.log"), b"console line\n").unwrap();
+        std::fs::write(vm_state_dir.join("supervisor.stderr.log"), b"stderr line\n").unwrap();
+        std::fs::write(vm_state_dir.join("supervisor.stdout.log"), b"").unwrap();
+        std::fs::write(
+            vm_state_dir.join("supervisor.lifecycle.log"),
+            b"dispatch_route: legacy\n",
+        )
+        .unwrap();
+        std::fs::write(
+            vm_state_dir.join("supervisor-config.json"),
+            format!(
+                r#"{{"krun":{{"extra_disks":[{{"id":"nix-store","path":"{}"}},{{"id":"input","path":"{}"}}]}}}}"#,
+                persistent_store_image.display(),
+                scratch.path().join("input.img").display(),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            scratch.path().join("mvm-host-vm-init.lifecycle.log"),
+            b"virtiofs_mount_ok: job->/job\n",
+        )
+        .unwrap();
+
+        let err = read_job_result_with_diagnostics(scratch.path(), &vm_state_dir).unwrap_err();
+        let msg = match err {
+            BuilderVmError::NixBuildFailed(msg) => msg,
+            other => panic!("expected NixBuildFailed, got {other:?}"),
+        };
+        assert!(msg.contains("guest did not write"));
+        assert!(msg.contains(&format!("builder VM state dir: {}", vm_state_dir.display())));
+        assert!(msg.contains(&format!("builder job dir: {}", scratch.path().display())));
+        assert!(msg.contains("console.log:"));
+        assert!(msg.contains("console line"));
+        assert!(msg.contains("supervisor.stdout.log: present but empty"));
+        assert!(msg.contains("supervisor.stderr.log:"));
+        assert!(msg.contains("stderr line"));
+        assert!(msg.contains("supervisor.lifecycle.log:"));
+        assert!(msg.contains("dispatch_route: legacy"));
+        assert!(msg.contains("supervisor-config.json:"));
+        assert!(msg.contains("mvm-host-vm-init.lifecycle.log:"));
+        assert!(msg.contains("virtiofs_mount_ok: job->/job"));
+        assert!(msg.contains("persistent nix-store init lifecycle"));
+    }
+
+    #[test]
+    fn persistent_nix_store_image_is_resolved_from_supervisor_config() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let config = scratch.path().join("supervisor-config.json");
+        std::fs::write(
+            &config,
+            r#"{"krun":{"extra_disks":[{"id":"input","path":"/tmp/input.img"},{"id":"nix-store","path":"/var/cache/mvm/nix-store-x86_64.img"}]}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            persistent_nix_store_image_from_supervisor_config(&config),
+            Some(PathBuf::from("/var/cache/mvm/nix-store-x86_64.img"))
+        );
     }
 
     #[test]

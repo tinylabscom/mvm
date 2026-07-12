@@ -12,9 +12,21 @@
 //! splice test cannot route through the real gate).
 
 use std::net::IpAddr;
+#[cfg(target_os = "linux")]
+use std::net::{SocketAddr, UdpSocket};
+#[cfg(target_os = "linux")]
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::time::Duration;
 
+#[cfg(target_os = "linux")]
+use hickory_proto::op::{Message, MessageType, OpCode, Query};
+#[cfg(target_os = "linux")]
+use hickory_proto::rr::rdata::{A, AAAA};
+#[cfg(target_os = "linux")]
+use hickory_proto::rr::{Name, RData, RecordType};
+#[cfg(target_os = "linux")]
+use hickory_proto::serialize::binary::{BinDecodable, BinEncodable, BinEncoder};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::supervisor::http_forward;
@@ -23,6 +35,10 @@ use mvm_backend::vmm::egress_gate::{EgressGate, EgressVerdict};
 /// Cap on the first `host:port` line. A guest that never sends a `\n` inside this
 /// many bytes is refused (fail closed) rather than read unbounded.
 const MAX_TARGET_LINE: usize = 256;
+#[cfg(target_os = "linux")]
+const DNS_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+#[cfg(target_os = "linux")]
+const RESOLV_CONF_PATH: &str = "/etc/resolv.conf";
 
 /// Serve raw-TCP egress over a bound UDS listener: one tokio task per guest
 /// connection, each gated then spliced. Runs until the listener errors.
@@ -67,9 +83,12 @@ where
     if target == http_forward::FRAME_LINE {
         return http_forward::serve_http_forward(guest, gate, timeout).await;
     }
-    match gate.decide_request(&target) {
-        EgressVerdict::Allow { ip, port } => splice(guest, ip, port, leftover, timeout).await,
+    match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
+        EgressVerdict::Allow { ip, port } => {
+            splice(guest, &target, ip, port, leftover, timeout).await
+        }
         EgressVerdict::Deny | EgressVerdict::Malformed => {
+            eprintln!("raw-egress: refusing target {target}");
             // Refused: close without ever opening a host socket.
             Ok(())
         }
@@ -112,6 +131,7 @@ where
 /// server without routing through the real gate (which mandatory-denies loopback).
 async fn splice<S>(
     mut guest: S,
+    target: &str,
     ip: IpAddr,
     port: u16,
     leftover: Vec<u8>,
@@ -122,15 +142,30 @@ where
 {
     let connect = tokio::net::TcpStream::connect((ip, port));
     let mut upstream = match tokio::time::timeout(timeout, connect).await {
-        Ok(Ok(stream)) => stream,
-        Ok(Err(_)) | Err(_) => return Ok(()),
+        Ok(Ok(s)) => s,
+        // Connect error or timeout → close the guest side, no splice.
+        Ok(Err(e)) => {
+            eprintln!("raw-egress: connect to {ip}:{port} failed: {e}");
+            return Ok(());
+        }
+        Err(_) => {
+            eprintln!("raw-egress: connect to {ip}:{port} timed out after {timeout:?}");
+            return Ok(());
+        }
     };
     if !leftover.is_empty() {
         upstream.write_all(&leftover).await?;
     }
+    eprintln!("raw-egress: connected target {target} -> {ip}:{port}");
     // EOF on either side ends the copy; a reset surfaces as an error we swallow so
     // one torn-down connection never crashes the accept loop.
-    let _ = tokio::io::copy_bidirectional(&mut guest, &mut upstream).await;
+    if let Ok((guest_to_upstream, upstream_to_guest)) =
+        tokio::io::copy_bidirectional(&mut guest, &mut upstream).await
+    {
+        eprintln!(
+            "raw-egress: completed target {target} guest_to_upstream_bytes={guest_to_upstream} upstream_to_guest_bytes={upstream_to_guest}"
+        );
+    }
     Ok(())
 }
 
@@ -140,9 +175,11 @@ where
 /// for backends that route guest→host over `vhost-vsock`.
 ///
 /// Both `accept(2)` and the per-connection target-read + splice run with blocking
-/// I/O on `spawn_blocking` threads (tokio's async reactor doesn't interplay
-/// reliably with an AF_VSOCK fd). The connect + upstream splice reuse the same
-/// gate decision as the UDS path.
+/// I/O. We intentionally avoid tokio's lazy `spawn_blocking` pool here: this
+/// endpoint self-confines *after* the runtime is built, and the raw builder path
+/// needs to keep working under seccomp even when no extra blocking-worker thread
+/// may be created afterward. The connect + upstream splice reuse the same gate
+/// decision as the UDS path.
 #[cfg(target_os = "linux")]
 pub async fn serve_raw_egress_vsock(
     listener: crate::supervisor::substitution_proxy::vsock::VsockListener,
@@ -152,79 +189,72 @@ pub async fn serve_raw_egress_vsock(
     use crate::supervisor::substitution_proxy::vsock;
     loop {
         let listen_fd = listener.raw_fd();
-        let accepted = tokio::task::spawn_blocking(move || vsock::accept(listen_fd)).await;
-        let conn_fd = match accepted {
-            Ok(Ok(fd)) => fd,
-            Ok(Err(e)) => {
+        let conn_fd = match vsock::accept(listen_fd) {
+            Ok(fd) => fd,
+            Err(e) => {
                 tracing::warn!(error = %e, "raw egress vsock accept failed; stopping");
                 return;
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "raw egress vsock accept task panicked; stopping");
-                return;
-            }
         };
-        let gate = Arc::clone(&gate);
-        tokio::task::spawn_blocking(move || {
-            if let Err(e) = handle_raw_conn_blocking(conn_fd, &gate, timeout) {
-                tracing::warn!(error = %e, "raw egress vsock connection failed");
-            }
-        });
+        if let Err(e) = handle_raw_conn_blocking(conn_fd, &gate, timeout) {
+            tracing::warn!(error = %e, "raw egress vsock connection failed");
+        }
     }
 }
 
-/// Blocking sibling of [`handle_raw_conn`] for the AF_VSOCK fd: read the target
-/// line, gate it, and (only on `Allow`) connect + splice with blocking std I/O.
-/// The accepted fd is adopted so it closes on drop.
 #[cfg(target_os = "linux")]
 fn handle_raw_conn_blocking(
     conn_fd: std::os::fd::RawFd,
     gate: &EgressGate,
     timeout: Duration,
 ) -> std::io::Result<()> {
-    use std::os::fd::{FromRawFd, OwnedFd};
-
-    // Adopt the fd; a File over a socket fd gives blocking Read+Write.
     let owned = unsafe { OwnedFd::from_raw_fd(conn_fd) };
     let mut guest = std::fs::File::from(owned);
 
     let Some(target) = read_target_line_blocking(&mut guest)? else {
-        return Ok(()); // no newline within the cap → fail closed
+        return Ok(());
     };
     if target == http_forward::FRAME_LINE {
         return http_forward::serve_http_forward_blocking(guest, gate, timeout);
     }
-    let (ip, port) = match gate.decide_request(&target) {
-        EgressVerdict::Allow { ip, port } => (ip, port),
-        EgressVerdict::Deny | EgressVerdict::Malformed => return Ok(()), // fail closed
-    };
-    let mut upstream =
+    let (ip, port) =
+        match gate.decide_request_with(&target, |host| resolve_hostname_ips_pure(host, timeout)) {
+            EgressVerdict::Allow { ip, port } => (ip, port),
+            EgressVerdict::Deny | EgressVerdict::Malformed => {
+                eprintln!("raw-egress: refusing target {target}");
+                return Ok(());
+            }
+        };
+
+    let upstream =
         match std::net::TcpStream::connect_timeout(&std::net::SocketAddr::new(ip, port), timeout) {
             Ok(stream) => stream,
-            Err(_) => return Ok(()),
+            Err(e) => {
+                eprintln!("raw-egress: connect to {ip}:{port} failed: {e}");
+                return Ok(());
+            }
         };
-    // Bidirectional blocking pump: guest→upstream on this thread, upstream→guest
-    // on a helper thread, each ending on the peer's EOF.
-    let mut up_read = upstream.try_clone()?;
-    let mut guest_write = guest.try_clone()?;
-    let pump_back = std::thread::spawn(move || {
-        let _ = std::io::copy(&mut up_read, &mut guest_write);
-    });
-    let _ = std::io::copy(&mut guest, &mut upstream);
-    // Shut the write half so the helper's copy sees EOF and winds down.
-    let _ = upstream.shutdown(std::net::Shutdown::Write);
-    let _ = pump_back.join();
+    eprintln!("raw-egress: connected target {target} -> {ip}:{port}");
+    let guest_fd = guest.as_raw_fd();
+    set_nonblocking(guest_fd)?;
+    upstream.set_nonblocking(true)?;
+    let stats = pump_bidirectional_poll(&guest, &upstream)?;
+    eprintln!(
+        "raw-egress: completed target {target} guest_to_upstream_bytes={} upstream_to_guest_bytes={} guest_eof={} upstream_eof={}",
+        stats.guest_to_upstream_bytes,
+        stats.upstream_to_guest_bytes,
+        stats.guest_eof,
+        stats.upstream_eof,
+    );
     Ok(())
 }
 
-/// Blocking read of the first `host:port` line, bounded at [`MAX_TARGET_LINE`].
-/// `None` ⇒ EOF or the cap was hit with no newline (fail closed).
 #[cfg(target_os = "linux")]
-fn read_target_line_blocking<R: std::io::Read>(r: &mut R) -> std::io::Result<Option<String>> {
+fn read_target_line_blocking<R: std::io::Read>(reader: &mut R) -> std::io::Result<Option<String>> {
     let mut buf = Vec::with_capacity(64);
     let mut byte = [0u8; 1];
     loop {
-        let n = r.read(&mut byte)?;
+        let n = reader.read(&mut byte)?;
         if n == 0 {
             return Ok(None);
         }
@@ -238,10 +268,357 @@ fn read_target_line_blocking<R: std::io::Read>(r: &mut R) -> std::io::Result<Opt
     }
 }
 
+#[cfg(target_os = "linux")]
+fn pump_bidirectional_poll(
+    guest: &std::fs::File,
+    upstream: &std::net::TcpStream,
+) -> std::io::Result<PumpStats> {
+    let guest_fd = guest.as_raw_fd();
+    let upstream_fd = upstream.as_raw_fd();
+    let mut guest_open = true;
+    let mut upstream_open = true;
+    let mut guest_write_shutdown = false;
+    let mut upstream_write_shutdown = false;
+    let mut guest_to_upstream = Vec::new();
+    let mut upstream_to_guest = Vec::new();
+    let mut scratch_guest = [0u8; 16 * 1024];
+    let mut scratch_upstream = [0u8; 16 * 1024];
+    let mut stats = PumpStats::default();
+
+    loop {
+        let mut fds = [
+            libc::pollfd {
+                fd: guest_fd,
+                events: 0,
+                revents: 0,
+            },
+            libc::pollfd {
+                fd: upstream_fd,
+                events: 0,
+                revents: 0,
+            },
+        ];
+
+        if guest_open && guest_to_upstream.is_empty() {
+            fds[0].events |= libc::POLLIN;
+        }
+        if !upstream_to_guest.is_empty() {
+            fds[0].events |= libc::POLLOUT;
+        }
+        if upstream_open && upstream_to_guest.is_empty() {
+            fds[1].events |= libc::POLLIN;
+        }
+        if !guest_to_upstream.is_empty() {
+            fds[1].events |= libc::POLLOUT;
+        }
+
+        if fds[0].events == 0 && fds[1].events == 0 {
+            break;
+        }
+
+        let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if err.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(err);
+        }
+
+        if (fds[0].revents & libc::POLLIN) != 0 && guest_to_upstream.is_empty() && guest_open {
+            match read_into_buffer(guest_fd, &mut scratch_guest, &mut guest_to_upstream)? {
+                ReadOutcome::Open(bytes) => stats.guest_to_upstream_bytes += bytes,
+                ReadOutcome::Closed => {
+                    guest_open = false;
+                    stats.guest_eof = true;
+                }
+            }
+        }
+        if (fds[1].revents & libc::POLLIN) != 0 && upstream_to_guest.is_empty() && upstream_open {
+            match read_into_buffer(upstream_fd, &mut scratch_upstream, &mut upstream_to_guest)? {
+                ReadOutcome::Open(bytes) => stats.upstream_to_guest_bytes += bytes,
+                ReadOutcome::Closed => {
+                    upstream_open = false;
+                    stats.upstream_eof = true;
+                }
+            }
+        }
+        if (fds[1].revents & libc::POLLOUT) != 0 && !guest_to_upstream.is_empty() {
+            write_from_buffer(upstream_fd, &mut guest_to_upstream)?;
+        }
+        if (fds[0].revents & libc::POLLOUT) != 0 && !upstream_to_guest.is_empty() {
+            write_from_buffer(guest_fd, &mut upstream_to_guest)?;
+        }
+
+        if !guest_open && guest_to_upstream.is_empty() && !upstream_write_shutdown {
+            shutdown_write(upstream_fd)?;
+            upstream_write_shutdown = true;
+        }
+        if !upstream_open && upstream_to_guest.is_empty() && !guest_write_shutdown {
+            shutdown_write(guest_fd)?;
+            guest_write_shutdown = true;
+        }
+    }
+
+    Ok(stats)
+}
+
+#[cfg(target_os = "linux")]
+enum ReadOutcome {
+    Open(usize),
+    Closed,
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Default)]
+struct PumpStats {
+    guest_to_upstream_bytes: usize,
+    upstream_to_guest_bytes: usize,
+    guest_eof: bool,
+    upstream_eof: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn set_nonblocking(fd: libc::c_int) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let rc = unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if rc < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn read_into_buffer(
+    fd: libc::c_int,
+    scratch: &mut [u8],
+    pending: &mut Vec<u8>,
+) -> std::io::Result<ReadOutcome> {
+    let rc = unsafe {
+        libc::read(
+            fd,
+            scratch.as_mut_ptr().cast::<libc::c_void>(),
+            scratch.len(),
+        )
+    };
+    if rc == 0 {
+        return Ok(ReadOutcome::Closed);
+    }
+    if rc < 0 {
+        let err = std::io::Error::last_os_error();
+        if matches!(err.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR)) {
+            return Ok(ReadOutcome::Open(0));
+        }
+        return Err(err);
+    }
+    let bytes = rc as usize;
+    pending.extend_from_slice(&scratch[..bytes]);
+    Ok(ReadOutcome::Open(bytes))
+}
+
+#[cfg(target_os = "linux")]
+fn write_from_buffer(fd: libc::c_int, pending: &mut Vec<u8>) -> std::io::Result<()> {
+    while !pending.is_empty() {
+        let rc = unsafe { libc::write(fd, pending.as_ptr().cast::<libc::c_void>(), pending.len()) };
+        if rc < 0 {
+            let err = std::io::Error::last_os_error();
+            if matches!(err.raw_os_error(), Some(libc::EAGAIN) | Some(libc::EINTR)) {
+                return Ok(());
+            }
+            return Err(err);
+        }
+        pending.drain(..rc as usize);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn shutdown_write(fd: libc::c_int) -> std::io::Result<()> {
+    let rc = unsafe { libc::shutdown(fd, libc::SHUT_WR) };
+    if rc == 0 {
+        return Ok(());
+    }
+    let err = std::io::Error::last_os_error();
+    if err.raw_os_error() == Some(libc::ENOTCONN) {
+        return Ok(());
+    }
+    Err(err)
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_hostname_ips_pure(host: &str, timeout: Duration) -> std::io::Result<Vec<IpAddr>> {
+    let upstreams = load_upstreams_from_resolv_conf(RESOLV_CONF_PATH)?;
+    if upstreams.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no nameservers found in {RESOLV_CONF_PATH}"),
+        ));
+    }
+    let timeout = timeout.min(DNS_QUERY_TIMEOUT);
+    let mut ips = Vec::new();
+    ips.extend(query_upstreams(host, RecordType::A, &upstreams, timeout)?);
+    ips.extend(query_upstreams(
+        host,
+        RecordType::AAAA,
+        &upstreams,
+        timeout,
+    )?);
+    if ips.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("dns lookup {host}: no A/AAAA records returned"),
+        ));
+    }
+    Ok(ips)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn resolve_hostname_ips_pure(host: &str, _timeout: Duration) -> std::io::Result<Vec<IpAddr>> {
+    use std::net::ToSocketAddrs;
+
+    Ok((host, 0u16)
+        .to_socket_addrs()?
+        .map(|addr| addr.ip())
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn load_upstreams_from_resolv_conf(path: &str) -> std::io::Result<Vec<SocketAddr>> {
+    let body = std::fs::read_to_string(path)?;
+    let mut upstreams = Vec::new();
+    for line in body.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        let mut parts = line.split_whitespace();
+        if parts.next() != Some("nameserver") {
+            continue;
+        }
+        let Some(addr) = parts.next() else {
+            continue;
+        };
+        let ip = addr.parse::<IpAddr>().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid nameserver {addr:?} in {path}: {e}"),
+            )
+        })?;
+        upstreams.push(SocketAddr::new(ip, 53));
+    }
+    Ok(upstreams)
+}
+
+#[cfg(target_os = "linux")]
+fn query_upstreams(
+    host: &str,
+    record_type: RecordType,
+    upstreams: &[SocketAddr],
+    timeout: Duration,
+) -> std::io::Result<Vec<IpAddr>> {
+    let packet = build_dns_query(host, record_type)?;
+    let request = decode_dns_message(&packet)?;
+    for upstream in upstreams {
+        if let Ok(response) = query_upstream(*upstream, &packet, timeout) {
+            let ips = parse_dns_response(&request, &response, record_type)?;
+            if !ips.is_empty() {
+                return Ok(ips);
+            }
+        }
+    }
+    Ok(Vec::new())
+}
+
+#[cfg(target_os = "linux")]
+fn build_dns_query(host: &str, record_type: RecordType) -> std::io::Result<Vec<u8>> {
+    let name = Name::from_ascii(host).map_err(|e| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid dns hostname {host:?}: {e}"),
+        )
+    })?;
+    let mut message = Message::new(rand::random(), MessageType::Query, OpCode::Query);
+    message.metadata.recursion_desired = true;
+    message.add_query(Query::query(name, record_type));
+    encode_dns_message(message)
+}
+
+#[cfg(target_os = "linux")]
+fn encode_dns_message(message: Message) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::with_capacity(512);
+    let mut encoder = BinEncoder::new(&mut out);
+    message.emit(&mut encoder).map_err(invalid_dns_data)?;
+    Ok(out)
+}
+
+#[cfg(target_os = "linux")]
+fn decode_dns_message(packet: &[u8]) -> std::io::Result<Message> {
+    let mut decoder = hickory_proto::serialize::binary::BinDecoder::new(packet);
+    Message::read(&mut decoder).map_err(invalid_dns_data)
+}
+
+#[cfg(target_os = "linux")]
+fn parse_dns_response(
+    request: &Message,
+    packet: &[u8],
+    record_type: RecordType,
+) -> std::io::Result<Vec<IpAddr>> {
+    let response = decode_dns_message(packet)?;
+    if response.metadata.message_type != MessageType::Response
+        || response.metadata.id != request.metadata.id
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "upstream DNS response did not match the forwarded query",
+        ));
+    }
+    Ok(response
+        .answers
+        .iter()
+        .filter_map(|answer| match (record_type, &answer.data) {
+            (RecordType::A, RData::A(A(ipv4))) => Some(IpAddr::V4(*ipv4)),
+            (RecordType::AAAA, RData::AAAA(AAAA(ipv6))) => Some(IpAddr::V6(*ipv6)),
+            _ => None,
+        })
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn query_upstream(
+    upstream: SocketAddr,
+    packet: &[u8],
+    timeout: Duration,
+) -> std::io::Result<Vec<u8>> {
+    let bind_addr = match upstream.ip() {
+        IpAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
+        IpAddr::V6(_) => SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0)),
+    };
+    let socket = UdpSocket::bind(bind_addr)?;
+    socket.set_read_timeout(Some(timeout))?;
+    socket.set_write_timeout(Some(timeout))?;
+    socket.connect(upstream)?;
+    socket.send(packet)?;
+    let mut buf = vec![0u8; 1232];
+    let len = socket.recv(&mut buf)?;
+    buf.truncate(len);
+    Ok(buf)
+}
+
+#[cfg(target_os = "linux")]
+fn invalid_dns_data(err: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "linux")]
+    use hickory_proto::rr::{Name, Record};
     use mvm_core::policy::network_policy::NetworkPolicy;
+    #[cfg(target_os = "linux")]
+    use std::net::{Ipv4Addr, Ipv6Addr};
+    #[cfg(target_os = "linux")]
+    use tempfile::tempdir;
     use tokio::io::AsyncWriteExt;
 
     /// A default-deny gate + a well-formed target ⇒ the connection is closed and
@@ -331,8 +708,10 @@ mod tests {
         let (mut client, guest) = tokio::io::duplex(1024);
         // `leftover` = bytes pipelined after the `\n`; they must reach upstream first.
         let splicer = tokio::spawn(async move {
+            let target = format!("{}:{}", addr.ip(), addr.port());
             splice(
                 guest,
+                &target,
                 addr.ip(),
                 addr.port(),
                 b"lead".to_vec(),
@@ -358,5 +737,65 @@ mod tests {
         drop(client);
         splicer.await.unwrap().unwrap();
         server.await.unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn load_upstreams_from_resolv_conf_parses_nameservers() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("resolv.conf");
+        std::fs::write(
+            &path,
+            "\
+# comment
+nameserver 1.1.1.1
+options edns0 trust-ad
+nameserver 2606:4700:4700::1111
+",
+        )
+        .unwrap();
+
+        let upstreams = load_upstreams_from_resolv_conf(path.to_str().unwrap()).unwrap();
+        assert_eq!(
+            upstreams,
+            vec![
+                "1.1.1.1:53".parse().unwrap(),
+                "[2606:4700:4700::1111]:53".parse().unwrap(),
+            ]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn parse_dns_response_extracts_ip_answers() {
+        let request =
+            decode_dns_message(&build_dns_query("cache.nixos.org", RecordType::A).unwrap())
+                .unwrap();
+
+        let mut response = Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+        response.add_query(Query::query(
+            Name::from_ascii("cache.nixos.org").unwrap(),
+            RecordType::A,
+        ));
+        response.add_answer(Record::from_rdata(
+            Name::from_ascii("cache.nixos.org").unwrap(),
+            30,
+            RData::A(A(Ipv4Addr::new(151, 101, 1, 91))),
+        ));
+        response.add_answer(Record::from_rdata(
+            Name::from_ascii("cache.nixos.org").unwrap(),
+            30,
+            RData::AAAA(AAAA(Ipv6Addr::new(0x2606, 0x4700, 0, 0, 0, 0, 0, 0x1111))),
+        ));
+
+        let encoded = encode_dns_message(response).unwrap();
+        let a_records = parse_dns_response(&request, &encoded, RecordType::A).unwrap();
+        let aaaa_records = parse_dns_response(&request, &encoded, RecordType::AAAA).unwrap();
+
+        assert_eq!(a_records, vec!["151.101.1.91".parse::<IpAddr>().unwrap()]);
+        assert_eq!(
+            aaaa_records,
+            vec!["2606:4700::1111".parse::<IpAddr>().unwrap()]
+        );
     }
 }

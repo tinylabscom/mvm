@@ -42,7 +42,10 @@ mod builder_backend_attempt_order_tests {
 
 #[cfg(test)]
 mod default_microvm_tests {
-    use super::default_microvm_assets;
+    use super::{
+        WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
+        resolve_workload_kernel_bootstrap,
+    };
 
     #[test]
     fn default_microvm_assets_pins_the_five_asset_contract() {
@@ -70,6 +73,68 @@ mod default_microvm_tests {
                 "/cache/dm/mvm-meta.json",
             ],
             "local dests must be the rootfs siblings the backend + admit gate expect",
+        );
+    }
+
+    #[test]
+    fn prod_workload_kernel_cache_never_reuses_dev_default_kernel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_string_lossy().to_string();
+        let dev_kernel = tmp.path().join("default-microvm/dev/vmlinux");
+        std::fs::create_dir_all(dev_kernel.parent().unwrap()).unwrap();
+        std::fs::write(&dev_kernel, b"dev-kernel").unwrap();
+
+        assert_eq!(
+            find_cached_workload_kernel(&cache_dir, "x86_64", true),
+            None,
+            "prod/workload boots must not silently reuse a dev-tier default kernel"
+        );
+    }
+
+    #[test]
+    fn dev_workload_kernel_cache_may_reuse_dev_default_kernel() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_string_lossy().to_string();
+        let dev_kernel = tmp.path().join("default-microvm/dev/vmlinux");
+        std::fs::create_dir_all(dev_kernel.parent().unwrap()).unwrap();
+        std::fs::write(&dev_kernel, b"dev-kernel").unwrap();
+
+        assert_eq!(
+            find_cached_workload_kernel(&cache_dir, "x86_64", false),
+            Some(dev_kernel.to_string_lossy().to_string())
+        );
+    }
+
+    #[test]
+    fn prod_workload_kernel_bootstrap_downloads_when_only_dev_default_kernel_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_string_lossy().to_string();
+        let dev_kernel = tmp.path().join("default-microvm/dev/vmlinux");
+        std::fs::create_dir_all(dev_kernel.parent().unwrap()).unwrap();
+        std::fs::write(&dev_kernel, b"dev-kernel").unwrap();
+
+        let resolved = resolve_workload_kernel_bootstrap(&cache_dir, "x86_64", true, false);
+        assert_eq!(
+            resolved,
+            WorkloadKernelBootstrap::Download(format!(
+                "{cache_dir}/builder-vm/{}/kernels/workload/vmlinux",
+                "x86_64"
+            ))
+        );
+    }
+
+    #[test]
+    fn prod_workload_kernel_bootstrap_builds_locally_from_source_checkout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache_dir = tmp.path().to_string_lossy().to_string();
+
+        let resolved = resolve_workload_kernel_bootstrap(&cache_dir, "x86_64", true, true);
+        assert_eq!(
+            resolved,
+            WorkloadKernelBootstrap::BuildLocal(format!(
+                "{cache_dir}/builder-vm/{}/kernels/workload/vmlinux",
+                "x86_64"
+            ))
         );
     }
 }
@@ -143,6 +208,16 @@ mod dev_status_image_tests {
         rootfs[EXT4_MAGIC_OFFSET] = 0x53;
         rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
         std::fs::write(dir.join("rootfs.ext4"), rootfs).expect("write rootfs");
+        std::fs::write(
+            dir.join("cmdline.txt"),
+            b"console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
+        )
+        .expect("write cmdline");
+        std::fs::write(
+            dir.join("manifest.json"),
+            br#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+        )
+        .expect("write manifest");
     }
 
     fn write_builder_vm_flake(dir: &std::path::Path) {

@@ -21,7 +21,8 @@ use mvm_build::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError, builder_vm_cache_dir,
 };
 use mvm_build::builder_vm_runtime::{
-    acquire_nix_store_image_lock, finalize_flake_job, stage_job_dir,
+    acquire_nix_store_image_lock, finalize_flake_job, read_job_result_with_diagnostics,
+    shell_job_exit_error, stage_job_dir, stage_shell_job_dir,
 };
 
 use super::runner::{BuilderBuild, BuilderRunner};
@@ -67,6 +68,72 @@ impl HvfBuilderVm {
         self.memory_mib = memory_mib;
         self
     }
+
+    /// Run a narrow builder shell job on the HVF builder backend.
+    ///
+    /// This mirrors the qemu/libkrun shell-job contract closely enough to reuse
+    /// the same live read-only runtime-overlay proof shape: `/work` is the
+    /// caller-supplied tree, `/out` receives proof artifacts, and `/job/cmd.sh`
+    /// runs under the builder guest's `mvm-host-vm-init`.
+    pub fn run_shell_script(
+        &self,
+        job: &mvm_build::libkrun_builder::BuilderShellJob,
+    ) -> Result<mvm_build::libkrun_builder::BuilderShellResult, BuilderVmError> {
+        validate_shell_job(job)?;
+
+        let cache = builder_vm_cache_dir();
+        let nix_store_lock = acquire_nix_store_image_lock(
+            &cache,
+            std::env::consts::ARCH,
+            u64::from(self.nix_store_mib),
+        )?;
+
+        let job_id = unique_job_id();
+        let job_dir = cache.join("jobs").join(&job_id);
+        stage_shell_job_dir(&job_dir, &job.script)?;
+
+        let host_bin_dir = cache.join("shell-job-empty-mvm-bins");
+        std::fs::create_dir_all(&host_bin_dir).map_err(|e| {
+            BuilderVmError::ExtractionFailed(format!(
+                "creating HVF builder shell-job host bin dir {}: {e}",
+                host_bin_dir.display()
+            ))
+        })?;
+
+        let name = format!("mvm-hvf-builder-shell-{job_id}");
+        let runtime_overlay = cached_runtime_overlay_ext4();
+        let outcome = BuilderRunner::new(HvfDriver::new())
+            .build(&BuilderBuild {
+                name: &name,
+                kernel: &self.kernel,
+                rootfs: &self.rootfs,
+                nix_store: nix_store_lock.path(),
+                job_dir: &job_dir,
+                work_src: &job.work_dir,
+                host_bin_dir: &host_bin_dir,
+                runtime_overlay: runtime_overlay.as_deref(),
+                output_size: u64::from(self.output_mib) << 20,
+                vcpus: self.vcpus,
+                memory_mib: self.memory_mib,
+            })
+            .map_err(|e| map_runner_failure(format!("hvf builder shell job: {e}")))?;
+        if !outcome.stopped {
+            return Err(map_runner_failure(
+                "hvf builder VM shell job did not power off within the deadline".into(),
+            ));
+        }
+
+        let vm_state_dir = mvm_core::config::vm_state_dir(&name);
+        let result = read_job_result_with_diagnostics(&outcome.output_dir, &vm_state_dir)?;
+        if result.exit_code != 0 {
+            return Err(shell_job_exit_error(result.exit_code, &result.stderr_tail));
+        }
+
+        Ok(mvm_build::libkrun_builder::BuilderShellResult {
+            job_dir: outcome.output_dir,
+            vm_state_dir,
+        })
+    }
 }
 
 /// A unique per-build job id (pid + monotonic-ish nanos); mirrors the other
@@ -84,6 +151,55 @@ fn unique_job_id() -> String {
 /// backend rather than surfacing a false build error.
 fn map_runner_failure(detail: String) -> BuilderVmError {
     BuilderVmError::HvfVmmFailed { detail }
+}
+
+fn cached_runtime_overlay_ext4() -> Option<PathBuf> {
+    let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host();
+    match mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
+        &cache_root,
+        version,
+        arch,
+    ) {
+        Ok(artifact) => Some(artifact.overlay_ext4),
+        Err(error) => {
+            tracing::warn!(
+                cache_root = %cache_root.display(),
+                version,
+                arch = %arch,
+                error = %error,
+                "runtime overlay unavailable for HVF builder"
+            );
+            None
+        }
+    }
+}
+
+fn validate_shell_job(
+    job: &mvm_build::libkrun_builder::BuilderShellJob,
+) -> Result<(), BuilderVmError> {
+    if !job.work_dir.is_dir() {
+        return Err(BuilderVmError::ExtractionFailed(format!(
+            "shell job work_dir must be a directory: {}",
+            job.work_dir.display()
+        )));
+    }
+    std::fs::create_dir_all(&job.artifact_out).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "creating artifact_out {}: {e}",
+            job.artifact_out.display()
+        ))
+    })?;
+    if job.script.trim().is_empty() {
+        return Err(BuilderVmError::NixBuildFailed(
+            "builder shell script is empty".to_string(),
+        ));
+    }
+    if !job.extra_disks.is_empty() {
+        return Err(BuilderVmError::NotYetImplemented);
+    }
+    Ok(())
 }
 
 impl BuilderVm for HvfBuilderVm {
@@ -122,6 +238,7 @@ impl BuilderVm for HvfBuilderVm {
         // Boot the builder VM over the hvf VMM + disk transport; the guest
         // runs cmd.sh and tars its artifacts back onto the output disk.
         let name = format!("mvm-hvf-builder-{job_id}");
+        let runtime_overlay = cached_runtime_overlay_ext4();
         let outcome = BuilderRunner::new(HvfDriver::new())
             .build(&BuilderBuild {
                 name: &name,
@@ -131,6 +248,7 @@ impl BuilderVm for HvfBuilderVm {
                 job_dir: &job_dir,
                 work_src: &mounts.flake_src,
                 host_bin_dir: &mounts.host_bin_dir,
+                runtime_overlay: runtime_overlay.as_deref(),
                 output_size: u64::from(self.output_mib) << 20,
                 vcpus: self.vcpus,
                 memory_mib: self.memory_mib,
@@ -151,6 +269,7 @@ impl BuilderVm for HvfBuilderVm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_build::libkrun_builder::BuilderShellJob;
 
     #[test]
     fn install_jobs_are_not_yet_implemented() {
@@ -189,5 +308,40 @@ mod tests {
     fn runner_failure_maps_to_vmm_level_error() {
         let e = map_runner_failure("hvf builder VM did not power off".into());
         assert!(matches!(e, BuilderVmError::HvfVmmFailed { .. }));
+    }
+
+    #[test]
+    fn shell_job_validation_rejects_missing_work_dir() {
+        let out = tempfile::tempdir().expect("out");
+        let job = BuilderShellJob {
+            work_dir: out.path().join("missing"),
+            artifact_out: out.path().to_path_buf(),
+            script: "true".to_string(),
+            extra_disks: Vec::new(),
+        };
+        let err = validate_shell_job(&job).expect_err("missing work dir refused");
+        assert!(err.to_string().contains("work_dir must be a directory"));
+    }
+
+    #[test]
+    fn shell_job_validation_rejects_extra_disks_for_now() {
+        let work = tempfile::tempdir().expect("work");
+        let out = tempfile::tempdir().expect("out");
+        let disk = out.path().join("disk.ext4");
+        std::fs::write(&disk, b"disk").expect("write disk");
+        let job = BuilderShellJob {
+            work_dir: work.path().to_path_buf(),
+            artifact_out: out.path().to_path_buf(),
+            script: "true".to_string(),
+            extra_disks: vec![mvm_build::libkrun_builder::BuilderExtraDisk {
+                id: "x".to_string(),
+                path: disk,
+                read_only: true,
+            }],
+        };
+        assert!(matches!(
+            validate_shell_job(&job),
+            Err(BuilderVmError::NotYetImplemented)
+        ));
     }
 }

@@ -45,7 +45,7 @@ apt install cosign
 ```bash
 # Replace <version> and <target> as appropriate
 VERSION=v0.7.0
-TARGET=aarch64-apple-darwin  # or x86_64-apple-darwin, x86_64-unknown-linux-gnu, etc.
+TARGET=aarch64-apple-darwin  # or x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu
 
 curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/mvmctl-${TARGET}.tar.gz"
 curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/mvmctl-${TARGET}.tar.gz.bundle"
@@ -96,6 +96,71 @@ To verify manually:
 curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/checksums-sha256.txt"
 shasum -a 256 --check <(grep "mvmctl-${TARGET}.tar.gz" checksums-sha256.txt)
 ```
+
+## Verifying the runtime overlay release assets
+
+Overlay-backed workloads consume a separate readonly guest-runtime artifact from
+the same release. To verify it manually:
+
+```bash
+VERSION=v0.17.0
+ARCH=aarch64   # or x86_64
+
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.ext4"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.verity"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.roothash"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.VERSION"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}-checksums-sha256.txt"
+
+grep "runtime-overlay-${ARCH}" "runtime-overlay-${ARCH}-checksums-sha256.txt" | sha256sum --check
+```
+
+When `mvmctl build runtime-overlay build --source download` installs these
+assets into `~/.cache/mvm/runtime-overlay/<version>/<arch>/`, it expects the
+same version-matched set.
+
+## Runtime overlay update model
+
+Verification tells you the release assets are authentic; rollout still follows
+the runtime contract:
+
+- stopped VMs pick up an updated version-matched overlay on the next start
+- running VMs keep the runtime they booted with until restart
+- mvm does not hot-remount a different runtime overlay into a live guest
+
+Plan restarts accordingly when moving production workloads onto a new release.
+
+## Runtime overlay rollout checklist
+
+Use this checklist when promoting a release that changes guest runtime
+binaries:
+
+1. Verify the `mvmctl` archive for the target tag.
+2. Verify the matching runtime-overlay assets for the same tag and
+   architecture.
+3. Preload the overlay cache with
+   `mvmctl build runtime-overlay build --source download` on hosts that should
+   pick up the release immediately.
+4. Restart stopped VMs when you want them to adopt the new runtime overlay.
+5. Restart already-running VMs only during a planned maintenance window; they
+   keep the runtime they booted with until then.
+
+This is a next-boot rollout, not a live remount rollout.
+
+## Runtime overlay rollback
+
+If you must roll back a release:
+
+1. Downgrade `mvmctl` to the older release.
+2. Ensure the matching older runtime-overlay assets are available again, either
+   by re-running `mvmctl build runtime-overlay build --source download` for the
+   older tag or by restoring the older cached artifact under
+   `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
+3. Restart affected VMs so they boot with the downgraded, version-matched
+   overlay.
+
+Do not expect a running VM to switch runtime versions in place. Rollback takes
+effect on restart, the same way rollout does.
 
 ---
 

@@ -34,11 +34,11 @@ pub fn run(workspace: &Path) -> Result<()> {
     let lists = [
         (
             "guest_agent_build.rs argv",
-            extract_bin_flags(workspace, GUEST_AGENT_BUILD)?,
+            extract_guest_agent_build_argv(workspace, GUEST_AGENT_BUILD)?,
         ),
         (
             "mvm-cli/build.rs argv",
-            extract_bin_flags(workspace, CLI_BUILD_RS)?,
+            extract_bin_flags_from_file(workspace, CLI_BUILD_RS)?,
         ),
         (
             "oci_runtime_inject.rs MvmRuntimeBinaries",
@@ -137,10 +137,29 @@ fn parse_bin_names(manifest: &str) -> BTreeSet<String> {
 /// plain `"--bin", "name"` (build.rs) and the `"--bin".to_string(),
 /// "name".to_string()` (guest_agent_build.rs) forms. Only `mvm-*` literals count
 /// — a `--bin <variable>` (host-bin loops) carries no literal and is skipped.
-fn extract_bin_flags(workspace: &Path, rel: &str) -> Result<BTreeSet<String>> {
-    let src = read(workspace, rel)?;
+fn extract_bin_flags(src: &str) -> BTreeSet<String> {
     let re = Regex::new(r#""--bin"(?:\.to_string\(\))?\s*,\s*"(mvm-[a-z0-9-]+)""#).unwrap();
-    Ok(re.captures_iter(&src).map(|c| c[1].to_string()).collect())
+    re.captures_iter(src).map(|c| c[1].to_string()).collect()
+}
+
+/// The authoritative OCI guest-runtime list in `GuestAgentBuildSpec::argv()`.
+/// `guest_agent_build.rs` also contains overlay-only runtime lists for the
+/// shared readonly artifact, so this lint must isolate the OCI injection list.
+fn extract_guest_agent_build_argv(workspace: &Path, rel: &str) -> Result<BTreeSet<String>> {
+    let src = read(workspace, rel)?;
+    let start = src
+        .find("pub fn argv(&self) -> Vec<String> {")
+        .with_context(|| format!("GuestAgentBuildSpec::argv not found in {rel}"))?;
+    let rest = &src[start..];
+    let end = rest
+        .find("\n    }\n")
+        .with_context(|| format!("GuestAgentBuildSpec::argv has no closing brace in {rel}"))?;
+    Ok(extract_bin_flags(&rest[..end]))
+}
+
+fn extract_bin_flags_from_file(workspace: &Path, rel: &str) -> Result<BTreeSet<String>> {
+    let src = read(workspace, rel)?;
+    Ok(extract_bin_flags(&src))
 }
 
 /// Guest binary names named in the `MvmRuntimeBinaries` struct field docs — each
@@ -215,7 +234,7 @@ name = "mvm-oci-init"
             r#"cmd.args(["zigbuild", "--bin", "mvm-oci-init", "--bin", "mvm-guest-agent"]);"#;
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(tmp.path().join("a.rs"), build_rs).unwrap();
-        let got = extract_bin_flags(tmp.path(), "a.rs").unwrap();
+        let got = extract_bin_flags_from_file(tmp.path(), "a.rs").unwrap();
         assert_eq!(
             got,
             BTreeSet::from(["mvm-oci-init".to_string(), "mvm-guest-agent".to_string()])
@@ -223,7 +242,7 @@ name = "mvm-oci-init"
 
         let gab = r#"vec!["--bin".to_string(), "mvm-verity-init".to_string()]"#;
         std::fs::write(tmp.path().join("b.rs"), gab).unwrap();
-        let got = extract_bin_flags(tmp.path(), "b.rs").unwrap();
+        let got = extract_bin_flags_from_file(tmp.path(), "b.rs").unwrap();
         assert_eq!(got, BTreeSet::from(["mvm-verity-init".to_string()]));
     }
 
@@ -246,10 +265,13 @@ name = "mvm-oci-init"
             "mvm-verity-init".to_string(),
         ]);
         assert_eq!(
-            extract_bin_flags(&root, GUEST_AGENT_BUILD).unwrap(),
+            extract_guest_agent_build_argv(&root, GUEST_AGENT_BUILD).unwrap(),
             expected
         );
-        assert_eq!(extract_bin_flags(&root, CLI_BUILD_RS).unwrap(), expected);
+        assert_eq!(
+            extract_bin_flags_from_file(&root, CLI_BUILD_RS).unwrap(),
+            expected
+        );
         assert_eq!(extract_runtime_struct(&root, OCI_INJECT).unwrap(), expected);
         assert_eq!(extract_find_calls(&root, IMAGE_MOD).unwrap(), expected);
     }

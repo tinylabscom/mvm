@@ -71,6 +71,122 @@ const BRIDGE_PID_FILE: &str = "qemu-vsock-bridge.pid";
 /// Nix-built workload rootfs the other backends boot. `mvm.backend=qemu`
 /// marks the dev tier (parity with the builder marker).
 const DEFAULT_CMDLINE: &str = "console=ttyS0 root=/dev/vda rw init=/init mvm.backend=qemu";
+const VERITY_CMDLINE: &str = "console=ttyS0 mvm.backend=qemu";
+
+fn qemu_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
+    config
+        .verity_path
+        .as_deref()
+        .zip(config.roothash.as_deref())
+        .and_then(|_| {
+            Path::new(&config.rootfs_path)
+                .parent()
+                .map(|p| p.join("rootfs.initrd"))
+        })
+        .filter(|p| p.exists())
+}
+
+fn qemu_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
+    config
+        .initrd_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| qemu_verity_initrd_path(config))
+}
+
+fn qemu_verity_enabled(config: &VmStartConfig) -> bool {
+    config.verity_path.is_some()
+        && config.roothash.is_some()
+        && qemu_effective_initrd(config).is_some()
+}
+
+fn qemu_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
+    Some((
+        config.runtime_overlay_path.as_deref()?,
+        config.runtime_overlay_verity_path.as_deref()?,
+        config.runtime_overlay_roothash.as_deref()?,
+    ))
+}
+
+fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
+    if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
+        return Ok(());
+    }
+    if !qemu_verity_enabled(config) {
+        bail!(
+            "required-overlay qemu boot requires verity metadata plus an initrd \
+             (`--initrd` or sibling rootfs.initrd)"
+        );
+    }
+    if qemu_runtime_overlay(config).is_none() {
+        bail!("required-overlay qemu boot requires the runtime overlay artifact triple");
+    }
+    Ok(())
+}
+
+fn qemu_cmdline(config: &VmStartConfig) -> String {
+    let mut cmdline = if qemu_verity_enabled(config) {
+        VERITY_CMDLINE.to_string()
+    } else {
+        DEFAULT_CMDLINE.to_string()
+    };
+    if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
+        cmdline.push(' ');
+        cmdline.push_str(&uvols);
+    }
+    if let Some(token) = crate::microvm::verb_grant_cmdline_token(&config.name) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
+    if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
+    if let Some(verity_args) = crate::microvm::build_verity_cmdline_args(
+        config.roothash.as_deref(),
+        if qemu_verity_enabled(config) {
+            qemu_runtime_overlay(config).map(|(_, _, roothash)| roothash)
+        } else {
+            None
+        },
+    ) {
+        cmdline.push(' ');
+        cmdline.push_str(&verity_args);
+    }
+    cmdline.push(' ');
+    cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
+        config.runtime_source_policy,
+    ));
+    cmdline
+}
+
+fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
+    if qemu_verity_enabled(config) {
+        let mut drives = vec![
+            format!(
+                "file={},if=virtio,format=raw,readonly=on",
+                config.rootfs_path
+            ),
+            format!(
+                "file={},if=virtio,format=raw,readonly=on",
+                config
+                    .verity_path
+                    .as_deref()
+                    .expect("verity-enabled qemu boot must carry a verity sidecar")
+            ),
+        ];
+        if let Some((overlay_path, overlay_verity_path, _)) = qemu_runtime_overlay(config) {
+            drives.push(format!(
+                "file={overlay_path},if=virtio,format=raw,readonly=on"
+            ));
+            drives.push(format!(
+                "file={overlay_verity_path},if=virtio,format=raw,readonly=on"
+            ));
+        }
+        return drives;
+    }
+    vec![format!("file={},if=virtio,format=raw", config.rootfs_path)]
+}
 
 impl VmBackend for QemuBackend {
     fn name(&self) -> &str {
@@ -102,6 +218,7 @@ impl VmBackend for QemuBackend {
     fn start(&self, config: &VmStartConfig) -> Result<VmId> {
         let qemu_bin = locate_qemu()?;
         let kernel = resolve_workload_kernel(config)?;
+        ensure_qemu_runtime_source_supported(config)?;
 
         let state_dir = vm_state_dir(&config.name);
         std::fs::create_dir_all(&state_dir)
@@ -112,8 +229,15 @@ impl VmBackend for QemuBackend {
         // overlay-aware contract hold on QEMU-launched VMs too.
         let rootfs = Path::new(&config.rootfs_path);
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
-        crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        mvm_build::builder_vm::admit_runtime_overlay_contract(
+            rootfs_dir,
+            config.runtime_source_policy,
+        )?;
+        crate::base::runtime_meta::record_from_start_config(
+            &config.name,
+            StartMode::Detached,
+            config,
+        )?;
 
         let kvm = kvm_available();
         if !kvm {
@@ -140,23 +264,7 @@ impl VmBackend for QemuBackend {
                 .map_err(|e| anyhow!("open console sink {}: {e}", console_log.display()))?,
         );
 
-        let mut cmdline = DEFAULT_CMDLINE.to_string();
-        if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
-            cmdline.push(' ');
-            cmdline.push_str(&uvols);
-        }
-        if let Some(token) = crate::microvm::verb_grant_cmdline_token(&config.name) {
-            cmdline.push(' ');
-            cmdline.push_str(&token);
-        }
-        if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
-            cmdline.push(' ');
-            cmdline.push_str(&token);
-        }
-        if let Some(roothash) = config.runtime_overlay_roothash.as_deref() {
-            cmdline.push_str(" mvm.runtime_roothash=");
-            cmdline.push_str(roothash);
-        }
+        let cmdline = qemu_cmdline(config);
 
         let vcpus = config.cpus.clamp(1, u32::from(u8::MAX));
 
@@ -177,14 +285,13 @@ impl VmBackend for QemuBackend {
             cmd.args(["-cpu", "max"]);
         }
         cmd.arg("-kernel").arg(&kernel);
-        if let Some(initrd) = config.initrd_path.as_deref() {
+        if let Some(initrd) = qemu_effective_initrd(config) {
             cmd.arg("-initrd").arg(initrd);
         }
         cmd.arg("-append").arg(&cmdline);
-        // Root disk (vda). Attached writable at the block level; the guest
-        // mounts per the cmdline (`rw`).
-        cmd.arg("-drive")
-            .arg(format!("file={},if=virtio,format=raw", config.rootfs_path));
+        for drive in qemu_drive_args(config) {
+            cmd.arg("-drive").arg(drive);
+        }
         // virtio-vsock on the per-VM guest CID. The host reaches the agent
         // through the AF_VSOCK↔UNIX bridge spawned below.
         cmd.arg("-device")
@@ -828,5 +935,108 @@ mod tests {
         assert_eq!(tail("a\nb\nc\nd", 2), "c\nd");
         assert_eq!(tail("a\nb", 0), "");
         assert_eq!(tail("a\nb", 10), "a\nb");
+    }
+
+    #[test]
+    fn qemu_cmdline_uses_verity_shape_and_runtime_overlay_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let cmdline = qemu_cmdline(&config);
+        assert!(!cmdline.contains("root=/dev/vda"));
+        assert!(!cmdline.contains("init=/init"));
+        assert!(cmdline.contains("mvm.roothash="));
+        assert!(cmdline.contains("mvm.data=/dev/vda"));
+        assert!(cmdline.contains("mvm.hash=/dev/vdb"));
+        assert!(cmdline.contains("mvm.runtime_roothash="));
+        assert!(cmdline.contains("mvm.runtime_data=/dev/vdc"));
+        assert!(cmdline.contains("mvm.runtime_hash=/dev/vdd"));
+        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
+    }
+
+    #[test]
+    fn qemu_drive_args_use_read_only_verity_layout_with_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            ..Default::default()
+        };
+        let drives = qemu_drive_args(&config);
+        assert_eq!(drives.len(), 4);
+        assert!(drives.iter().all(|drive| drive.contains("readonly=on")));
+        assert!(drives[0].contains(&config.rootfs_path));
+        assert!(drives[1].contains(config.verity_path.as_deref().expect("verity path")));
+        assert!(drives[2].contains("/tmp/runtime.ext4"));
+        assert!(drives[3].contains("/tmp/runtime.verity"));
+    }
+
+    #[test]
+    fn required_overlay_qemu_support_rejects_missing_overlay_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let err = ensure_qemu_runtime_source_supported(&config).unwrap_err();
+        assert!(err.to_string().contains("runtime overlay artifact triple"));
+    }
+
+    #[test]
+    fn required_overlay_qemu_support_rejects_missing_initrd() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let err = ensure_qemu_runtime_source_supported(&config).unwrap_err();
+        assert!(err.to_string().contains("rootfs.initrd"));
     }
 }

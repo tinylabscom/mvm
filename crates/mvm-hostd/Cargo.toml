@@ -76,6 +76,7 @@ ipnet.workspace = true
 # custom-dns pulls hickory 0.26 (needs Rust 1.88); the default build
 # carries no hickory and stays on the workspace 1.85 floor.
 hickory-resolver = { workspace = true, features = ["tokio"], optional = true }
+hickory-proto.workspace = true
 rand.workspace = true
 regex.workspace = true
 secrecy.workspace = true

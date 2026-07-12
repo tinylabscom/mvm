@@ -100,10 +100,42 @@ At boot the host attaches a virtio-fs device per declaration and the guest agent
 
 - **Firecracker kernel** (vmlinux) — tuned for microVM workloads
 - **Busybox init** — sub-5s boot, no systemd overhead
-- **Guest agent** — vsock-based health checks, status reporting, snapshot coordination
+- **Overlay-aware runtime boot** — the `/init` path, `/mvm/runtime` mount
+  point, and policy needed to boot from a sealed runtime overlay
+- **Guest agent** — vsock-based health checks, status reporting, snapshot
+  coordination; baked into dev/fallback images and supplied by the runtime
+  overlay on sealed required-overlay boots
 - **Networking** — eth0 configured via kernel boot args, NAT to host network
 - **Drive mounting** — `/mnt/config` (ro), `/mnt/secrets` (ro), `/mnt/data` (rw)
 - **Service supervision** — automatic restart on failure with backoff
+
+## Runtime overlay contract
+
+`mkGuest` images are **overlay-aware** by default: they carry the
+`/mvm/runtime` mount point and boot logic needed to use the sealed runtime
+overlay when the selected backend/policy attaches one.
+
+For sealed images on admitted block-backed backends, mvm now uses a
+`RequiredOverlay` contract:
+
+- The workload rootfs keeps the mount point and boot logic.
+- The guest runtime binaries come from a separate read-only,
+  verity-protected runtime overlay.
+- The overlay is **version-matched** to the host `mvmctl` build, not "whatever
+  overlay is newest in cache".
+
+Operationally, this means:
+
+- Updating the runtime overlay is the normal way to update guest runtime
+  binaries for **future boots**.
+- You can prebuild that artifact explicitly with
+  `mvmctl build runtime-overlay build` (or `just runtime-overlay-build` in a
+  source checkout) so later required-overlay boots do not pay guest-binary
+  rebuild cost on the hot path.
+- A stopped VM picks up the newer overlay on its next `machine start` /
+  `machine restart`.
+- A running VM keeps the overlay version it already booted with until restart;
+  mvm does not live-remount a different runtime overlay into an active guest.
 
 ## Adding Services
 
@@ -264,7 +296,9 @@ When you run `mvmctl build --flake .`:
 2. The builder VM runs Nix evaluation and `nix build` in Linux.
 3. The resulting closure is packed into the rootfs.
 4. Kernel and rootfs artifacts are copied back to the host cache.
-5. Runtime commands boot those already-built artifacts on the selected backend.
+5. Runtime commands boot those already-built artifacts on the selected backend,
+   attaching a version-matched runtime overlay when the workload policy
+   requires or prefers it.
 
 The same rootfs works on all backends (Firecracker, HVF, microvm.nix).
 

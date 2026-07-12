@@ -1913,7 +1913,10 @@ mod tests {
             .expect("event");
         assert!(matches!(c1.kind, FlowEventKind::Closed { .. }));
         assert!(matches!(c2.kind, FlowEventKind::Closed { .. }));
-        let _ = bridge_task.await;
+        bridge_task
+            .await
+            .expect("bridge task joins cleanly")
+            .expect("bridge copy succeeds");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

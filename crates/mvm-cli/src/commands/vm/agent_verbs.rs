@@ -150,10 +150,11 @@ mod tests {
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"x").unwrap();
 
-        // A sealed prod sidecar => sealed (accessible:false, sealed:true).
-        GuestSidecar::for_oci_run("t", true)
-            .write_to_dir(dir.path())
-            .unwrap();
+        // A sealed prod sidecar => sealed.
+        let mut sc = GuestSidecar::for_oci_run("t", false, false); // accessible:true, sealed:false baseline
+        sc.accessible = false;
+        sc.sealed = true;
+        sc.write_to_dir(dir.path()).unwrap();
         assert!(image_is_sealed(&rootfs));
     }
 
@@ -168,7 +169,7 @@ mod tests {
         assert!(!image_is_sealed(&rootfs));
 
         // OCI sidecar (accessible:true, sealed:false) => not sealed.
-        GuestSidecar::for_oci_run("t", false)
+        GuestSidecar::for_oci_run("t", false, false)
             .write_to_dir(dir.path())
             .unwrap();
         assert!(!image_is_sealed(&rootfs));

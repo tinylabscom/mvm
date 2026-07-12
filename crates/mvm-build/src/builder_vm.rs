@@ -232,6 +232,11 @@ pub struct GuestSidecar {
     /// fail or silently degrade.
     #[serde(default)]
     pub overlay_aware: bool,
+    /// Whether the rootfs intentionally omits the baked
+    /// `/usr/local/bin/mvm-guest-agent` + `mvm-guest-netinit` fallback and
+    /// therefore depends on the runtime overlay contract for those binaries.
+    #[serde(default)]
+    pub runtime_lean: bool,
 }
 
 impl GuestSidecar {
@@ -261,6 +266,12 @@ impl GuestSidecar {
         self.overlay_aware
     }
 
+    /// Whether the rootfs intentionally depends on the runtime overlay for the
+    /// agent/netinit pair instead of carrying a baked fallback.
+    pub fn is_runtime_lean(&self) -> bool {
+        self.runtime_lean
+    }
+
     /// Sidecar for a rootfs materialized from an OCI image and made
     /// bootable by the mvm runtime injection (baked agent + netinit +
     /// `/mvm/runtime` mount point + overlay-preferring `/init`).
@@ -283,8 +294,9 @@ impl GuestSidecar {
     /// cross-compiled binary, not the stub. `hypervisor` is left
     /// backend-neutral ("oci"): the materialized rootfs is cached and
     /// boots on any backend, so it can't honestly name one — and no
-    /// gate reads that field (it is informational).
-    pub fn for_oci_run(name: &str, sealed: bool) -> Self {
+    /// gate reads this field (it is informational; only `accessible`
+    /// drives a runtime decision).
+    pub fn for_oci_run(name: &str, sealed: bool, runtime_lean: bool) -> Self {
         Self {
             name: name.to_string(),
             accessible: !sealed,
@@ -301,6 +313,7 @@ impl GuestSidecar {
             rootless_entrypoint: false,
             hypervisor: "oci".to_string(),
             overlay_aware: true,
+            runtime_lean,
         }
     }
 
@@ -996,6 +1009,22 @@ pub fn emit_sidecar_via_passthru_query(
 /// gate needs the recovery path (rebuild with current mkGuest, or
 /// drop the cached template) in one glance.
 pub fn admit_overlay_aware(rootfs_dir: &Path) -> Result<(), anyhow::Error> {
+    admit_runtime_overlay_contract(
+        rootfs_dir,
+        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+    )
+}
+
+/// Admission gate for the runtime-overlay contract.
+///
+/// `PreferOverlay` / `RootfsOnly` require only the original
+/// overlay-awareness claim. `RequiredOverlay` additionally requires a
+/// runtime-lean rootfs so the boot contract cannot silently degrade back to a
+/// baked agent/netinit pair.
+pub fn admit_runtime_overlay_contract(
+    rootfs_dir: &Path,
+    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+) -> Result<(), anyhow::Error> {
     let sidecar = GuestSidecar::read_from_dir(rootfs_dir)?;
     match sidecar {
         None => Err(anyhow::anyhow!(
@@ -1015,6 +1044,21 @@ pub fn admit_overlay_aware(rootfs_dir: &Path) -> Result<(), anyhow::Error> {
              (`passthru.mvm.overlayAware = true`).",
             rootfs_dir.display()
         )),
+        Some(s)
+            if runtime_source_policy
+                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+                && !s.is_runtime_lean() =>
+        {
+            Err(anyhow::anyhow!(
+                "refusing to start VM: rootfs at {} is marked `overlayAware: true` but \
+                 not `runtimeLean: true` in its `mvm-meta.json` sidecar. Required-overlay \
+                 boots must use a rootfs that intentionally omits the baked \
+                 `/usr/local/bin/mvm-guest-agent` + `mvm-guest-netinit` fallback so the \
+                 boot contract cannot silently degrade. Rebuild the image with the \
+                 sealed/required-overlay mkGuest shape.",
+                rootfs_dir.display()
+            ))
+        }
         Some(_) => Ok(()),
     }
 }
@@ -1215,6 +1259,7 @@ mod tests {
             rootless_entrypoint: false,
             hypervisor: "libkrun".to_string(),
             overlay_aware: true,
+            runtime_lean: false,
         }
     }
 
@@ -1244,7 +1289,7 @@ mod tests {
         // the `for_oci_run` sidecar next to the rootfs must satisfy
         // `admit_overlay_aware` — without it, `run --image` never boots.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef", false);
+        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef", false, false);
         assert!(sidecar.is_overlay_aware());
         assert_eq!(sidecar.agent_binary, "real");
         sidecar.write_to_dir(tmp.path()).expect("write");
@@ -1252,20 +1297,16 @@ mod tests {
     }
 
     #[test]
-    fn oci_run_sidecar_sealed_flag_flips_posture() {
-        // A dev OCI run is accessible + unsealed; a `--prod` OCI run is
-        // sealed + not accessible so the console/exec gate refuses it.
-        let dev = GuestSidecar::for_oci_run("oci:dev", false);
-        assert!(!dev.sealed);
-        assert!(dev.accessible);
-        assert!(dev.is_overlay_aware());
-
-        let prod = GuestSidecar::for_oci_run("oci:prod", true);
-        assert!(prod.sealed);
-        assert!(!prod.accessible);
-        // Sealing does not change the honest overlay-aware claim.
-        assert!(prod.is_overlay_aware());
-        assert_eq!(prod.agent_binary, "real");
+    fn runtime_lean_oci_run_sidecar_admits_required_overlay() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef", true, true);
+        assert!(sidecar.is_runtime_lean());
+        sidecar.write_to_dir(tmp.path()).expect("write");
+        admit_runtime_overlay_contract(
+            tmp.path(),
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+        )
+        .expect("runtime-lean OCI rootfs must admit required-overlay boots");
     }
 
     #[test]
@@ -1287,18 +1328,20 @@ mod tests {
         fixture_sidecar().write_to_dir(tmp.path()).expect("write");
         let body = std::fs::read_to_string(tmp.path().join(SIDECAR_FILENAME)).expect("read raw");
         assert!(body.contains("\"overlayAware\""), "got: {body}");
+        assert!(body.contains("\"runtimeLean\""), "got: {body}");
         let read = GuestSidecar::read_from_dir(tmp.path())
             .expect("read")
             .expect("present");
         assert!(read.is_overlay_aware());
+        assert!(!read.is_runtime_lean());
     }
 
     #[test]
-    fn sidecar_missing_overlay_aware_field_deserializes_as_false() {
-        // Older sidecars on disk don't carry `overlayAware`.
-        // `#[serde(default)]` must read them as `false` so the
-        // admission gate refuses them rather than silently
-        // boot-attempting a non-overlay-aware rootfs.
+    fn sidecar_missing_overlay_fields_deserialize_as_false() {
+        // Older sidecars on disk don't carry `overlayAware` or `runtimeLean`.
+        // `#[serde(default)]` must read them as `false` so the admission gate
+        // refuses them rather than silently boot-attempting a non-overlay-aware
+        // or non-runtime-lean rootfs.
         let tmp = tempfile::tempdir().expect("tempdir");
         let legacy_json = r#"{
             "name": "legacy",
@@ -1319,6 +1362,10 @@ mod tests {
             !read.is_overlay_aware(),
             "missing overlayAware field must default to false"
         );
+        assert!(
+            !read.is_runtime_lean(),
+            "missing runtimeLean field must default to false"
+        );
     }
 
     #[test]
@@ -1326,6 +1373,32 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         fixture_sidecar().write_to_dir(tmp.path()).expect("write");
         admit_overlay_aware(tmp.path()).expect("overlay_aware: true must admit");
+    }
+
+    #[test]
+    fn required_overlay_admission_refuses_non_runtime_lean_sidecar() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        fixture_sidecar().write_to_dir(tmp.path()).expect("write");
+        let err = admit_runtime_overlay_contract(
+            tmp.path(),
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+        )
+        .expect_err("required-overlay rootfs must be runtime-lean");
+        let msg = err.to_string();
+        assert!(msg.contains("runtimeLean: true"), "got: {msg}");
+    }
+
+    #[test]
+    fn required_overlay_admission_accepts_runtime_lean_sidecar() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut sidecar = fixture_sidecar();
+        sidecar.runtime_lean = true;
+        sidecar.write_to_dir(tmp.path()).expect("write");
+        admit_runtime_overlay_contract(
+            tmp.path(),
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+        )
+        .expect("runtime-lean sidecar must admit");
     }
 
     #[test]

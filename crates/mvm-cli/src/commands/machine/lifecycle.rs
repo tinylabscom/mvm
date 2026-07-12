@@ -59,8 +59,8 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     if args.dry_run {
         let summary = machine_start_preflight_summary(
             &spec,
-            args.receipt.as_deref(),
             args.hypervisor.as_deref(),
+            args.receipt.as_deref(),
         )?;
         if args.json {
             println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -74,8 +74,11 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         return Ok(());
     }
     enforce_dev_init_profile(&spec.profile, &spec.init)?;
-    let effective_hypervisor =
-        super::receipt::select_machine_start_backend(&spec, args.hypervisor.as_deref())?;
+    let effective_hypervisor = args
+        .hypervisor
+        .as_deref()
+        .map(String::from)
+        .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
     let ssh_auth_sock = if spec.ssh_agent {
         Some(ssh_auth_sock_from_env()?)
@@ -87,32 +90,12 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volume_cfg = build_machine_volume_cfg(&spec.volumes)?;
 
-    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest, boot_verity) = if spec
-        .runtime_pack
+    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest) = if std::env::var(
+        "MVM_DIRECT_BOOT",
+    )
+    .as_deref()
+        == Ok("1")
     {
-        let src = crate::commands::vm::runtime_pack::resolve_runtime_pack_image_source(false)?;
-        let crate::exec::ImageSource::Prebuilt {
-            kernel_path,
-            rootfs_path,
-            label,
-            ..
-        } = src
-        else {
-            anyhow::bail!("runtime pack did not resolve to a prebuilt image source");
-        };
-        let digest = label
-            .strip_prefix("runtime-pack:")
-            .unwrap_or(&label)
-            .to_string();
-        let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs_path);
-        (
-            Some(kernel_path),
-            label,
-            std::path::PathBuf::from(rootfs_path),
-            digest,
-            (verity_path, roothash),
-        )
-    } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
         let kernel = std::env::var("MVM_KERNEL_PATH")
             .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_KERNEL_PATH"))?;
         let rootfs = std::env::var("MVM_ROOTFS_PATH")
@@ -122,7 +105,6 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
             "direct-boot".to_string(),
             std::path::PathBuf::from(rootfs),
             "direct-boot".to_string(),
-            (None, None),
         )
     } else {
         let (label, rootfs, digest) = if let Some(slot_hash) = &spec.manifest {
@@ -158,11 +140,11 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
             )
         } else {
             anyhow::bail!(
-                "machine {name:?} spec has neither an image, a manifest, nor a runtime-pack source — use `machine rm` to remove and recreate it",
+                "machine {name:?} spec has neither image nor manifest — use `machine rm` to remove and recreate it",
                 name = spec.name
             );
         };
-        (None, label, rootfs, digest, (None, None))
+        (None, label, rootfs, digest)
     };
     let kernel_path = match direct_boot_kernel {
         Some(k) => Some(k),
@@ -183,8 +165,6 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         backend_name: &effective_hypervisor,
         no_supervisor: args.no_supervisor,
         kernel_path,
-        verity_path: boot_verity.0,
-        roothash: boot_verity.1,
         agent_verb: spec.agent_verb.clone(),
         has_ad_hoc_argv: args.has_ad_hoc_argv,
     })?;

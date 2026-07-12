@@ -53,42 +53,73 @@ use crate::network_tunnel_spawn::{
 };
 use crate::substitution_spawn::EndpointGuard;
 
-/// Spawn the per-VM substitution endpoint when the admitted plan carries egress
-/// secrets, returning an armed [`EndpointGuard`]; a secret-free plan (or no
-/// `plan.json`) yields a defused no-op guard. The libkrun guest reaches the
-/// proxy-aware endpoint by dialing `connect_host_vsock(EGRESS_PORT)`.
-/// The native gateway forwards intercepted `:80/:443` flows to the host
-/// loopback terminator on `terminator_port`.
+/// Spawn the per-VM egress endpoint for libkrun workloads. Secret-bound runs
+/// get the WireRequest substitution path; secret-free runs can opt into the
+/// raw vsock relay when the resolved policy allows egress. Deny-all,
+/// secret-free runs keep the endpoint defused because the guest will not be
+/// told to start the egress client.
 fn spawn_libkrun_egress_endpoint_if_needed(
     vm_name: &str,
     state_dir: &Path,
-    terminator_port: u16,
+    config_tenant: &str,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> Result<EndpointGuard> {
     use crate::substitution_spawn::{
         EndpointTransport, SubstitutionSpawnParams, spawn_substitution_endpoint,
     };
-    use std::net::SocketAddr;
-    let Some((secrets, redaction, tenant)) =
-        crate::egress_shared::decode_plan_secrets_from_state(state_dir)?
-    else {
+    let default_redaction = mvm_core::policy::RedactionPolicy::default();
+    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let (secrets, redaction, tenant): (&[_], &mvm_core::policy::RedactionPolicy, &str) =
+        match &decoded {
+            Some((secrets, redaction, tenant)) => (secrets.as_slice(), redaction, tenant.as_str()),
+            None => (
+                &[],
+                &default_redaction,
+                if config_tenant.is_empty() {
+                    "local"
+                } else {
+                    config_tenant
+                },
+            ),
+        };
+    if secrets.is_empty() && !network_policy.allows_egress() {
         return Ok(EndpointGuard::defused());
-    };
-    let tls_intermediate = crate::substitution_spawn::read_egress_intermediate(state_dir)?;
+    }
     spawn_substitution_endpoint(SubstitutionSpawnParams {
         vm_name,
         state_dir,
-        tenant: &tenant,
-        secrets: &secrets,
-        redaction: &redaction,
+        tenant,
+        secrets,
+        redaction,
         transport: EndpointTransport::Uds {
             path: mvm_core::config::vm_vsock_port_socket(vm_name, mvm_guest::vsock::EGRESS_PORT),
         },
-        terminator_listen: Some(SocketAddr::from(([127, 0, 0, 1], terminator_port))),
-        tls_intermediate,
-        network_policy: None,
-        raw_egress: false,
+        terminator_listen: None,
+        tls_intermediate: None,
+        network_policy: Some(network_policy),
+        raw_egress: secrets.is_empty(),
     })?;
     Ok(EndpointGuard::new(vm_name))
+}
+
+/// Kernel cmdline token that turns on the in-guest vsock egress client.
+/// Emitted only when outbound egress is allowed and the workload carries no
+/// bound secrets, so the raw SOCKS path never contends with the
+/// substitution endpoint for the shared egress port.
+fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Option<String> {
+    (config.network_policy.allows_egress()
+        && !crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false))
+    .then(|| "mvm.vsock_egress=1".to_string())
+}
+
+fn validate_libkrun_network_policy(policy: &mvm_core::network_policy::NetworkPolicy) -> Result<()> {
+    if !policy.allows_egress() {
+        return Ok(());
+    }
+    bail!(
+        "libkrun does not support outbound workload egress in the current direct-path architecture; \
+         boot with deny-all networking or choose a backend that implements the no-NIC host-vsock-proxy egress path"
+    );
 }
 
 /// How long [`LibkrunBackend::start`] waits for the supervisor to
@@ -133,14 +164,7 @@ pub(crate) fn open_console_capture(path: &std::path::Path) -> std::io::Result<st
 /// `root=/dev/vda rw init=/init` matches Apple Container's
 /// boot for the same Nix-built rootfs layout.
 const DEFAULT_CMDLINE: &str = "console=hvc0 root=/dev/vda rw init=/init";
-const VSOCK_ONLY_CMDLINE_TOKEN: &str = "mvm.vsock_only=1";
-
-fn disconnected_guest_mac(name: &str) -> [u8; 6] {
-    use sha2::{Digest, Sha256};
-
-    let digest = Sha256::digest(name.as_bytes());
-    [0x02, digest[0], digest[1], digest[2], digest[3], digest[4]]
-}
+const VERITY_CMDLINE: &str = "console=hvc0";
 
 /// Build the supervisor config for one VM, lifting
 /// the audit-substrate resolution into the shared `audit_substrate`
@@ -151,9 +175,10 @@ fn disconnected_guest_mac(name: &str) -> [u8; 6] {
 /// may carry secret bindings, env vars, or policy refs that resolve
 /// to credentials. They're opaque transport bytes; the supervisor
 /// re-verifies the signed envelope before trusting any decoded field.
-/// Workload-**independent** KrunContext: kernel + resources + cmdline + vsock wiring.
-/// **No rootfs** (the cold path sets the workload rootfs; a prelaunched standby
-/// leaves it `None` until claim), **no user volumes**, and **no guest NIC**.
+/// Workload-**independent** KrunContext: kernel + resources + cmdline + vsock wiring +
+/// the configured direct-vsock transport. **No rootfs** (the cold path sets the
+/// workload rootfs; a prelaunched standby leaves it `None` until claim) and **no
+/// user volumes**.
 /// Shared verbatim by `build_supervisor_config` (cold) and `standby_base_config` (warm)
 /// so the two launch paths can't drift.
 fn krun_context_base(
@@ -169,7 +194,6 @@ fn krun_context_base(
     let mut krun = KrunContext::new(name, kernel, "")
         .with_resources(vcpus, mem_mib)
         .with_cmdline(cmdline)
-        .with_disconnected_net(disconnected_guest_mac(name))
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
         .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
         // Workload exit-code capture (listen=false → host binds).
@@ -188,7 +212,10 @@ fn krun_context_base(
         // the per-machine proxy that connects to SSH_AUTH_SOCK.
         .add_host_listen_port(mvm_guest::vsock::SSH_AGENT_PORT);
     krun.rootfs_path = None;
-    krun
+    // The active libkrun transport is direct-vsock only; keep the workload
+    // base aligned with the builder path so no guest-NIC helper can be
+    // reopened through a different launch site.
+    krun.with_vsock_direct()
 }
 
 /// Translate a backend-agnostic [`StandbySpec`] into the `SupervisorBaseConfig`
@@ -270,26 +297,64 @@ fn libkrun_kernel_for_host(kernel: &str) -> Result<(String, KernelFormat)> {
     Ok((kernel.to_string(), KernelFormat::Raw))
 }
 
-/// Kernel cmdline token that turns on the in-guest vsock egress client. Emitted
-/// only when the host opted in AND the workload carries no bound secrets (Phase A
-/// scope — a secrets workload still uses the substitution endpoint on the NIC).
-/// mkGuest's `/init` parses `mvm.vsock_egress=1` and exports `MVM_VSOCK_EGRESS`,
-/// which starts `mvm-egress-client` and points the workload's proxy env at it.
-fn vsock_egress_cmdline_token(opt_in: bool, has_bound_secrets: bool) -> Option<String> {
-    (opt_in && !has_bound_secrets).then(|| "mvm.vsock_egress=1".to_string())
+fn libkrun_verity_initrd_path(config: &VmStartConfig) -> Option<PathBuf> {
+    config
+        .verity_path
+        .as_deref()
+        .zip(config.roothash.as_deref())
+        .and_then(|_| {
+            Path::new(&config.rootfs_path)
+                .parent()
+                .map(|p| p.join("rootfs.initrd"))
+        })
+        .filter(|p| p.exists())
 }
 
-fn persist_vsock_egress_marker(name: &str, enabled: bool) -> Result<()> {
-    let marker = mvm_core::config::vm_vsock_egress_marker_path(name);
-    if enabled {
-        if let Some(parent) = marker.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create vsock egress marker dir {}", parent.display()))?;
-        }
-        std::fs::write(&marker, b"1")
-            .with_context(|| format!("write vsock egress marker {}", marker.display()))?;
-    } else {
-        let _ = std::fs::remove_file(&marker);
+fn libkrun_effective_initrd(config: &VmStartConfig) -> Option<PathBuf> {
+    config
+        .initrd_path
+        .as_ref()
+        .map(PathBuf::from)
+        .or_else(|| libkrun_verity_initrd_path(config))
+}
+
+fn libkrun_verity_enabled(config: &VmStartConfig) -> bool {
+    config.verity_path.is_some()
+        && config.roothash.is_some()
+        && libkrun_effective_initrd(config).is_some()
+}
+
+fn libkrun_runtime_overlay(config: &VmStartConfig) -> Option<(&str, &str, &str)> {
+    Some((
+        config.runtime_overlay_path.as_deref()?,
+        config.runtime_overlay_verity_path.as_deref()?,
+        config.runtime_overlay_roothash.as_deref()?,
+    ))
+}
+
+fn libkrun_verity_cmdline_args(config: &VmStartConfig) -> Option<String> {
+    let rootfs_hash = config.roothash.as_deref()?;
+    let base = format!("mvm.roothash={rootfs_hash} mvm.data=/dev/vdb mvm.hash=/dev/vdc");
+    match libkrun_runtime_overlay(config) {
+        Some((_, _, overlay_hash)) => Some(format!(
+            "{base} mvm.runtime_roothash={overlay_hash} mvm.runtime_data=/dev/vdd mvm.runtime_hash=/dev/vde"
+        )),
+        None => Some(base),
+    }
+}
+
+fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
+    if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
+        return Ok(());
+    }
+    if !libkrun_verity_enabled(config) {
+        bail!(
+            "required-overlay libkrun boot requires verity metadata plus an initrd \
+             (`--initrd` or sibling rootfs.initrd)"
+        );
+    }
+    if libkrun_runtime_overlay(config).is_none() {
+        bail!("required-overlay libkrun boot requires the runtime overlay artifact triple");
     }
     Ok(())
 }
@@ -304,7 +369,11 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // Append the `mvm.uvols=` param so the dev VM's `mvm-host-vm-init`
     // mounts user volumes at their guest paths (no-op when there are
     // none; harmless for workload guests whose `/init` ignores it).
-    let mut cmdline = DEFAULT_CMDLINE.to_string();
+    let mut cmdline = if libkrun_verity_enabled(config) {
+        VERITY_CMDLINE.to_string()
+    } else {
+        DEFAULT_CMDLINE.to_string()
+    };
     if let Some(uvols) = mvm_core::vm_backend::encode_user_volumes_cmdline(&config.volumes) {
         cmdline.push(' ');
         cmdline.push_str(&uvols);
@@ -313,37 +382,31 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    cmdline.push(' ');
-    cmdline.push_str(VSOCK_ONLY_CMDLINE_TOKEN);
     if let Some(token) = crate::microvm::require_grant_cmdline_token(&config.name) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    if let Some(verity_args) = libkrun_verity_enabled(config)
+        .then(|| libkrun_verity_cmdline_args(config))
+        .flatten()
+    {
+        cmdline.push(' ');
+        cmdline.push_str(&verity_args);
+    }
+    cmdline.push(' ');
+    cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
+        config.runtime_source_policy,
+    ));
     // Vsock-only guests have no config drive, so the grant trust anchor rides
     // the cmdline instead.
     if let Some(token) = crate::microvm::host_signer_pub_cmdline_token(&config.name) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    if let Some(token) = config
-        .network_tunnel
-        .as_ref()
-        .and_then(mvm_core::vm_backend::encode_network_tunnel_cmdline)
-    {
+    if let Some(token) = vsock_egress_cmdline_token(config, state_dir) {
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    let vsock_egress_opt_in = mvm_build::libkrun_network_provider::vsock_egress_opt_in();
-    if let Some(token) = vsock_egress_cmdline_token(
-        vsock_egress_opt_in,
-        // Only read plan.json for secrets when the flag is on (short-circuit).
-        vsock_egress_opt_in
-            && crate::egress_shared::state_has_bound_secrets(state_dir).unwrap_or(false),
-    ) {
-        cmdline.push(' ');
-        cmdline.push_str(&token);
-    }
-    persist_vsock_egress_marker(&config.name, cmdline.contains("mvm.vsock_egress=1"))?;
     // Workload-independent KrunContext (kernel + resources + vsock + gateway), shared
     // verbatim with the standby spawn so the two paths can't drift. The cold path
     // then sets the workload rootfs + user volumes below.
@@ -355,8 +418,32 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         &cmdline,
         state_dir,
     );
-    krun = krun.with_kernel_format(kernel_format);
-    krun.rootfs_path = Some(config.rootfs_path.clone());
+    krun = krun
+        .with_kernel_format(kernel_format)
+        .with_console_output(vm_console_log(&config.name).display().to_string());
+    if libkrun_verity_enabled(config) {
+        krun.initramfs_path =
+            libkrun_effective_initrd(config).map(|p| p.to_string_lossy().into_owned());
+        krun = krun
+            .add_disk("root", config.rootfs_path.clone(), true)
+            .add_disk(
+                "root-verity",
+                config
+                    .verity_path
+                    .clone()
+                    .expect("verity-enabled libkrun boot must carry a verity sidecar"),
+                true,
+            );
+        if let Some((overlay_path, overlay_verity_path, _)) = libkrun_runtime_overlay(config) {
+            krun = krun.add_disk("runtime", overlay_path, true).add_disk(
+                "runtime-verity",
+                overlay_verity_path,
+                true,
+            );
+        }
+    } else {
+        krun.rootfs_path = Some(config.rootfs_path.clone());
+    }
 
     // A dev-accessible managed machine (`machine run -t` / `machine shell` /
     // `up --console`) pre-opens the interactive-console data range. libkrun
@@ -481,6 +568,164 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     })
 }
 
+fn supervisor_config_dump_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("supervisor-config.json")
+}
+
+fn persist_supervisor_config_dump(state_dir: &Path, json: &str) -> Result<()> {
+    let path = supervisor_config_dump_path(state_dir);
+    std::fs::write(&path, json).map_err(|e| anyhow!("write {}: {e}", path.display()))
+}
+
+fn read_last_bytes_of(path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len();
+    let take = max_bytes.min(len);
+    let offset = i64::try_from(take).unwrap_or(i64::MAX).saturating_neg();
+    file.seek(SeekFrom::End(offset))?;
+    let mut buf = Vec::with_capacity(take as usize);
+    file.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).into_owned())
+}
+
+fn summarize_supervisor_config(path: &Path) -> String {
+    if !path.exists() {
+        return format!("supervisor-config.json: missing ({})", path.display());
+    }
+    let body = match std::fs::read_to_string(path) {
+        Ok(body) => body,
+        Err(err) => {
+            return format!(
+                "supervisor-config.json: present but unreadable ({}): {err}",
+                path.display()
+            );
+        }
+    };
+    if body.trim().is_empty() {
+        return format!(
+            "supervisor-config.json: present but empty ({})",
+            path.display()
+        );
+    }
+    let value: serde_json::Value = match serde_json::from_str(&body) {
+        Ok(value) => value,
+        Err(err) => {
+            return format!(
+                "supervisor-config.json: present but invalid json ({}): {err}",
+                path.display()
+            );
+        }
+    };
+    let kernel_path = value
+        .pointer("/krun/kernel_path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<none>");
+    let rootfs_path = value
+        .pointer("/krun/rootfs_path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<none>");
+    let initramfs_path = value
+        .pointer("/krun/initramfs_path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<none>");
+    let networking = value
+        .pointer("/krun/networking")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<none>");
+    let disks = value
+        .pointer("/krun/disks")
+        .and_then(serde_json::Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry.get("id").and_then(serde_json::Value::as_str))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let cmdline = value
+        .pointer("/krun/cmdline")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<none>");
+    let console_output_path = value
+        .pointer("/krun/console_output_path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("<none>");
+    format!(
+        "supervisor-config.json: {}\n  kernel_path={kernel_path}\n  rootfs_path={rootfs_path}\n  initramfs_path={initramfs_path}\n  networking={networking}\n  console_output_path={console_output_path}\n  disks={} [{}]\n  cmdline={cmdline}",
+        path.display(),
+        disks.len(),
+        disks.join(", ")
+    )
+}
+
+fn diagnose_log_path(label: &str, path: &Path) -> String {
+    if !path.exists() {
+        return format!("{label}: missing ({})", path.display());
+    }
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.len() == 0 => {
+            format!("{label}: present but empty ({})", path.display())
+        }
+        Ok(_) => match read_last_bytes_of(path, 4096) {
+            Ok(tail) => format!("{label}: {}\n{}", path.display(), tail.trim_end()),
+            Err(err) => format!(
+                "{label}: present but unreadable ({}): {err}",
+                path.display()
+            ),
+        },
+        Err(err) => format!(
+            "{label}: present but unreadable ({}): {err}",
+            path.display()
+        ),
+    }
+}
+
+fn diagnose_vsock_sockets(state_dir: &Path) -> String {
+    let mut sockets = match std::fs::read_dir(state_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| {
+                let entry = entry.ok()?;
+                let file_name = entry.file_name();
+                let name = file_name.to_str()?;
+                (name.starts_with("vsock-") && name.ends_with(".sock")).then(|| name.to_string())
+            })
+            .collect::<Vec<_>>(),
+        Err(err) => {
+            return format!(
+                "vsock sockets: unreadable state dir ({}): {err}",
+                state_dir.display()
+            );
+        }
+    };
+    sockets.sort();
+    if sockets.is_empty() {
+        format!("vsock sockets: none under {}", state_dir.display())
+    } else {
+        format!(
+            "vsock sockets under {}: {}",
+            state_dir.display(),
+            sockets.join(", ")
+        )
+    }
+}
+
+fn libkrun_startup_diagnostics(state_dir: &Path) -> String {
+    let console_log = state_dir.join("console.log");
+    let supervisor_stderr = state_dir.join("supervisor.stderr.log");
+    let supervisor_lifecycle = state_dir.join("supervisor.lifecycle.log");
+    let supervisor_config = supervisor_config_dump_path(state_dir);
+    format!(
+        "libkrun vm state dir: {}\n{}\n{}\n{}\n{}\n{}",
+        state_dir.display(),
+        diagnose_vsock_sockets(state_dir),
+        diagnose_log_path("supervisor.lifecycle.log", &supervisor_lifecycle),
+        summarize_supervisor_config(&supervisor_config),
+        diagnose_log_path("supervisor.stderr.log", &supervisor_stderr),
+        diagnose_log_path("console.log", &console_log),
+    )
+}
+
 impl VmBackend for LibkrunBackend {
     fn name(&self) -> &str {
         "libkrun"
@@ -528,6 +773,8 @@ impl VmBackend for LibkrunBackend {
                 libkrun_sys::install_hint()
             );
         }
+        validate_libkrun_network_policy(&config.network_policy)?;
+        ensure_libkrun_runtime_source_supported(config)?;
 
         // Early kernel-path check. `build_supervisor_config`
         // re-checks too, but this keeps the existing test contract
@@ -551,16 +798,23 @@ impl VmBackend for LibkrunBackend {
         // `/mvm/runtime` mount point. Fires before the supervisor
         // spawn so a refusal leaves no PID file or krun handle behind.
         let rootfs_dir = rootfs.parent().unwrap_or_else(|| Path::new("."));
-        mvm_build::builder_vm::admit_overlay_aware(rootfs_dir)?;
-        crate::base::runtime_meta::record_from_rootfs(&config.name, StartMode::Detached, rootfs)?;
+        mvm_build::builder_vm::admit_runtime_overlay_contract(
+            rootfs_dir,
+            config.runtime_source_policy,
+        )?;
+        crate::base::runtime_meta::record_from_start_config(
+            &config.name,
+            StartMode::Detached,
+            config,
+        )?;
 
         let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
         let cfg = build_supervisor_config(config, &state_dir)?;
         let mut endpoint_guard = spawn_libkrun_egress_endpoint_if_needed(
             &config.name,
             &state_dir,
-            cfg.transparent_terminator_port
-                .expect("libkrun transparent terminator port is set"),
+            config.tenant_id.as_deref().unwrap_or("local"),
+            &config.network_policy,
         )?;
         let mut tunnel_guard =
             spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
@@ -582,6 +836,7 @@ impl VmBackend for LibkrunBackend {
 
         let json =
             serde_json::to_string(&cfg).map_err(|e| anyhow!("serialize SupervisorConfig: {e}"))?;
+        persist_supervisor_config_dump(&state_dir, &json)?;
 
         ui::info(&format!(
             "Starting libkrun VM '{}' (cpus={vcpus}, mem={}MiB) via {}...",
@@ -597,10 +852,13 @@ impl VmBackend for LibkrunBackend {
         let console_log = open_console_capture(&vm_console_log(&config.name))
             .map(Stdio::from)
             .unwrap_or_else(|_| Stdio::null());
+        let supervisor_stderr = open_console_capture(&state_dir.join("supervisor.stderr.log"))
+            .map(Stdio::from)
+            .unwrap_or_else(|_| Stdio::inherit());
         let mut child = Command::new(&supervisor_path)
             .stdin(Stdio::piped())
             .stdout(console_log)
-            .stderr(Stdio::inherit())
+            .stderr(supervisor_stderr)
             .spawn()
             .map_err(|e| anyhow!("spawn {}: {e}", supervisor_path.display()))?;
         child
@@ -653,16 +911,18 @@ impl VmBackend for LibkrunBackend {
                 .map_err(|e| anyhow!("poll supervisor child: {e}"))?
             {
                 bail!(
-                    "supervisor exited before binding vsock socket {} (status: {status})",
-                    agent_sock.display()
+                    "supervisor exited before binding vsock socket {} (status: {status})\n{}",
+                    agent_sock.display(),
+                    libkrun_startup_diagnostics(&state_dir)
                 );
             }
             if Instant::now() >= sock_deadline {
                 let _ = child.kill();
                 bail!(
-                    "supervisor did not bind vsock socket {} within {:?}; killed",
+                    "supervisor did not bind vsock socket {} within {:?}; killed\n{}",
                     agent_sock.display(),
-                    VSOCK_SOCKET_TIMEOUT
+                    VSOCK_SOCKET_TIMEOUT,
+                    libkrun_startup_diagnostics(&state_dir)
                 );
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -939,6 +1199,8 @@ impl VmBackend for LibkrunBackend {
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<VmId, StandbyError> {
+        validate_libkrun_network_policy(&claim.network_policy)
+            .map_err(|e| StandbyError::ClaimFailed(e.to_string()))?;
         let attach = standby_attach_config(claim, handle.binding_nonce.clone())?;
         let mut stream = UnixStream::connect(&handle.control_socket).map_err(|e| {
             StandbyError::ClaimFailed(format!(
@@ -1273,6 +1535,146 @@ mod tests {
         } else {
             assert_eq!(format, KernelFormat::Raw);
         }
+    }
+
+    #[test]
+    fn libkrun_build_supervisor_config_uses_verity_shape_and_runtime_overlay_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let config = VmStartConfig {
+            name: "verity".into(),
+            rootfs_path: rootfs.display().to_string(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let cfg = build_supervisor_config(&config, dir.path()).expect("build");
+        let cmdline = cfg.krun.kernel_cmdline.as_deref().expect("cmdline is set");
+        assert!(!cmdline.contains("root=/dev/vda"));
+        assert!(!cmdline.contains("init=/init"));
+        assert!(cmdline.contains("mvm.roothash="));
+        assert!(cmdline.contains("mvm.data=/dev/vdb"));
+        assert!(cmdline.contains("mvm.hash=/dev/vdc"));
+        assert!(cmdline.contains("mvm.runtime_roothash="));
+        assert!(cmdline.contains("mvm.runtime_data=/dev/vdd"));
+        assert!(cmdline.contains("mvm.runtime_hash=/dev/vde"));
+        assert!(cmdline.contains("mvm.runtime_source_policy=required_overlay"));
+        assert_eq!(
+            cfg.krun.initramfs_path.as_deref(),
+            Some(initrd.to_string_lossy().as_ref())
+        );
+        assert!(cfg.krun.rootfs_path.is_none());
+        assert_eq!(
+            cfg.krun.console_output_path.as_deref(),
+            Some(vm_console_log("verity").to_string_lossy().as_ref())
+        );
+    }
+
+    #[test]
+    fn libkrun_verity_cmdline_args_shift_devices_for_initrd_boot() {
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            verity_path: Some("/tmp/rootfs.verity".into()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            ..Default::default()
+        };
+
+        let args = libkrun_verity_cmdline_args(&config).expect("verity cmdline args");
+        assert!(args.contains("mvm.data=/dev/vdb"), "got: {args}");
+        assert!(args.contains("mvm.hash=/dev/vdc"), "got: {args}");
+        assert!(args.contains("mvm.runtime_data=/dev/vdd"), "got: {args}");
+        assert!(args.contains("mvm.runtime_hash=/dev/vde"), "got: {args}");
+    }
+
+    #[test]
+    fn libkrun_build_supervisor_config_uses_read_only_verity_disk_layout_with_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let config = VmStartConfig {
+            name: "verity".into(),
+            rootfs_path: rootfs.display().to_string(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            ..Default::default()
+        };
+        let cfg = build_supervisor_config(&config, dir.path()).expect("build");
+        assert_eq!(cfg.krun.extra_disks.len(), 4);
+        assert!(cfg.krun.extra_disks.iter().all(|disk| disk.read_only));
+        assert_eq!(cfg.krun.extra_disks[0].path, rootfs.to_string_lossy());
+        assert_eq!(cfg.krun.extra_disks[1].path, verity.to_string_lossy());
+        assert_eq!(cfg.krun.extra_disks[2].path, "/tmp/runtime.ext4");
+        assert_eq!(cfg.krun.extra_disks[3].path, "/tmp/runtime.verity");
+    }
+
+    #[test]
+    fn required_overlay_libkrun_support_rejects_missing_overlay_artifacts() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        let initrd = dir.path().join("rootfs.initrd");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+        std::fs::write(&initrd, b"initrd").unwrap();
+
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let err = ensure_libkrun_runtime_source_supported(&config).unwrap_err();
+        assert!(err.to_string().contains("runtime overlay artifact triple"));
+    }
+
+    #[test]
+    fn required_overlay_libkrun_support_rejects_missing_initrd() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        let verity = dir.path().join("rootfs.verity");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+        std::fs::write(&verity, b"verity").unwrap();
+
+        let config = VmStartConfig {
+            rootfs_path: rootfs.display().to_string(),
+            verity_path: Some(verity.display().to_string()),
+            roothash: Some("a".repeat(64)),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let err = ensure_libkrun_runtime_source_supported(&config).unwrap_err();
+        assert!(err.to_string().contains("rootfs.initrd"));
     }
 
     /// claim 1 (host-fs isolation): libkrun can't enforce a read-only virtio-fs
@@ -1633,15 +2035,82 @@ mod tests {
         );
     }
 
-    /// No `plan.json` (or a secret-free plan) ⇒ no endpoint is spawned and the
+    #[test]
+    fn persist_supervisor_config_dump_writes_workload_json_dump() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = SupervisorConfig {
+            krun: KrunContext::new("vm-1", "/k", "/r"),
+            vm_state_dir: "/run/state/vm-1".into(),
+            pid_file_name: None,
+            tenant_id: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            gateway_events_socket: None,
+            signing_key_path: None,
+            plan: None,
+            bundle: None,
+            network_policy: None,
+            bridge_restart_policy: libkrun_sys::BridgeRestartPolicy::HardFail,
+            transparent_terminator_port: None,
+        };
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        persist_supervisor_config_dump(dir.path(), &json).expect("persist supervisor config");
+
+        let path = supervisor_config_dump_path(dir.path());
+        assert_eq!(path, dir.path().join("supervisor-config.json"));
+        let contents = std::fs::read_to_string(&path).expect("read persisted config");
+        assert_eq!(contents, json);
+        let value: serde_json::Value =
+            serde_json::from_str(&contents).expect("persisted config stays valid json");
+        assert_eq!(value["vm_state_dir"], "/run/state/vm-1");
+    }
+
+    #[test]
+    fn libkrun_startup_diagnostics_reports_vsock_and_log_state() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("supervisor.lifecycle.log"),
+            "dispatch_route: legacy_direct_vsock\n",
+        )
+        .expect("write lifecycle");
+        std::fs::write(
+            dir.path().join("supervisor-config.json"),
+            r#"{"krun":{"kernel_path":"/kernel","rootfs_path":null,"initramfs_path":"/initrd","networking":"vsock_direct","console_output_path":"/state/console.log","disks":[{"id":"root"},{"id":"runtime"}],"cmdline":"console=hvc0 mvm.runtime_source_policy=required_overlay"}}"#,
+        )
+            .expect("write config");
+        std::fs::write(dir.path().join("console.log"), "").expect("write empty console log");
+        std::fs::write(dir.path().join("vsock-5251.sock"), b"")
+            .expect("write placeholder socket path");
+        std::fs::write(dir.path().join("vsock-5253.sock"), b"")
+            .expect("write placeholder socket path");
+
+        let body = libkrun_startup_diagnostics(dir.path());
+        assert!(body.contains("libkrun vm state dir:"));
+        assert!(body.contains("vsock-5251.sock"));
+        assert!(body.contains("vsock-5253.sock"));
+        assert!(body.contains("dispatch_route: legacy_direct_vsock"));
+        assert!(body.contains("kernel_path=/kernel"));
+        assert!(body.contains("initramfs_path=/initrd"));
+        assert!(body.contains("networking=vsock_direct"));
+        assert!(body.contains("console_output_path=/state/console.log"));
+        assert!(body.contains("disks=2 [root, runtime]"));
+        assert!(body.contains("mvm.runtime_source_policy=required_overlay"));
+        assert!(body.contains("console.log: present but empty"));
+    }
+
+    /// No `plan.json` plus deny-all policy ⇒ no endpoint is spawned and the
     /// returned guard is defused (its Drop is a no-op, so an early return can't
     /// reap a process that was never started).
     #[test]
-    fn libkrun_substitution_not_spawned_when_no_secrets() {
+    fn libkrun_substitution_not_spawned_when_no_secrets_and_no_egress() {
         let tmp = tempfile::tempdir().unwrap();
-        // Empty state dir: no plan.json at all.
-        let guard = spawn_libkrun_egress_endpoint_if_needed("no-secrets-vm", tmp.path(), 18080)
-            .expect("no-secrets path must succeed");
+        let guard = spawn_libkrun_egress_endpoint_if_needed(
+            "no-secrets-vm",
+            tmp.path(),
+            "local",
+            &mvm_core::network_policy::NetworkPolicy::deny_all(),
+        )
+        .expect("deny-all no-secrets path must succeed");
         assert!(
             guard.vm_name.is_none(),
             "a secret-free plan must yield a defused (no-op) guard"
@@ -1655,15 +2124,21 @@ mod tests {
     }
 
     #[test]
-    fn vsock_egress_cmdline_token_only_when_eligible() {
-        // Eligible: opted in, no secrets → token present.
+    fn vsock_egress_cmdline_token_only_when_policy_allows_egress() {
+        let dir = tempfile::tempdir().unwrap();
+        let deny_all = VmStartConfig::default();
+        assert_eq!(vsock_egress_cmdline_token(&deny_all, dir.path()), None);
+
+        let allow_egress = VmStartConfig {
+            network_policy: mvm_core::network_policy::NetworkPolicy::preset(
+                mvm_core::network_policy::NetworkPreset::Dev,
+            ),
+            ..Default::default()
+        };
         assert_eq!(
-            vsock_egress_cmdline_token(true, false).as_deref(),
+            vsock_egress_cmdline_token(&allow_egress, dir.path()).as_deref(),
             Some("mvm.vsock_egress=1")
         );
-        // Any disqualifier → no token (legacy NIC path, byte-identical cmdline).
-        assert_eq!(vsock_egress_cmdline_token(false, false), None);
-        assert_eq!(vsock_egress_cmdline_token(true, true), None);
     }
 
     fn seed_grant_sidecar_and_key(vm_name: &str) {
@@ -1744,51 +2219,53 @@ mod tests {
     }
 
     #[test]
-    fn build_supervisor_config_appends_network_tunnel_cmdline_token() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = VmStartConfig {
-            name: "netd-vm".to_string(),
-            kernel_path: Some("/tmp/kernel".to_string()),
-            rootfs_path: "/tmp/rootfs.ext4".to_string(),
-            network_tunnel: Some(mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
-                guest_port: 5302,
-                session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
-                    tenant_id: "tenant-a".into(),
-                    vm_id: "vm-1".into(),
-                    boot_id: "boot-1".into(),
-                    session_nonce: "nonce-1".into(),
-                    requested_features: mvm_core::protocol::network_tunnel::TunnelFeatures::default(
-                    ),
-                    maximum_frame_size: 4096,
-                },
-            }),
-            ..Default::default()
-        };
+    fn validate_libkrun_network_policy_accepts_deny_all() {
+        validate_libkrun_network_policy(&mvm_core::network_policy::NetworkPolicy::deny_all())
+            .expect("deny-all must remain valid for libkrun");
+    }
 
-        let supervisor = build_supervisor_config(&config, dir.path()).expect("supervisor config");
+    #[test]
+    fn validate_libkrun_network_policy_refuses_outbound_egress() {
+        let err =
+            validate_libkrun_network_policy(&mvm_core::network_policy::NetworkPolicy::preset(
+                mvm_core::network_policy::NetworkPreset::Dev,
+            ))
+            .expect_err("libkrun outbound workload egress must fail closed");
         assert!(
-            supervisor
-                .krun
-                .kernel_cmdline
-                .as_deref()
-                .unwrap_or_default()
-                .contains("mvm.network_tunnel=")
+            err.to_string().contains("direct-path architecture"),
+            "unexpected error: {err:#}"
         );
     }
 
     #[test]
-    fn persist_vsock_egress_marker_writes_and_clears_marker() {
-        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
-
-        persist_vsock_egress_marker("marker-vm", true).expect("write marker");
-        assert!(mvm_core::config::vm_vsock_egress_marker_path("marker-vm").is_file());
-
-        persist_vsock_egress_marker("marker-vm", false).expect("clear marker");
-        assert!(!mvm_core::config::vm_vsock_egress_marker_path("marker-vm").exists());
+    fn libkrun_claim_standby_refuses_outbound_egress() {
+        let handle = StandbyHandle {
+            id: "standby-x".into(),
+            control_socket: std::path::PathBuf::from("/tmp/does-not-matter.sock"),
+            pid: 1,
+            kernel_sha256: "a".repeat(64),
+            vcpus: 2,
+            mem_mib: 1024,
+            binding_nonce: "ab".repeat(32),
+            spawned_unix_secs: 0,
+            state: StandbyState::Idle,
+            image_sha256: None,
+        };
+        let mut claim = sample_standby_claim();
+        claim.network_policy = mvm_core::network_policy::NetworkPolicy::preset(
+            mvm_core::network_policy::NetworkPreset::Dev,
+        );
+        let err = LibkrunBackend
+            .claim_standby(&handle, &claim)
+            .expect_err("egress-enabled standby claim must fail closed");
+        match err {
+            StandbyError::ClaimFailed(msg) => {
+                assert!(
+                    msg.contains("direct-path architecture"),
+                    "unexpected error: {msg}"
+                );
+            }
+            other => panic!("expected ClaimFailed, got {other:?}"),
+        }
     }
 }

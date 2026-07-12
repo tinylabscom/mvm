@@ -206,6 +206,7 @@ impl Commands {
             // `env <sub>` delegates (bootstrap/cleanup/uninstall/update/sign).
             Commands::Env(a) => a.action.verb_name(),
             Commands::Bootstrap(_) => "bootstrap",
+            Commands::BuilderVmBootstrap(_) => "__builder-vm-bootstrap",
             Commands::Dev(_) => "dev",
             Commands::Ls(_) => "ls",
             Commands::Explain(_) => "explain",

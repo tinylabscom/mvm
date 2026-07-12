@@ -715,7 +715,7 @@ Expected: every helper-compile / "building per-VM host helper" line appears **be
 - [ ] **Step 5: Confirm the CI spec-ref gate is clean** (comments must not cite plans/PRs/ADRs):
 
 Run: `cargo run -p xtask -- check-no-spec-refs-in-comments && cargo run -p xtask -- check-spec-numbers`
-Expected: both report clean (242 is a unique prefix).
+Expected: both report clean (243 is a unique prefix).
 
 - [ ] **Step 6: Commit**
 

@@ -3,44 +3,31 @@
 //! An arbitrary OCI image (alpine, debian, a language base) ships none
 //! of the mvm runtime: no guest agent, no `/init` that brings the agent
 //! up, no `/mvm/runtime` overlay mount point. Without those, a microVM
-//! booted from the image has no vsock control plane — `run --image`
-//! boots a kernel that can't be talked to and times out at
-//! `wait_for_agent`.
+//! booted from the image has no vsock control plane.
 //!
 //! This module is the host-side fix. It runs against the unpacked OCI
 //! tree *before* it is sealed into `rootfs.ext4`, baking in:
 //!
-//! - `/init`, `/usr/local/bin/mvm-guest-agent`,
-//!   `/usr/local/bin/mvm-guest-netinit`,
-//!   `/usr/local/bin/mvm-guest-netd`, and
-//!   `/usr/local/bin/mvm-egress-client` — the cross-compiled guest binaries.
-//!   `/init` is a static Rust PID 1, not a shell script, so the source OCI image
-//!   does not need `/bin/sh`, busybox, coreutils, or its own init system.
+//! - `/init`, installed from the static `mvm-oci-init` binary, so the
+//!   source OCI image does not need `/bin/sh`, busybox, or its own init.
 //! - `/usr/lib/mvm/wrappers/oci-entrypoint` plus `/etc/mvm/entrypoint`
-//!   when the OCI config declares Entrypoint/Cmd. The wrapper is a static
-//!   binary that execs the declared argv directly; it never shells out.
-//! - `/mvm/runtime` — the overlay mount point. On Firecracker the host
-//!   attaches a verity-sealed overlay here; the injected `/init` prefers
-//!   the overlay-resident agent and falls back to the baked one, exactly
-//!   like a mkGuest rootfs. When no overlay attaches, the baked binaries are
-//!   used.
-//! - `/etc/mvm/{name,variant}` — the minimal markers the agent reads.
+//!   when the OCI config declares Entrypoint/Cmd.
+//! - `/mvm/runtime`, the shared runtime overlay mount point.
+//! - `/etc/mvm/{name,variant}` and, for sealed boots,
+//!   `/etc/mvm/verb-trust.json`.
+//! - For rootfs-only launch shapes, baked guest binaries under
+//!   `/usr/local/bin/`.
 //!
-//! Because the mount point + overlay-preferring `/init` are genuinely
-//! present after injection, the rootfs can carry an honest
-//! `overlay_aware: true` sidecar ([`crate::builder_vm::GuestSidecar::for_oci_run`])
-//! and pass `admit_overlay_aware` without scoping the gate off.
-//!
-//! Everything here is plain host filesystem I/O against the staging
-//! directory — no VM, no nix. The builder-VM materialize step copies the
-//! staging tree (now carrying the injected runtime) into the ext4 as-is.
+//! Runtime-lean launch shapes intentionally do *not* bake the guest runtime
+//! helpers into the OCI rootfs; those binaries must come from the shared
+//! read-only runtime overlay.
 
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// The cross-compiled guest binaries to bake into the rootfs. Produced
-/// on the host by [`crate::guest_agent_build`] (source-checkout
-/// `cargo-zigbuild`) or unpacked from the published runtime overlay.
+/// The cross-compiled guest binaries to bake into the rootfs. Produced on the
+/// host by [`crate::guest_agent_build`] or unpacked from the published runtime
+/// overlay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MvmRuntimeBinaries {
     /// Static OCI PID 1 (`mvm-oci-init`), installed as `/init`.
@@ -55,11 +42,9 @@ pub struct MvmRuntimeBinaries {
     pub egress_client: PathBuf,
     /// Static OCI entrypoint runner (`mvm-oci-entrypoint`).
     pub entrypoint_runner: PathBuf,
-    /// Static verity initramfs PID 1 (`mvm-verity-init`). NOT baked into the
-    /// rootfs — it goes into the separate `rootfs.initrd` cpio via
-    /// [`crate::verity_initrd`]. Carried here so the guest-binary resolver
-    /// (cache / source-checkout / embedded) produces it alongside the rootfs
-    /// set; `inject_mvm_runtime` deliberately ignores it.
+    /// Static verity initramfs PID 1 (`mvm-verity-init`). Not baked into the
+    /// rootfs itself; carried here so the guest-binary resolver produces the
+    /// full set consistently.
     pub verity_init: PathBuf,
 }
 
@@ -73,7 +58,6 @@ pub struct OciEntrypointConfig {
     pub working_dir: Option<String>,
 }
 
-/// Where the injected guest binaries land inside the rootfs.
 const AGENT_DEST: &str = "usr/local/bin/mvm-guest-agent";
 const NETINIT_DEST: &str = "usr/local/bin/mvm-guest-netinit";
 const NETD_DEST: &str = "usr/local/bin/mvm-guest-netd";
@@ -81,22 +65,30 @@ const EGRESS_CLIENT_DEST: &str = "usr/local/bin/mvm-egress-client";
 const ENTRYPOINT_RUNNER_DEST: &str = "usr/lib/mvm/wrappers/oci-entrypoint";
 const ENTRYPOINT_MARKER_DEST: &str = "etc/mvm/entrypoint";
 const OCI_ENTRYPOINT_CONFIG_DEST: &str = "etc/mvm/oci-entrypoint.json";
-/// The measured verb-trust policy the guest agent reads at
-/// `/etc/mvm/verb-trust.json`. Written only into a sealed rootfs so the
-/// require-grant requirement is intrinsic to the dm-verity-hashed data,
-/// fail-closed even if the host omits the require-grant cmdline token.
 const VERB_TRUST_DEST: &str = "etc/mvm/verb-trust.json";
+
+/// Which runtime shape to inject into an OCI-prepared rootfs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeInjectionProfile {
+    /// Rootfs-only launch shape: bake the guest binaries into the tree because
+    /// the boot path intentionally does not consume `/mvm/runtime`.
+    RootfsOnly,
+    /// Overlay-backed launch shape: install only PID 1, entrypoint wrapper,
+    /// mountpoints, and markers; the actual guest runtime binaries must come
+    /// from the shared read-only runtime overlay.
+    RuntimeLean,
+}
 
 /// Inject the mvm runtime into the OCI-unpacked `rootfs_dir`.
 ///
-/// Idempotent: re-running overwrites the injected files. Returns the
-/// paths created (the `/init` and the runtime binary destinations) so the
-/// caller can log/verify them.
+/// Idempotent: re-running overwrites the injected files. Returns the paths
+/// written so the caller can verify the resulting rootfs shape.
 pub fn inject_mvm_runtime(
     rootfs_dir: &Path,
     bins: &MvmRuntimeBinaries,
     entrypoint: Option<&OciEntrypointConfig>,
     sealed: bool,
+    profile: RuntimeInjectionProfile,
 ) -> Result<InjectedPaths, io::Error> {
     if !rootfs_dir.is_dir() {
         return Err(io::Error::new(
@@ -108,8 +100,6 @@ pub fn inject_mvm_runtime(
         ));
     }
 
-    // Mount points must exist on disk before a read-only root boot; PID 1
-    // cannot create them once the root is served by a read-only virtiofs device.
     for (rel, mode) in [
         ("proc", 0o755),
         ("sys", 0o755),
@@ -125,20 +115,12 @@ pub fn inject_mvm_runtime(
     }
     let runtime_dir = rootfs_dir.join("mvm").join("runtime");
 
-    // Minimal markers the agent reads. `variant=dev` keeps the
-    // interactive/console surface enabled (a plain `run --image` is a dev
-    // surface); a `--prod` run bakes `variant=prod` so the sealed agent
-    // links no console/exec and the runtime gate refuses interactive access.
     let etc_mvm = rootfs_dir.join("etc").join("mvm");
     std::fs::create_dir_all(&etc_mvm)?;
     let variant: &[u8] = if sealed { b"prod\n" } else { b"dev\n" };
     write_file(&etc_mvm.join("variant"), variant, 0o644)?;
     write_file(&etc_mvm.join("name"), b"oci\n", 0o644)?;
 
-    // Bake the require-grant policy into the sealed rootfs so it rides inside
-    // the verity-hashed data — the guest ORs it with the cmdline token, so a
-    // host that forgets the token still lands fail-closed. Dev stays absent
-    // (permissive default).
     if sealed {
         let policy = mvm_core::plan::VerbTrustPolicy {
             version: mvm_core::plan::VERB_TRUST_POLICY_VERSION,
@@ -149,17 +131,24 @@ pub fn inject_mvm_runtime(
         write_file(&rootfs_dir.join(VERB_TRUST_DEST), &policy_json, 0o444)?;
     }
 
-    // Baked guest binaries.
-    let bin_dir = rootfs_dir.join("usr").join("local").join("bin");
-    std::fs::create_dir_all(&bin_dir)?;
     let agent_dest = rootfs_dir.join(AGENT_DEST);
     let netinit_dest = rootfs_dir.join(NETINIT_DEST);
     let netd_dest = rootfs_dir.join(NETD_DEST);
     let egress_client_dest = rootfs_dir.join(EGRESS_CLIENT_DEST);
-    copy_exec(&bins.agent, &agent_dest)?;
-    copy_exec(&bins.netinit, &netinit_dest)?;
-    copy_exec(&bins.netd, &netd_dest)?;
-    copy_exec(&bins.egress_client, &egress_client_dest)?;
+    if profile == RuntimeInjectionProfile::RootfsOnly {
+        let bin_dir = rootfs_dir.join("usr").join("local").join("bin");
+        std::fs::create_dir_all(&bin_dir)?;
+        copy_exec(&bins.agent, &agent_dest)?;
+        copy_exec(&bins.netinit, &netinit_dest)?;
+        copy_exec(&bins.netd, &netd_dest)?;
+        copy_exec(&bins.egress_client, &egress_client_dest)?;
+    } else {
+        let _ = std::fs::remove_file(&agent_dest);
+        let _ = std::fs::remove_file(&netinit_dest);
+        let _ = std::fs::remove_file(&netd_dest);
+        let _ = std::fs::remove_file(&egress_client_dest);
+    }
+
     let entrypoint_runner_dest = rootfs_dir.join(ENTRYPOINT_RUNNER_DEST);
     copy_file_with_mode(&bins.entrypoint_runner, &entrypoint_runner_dest, 0o555)?;
     if let Some(entrypoint) = entrypoint
@@ -178,8 +167,6 @@ pub fn inject_mvm_runtime(
         )?;
     }
 
-    // PID 1. This is a static binary, not a shell script, so arbitrary OCI
-    // images do not need busybox/coreutils/shell in their rootfs.
     let init_dest = rootfs_dir.join("init");
     copy_exec(&bins.oci_init, &init_dest)?;
 
@@ -228,8 +215,6 @@ fn copy_file_with_mode(src: &Path, dst: &Path, mode: u32) -> Result<(), io::Erro
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    // Remove an existing destination first so a read-only (0444) cached
-    // binary from a prior inject doesn't reject the overwrite.
     let _ = std::fs::remove_file(dst);
     std::fs::copy(src, dst)?;
     set_mode(dst, mode)
@@ -294,13 +279,17 @@ mod tests {
             working_dir: Some("/app".to_string()),
         };
 
-        let injected = inject_mvm_runtime(&root, &bins, Some(&entrypoint), false).expect("inject");
+        let injected = inject_mvm_runtime(
+            &root,
+            &bins,
+            Some(&entrypoint),
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("inject");
 
-        // /init is the injected static binary, not a shell script that would
-        // require `/bin/sh` or busybox from the source OCI image.
         assert_eq!(std::fs::read(&injected.init).unwrap(), b"\x7fELF-oci-init");
         assert!(is_executable(&injected.init));
-        // Binaries copied to the baked path, executable, content-equal.
         assert_eq!(std::fs::read(&injected.agent).unwrap(), b"\x7fELF-agent");
         assert!(is_executable(&injected.agent));
         assert_eq!(
@@ -337,13 +326,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(written_entrypoint, entrypoint);
-        // Overlay mount point exists on disk.
         assert!(injected.runtime_mount_point.is_dir());
         assert!(root.join("mvm/runtime").is_dir());
         for rel in ["proc", "sys", "dev/pts", "dev/shm", "run", "tmp"] {
             assert!(root.join(rel).is_dir(), "{rel} mountpoint exists");
         }
-        // Markers.
         assert_eq!(
             std::fs::read_to_string(root.join("etc/mvm/variant")).unwrap(),
             "dev\n"
@@ -357,9 +344,22 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let bins = fake_bins(tmp.path());
 
-        inject_mvm_runtime(&root, &bins, None, false).expect("first inject");
-        // A second inject (e.g. cache reuse) must not error on existing files.
-        let second = inject_mvm_runtime(&root, &bins, None, false).expect("second inject");
+        inject_mvm_runtime(
+            &root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("first inject");
+        let second = inject_mvm_runtime(
+            &root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("second inject");
         assert!(is_executable(&second.agent));
         assert!(is_executable(&second.netd));
         assert!(is_executable(&second.egress_client));
@@ -370,19 +370,57 @@ mod tests {
     fn inject_rejects_missing_rootfs_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let bins = fake_bins(tmp.path());
-        let err = inject_mvm_runtime(&tmp.path().join("nope"), &bins, None, false).unwrap_err();
+        let err = inject_mvm_runtime(
+            &tmp.path().join("nope"),
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 
     #[test]
+    fn runtime_lean_profile_skips_baked_guest_binaries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("rootfs");
+        std::fs::create_dir_all(&root).unwrap();
+        let bins = fake_bins(tmp.path());
+
+        let injected = inject_mvm_runtime(
+            &root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RuntimeLean,
+        )
+        .expect("inject");
+
+        assert!(is_executable(&injected.init));
+        assert!(is_executable(&injected.entrypoint_runner));
+        assert!(injected.runtime_mount_point.is_dir());
+        assert!(!injected.agent.exists());
+        assert!(!injected.netinit.exists());
+        assert!(!injected.netd.exists());
+        assert!(!injected.egress_client.exists());
+    }
+
+    #[test]
     fn sealed_inject_writes_prod_variant() {
-        // A `--prod` OCI run bakes `variant=prod`; the dev run keeps `dev`.
         let tmp = tempfile::tempdir().unwrap();
         let bins = fake_bins(tmp.path());
 
         let dev_root = tmp.path().join("dev-rootfs");
         std::fs::create_dir_all(&dev_root).unwrap();
-        inject_mvm_runtime(&dev_root, &bins, None, false).expect("dev inject");
+        inject_mvm_runtime(
+            &dev_root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("dev inject");
         assert_eq!(
             std::fs::read_to_string(dev_root.join("etc/mvm/variant")).unwrap(),
             "dev\n"
@@ -390,7 +428,14 @@ mod tests {
 
         let prod_root = tmp.path().join("prod-rootfs");
         std::fs::create_dir_all(&prod_root).unwrap();
-        inject_mvm_runtime(&prod_root, &bins, None, true).expect("prod inject");
+        inject_mvm_runtime(
+            &prod_root,
+            &bins,
+            None,
+            true,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("prod inject");
         assert_eq!(
             std::fs::read_to_string(prod_root.join("etc/mvm/variant")).unwrap(),
             "prod\n"
@@ -399,50 +444,48 @@ mod tests {
 
     #[test]
     fn sealed_inject_bakes_require_grant_policy() {
-        // A `--prod` OCI run bakes `/etc/mvm/verb-trust.json` into the rootfs
-        // before the dm-verity seal, so require-grant is intrinsic to the
-        // measured image. The dev run must leave the file absent (permissive).
         let tmp = tempfile::tempdir().unwrap();
         let bins = fake_bins(tmp.path());
 
         let dev_root = tmp.path().join("dev-rootfs");
         std::fs::create_dir_all(&dev_root).unwrap();
-        inject_mvm_runtime(&dev_root, &bins, None, false).expect("dev inject");
-        assert!(
-            !dev_root.join("etc/mvm/verb-trust.json").exists(),
-            "dev inject must not bake a require-grant policy"
-        );
+        inject_mvm_runtime(
+            &dev_root,
+            &bins,
+            None,
+            false,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("dev inject");
+        assert!(!dev_root.join("etc/mvm/verb-trust.json").exists());
 
         let prod_root = tmp.path().join("prod-rootfs");
         std::fs::create_dir_all(&prod_root).unwrap();
-        inject_mvm_runtime(&prod_root, &bins, None, true).expect("prod inject");
+        inject_mvm_runtime(
+            &prod_root,
+            &bins,
+            None,
+            true,
+            RuntimeInjectionProfile::RootfsOnly,
+        )
+        .expect("prod inject");
         let policy_path = prod_root.join("etc/mvm/verb-trust.json");
-        assert!(
-            policy_path.is_file(),
-            "sealed inject writes verb-trust.json"
-        );
+        assert!(policy_path.is_file());
         assert_eq!(
             std::fs::metadata(&policy_path)
                 .unwrap()
                 .permissions()
                 .mode()
                 & 0o777,
-            0o444,
-            "verb-trust.json is read-only (0444)"
+            0o444
         );
         let policy: mvm_core::plan::VerbTrustPolicy =
-            serde_json::from_slice(&std::fs::read(&policy_path).unwrap())
-                .expect("verb-trust.json round-trips");
+            serde_json::from_slice(&std::fs::read(&policy_path).unwrap()).unwrap();
         assert!(policy.require_grant);
         assert_eq!(policy.version, mvm_core::plan::VERB_TRUST_POLICY_VERSION);
         assert_eq!(
             policy.grant_key_source,
             mvm_core::plan::GrantKeySource::LaunchProvisioned
-        );
-        // Byte-for-byte identical to what mkGuest bakes for sealed block images.
-        assert_eq!(
-            std::fs::read(&policy_path).unwrap(),
-            br#"{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}"#
         );
     }
 
@@ -451,6 +494,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(p).unwrap().permissions().mode() & 0o111 != 0
     }
+
     #[cfg(not(unix))]
     fn is_executable(_p: &Path) -> bool {
         true

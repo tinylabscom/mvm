@@ -3,6 +3,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::vm_backend::RuntimeSourcePolicy;
+
 /// Stable identifier for a checkpoint (also its on-disk directory name under
 /// `config::checkpoints_dir()`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -58,6 +60,10 @@ pub struct CheckpointMeta {
     pub created_unix: u64,
     pub content: Vec<ContentBlob>,
     pub supervisor_config_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_source_policy: Option<RuntimeSourcePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_overlay_version: Option<String>,
     pub audit_ref: Option<String>,
 }
 
@@ -76,6 +82,8 @@ impl CheckpointMeta {
             created_unix: 0,
             content: Vec::new(),
             supervisor_config_digest: String::new(),
+            runtime_source_policy: None,
+            runtime_overlay_version: None,
             audit_ref: None,
         }
     }
@@ -93,6 +101,8 @@ pub struct CheckpointMetaBuilder {
     created_unix: u64,
     content: Vec<ContentBlob>,
     supervisor_config_digest: String,
+    runtime_source_policy: Option<RuntimeSourcePolicy>,
+    runtime_overlay_version: Option<String>,
     audit_ref: Option<String>,
 }
 
@@ -117,6 +127,14 @@ impl CheckpointMetaBuilder {
         self.supervisor_config_digest = d.into();
         self
     }
+    pub fn runtime_source_policy(mut self, policy: Option<RuntimeSourcePolicy>) -> Self {
+        self.runtime_source_policy = policy;
+        self
+    }
+    pub fn runtime_overlay_version(mut self, version: Option<String>) -> Self {
+        self.runtime_overlay_version = version;
+        self
+    }
     pub fn audit_ref(mut self, r: Option<String>) -> Self {
         self.audit_ref = r;
         self
@@ -131,6 +149,8 @@ impl CheckpointMetaBuilder {
             created_unix: self.created_unix,
             content: self.content,
             supervisor_config_digest: self.supervisor_config_digest,
+            runtime_source_policy: self.runtime_source_policy,
+            runtime_overlay_version: self.runtime_overlay_version,
             audit_ref: self.audit_ref,
         }
     }
@@ -155,6 +175,8 @@ mod tests {
         .tag(Some("golden".to_string()))
         .parent(Some(CheckpointId::new("ckpt-parent")))
         .created_unix(1_700_000_000)
+        .runtime_source_policy(Some(RuntimeSourcePolicy::RequiredOverlay))
+        .runtime_overlay_version(Some("0.17.0".to_string()))
         .build();
 
         let json = serde_json::to_string(&meta).unwrap();
@@ -163,6 +185,11 @@ mod tests {
         assert_eq!(back.class, CheckpointClass::FsQuick);
         assert_eq!(back.parent.unwrap().as_str(), "ckpt-parent");
         assert_eq!(back.content[0].sha256, "deadbeef");
+        assert_eq!(
+            back.runtime_source_policy,
+            Some(RuntimeSourcePolicy::RequiredOverlay)
+        );
+        assert_eq!(back.runtime_overlay_version.as_deref(), Some("0.17.0"));
     }
 
     #[test]
@@ -185,6 +212,8 @@ mod tests {
             .build();
         assert!(meta.tag.is_none());
         assert!(meta.parent.is_none());
+        assert!(meta.runtime_source_policy.is_none());
+        assert!(meta.runtime_overlay_version.is_none());
         assert!(meta.audit_ref.is_none());
     }
 
@@ -228,5 +257,15 @@ mod tests {
         let b: ContentBlob = serde_json::from_str(r#"{"name":"x","sha256":"y"}"#).unwrap();
         assert_eq!(b.name, "x");
         assert!(serde_json::from_str::<ContentBlob>(r#"{"name":"x","sha256":"y","z":1}"#).is_err());
+    }
+
+    #[test]
+    fn older_meta_without_runtime_overlay_fields_still_parses() {
+        let json = r#"{"id":"x","class":"fs_quick","vm_name":"v","tag":null,
+            "parent":null,"created_unix":1,"content":[],
+            "supervisor_config_digest":"d","audit_ref":null}"#;
+        let meta: CheckpointMeta = serde_json::from_str(json).unwrap();
+        assert!(meta.runtime_source_policy.is_none());
+        assert!(meta.runtime_overlay_version.is_none());
     }
 }

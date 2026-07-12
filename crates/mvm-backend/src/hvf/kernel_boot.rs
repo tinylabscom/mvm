@@ -67,15 +67,17 @@ const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
-/// virtio-fs **root** window + SPI, above the disk band (MAX_DISKS=4 → up to
-/// base+4*stride) and vsock, so it never collides. Used only on a virtiofs-root
+/// virtio-fs **root** window + SPI, above the disk band (MAX_DISKS=5 → up to
+/// base+5*stride) and vsock, so it never collides. Used only on a virtiofs-root
 /// dev boot (there are no virtio-blk disks then).
 const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 6 * MMIO_STRIDE;
 const FS_IRQ: u32 = 54;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 const MMIO_STRIDE: u64 = 0x200;
-/// Max virtio-blk devices (`/dev/vda`..). Bounds the reserved window band.
-const MAX_DISKS: usize = 4;
+/// Max virtio-blk devices (`/dev/vda`..). The builder-with-runtime-overlay path
+/// needs five: rootfs, nix-store, input, output, and the read-only runtime
+/// overlay.
+const MAX_DISKS: usize = 5;
 
 /// MMIO base + SPI for virtio-blk device `i` (`/dev/vda` = 0). Disk 0 keeps the
 /// original single-disk window; disks 1+ sit *above* the vsock slot, so vsock's
@@ -937,6 +939,21 @@ mod tests {
         let meta = KernelImageSource::File(&kernel).metadata().unwrap();
         assert_eq!(meta.file_len, 128);
         assert_eq!(meta.reserved_len, HVF_PAGE_SIZE);
+    }
+
+    #[test]
+    fn fifth_disk_slot_stays_below_virtiofs_window() {
+        let (last_mmio, _) = disk_mmio(MAX_DISKS - 1);
+        assert!(
+            last_mmio + MMIO_STRIDE <= FS_MMIO_BASE,
+            "fifth disk must fit below the virtiofs MMIO window"
+        );
+
+        let (next_mmio, _) = disk_mmio(MAX_DISKS);
+        assert_eq!(
+            next_mmio, FS_MMIO_BASE,
+            "a sixth disk would collide with the virtiofs root window"
+        );
     }
 
     #[test]

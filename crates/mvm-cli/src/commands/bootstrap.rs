@@ -26,3 +26,18 @@ pub(in crate::commands) struct Args {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     super::env::bootstrap::bootstrap_environment(args.production)
 }
+
+#[derive(ClapArgs, Debug, Clone, Default)]
+pub(in crate::commands) struct BuilderVmBootstrapArgs {}
+
+pub(in crate::commands) fn run_builder_vm_bootstrap(
+    _cli: &Cli,
+    _args: BuilderVmBootstrapArgs,
+    _cfg: &MvmConfig,
+) -> Result<()> {
+    #[cfg(feature = "builder-vm")]
+    if mvm_build::libkrun_builder::maybe_reexec_builder_vm_bootstrap_helper()? {
+        return Ok(());
+    }
+    super::env::dev_vz::bootstrap_builder_vm_image()
+}

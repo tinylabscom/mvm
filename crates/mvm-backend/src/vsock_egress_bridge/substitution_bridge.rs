@@ -163,7 +163,7 @@ fn write_nonblocking(stream: &mut UnixStream, payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::net::UnixListener;
+    use crate::test_support::bind_unix_listener;
     use std::time::Duration;
 
     /// No endpoint configured → every stream is refused, nothing opened.
@@ -184,7 +184,9 @@ mod tests {
     fn relays_raw_frame_both_directions() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("subst.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
         let server = std::thread::spawn(move || {
             let (mut c, _) = listener.accept().unwrap();
             let mut buf = [0u8; 64];
@@ -229,7 +231,9 @@ mod tests {
     fn later_frames_relay_and_close_drops_connection() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("subst.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
         // The endpoint accepts exactly one connection and drains it; a second
         // accept (i.e. a second connection wrongly opened for the same stream)
         // would block, proving both frames share one connection.
@@ -265,7 +269,9 @@ mod tests {
     fn poll_fds_include_open_endpoint_streams() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("subst.sock");
-        let listener = UnixListener::bind(&sock).unwrap();
+        let Some(listener) = bind_unix_listener(&sock) else {
+            return;
+        };
         let server = std::thread::spawn(move || {
             let (_c, _) = listener.accept().unwrap();
         });

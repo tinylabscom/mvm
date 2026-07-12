@@ -30,12 +30,11 @@ pub struct MaterializeExt4Input {
     pub output: PathBuf,
     /// Sum of OCI layer uncompressed sizes for this image.
     pub uncompressed_size_bytes: u64,
-    /// When true, the pure path also computes dm-verity and writes the
+    /// When true, materialization also computes dm-verity and writes the
     /// `rootfs.verity` + `rootfs.roothash` sidecars beside the image. Off by
-    /// default so materializing a rootfs is a pure mechanism swap: the run path
-    /// today boots these images without rootfs verity (the boot config sets
-    /// `verity_path`/`roothash` to `None`), and emitting sidecars a probe would
-    /// pick up would silently change that. The builder-VM path ignores this.
+    /// default so generic callers can opt in deliberately; the run-image path
+    /// turns it on to make OCI block roots sealed across both the pure and
+    /// builder-VM materializers.
     pub emit_verity: bool,
 }
 
@@ -88,10 +87,8 @@ impl Default for MaterializeExt4Options {
 pub struct MaterializedExt4 {
     pub path: PathBuf,
     pub size_bytes: u64,
-    /// 64-char lowercase-hex dm-verity root hash, when the materializer computed
-    /// it in-process (the `pure-mkfs` path writes `rootfs.verity` +
-    /// `rootfs.roothash` beside the image). `None` for the builder-VM path, which
-    /// generates verity separately.
+    /// 64-char lowercase-hex dm-verity root hash when the materializer wrote
+    /// `rootfs.verity` + `rootfs.roothash` beside the image.
     pub verity_root_hash: Option<String>,
 }
 
@@ -113,6 +110,9 @@ pub enum RootfsError {
     #[error("builder-vm feature is required for ext4 materialization")]
     BuilderVmFeatureDisabled,
 
+    #[error("dm-verity sidecar emission requires the `pure-mkfs` feature")]
+    VerityFeatureDisabled,
+
     #[cfg(feature = "builder-vm")]
     #[error("builder VM ext4 materialization failed: {0}")]
     BuilderVm(#[from] crate::builder_vm::BuilderVmError),
@@ -128,6 +128,14 @@ pub enum RootfsError {
     #[cfg(feature = "pure-mkfs")]
     #[error("building ext4 image in-process: {0}")]
     PureBuild(#[from] mvm_ext4::Ext4Error),
+
+    #[cfg(feature = "pure-mkfs")]
+    #[error("reading rootfs image {path}: {source}")]
+    ReadOutput {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[cfg(feature = "pure-mkfs")]
     #[error("writing rootfs image {path}: {source}")]
@@ -213,10 +221,12 @@ pub fn materialize_ext4(
             return Err(err);
         }
 
+        let verity_root_hash = maybe_emit_verity_sidecars(input)?;
+
         Ok(MaterializedExt4 {
             path: input.output.clone(),
             size_bytes,
-            verity_root_hash: None,
+            verity_root_hash,
         })
     }
 }
@@ -292,9 +302,9 @@ fn materialize_ext4_in_builder_vm(
 #[cfg(feature = "builder-vm")]
 fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendChoice {
     // Use the resolved builder backend (override → env → auto-detect: macOS 26+
-    // Apple Silicon → hvf builder, everywhere else → libkrun). Delegates to
-    // `resolve_choice()` so the materializer always uses the same backend as
-    // every other build entry point.
+    // Apple Silicon → hvf builder, Linux native → qemu builder, everywhere
+    // else → libkrun). Delegates to `resolve_choice()` so the materializer
+    // always uses the same backend as every other build entry point.
     crate::builder_backend_select::resolve_choice()
 }
 
@@ -386,41 +396,12 @@ pub fn materialize_ext4_pure(
         })?;
     }
     let size_bytes = stream_pure_ext4_output(&nodes, &input.output)?;
-
-    if !input.emit_verity {
-        return Ok(MaterializedExt4 {
-            path: input.output.clone(),
-            size_bytes,
-            verity_root_hash: None,
-        });
-    }
-
-    // dm-verity, computed in-process (no `veritysetup`). v1, sha256, 4 KiB
-    // data+hash blocks, zero salt — the params the boot path expects. Write the
-    // hash tree + 64-hex root hash beside the image under the fixed names
-    // `probe_verity_sidecar` reads (`rootfs.verity` / `rootfs.roothash`).
-    let image = std::fs::read(&input.output).map_err(|source| RootfsError::WriteOutput {
-        path: input.output.clone(),
-        source,
-    })?;
-    let salt = [0u8; 32];
-    let verity = mvm_ext4::verity::format(&image, &salt, 4096, 4096);
-    let dir = input
-        .output
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let root_hex = mvm_ext4::verity::to_hex(&verity.root_hash);
-    write_sidecar(&dir.join("rootfs.verity"), &verity.hash_tree)?;
-    write_sidecar(
-        &dir.join("rootfs.roothash"),
-        format!("{root_hex}\n").as_bytes(),
-    )?;
+    let verity_root_hash = maybe_emit_verity_sidecars(input)?;
 
     Ok(MaterializedExt4 {
         path: input.output.clone(),
         size_bytes,
-        verity_root_hash: Some(root_hex),
+        verity_root_hash,
     })
 }
 
@@ -460,6 +441,55 @@ fn write_sidecar(path: &std::path::Path, body: &[u8]) -> Result<(), RootfsError>
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn maybe_emit_verity_sidecars(input: &MaterializeExt4Input) -> Result<Option<String>, RootfsError> {
+    if !input.emit_verity {
+        return Ok(None);
+    }
+
+    let image = std::fs::read(&input.output).map_err(|source| RootfsError::ReadOutput {
+        path: input.output.clone(),
+        source,
+    })?;
+    Ok(Some(emit_verity_sidecars_for_image(&input.output, &image)?))
+}
+
+#[cfg(all(feature = "builder-vm", not(feature = "pure-mkfs")))]
+fn maybe_emit_verity_sidecars(input: &MaterializeExt4Input) -> Result<Option<String>, RootfsError> {
+    if input.emit_verity {
+        return Err(RootfsError::VerityFeatureDisabled);
+    }
+    Ok(None)
+}
+
+#[cfg(feature = "pure-mkfs")]
+fn emit_verity_sidecars_for_image(
+    image_path: &std::path::Path,
+    image: &[u8],
+) -> Result<String, RootfsError> {
+    // dm-verity, computed in-process (no `veritysetup`). The block sizes and
+    // salt must match the pinned `mvm-verity-init` / `veritysetup` contract or
+    // the guest will panic at boot with a mismatched hash-tree geometry.
+    let salt = [0u8; 32];
+    let verity = mvm_ext4::verity::format(
+        image,
+        &salt,
+        crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
+        crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
+    );
+    let dir = image_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let root_hex = mvm_ext4::verity::to_hex(&verity.root_hash);
+    write_sidecar(&dir.join("rootfs.verity"), &verity.hash_tree)?;
+    write_sidecar(
+        &dir.join("rootfs.roothash"),
+        format!("{root_hex}\n").as_bytes(),
+    )?;
+    Ok(root_hex)
 }
 
 #[cfg(feature = "pure-mkfs")]
@@ -840,6 +870,57 @@ mod tests {
         assert!(!verity.is_empty());
         let roothash = std::fs::read_to_string(out.path().join("rootfs.roothash")).unwrap();
         assert_eq!(roothash, format!("{root_hex}\n"));
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn emit_verity_sidecars_can_seal_an_existing_image() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let out_path = out.path().join("rootfs.ext4");
+        let input = MaterializeExt4Input::new(src.path().to_path_buf(), out_path.clone(), 0);
+
+        let mat = materialize_ext4_pure(&input).expect("pure materialize");
+        assert!(mat.verity_root_hash.is_none());
+
+        let image = std::fs::read(&out_path).unwrap();
+        let root_hex = emit_verity_sidecars_for_image(&out_path, &image).expect("emit sidecars");
+        assert_eq!(root_hex.len(), 64);
+        assert!(out.path().join("rootfs.verity").is_file());
+        assert_eq!(
+            std::fs::read_to_string(out.path().join("rootfs.roothash")).unwrap(),
+            format!("{root_hex}\n")
+        );
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn emit_verity_sidecars_uses_the_pinned_boot_contract_block_sizes() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let out_path = out.path().join("rootfs.ext4");
+        let input = MaterializeExt4Input::new(src.path().to_path_buf(), out_path.clone(), 0);
+        materialize_ext4_pure(&input).expect("pure materialize");
+
+        let image = std::fs::read(&out_path).unwrap();
+        let root_hex = emit_verity_sidecars_for_image(&out_path, &image).expect("emit sidecars");
+        let actual_sidecar = std::fs::read(out.path().join("rootfs.verity")).unwrap();
+        let expected = mvm_ext4::verity::format(
+            &image,
+            &[0u8; 32],
+            crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
+            crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
+        );
+        let wrong_contract = mvm_ext4::verity::format(&image, &[0u8; 32], 1024, 4096);
+
+        assert_eq!(actual_sidecar, expected.hash_tree);
+        assert_eq!(root_hex, mvm_ext4::verity::to_hex(&expected.root_hash));
+        assert_ne!(
+            actual_sidecar, wrong_contract.hash_tree,
+            "the pure path must not drift to the older 1K/4K verity geometry"
+        );
     }
 
     #[cfg(feature = "pure-mkfs")]

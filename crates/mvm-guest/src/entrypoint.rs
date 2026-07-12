@@ -1196,7 +1196,19 @@ mod tests {
 
     #[test]
     fn test_validate_setuid_rejected() {
-        let (tmp, marker, _wrapper) = make_tree(0o4755, b"#!/bin/sh\n");
+        let (tmp, marker, wrapper) = make_tree(0o4755, b"#!/bin/sh\n");
+        let mode = std::fs::metadata(&wrapper)
+            .expect("wrapper metadata")
+            .permissions()
+            .mode()
+            & 0o7777;
+        if mode & 0o4000 == 0 {
+            eprintln!(
+                "skipping setuid rejection test: host filesystem kept {:o} instead of a setuid mode",
+                mode
+            );
+            return;
+        }
         let policy = test_policy(marker, tmp.path().join("usr/lib/mvm/wrappers"), 0o755);
         match policy.validate() {
             Err(ValidationError::SetuidOrSetgid { mode, .. }) => {

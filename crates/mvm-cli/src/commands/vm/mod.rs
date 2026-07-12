@@ -34,7 +34,7 @@ pub(super) mod sdk_no_vm;
 pub(super) mod session;
 pub(super) mod set_ttl;
 pub(super) mod tenant_resolution;
-pub(super) mod up;
+pub(crate) mod up;
 pub(in crate::commands) mod verb_audit;
 pub(super) mod volume;
 pub(in crate::commands) mod wait;

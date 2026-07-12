@@ -1,6 +1,7 @@
-#[cfg(feature = "builder-vm")]
-use super::kernel::{KernelSource, resolve_kernel_source};
 use super::*;
+use crate::commands::runtime_overlay::{
+    RuntimeOverlayAcquireMode, runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
+};
 
 pub(crate) fn ensure_default_microvm_image(
     mode: mvm_build::pipeline::BuildMode,
@@ -19,29 +20,25 @@ pub(crate) fn ensure_default_microvm_image(
 pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     let cache = mvm_core::config::mvm_cache_dir();
     let arch = builder_vm_host_arch();
-    let source_checkout = find_builder_vm_flake_is_source_checkout();
-    let source_build_requested = workload_kernel_source_build_requested(source_checkout);
-    let resolved = resolve_workload_kernel_bootstrap(&cache, arch, prod, source_build_requested);
+    let resolved =
+        resolve_workload_kernel_bootstrap(&cache, arch, prod, find_builder_vm_flake().is_ok());
     match resolved {
         WorkloadKernelBootstrap::Cached(path) => Ok(path),
         WorkloadKernelBootstrap::ReusableBuilder(path) => {
             ui::info("Reusing builder-image kernel as workload kernel (dev mode).");
             Ok(path)
         }
-        WorkloadKernelBootstrap::Build(path) => {
-            ui::info("Building workload kernel locally from the source checkout...");
-            #[cfg(feature = "builder-vm")]
-            {
-                build_kernel_via_stage0(KernelVariant::Workload, false)?;
-                Ok(path)
-            }
-            #[cfg(not(feature = "builder-vm"))]
-            {
-                let _ = &path;
-                anyhow::bail!(
-                    "source checkout detected but this mvmctl was built without the `builder-vm` feature"
-                );
-            }
+        WorkloadKernelBootstrap::BuildLocal(path) => {
+            ui::info("Building workload kernel locally (source checkout)...");
+            build_workload_kernel_locally()
+                .map(|built| built.display().to_string())
+                .or_else(|e| {
+                    if std::path::Path::new(&path).is_file() {
+                        Ok(path)
+                    } else {
+                        Err(e)
+                    }
+                })
         }
         WorkloadKernelBootstrap::Download(dest) => {
             download_workload_kernel(arch, &dest)?;
@@ -50,11 +47,69 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     }
 }
 
+pub(crate) fn ensure_workload_verity_initrd() -> Result<String> {
+    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
+    let version = env!("CARGO_PKG_VERSION");
+    let arch = mvm_core::arch::GuestArch::host();
+    let layout = mvm_build::verity_initrd::VerityInitrdLayout::under(&cache_root, version, arch);
+    let workspace_root = workload_verity_initrd_source_checkout_root().filter(|_| {
+        runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
+    });
+    if let Some(ws) = workspace_root {
+        return mvm_build::verity_initrd::resolve_or_build_verity_initrd(
+            &cache_root,
+            version,
+            arch,
+            &ws,
+        )
+        .map(|p| p.display().to_string())
+        .context("build verity initrd from the source checkout");
+    }
+    if layout.initrd.is_file() {
+        return Ok(layout.initrd.display().to_string());
+    }
+
+    if let Some(bytes) = embedded_verity_init_bytes() {
+        return mvm_build::verity_initrd::install_prebuilt_verity_initrd(
+            bytes,
+            &cache_root,
+            version,
+            arch,
+        )
+        .map(|p| p.display().to_string())
+        .context("install embedded verity initrd");
+    }
+
+    anyhow::bail!(
+        "no verity initrd available: this build embeds no mvm-verity-init binary and there is no source checkout to cross-compile from"
+    )
+}
+
+fn workload_verity_initrd_source_checkout_root() -> Option<std::path::PathBuf> {
+    runtime_overlay_source_checkout_root().or_else(|| {
+        super::find_builder_vm_flake().ok().and_then(|flake_dir| {
+            std::path::PathBuf::from(flake_dir)
+                .parent()
+                .and_then(|p| p.parent())
+                .and_then(|p| p.parent())
+                .map(std::path::Path::to_path_buf)
+        })
+    })
+}
+
+fn embedded_verity_init_bytes() -> Option<&'static [u8]> {
+    crate::host_binaries::embedded::EMBEDDED
+        .iter()
+        .find(|b| b.name == "mvm-verity-init")
+        .map(|b| b.bytes)
+        .filter(|b| !b.is_empty())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorkloadKernelBootstrap {
     Cached(String),
     ReusableBuilder(String),
-    Build(String),
+    BuildLocal(String),
     Download(String),
 }
 
@@ -62,34 +117,33 @@ pub(super) fn resolve_workload_kernel_bootstrap(
     cache_dir: &str,
     arch: &str,
     prod: bool,
-    source_build_requested: bool,
+    source_checkout: bool,
 ) -> WorkloadKernelBootstrap {
-    if let Some(cached) = find_cached_workload_kernel(cache_dir, arch) {
+    if let Some(cached) = find_cached_workload_kernel(cache_dir, arch, prod) {
         return WorkloadKernelBootstrap::Cached(cached);
     }
     if !prod && let Some(builder) = find_reusable_builder_kernel(cache_dir, arch) {
         return WorkloadKernelBootstrap::ReusableBuilder(builder);
     }
-    if source_build_requested {
-        return WorkloadKernelBootstrap::Build(format!(
-            "{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"
-        ));
+    let dest = format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux");
+    if source_checkout {
+        WorkloadKernelBootstrap::BuildLocal(dest)
+    } else {
+        WorkloadKernelBootstrap::Download(dest)
     }
-    WorkloadKernelBootstrap::Download(format!(
-        "{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"
-    ))
 }
 
-fn workload_kernel_source_build_requested(source_checkout: bool) -> bool {
-    #[cfg(feature = "builder-vm")]
-    {
-        source_checkout && matches!(resolve_kernel_source(), Some(KernelSource::Compile))
-    }
-    #[cfg(not(feature = "builder-vm"))]
-    {
-        let _ = source_checkout;
-        false
-    }
+#[cfg(feature = "builder-vm")]
+fn build_workload_kernel_locally() -> Result<std::path::PathBuf> {
+    super::build_kernel_via_stage0(super::KernelVariant::Workload, false)
+}
+
+#[cfg(not(feature = "builder-vm"))]
+fn build_workload_kernel_locally() -> Result<std::path::PathBuf> {
+    anyhow::bail!(
+        "building the workload kernel locally requires the `builder-vm` feature; \
+         use a release build with published kernels or rebuild mvmctl with builder-vm enabled"
+    )
 }
 
 pub(super) fn find_reusable_builder_kernel(cache_dir: &str, arch: &str) -> Option<String> {
@@ -119,14 +173,21 @@ fn download_workload_kernel(arch: &str, dest: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn find_cached_workload_kernel(cache_dir: &str, arch: &str) -> Option<String> {
-    [
+pub(super) fn find_cached_workload_kernel(
+    cache_dir: &str,
+    arch: &str,
+    prod: bool,
+) -> Option<String> {
+    let mut candidates = vec![
         format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux"),
         format!("{cache_dir}/default-microvm/prod/vmlinux"),
-        format!("{cache_dir}/default-microvm/dev/vmlinux"),
-    ]
-    .into_iter()
-    .find(|p| std::path::Path::new(p).is_file())
+    ];
+    if !prod {
+        candidates.push(format!("{cache_dir}/default-microvm/dev/vmlinux"));
+    }
+    candidates
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file())
 }
 
 fn ensure_default_microvm_prod_image(cache_dir: &str) -> Result<(String, String)> {
@@ -242,10 +303,10 @@ fn build_default_microvm_via_libkrun(
         .to_path_buf();
 
     let host_bins_cache = format!("{}/host-bins", mvm_core::config::mvm_cache_dir());
-    let host_bin_dir = crate::host_binaries::extract::ensure_extracted_for_boot(
+    let host_bin_dir = crate::host_binaries::extract::ensure_boot_host_binaries(
         std::path::Path::new(&host_bins_cache),
-    )
-    .map_err(|e| anyhow::anyhow!("extract embedded host-vm binaries: {e}"))?;
+    )?
+    .dir;
 
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating default-microvm dev out dir {out_dir}"))?;

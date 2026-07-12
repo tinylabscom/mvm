@@ -7,9 +7,9 @@ say they ship.
 **Status:** This walks the macOS-host-runnable gates an operator
 clears before `git tag v<X>.<Y>.<Z>`. The Linux/KVM-only gates
 (live boot benchmark, verified-boot tamper regression, builder-
-image reproducibility) run in `.github/workflows/security.yml`
-on the CI side; this runbook focuses on what the operator can
-attest locally before pushing the tag.
+image reproducibility, and the native-Linux builder contract)
+run in CI or on the approved real KVM host; this runbook focuses
+on what the operator can attest locally before pushing the tag.
 
 The gates correspond 1:1 to the plan-60 §"Checkpoint review
 process" exit checklist and the eight security claims in
@@ -101,7 +101,46 @@ Markers:
 `--json` mode emits one object per check for programmatic
 release gates.
 
-## Gate 4 — Audit chain integrity is verifiable
+## Gate 4 — Runtime-overlay release contract is still true
+
+Every release now ships a shared readonly guest-runtime overlay,
+and the release operator must verify that the release surface still
+matches the product contract before tagging.
+
+Release artifacts that must exist per architecture:
+
+- `runtime-overlay-<arch>.ext4`
+- `runtime-overlay-<arch>.verity`
+- `runtime-overlay-<arch>.roothash`
+- `runtime-overlay-<arch>.VERSION`
+- `runtime-overlay-<arch>-checksums-sha256.txt`
+
+The operator confirms:
+
+1. the docs still say the overlay is cached under
+   `~/.cache/mvm/runtime-overlay/<version>/<arch>/`
+2. only **guest-executed** runtime binaries belong in the overlay
+3. admitted backends mount it read-only
+4. running VMs do not hot-remount
+5. stopped VMs adopt a new version-matched overlay only on restart
+6. unsupported Linux rootfs-backed libkrun builder use is fail-closed
+
+The release workflow itself publishes the overlay assets, but the
+operator still verifies the contract by checking the docs and
+release surface together:
+
+```bash
+$ rg -n "runtime-overlay/<version>|hot-remount|stopped VMs|guest-executed" \
+    public/src/content/docs/reference/releases.md \
+    public/src/content/docs/reference/filesystem.md \
+    public/src/content/docs/reference/guest-agent.md \
+    public/src/content/docs/reference/cli-commands.md
+```
+
+For the full rollout/update/rollback procedure, see
+`specs/runbooks/runtime-overlay-production-rollout.md`.
+
+## Gate 5 — Audit chain integrity is verifiable
 
 The audit chain at `~/.mvm/audit/<tenant>.jsonl` is the
 operator-attested record of every `mvmctl` invocation. Before
@@ -118,7 +157,7 @@ mismatch). Treat as a security incident — the chain shouldn't
 break under normal operation, so a failure means either
 tampering or a regression in the chain-emit path.
 
-## Gate 5 — Destruction certificate verifier round-trip
+## Gate 6 — Destruction certificate verifier round-trip
 
 The hosted-cloud tenant deprovisioning workflow belongs to `mvmd`.
 `mvm` still owns the overlay erasure substrate and the independent
@@ -142,10 +181,11 @@ contains a matching destruction event with the `cert_fingerprint`
 label. See `specs/runbooks/overlay-erasure.md` for the full
 three-axis documentation.
 
-## Gate 6 — Linux/KVM-only gates have passed in CI
+## Gate 7 — Linux/KVM-only gates have passed in CI or on the approved host
 
 These can't run on a macOS host; the operator reads them off
-the CI status panel rather than running them locally:
+the CI status panel or the approved KVM host evidence rather than
+running them locally:
 
 | Gate | Workflow | What it asserts |
 |------|----------|-----------------|
@@ -156,6 +196,7 @@ the CI status panel rather than running them locally:
 | Cargo deny + audit | `security.yml::cargo-{deny,audit}` | Supply chain advisory + license clean |
 | Fuzz | `security.yml::fuzz` | vsock frame parser fuzz lanes pass for 5 min (30 min on cron) |
 | Flake lock cleanliness | `security.yml::flake-locks-clean` | Every `flake.lock` is committed + in sync |
+| Native Linux builder overlay contract | approved KVM host `88.99.197.234` | Linux auto-detect picks qemu and rootfs-backed libkrun builder remains fail-closed |
 
 A red status on any of these blocks the release. The CI lane
 descriptions point to the ADR section that motivates them.
@@ -186,13 +227,14 @@ After every gate above is green, the operator records a sign-
 off line in the release commit message:
 
 ```text
-release-readiness: all 6 macOS gates + 7 CI gates green
+release-readiness: all 7 local gates + CI/KVM gates green
   perf budgets: 11 tracked, no drift
   posture: host_signer + audit_chain + tls_minimum + overlay_root ✓
+  runtime overlay: release assets + restart-only rollout contract ✓
   audit chain: 1247 entries verify clean
   destruction cert round-trip: smoke ✓
 ```
 
-The auditor receiving the release artifacts replays Gates 2-5
+The auditor receiving the release artifacts replays Gates 2-6
 against the published binaries; mismatch is a signal to dig
 into the operator's chain before trusting the artifacts.

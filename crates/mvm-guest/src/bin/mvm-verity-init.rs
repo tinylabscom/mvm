@@ -286,6 +286,40 @@ mod config {
         fn handles_empty_cmdline() {
             assert!(VeritySetupConfig::parse("").is_err());
         }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn hash_start_block_uses_superblock_when_sidecar_has_extra_block() {
+            let data_blocks = 9_448;
+            let hash_dev_size = 76 * 4_096;
+            assert_eq!(
+                crate::linux::choose_hash_start_block(data_blocks, hash_dev_size)
+                    .expect("hash start block"),
+                1
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn hash_start_block_accepts_no_superblock_sidecars() {
+            let data_blocks = 9_448;
+            let hash_dev_size = 75 * 4_096;
+            assert_eq!(
+                crate::linux::choose_hash_start_block(data_blocks, hash_dev_size)
+                    .expect("hash start block"),
+                0
+            );
+        }
+
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn hash_start_block_rejects_truncated_sidecars() {
+            let data_blocks = 9_448;
+            let hash_dev_size = 74 * 4_096;
+            let err =
+                crate::linux::choose_hash_start_block(data_blocks, hash_dev_size).unwrap_err();
+            assert!(err.contains("hash device too small"), "{err}");
+        }
     }
 }
 
@@ -432,23 +466,19 @@ mod linux {
         //
         // Salt is zero (matches mkGuest's pinned `--salt=00…00`).
         //
-        // `data-block-size = 1024` (NOT 4096) so the device's logical
-        // block size matches the ext4 we ship — mkGuest builds the
-        // rootfs with mke2fs's default 1 KiB blocks at our typical
-        // 200 MB image size, and the kernel's ext4 refuses to mount
-        // when FS block size < device logical block size. The hash
-        // tree itself stays at 4 KiB because that's the typical
+        // `data-block-size` comes from the ext4 superblock on the data
+        // device. Older sealed images and the runtime overlay still use
+        // 1 KiB blocks, while the newer in-process OCI rootfs path emits
+        // 4 KiB ext4 blocks. The guest must reconstruct the verity table
+        // from the image's actual on-disk geometry, not a baked constant.
+        // The hash tree itself stays at 4 KiB because that's the typical
         // veritysetup default and gives a reasonable fan-out.
         //
-        // `hash_start_block = 1` (NOT 0): `veritysetup format` writes a
-        // 512-byte "verity superblock" at offset 0 of the sidecar that
-        // stores tree metadata (UUID, hash type, salt). The actual
-        // Merkle tree starts at block 1. Setting hash_start_block=0
-        // makes the kernel read the superblock as a hash node and
-        // report `metadata block 0 is corrupted`. The `--no-superblock`
-        // veritysetup flag would let us use 0, but keeping the
-        // superblock is what makes `veritysetup verify` work against
-        // the artifact (used by the runbook + CI).
+        // `hash_start_block` depends on the sidecar layout. `veritysetup format`
+        // writes a 512-byte verity superblock at offset 0 and puts the Merkle
+        // tree at block 1; the pure in-process path writes the no-superblock
+        // layout and starts the tree at block 0. We detect which artifact we
+        // have from the hash-device geometry so both cached layouts boot.
         // ── 4. Open /dev/mapper/control (auto-created by devtmpfs).
         let ctrl = fs::OpenOptions::new()
             .read(true)
@@ -568,13 +598,13 @@ mod linux {
     /// Parameters are pinned to the values the rest of the boot path
     /// expects:
     ///
-    /// - `data-block-size = 1024` — must match the ext4 block size
-    ///   (mke2fs's default for sub-512 MiB images, and what
-    ///   `Mke2fsOptions::default()` produces on the OCI path).
+    /// - `data-block-size` — probed from the ext4 superblock on the data
+    ///   device so both older 1 KiB-block images and newer 4 KiB-block
+    ///   OCI rootfs images boot correctly.
     /// - `hash-block-size = 4096` — veritysetup default.
-    /// - `hash_start_block = 1` — the verity superblock occupies
-    ///   block 0 of the hash device; the Merkle tree starts at
-    ///   block 1.
+    /// - `hash_start_block = 1` when the sidecar carries the verity
+    ///   superblock in block 0, else `0` for the no-superblock
+    ///   layout the in-process builder emits.
     /// - `algorithm = sha256`, `salt = 64 hex zeros` — match
     ///   `mvm_build::oci_to_rootfs::verity::VeritysetupOptions::default()`.
     fn setup_verity_target(
@@ -584,23 +614,30 @@ mod linux {
         hash_dev: &str,
         roothash: &str,
     ) -> Result<(), String> {
-        const DATA_BLOCK_SIZE: u64 = 1024;
         const HASH_BLOCK_SIZE: u64 = 4096;
+        let data_block_size = probe_ext4_block_size(data_dev)?;
         let data_size = block_device_size(data_dev)?;
-        if !data_size.is_multiple_of(DATA_BLOCK_SIZE) {
+        let hash_size = block_device_size(hash_dev)?;
+        if !data_size.is_multiple_of(data_block_size) {
             return Err(format!(
-                "{device_name}: data device {data_dev} size {data_size} not multiple of {DATA_BLOCK_SIZE}"
+                "{device_name}: data device {data_dev} size {data_size} not multiple of {data_block_size}"
             ));
         }
-        let data_blocks = data_size / DATA_BLOCK_SIZE;
-        let num_sectors = data_blocks * (DATA_BLOCK_SIZE / 512);
+        let data_blocks = data_size / data_block_size;
+        let num_sectors = data_blocks * (data_block_size / 512);
+        let hash_start_block = choose_hash_start_block(data_blocks, hash_size)?;
         let salt = "0".repeat(64);
         let table_args = format!(
-            "1 {data_dev} {hash_dev} {DATA_BLOCK_SIZE} {HASH_BLOCK_SIZE} {data_blocks} 1 sha256 {roothash} {salt}"
+            "1 {data_dev} {hash_dev} {data_block_size} {HASH_BLOCK_SIZE} {data_blocks} {hash_start_block} sha256 {roothash} {salt}"
         );
         msg(&format!(
-            "mvm-verity-init: {device_name} verity table = {num_sectors} sectors, {data_blocks} data blocks"
+            "mvm-verity-init: {device_name} verity table = {num_sectors} sectors, {data_blocks} data blocks, data_block_size={data_block_size}"
         ));
+        if hash_start_block == 0 {
+            msg(&format!(
+                "mvm-verity-init: {device_name} sidecar has no verity superblock; using hash_start_block=0"
+            ));
+        }
 
         // DM_DEV_CREATE — register the device by name (no table yet).
         let mut io = base_ioctl();
@@ -635,6 +672,41 @@ mod linux {
             .map_err(|e| format!("DM_DEV_SUSPEND(resume, {device_name}): {e}"))?;
         msg(&format!("mvm-verity-init: dm-verity {device_name} active"));
         Ok(())
+    }
+
+    pub(super) fn choose_hash_start_block(data_blocks: u64, hash_size: u64) -> Result<u64, String> {
+        const HASH_BLOCK_SIZE: u64 = 4096;
+        if !hash_size.is_multiple_of(HASH_BLOCK_SIZE) {
+            return Err(format!(
+                "hash device size {hash_size} is not a multiple of {HASH_BLOCK_SIZE}"
+            ));
+        }
+        let hash_blocks = hash_size / HASH_BLOCK_SIZE;
+        let tree_blocks = verity_tree_block_count(data_blocks, HASH_BLOCK_SIZE);
+        if hash_blocks >= tree_blocks + 1 {
+            Ok(1)
+        } else if hash_blocks >= tree_blocks {
+            Ok(0)
+        } else {
+            Err(format!(
+                "hash device too small: need at least {tree_blocks} hash blocks for {data_blocks} data blocks, got {hash_blocks}"
+            ))
+        }
+    }
+
+    fn verity_tree_block_count(data_blocks: u64, hash_block_size: u64) -> u64 {
+        const DIGEST_SIZE: u64 = 32;
+        let hashes_per_block = hash_block_size / DIGEST_SIZE;
+        let mut level_hashes = data_blocks.max(1);
+        let mut total_blocks = 0;
+        loop {
+            let level_blocks = level_hashes.div_ceil(hashes_per_block).max(1);
+            total_blocks += level_blocks;
+            if level_blocks == 1 {
+                return total_blocks;
+            }
+            level_hashes = level_blocks;
+        }
     }
 
     /// Resolve the device path for a freshly-created dm-verity
@@ -766,6 +838,38 @@ mod linux {
         Ok(size)
     }
 
+    fn probe_ext4_block_size(path: &str) -> Result<u64, String> {
+        const SUPERBLOCK_OFFSET: u64 = 1024;
+        const LOG_BLOCK_SIZE_OFFSET: usize = 0x18;
+        const MAGIC_OFFSET: usize = 0x38;
+        const EXT4_SUPER_MAGIC: u16 = 0xef53;
+
+        let file = fs::File::open(path).map_err(|e| format!("open {path}: {e}"))?;
+        let mut superblock = [0u8; 1024];
+        std::os::unix::fs::FileExt::read_exact_at(&file, &mut superblock, SUPERBLOCK_OFFSET)
+            .map_err(|e| format!("read ext4 superblock from {path}: {e}"))?;
+
+        let magic = u16::from_le_bytes([superblock[MAGIC_OFFSET], superblock[MAGIC_OFFSET + 1]]);
+        if magic != EXT4_SUPER_MAGIC {
+            return Err(format!(
+                "{path} ext4 superblock magic mismatch: expected 0x{EXT4_SUPER_MAGIC:04x}, got 0x{magic:04x}"
+            ));
+        }
+
+        let log_block_size = u32::from_le_bytes(
+            superblock[LOG_BLOCK_SIZE_OFFSET..LOG_BLOCK_SIZE_OFFSET + 4]
+                .try_into()
+                .map_err(|_| format!("parse ext4 log block size from {path}"))?,
+        );
+        if log_block_size > 6 {
+            return Err(format!(
+                "{path} ext4 log block size {log_block_size} is out of range"
+            ));
+        }
+
+        Ok(1024u64 << log_block_size)
+    }
+
     /// Issue a device-mapper ioctl on the `/dev/mapper/control` fd.
     ///
     /// # Safety
@@ -877,5 +981,73 @@ mod linux {
             return Err(format!("execv({prog}): {}", io::Error::last_os_error()));
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::{choose_hash_start_block, probe_ext4_block_size};
+        use std::io::{Seek, SeekFrom, Write};
+
+        fn write_superblock_image(log_block_size: u32) -> tempfile::NamedTempFile {
+            let mut image = tempfile::NamedTempFile::new().expect("temp image");
+            image
+                .as_file_mut()
+                .set_len(8 * 1024)
+                .expect("set temp image length");
+            image
+                .as_file_mut()
+                .seek(SeekFrom::Start(1024))
+                .expect("seek to ext4 superblock");
+            let mut superblock = [0u8; 1024];
+            superblock[0x18..0x1c].copy_from_slice(&log_block_size.to_le_bytes());
+            superblock[0x38..0x3a].copy_from_slice(&0xef53u16.to_le_bytes());
+            image
+                .as_file_mut()
+                .write_all(&superblock)
+                .expect("write ext4 superblock");
+            image
+        }
+
+        #[test]
+        fn probe_ext4_block_size_reads_1k_block_images() {
+            let image = write_superblock_image(0);
+            assert_eq!(
+                probe_ext4_block_size(image.path().to_str().expect("temp path"))
+                    .expect("block size"),
+                1024
+            );
+        }
+
+        #[test]
+        fn probe_ext4_block_size_reads_4k_block_images() {
+            let image = write_superblock_image(2);
+            assert_eq!(
+                probe_ext4_block_size(image.path().to_str().expect("temp path"))
+                    .expect("block size"),
+                4096
+            );
+        }
+
+        #[test]
+        fn probe_ext4_block_size_rejects_bad_magic() {
+            let mut image = tempfile::NamedTempFile::new().expect("temp image");
+            image
+                .as_file_mut()
+                .set_len(8 * 1024)
+                .expect("set temp image length");
+            let err = probe_ext4_block_size(image.path().to_str().expect("temp path"))
+                .expect_err("bad magic must fail");
+            assert!(err.contains("magic mismatch"), "{err}");
+        }
+
+        #[test]
+        fn choose_hash_start_block_accepts_exact_no_superblock_layout() {
+            let data_blocks = 8_456;
+            let hash_dev_size = 68 * 4_096;
+            assert_eq!(
+                choose_hash_start_block(data_blocks, hash_dev_size).expect("hash start block"),
+                0
+            );
+        }
     }
 }

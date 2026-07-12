@@ -57,6 +57,7 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+mvm-ext4.workspace = true
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true

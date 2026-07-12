@@ -142,6 +142,17 @@
           withDevShell = false;
         };
 
+      mvmGuestDevFor = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        import (workspace + "/nix/packages/mvm-guest-agent.nix") {
+          inherit pkgs;
+          lib = pkgs.lib;
+          mvmSrc = workspace;
+          withDevShell = true;
+        };
+
       # mvm-runner — the function-workload entrypoint runner.
       # Folded into mvm-guest as a [[bin]], so we select just that
       # binary out of the mvm-guest package; workspace Cargo.lock
@@ -165,6 +176,16 @@
           };
         };
 
+      mvmEgressClientFor = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        import (workspace + "/nix/packages/mvm-egress-client.nix") {
+          inherit pkgs;
+          lib = pkgs.lib;
+          mvmSrc = workspace;
+        };
+
       # libmvm_host_services.so — the in-guest host-services FFI shared
       # object the language SDKs dlopen via ctypes/koffi. One JSON-in/
       # JSON-out C ABI over the broker clients; built for the glibc workload
@@ -179,6 +200,18 @@
           lib = pkgs.lib;
           mvmSrc = workspace;
         };
+
+      # The runtime overlay is mounted into arbitrary guest userspaces,
+      # including OCI rootfs imports that do not carry `/nix/store` or a glibc
+      # loader at the host build path. Bundle the loader + minimal runtime
+      # libs the overlay executables need, then rewrite those executables to
+      # point at `/mvm/runtime/lib/*` so `/mvm/runtime/{agent,netinit,
+      # seccomp-apply,runner,egress-client}` stays launchable regardless of the
+      # rootfs image's own libc layout.
+      runtimeLoaderFor = pkgs: pkgs.stdenv.cc.bintools.dynamicLinker;
+      runtimeLoaderBaseFor = pkgs: builtins.baseNameOf (runtimeLoaderFor pkgs);
+      runtimeLibcFor = pkgs: "${pkgs.glibc.out}/lib/libc.so.6";
+      runtimeLibgccFor = pkgs: "${pkgs.lib.getLib pkgs.stdenv.cc.cc}/lib/libgcc_s.so.1";
 
       # Pinned-for-determinism flags. MUST mirror:
       #
@@ -228,7 +261,9 @@
         let
           pkgs = import nixpkgs { inherit system; };
           guest = mvmGuestFor system;
+          guestDev = mvmGuestDevFor system;
           runner = mvmRunnerFor system;
+          egressClient = mvmEgressClientFor system;
           hostsvc = mvmHostServicesFfiFor system;
         in
         pkgs.runCommand "mvm-runtime-overlay-${system}"
@@ -237,9 +272,10 @@
               pkgs.e2fsprogs
               (pinnedCryptsetupFor pkgs) # provides pinned veritysetup
               pkgs.coreutils
+              pkgs.patchelf
             ];
             passthru = {
-              inherit guest runner hostsvc;
+              inherit guest guestDev runner hostsvc;
               version = overlayVersion;
               dataBlockSize = overlayBlockSize;
               verityHashAlgorithm = overlayVerityHashAlgorithm;
@@ -251,21 +287,49 @@
             # Staging tree — the eventual filesystem root inside the
             # overlay ext4. The kernel mounts this at /mvm/runtime
             # inside the guest, so the *FS root* contains
-            # /agent, /seccomp-apply, /runner, /sdk-py/, /sdk-ts/,
-            # /VERSION.
+            # /agent, /seccomp-apply, /netinit, /runner,
+            # /egress-client, /sdk-py/, /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"
-            mkdir -p "$staging"
-            cp ${guest}/bin/mvm-guest-agent      "$staging/agent"
-            cp ${guest}/bin/mvm-seccomp-apply    "$staging/seccomp-apply"
+            mkdir -p "$staging" "$staging/lib"
+
+            relocate_runtime_exe() {
+              chmod u+w "$1"
+              patchelf \
+                --set-interpreter /mvm/runtime/lib/${runtimeLoaderBaseFor pkgs} \
+                --set-rpath /mvm/runtime/lib \
+                "$1"
+              chmod 0555 "$1"
+            }
+
+            cp ${runtimeLoaderFor pkgs} "$staging/lib/${runtimeLoaderBaseFor pkgs}"
+            cp ${runtimeLibcFor pkgs} "$staging/lib/libc.so.6"
+            cp ${runtimeLibgccFor pkgs} "$staging/lib/libgcc_s.so.1"
+            chmod 0555 \
+              "$staging/lib/${runtimeLoaderBaseFor pkgs}" \
+              "$staging/lib/libc.so.6" \
+              "$staging/lib/libgcc_s.so.1"
+
+            cp ${guest}/bin/mvm-guest-agent "$staging/agent"
+            cp ${guestDev}/bin/mvm-guest-agent "$staging/agent-dev-shell"
+            cp ${guest}/bin/mvm-seccomp-apply "$staging/seccomp-apply"
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
-            cp ${runner}/bin/mvm-runner          "$staging/runner"
+            cp ${runner}/bin/mvm-runner "$staging/runner"
+            cp ${egressClient}/bin/mvm-egress-client "$staging/egress-client"
+            relocate_runtime_exe "$staging/agent"
+            relocate_runtime_exe "$staging/agent-dev-shell"
+            relocate_runtime_exe "$staging/seccomp-apply"
+            relocate_runtime_exe "$staging/netinit"
+            relocate_runtime_exe "$staging/runner"
+            relocate_runtime_exe "$staging/egress-client"
 
             # In-guest host-services FFI shared object. The language SDKs
             # (mvm.audit / mvm.host) dlopen this via ctypes/koffi; it is the
             # one JSON-in/JSON-out C ABI over the broker clients. The Python
             # ctypes loader (mvm._hostsvc) defaults to this exact path.
-            mkdir -p "$staging/lib"
             cp ${hostsvc}/lib/libmvm_host_services.so \
+              "$staging/lib/libmvm_host_services.so"
+            chmod u+w "$staging/lib/libmvm_host_services.so"
+            patchelf --set-rpath /mvm/runtime/lib \
               "$staging/lib/libmvm_host_services.so"
             chmod 0555 "$staging/lib/libmvm_host_services.so"
 

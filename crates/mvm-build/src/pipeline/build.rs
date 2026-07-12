@@ -1,14 +1,11 @@
 use anyhow::Result;
-use std::collections::BTreeMap;
 
-use crate::nix_manifest::NixManifest;
-use crate::scripts::render_script;
 use mvm_core::build_env::BuildEnvironment;
 #[cfg(test)]
 use mvm_core::build_env::ShellEnvironment;
 use mvm_core::instance::InstanceNet;
 use mvm_core::naming;
-use mvm_core::pool::{BuildRevision, pool_artifacts_dir};
+use mvm_core::pool::BuildRevision;
 use mvm_core::tenant::TenantNet;
 
 /// Base directory for builder infrastructure.
@@ -20,18 +17,9 @@ pub(crate) const BUILDER_AGENT_SERVICE: &str = "/etc/systemd/system/mvm-builder-
 pub(crate) const BUILDER_VCPUS: u8 = 4;
 pub(crate) const BUILDER_MEM_MIB: u32 = 4096;
 pub(crate) const BUILDER_OUTPUT_DISK_MIB: u32 = 8192;
-// SSH user for builder VM; default root because upstream FC rootfs images do not
-// always ship an 'ubuntu' user. Override by editing this constant if your image
-// provides a non-root default user.
-pub(crate) const BUILDER_SSH_USER: &str = "root";
 
 /// IP offset reserved for the builder VM within each tenant subnet.
 const BUILDER_IP_OFFSET: u8 = 2;
-
-/// Path to the builder SSH private key on the host (in the VM namespace).
-pub(crate) fn builder_ssh_key_path() -> String {
-    format!("{}/id_rsa", BUILDER_DIR)
-}
 
 /// Default build timeout in seconds (30 minutes).
 pub(crate) const DEFAULT_TIMEOUT_SECS: u64 = 1800;
@@ -162,233 +150,6 @@ pub(crate) fn builder_instance_net(tenant_net: &TenantNet) -> InstanceNet {
         gateway_ip: tenant_net.gateway_ip.clone(),
         cidr,
     }
-}
-
-/// If flake_ref is a local path, sync it into the builder VM so `nix build .` works.
-pub(crate) fn sync_local_flake_if_needed(
-    env: &dyn BuildEnvironment,
-    builder_ip: &str,
-    ssh_key_path: &str,
-    flake_ref: &str,
-) -> Option<String> {
-    if flake_ref.contains(':') {
-        return None; // remote ref, nothing to do
-    }
-
-    // Canonicalize inside the Lima/host environment.
-    let realpath = env
-        .shell_exec_stdout(&format!("realpath {} 2>/dev/null", flake_ref))
-        .ok()?;
-
-    if realpath.is_empty() {
-        env.log_info(&format!(
-            "Local flake '{}' not found; skipping sync",
-            flake_ref
-        ));
-        return None;
-    }
-
-    let tmp_tar = env
-        .shell_exec_stdout("mktemp /tmp/mvm-flake-XXXX.tar.gz")
-        .ok()?;
-    let mut ctx = BTreeMap::new();
-    ctx.insert("tmp", tmp_tar.clone());
-    ctx.insert("src", realpath.to_string());
-    ctx.insert("key", ssh_key_path.to_string());
-    ctx.insert("ip", builder_ip.to_string());
-    ctx.insert("user", BUILDER_SSH_USER.to_string());
-    let script = match render_script("sync_local_flake", &ctx) {
-        Ok(s) => s,
-        Err(_) => return None,
-    };
-
-    if env.shell_exec(&script).is_err() {
-        env.log_info("Failed to sync local flake; continuing with original ref");
-        return None;
-    }
-
-    env.log_info("Local flake synced to builder at /root/project");
-    Some("/root/project".to_string())
-}
-
-/// Compute the hash of flake.lock inside the builder VM (if present).
-pub(crate) fn flake_lock_hash(
-    env: &dyn BuildEnvironment,
-    builder_ip: &str,
-    ssh_key_path: &str,
-    flake_ref: &str,
-) -> Option<String> {
-    let cmd = format!(
-        r#"
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=no -o BatchMode=yes -i {key} {user}@{ip} \
-            'if [ -f {flake}/flake.lock ]; then nix hash path {flake}/flake.lock; else echo __NOLOCK__; fi'
-        "#,
-        key = ssh_key_path,
-        ip = builder_ip,
-        flake = flake_ref,
-        user = BUILDER_SSH_USER,
-    );
-    let hash = env.shell_exec_stdout(&cmd).ok()?;
-    if hash.contains("__NOLOCK__") || hash.trim().is_empty() {
-        None
-    } else {
-        Some(hash.trim().to_string())
-    }
-}
-
-/// Ensure Nix is available inside the builder VM (first boot installs if missing).
-pub(crate) fn ensure_nix_installed(
-    env: &dyn BuildEnvironment,
-    builder_ip: &str,
-    ssh_key_path: &str,
-) -> Result<()> {
-    env.log_info("Ensuring Nix is installed in builder...");
-    env.shell_exec_visible(&format!(
-        r#"
-        ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=no -o BatchMode=yes -i {key} {user}@{ip} '
-            if command -v nix >/dev/null 2>&1; then
-                echo "Nix already present";
-                exit 0;
-            fi
-            echo "Installing Nix in builder (single-user)..."
-            curl -L https://nixos.org/nix/install | sh -s -- --no-daemon
-            . /home/{user}/.nix-profile/etc/profile.d/nix.sh
-        '
-        "#,
-        key = ssh_key_path,
-        ip = builder_ip,
-        user = BUILDER_SSH_USER,
-    ))?;
-    Ok(())
-}
-
-/// Construct the nix build attribute for a pool.
-fn resolve_build_attribute(
-    env: &dyn BuildEnvironment,
-    builder_ip: &str,
-    ssh_key_path: &str,
-    flake_ref: &str,
-    role: &mvm_core::pool::Role,
-    profile: &str,
-) -> String {
-    let system = if cfg!(target_arch = "aarch64") {
-        "aarch64-linux"
-    } else {
-        "x86_64-linux"
-    };
-
-    // Try to read mvm-profiles.toml from inside the builder VM
-    let manifest_check = env.shell_exec_stdout(&format!(
-        "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o PasswordAuthentication=no -o BatchMode=yes \
-            -i {key} {user}@{ip} \
-            'cat {flake}/mvm-profiles.toml 2>/dev/null || echo __NOT_FOUND__'",
-        key = ssh_key_path,
-        ip = builder_ip,
-        flake = flake_ref,
-        user = BUILDER_SSH_USER,
-    ));
-
-    if let Ok(content) = manifest_check
-        && !content.contains("__NOT_FOUND__")
-        && let Ok(manifest) = NixManifest::from_toml(&content)
-        && manifest.resolve(role, profile).is_ok()
-    {
-        // Primary pattern: tenant-<role> (e.g., tenant-gateway, tenant-worker).
-        let attr = format!("{}#packages.{}.tenant-{}", flake_ref, system, role);
-        env.log_info(&format!("Manifest found, using attribute: {}", attr));
-        return attr;
-    }
-
-    // Fallback without manifest: try tenant-<profile> (legacy convention).
-    let attr = format!("{}#packages.{}.tenant-{}", flake_ref, system, profile);
-    env.log_info(&format!(
-        "No manifest found, using legacy attribute: {}",
-        attr
-    ));
-    attr
-}
-
-/// Run `nix build` inside the builder VM via SSH.
-pub(crate) fn run_nix_build(
-    env: &dyn BuildEnvironment,
-    builder_ip: &str,
-    ssh_key_path: &str,
-    flake_ref: &str,
-    role: &mvm_core::pool::Role,
-    profile: &str,
-    timeout_secs: u64,
-) -> Result<String> {
-    let build_attr =
-        resolve_build_attribute(env, builder_ip, ssh_key_path, flake_ref, role, profile);
-
-    env.log_info(&format!("Running: nix build {}", build_attr));
-
-    let log_path = "/tmp/mvm-nix-build.log";
-
-    let mut ctx = BTreeMap::new();
-    ctx.insert("key", ssh_key_path.to_string());
-    ctx.insert("ip", builder_ip.to_string());
-    ctx.insert("user", BUILDER_SSH_USER.to_string());
-    ctx.insert("timeout", timeout_secs.to_string());
-    ctx.insert("attr", build_attr.clone());
-    ctx.insert("log", log_path.to_string());
-    if let Err(build_err) = env.shell_exec_visible(&render_script("run_nix_build_ssh", &ctx)?) {
-        // Surface the builder's nix output so users can see what went wrong.
-        let log_tail = env
-            .shell_exec_stdout(&format!("tail -50 {} 2>/dev/null || true", log_path))
-            .unwrap_or_default();
-        let log_tail = log_tail.trim();
-        if log_tail.is_empty() {
-            return Err(build_err.context(format!("nix build failed for {}", build_attr)));
-        }
-        return Err(build_err.context(format!(
-            "nix build failed for {}. Builder output (last 50 lines):\n{}",
-            build_attr, log_tail
-        )));
-    }
-
-    let output = env.shell_exec_stdout(&format!("cat {} 2>/dev/null", log_path))?;
-
-    let out_path = output
-        .lines()
-        .rev()
-        .find(|l| l.starts_with("/nix/store/"))
-        .ok_or_else(|| anyhow::anyhow!("nix build did not produce an output path"))?
-        .to_string();
-
-    env.log_info(&format!("Build output: {}", out_path));
-    Ok(out_path)
-}
-
-/// Extract build artifacts from the builder VM to the pool's revisions directory.
-pub(crate) fn extract_artifacts(
-    env: &dyn BuildEnvironment,
-    builder_ip: &str,
-    ssh_key_path: &str,
-    nix_output_path: &str,
-    tenant_id: &str,
-    pool_id: &str,
-) -> Result<String> {
-    let revision_hash = nix_output_path
-        .strip_prefix("/nix/store/")
-        .and_then(|s| s.split('-').next())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let artifacts_dir = pool_artifacts_dir(tenant_id, pool_id);
-    let rev_dir = format!("{}/revisions/{}", artifacts_dir, revision_hash);
-
-    env.shell_exec(&format!("mkdir -p {}", rev_dir))?;
-
-    let mut ctx = BTreeMap::new();
-    ctx.insert("key", ssh_key_path.to_string());
-    ctx.insert("ip", builder_ip.to_string());
-    ctx.insert("user", BUILDER_SSH_USER.to_string());
-    ctx.insert("out_path", nix_output_path.to_string());
-    ctx.insert("rev_dir", rev_dir.clone());
-    env.shell_exec_visible(&render_script("extract_artifacts_ssh", &ctx)?)?;
-
-    Ok(revision_hash)
 }
 
 /// Append a build revision to the pool's build history.
@@ -572,57 +333,20 @@ mod tests {
         assert_eq!(DEFAULT_TIMEOUT_SECS, 1800);
     }
 
-    /// Guard that injects a synthetic `MVM_BUILDER_AUTHORIZED_KEY` for
-    /// the duration of a test, then restores the prior value. Needed
-    /// because `ensure_builder_artifacts(_, require_ssh_keys=true)`
-    /// reads pubkeys from the host (`$HOME/.ssh/*.pub` +
-    /// `MVM_BUILDER_AUTHORIZED_KEY`) — CI runners have neither, so
-    /// without this the SSH-fan-out branch errors out before the
-    /// recorded-command assertions can run.
-    struct AuthorizedKeyGuard {
-        prev: Option<String>,
-    }
-    impl AuthorizedKeyGuard {
-        fn install() -> Self {
-            let prev = std::env::var("MVM_BUILDER_AUTHORIZED_KEY").ok();
-            // SAFETY: tests-only; the value is harmless and Drop restores prior state.
-            unsafe {
-                std::env::set_var(
-                    "MVM_BUILDER_AUTHORIZED_KEY",
-                    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYBUILDERVMARTIFACTS test@mvm",
-                );
-            }
-            Self { prev }
-        }
-    }
-    impl Drop for AuthorizedKeyGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match self.prev.take() {
-                    Some(v) => std::env::set_var("MVM_BUILDER_AUTHORIZED_KEY", v),
-                    None => std::env::remove_var("MVM_BUILDER_AUTHORIZED_KEY"),
-                }
-            }
-        }
-    }
-
     #[test]
     fn test_ensure_builder_artifacts_skips_when_present() {
-        let _guard = AuthorizedKeyGuard::install();
         let env = FakeEnv::new(&["yes", "target/debug/mvm-builder-agent"]);
-        crate::artifacts::ensure_builder_artifacts(&env, true).expect("should succeed");
+        crate::artifacts::ensure_builder_artifacts(&env).expect("should succeed");
         let cmds = env.cmds.lock().unwrap();
-        assert!(!cmds.is_empty()); // key regen + mount refresh
-        assert!(cmds.iter().any(|c| c.contains("authorized_keys")));
+        assert!(!cmds.is_empty());
+        assert!(cmds.iter().any(|c| c.contains("mvm-builder-agent")));
         assert!(env.visible_cmds.lock().unwrap().is_empty());
     }
 
     #[test]
     fn test_ensure_builder_artifacts_downloads_when_missing() {
-        let _guard = AuthorizedKeyGuard::install();
         let env = FakeEnv::new(&["no", "target/debug/mvm-builder-agent"]);
-        crate::artifacts::ensure_builder_artifacts(&env, true)
-            .expect("download path should succeed");
+        crate::artifacts::ensure_builder_artifacts(&env).expect("download path should succeed");
 
         let cmds = env.cmds.lock().unwrap();
         let visibles = env.visible_cmds.lock().unwrap();

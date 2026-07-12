@@ -71,6 +71,7 @@ fn internal_subprocess_commands_are_hidden_from_help() {
         "shell-init",
         "reconcile",
         "persistent-builder",
+        "__builder-vm-bootstrap",
         "__qemu-vsock-bridge",
         "__ssh-agent-proxy",
     ] {
@@ -79,6 +80,12 @@ fn internal_subprocess_commands_are_hidden_from_help() {
             "internal command `{hidden}` must be hidden from top-level help"
         );
     }
+}
+
+#[test]
+fn internal_builder_vm_bootstrap_command_is_hidden_but_parseable() {
+    let cli = Cli::try_parse_from(["mvmctl", "__builder-vm-bootstrap"]).unwrap();
+    assert!(matches!(cli.command, Commands::BuilderVmBootstrap(_)));
 }
 
 #[test]
@@ -458,6 +465,19 @@ fn build_image_subcommand_removed() {
         err.kind(),
         clap::error::ErrorKind::InvalidSubcommand,
         "expected InvalidSubcommand, got: {err:?}"
+    );
+}
+
+#[test]
+fn build_runtime_overlay_subcommand_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "runtime-overlay", "build"])
+        .expect("runtime-overlay build must parse");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group");
+    };
+    assert!(
+        matches!(bg.action, build_group::BuildCmd::RuntimeOverlay(_)),
+        "expected runtime-overlay build command"
     );
 }
 
@@ -4292,6 +4312,8 @@ fn machine_console_refused_on_sealed_image() {
             mode: StartModeKind::Detached,
             accessible: false,
             rootfs_path: None,
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+            runtime_overlay_version: None,
         },
     )
     .expect("write");

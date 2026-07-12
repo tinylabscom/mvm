@@ -1187,8 +1187,15 @@ mod tests {
 
     /// Spawn a one-shot TCP server that responds to a single HTTP request
     /// with `200 OK` and the given JSON body. Returns the bound `host:port`.
-    fn spawn_one_shot_http_ok(json_body: &'static str) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1:0");
+    fn spawn_one_shot_http_ok(json_body: &'static str) -> Option<String> {
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(listener) => listener,
+            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!("skipping local template probe tcp bind test: {err}");
+                return None;
+            }
+            Err(err) => panic!("bind 127.0.0.1:0: {err}"),
+        };
         let addr = listener.local_addr().expect("addr").to_string();
         thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
@@ -1203,7 +1210,7 @@ mod tests {
                 let _ = stream.flush();
             }
         });
-        addr
+        Some(addr)
     }
 
     /// Clear the LLM-related env vars on the test's `TestEnv` so each probe
@@ -1235,14 +1242,18 @@ mod tests {
 
         // Phase 1: probe target reachable → returns base_url; auto picks Local.
         clear_llm_env(&mut env);
-        let addr = spawn_one_shot_http_ok(r#"{"data":[]}"#);
+        let Some(addr) = spawn_one_shot_http_ok(r#"{"data":[]}"#) else {
+            return;
+        };
         let target = format!("http://{}", addr);
         env.set("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target);
         let probed = probe_local_openai_endpoint();
         assert_eq!(probed.as_deref(), Some(target.as_str()));
 
         // The one-shot server is consumed; respawn for the auto path.
-        let addr2 = spawn_one_shot_http_ok(r#"{"data":[]}"#);
+        let Some(addr2) = spawn_one_shot_http_ok(r#"{"data":[]}"#) else {
+            return;
+        };
         let target2 = format!("http://{}", addr2);
         env.set("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target2);
         let cfg = llm_generation_config_from_env()
@@ -1264,7 +1275,9 @@ mod tests {
         // Phase 3: MVM_TEMPLATE_NO_LOCAL_PROBE=1 skips the probe even when
         // a target is reachable. Without OPENAI_API_KEY, auto returns None.
         clear_llm_env(&mut env);
-        let addr3 = spawn_one_shot_http_ok(r#"{"data":[]}"#);
+        let Some(addr3) = spawn_one_shot_http_ok(r#"{"data":[]}"#) else {
+            return;
+        };
         let target3 = format!("http://{}", addr3);
         env.set("MVM_TEMPLATE_LOCAL_PROBE_TARGETS", &target3);
         env.set("MVM_TEMPLATE_NO_LOCAL_PROBE", "1");

@@ -8,7 +8,8 @@ fn find_cached_workload_kernel_prefers_dedicated_then_default_images() {
     let cache = tmp.path().to_str().unwrap();
     let arch = "x86_64";
     // Nothing on disk → None (caller will build/download).
-    assert_eq!(find_cached_workload_kernel(cache, arch), None);
+    assert_eq!(find_cached_workload_kernel(cache, arch, false), None);
+    assert_eq!(find_cached_workload_kernel(cache, arch, true), None);
 
     let mk = |rel: &str| {
         let p = tmp.path().join(rel);
@@ -19,19 +20,28 @@ fn find_cached_workload_kernel_prefers_dedicated_then_default_images() {
     // The dev default image's kernel is a valid reuse source.
     let dev = mk("default-microvm/dev/vmlinux");
     assert_eq!(
-        find_cached_workload_kernel(cache, arch).as_deref(),
+        find_cached_workload_kernel(cache, arch, false).as_deref(),
         Some(dev.as_str())
     );
+    assert_eq!(find_cached_workload_kernel(cache, arch, true), None);
     // Prod wins over dev (checked first).
     let prod = mk("default-microvm/prod/vmlinux");
     assert_eq!(
-        find_cached_workload_kernel(cache, arch).as_deref(),
+        find_cached_workload_kernel(cache, arch, false).as_deref(),
+        Some(prod.as_str())
+    );
+    assert_eq!(
+        find_cached_workload_kernel(cache, arch, true).as_deref(),
         Some(prod.as_str())
     );
     // The dedicated kernel cache wins over everything.
     let dedicated = mk(&format!("builder-vm/{arch}/kernels/workload/vmlinux"));
     assert_eq!(
-        find_cached_workload_kernel(cache, arch).as_deref(),
+        find_cached_workload_kernel(cache, arch, false).as_deref(),
+        Some(dedicated.as_str())
+    );
+    assert_eq!(
+        find_cached_workload_kernel(cache, arch, true).as_deref(),
         Some(dedicated.as_str())
     );
 }
@@ -69,7 +79,7 @@ fn explicit_source_build_request_builds_workload_kernel_locally() {
     let arch = "aarch64";
     assert_eq!(
         resolve_workload_kernel_bootstrap(cache, arch, false, true),
-        WorkloadKernelBootstrap::Build(format!(
+        WorkloadKernelBootstrap::BuildLocal(format!(
             "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
         ))
     );
@@ -96,7 +106,8 @@ fn find_reusable_builder_kernel_detects_builder_image_vmlinux() {
 
     // The builder kernel is NOT a workload-kernel cache candidate, so reuse is
     // a deliberate separate step — the cache lookup still misses here.
-    assert!(find_cached_workload_kernel(cache, arch).is_none());
+    assert!(find_cached_workload_kernel(cache, arch, false).is_none());
+    assert!(find_cached_workload_kernel(cache, arch, true).is_none());
     assert_eq!(
         resolve_workload_kernel_bootstrap(cache, arch, false, false),
         WorkloadKernelBootstrap::ReusableBuilder(vmlinux.to_str().unwrap().to_string())
@@ -322,6 +333,16 @@ fn write_valid_builder_vm_artifacts(dir: &std::path::Path) {
     rootfs[EXT4_MAGIC_OFFSET] = 0x53;
     rootfs[EXT4_MAGIC_OFFSET + 1] = 0xEF;
     std::fs::write(dir.join("rootfs.ext4"), rootfs).expect("write rootfs");
+    std::fs::write(
+        dir.join("cmdline.txt"),
+        b"console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init\n",
+    )
+    .expect("write cmdline");
+    std::fs::write(
+        dir.join("manifest.json"),
+        br#"{"cache_contract_version":2,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+    )
+    .expect("write manifest");
 }
 
 fn write_builder_vm_flake(dir: &std::path::Path, flake: &str, lock: Option<&str>) {
@@ -702,6 +723,16 @@ fn builder_vm_stage0_promotion_rejects_invalid_artifacts_without_live_cache() {
     std::fs::create_dir_all(&staging).expect("mkdir staging");
     std::fs::write(staging.join("vmlinux"), b"stub").expect("write stub kernel");
     std::fs::write(staging.join("rootfs.ext4"), b"stub").expect("write stub rootfs");
+    std::fs::write(
+        staging.join("cmdline.txt"),
+        b"console=hvc0 root=/dev/vda ro init=/sbin/mvm-host-vm-init\n",
+    )
+    .expect("write cmdline");
+    std::fs::write(
+        staging.join("manifest.json"),
+        br#"{"cache_contract_version":2,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
+    )
+    .expect("write manifest");
     write_builder_vm_source_cache_metadata(&staging, "fingerprint");
     let final_dir = tmp.path().join("aarch64");
 

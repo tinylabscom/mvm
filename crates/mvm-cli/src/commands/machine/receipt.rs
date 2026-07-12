@@ -195,6 +195,11 @@ pub(super) fn machine_start_receipt_input(
 ) -> Result<MachineStartReceiptInput> {
     enforce_ssh_agent_profile(&spec.profile, spec.ssh_agent)?;
     let network_policy = shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    crate::exec::validate_image_egress_backend_name(
+        backend,
+        spec.image.is_some(),
+        &network_policy,
+    )?;
     let _ = validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
     let volumes = machine_start_volume_policy(spec)?;
     Ok(MachineStartReceiptInput {
@@ -214,19 +219,6 @@ pub(super) fn machine_start_receipt_input(
     })
 }
 
-pub(super) fn select_machine_start_backend(
-    spec: &MachineSpec,
-    hypervisor_override: Option<&str>,
-) -> Result<String> {
-    let network_policy = shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
-    crate::exec::select_backend_name_for_egress(
-        hypervisor_override,
-        spec.image.is_some(),
-        &network_policy,
-        "OCI-backed machine starts with outbound egress enabled",
-    )
-}
-
 pub(super) fn machine_start_volume_summary(volumes: &[MachineStartVolumePolicy]) -> &'static str {
     if volumes.is_empty() {
         "none"
@@ -239,10 +231,12 @@ pub(super) fn machine_start_volume_summary(volumes: &[MachineStartVolumePolicy])
 
 pub(super) fn machine_start_preflight_summary(
     spec: &MachineSpec,
+    backend_override: Option<&str>,
     receipt: Option<&Path>,
-    hypervisor_override: Option<&str>,
 ) -> Result<MachineStartPreflightSummary> {
-    let backend = select_machine_start_backend(spec, hypervisor_override)?;
+    let backend = backend_override
+        .map(str::to_owned)
+        .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
     let invocation = machine_start_receipt_input(spec, &backend)?;
     let (memory_mib, mem_initial_mib) =
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;

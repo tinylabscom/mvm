@@ -747,9 +747,11 @@ jobs:
             sbom.cdx.json
             sbom.cdx.json.bundle
           )
+          RELEASE_NOTES_PREFIX="$(cat packaging/release/runtime-overlay-operational-note.md)"
           gh release create "${TAG_NAME}" \
             --title "${TAG_NAME}" \
             --generate-notes \
+            --notes "${RELEASE_NOTES_PREFIX}" \
             "${assets[@]}"
 
       # The "release: published" event fired by `gh release create` runs under

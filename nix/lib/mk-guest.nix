@@ -154,6 +154,14 @@ in
 # exits at boot → kernel panic. `null` (the default) keeps the legacy
 # single-file behaviour: PID 1 runs `/etc/mvm/entrypoint`.
 , bootCommand    ? null
+, runtimeLeanOverride ? null
+# Whether to bake the `mvm-exit-report` binary into the rootfs at
+# `/usr/local/bin/mvm-exit-report`. The default (`true`) matches the mkGuest
+# `/init` contract, which reports workload exit status before poweroff. VMs
+# that replace mkGuest's `/init` as PID 1 (for example the builder VM, which
+# runs `mvm-host-vm-init`) should set this `false` to avoid compiling an
+# unused guest-runtime fallback into the rootfs closure.
+, bakeExitReport ? true
 }:
 let
   entrypointKind = classifyEntrypoint entrypoint;
@@ -166,6 +174,12 @@ let
   # console-wiring fact (see `mvmMeta.withDevShell`) — distinct from the
   # accessible/sealed classification it happens to track.
   withDevShell = isDev;
+  # Sealed workload images now treat the verity-backed runtime overlay as the
+  # authoritative source for the guest-control binaries it already carries
+  # today. Dev-tier images keep the baked fallback until every local backend
+  # can attach the overlay.
+  runtimeLean =
+    if runtimeLeanOverride == null then isSealed else runtimeLeanOverride;
 
   extraFileLabel = path:
     let
@@ -405,6 +419,21 @@ let
     /bin/busybox mount -t tmpfs -o mode=1777,nosuid,nodev tmpfs /tmp
     /bin/busybox mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs /run
 
+    # Stage 2.05 — optional chained PID 1. Some images want the
+    # busybox /init bootstrap (pseudofs + tmpfs + /dev/fd setup)
+    # before handing control to a second static binary. The builder
+    # image uses this to enter mvm-host-vm-init after the generic
+    # bootstrap so backends that struggle with a direct `init=/sbin/...`
+    # exec still start from the same minimal shell-known-good path.
+    MVM_CHAIN_INIT=$(/bin/busybox sed -n 's/.*\bmvm\.chain_init=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_CHAIN_INIT" ]; then
+      if [ ! -x "$MVM_CHAIN_INIT" ]; then
+        echo "mvm-init: requested chained init $MVM_CHAIN_INIT is missing or not executable"
+        exit 1
+      fi
+      exec "$MVM_CHAIN_INIT"
+    fi
+
     # Stage 2.25 — vsock kernel modules. Stock nixpkgs kernel ships
     # AF_VSOCK as `=m`; without modprobe the agent's
     # `socket(AF_VSOCK, …)` returns EAFNOSUPPORT. modprobe-ing
@@ -502,36 +531,38 @@ let
     # block any workload on a kernel without rtnetlink. Log the
     # failure and continue; an operator who needs guest-side
     # defense flagged the issue from the JSON line.
-    MVM_NETINIT_BIN=
-    if [ -x /mvm/runtime/netinit ]; then
-      MVM_NETINIT_BIN=/mvm/runtime/netinit
-    elif [ -x /usr/local/bin/mvm-guest-netinit ]; then
-      MVM_NETINIT_BIN=/usr/local/bin/mvm-guest-netinit
-    fi
-    if [ -n "$MVM_NETINIT_BIN" ]; then
-      "$MVM_NETINIT_BIN" || echo "mvm-init: netinit exited nonzero; continuing without guest-side defense"
-    fi
-
     # Stage 2.46 — trust the per-VM egress CA (https
     # substitution). A fresh FC boot attaches no secrets drive, so the host
     # delivers the per-VM name-constrained intermediate CERT on the kernel
-    # cmdline as `mvm.egress_ca=<hex(PEM)>` (cert only — the key stays host-side
-    # in the terminator). We decode it to a tmpfs file (writable under the
-    # dm-verity-sealed rootfs) and point the common TLS-trust env vars at a
-    # bundle = baked roots + this cert, so a workload trusts host-terminated
-    # bound-host TLS. The export reaches the entrypoint (setpriv preserves env).
+    # cmdline as `mvm.egress_ca=pem:<body>` (cert only — the key stays host-side
+    # in the terminator). Older boots may still carry the legacy hex-encoded
+    # full PEM; accept both while the host-side encoder moves to the compact
+    # format. We decode it to a tmpfs file (writable under the dm-verity-sealed
+    # rootfs) and point the common TLS-trust env vars at a bundle = baked roots
+    # + this cert, so a workload trusts host-terminated bound-host TLS. The
+    # export reaches the entrypoint (setpriv preserves env).
     #
     # Honest caveat: Python `ssl` and older Node do NOT enforce X.509
     # nameConstraints client-side, so this trust is a courtesy — the real egress
     # boundary is the host-side allow-list check (claim 12), not this cert.
     #
-    # Same hex+sed+printf decode as `mvm.uvols`. Absent token ⇒ whole block is a
-    # no-op (no-secret guests boot byte-identically).
-    MVM_EGRESS_CA_HEX=$(/bin/busybox sed -n 's/.*\bmvm\.egress_ca=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -n "$MVM_EGRESS_CA_HEX" ]; then
+    # Compact `pem:` tokens reconstruct the PEM body under tmpfs; the legacy
+    # hex form stays accepted for older host launches. Absent token ⇒ whole
+    # block is a no-op (no-secret guests boot byte-identically).
+    MVM_EGRESS_CA_TOKEN=$(/bin/busybox sed -n 's/.*\bmvm\.egress_ca=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_EGRESS_CA_TOKEN" ]; then
       /bin/busybox mkdir -p /run/mvm
-      printf '%b' "$(echo "$MVM_EGRESS_CA_HEX" | /bin/busybox sed 's/../\\x&/g')" \
-        > /run/mvm/egress-ca.crt
+      if echo "$MVM_EGRESS_CA_TOKEN" | /bin/busybox grep -q '^pem:'; then
+        MVM_EGRESS_CA_BODY=''${MVM_EGRESS_CA_TOKEN#pem:}
+        {
+          printf '%s\n' '-----BEGIN CERTIFICATE-----'
+          printf '%s' "$MVM_EGRESS_CA_BODY" | /bin/busybox sed 's/.\{64\}/&\n/g'
+          printf '\n%s\n' '-----END CERTIFICATE-----'
+        } > /run/mvm/egress-ca.crt
+      else
+        printf '%b' "$(echo "$MVM_EGRESS_CA_TOKEN" | /bin/busybox sed 's/../\\x&/g')" \
+          > /run/mvm/egress-ca.crt
+      fi
       # Combined bundle so the per-VM cert is trusted ALONGSIDE the baked roots
       # (a workload still reaches cache.nixos.org/api.github.com etc.).
       if cat /etc/ssl/certs/ca-bundle.crt /run/mvm/egress-ca.crt \
@@ -666,27 +697,60 @@ let
         -- /usr/local/bin/mvm-addon-dns &
     fi
 
-    # Stage 2.55 — decode the vsock-egress opt-in. The libkrun/vsock-gateway
-    # workload path sets `mvm.vsock_egress=1` on the kernel cmdline; export the
-    # env var Stage 2.6 keys on. Mirrors the mvm.secret_env / mvm.verb_grant
-    # cmdline parsers above. Absent token ⇒ no-op (NIC guests boot unchanged).
+    # Stage 2.55 — decode the vsock-egress opt-in. Backends that route outbound
+    # egress through the host vsock gate set `mvm.vsock_egress=1` on the kernel
+    # cmdline; export the env var Stage 2.6 keys on. Mirrors the mvm.secret_env
+    # / mvm.verb_grant cmdline parsers above. Absent token ⇒ no-op.
+    MVM_VSOCK_EGRESS=
     if /bin/busybox grep -qE ' mvm\.vsock_egress=1( |$)' /proc/cmdline 2>/dev/null; then
       export MVM_VSOCK_EGRESS=1
     fi
 
-    # Stage 2.6 — vsock egress shim. When the boot env requests vsock-only
-    # egress (the backend sets MVM_VSOCK_EGRESS for a vsock-gateway backend — HVF/KVM
-    # today), bring up loopback, start the SOCKS5→vsock shim under the agent uid, and
-    # point the workload's proxy env at it. `socks5h` makes the host resolve names
-    # (DNS-over-vsock); the guest has no NIC, so this is its only path off-VM. The
-    # exports reach the entrypoint (setpriv preserves env). Inert when the flag is
-    # unset, so NIC backends keep their existing path untouched.
-    if [ -n "$MVM_VSOCK_EGRESS" ] && [ -x /usr/local/bin/mvm-egress-client ]; then
+    # Stage 2.56 — declared runtime-source policy. The host carries the
+    # per-boot runtime contract on the kernel cmdline; when omitted we keep
+    # the historical preferred-overlay compatibility behavior.
+    MVM_RUNTIME_SOURCE_POLICY=$(/bin/busybox sed -n 's/.*\bmvm\.runtime_source_policy=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -z "$MVM_RUNTIME_SOURCE_POLICY" ]; then
+      MVM_RUNTIME_SOURCE_POLICY=prefer_overlay
+    fi
+
+    MVM_NETINIT_BIN=
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
+      if [ -x /usr/local/bin/mvm-guest-netinit ]; then
+        MVM_NETINIT_BIN=/usr/local/bin/mvm-guest-netinit
+      fi
+    elif [ -x /mvm/runtime/netinit ]; then
+      MVM_NETINIT_BIN=/mvm/runtime/netinit
+    elif [ -x /usr/local/bin/mvm-guest-netinit ]; then
+      MVM_NETINIT_BIN=/usr/local/bin/mvm-guest-netinit
+    fi
+    if [ -n "$MVM_NETINIT_BIN" ]; then
+      "$MVM_NETINIT_BIN" || echo "mvm-init: netinit exited nonzero; continuing without guest-side defense"
+    fi
+
+    # Stage 2.6 — vsock egress shim. Prefer the overlay-resident helper on
+    # overlay-backed boots; keep the baked rootfs fallback only on
+    # prefer-overlay / rootfs-only paths. On required-overlay boots, a
+    # requested egress shim must come from /mvm/runtime.
+    MVM_EGRESS_CLIENT_BIN=
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
+      if [ -x /usr/local/bin/mvm-egress-client ]; then
+        MVM_EGRESS_CLIENT_BIN=/usr/local/bin/mvm-egress-client
+      fi
+    elif [ -x /mvm/runtime/egress-client ]; then
+      MVM_EGRESS_CLIENT_BIN=/mvm/runtime/egress-client
+    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ] && [ -n "''${MVM_VSOCK_EGRESS:-}" ]; then
+      echo "mvm-init: runtime overlay required but /mvm/runtime/egress-client is missing"
+      exit 1
+    elif [ -x /usr/local/bin/mvm-egress-client ]; then
+      MVM_EGRESS_CLIENT_BIN=/usr/local/bin/mvm-egress-client
+    fi
+    if [ -n "''${MVM_VSOCK_EGRESS:-}" ] && [ -n "$MVM_EGRESS_CLIENT_BIN" ]; then
       /bin/busybox ip link set lo up 2>/dev/null || true
       /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
         --reuid=${toString agentUid} --regid=${toString agentUid} \
         --clear-groups --no-new-privs \
-        -- /usr/local/bin/mvm-egress-client &
+        -- "$MVM_EGRESS_CLIENT_BIN" &
       export ALL_PROXY="socks5h://127.0.0.1:1080"
       export HTTP_PROXY="$ALL_PROXY"
       export HTTPS_PROXY="$ALL_PROXY"
@@ -711,9 +775,19 @@ let
     # paths are exec-tested so a half-attached overlay (directory
     # present, agent missing) still falls through to the baked-in
     # path rather than booting agent-less.
+    MVM_VARIANT=$(/bin/busybox cat /etc/mvm/variant 2>/dev/null || echo prod)
     MVM_AGENT_BIN=
-    if [ -x /mvm/runtime/agent ]; then
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
+      if [ -x /usr/local/bin/mvm-guest-agent ]; then
+        MVM_AGENT_BIN=/usr/local/bin/mvm-guest-agent
+      fi
+    elif [ "$MVM_VARIANT" = dev ] && [ -x /mvm/runtime/agent-dev-shell ]; then
+      MVM_AGENT_BIN=/mvm/runtime/agent-dev-shell
+    elif [ -x /mvm/runtime/agent ]; then
       MVM_AGENT_BIN=/mvm/runtime/agent
+    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
+      echo "mvm-init: runtime overlay required but no matching /mvm/runtime agent is present"
+      exit 1
     elif [ -x /usr/local/bin/mvm-guest-agent ]; then
       MVM_AGENT_BIN=/usr/local/bin/mvm-guest-agent
     fi
@@ -1075,28 +1149,32 @@ let
     ln -sf /etc/ssl/certs/ca-bundle.crt "$out/etc/ssl/certs/ca-certificates.crt"
     chmod 0644 "$out/etc/ssl/certs/ca-bundle.crt"
 
-    # mvm-guest-agent — installed under /usr/local/bin so /init can
-    # exec it. Mode 0555 so the agent can't rewrite itself; ownership
-    # is the build-time user (Nix sandbox has no root) — a later layer
-    # binds /etc + /usr read-only at boot to make this load-bearing.
-    #
-    # mkdir before the cp: when `packages = []` the directory-creation
-    # block below is a no-op, so /usr/local/bin doesn't exist yet and
-    # the cp fails with "No such file or directory". That was the
-    # latent bug that broke release.yml's dev-image lane and the
-    # ch-linux bootcheck before this fix.
-    mkdir -p "$out/usr/local/bin"
-    cp ${agentBinary} "$out/usr/local/bin/mvm-guest-agent"
-    chmod 0555 "$out/usr/local/bin/mvm-guest-agent"
+    ${if runtimeLean then ""
+    else ''
+      # mvm-guest-agent — installed under /usr/local/bin so /init can
+      # exec it on dev-tier fallback paths. Mode 0555 so the agent can't
+      # rewrite itself; ownership is the build-time user (Nix sandbox has no
+      # root) — a later layer binds /etc + /usr read-only at boot to make
+      # this load-bearing.
+      #
+      # mkdir before the cp: when `packages = []` the directory-creation
+      # block below is a no-op, so /usr/local/bin doesn't exist yet and
+      # the cp fails with "No such file or directory". That was the
+      # latent bug that broke release.yml's dev-image lane and the
+      # ch-linux bootcheck before this fix.
+      mkdir -p "$out/usr/local/bin"
+      cp ${agentBinary} "$out/usr/local/bin/mvm-guest-agent"
+      chmod 0555 "$out/usr/local/bin/mvm-guest-agent"
 
-    # Guest-side network defense. Same mode as the
-    # agent (0555: read+exec, not writable). /init runs this as
-    # uid 0 BEFORE forking the agent under setpriv, so the routes
-    # exist before any workload code can attempt egress. The
-    # binary itself does not need elevated capabilities at run
-    # time beyond the CAP_NET_ADMIN that PID 1 already has.
-    cp ${mvmGuestNetinitBinary} "$out/usr/local/bin/mvm-guest-netinit"
-    chmod 0555 "$out/usr/local/bin/mvm-guest-netinit"
+      # Guest-side network defense. Same mode as the
+      # agent (0555: read+exec, not writable). /init runs this as
+      # uid 0 BEFORE forking the agent under setpriv, so the routes
+      # exist before any workload code can attempt egress. The
+      # binary itself does not need elevated capabilities at run
+      # time beyond the CAP_NET_ADMIN that PID 1 already has.
+      cp ${mvmGuestNetinitBinary} "$out/usr/local/bin/mvm-guest-netinit"
+      chmod 0555 "$out/usr/local/bin/mvm-guest-netinit"
+    ''}
 
     # In-guest addon DNS resolver. Baked into every workload rootfs
     # so /init can spawn it without a build-time mkGuest flag;
@@ -1112,17 +1190,22 @@ let
       chmod 0555 "$out/usr/local/bin/mvm-addon-dns"
     '' else ""}
 
-    # Exit reporter — unconditional: every prod and dev image carries
-    # this binary so the guest can record its exit status before
-    # poweroff regardless of whether dev-shell features are compiled in.
-    cp ${mvmExitReportBinary} "$out/usr/local/bin/mvm-exit-report"
-    chmod 0555 "$out/usr/local/bin/mvm-exit-report"
+    ${if bakeExitReport then ''
+      # Exit reporter — baked by default because mkGuest's `/init`
+      # reports workload exit status through it before poweroff. Rootfses that
+      # replace mkGuest's PID 1 can opt out to keep the runtime contract on the
+      # mounted overlay instead of recompiling an unused fallback binary.
+      cp ${mvmExitReportBinary} "$out/usr/local/bin/mvm-exit-report"
+      chmod 0555 "$out/usr/local/bin/mvm-exit-report"
+    '' else ""}
 
-    # Egress shim  — unconditional bake; inert unless /init starts it when
-    # the boot env requests vsock-only egress (no NIC). The guest's sole path off-VM
-    # under the no-network model.
-    cp ${mvmEgressClientBinary} "$out/usr/local/bin/mvm-egress-client"
-    chmod 0555 "$out/usr/local/bin/mvm-egress-client"
+    ${if runtimeLean then ""
+    else ''
+      # Egress shim — dev/preferred-overlay fallback. Runtime-lean sealed
+      # roots source this from /mvm/runtime/egress-client instead.
+      cp ${mvmEgressClientBinary} "$out/usr/local/bin/mvm-egress-client"
+      chmod 0555 "$out/usr/local/bin/mvm-egress-client"
+    ''}
 
     # In-guest host.audit.v1 driver — test fixture, baked only when the
     # caller opts in. The production guest closure never carries it.
@@ -1321,6 +1404,9 @@ let
     # refuse to boot a workload whose rootfs is not overlay-aware
     # (e.g. an old cached template predating overlay support).
     overlayAware = true;
+    # True when the rootfs intentionally omits the baked agent/netinit pair
+    # and therefore depends on the runtime overlay contract at boot.
+    runtimeLean = runtimeLean;
     sshTemplateBan = builtins.seq assertNoSshTemplateInputs true;
   };
 in

@@ -141,20 +141,13 @@ fn run_rootfs_output(name: &str) -> PathBuf {
 fn materialize_from_dir(dir: &Path, name: &str) -> Result<PathBuf> {
     let output = run_rootfs_output(name);
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
-    // The library carries no embedded guest binaries, so it resolves them from
-    // the cache or a source checkout.
-    // `{:#}` keeps the anyhow context chain — the top context alone
-    // ("build guest agent binaries…") hides the actionable root cause.
-    // The in-process local backend materializes dev run rootfs only; the sealed
-    // `--prod` path is driven by the CLI's `run --image --prod`.
+    // `None`: this library carries no embedded guest binaries (only the mvmctl
+    // binary does), so it resolves them from the cache or a source checkout.
     mvm_build::run_image::inject_and_materialize(
-        &cache_root,
-        dir,
-        &output,
-        name,
-        None,
-        None,
-        false,
+        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
+            .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
+            .sealed(false)
+            .build(),
     )
     .map_err(|e| backend_err(format!("{e:#}")))?;
     Ok(output)

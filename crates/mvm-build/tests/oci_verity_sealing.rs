@@ -63,14 +63,8 @@ fn make_small_ext4() -> (TempDir, MaterializedRootfs) {
 
     let out_dir = TempDir::new().unwrap();
     let output = out_dir.path().join("rootfs.ext4");
-    // mke2fs default options use 4096-byte blocks; verity expects
-    // 1024 for compatibility with mvm-verity-init. Override.
-    let mke2fs_options = Mke2fsOptions {
-        block_size: 1024,
-        ..Mke2fsOptions::default()
-    };
     let materialized =
-        materialize_to_ext4(&staged, &output, &mke2fs_options).expect("materialize_to_ext4");
+        materialize_to_ext4(&staged, &output, &Mke2fsOptions::default()).expect("materialize");
 
     // Carry the staging tmp around so the staged dir lives long
     // enough for the verity step to read the rootfs. The returned
@@ -116,7 +110,7 @@ fn seal_produces_sidecar_and_roothash_files() {
 
     // Metadata fields mirror the options.
     assert_eq!(sealed.algorithm, "sha256");
-    assert_eq!(sealed.data_block_size, 1024);
+    assert_eq!(sealed.data_block_size, 4096);
 }
 
 #[test]

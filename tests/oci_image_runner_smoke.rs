@@ -1,8 +1,7 @@
 //! Live end-to-end smoke for `mvmctl run --image <oci>`.
 //!
 //! Disabled by default. Set `MVM_OCI_IMAGE_RUNNER_SMOKE=1` on a host with
-//! a working workload backend (Vz on macOS 26+, libkrun on macOS 13-25,
-//! Firecracker on Linux/KVM), the matching supervisor/drainer helper
+//! a working workload backend, the matching supervisor/drainer helper
 //! binaries built into the workspace `target/`, a populated builder-VM
 //! image cache, and network access to the registry.
 //!
@@ -15,8 +14,8 @@
 //! 4. the `admit_overlay_aware` admission gate (the injected rootfs must
 //!    pass it — an un-injected OCI rootfs is refused),
 //! 5. boot on the workload backend,
-//! 6. a real in-guest agent round-trip: the agent runs the trailing
-//!    command over vsock and streams its stdout back.
+//! 6. a real in-guest agent round-trip over the repo's vsock-only control
+//!    plane: the agent runs the trailing command and streams its stdout back.
 //!
 //! The marker echoed by the in-guest command proves the command actually
 //! ran inside the guest, not on the host.
@@ -30,6 +29,7 @@
 
 #![cfg(unix)]
 
+use mvm_backend::backend::AnyBackend;
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
@@ -39,6 +39,9 @@ use std::process::Command;
 use serde::Deserialize;
 
 const ENABLE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_SMOKE";
+const REQUIRED_OVERLAY_ENABLE_VAR: &str = "MVM_OCI_REQUIRED_OVERLAY_SMOKE";
+const VSOCK_EGRESS_ENABLE_VAR: &str = "MVM_OCI_VSOCK_EGRESS_SMOKE";
+const BACKEND_VAR: &str = "MVM_OCI_IMAGE_RUNNER_HYPERVISOR";
 const IMAGE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_REF";
 const DEFAULT_IMAGE: &str = "docker.io/library/alpine:3.20";
 #[cfg(target_os = "macos")]
@@ -163,6 +166,31 @@ fn prod_rootfs_path_for_digest(digest: &str) -> Option<PathBuf> {
     Some(mvm_cache_dir().join("oci").join(rel))
 }
 
+fn required_overlay_backend() -> String {
+    std::env::var(BACKEND_VAR).unwrap_or_else(|_| {
+        if cfg!(target_os = "linux") {
+            "firecracker".to_string()
+        } else {
+            "hvf".to_string()
+        }
+    })
+}
+
+fn vsock_egress_backend() -> Option<String> {
+    std::env::var(BACKEND_VAR).ok().or_else(|| {
+        if cfg!(target_os = "macos") {
+            Some("hvf".to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn backend_supports_image_vsock_egress(backend: &str) -> bool {
+    let caps = AnyBackend::from_hypervisor(backend).capabilities();
+    caps.vsock && caps.no_routable_guest_nic && caps.host_vsock_proxy
+}
+
 #[test]
 fn run_image_boots_and_round_trips_the_agent() {
     if std::env::var(ENABLE_VAR).as_deref() != Ok("1") {
@@ -230,8 +258,9 @@ fn run_image_prod_boots_with_cached_verity_sidecars() {
 
     let output = mvmctl_with_target_path()
         .env("MVM_OCI_POLICY", &policy_path)
-        .args(["--kernel-source", "compile"])
         .args([
+            "--kernel-source",
+            "compile",
             "run",
             "--image",
             &image_ref,
@@ -286,5 +315,169 @@ fn run_image_prod_boots_with_cached_verity_sidecars() {
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
         "prod roothash must be lowercase hex: {roothash}"
+    );
+}
+
+#[test]
+fn run_image_block_root_required_overlay_is_read_only_on_selected_backend() {
+    if std::env::var(REQUIRED_OVERLAY_ENABLE_VAR).as_deref() != Ok("1") {
+        eprintln!(
+            "[oci_image_runner_smoke] skipped - set {REQUIRED_OVERLAY_ENABLE_VAR}=1 to prove the \
+             block-backed OCI path boots with required-overlay and a read-only /mvm/runtime mount. \
+             Optional: set {BACKEND_VAR}=firecracker|hvf|libkrun|qemu (default: firecracker on \
+             Linux, hvf elsewhere)."
+        );
+        return;
+    }
+
+    let image_ref = std::env::var(IMAGE_VAR).unwrap_or_else(|_| DEFAULT_IMAGE.to_string());
+    let mvmctl = env!("CARGO_BIN_EXE_mvmctl");
+    let backend = required_overlay_backend();
+
+    let target_dir = Path::new(mvmctl)
+        .parent()
+        .expect("mvmctl binary has a parent dir")
+        .to_path_buf();
+    let path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{path}", target_dir.display());
+
+    let marker = format!("oci-required-overlay-{}", std::process::id());
+    let guest_script = format!(
+        "set -eu; \
+         echo MARKER:{marker}; \
+         grep ' /mvm/runtime ' /proc/mounts; \
+         cat /proc/cmdline; \
+         if touch /mvm/runtime/probe-write 2>/tmp/runtime-touch.err; then \
+           echo UNEXPECTED_WRITE_SUCCESS; \
+           exit 1; \
+         fi; \
+         cat /tmp/runtime-touch.err"
+    );
+
+    let output = Command::new(mvmctl)
+        .env("PATH", path)
+        .env("MVM_HYPERVISOR", &backend)
+        .args([
+            "run",
+            "--image",
+            &image_ref,
+            "--",
+            "/bin/sh",
+            "-lc",
+            &guest_script,
+        ])
+        .output()
+        .expect("spawn mvmctl run --image required-overlay proof");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        output.status.success(),
+        "mvmctl run --image required-overlay proof on backend {backend} exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code(),
+    );
+    assert!(
+        combined.contains(&format!("MARKER:{marker}")),
+        "guest command did not run inside the OCI VM.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        combined.contains("mvm.runtime_source_policy=required_overlay"),
+        "guest cmdline must declare required_overlay on OCI block boots.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        combined.contains(" /mvm/runtime ")
+            && (combined.contains(" ro,") || combined.contains(" ro ")),
+        "guest must report /mvm/runtime mounted read-only.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        combined.contains("Read-only file system"),
+        "guest write attempt must fail with EROFS.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        !combined.contains("UNEXPECTED_WRITE_SUCCESS"),
+        "guest unexpectedly wrote to /mvm/runtime.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+}
+
+#[test]
+fn run_image_uses_vsock_only_egress_contract_on_selected_backend() {
+    if std::env::var(VSOCK_EGRESS_ENABLE_VAR).as_deref() != Ok("1") {
+        eprintln!(
+            "[oci_image_runner_smoke] skipped - set {VSOCK_EGRESS_ENABLE_VAR}=1 to prove the OCI \
+             path uses the all-vsock egress contract on a backend that advertises \
+             {{vsock,no_guest_nic,host_vsock_proxy}}. Optional: set {BACKEND_VAR}=hvf|... \
+             (default: hvf on macOS)."
+        );
+        return;
+    }
+
+    let Some(backend) = vsock_egress_backend() else {
+        eprintln!(
+            "[oci_image_runner_smoke] skipped - no default all-vsock OCI egress backend is \
+             declared for this host. Set {BACKEND_VAR} to a backend that advertises \
+             {{vsock,no_guest_nic,host_vsock_proxy}}."
+        );
+        return;
+    };
+    assert!(
+        backend_supports_image_vsock_egress(&backend),
+        "backend {backend} does not advertise the all-vsock OCI egress contract \
+         (requires vsock + no_guest_nic + host_vsock_proxy); this witness must not \
+         run on a NIC-backed or otherwise non-vsock-proxy path"
+    );
+
+    let image_ref = std::env::var(IMAGE_VAR).unwrap_or_else(|_| DEFAULT_IMAGE.to_string());
+    let mvmctl = env!("CARGO_BIN_EXE_mvmctl");
+    let target_dir = Path::new(mvmctl)
+        .parent()
+        .expect("mvmctl binary has a parent dir")
+        .to_path_buf();
+    let path = std::env::var("PATH").unwrap_or_default();
+    let path = format!("{}:{path}", target_dir.display());
+    let marker = format!("oci-vsock-egress-{}", std::process::id());
+    let guest_script = format!(
+        "set -eu; \
+         echo MARKER:{marker}; \
+         cat /proc/cmdline; \
+         env | grep '^ALL_PROXY='"
+    );
+
+    let output = Command::new(mvmctl)
+        .env("PATH", path)
+        .env("MVM_HYPERVISOR", &backend)
+        .args([
+            "run",
+            "--image",
+            &image_ref,
+            "--allow-host",
+            "example.com",
+            "--",
+            "/bin/sh",
+            "-lc",
+            &guest_script,
+        ])
+        .output()
+        .expect("spawn mvmctl run --image vsock egress proof");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stdout}\n{stderr}");
+    assert!(
+        output.status.success(),
+        "mvmctl run --image vsock egress proof on backend {backend} exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        output.status.code(),
+    );
+    assert!(
+        combined.contains(&format!("MARKER:{marker}")),
+        "guest command did not run inside the OCI VM.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        combined.contains("mvm.vsock_egress=1"),
+        "guest cmdline must opt into the vsock egress helper when outbound egress is allowed.\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        combined.contains("ALL_PROXY=socks5h://127.0.0.1:1080"),
+        "guest env must receive the OCI SOCKS proxy contract for the vsock egress helper.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
 }

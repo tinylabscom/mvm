@@ -237,6 +237,13 @@ impl Context {
         check(unsafe { bindings::krun_add_vsock(self.ctx_id, tsi_features) })
     }
 
+    /// Disable libkrun's implicit-vsock / TSI transport for this
+    /// context while keeping the explicit `add_vsock_port2(...)`
+    /// control sockets usable. This is the no-NIC, no-TSI direct path.
+    pub fn disable_implicit_vsock(&self) -> Result<(), Error> {
+        check(unsafe { bindings::krun_disable_implicit_vsock(self.ctx_id) })
+    }
+
     pub fn add_vsock_port(&self, port: u32, host_path: &Path) -> Result<(), Error> {
         let path = cstring(host_path)?;
         check(unsafe { bindings::krun_add_vsock_port(self.ctx_id, port, path.as_ptr()) })

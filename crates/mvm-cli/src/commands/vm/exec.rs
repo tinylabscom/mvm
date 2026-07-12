@@ -448,11 +448,19 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             network_policy,
         )?;
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-        let output = match crate::exec::run_captured_with_posture(req, Some(&admit), &posture) {
+        let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
+            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+        );
+        let output = match crate::exec::run_captured_with_posture(
+            req,
+            Some(&admit),
+            &posture,
+            &runtime_source_policy,
+        ) {
             Ok(o) => {
                 let ctx = admit_ctx.borrow_mut().take();
                 super::up::emit_launched_if(&ctx, &receipt_backend);
-                super::up::emit_boot_posture_if(&ctx, posture.get());
+                super::up::emit_boot_posture_if(&ctx, posture.get(), runtime_source_policy.get());
                 o
             }
             Err(e) => {
@@ -614,21 +622,25 @@ fn run_run_args(
 ) -> Result<()> {
     let req = build_exec_request(args, "`mvmctl run`", selection, network_policy)?;
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-    let exit_code = match crate::exec::run_with_posture(req, audit.admit, &posture) {
-        Ok(code) => {
-            // The VM booted and the command ran (whatever its exit code), so the
-            // admission launched — emit `plan.launched` plus the resolved boot
-            // posture (virtiofs-root vs block-ext4) against the same plan.
-            let ctx = audit.ctx.borrow_mut().take();
-            super::up::emit_launched_if(&ctx, audit.backend);
-            super::up::emit_boot_posture_if(&ctx, posture.get());
-            code
-        }
-        Err(e) => {
-            super::up::emit_failed_if(&audit.ctx.borrow_mut().take(), "launch", &e);
-            return Err(e);
-        }
-    };
+    let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
+        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+    );
+    let exit_code =
+        match crate::exec::run_with_posture(req, audit.admit, &posture, &runtime_source_policy) {
+            Ok(code) => {
+                // The VM booted and the command ran (whatever its exit code), so the
+                // admission launched — emit `plan.launched` plus the resolved boot
+                // posture (virtiofs-root vs block-ext4) against the same plan.
+                let ctx = audit.ctx.borrow_mut().take();
+                super::up::emit_launched_if(&ctx, audit.backend);
+                super::up::emit_boot_posture_if(&ctx, posture.get(), runtime_source_policy.get());
+                code
+            }
+            Err(e) => {
+                super::up::emit_failed_if(&audit.ctx.borrow_mut().take(), "launch", &e);
+                return Err(e);
+            }
+        };
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -1170,6 +1182,11 @@ impl ReceiptInput {
         };
 
         let selected_backend = mvm_backend::backend::AnyBackend::from_hypervisor(backend);
+        crate::exec::validate_image_egress_backend(
+            &selected_backend,
+            args.image.is_some(),
+            &policy,
+        )?;
         let mut env_keys =
             oci_vsock_proxy_env_for_backend(&selected_backend, args.image.is_some(), &policy)
                 .into_iter()
@@ -1590,6 +1607,18 @@ mod tests {
     }
 
     #[test]
+    fn receipt_accepts_oci_egress_on_libkrun_and_records_uniform_l4_enforcement() {
+        let mut args = run_args(RunProfile::Standard);
+        args.image = Some("docker.io/library/alpine:latest".to_string());
+        args.allow_host = vec!["example.com".to_string()];
+
+        let receipt = ReceiptInput::from_run_args(&args, "libkrun")
+            .expect("libkrun OCI allow-host receipts should follow the active uniform L4 contract");
+        assert_eq!(receipt.network_posture, "allow-list:example.com:443");
+        assert_eq!(receipt.egress_enforcement, "libkrun:l4-host-port");
+    }
+
+    #[test]
     fn receipt_env_keys_include_injected_oci_proxy_vars() {
         let mut args = run_args(RunProfile::Standard);
         args.image = Some("docker.io/library/alpine:latest".to_string());
@@ -1597,7 +1626,7 @@ mod tests {
         args.env.push("HTTP_PROXY=override".to_string());
         args.env.push("APP_MODE=dev".to_string());
 
-        let receipt = ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input");
+        let receipt = ReceiptInput::from_run_args(&args, "libkrun").expect("receipt input");
         let mut env_keys = std::collections::BTreeSet::from_iter(receipt.env_keys.clone());
         env_keys.extend(
             oci_vsock_proxy_env_for_capabilities(

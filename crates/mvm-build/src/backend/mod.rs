@@ -7,7 +7,6 @@ use mvm_core::tenant::TenantNet;
 use crate::build::PoolBuildOpts;
 
 pub(crate) mod host;
-pub(crate) mod ssh;
 pub(crate) mod vsock;
 
 #[derive(Debug, Clone)]
