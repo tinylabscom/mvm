@@ -6,8 +6,9 @@ description: "How mvm's v* release tags publish binaries, kernels, and images â€
 Every `v*` git tag fires two GitHub Actions workflows that publish a single
 GitHub Release:
 
-- **`release.yml`** builds `mvmctl` for all four targets
-  (`aarch64`/`x86_64` Ã— macOS/Linux), packages each as
+- **`release.yml`** builds `mvmctl` for the currently published targets
+  (`aarch64-apple-darwin`, `x86_64-unknown-linux-gnu`, and
+  `aarch64-unknown-linux-gnu`), packages each as
   `mvmctl-<target>.tar.gz` (binary + adjacent host helpers + `resources` +
   man pages), generates `checksums-sha256.txt`, cosign-signs every tarball,
   and also builds the dev / builder / default-microvm / builder-vm /
