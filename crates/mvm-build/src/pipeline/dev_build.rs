@@ -422,9 +422,9 @@ fn dev_build_via_shell_env(
     // Step 4: Check cache — skip copy if artifacts already exist
     if check_cache(env, &revision_hash)? {
         env.log_success(&format!("Cache hit: {}", build_dir));
-        let initrd_path = detect_initrd(env, &build_dir);
-        let runner_dir = detect_runner(env, &build_dir);
-        let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
+        let initrd_path = detect_initrd(&build_dir);
+        let runner_dir = detect_runner(&build_dir);
+        let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
         return Ok(DevBuildResult {
             vmlinux_path: format!("{}/vmlinux", build_dir),
             initrd_path,
@@ -456,9 +456,9 @@ fn dev_build_via_shell_env(
 
     env.log_success(&format!("Artifacts stored at {}", build_dir));
 
-    let initrd_path = detect_initrd(env, &build_dir);
-    let runner_dir = detect_runner(env, &build_dir);
-    let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
+    let initrd_path = detect_initrd(&build_dir);
+    let runner_dir = detect_runner(&build_dir);
+    let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
     Ok(DevBuildResult {
         vmlinux_path: format!("{}/vmlinux", build_dir),
         initrd_path,
@@ -486,7 +486,7 @@ fn dev_build_via_builder_vm(
     // image would be byte-identical — see `build_cache`'s soundness note.
     let fingerprint = build_cache_fingerprint(flake_ref, profile, mode);
     if let Some(fp) = fingerprint.as_deref()
-        && let Some(hit) = cached_build_result(env, fp)
+        && let Some(hit) = cached_build_result(fp)
     {
         env.log_success(&format!(
             "Build cache hit — reusing {} (skipped builder VM + nix eval)",
@@ -540,16 +540,16 @@ fn build_cache_fingerprint(
 /// a kernel-less mkGuest image carries no `vmlinux` and relies on the
 /// cached-builder-kernel fallback resolved at boot.
 #[cfg(feature = "builder-vm")]
-fn cached_build_result(env: &dyn ShellEnvironment, fingerprint: &str) -> Option<DevBuildResult> {
+fn cached_build_result(fingerprint: &str) -> Option<DevBuildResult> {
     let revision_hash = crate::pipeline::build_cache::read_cached_revision(fingerprint)?;
     let build_dir = dev_build_dir(&revision_hash);
     let rootfs_path = format!("{build_dir}/rootfs.ext4");
     if !std::path::Path::new(&rootfs_path).is_file() {
         return None;
     }
-    let initrd_path = detect_initrd(env, &build_dir);
-    let runner_dir = detect_runner(env, &build_dir);
-    let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
+    let initrd_path = detect_initrd(&build_dir);
+    let runner_dir = detect_runner(&build_dir);
+    let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
     Some(DevBuildResult {
         vmlinux_path: format!("{build_dir}/vmlinux"),
         rootfs_path,
@@ -789,9 +789,9 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     let build_dir = final_dir;
     let vmlinux_path = format!("{build_dir}/vmlinux");
     let rootfs_path = format!("{build_dir}/rootfs.ext4");
-    let initrd_path = detect_initrd(env, &build_dir);
-    let runner_dir = detect_runner(env, &build_dir);
-    let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
+    let initrd_path = detect_initrd(&build_dir);
+    let runner_dir = detect_runner(&build_dir);
+    let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
 
     env.log_success(&format!(
         "Builder VM build complete; artifacts at {build_dir}"
@@ -900,9 +900,9 @@ fn finalize_typed_persistent_build(
     let build_dir = final_dir;
     let vmlinux_path = format!("{build_dir}/vmlinux");
     let rootfs_path = format!("{build_dir}/rootfs.ext4");
-    let initrd_path = detect_initrd(env, &build_dir);
-    let runner_dir = detect_runner(env, &build_dir);
-    let artifact_sizes = measure_artifact_sizes(env, &build_dir, initrd_path.is_some());
+    let initrd_path = detect_initrd(&build_dir);
+    let runner_dir = detect_runner(&build_dir);
+    let artifact_sizes = measure_artifact_sizes(&build_dir, initrd_path.is_some());
 
     env.log_success(&format!(
         "Builder VM build complete (typed); artifacts at {build_dir}"
@@ -1153,24 +1153,20 @@ fn copy_dev_artifacts(
     .with_context(|| format!("Failed to copy artifacts to {}", build_dir))
 }
 
-/// Measure artifact file sizes in the build directory using `stat -c%s`.
+/// Measure artifact file sizes in the build directory.
+///
+/// `build_dir` is always a host path (the dev-build cache dir the build
+/// just wrote), so this reads it directly rather than shelling through
+/// whichever `ShellEnvironment` happens to be active — on macOS 26+ that
+/// environment dials a VM that has no view of the host filesystem.
 #[cfg(any(test, feature = "builder-vm"))]
-fn measure_artifact_sizes(
-    env: &dyn ShellEnvironment,
-    build_dir: &str,
-    has_initrd: bool,
-) -> mvm_core::pool::ArtifactSizes {
-    let parse_size = |path: &str| -> u64 {
-        env.shell_exec_stdout(&format!("stat -c%s {} 2>/dev/null || echo 0", path))
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    };
+fn measure_artifact_sizes(build_dir: &str, has_initrd: bool) -> mvm_core::pool::ArtifactSizes {
+    let file_size = |path: &str| std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
-    let vmlinux_bytes = parse_size(&format!("{}/vmlinux", build_dir));
-    let rootfs_bytes = parse_size(&format!("{}/rootfs.ext4", build_dir));
+    let vmlinux_bytes = file_size(&format!("{}/vmlinux", build_dir));
+    let rootfs_bytes = file_size(&format!("{}/rootfs.ext4", build_dir));
     let initrd_bytes = if has_initrd {
-        Some(parse_size(&format!("{}/initrd", build_dir)))
+        Some(file_size(&format!("{}/initrd", build_dir)))
     } else {
         None
     };
@@ -1183,36 +1179,28 @@ fn measure_artifact_sizes(
     }
 }
 
-/// Check whether an initrd exists in the build directory.
+/// Check whether an initrd exists in the build directory (a host path).
 #[cfg(any(test, feature = "builder-vm"))]
-fn detect_initrd(env: &dyn ShellEnvironment, build_dir: &str) -> Option<String> {
+fn detect_initrd(build_dir: &str) -> Option<String> {
     let path = format!("{}/initrd", build_dir);
-    let result = env
-        .shell_exec_stdout(&format!("test -f {} && echo yes || echo no", path))
-        .ok()?;
-    if result.trim() == "yes" {
-        Some(path)
-    } else {
-        None
-    }
+    std::path::Path::new(&path).exists().then_some(path)
 }
 
-/// Check whether a microvm.nix runner script exists in the build directory.
+/// Check whether a microvm.nix runner script exists in the build directory
+/// (a host path).
 ///
 /// The root flake's `mkGuest` copies the runner to `$out/bin/microvm-run`
 /// when the microvm.nix runner is available. If found, returns the runner
 /// directory path (parent of `bin/`).
 #[cfg(any(test, feature = "builder-vm"))]
-fn detect_runner(env: &dyn ShellEnvironment, build_dir: &str) -> Option<String> {
+fn detect_runner(build_dir: &str) -> Option<String> {
+    use std::os::unix::fs::PermissionsExt;
+
     let runner_path = format!("{}/bin/microvm-run", build_dir);
-    let result = env
-        .shell_exec_stdout(&format!("test -x {} && echo yes || echo no", runner_path))
-        .ok()?;
-    if result.trim() == "yes" {
-        Some(build_dir.to_string())
-    } else {
-        None
-    }
+    let is_executable = std::fs::metadata(&runner_path)
+        .map(|m| m.permissions().mode() & 0o111 != 0)
+        .unwrap_or(false);
+    is_executable.then(|| build_dir.to_string())
 }
 
 /// Return the Nix Linux system identifier for the current architecture.
@@ -2007,28 +1995,91 @@ mod tests {
 
     #[test]
     fn test_measure_artifact_sizes() {
-        let env = TestEnv::new();
-        env.stub_stdout("vmlinux", "12345678");
-        env.stub_stdout("rootfs.ext4", "45678901");
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("vmlinux"), vec![0u8; 1234]).unwrap();
+        std::fs::write(tmp.path().join("rootfs.ext4"), vec![0u8; 5678]).unwrap();
 
-        let sizes = measure_artifact_sizes(&env, "/tmp/build", false);
-        assert_eq!(sizes.vmlinux_bytes, 12_345_678);
-        assert_eq!(sizes.rootfs_bytes, 45_678_901);
+        let sizes = measure_artifact_sizes(tmp.path().to_str().unwrap(), false);
+        assert_eq!(sizes.vmlinux_bytes, 1234);
+        assert_eq!(sizes.rootfs_bytes, 5678);
         assert!(sizes.initrd_bytes.is_none());
         assert!(sizes.nix_closure_bytes.is_none());
     }
 
     #[test]
     fn test_measure_artifact_sizes_with_initrd() {
-        let env = TestEnv::new();
-        env.stub_stdout("vmlinux", "12345678");
-        env.stub_stdout("rootfs.ext4", "45678901");
-        env.stub_stdout("initrd", "2345678");
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("vmlinux"), vec![0u8; 1234]).unwrap();
+        std::fs::write(tmp.path().join("rootfs.ext4"), vec![0u8; 5678]).unwrap();
+        std::fs::write(tmp.path().join("initrd"), vec![0u8; 42]).unwrap();
 
-        let sizes = measure_artifact_sizes(&env, "/tmp/build", true);
-        assert_eq!(sizes.vmlinux_bytes, 12_345_678);
-        assert_eq!(sizes.rootfs_bytes, 45_678_901);
-        assert_eq!(sizes.initrd_bytes, Some(2_345_678));
+        let sizes = measure_artifact_sizes(tmp.path().to_str().unwrap(), true);
+        assert_eq!(sizes.vmlinux_bytes, 1234);
+        assert_eq!(sizes.rootfs_bytes, 5678);
+        assert_eq!(sizes.initrd_bytes, Some(42));
+    }
+
+    #[test]
+    fn test_measure_artifact_sizes_missing_files_are_zero() {
+        // A build_dir that exists but hasn't been populated yet (or a
+        // probe racing the copy step) must fail closed to zero, not
+        // panic or silently skip the field.
+        let tmp = tempfile::tempdir().unwrap();
+
+        let sizes = measure_artifact_sizes(tmp.path().to_str().unwrap(), true);
+        assert_eq!(sizes.vmlinux_bytes, 0);
+        assert_eq!(sizes.rootfs_bytes, 0);
+        assert_eq!(sizes.initrd_bytes, Some(0));
+    }
+
+    #[test]
+    fn test_detect_initrd_finds_existing_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("initrd"), b"stage-1").unwrap();
+
+        let build_dir = tmp.path().to_str().unwrap();
+        assert_eq!(
+            detect_initrd(build_dir),
+            Some(format!("{build_dir}/initrd"))
+        );
+    }
+
+    #[test]
+    fn test_detect_initrd_returns_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(detect_initrd(tmp.path().to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn test_detect_runner_finds_executable_script() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let runner = bin_dir.join("microvm-run");
+        std::fs::write(&runner, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let build_dir = tmp.path().to_str().unwrap();
+        assert_eq!(detect_runner(build_dir), Some(build_dir.to_string()));
+    }
+
+    #[test]
+    fn test_detect_runner_returns_none_when_not_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        // std::fs::write's default mode (0o644) carries no execute bit.
+        std::fs::write(bin_dir.join("microvm-run"), b"#!/bin/sh\nexit 0\n").unwrap();
+
+        assert_eq!(detect_runner(tmp.path().to_str().unwrap()), None);
+    }
+
+    #[test]
+    fn test_detect_runner_returns_none_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(detect_runner(tmp.path().to_str().unwrap()), None);
     }
 
     #[test]
@@ -2066,18 +2117,28 @@ mod tests {
 
     #[test]
     fn test_dev_build_includes_artifact_sizes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut process_env = mvm_core::util::test_env::TestEnv::new();
+        process_env.set("MVM_DATA_DIR", tmp.path());
+
         let env = TestEnv::new();
         env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
-
         env.stub_stdout("--print-out-paths", "/nix/store/xyz789-tenant-minimal\n");
         env.stub_stdout("test -f", "no");
-        // stat calls return sizes
-        env.stub_stdout("stat -c%s", "99999");
+
+        // `copy_dev_artifacts` below is shell-mocked and never touches disk,
+        // so pre-seed the real files it would have written. The build dir
+        // path is deterministic from the stubbed nix output's revision hash.
+        let build_dir = dev_build_dir("xyz789");
+        std::fs::create_dir_all(&build_dir).unwrap();
+        std::fs::write(format!("{build_dir}/vmlinux"), vec![0u8; 1234]).unwrap();
+        std::fs::write(format!("{build_dir}/rootfs.ext4"), vec![0u8; 5678]).unwrap();
 
         let result =
             dev_build_via_shell_env(&env, "/tmp/flake", Some("minimal"), BuildMode::Dev).unwrap();
-        // Sizes should be populated (exact value depends on stub matching)
-        assert!(result.artifact_sizes.vmlinux_bytes > 0 || result.artifact_sizes.rootfs_bytes > 0);
+
+        assert_eq!(result.artifact_sizes.vmlinux_bytes, 1234);
+        assert_eq!(result.artifact_sizes.rootfs_bytes, 5678);
     }
 
     fn fixture_passthru_json(accessible: bool) -> String {
