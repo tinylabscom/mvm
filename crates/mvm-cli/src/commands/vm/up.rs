@@ -1797,6 +1797,8 @@ mod runtime_overlay_attach_tests {
     use mvm_ext4::Node;
     use sha2::{Digest, Sha256};
 
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn valid_overlay_ext4_bytes(version: &str, include_egress_client: bool) -> Vec<u8> {
         let mut nodes = vec![
             Node::File {
@@ -1990,6 +1992,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn firecracker_cold_cache_leaves_fields_unset_non_fatal() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap(); // empty cache
         let home = tempfile::tempdir().unwrap();
@@ -2010,6 +2013,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn firecracker_cold_cache_errors_when_overlay_is_required() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap(); // empty cache
         let home = tempfile::tempdir().unwrap();
@@ -2027,6 +2031,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn hvf_cold_cache_errors_when_overlay_is_required() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -2045,6 +2050,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn libkrun_cold_cache_errors_when_overlay_is_required() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -2080,6 +2086,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn qemu_cold_cache_errors_when_overlay_is_required() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -2098,6 +2105,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn required_overlay_cache_miss_downloads_overlay_and_attaches_it() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let cache = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
@@ -2143,6 +2151,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn runtime_overlay_acquire_mode_honors_explicit_download_override() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
         assert_eq!(
@@ -2153,6 +2162,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn runtime_overlay_acquire_mode_honors_explicit_build_override() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "build");
         assert_eq!(
@@ -2163,6 +2173,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn attach_runtime_overlay_if_cached_version_uses_requested_cached_version() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", dir.path());
@@ -2203,6 +2214,7 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn attach_runtime_overlay_if_cached_version_refuses_drift_to_other_cached_version() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", dir.path());
@@ -2238,9 +2250,11 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn attach_runtime_overlay_if_cached_prefers_current_host_version_for_plain_boot() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", dir.path());
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
 
         let current = env!("CARGO_PKG_VERSION");
         let older = if current == "0.17.0" {
@@ -2274,9 +2288,11 @@ mod runtime_overlay_attach_tests {
 
     #[test]
     fn attach_runtime_overlay_if_cached_ignores_stale_recorded_version_on_plain_boot() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", dir.path());
+        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
 
         let current = env!("CARGO_PKG_VERSION");
         let stale = if current == "0.17.0" {
@@ -2351,6 +2367,8 @@ mod runtime_overlay_attach_tests {
 
 #[cfg(test)]
 mod runtime_source_policy_for_workload_boot_tests {
+    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::RuntimeSourcePolicy;
 
@@ -2410,7 +2428,7 @@ mod runtime_source_policy_for_workload_boot_tests {
             format!("{}\n", "a".repeat(64)),
         )
         .unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", true)
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", true, true)
             .write_to_dir(dir.path())
             .unwrap();
 
@@ -2424,7 +2442,7 @@ mod runtime_source_policy_for_workload_boot_tests {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", true)
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", true, true)
             .write_to_dir(dir.path())
             .unwrap();
 
@@ -2435,6 +2453,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
     #[test]
     fn persistent_oci_required_overlay_prefers_sibling_initrd() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
         let initrd = dir.path().join("rootfs.initrd");
@@ -2458,6 +2477,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
     #[test]
     fn persistent_oci_required_overlay_falls_back_to_cached_verity_initrd() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").unwrap();
@@ -2499,6 +2519,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
     #[test]
     fn persistent_oci_required_overlay_source_checkout_ignores_stale_sibling_initrd() {
+        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let Some(workspace_root) =
             crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
         else {

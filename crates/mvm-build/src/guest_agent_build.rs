@@ -218,10 +218,6 @@ pub struct GuestAgentBuildSpec {
     pub target_dir: PathBuf,
     /// Override the cargo binary (tests). `None` ⇒ `cargo` on `$PATH`.
     pub cargo: Option<PathBuf>,
-    /// Cargo target dir for the cross-compile. Cache-scoped, deliberately not
-    /// `<workspace_root>/target`, so guest/runtime builds stay under
-    /// `~/.cache/mvm` instead of a shared checkout target tree.
-    pub target_dir: PathBuf,
 }
 
 impl GuestAgentBuildSpec {
@@ -401,6 +397,13 @@ pub fn resolve_or_build_guest_binaries(
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
+    let _build_lock = mvm_core::util::atomic_io::FileLock::acquire(&layout.dir.join("build"))
+        .map_err(|e| GuestAgentBuildError::BuildFailed {
+            reason: format!("acquire guest runtime build lock: {e:#}"),
+        })?;
+    if layout.is_complete() {
+        return Ok(layout.binaries());
+    }
     let spec = GuestAgentBuildSpec::new(
         workspace_root.to_path_buf(),
         arch,
@@ -465,6 +468,13 @@ pub fn resolve_or_build_runtime_overlay_guest_binaries(
 ) -> Result<RuntimeOverlayGuestBinaries, GuestAgentBuildError> {
     let fingerprint = runtime_overlay_source_checkout_fingerprint(workspace_root)?;
     let layout = RuntimeOverlayGuestLayout::under(cache_root, version, arch, &fingerprint);
+    if layout.is_complete() {
+        return Ok(layout.binaries());
+    }
+    let _build_lock = mvm_core::util::atomic_io::FileLock::acquire(&layout.dir.join("build"))
+        .map_err(|e| GuestAgentBuildError::BuildFailed {
+            reason: format!("acquire runtime overlay guest build lock: {e:#}"),
+        })?;
     if layout.is_complete() {
         return Ok(layout.binaries());
     }
@@ -589,6 +599,7 @@ fn run_zigbuild(
     cargo: &std::ffi::OsStr,
     args: &[String],
 ) -> Result<(), GuestAgentBuildError> {
+    let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
     let mut cmd = std::process::Command::new(cargo);
     cmd.args(args).current_dir(&spec.workspace_root);
     apply_zigbuild_env(&mut cmd, spec)?;
@@ -642,6 +653,7 @@ type BuiltGuestBinaries = (
 pub fn build_guest_binaries(
     spec: &GuestAgentBuildSpec,
 ) -> Result<BuiltGuestBinaries, GuestAgentBuildError> {
+    let _zigbuild_lock = acquire_guest_zigbuild_lock(&spec.target_dir)?;
     let argv = spec.argv();
     let mut cmd = std::process::Command::new(&argv[0]);
     cmd.args(&argv[1..]).current_dir(&spec.workspace_root);
@@ -709,8 +721,8 @@ fn apply_zigbuild_env(
     // `~/Library/Caches/cargo-zigbuild` on macOS). This keeps the direct guest
     // binary path aligned with `MVM_CACHE_DIR` / `~/.cache/mvm` and avoids
     // depending on unrelated host cache permissions.
-    let zigbuild_cache_dir = zigbuild_cache_dir();
-    let zig_global_cache_dir = zig_global_cache_dir();
+    let zigbuild_cache_dir = zigbuild_cache_dir(&spec.target_dir);
+    let zig_global_cache_dir = zig_global_cache_dir(&spec.target_dir);
     std::fs::create_dir_all(&zigbuild_cache_dir)?;
     std::fs::create_dir_all(&zig_global_cache_dir)?;
     cmd.env("CARGO_ZIGBUILD_CACHE_DIR", zigbuild_cache_dir);
@@ -718,12 +730,32 @@ fn apply_zigbuild_env(
     Ok(())
 }
 
-fn zigbuild_cache_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_cache_dir()).join("cargo-zigbuild")
+fn zigbuild_cache_dir(target_dir: &Path) -> PathBuf {
+    scoped_tool_cache_dir("cargo-zigbuild", target_dir)
 }
 
-fn zig_global_cache_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_cache_dir()).join("zig")
+fn zig_global_cache_dir(target_dir: &Path) -> PathBuf {
+    scoped_tool_cache_dir("zig", target_dir)
+}
+
+fn scoped_tool_cache_dir(tool: &str, target_dir: &Path) -> PathBuf {
+    target_dir
+        .parent()
+        .unwrap_or(target_dir)
+        .join("tool-cache")
+        .join(tool)
+}
+
+fn acquire_guest_zigbuild_lock(
+    target_dir: &Path,
+) -> Result<mvm_core::util::atomic_io::FileLock, GuestAgentBuildError> {
+    mvm_core::util::atomic_io::FileLock::acquire(&scoped_tool_cache_dir(
+        "zigbuild-lock",
+        target_dir,
+    ))
+    .map_err(|e| GuestAgentBuildError::BuildFailed {
+        reason: format!("acquire guest zigbuild lock: {e:#}"),
+    })
 }
 
 fn hash_dir_recursive(
@@ -933,27 +965,24 @@ mod tests {
     }
 
     #[test]
-    fn zigbuild_cache_dir_lives_under_mvm_cache_dir() {
-        let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", "/tmp/mvm-cache-root");
+    fn zigbuild_cache_dir_lives_under_guest_build_root() {
+        let target_dir = Path::new("/tmp/mvm-cache-root/guest-agent-build/target");
         assert_eq!(
-            zigbuild_cache_dir(),
-            PathBuf::from("/tmp/mvm-cache-root/cargo-zigbuild")
+            zigbuild_cache_dir(target_dir),
+            scoped_tool_cache_dir("cargo-zigbuild", target_dir)
         );
         assert_eq!(
-            zig_global_cache_dir(),
-            PathBuf::from("/tmp/mvm-cache-root/zig")
+            zig_global_cache_dir(target_dir),
+            scoped_tool_cache_dir("zig", target_dir)
         );
     }
 
     #[test]
     fn apply_zigbuild_env_exports_explicit_cache_dir() {
-        let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", "/tmp/mvm-cache-root");
         let spec = GuestAgentBuildSpec::new(
             PathBuf::from("/ws"),
             GuestArch::Aarch64,
-            PathBuf::from("/tmp/mvm-guest-target"),
+            PathBuf::from("/tmp/mvm-cache-root/guest-agent-build/target"),
         );
         let mut cmd = std::process::Command::new("cargo");
         apply_zigbuild_env(&mut cmd, &spec).expect("configure zigbuild env");
@@ -964,19 +993,27 @@ mod tests {
                 value.map(|value| (key.to_os_string(), value.to_os_string()))
             })
             .collect();
+        let expected_zigbuild_cache = scoped_tool_cache_dir(
+            "cargo-zigbuild",
+            Path::new("/tmp/mvm-cache-root/guest-agent-build/target"),
+        );
+        let expected_zig_cache = scoped_tool_cache_dir(
+            "zig",
+            Path::new("/tmp/mvm-cache-root/guest-agent-build/target"),
+        );
         assert_eq!(
             envs.get(std::ffi::OsStr::new("CARGO_ZIGBUILD_CACHE_DIR")),
-            Some(&std::ffi::OsString::from(
-                "/tmp/mvm-cache-root/cargo-zigbuild"
-            ))
+            Some(&expected_zigbuild_cache.into_os_string())
         );
         assert_eq!(
             envs.get(std::ffi::OsStr::new("ZIG_GLOBAL_CACHE_DIR")),
-            Some(&std::ffi::OsString::from("/tmp/mvm-cache-root/zig"))
+            Some(&expected_zig_cache.into_os_string())
         );
         assert_eq!(
             envs.get(std::ffi::OsStr::new("CARGO_TARGET_DIR")),
-            Some(&std::ffi::OsString::from("/tmp/mvm-guest-target"))
+            Some(&std::ffi::OsString::from(
+                "/tmp/mvm-cache-root/guest-agent-build/target"
+            ))
         );
     }
 

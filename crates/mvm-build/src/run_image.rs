@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::guest_agent_build::GuestRuntimeBinaryBytes;
-use crate::oci_runtime_inject::MvmRuntimeBinaries;
+use crate::oci_runtime_inject::{MvmRuntimeBinaries, OciEntrypointConfig};
 use crate::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
 };
@@ -31,6 +31,83 @@ pub struct PrebuiltGuestBinaries<'a> {
     pub verity_init: &'a [u8],
 }
 
+pub struct InjectAndMaterializeRequest<'a> {
+    cache_root: &'a Path,
+    unpacked_root: &'a Path,
+    output: &'a Path,
+    label: &'a str,
+    profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
+    entrypoint: Option<&'a OciEntrypointConfig>,
+    prebuilt: Option<PrebuiltGuestBinaries<'a>>,
+    sealed: bool,
+}
+
+impl<'a> InjectAndMaterializeRequest<'a> {
+    pub fn builder(
+        cache_root: &'a Path,
+        unpacked_root: &'a Path,
+        output: &'a Path,
+        label: &'a str,
+    ) -> InjectAndMaterializeRequestBuilder<'a> {
+        InjectAndMaterializeRequestBuilder {
+            cache_root,
+            unpacked_root,
+            output,
+            label,
+            profile: crate::oci_runtime_inject::RuntimeInjectionProfile::RootfsOnly,
+            entrypoint: None,
+            prebuilt: None,
+            sealed: false,
+        }
+    }
+}
+
+pub struct InjectAndMaterializeRequestBuilder<'a> {
+    cache_root: &'a Path,
+    unpacked_root: &'a Path,
+    output: &'a Path,
+    label: &'a str,
+    profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
+    entrypoint: Option<&'a OciEntrypointConfig>,
+    prebuilt: Option<PrebuiltGuestBinaries<'a>>,
+    sealed: bool,
+}
+
+impl<'a> InjectAndMaterializeRequestBuilder<'a> {
+    pub fn profile(mut self, profile: crate::oci_runtime_inject::RuntimeInjectionProfile) -> Self {
+        self.profile = profile;
+        self
+    }
+
+    pub fn entrypoint(mut self, entrypoint: Option<&'a OciEntrypointConfig>) -> Self {
+        self.entrypoint = entrypoint;
+        self
+    }
+
+    pub fn prebuilt(mut self, prebuilt: Option<PrebuiltGuestBinaries<'a>>) -> Self {
+        self.prebuilt = prebuilt;
+        self
+    }
+
+    pub fn sealed(mut self, sealed: bool) -> Self {
+        self.sealed = sealed;
+        self
+    }
+
+    pub fn build(self) -> InjectAndMaterializeRequest<'a> {
+        InjectAndMaterializeRequest {
+            cache_root: self.cache_root,
+            unpacked_root: self.unpacked_root,
+            output: self.output,
+            label: self.label,
+            profile: self.profile,
+            entrypoint: self.entrypoint,
+            prebuilt: self.prebuilt,
+            sealed: self.sealed,
+        }
+    }
+}
+
 /// Inject the mvm runtime into `unpacked_root`, materialize it into `output` (a
 /// `rootfs.ext4` path), and write the overlay-aware guest sidecar beside it.
 /// `cache_root` holds the guest-agent binary cache; `label` names the image in
@@ -45,19 +122,26 @@ pub struct PrebuiltGuestBinaries<'a> {
 /// cross-compile (contributors get their local edits), then the `prebuilt`
 /// bytes embedded in the host binary (the shipped-mvmctl end-user path). A
 /// caller with no embedded binaries passes `None`.
-pub fn inject_and_materialize(
-    cache_root: &Path,
-    unpacked_root: &Path,
-    output: &Path,
-    label: &str,
-    profile: crate::oci_runtime_inject::RuntimeInjectionProfile,
-    entrypoint: Option<&OciEntrypointConfig>,
-    prebuilt: Option<PrebuiltGuestBinaries<'_>>,
-    sealed: bool,
-) -> Result<()> {
+pub fn inject_and_materialize(request: InjectAndMaterializeRequest<'_>) -> Result<()> {
+    let InjectAndMaterializeRequest {
+        cache_root,
+        unpacked_root,
+        output,
+        label,
+        profile,
+        entrypoint,
+        prebuilt,
+        sealed,
+    } = request;
     let bins = resolve_guest_binaries(cache_root, prebuilt)?;
-    crate::oci_runtime_inject::inject_mvm_runtime(unpacked_root, &bins, entrypoint, sealed, profile)
-        .context("inject mvm runtime into OCI rootfs")?;
+    crate::oci_runtime_inject::inject_mvm_runtime(
+        unpacked_root,
+        &bins,
+        entrypoint,
+        sealed,
+        profile,
+    )
+    .context("inject mvm runtime into OCI rootfs")?;
 
     // Measure AFTER injection so the ext4 sizing covers the baked agent/netinit.
     let tree_size = unpacked_tree_size(unpacked_root)

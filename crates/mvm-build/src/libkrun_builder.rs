@@ -5186,7 +5186,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$XDG_CACHE_HOME/mvm/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\ncat > \"$arch_dir/manifest.json\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$XDG_CACHE_HOME/mvm/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -5354,7 +5354,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_CACHE_DIR/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\ncat > \"$arch_dir/manifest.json\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_CACHE_DIR/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();

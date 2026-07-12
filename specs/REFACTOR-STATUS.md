@@ -1,5 +1,5 @@
-**Additional 2026-07-11 — Plan 242's refreshed ship candidate is now pushed
-and revalidated at exact head `96900bc8ebf74d19afd4e3ff9bb10d619561df0f`.**
+**Additional 2026-07-11 — Plan 242's current ship candidate has been
+revalidated in the worktree.**
 The code/docs contract is stable: guest-executed runtime binaries are
 centralized into the shared read-only cache artifact under
 `~/.cache/mvm/runtime-overlay/<version>/<arch>/`; every admitted backend/tier
@@ -9,13 +9,12 @@ overlays on restart, while running VMs keep the runtime they booted with. The
 current closeout slice also fixes the exact-current candidate witnesses by
 aligning the SDK/fixture receipt posture tests with the current vsock-only
 libkrun contract and isolating the `mvm-build` library tests from shared
-env/cache races. Fresh host gates are green on that exact head, and the
+env/cache races. Fresh host gates are green on the current candidate, and the
 Linux-native `cargo test -p mvm-build --lib --offline` witness is green on
-`88.99.197.234` from a fresh source snapshot of the same head. The
-rollout/runbook surface is explicit in the docs and release note; the
-remaining blocker is external only: PR `#1613` is mergeable and still waiting
-on the fresh required GitHub checks before it can merge through the normal
-review path.
+`88.99.197.234` from a fresh source snapshot. The rollout/runbook surface is
+explicit in the docs and release note. Branch/PR synchronization is an
+external closeout step and is not part of the implementation status recorded
+here.
 
 Older entries below are retained as the execution log. Where they describe
 earlier intermediate gaps or proofs-in-progress, this top entry is the

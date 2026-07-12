@@ -292,7 +292,10 @@ mod tests {
         assert!(is_executable(&injected.init));
         assert_eq!(std::fs::read(&injected.agent).unwrap(), b"\x7fELF-agent");
         assert!(is_executable(&injected.agent));
-        assert_eq!(std::fs::read(&injected.netinit).unwrap(), b"\x7fELF-netinit");
+        assert_eq!(
+            std::fs::read(&injected.netinit).unwrap(),
+            b"\x7fELF-netinit"
+        );
         assert!(is_executable(&injected.netinit));
         assert_eq!(std::fs::read(&injected.netd).unwrap(), b"\x7fELF-netd");
         assert!(is_executable(&injected.netd));

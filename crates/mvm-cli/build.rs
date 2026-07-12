@@ -104,12 +104,12 @@ fn main() {
         );
     }
 
-    // Guest runtime binaries (agent + netinit + egress-client, guest arch =
-    // host arch). Embedded alongside the host bins so an end-user mvmctl with no
-    // source checkout can inject them into an OCI `run --image` rootfs. Built in
-    // one cargo invocation; they ride the same `EMBEDDED` array and are looked
-    // up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte stubs) — a stub
-    // build can't materialize an OCI run, same as the host bins.
+// Guest runtime binaries for OCI rootfs injection (guest arch = host arch).
+// Embedded alongside the host bins so an end-user mvmctl with no source
+// checkout can inject the full OCI runtime set into a `run --image` rootfs.
+// Built in one cargo invocation; they ride the same `EMBEDDED` array and are
+// looked up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte stubs) — a stub
+// build can't materialize an OCI run, same as the host bins.
     if !skip_embed {
         run_guest_zigbuild(
             &workspace_root,
@@ -418,7 +418,8 @@ fn run_cargo_zigbuild(
 fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
     eprintln!(
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-guest \
-         --bin mvm-guest-agent --bin mvm-guest-netinit --bin mvm-verity-init \
+         --bin mvm-guest-agent --bin mvm-guest-netinit --bin mvm-guest-netd \
+         --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-verity-init \
          -p mvm-guest-helpers --bin mvm-egress-client --features mvm-guest/dev-shell"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
@@ -434,6 +435,12 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "mvm-guest-agent",
         "--bin",
         "mvm-guest-netinit",
+        "--bin",
+        "mvm-guest-netd",
+        "--bin",
+        "mvm-oci-init",
+        "--bin",
+        "mvm-oci-entrypoint",
         "--bin",
         "mvm-verity-init",
         "-p",
@@ -464,6 +471,8 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "mvm-guest-agent",
         "mvm-guest-netinit",
         "mvm-guest-netd",
+        "mvm-oci-init",
+        "mvm-oci-entrypoint",
         "mvm-egress-client",
         "mvm-verity-init",
     ] {

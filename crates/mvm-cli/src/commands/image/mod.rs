@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 use flate2::read::GzDecoder;
+use mvm_build::oci_runtime_inject::OciEntrypointConfig;
 use mvm_build::rootfs::MaterializeExt4Input;
 use mvm_oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
@@ -33,9 +34,6 @@ mod trust;
 use trust::{CosignCommandVerifier, CosignVerifier, default_require_signatures, registry_auth_for};
 
 const INDEX_FILE: &str = "index.json";
-
-#[derive(Clone, Debug)]
-struct OciEntrypointConfig;
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -376,9 +374,13 @@ fn oci_entrypoint_from_config_bytes(bytes: &[u8]) -> Result<Option<OciEntrypoint
     if argv.is_empty() {
         return Ok(None);
     }
-    let _ = config.config.env;
-    let _ = config.config.working_dir.filter(|dir| !dir.is_empty());
-    Ok(Some(OciEntrypointConfig))
+    let env = config.config.env;
+    let working_dir = config.config.working_dir.filter(|dir| !dir.is_empty());
+    Ok(Some(OciEntrypointConfig {
+        argv,
+        env,
+        working_dir,
+    }))
 }
 
 fn oci_entrypoint_from_cache_path(
@@ -638,14 +640,17 @@ fn inject_runtime_and_materialize(
     sealed: bool,
 ) -> Result<()> {
     mvm_build::run_image::inject_and_materialize(
-        cache_root,
-        unpacked_root,
-        rootfs_abs,
-        image_label,
-        mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean,
-        entrypoint,
-        embedded_guest_binaries(),
-        sealed,
+        mvm_build::run_image::InjectAndMaterializeRequest::builder(
+            cache_root,
+            unpacked_root,
+            rootfs_abs,
+            image_label,
+        )
+        .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
+        .entrypoint(entrypoint)
+        .prebuilt(embedded_guest_binaries())
+        .sealed(sealed)
+        .build(),
     )
 }
 
@@ -1918,8 +1923,10 @@ mod tests {
             &guest_layout.oci_init,
             &guest_layout.agent,
             &guest_layout.netinit,
+            &guest_layout.netd,
             &guest_layout.egress_client,
             &guest_layout.entrypoint_runner,
+            &guest_layout.verity_init,
         ] {
             std::fs::write(path, b"#!/bin/sh\nexit 0\n").expect("seed guest runtime cache");
         }
@@ -2295,6 +2302,7 @@ mod tests {
         );
         write_minimal_config(tmp.path());
         create_unpacked_root(tmp.path(), digest);
+        seed_guest_runtime_cache(tmp.path());
 
         let resolved = resolve_or_pull_run_image_with(
             tmp.path(),

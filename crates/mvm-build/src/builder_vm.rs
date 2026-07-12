@@ -299,8 +299,8 @@ impl GuestSidecar {
     pub fn for_oci_run(name: &str, sealed: bool, runtime_lean: bool) -> Self {
         Self {
             name: name.to_string(),
-            accessible: true,
-            sealed: false,
+            accessible: !sealed,
+            sealed,
             entrypoint_kind: "command".to_string(),
             init_system: "busybox".to_string(),
             // Unknown for an arbitrary OCI image; not load-bearing
@@ -1289,7 +1289,7 @@ mod tests {
         // the `for_oci_run` sidecar next to the rootfs must satisfy
         // `admit_overlay_aware` — without it, `run --image` never boots.
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef", false);
+        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef", false, false);
         assert!(sidecar.is_overlay_aware());
         assert_eq!(sidecar.agent_binary, "real");
         sidecar.write_to_dir(tmp.path()).expect("write");
@@ -1299,7 +1299,7 @@ mod tests {
     #[test]
     fn runtime_lean_oci_run_sidecar_admits_required_overlay() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef", true);
+        let sidecar = GuestSidecar::for_oci_run("oci:sha256-deadbeef", true, true);
         assert!(sidecar.is_runtime_lean());
         sidecar.write_to_dir(tmp.path()).expect("write");
         admit_runtime_overlay_contract(

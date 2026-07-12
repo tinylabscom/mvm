@@ -144,14 +144,10 @@ fn materialize_from_dir(dir: &Path, name: &str) -> Result<PathBuf> {
     // `None`: this library carries no embedded guest binaries (only the mvmctl
     // binary does), so it resolves them from the cache or a source checkout.
     mvm_build::run_image::inject_and_materialize(
-        &cache_root,
-        dir,
-        &output,
-        name,
-        mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean,
-        None,
-        None,
-        false,
+        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
+            .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
+            .sealed(false)
+            .build(),
     )
     .map_err(|e| backend_err(format!("{e:#}")))?;
     Ok(output)
