@@ -40,7 +40,7 @@ pub fn with_hints(result: Result<()>) -> Result<()> {
         } else if msg.contains("No space left on device") || msg.contains("ENOSPC") {
             ui::warn(
                 "Hint: Disk full. Run 'mvmctl doctor' to check space, \
-                 or run 'nix-collect-garbage -d' inside the dev VM.",
+                 or run 'nix-collect-garbage -d' inside the builder VM.",
             );
         } else if msg.contains("timed out") || msg.contains("connection refused") {
             ui::warn(
