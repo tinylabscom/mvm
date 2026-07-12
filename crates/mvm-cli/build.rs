@@ -65,12 +65,14 @@ fn main() {
     // Build policy:
     // - `MVM_SKIP_EMBED_BINARIES=1` always skips the nested cross-compile.
     // - `MVM_EMBED_BINARIES=1` always performs the real embed, even in dev/test.
-    // - Otherwise, release builds embed the real binaries and non-release
-    //   builds bake zero-byte stubs.
+    // - `release-artifact-bootstrap` embeds real binaries for packaged
+    //   mvmctl artifacts.
+    // - Otherwise, source builds bake zero-byte stubs and runtime paths either
+    //   use a warm cache or build the missing helper binaries from the source
+    //   checkout on demand.
     //
-    // This keeps production artifacts reproducible by default while removing
-    // the dominant cold-build tax from ordinary `cargo check`/`cargo test`
-    // contributor workflows.
+    // This keeps production artifacts self-contained without putting the
+    // nested cross-compile in every `cargo run --release` source-build path.
     let skip_embed = should_skip_embed_binaries();
     println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
     println!("cargo:rerun-if-env-changed=MVM_EMBED_BINARIES");
@@ -80,6 +82,7 @@ fn main() {
              set MVM_EMBED_BINARIES=1 to force real embedded binaries"
         );
     }
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RELEASE_ARTIFACT_BOOTSTRAP");
 
     for name in manifest.iter() {
         let out_file = bins_out.join(name);
@@ -193,9 +196,11 @@ fn emit_rerun_for_tree(root: &Path) {
 
 fn should_skip_embed_binaries() -> bool {
     build_embed_mode::should_skip_embed_binaries(
-        std::env::var("PROFILE").ok().as_deref(),
         std::env::var("MVM_SKIP_EMBED_BINARIES").ok().as_deref(),
         std::env::var("MVM_EMBED_BINARIES").ok().as_deref(),
+        std::env::var("CARGO_FEATURE_RELEASE_ARTIFACT_BOOTSTRAP")
+            .ok()
+            .as_deref(),
     )
 }
 

@@ -89,6 +89,21 @@ Adopt Plan 214 S4/S6/S7 into execution, with the **builder as a policy profile, 
         (`machine run -d --image ...` and `machine start` on an image-backed
         machine), so stored machine lifecycles cannot regress onto the legacy
         NIC/gateway path.
+  - [x] 2026-07-09 HTTP proxy compatibility follow-up: `mvm-egress-client`
+        now accepts SOCKS5 and HTTP proxy requests on the same loopback port.
+        `ALL_PROXY` remains SOCKS5H, while `HTTP_PROXY`/`HTTPS_PROXY` use the
+        loopback HTTP proxy so BusyBox-style absolute-form `https://...`
+        requests are forwarded over the existing vsock egress channel. The
+        host raw-egress endpoint recognizes a reserved HTTP-forward frame,
+        reuses `EgressGate` for host:port admission, disables host environment
+        proxies, pins reqwest DNS resolution to the admitted IP, and originates
+        TLS on the host rather than adding guest TLS.
+  - [x] 2026-07-09 source-build hot-path follow-up: `cargo run --release`
+        from a source checkout now keeps embedded helper binaries stubbed by
+        default, matching debug/test builds. Release artifacts still embed the
+        real helper set by enabling `release-artifact-bootstrap`, and
+        `MVM_EMBED_BINARIES=1` remains the explicit local override when a
+        source build intentionally wants a self-contained binary.
 - [ ] **B2 (firecracker workloads):** egress via vhost-vsock → gating endpoint; retire workload TAP + nftables enforcement (endpoint enforces `PlanFlowPolicy` uniformly). nftables remains only as belt-and-braces during transition, then removed.
 - [ ] **B3 (builders):** builder VMs boot with **no NIC**. Nix egress rides `HTTP(S)_PROXY` → in-guest forward proxy (existing `127.0.0.1:18080` machinery + the already-embedded `mvm-egress-proxy` builder binary) → AF_VSOCK → host gating endpoint running a **builder profile**: fetch-host allowlist + **chain-signed audit entry per fetch (URL + content hash)**. Remove `host_gvproxy` spawn sites on the builder path.
 - [ ] **B4 (supply-chain manifest):** the per-build fetch log + flake.lock forms a reviewable manifest; `mvmctl trust audit verify` covers it. Optional host-side content-addressed fetch cache at the endpoint (faster warm builds, offline replay).

@@ -105,8 +105,8 @@ pub(crate) mod test_support;
 /// loading, virtio-mmio block/vsock). Compiles on every target; the per-platform
 /// backends (HVF/KVM/WHP) drive it. The "no VMM lock-in" seam.
 pub mod vmm;
-/// The single host-side vsock egress bridge. Backend-agnostic; every VMM path
-/// enforces claim-10 / claims-12/13 through exactly this module.
+/// Shared host-side vsock egress support. Backend-agnostic; every VMM path uses
+/// the same gate/relay substrate while policy remains in the host endpoint.
 pub mod vsock_egress_bridge;
 /// `WorkloadBackend` marker trait — the type-level permission to carry an
 /// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`

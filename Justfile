@@ -274,11 +274,11 @@ release-tag VERSION:
 
 # Build optimized release binary
 release-build:
-    cargo build --release --features host,user,template-registry-s3
+    cargo build --release --features host,user,template-registry-s3,release-artifact-bootstrap
 
 # Cross-compile release binary for a target
 release-build-target TARGET:
-    cargo build --release --target {{TARGET}} --features host,user,template-registry-s3
+    cargo build --release --target {{TARGET}} --features host,user,template-registry-s3,release-artifact-bootstrap
 
 # Dry-run crates.io publish (all crates in dependency order)
 publish-dry-run:

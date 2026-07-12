@@ -564,9 +564,9 @@ impl AnyBackend {
         }
 
         // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`). Vz is sunset
-        //    (opt-in only via `--hypervisor vz`); the hvf path enforces claim-10
-        //    egress via its per-VM gating endpoint over vsock — no legacy
-        //    userspace gateway sidecar.
+        //    (opt-in only via `--hypervisor vz`); the hvf path routes egress to
+        //    its per-VM gating endpoint over vsock, where claim-10 and claims
+        //    12/13 are enforced — no guest-NIC helper sidecar.
         if plat.is_vz_default_tier() {
             return Self::Hvf(HvfBackend);
         }
@@ -703,10 +703,9 @@ impl AnyBackend {
             AnyBackend::Libkrun(b) => Some(b),
             AnyBackend::Mock(b) => Some(b),
             AnyBackend::Qemu(_) => None,
-            // HVF carries untrusted workloads: claim-10 default-deny egress, a real
-            // mkGuest workload boot, a host-reachable guest agent, and now the
-            // secret-substitution gateway (claim-10 at the substitution bridge,
-            // claims 12/13 at the per-VM endpoint) all run on the hvf VMM.
+            // HVF carries untrusted workloads: a real mkGuest workload boot, a
+            // host-reachable guest agent, and an egress relay to the per-VM
+            // endpoint that owns claim-10 and claims 12/13.
             AnyBackend::Hvf(b) => Some(b),
             // Same hvf VMM as Hvf, reached via the runner role: claim-10 at
             // the endpoint, claims 12/13 at the per-VM substitution endpoint.

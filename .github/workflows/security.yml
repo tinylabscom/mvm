@@ -228,12 +228,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
-      # build.rs cross-compiles the embedded host-vm binaries (Plan 115 /
-      # ADR-065); without zig + cargo-zigbuild the mvmctl build panics.
+      # The release-artifact feature embeds the helper binaries that shipped
+      # mvmctl artifacts need at runtime, so this reproducibility check must
+      # use the same feature set as the release workflow.
       - uses: ./.github/actions/install-zigbuild
 
       - name: Build A
-        run: cargo build --release --locked --bin mvmctl --features host,user,template-registry-s3
+        run: cargo build --release --locked --bin mvmctl --features host,user,template-registry-s3,release-artifact-bootstrap
 
       - name: Hash A
         run: sha256sum target/release/mvmctl | tee /tmp/hash-a.txt
@@ -242,7 +243,7 @@ jobs:
         run: cargo clean
 
       - name: Build B
-        run: cargo build --release --locked --bin mvmctl --features host,user,template-registry-s3
+        run: cargo build --release --locked --bin mvmctl --features host,user,template-registry-s3,release-artifact-bootstrap
 
       - name: Hash B
         run: sha256sum target/release/mvmctl | tee /tmp/hash-b.txt

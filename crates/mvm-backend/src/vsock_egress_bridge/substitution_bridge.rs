@@ -19,9 +19,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 /// Per-drain read budget per endpoint connection.
 const READ_CHUNK: usize = 16 * 1024;
 
-/// What the device should signal the guest after an inbound substitution frame.
+/// What the device should signal the guest after an inbound endpoint-relay frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SubstitutionAction {
+pub(crate) enum EndpointRelayAction {
     /// Opened + relayed to the endpoint (or a later frame on an open stream).
     Relayed,
     /// Refused: no endpoint or a connect failure. Fail-closed — the stream is
@@ -30,11 +30,32 @@ pub(crate) enum SubstitutionAction {
 }
 
 /// Result of draining the open endpoint sockets once.
-pub(crate) struct SubstitutionDrain {
+pub(crate) struct EndpointRelayDrain {
     /// Bytes read per connection id, to frame back to the guest as `OP_RW`.
     pub ready: Vec<(u32, Vec<u8>)>,
     /// Connection ids that hit EOF / error and were closed.
     pub closed: Vec<u32>,
+}
+
+/// Backend-side byte relay between a guest connection id and a per-VM endpoint.
+///
+/// This is intentionally transport-only: the relay moves bytes between the guest
+/// stream abstraction and the per-VM UDS endpoint. Policy, HTTP parsing, TLS, and
+/// host client behavior stay above this seam.
+pub(crate) trait GuestEndpointRelay {
+    /// Relay guest→host bytes for `conn_id`. The first payload may open the
+    /// endpoint connection. Implementations fail closed on missing endpoints or
+    /// connect failures.
+    fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction;
+
+    /// Drain host→guest endpoint bytes once from every active connection.
+    fn drain_endpoint_bytes(&mut self) -> EndpointRelayDrain;
+
+    /// Close the endpoint side of `conn_id`.
+    fn close_connection(&mut self, conn_id: u32);
+
+    /// Whether any endpoint connections are still active.
+    fn is_active(&self) -> bool;
 }
 
 /// The substitution transport for one guest.
@@ -67,26 +88,32 @@ impl SubstitutionBridge {
         self.active = Some(counter);
     }
 
-    /// True while at least one endpoint stream is open (the heartbeat gate).
-    pub fn has_active(&self) -> bool {
-        !self.conns.is_empty()
+    fn bump(&self, delta: i32) {
+        if let Some(c) = &self.active {
+            if delta >= 0 {
+                c.fetch_add(delta as usize, Ordering::Relaxed);
+            } else {
+                c.fetch_sub((-delta) as usize, Ordering::Relaxed);
+            }
+        }
     }
+}
 
+impl SubstitutionBridge {
     /// Fds the host-I/O thread should watch for endpoint replies.
     pub fn poll_fds(&self) -> Vec<RawFd> {
         self.conns.values().map(AsRawFd::as_raw_fd).collect()
     }
+}
 
-    /// Relay one inbound frame on stream `conn_id`. The first frame opens the
-    /// endpoint and relays; later frames relay directly. No endpoint or a connect
-    /// failure fails closed — the endpoint is the sole gate.
-    pub fn handle_frame(&mut self, conn_id: u32, payload: &[u8]) -> SubstitutionAction {
+impl GuestEndpointRelay for SubstitutionBridge {
+    fn relay_guest_bytes(&mut self, conn_id: u32, payload: &[u8]) -> EndpointRelayAction {
         if let Some(up) = self.conns.get_mut(&conn_id) {
             write_nonblocking(up, payload);
-            return SubstitutionAction::Relayed;
+            return EndpointRelayAction::Relayed;
         }
         let Some(path) = self.endpoint.clone() else {
-            return SubstitutionAction::Refused;
+            return EndpointRelayAction::Refused;
         };
         match UnixStream::connect(&path) {
             Ok(stream) => {
@@ -94,21 +121,19 @@ impl SubstitutionBridge {
                 let up = self.conns.entry(conn_id).or_insert(stream);
                 write_nonblocking(up, payload);
                 self.bump(1);
-                SubstitutionAction::Relayed
+                EndpointRelayAction::Relayed
             }
-            Err(_) => SubstitutionAction::Refused,
+            Err(_) => EndpointRelayAction::Refused,
         }
     }
 
-    /// Read each open endpoint socket once (non-blocking); a peer EOF or error
-    /// closes that connection. The host→guest half of the relay.
-    pub fn drain(&mut self) -> SubstitutionDrain {
+    fn drain_endpoint_bytes(&mut self) -> EndpointRelayDrain {
         let mut ready = Vec::new();
         let mut closed = Vec::new();
         for (conn_id, up) in self.conns.iter_mut() {
             let mut buf = vec![0u8; READ_CHUNK];
             match up.read(&mut buf) {
-                Ok(0) => closed.push(*conn_id), // endpoint closed the reply
+                Ok(0) => closed.push(*conn_id),
                 Ok(n) => {
                     buf.truncate(n);
                     ready.push((*conn_id, buf));
@@ -118,27 +143,19 @@ impl SubstitutionBridge {
             }
         }
         for conn_id in &closed {
-            self.close(*conn_id);
+            self.close_connection(*conn_id);
         }
-        SubstitutionDrain { ready, closed }
+        EndpointRelayDrain { ready, closed }
     }
 
-    /// Close a stream (guest `OP_SHUTDOWN`/`OP_RST`), dropping its endpoint
-    /// connection so the endpoint sees EOF.
-    pub fn close(&mut self, conn_id: u32) {
+    fn close_connection(&mut self, conn_id: u32) {
         if self.conns.remove(&conn_id).is_some() {
             self.bump(-1);
         }
     }
 
-    fn bump(&self, delta: i32) {
-        if let Some(c) = &self.active {
-            if delta >= 0 {
-                c.fetch_add(delta as usize, Ordering::Relaxed);
-            } else {
-                c.fetch_sub((-delta) as usize, Ordering::Relaxed);
-            }
-        }
+    fn is_active(&self) -> bool {
+        !self.conns.is_empty()
     }
 }
 
@@ -171,10 +188,10 @@ mod tests {
     fn no_endpoint_refuses_fail_closed() {
         let mut b = SubstitutionBridge::new();
         assert_eq!(
-            b.handle_frame(5, b"1.2.3.4:80\n"),
-            SubstitutionAction::Refused
+            b.relay_guest_bytes(5, b"1.2.3.4:80\n"),
+            EndpointRelayAction::Refused
         );
-        assert!(!b.has_active());
+        assert!(!b.is_active());
     }
 
     /// A raw first frame (not a WireRequest) is relayed byte-for-byte to the
@@ -203,8 +220,8 @@ mod tests {
         b.set_endpoint(&sock);
 
         let raw = b"1.2.3.4:80\n";
-        assert_eq!(b.handle_frame(3, raw), SubstitutionAction::Relayed);
-        assert!(b.has_active());
+        assert_eq!(b.relay_guest_bytes(3, raw), EndpointRelayAction::Relayed);
+        assert!(b.is_active());
         assert_eq!(active.load(Ordering::Relaxed), 1);
 
         let got_by_endpoint = server.join().unwrap();
@@ -212,7 +229,7 @@ mod tests {
 
         let mut reply = None;
         for _ in 0..200 {
-            let d = b.drain();
+            let d = b.drain_endpoint_bytes();
             if let Some((cid, bytes)) = d.ready.into_iter().next() {
                 assert_eq!(cid, 3);
                 reply = Some(bytes);
@@ -249,15 +266,21 @@ mod tests {
         b.set_activity(active.clone());
         b.set_endpoint(&sock);
 
-        assert_eq!(b.handle_frame(7, b"first"), SubstitutionAction::Relayed);
+        assert_eq!(
+            b.relay_guest_bytes(7, b"first"),
+            EndpointRelayAction::Relayed
+        );
         assert_eq!(active.load(Ordering::Relaxed), 1);
         // Second frame on the same open stream — no new connection.
-        assert_eq!(b.handle_frame(7, b"second"), SubstitutionAction::Relayed);
+        assert_eq!(
+            b.relay_guest_bytes(7, b"second"),
+            EndpointRelayAction::Relayed
+        );
         assert_eq!(active.load(Ordering::Relaxed), 1);
 
         // Close drops the endpoint connection (the endpoint then sees EOF).
-        b.close(7);
-        assert!(!b.has_active());
+        b.close_connection(7);
+        assert!(!b.is_active());
         assert_eq!(active.load(Ordering::Relaxed), 0);
 
         // The single endpoint connection received both frames' bytes concatenated.
@@ -280,11 +303,11 @@ mod tests {
         bridge.set_endpoint(&sock);
         assert!(bridge.poll_fds().is_empty());
         assert_eq!(
-            bridge.handle_frame(7, b"first"),
-            SubstitutionAction::Relayed
+            bridge.relay_guest_bytes(7, b"first"),
+            EndpointRelayAction::Relayed
         );
         assert_eq!(bridge.poll_fds().len(), 1);
-        bridge.close(7);
+        bridge.close_connection(7);
         assert!(bridge.poll_fds().is_empty());
         server.join().unwrap();
     }

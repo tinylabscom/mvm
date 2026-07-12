@@ -247,17 +247,29 @@ impl VsockTransportCore {
             if last == avail_idx {
                 break;
             }
-            let (hdr, payload) = self.pending_rx.remove(0);
+            let (mut hdr, payload) = self.pending_rx.remove(0);
             let slot = last % qsz;
             let head = self.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
             let da = q.desc + u64::from(head) * 16;
             let addr = self.mem.rd_u64(da);
             let cap = self.mem.rd_u32(da + 8) as usize;
+            let payload_cap = match cap.checked_sub(HDR_LEN) {
+                Some(payload_cap) if payload_cap > 0 || payload.is_empty() => payload_cap,
+                _ => {
+                    self.pending_rx.insert(0, (hdr, payload));
+                    break;
+                }
+            };
+            let send_len = payload.len().min(payload_cap);
+            let remainder = payload[send_len..].to_vec();
+            hdr.len = send_len as u32;
             let mut bytes = hdr.to_bytes().to_vec();
-            bytes.extend_from_slice(&payload);
-            let n = bytes.len().min(cap);
-            self.mem.write_bytes(addr, &bytes[..n]);
-            self.complete(RX, head, n as u32);
+            bytes.extend_from_slice(&payload[..send_len]);
+            self.mem.write_bytes(addr, &bytes);
+            self.complete(RX, head, bytes.len() as u32);
+            if !remainder.is_empty() {
+                self.pending_rx.insert(0, (hdr, remainder));
+            }
             last = last.wrapping_add(1);
             delivered = true;
         }
@@ -321,4 +333,77 @@ fn set_lo(v: &mut u64, lo: u32) {
 
 fn set_hi(v: &mut u64, hi: u32) {
     *v = (*v & 0xffff_ffff) | (u64::from(hi) << 32);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn transport() -> VsockTransportCore {
+        let ram = vec![0u8; 0x1000].leak();
+        // SAFETY: leaked for the test.
+        unsafe { VsockTransportCore::new(ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
+    }
+
+    fn configure_rx_buffers(core: &mut VsockTransportCore, caps: &[usize]) -> Vec<u64> {
+        let base = 0x4000_0000;
+        let desc = base + 0x100;
+        let avail = base + 0x200;
+        let used = base + 0x300;
+        let mut buffers = Vec::new();
+        core.queues[RX] = Queue {
+            num: caps.len() as u32,
+            ready: 1,
+            desc,
+            avail,
+            used,
+            last_avail: 0,
+        };
+        core.mem.wr_u16(avail + 2, caps.len() as u16);
+        for (index, cap) in caps.iter().enumerate() {
+            let buf = base + 0x400 + (index as u64 * 0x100);
+            buffers.push(buf);
+            let desc_addr = desc + (index as u64 * 16);
+            core.mem.write_bytes(desc_addr, &buf.to_le_bytes());
+            core.mem
+                .write_bytes(desc_addr + 8, &(*cap as u32).to_le_bytes());
+            core.mem
+                .wr_u16(avail + 4 + (index as u64 * 2), index as u16);
+        }
+        buffers
+    }
+
+    #[test]
+    fn flush_rx_splits_large_stream_payload_across_guest_buffers() {
+        let mut core = transport();
+        let buffers = configure_rx_buffers(&mut core, &[HDR_LEN + 6, HDR_LEN + 4]);
+        let hdr = VsockHdr {
+            src_cid: HOST_CID,
+            dst_cid: GUEST_CID,
+            src_port: mvm_guest::vsock::EGRESS_PORT,
+            dst_port: 1500,
+            len: 10,
+            typ: TYPE_STREAM,
+            op: OP_RW,
+            flags: 0,
+            buf_alloc: HOST_BUF_ALLOC,
+            fwd_cnt: 12,
+        };
+        core.pending_rx.push((hdr, b"abcdefghij".to_vec()));
+
+        assert!(core.flush_rx());
+        assert!(core.pending_rx.is_empty());
+
+        let first = core.mem.read_bytes(buffers[0], HDR_LEN + 6);
+        let first_hdr = VsockHdr::from_bytes(&first[..HDR_LEN]);
+        assert_eq!(first_hdr.op, OP_RW);
+        assert_eq!(first_hdr.len, 6);
+        assert_eq!(&first[HDR_LEN..], b"abcdef");
+
+        let second = core.mem.read_bytes(buffers[1], HDR_LEN + 4);
+        let second_hdr = VsockHdr::from_bytes(&second[..HDR_LEN]);
+        assert_eq!(second_hdr.op, OP_RW);
+        assert_eq!(second_hdr.len, 4);
+        assert_eq!(&second[HDR_LEN..], b"ghij");
+    }
 }

@@ -313,7 +313,7 @@ mod tests {
     use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
 
     fn dev() -> VsockShared {
-        let mut ram = vec![0u8; 0x1000];
+        let ram = vec![0u8; 0x1000].leak();
         // SAFETY: leaked for the test.
         unsafe { VsockShared::new(49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
     }

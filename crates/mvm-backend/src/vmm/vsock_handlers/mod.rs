@@ -7,7 +7,7 @@ use std::sync::atomic::AtomicBool;
 
 use super::agent_bridge::AgentBridge;
 use super::console_bridge::ConsoleBridge;
-use super::substitution_bridge::{SubstitutionAction, SubstitutionBridge};
+use super::substitution_bridge::{EndpointRelayAction, GuestEndpointRelay, SubstitutionBridge};
 use super::vsock_transport::{
     OP_CREDIT_REQUEST, OP_CREDIT_UPDATE, OP_REQUEST, OP_RESPONSE, OP_RST, OP_RW, OP_SHUTDOWN,
     VsockHdr, VsockTransportCore,
@@ -340,12 +340,12 @@ impl GuestPortHandler for StreamRelayHandler {
             OP_REQUEST => ctx.queue_reply(&hdr, OP_RESPONSE, &[]),
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
-                match self.bridge.handle_frame(hdr.src_port, &payload[..n]) {
-                    SubstitutionAction::Relayed => {
+                match self.bridge.relay_guest_bytes(hdr.src_port, &payload[..n]) {
+                    EndpointRelayAction::Relayed => {
                         self.headers.insert(hdr.src_port, hdr);
                         ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
                     }
-                    SubstitutionAction::Refused => {
+                    EndpointRelayAction::Refused => {
                         self.headers.remove(&hdr.src_port);
                         ctx.queue_reply(&hdr, OP_RST, &[]);
                     }
@@ -355,7 +355,7 @@ impl GuestPortHandler for StreamRelayHandler {
             OP_CREDIT_REQUEST => ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]),
             OP_SHUTDOWN => {
                 if self.headers.remove(&hdr.src_port).is_some() {
-                    self.bridge.close(hdr.src_port);
+                    self.bridge.close_connection(hdr.src_port);
                 }
                 ctx.remove_recv(hdr.dst_port, hdr.src_port);
                 ctx.queue_reply(&hdr, OP_RST, &[]);
@@ -365,10 +365,10 @@ impl GuestPortHandler for StreamRelayHandler {
     }
 
     fn drain(&mut self, ctx: &mut VsockHandlerContext<'_>) -> Option<u32> {
-        if !self.bridge.has_active() {
+        if !self.bridge.is_active() {
             return None;
         }
-        let drained = self.bridge.drain();
+        let drained = self.bridge.drain_endpoint_bytes();
         for (conn_id, bytes) in drained.ready {
             if let Some(hdr) = self.headers.get(&conn_id).copied() {
                 ctx.queue_reply(&hdr, OP_RW, &bytes);
