@@ -61,7 +61,7 @@ fn kernel_build_rejects_unknown_arch() {
 /// The global `--kernel-source` flag accepts only compile|download|auto.
 #[test]
 fn global_kernel_source_rejects_unknown() {
-    let out = mvmctl(&["--kernel-source", "bogus", "dev", "up"]);
+    let out = mvmctl(&["--kernel-source", "bogus", "doctor"]);
     assert!(
         !out.status.success(),
         "unknown --kernel-source value should fail to parse"

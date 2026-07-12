@@ -412,7 +412,6 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Top-level `mvmctl bootstrap` — installer surface (host tooling + builder
     // VM image prefetch). Same posture as `env bootstrap` and `init`.
     ("bootstrap", AuditPosture::InteractiveOrControl),
-    ("dev", AuditPosture::InteractiveOrControl),
     ("doctor", AuditPosture::ReadOnly),
     // Runtime-pack readiness report — reads the local pack cache only, no
     // mutation and no audit-chain emission.
