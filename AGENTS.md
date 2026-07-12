@@ -297,7 +297,9 @@ Documentation is a **first-class deliverable**. Every code change that touches u
 
 ## Screenshots & Temporary Files
 
-**NEVER** save screenshots, images, or any binary artifacts to the project root or any directory within the repository. Always save screenshots and temporary files to `/tmp/` (e.g. `/tmp/screenshot.png`, `/tmp/page-snapshot.png`). This prevents binary files from polluting the git history.
+**NEVER** write scratch, temporary, or intermediate files anywhere inside the repository working tree — not the project root, not a subdirectory, not a hidden dotfile (`.foo.txt`), not even a gitignored path. This applies to **every** kind of agent-created scratch, not just screenshots/binaries: analysis lists, command output, intermediate JSON/TSV, logs, ad-hoc scripts, `git merge-file` inputs, etc.
+
+Always write such files under `/tmp/` instead (e.g. `/tmp/screenshot.png`, `/tmp/worktree-audit.txt`). This keeps the working directory clean and keeps junk out of git. If you need three-way-merge scratch or similar, use `/tmp/`, never the repo.
 
 When using Playwright or other browser tools, explicitly set the output path to `/tmp/`:
 
