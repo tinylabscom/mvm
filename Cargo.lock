@@ -1761,7 +1761,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libkrun-sys"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "libc",
  "mvm-backend",
@@ -1895,7 +1895,7 @@ dependencies = [
 
 [[package]]
 name = "mvm"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1924,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-backend"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "ext4-view",
@@ -1952,7 +1952,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-build"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -1990,7 +1990,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-cli"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2033,7 +2033,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-client"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-trait",
  "flate2",
@@ -2049,7 +2049,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-core"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "aes-gcm",
  "aho-corasick",
@@ -2091,7 +2091,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-ext4"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "am-fs-ext4",
  "sha2",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-guest"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -2120,7 +2120,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-guest-helpers"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "hickory-proto",
@@ -2135,7 +2135,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-host-services-ffi"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "mvm-core",
  "mvm-guest",
@@ -2145,7 +2145,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-hostd"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2194,7 +2194,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-mcp"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -2205,7 +2205,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-network"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "mvm-core",
  "mvm-sdk",
@@ -2214,7 +2214,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-oci"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2235,7 +2235,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-sdk"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -2262,7 +2262,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-storage"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2280,7 +2280,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-verify"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
@@ -2291,7 +2291,7 @@ dependencies = [
 
 [[package]]
 name = "mvm-vm-host"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2316,7 +2316,7 @@ dependencies = [
 
 [[package]]
 name = "mvmctl"
-version = "0.17.0"
+version = "0.18.0"
 dependencies = [
  "anyhow",
  "assert_cmd",
