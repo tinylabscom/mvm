@@ -440,6 +440,10 @@ Every new module, type, or function needs test coverage:
 - CLI: integration tests in `tests/cli.rs` for help text and argument parsing
 - Security: positive path, negative path (wrong key, tampered, replay), edge cases
 
+## Scratch & temporary files
+
+Never write scratch, temporary, or intermediate files anywhere inside the repo working tree — not the root, not a subdirectory, not a hidden dotfile, not a gitignored path. This covers **every** kind of agent-created scratch (analysis lists, command output, intermediate JSON/TSV, logs, ad-hoc scripts, `git merge-file` inputs), not just screenshots/binaries. Write them under `/tmp/` instead. See AGENTS.md §"Screenshots & Temporary Files" for the full rule.
+
 ## Build and Run
 
 ```bash
