@@ -772,6 +772,10 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
         anyhow::bail!("ext4 label '{label}' must be 1-16 ASCII alphanumeric/dash chars",);
     }
 
+    if !std::path::Path::new(host_dir).is_dir() {
+        anyhow::bail!("--add-dir host path must be a directory: {host_dir}");
+    }
+
     let nodes = mvm_build::rootfs::collect_nodes(
         std::path::Path::new(host_dir),
         mvm_build::rootfs::UnsupportedNodePolicy::Reject,
