@@ -342,6 +342,7 @@ mod tests {
             auth: AuthPolicy::none(),
             egress_policy: PolicyRef("e".to_string()),
             redaction: Default::default(),
+            reversible_replacement: Default::default(),
             tool_policy: PolicyRef("t".to_string()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec![],

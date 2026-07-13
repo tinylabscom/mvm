@@ -563,7 +563,7 @@ This model supports both integrity-focused deployments and confidential-computin
 
 ## 15. Unbypassable Egress, PII, and Exploit Controls
 
-> **Implementation status (V2 draft):** §15 and §15.1 describe the runtime policy plane's design intent. L3 destination allowlisting via `NetworkPreset` is shipped today. The L7 egress proxy, AI-provider request inspection, PII detection, secret/token detection at egress, and response inspection are tracked as Sprint 44 / plan 37 Wave 2 (`mvm-supervisor` + `PiiRedactor`); the foundation (`EgressMode::L3PlusL7`, `EgressProxy` trait, `StubEgressProxy`) shipped in PR #23. The example in §15.1 is the target output shape, not a current trace from a running system. The fail-closed and detect-only-first invariants documented here are load-bearing for when the engine ships.
+> **Implementation status (V2 draft):** §15 and §15.1 describe the runtime policy plane's broader design intent. L3 destination allowlisting via `NetworkPreset` is shipped today. The full AI-provider policy plane remains in progress, but the first owned-path reversible-replacement slice is now real: the host substitution proxy can detect secret/PII spans on owned cleartext request headers/bodies, replace them with opaque request-scoped tokens, and restore exact token echoes on the owned response path while keeping proofs plaintext-free. The larger L7 egress proxy / provider inspection / generalized response inspection surface remains tracked as Sprint 44 / plan 37 Wave 2 (`mvm-supervisor` + `PiiRedactor`). The example in §15.1 is still the target output shape for the broader policy plane, not a current full-system trace.
 
 MVM’s policy path prevents tenant workloads from bypassing the controls that govern outbound behavior.
 

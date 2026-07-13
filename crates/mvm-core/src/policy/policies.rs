@@ -160,6 +160,11 @@ pub struct EgressPolicy {
     /// `ExecutionPlan.redaction` at admission. Default = all-off.
     #[serde(default)]
     pub redaction: crate::policy::RedactionPolicy,
+    /// Per-destination reversible replacement / reinjection. Synthesized into
+    /// the signed `ExecutionPlan.reversible_replacement` at admission. Default
+    /// = disabled.
+    #[serde(default)]
+    pub reversible_replacement: crate::policy::ReversibleReplacementPolicy,
 }
 
 /// Default body cap when `EgressPolicy::body_cap_bytes` is 0.

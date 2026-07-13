@@ -337,6 +337,7 @@ mod tests {
                 path: "/tmp/mvm-substitution-endpoint-test.sock".into(),
             },
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
             secret_store_dir: None,
             binding_store_dir: None,

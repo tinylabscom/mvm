@@ -165,6 +165,7 @@ mod tests {
                 body_cap_bytes: 0,
                 disabled_inspectors: vec![],
                 redaction: crate::policy::RedactionPolicy::default(),
+                reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
             },
             pii: PiiPolicy {
                 mode: Some("detect".to_string()),

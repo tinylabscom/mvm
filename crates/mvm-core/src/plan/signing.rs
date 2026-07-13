@@ -91,6 +91,17 @@ pub fn redaction_from_signed_json(
     Ok(plan.redaction)
 }
 
+/// Extract the reversible replacement policy from a signed plan's payload,
+/// without re-verifying the signature — same trust posture as
+/// [`redaction_from_signed_json`].
+pub fn reversible_replacement_from_signed_json(
+    plan_json: &str,
+) -> Result<crate::policy::ReversibleReplacementPolicy, serde_json::Error> {
+    let signed: SignedExecutionPlan = serde_json::from_str(plan_json)?;
+    let plan: ExecutionPlan = serde_json::from_slice(&signed.0.payload)?;
+    Ok(plan.reversible_replacement)
+}
+
 /// Extract the `tenant` id from a serialised `SignedExecutionPlan` envelope.
 ///
 /// The Firecracker launch path reads the admitted plan from disk
@@ -234,6 +245,7 @@ pub mod test_support {
             auth: AuthPolicy::none(),
             egress_policy: PolicyRef("agent-l7".to_string()),
             redaction: crate::policy::RedactionPolicy::default(),
+            reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
             tool_policy: PolicyRef("read-only-tools".to_string()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],

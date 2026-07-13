@@ -195,6 +195,14 @@ pub struct SecretsScanner {
     regexes: Vec<Regex>,
 }
 
+/// One validated secret match span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SecretMatch {
+    pub name: &'static str,
+    pub start: usize,
+    pub end: usize,
+}
+
 impl SecretsScanner {
     /// Build a scanner from a custom rule list. Returns `Err` if any
     /// pattern fails to compile (a programming error — patterns are
@@ -230,6 +238,22 @@ impl SecretsScanner {
             .into_iter()
             .map(|idx| self.rule_names[idx])
             .collect()
+    }
+
+    /// Validated match byte ranges with the rule name that fired.
+    pub fn match_spans(&self, body: &[u8]) -> Vec<SecretMatch> {
+        let candidate_indices: Vec<usize> = self.set.matches(body).into_iter().collect();
+        let mut spans = Vec::new();
+        for idx in candidate_indices {
+            for m in self.regexes[idx].find_iter(body) {
+                spans.push(SecretMatch {
+                    name: self.rule_names[idx],
+                    start: m.start(),
+                    end: m.end(),
+                });
+            }
+        }
+        spans
     }
 
     /// Replace every secret-pattern match in `body` with
