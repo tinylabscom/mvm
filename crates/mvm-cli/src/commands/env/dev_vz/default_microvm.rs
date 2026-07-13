@@ -24,10 +24,6 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
         resolve_workload_kernel_bootstrap(&cache, arch, prod, find_builder_vm_flake().is_ok());
     match resolved {
         WorkloadKernelBootstrap::Cached(path) => Ok(path),
-        WorkloadKernelBootstrap::ReusableBuilder(path) => {
-            ui::info("Reusing builder-image kernel as workload kernel (dev mode).");
-            Ok(path)
-        }
         WorkloadKernelBootstrap::BuildLocal(path) => {
             ui::info("Building workload kernel locally (source checkout)...");
             build_workload_kernel_locally()
@@ -108,7 +104,6 @@ fn embedded_verity_init_bytes() -> Option<&'static [u8]> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum WorkloadKernelBootstrap {
     Cached(String),
-    ReusableBuilder(String),
     BuildLocal(String),
     Download(String),
 }
@@ -122,9 +117,13 @@ pub(super) fn resolve_workload_kernel_bootstrap(
     if let Some(cached) = find_cached_workload_kernel(cache_dir, arch, prod) {
         return WorkloadKernelBootstrap::Cached(cached);
     }
-    if !prod && let Some(builder) = find_reusable_builder_kernel(cache_dir, arch) {
-        return WorkloadKernelBootstrap::ReusableBuilder(builder);
-    }
+    // The workload always boots through the verity initrd (mvm-verity-init opens
+    // /dev/mapper/control and builds the dm-verity target), so its kernel must
+    // carry device-mapper + dm-verity built in. The builder kernel force-drops
+    // both (it boots `root=/dev/vda ro` with no roothash), so it can never stand
+    // in for the workload kernel — reusing it panics the guest at boot. Always
+    // resolve the real workload kernel: build it (source checkout) or download
+    // the published one.
     let dest = format!("{cache_dir}/builder-vm/{arch}/kernels/workload/vmlinux");
     if source_checkout {
         WorkloadKernelBootstrap::BuildLocal(dest)
@@ -144,11 +143,6 @@ fn build_workload_kernel_locally() -> Result<std::path::PathBuf> {
         "building the workload kernel locally requires the `builder-vm` feature; \
          use a release build with published kernels or rebuild mvmctl with builder-vm enabled"
     )
-}
-
-pub(super) fn find_reusable_builder_kernel(cache_dir: &str, arch: &str) -> Option<String> {
-    let path = format!("{cache_dir}/builder-vm/{arch}/vmlinux");
-    std::path::Path::new(&path).is_file().then_some(path)
 }
 
 fn download_workload_kernel(arch: &str, dest: &str) -> Result<()> {
