@@ -5028,6 +5028,7 @@ mod tests {
                 name: "work",
                 src: staged.path(),
             }],
+            None,
             &image,
             512,
         )
