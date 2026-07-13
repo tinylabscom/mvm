@@ -2973,20 +2973,12 @@ mod linux {
     /// below is on this disk, not tmpfs.
     const DISK_INPUT_STAGE: &str = "/nix-store/builder-input";
 
-<<<<<<< HEAD
     /// Populate `/job`, `/work`, `/mvm-bins`, and (when the host packed one)
     /// `/closure-seed` from the input disk, and back `/out` with a writable
     /// dir on the persistent nix-store disk. This is the disk-transport
-    /// equivalent of the virtio-fs shares, for the hvf VMM (which has no
-    /// virtio-fs). A tmpfs `/out` would be capped by guest RAM — too small
-    /// for a built rootfs — so `/out` lives on the big nix-store disk.
-=======
-    /// Populate `/job`, `/work`, `/mvm-bins` from the input disk and back `/out`
-    /// with a writable dir on the persistent nix-store disk. This is the
-    /// disk-transport equivalent of the virtio-fs shares — the primary
-    /// transport for a Rootfs-image libkrun builder VM, and the only option
-    /// for the hvf VMM (which has no virtio-fs).
->>>>>>> 772e9bb83 (fix(builder-guest): stage disk-transport input off the RAM tmpfs)
+    /// equivalent of the virtio-fs shares — the primary transport for a
+    /// Rootfs-image libkrun builder VM, and the only option for the hvf VMM
+    /// (which has no virtio-fs).
     fn stage_disk_transport_input(t: &crate::DiskTransport) -> Result<(), String> {
         std::fs::create_dir_all(DISK_INPUT_STAGE)
             .map_err(|e| format!("mkdir {DISK_INPUT_STAGE}: {e}"))?;
