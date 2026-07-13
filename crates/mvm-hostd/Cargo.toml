@@ -103,11 +103,9 @@ tracing-subscriber.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
-
-# macOS userspace TCP/IP egress: terminate guest tunnel flows in-process and
-# bridge each admitted flow to a host socket (no unprivileged kernel NAT on
-# macOS). Linux uses the kernel TUN + NAT path instead, so this is macOS-only.
-[target.'cfg(target_os = "macos")'.dependencies]
+# Userspace TCP/IP egress: terminate guest tunnel flows in an in-process stack
+# and bridge each admitted flow to an ordinary host socket. One forwarder on
+# every host — no unprivileged kernel NAT required anywhere.
 smoltcp.workspace = true
 
 # mvm-jailer-lite confinement: seccomp + landlock are Linux-only.

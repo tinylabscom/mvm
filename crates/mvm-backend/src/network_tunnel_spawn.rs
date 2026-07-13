@@ -3,8 +3,9 @@
 //! The first production tunnel slice keeps one host-owned helper process per
 //! VM. It binds the per-port host UDS the backend already exposes to the guest
 //! via virtio-vsock, validates the guest's tunnel identity, hands down the
-//! host-authored `mvm-net0` config, and then enforces a default-deny packet
-//! policy until the admitted forward path lands.
+//! host-authored `mvm-net0` config, and then enforces its packet policy:
+//! default-deny, or forward admitted flows through the worker's in-process
+//! userspace stack.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -27,17 +28,14 @@ use crate::broker_services_spawn::{
 /// clamped down to a routable value from this in [`derive_network_config`].
 const LAUNCH_TUNNEL_FRAME_SIZE: u32 = 4096;
 
-/// Fixed prefix for a per-VM host TUN interface name. Kept short so the derived
-/// name stays under `IFNAMSIZ` (16, so ≤15 usable bytes).
-const HOST_TUN_IFACE_PREFIX: &str = "mvmt";
+/// Opaque forward-vs-gate-only selector handed to the worker's `l3_forward`
+/// packet policy. Its presence (not its value) selects the forwarding path; the
+/// worker's in-process userspace stack binds no host device, so any stable
+/// string works.
+const L3_FORWARD_MARKER: &str = "mvm-net0";
 
 pub const NETWORK_TUNNEL_WORKER_PID_FILE: &str = "network-tunnel-worker.pid";
 pub const NETWORK_TUNNEL_AUDIT_JSONL: &str = "network-tunnel.audit.jsonl";
-/// Records the per-VM host TUN interface the worker installed a NAT table for.
-/// Persisted at spawn so a later reap — including one after a SIGKILLed worker
-/// that never ran its own teardown — can remove the leaked NAT table without
-/// re-deriving the name from the VM.
-pub const NETWORK_TUNNEL_HOST_IFACE_FILE: &str = "network-tunnel-host-iface";
 pub(crate) const NETWORK_TUNNEL_READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,13 +50,10 @@ pub(crate) struct NetworkTunnelWorkerSpawnParams<'a> {
     pub listener: Option<NetworkTunnelListener>,
     /// The VM's resolved egress policy. An admitted allow-list (≥1 host rule)
     /// makes the worker an L3 forwarder: the policy's hosts are resolved to an
-    /// admission `DnsPinRegistry` and admitted packets forward out a per-VM host
-    /// TUN. Deny-all / unrestricted / absent leaves the worker a `drop_all`
-    /// default-deny gate.
+    /// admission `DnsPinRegistry` and admitted flows are forwarded through the
+    /// worker's in-process userspace stack. Deny-all / unrestricted / absent
+    /// leaves the worker a `drop_all` default-deny gate.
     pub network_policy: Option<&'a NetworkPolicy>,
-    /// Per-VM name the host TUN interface name is derived from. Only consulted
-    /// when the policy selects the L3-forward path.
-    pub vm_name: &'a str,
 }
 
 /// The concrete packet policy the worker is told to enforce, resolved from the
@@ -67,13 +62,10 @@ pub(crate) struct NetworkTunnelWorkerSpawnParams<'a> {
 enum WorkerPacketPolicy {
     /// Default-deny: inspect and drop every guest packet.
     DropAll,
-    /// Relay every guest packet out a named host TUN, ungated. Retained so the
-    /// spawn layer can still emit the worker's ungated `host_tun` contract; the
-    /// admitted launch path always resolves to `DropAll` or `L3Forward`.
-    #[allow(dead_code)]
-    HostTun { interface_name: String },
-    /// Gate each guest packet against the admitted policy + pins; forward only
-    /// admitted packets out the per-VM host TUN.
+    /// Gate each guest packet against the admitted policy + pins; the worker
+    /// forwards only admitted flows through its in-process userspace stack. The
+    /// `interface_name` is an opaque forward-vs-gate-only selector — the stack
+    /// binds no host device.
     L3Forward {
         policy: NetworkPolicy,
         pins: DnsPinRegistry,
@@ -83,13 +75,10 @@ enum WorkerPacketPolicy {
 
 /// Choose the worker's packet policy from the launch's egress policy. An
 /// admitted allow-list (≥1 concrete host rule) resolves its hosts to pins and
-/// selects the L3-forward path out a per-VM host TUN. Every other policy
-/// (deny-all, unrestricted, absent) fails closed to `drop_all` — an unrestricted
-/// allow-all can't be expressed as a finite pin set, so it never widens the gate.
-fn worker_packet_policy(
-    network_policy: Option<&NetworkPolicy>,
-    vm_name: &str,
-) -> WorkerPacketPolicy {
+/// selects the L3-forward path. Every other policy (deny-all, unrestricted,
+/// absent) fails closed to `drop_all` — an unrestricted allow-all can't be
+/// expressed as a finite pin set, so it never widens the gate.
+fn worker_packet_policy(network_policy: Option<&NetworkPolicy>) -> WorkerPacketPolicy {
     match network_policy {
         Some(policy)
             if policy
@@ -99,40 +88,11 @@ fn worker_packet_policy(
             WorkerPacketPolicy::L3Forward {
                 pins: resolve_network_policy_pins(policy),
                 policy: policy.clone(),
-                interface_name: host_tun_interface_name(vm_name),
+                interface_name: L3_FORWARD_MARKER.to_string(),
             }
         }
         _ => WorkerPacketPolicy::DropAll,
     }
-}
-
-impl WorkerPacketPolicy {
-    /// The per-VM host TUN interface whose NAT table must be reaped if this
-    /// worker is orphaned. Only the L3-forward path installs a NAT table, so
-    /// only it names an interface to sweep.
-    fn nat_interface_name(&self) -> Option<&str> {
-        match self {
-            WorkerPacketPolicy::L3Forward { interface_name, .. } => Some(interface_name),
-            _ => None,
-        }
-    }
-}
-
-/// Derive a stable, `IFNAMSIZ`-valid (≤15 bytes), per-VM host TUN interface
-/// name. A fixed prefix plus 40 bits of a deterministic hash of the VM name
-/// keeps distinct VMs from colliding while staying within the kernel's cap and
-/// the `[A-Za-z0-9_.-]` charset the tunnel worker validates.
-pub(crate) fn host_tun_interface_name(vm_name: &str) -> String {
-    use std::hash::{Hash, Hasher};
-    // `DefaultHasher::new()` seeds with fixed keys, so the name is stable across
-    // processes for the same VM (setup/teardown key on it identically).
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    vm_name.hash(&mut hasher);
-    // 10 hex digits = 40 bits; prefix(4) + 10 = 14 bytes, under IFNAMSIZ.
-    format!(
-        "{HOST_TUN_IFACE_PREFIX}{:010x}",
-        hasher.finish() & 0x00ff_ffff_ffff
-    )
 }
 
 /// Launch-time identity for a workload's packet tunnel. `tenant_id` + `vm_id`
@@ -208,7 +168,7 @@ pub(crate) fn spawn_network_tunnel_worker_if_configured(
             .map_err(|e| anyhow!("create tunnel worker audit dir {}: {e}", parent.display()))?;
     }
 
-    let packet_policy = worker_packet_policy(params.network_policy, params.vm_name);
+    let packet_policy = worker_packet_policy(params.network_policy);
     let config_json = build_network_tunnel_worker_config_json(
         &listener,
         &audit_jsonl_path,
@@ -232,13 +192,6 @@ pub(crate) fn spawn_network_tunnel_worker_if_configured(
     let pid_file = state_dir.join(NETWORK_TUNNEL_WORKER_PID_FILE);
     std::fs::write(&pid_file, child.id().to_string())
         .map_err(|e| anyhow!("write {}: {e}", pid_file.display()))?;
-    // Persist the NAT interface so reap can remove a leaked table if the worker
-    // is SIGKILLed before its own teardown runs.
-    if let Some(iface) = packet_policy.nat_interface_name() {
-        let iface_file = state_dir.join(NETWORK_TUNNEL_HOST_IFACE_FILE);
-        std::fs::write(&iface_file, iface)
-            .map_err(|e| anyhow!("write {}: {e}", iface_file.display()))?;
-    }
     Ok(guard)
 }
 
@@ -280,9 +233,6 @@ fn build_network_tunnel_worker_config_json(
 fn packet_policy_json(policy: &WorkerPacketPolicy) -> serde_json::Value {
     match policy {
         WorkerPacketPolicy::DropAll => serde_json::json!({ "kind": "drop_all" }),
-        WorkerPacketPolicy::HostTun { interface_name } => {
-            serde_json::json!({ "kind": "host_tun", "interface_name": interface_name })
-        }
         WorkerPacketPolicy::L3Forward {
             policy,
             pins,
@@ -361,10 +311,8 @@ fn derive_network_config(runtime_config: &TunnelRuntimeConfig) -> Result<TunnelN
             .expect("static tunnel gateway IPv4 is valid"),
         dns_servers: vec!["10.240.0.1".parse().expect("static tunnel DNS IP is valid")],
         mtu,
-        // Seam: the admission pins aren't threaded into this backend spawn path
-        // yet (it only builds drop_all / host_tun policies, which carry no pin
-        // registry). When this path grows an l3_forward policy, the host worker
-        // fills host_entries from that policy's pins in `HostTunnelWorker::new`.
+        // The host worker fills host_entries from the admitted l3_forward gate's
+        // pins when it builds the session, so this backend seed stays empty.
         host_entries: Vec::new(),
     };
     config.validate()?;
@@ -426,54 +374,9 @@ pub(crate) fn reap_network_tunnel_worker(state_dir: &Path) {
     {
         kill(pid, libc::SIGTERM);
     }
-    // Remove a NAT table a SIGKILLed / orphaned worker could not tear down. The
-    // interface name was persisted at spawn; a missing file means no NAT to
-    // reap (drop-all workers install none).
-    let iface_file = state_dir.join(NETWORK_TUNNEL_HOST_IFACE_FILE);
-    if let Ok(iface) = std::fs::read_to_string(&iface_file) {
-        let iface = iface.trim();
-        if !iface.is_empty() {
-            remove_leaked_nat_table(iface);
-        }
-    }
-    let _ = std::fs::remove_file(&iface_file);
     let _ = std::fs::remove_file(&pid_file);
     let _ = std::fs::remove_file(state_dir.join(NETWORK_TUNNEL_AUDIT_JSONL));
 }
-
-/// Compose the argv that removes a leaked per-VM NAT table. Pure so the reap
-/// wiring is unit-testable without invoking nft. The table name is the shared
-/// source of truth both the host worker (setup/teardown) and this reap derive,
-/// so the two can never drift.
-fn nft_delete_nat_table_argv(interface_name: &str) -> Vec<String> {
-    let table = mvm_core::protocol::network_tunnel::host_tun_nat_table_name(interface_name);
-    vec![
-        "nft".to_string(),
-        "delete".to_string(),
-        "table".to_string(),
-        "ip".to_string(),
-        table,
-    ]
-}
-
-/// Best-effort removal of a leaked per-VM NAT table. The argv is composed on
-/// every platform (keeping the pure composition exercised) but only executed on
-/// Linux. The delete is idempotent: a missing table just fails and is ignored,
-/// so the reap never errors on a double sweep.
-fn remove_leaked_nat_table(interface_name: &str) {
-    let argv = nft_delete_nat_table_argv(interface_name);
-    exec_nft_delete(&argv);
-}
-
-#[cfg(target_os = "linux")]
-fn exec_nft_delete(argv: &[String]) {
-    let _ = std::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .status();
-}
-
-#[cfg(not(target_os = "linux"))]
-fn exec_nft_delete(_argv: &[String]) {}
 
 #[cfg(test)]
 mod tests {
@@ -574,35 +477,15 @@ mod tests {
         assert_eq!(config["listener"]["port"], 5302);
     }
 
-    #[test]
-    fn build_worker_config_json_supports_host_tun_packet_policy() {
-        let listener = NetworkTunnelListener::Vsock(5302);
-        let audit = Path::new("/run/mvm/network-tunnel.audit.jsonl");
-        let config = build_network_tunnel_worker_config_json(
-            &listener,
-            audit,
-            &runtime_config(),
-            &WorkerPacketPolicy::HostTun {
-                interface_name: "mvmht0".to_string(),
-            },
-        )
-        .unwrap();
-        assert_eq!(config["worker"]["packet_policy"]["kind"], "host_tun");
-        assert_eq!(
-            config["worker"]["packet_policy"]["interface_name"],
-            "mvmht0"
-        );
-    }
-
     /// An allow-list policy resolves to an `l3_forward` worker policy carrying
-    /// the policy + resolved pins + a per-VM host TUN interface name. Uses a
+    /// the policy + resolved pins + the opaque forward selector. Uses a
     /// literal-IP allow-list so pin resolution needs no live DNS.
     #[test]
     fn worker_config_json_is_l3_forward_with_policy_and_pins() {
         let listener = NetworkTunnelListener::Vsock(5302);
         let audit = Path::new("/run/mvm/network-tunnel.audit.jsonl");
         let policy = NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]);
-        let packet_policy = worker_packet_policy(Some(&policy), "vm-1");
+        let packet_policy = worker_packet_policy(Some(&policy));
         let config = build_network_tunnel_worker_config_json(
             &listener,
             audit,
@@ -619,106 +502,25 @@ mod tests {
             pp["gate"]["pins"]["pins"]["93.184.216.34"]["ips"][0],
             "93.184.216.34"
         );
-        // The per-VM host TUN interface name is present + IFNAMSIZ-valid.
-        let iface = pp["interface_name"]
-            .as_str()
-            .expect("interface_name string");
-        assert!(iface.starts_with(HOST_TUN_IFACE_PREFIX));
-        assert!(iface.len() <= 15, "iface {iface:?} must fit IFNAMSIZ");
+        // The opaque forward selector is present; its presence (not value)
+        // selects the worker's forwarding path.
+        assert_eq!(pp["interface_name"], "mvm-net0");
     }
 
     #[test]
     fn worker_packet_policy_defaults_closed_for_deny_all_and_unrestricted() {
         assert!(matches!(
-            worker_packet_policy(Some(&NetworkPolicy::deny_all()), "vm-1"),
+            worker_packet_policy(Some(&NetworkPolicy::deny_all())),
             WorkerPacketPolicy::DropAll
         ));
         assert!(matches!(
-            worker_packet_policy(Some(&NetworkPolicy::unrestricted()), "vm-1"),
+            worker_packet_policy(Some(&NetworkPolicy::unrestricted())),
             WorkerPacketPolicy::DropAll
         ));
         assert!(matches!(
-            worker_packet_policy(None, "vm-1"),
+            worker_packet_policy(None),
             WorkerPacketPolicy::DropAll
         ));
-    }
-
-    #[test]
-    fn reap_removes_leaked_nat_table() {
-        // The reap sweep composes the exact idempotent nft delete argv from the
-        // per-VM interface name, using the shared table-name source of truth.
-        let iface = host_tun_interface_name("workload-alpha");
-        let expected_table = mvm_core::protocol::network_tunnel::host_tun_nat_table_name(&iface);
-        assert_eq!(
-            nft_delete_nat_table_argv(&iface),
-            vec![
-                "nft".to_string(),
-                "delete".to_string(),
-                "table".to_string(),
-                "ip".to_string(),
-                expected_table.clone(),
-            ]
-        );
-        assert!(expected_table.starts_with("mvm_tun_nat_"));
-    }
-
-    #[test]
-    fn reap_clears_persisted_iface_file() {
-        // Reap consumes the persisted interface file (best-effort NAT sweep) and
-        // removes it so a re-reap is a clean no-op. nft exec is a no-op off Linux.
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmp =
-            std::env::temp_dir().join(format!("mvm-tun-reap-{}-{unique}", std::process::id()));
-        std::fs::create_dir_all(&tmp).expect("create temp state dir");
-        let iface_file = tmp.join(NETWORK_TUNNEL_HOST_IFACE_FILE);
-        std::fs::write(&iface_file, host_tun_interface_name("workload-alpha"))
-            .expect("write iface file");
-
-        reap_network_tunnel_worker(&tmp);
-        assert!(
-            !iface_file.exists(),
-            "reap must remove the persisted iface file"
-        );
-        // A second reap on the now-clean dir must not panic.
-        reap_network_tunnel_worker(&tmp);
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn drop_all_policy_names_no_nat_interface() {
-        // Only the L3-forward path installs a NAT table, so drop-all persists no
-        // interface and reap has nothing to sweep.
-        assert!(
-            worker_packet_policy(Some(&NetworkPolicy::deny_all()), "vm-1")
-                .nat_interface_name()
-                .is_none()
-        );
-        let l3 = worker_packet_policy(
-            Some(&NetworkPolicy::allow_list(vec![HostPort::new(
-                "93.184.216.34",
-                443,
-            )])),
-            "vm-1",
-        );
-        assert!(l3.nat_interface_name().is_some());
-    }
-
-    #[test]
-    fn host_tun_interface_name_is_stable_and_ifnamsiz_valid() {
-        let a = host_tun_interface_name("workload-alpha");
-        let b = host_tun_interface_name("workload-alpha");
-        let c = host_tun_interface_name("workload-beta");
-        assert_eq!(a, b, "same VM name → same interface name");
-        assert_ne!(a, c, "distinct VM names → distinct interface names");
-        assert!(a.starts_with(HOST_TUN_IFACE_PREFIX));
-        assert!(a.len() <= 15);
-        assert!(
-            a.bytes()
-                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'.' || ch == b'-' || ch == b'_')
-        );
     }
 
     /// An admitted allow-list launch carries a forwarding tunnel with the plan's
@@ -764,7 +566,7 @@ mod tests {
         // The resolved gate must pin exactly the admitted destination.
         let policy = NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)]);
         let WorkerPacketPolicy::L3Forward { pins, policy, .. } =
-            worker_packet_policy(Some(&policy), "vm-1")
+            worker_packet_policy(Some(&policy))
         else {
             panic!("an allow-list policy must resolve to an L3-forward worker policy");
         };

@@ -1,23 +1,23 @@
-//! macOS userspace TCP/IP egress for the host-forwarded packet tunnel.
+//! Userspace TCP/IP egress for the host-forwarded packet tunnel.
 //!
-//! The guest hands the host raw IPv4 packets over the network tunnel. On Linux
-//! admitted packets are injected into a kernel TUN + NAT. macOS has no
-//! unprivileged kernel NAT, so the host instead terminates the guest's TCP and
-//! UDP flows in an in-process `smoltcp` stack and bridges each admitted flow to
-//! an ordinary host socket — no root, no utun.
+//! The guest hands the host raw IPv4 packets over the network tunnel. Rather
+//! than inject admitted packets into a privileged kernel TUN device with NAT,
+//! the host terminates the guest's TCP and UDP flows in an in-process `smoltcp`
+//! stack and bridges each admitted flow to an ordinary host socket — no root, no
+//! host network device. This is the sole host-side L3 forwarder on every unix
+//! host.
 //!
 //! Admission is unchanged: every guest packet is gated by
 //! [`L3ForwardPolicy::decide_packet`] before it reaches the stack, exactly like
 //! the raw-L3 decision gate. Only admitted packets are fed to `smoltcp`; a
 //! denied destination is audited and dropped and never opens a socket. The
-//! stack's gateway address mirrors the Linux TUN path (`10.240.0.1/30`, guest
-//! `10.240.0.2`).
+//! stack's gateway lives at `10.240.0.1/30` with the guest at `10.240.0.2`.
 //!
 //! Scope: TCP, UDP, and ICMP-echo forward. TCP terminates each guest flow and
 //! splices it to a host `TcpStream`; UDP bridges each admitted guest 4-tuple to
 //! a connected host `UdpSocket`, reaping idle flows on a timeout (UDP has no
 //! close). An admitted guest ICMP echo request is relayed via an unprivileged
-//! host ping socket (macOS grants `SOCK_DGRAM`/`IPPROTO_ICMP` without root); the
+//! host ping socket (an unprivileged `SOCK_DGRAM`/`IPPROTO_ICMP` socket); the
 //! host waits for the reply and synthesizes an echo reply back to the guest, so
 //! `ping <admitted-host>` works. DNS already works via the guest `/etc/hosts`
 //! injection (the tunnel hands the guest pin-consistent entries), so no resolver
@@ -40,8 +40,8 @@ use smoltcp::wire::{HardwareAddress, IpAddress, IpCidr, IpEndpoint, Ipv4Address}
 
 use crate::net_l3::{L3Decision, L3DropReason, L3ForwardPolicy};
 use crate::network_tunnel::{
-    GuestSessionEvent, HostTunnelWorker, TunnelAuditEvent, TunnelAuditSink, TunnelWorkerError,
-    TunnelWorkerOutcome,
+    GuestSessionEvent, HostNetworkTunnelWorker, TunnelAuditEvent, TunnelAuditSink,
+    TunnelWorkerError, TunnelWorkerOutcome,
 };
 
 /// IPv4 protocol number for TCP.
@@ -70,9 +70,8 @@ const UDP_BATCH_PER_ITER: usize = 64;
 /// sends larger than the tunnel MTU are framed and dropped downstream by the
 /// device (fail closed), so this only bounds the scratch buffer.
 const UDP_DATAGRAM_MAX: usize = 65_507;
-/// Userspace-stack gateway address + prefix, matching the Linux TUN gateway so
-/// the guest sees identical addressing on both host platforms. The guest lives
-/// at `10.240.0.2` inside the same `/30`.
+/// Userspace-stack gateway address + prefix. The guest lives at `10.240.0.2`
+/// inside the same `/30`.
 const GATEWAY_OCTETS: [u8; 4] = [10, 240, 0, 1];
 const GATEWAY_PREFIX_LEN: u8 = 30;
 /// Read/write scratch used when splicing between a guest socket and its host
@@ -422,7 +421,7 @@ impl SmoltcpEgress {
     /// sink, and its per-session quota; the gate gates every packet at ingest.
     pub fn run<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<TunnelWorkerOutcome, TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -497,7 +496,7 @@ impl SmoltcpEgress {
     /// guest, so `ping <admitted-host>` works.
     fn ingest_guest_packet<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
         flow_id: u32,
         sequence: u64,
         payload: Vec<u8>,
@@ -536,7 +535,7 @@ impl SmoltcpEgress {
     /// is logged and the echo dropped (mirroring a failed TCP host connect).
     fn relay_icmp_echo<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
         echo: IcmpEchoRequest,
     ) -> Result<(), TunnelWorkerError>
     where
@@ -588,7 +587,7 @@ impl SmoltcpEgress {
     /// Promote accepted listeners into bridges and splice established flows.
     fn service_flows<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<(), TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -609,7 +608,7 @@ impl SmoltcpEgress {
     /// dropped (logged, not gate-denied). The host socket closes on drop.
     fn service_icmp_echoes<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<(), TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -653,7 +652,7 @@ impl SmoltcpEgress {
     /// failed host connect, reset the guest socket.
     fn promote_accepted_listeners<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<(), TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -695,7 +694,7 @@ impl SmoltcpEgress {
 
     fn open_admitted_flow<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
         handle: SocketHandle,
         dst: Ipv4Addr,
         dst_port: u16,
@@ -760,7 +759,7 @@ impl SmoltcpEgress {
     /// flows with a `TcpFlowClosed` audit.
     fn pump_established_flows<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<(), TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -793,7 +792,7 @@ impl SmoltcpEgress {
     /// Relay UDP both ways and reap idle flows.
     fn service_udp_flows<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<(), TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -811,7 +810,7 @@ impl SmoltcpEgress {
     /// opening a host socket.
     fn pump_udp_guest_to_host<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<(), TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -847,7 +846,7 @@ impl SmoltcpEgress {
     /// Gate + relay one guest datagram, creating the flow on first sight.
     fn relay_guest_datagram<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
         port: u16,
         guest: IpEndpoint,
         dst: Ipv4Addr,
@@ -979,7 +978,7 @@ impl SmoltcpEgress {
     /// its relayed byte counts.
     fn reap_idle_udp_flows<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<(), TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -1043,7 +1042,7 @@ impl SmoltcpEgress {
 
     fn drain_tx_to_guest<S, A>(
         &mut self,
-        worker: &mut HostTunnelWorker<S, A>,
+        worker: &mut HostNetworkTunnelWorker<S, A>,
     ) -> Result<Option<TunnelWorkerOutcome>, TunnelWorkerError>
     where
         S: Read + Write + AsRawFd,
@@ -1132,8 +1131,11 @@ fn parse_icmp_echo_request(packet: &[u8]) -> Option<IcmpEchoRequest> {
 }
 
 /// Open a non-blocking, unprivileged host ICMP socket connected to `dst`. macOS
-/// grants `SOCK_DGRAM`/`IPPROTO_ICMP` without root; `connect` fixes the peer so
-/// stray replies from other hosts are rejected and `send`/`recv` suffice.
+/// grants `SOCK_DGRAM`/`IPPROTO_ICMP` without root; on Linux the same socket is
+/// unprivileged when the worker's gid falls in `net.ipv4.ping_group_range` (the
+/// standard container/desktop default) and otherwise fails closed — TCP/UDP/DNS
+/// egress is unaffected. `connect` fixes the peer so stray replies from other
+/// hosts are rejected and `send`/`recv` suffice.
 fn open_host_icmp(dst: Ipv4Addr) -> std::io::Result<OwnedFd> {
     // SAFETY: standard socket(2); the raw fd is immediately owned so it is closed
     // on every return path.
@@ -1152,8 +1154,13 @@ fn open_host_icmp(dst: Ipv4Addr) -> std::io::Result<OwnedFd> {
         return Err(std::io::Error::last_os_error());
     }
     let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
-    addr.sin_family = libc::AF_INET as u8;
+    // macOS/BSD `sockaddr_in` carries a `sin_len` byte that Linux omits, and the
+    // `sin_family` width differs (u8 on Apple, u16 on Linux) — cast to the field.
+    #[cfg(target_os = "macos")]
+    {
+        addr.sin_len = std::mem::size_of::<libc::sockaddr_in>() as u8;
+    }
+    addr.sin_family = libc::AF_INET as _;
     addr.sin_addr.s_addr = u32::from(dst).to_be();
     // SAFETY: `addr` is a fully initialized sockaddr_in of the passed length.
     let rc = unsafe {
@@ -1351,7 +1358,7 @@ mod tests {
     use super::*;
     use crate::net_l3::L3ForwardPolicy;
     use crate::network_tunnel::{
-        ExpectedTunnelSession, HostTunnelWorker, NoopTunnelAuditSink, TunnelPacketPolicy,
+        ExpectedTunnelSession, HostNetworkTunnelWorker, NoopTunnelAuditSink, TunnelPacketPolicy,
         TunnelWorkerConfig, TunnelWorkerLimits,
     };
     use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
@@ -1551,7 +1558,7 @@ mod tests {
         // Host: worker + smoltcp egress.
         let host_gate = gate.clone();
         let host = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
+            let mut worker = HostNetworkTunnelWorker::new(
                 host_raw,
                 NoopTunnelAuditSink,
                 worker_config(host_gate.clone()),
@@ -1726,7 +1733,8 @@ mod tests {
         let host_gate = gate.clone();
         let host = std::thread::spawn(move || {
             let mut worker =
-                HostTunnelWorker::new(host_raw, audit, worker_config(host_gate.clone())).unwrap();
+                HostNetworkTunnelWorker::new(host_raw, audit, worker_config(host_gate.clone()))
+                    .unwrap();
             worker.bootstrap(1, 2, 3).unwrap();
             let mut egress = SmoltcpEgress::new(&host_gate, EgressConfig::default()).unwrap();
             egress.run(&mut worker).unwrap();
@@ -1807,7 +1815,7 @@ mod tests {
 
         let host_gate = gate.clone();
         let host = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
+            let mut worker = HostNetworkTunnelWorker::new(
                 host_raw,
                 NoopTunnelAuditSink,
                 worker_config(host_gate.clone()),
@@ -1959,7 +1967,8 @@ mod tests {
         let host_gate = gate.clone();
         let host = std::thread::spawn(move || {
             let mut worker =
-                HostTunnelWorker::new(host_raw, audit, worker_config(host_gate.clone())).unwrap();
+                HostNetworkTunnelWorker::new(host_raw, audit, worker_config(host_gate.clone()))
+                    .unwrap();
             worker.bootstrap(1, 2, 3).unwrap();
             let mut egress = SmoltcpEgress::new(&host_gate, EgressConfig::default()).unwrap();
             egress.run(&mut worker).unwrap();
@@ -2054,6 +2063,15 @@ mod tests {
     /// `ping <admitted-host>` works on the macOS userspace stack.
     #[test]
     fn admitted_icmp_echo_reaches_pinned_host_and_replies() {
+        // The relay opens an unprivileged SOCK_DGRAM/IPPROTO_ICMP ping socket.
+        // macOS grants it freely; on Linux it needs the process gid inside
+        // net.ipv4.ping_group_range. Where the environment forbids it (a
+        // locked-down CI container), skip rather than fail — the relay logic is
+        // identical; only the host socket is unavailable.
+        if open_host_icmp(Ipv4Addr::new(127, 0, 0, 1)).is_err() {
+            eprintln!("skipping admitted_icmp_echo: host ping socket unavailable");
+            return;
+        }
         const IDENT: u16 = 0xBEEF;
         const SEQUENCE: u16 = 7;
         const PAYLOAD: &[u8] = b"icmp-echo-over-smoltcp";
@@ -2066,7 +2084,7 @@ mod tests {
 
         let host_gate = gate.clone();
         let host = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
+            let mut worker = HostNetworkTunnelWorker::new(
                 host_raw,
                 NoopTunnelAuditSink,
                 worker_config(host_gate.clone()),
@@ -2184,7 +2202,8 @@ mod tests {
         let host_gate = gate.clone();
         let host = std::thread::spawn(move || {
             let mut worker =
-                HostTunnelWorker::new(host_raw, audit, worker_config(host_gate.clone())).unwrap();
+                HostNetworkTunnelWorker::new(host_raw, audit, worker_config(host_gate.clone()))
+                    .unwrap();
             worker.bootstrap(1, 2, 3).unwrap();
             let mut egress = SmoltcpEgress::new(&host_gate, EgressConfig::default()).unwrap();
             egress.run(&mut worker).unwrap();

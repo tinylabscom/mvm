@@ -560,12 +560,10 @@ fn builder_transport_check(_plat: Platform) -> Check {
     }
 }
 
-/// Summarize workload packet-tunnel worker state under `vms_root`.
-/// Reports running workers as either `drop_all` or `l3_forward(<iface>)`
-/// based on the persisted host-interface sidecar, flags stale artifacts when
-/// the pid is dead or malformed, and reports `absent` when nothing is staged.
-/// Informational: no tunnel worker is the normal state for a workload with no
-/// admitted forwarding tunnel.
+/// Summarize workload packet-tunnel worker state under `vms_root`. Reports each
+/// worker as active (live pid) or stale (dead/malformed pid with leftover
+/// artifacts), and `absent` when nothing is staged. Informational: no tunnel
+/// worker is the normal state for a workload with no admitted forwarding tunnel.
 fn network_tunnel_worker_summary(vms_root: &std::path::Path) -> String {
     let Ok(entries) = std::fs::read_dir(vms_root) else {
         return "absent (no workload tunnel worker running)".to_string();
@@ -580,24 +578,15 @@ fn network_tunnel_worker_summary(vms_root: &std::path::Path) -> String {
         let name = entry.file_name().to_string_lossy().into_owned();
         let pid_file = dir.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE);
         let audit_file = dir.join(mvm_backend::NETWORK_TUNNEL_AUDIT_JSONL);
-        let iface_file = dir.join(mvm_backend::NETWORK_TUNNEL_HOST_IFACE_FILE);
         let pid_file_exists = pid_file.exists();
         let pid = std::fs::read_to_string(&pid_file)
             .ok()
             .and_then(|s| s.trim().parse::<libc::pid_t>().ok());
-        let iface = std::fs::read_to_string(&iface_file)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        let has_artifacts = pid_file_exists || audit_file.exists() || iface.is_some();
-        let mode = iface
-            .as_deref()
-            .map(|iface| format!("l3_forward ({iface})"))
-            .unwrap_or_else(|| "drop_all".to_string());
+        let has_artifacts = pid_file_exists || audit_file.exists();
         if let Some(pid) = pid.filter(|pid| pid_is_alive(*pid)) {
-            running.push(format!("{name}: {mode} (pid {pid})"));
+            running.push(format!("{name} (pid {pid})"));
         } else if has_artifacts {
-            stale.push(format!("{name}: {mode}"));
+            stale.push(name);
         }
     }
     running.sort();
@@ -3981,33 +3970,22 @@ mod tests {
     }
 
     #[test]
-    fn network_tunnel_worker_summary_reports_live_drop_all_and_l3_forward() {
+    fn network_tunnel_worker_summary_reports_live_workers() {
         let root = tempfile::tempdir().unwrap();
-        let drop_all = root.path().join("vm-drop");
-        std::fs::create_dir_all(&drop_all).unwrap();
-        std::fs::write(
-            drop_all.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
-            format!("{}\n", std::process::id()),
-        )
-        .unwrap();
-
-        let l3 = root.path().join("vm-l3");
-        std::fs::create_dir_all(&l3).unwrap();
-        std::fs::write(
-            l3.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
-            format!("{}\n", std::process::id()),
-        )
-        .unwrap();
-        std::fs::write(
-            l3.join(mvm_backend::NETWORK_TUNNEL_HOST_IFACE_FILE),
-            "mvmhtdeadbeef\n",
-        )
-        .unwrap();
+        for name in ["vm-a", "vm-b"] {
+            let dir = root.path().join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
+                format!("{}\n", std::process::id()),
+            )
+            .unwrap();
+        }
 
         let s = network_tunnel_worker_summary(root.path());
         assert!(s.contains("2 active"), "got {s:?}");
-        assert!(s.contains("vm-drop: drop_all"), "got {s:?}");
-        assert!(s.contains("vm-l3: l3_forward (mvmhtdeadbeef)"), "got {s:?}");
+        assert!(s.contains("vm-a (pid"), "got {s:?}");
+        assert!(s.contains("vm-b (pid"), "got {s:?}");
     }
 
     #[test]
@@ -4020,18 +3998,10 @@ mod tests {
             "2147483646\n",
         )
         .unwrap();
-        std::fs::write(
-            stale.join(mvm_backend::NETWORK_TUNNEL_HOST_IFACE_FILE),
-            "mvmhtstale00\n",
-        )
-        .unwrap();
         std::fs::write(stale.join(mvm_backend::NETWORK_TUNNEL_AUDIT_JSONL), "").unwrap();
 
         let s = network_tunnel_worker_summary(root.path());
-        assert!(
-            s.contains("stale: vm-stale: l3_forward (mvmhtstale00)"),
-            "got {s:?}"
-        );
+        assert!(s.contains("stale: vm-stale"), "got {s:?}");
     }
 
     #[test]

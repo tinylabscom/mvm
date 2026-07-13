@@ -947,7 +947,6 @@ fn run_configured_firecracker(
                 .as_ref()
                 .map(|tunnel| NetworkTunnelListener::Vsock(tunnel.guest_port)),
             network_policy: Some(&config.network_policy),
-            vm_name: &config.name,
         })?;
 
     // Configure VM via Firecracker API

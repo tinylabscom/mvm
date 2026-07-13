@@ -30,8 +30,6 @@ pub mod health_probe;
 /// Idle-registration self-termination logic for the `mvm-host-agent` worker.
 pub mod host_agent_idle;
 pub mod host_signer;
-/// Host-side `/dev/net/tun` helper for the shared packet-tunnel data plane.
-pub mod host_tun;
 pub mod jailer;
 /// Secret keyholder — the `SecretRef` → credential boundary: the
 /// [`keyholder::SecretResolver`] trait + the single-host
@@ -49,10 +47,9 @@ pub mod network_tunnel;
 pub mod parent_death;
 pub mod plan_admission;
 pub mod run;
-/// macOS userspace TCP/IP egress for the packet tunnel: terminate admitted
-/// guest TCP flows in an in-process `smoltcp` stack and bridge each to an
-/// ordinary host socket. macOS has no unprivileged kernel NAT; Linux uses the
-/// [`host_tun`] kernel-TUN path instead.
-#[cfg(target_os = "macos")]
+/// Userspace TCP/IP egress for the packet tunnel: terminate admitted guest
+/// flows in an in-process `smoltcp` stack and bridge each to an ordinary host
+/// socket. One forwarder on every host — no unprivileged kernel NAT required.
+#[cfg(unix)]
 pub mod smoltcp_egress;
 pub mod supervisor;

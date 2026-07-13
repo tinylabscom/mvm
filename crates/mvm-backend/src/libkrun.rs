@@ -827,7 +827,6 @@ impl VmBackend for LibkrunBackend {
                     ))
                 }),
                 network_policy: Some(&config.network_policy),
-                vm_name: &config.name,
             })?;
         let pid_file = cfg.pid_file();
         // Remove any stale PID file from a previous crashed supervisor

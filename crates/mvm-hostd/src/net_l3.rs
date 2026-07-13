@@ -444,7 +444,6 @@ mod tests {
         let manifest = env!("CARGO_MANIFEST_DIR"); // .../crates/mvm-hostd
         let files = [
             format!("{manifest}/src/net_l3.rs"),
-            format!("{manifest}/src/host_tun.rs"),
             format!("{manifest}/src/network_tunnel.rs"),
             format!("{manifest}/src/bin/mvm-network-tunnel-worker.rs"),
             format!("{manifest}/../mvm-core/src/protocol/network_tunnel.rs"),

@@ -145,7 +145,6 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
                     ))
                 }),
                 network_policy: Some(&inputs.config.network_policy),
-                vm_name: &inputs.config.name,
             })?;
 
         let egress_uds = self.spawner.spawn(&EndpointSpawnRequest {

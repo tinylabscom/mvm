@@ -23,7 +23,6 @@ use serde::{Deserialize, Serialize};
 
 use std::net::{IpAddr, Ipv4Addr};
 
-use crate::host_tun;
 use crate::net_l3::{L3Decision, L3DropReason, L3ForwardPolicy, parse_ipv4_dst_and_l4};
 
 /// Host-owned expected session identity for one VM boot.
@@ -242,16 +241,15 @@ pub enum TunnelPacketPolicy {
     DropAll,
     /// Inspect each guest IPv4 packet, decide allow/drop against the admitted
     /// policy + DNS pins, and audit the outcome. With no `interface_name` the
-    /// gate only decides + drops; with one, admitted packets forward out the
-    /// named host TUN and replies frame back to the guest via the bidirectional
-    /// [`HostTunnelWorker::run_blocking_l3_relay_loop`].
+    /// gate only decides + drops; with one, admitted flows are forwarded by the
+    /// in-process userspace stack ([`crate::smoltcp_egress`]) — no host device,
+    /// no NAT. The `interface_name` value is unused by that stack; its presence
+    /// is the forward (vs gate-only) selector.
     L3Forward {
         gate: L3ForwardPolicy,
         #[serde(default)]
         interface_name: Option<String>,
     },
-    /// Relay packets through a host-owned Linux TUN device.
-    HostTun { interface_name: String },
 }
 
 /// Per-session packet limits enforced by the host worker.
@@ -307,16 +305,8 @@ impl TunnelWorkerConfig {
             .map_err(TunnelWorkerError::InvalidInitialCredit)?;
         match &self.packet_policy {
             TunnelPacketPolicy::DropAll => {}
-            TunnelPacketPolicy::L3Forward { interface_name, .. } => {
-                if let Some(interface_name) = interface_name {
-                    crate::host_tun::validate_interface_name(interface_name)
-                        .map_err(TunnelWorkerError::InvalidPacketPolicy)?;
-                }
-            }
-            TunnelPacketPolicy::HostTun { interface_name } => {
-                crate::host_tun::validate_interface_name(interface_name)
-                    .map_err(TunnelWorkerError::InvalidPacketPolicy)?;
-            }
+            // The userspace stack binds no host device, so the name is unused.
+            TunnelPacketPolicy::L3Forward { .. } => {}
         }
         self.limits.validate()?;
         Ok(())
@@ -496,61 +486,6 @@ impl HostPacketPath for DropAllPacketPath {
     }
 }
 
-#[derive(Debug)]
-pub struct HostTunPacketPath<D> {
-    device: D,
-}
-
-impl<D> HostTunPacketPath<D> {
-    pub fn new(device: D) -> Self {
-        Self { device }
-    }
-
-    pub fn device(&self) -> &D {
-        &self.device
-    }
-
-    pub fn device_mut(&mut self) -> &mut D {
-        &mut self.device
-    }
-}
-
-impl<D> AsRawFd for HostTunPacketPath<D>
-where
-    D: AsRawFd,
-{
-    fn as_raw_fd(&self) -> std::os::fd::RawFd {
-        self.device.as_raw_fd()
-    }
-}
-
-impl<D> HostPacketPath for HostTunPacketPath<D>
-where
-    D: host_tun::PacketDevice,
-{
-    fn handle_guest_packet(
-        &mut self,
-        _flow_id: u32,
-        _sequence: u64,
-        packet: &[u8],
-    ) -> std::result::Result<HostPacketAction, String> {
-        let written = self
-            .device
-            .write_packet(packet)
-            .map_err(|err| err.to_string())?;
-        if written != packet.len() {
-            return Err(format!(
-                "host packet path short write on {}: wrote {written} of {} bytes",
-                self.device.interface_name(),
-                packet.len()
-            ));
-        }
-        Ok(HostPacketAction::Forwarded {
-            interface_name: self.device.interface_name().to_string(),
-        })
-    }
-}
-
 /// Derive guest `/etc/hosts` entries from the admission DNS pins.
 ///
 /// IPv4 pins only (IPv6 pins are skipped — the L3 forward path is IPv4-only),
@@ -581,14 +516,14 @@ pub fn host_entries_from_pins(pins: &DnsPinRegistry) -> Vec<TunnelHostEntry> {
     entries
 }
 
-pub struct HostTunnelWorker<S, A> {
+pub struct HostNetworkTunnelWorker<S, A> {
     session: HostNetworkTunnelSession<S>,
     audit: A,
     config: TunnelWorkerConfig,
     stats: TunnelWorkerStats,
 }
 
-impl<S, A> HostTunnelWorker<S, A>
+impl<S, A> HostNetworkTunnelWorker<S, A>
 where
     S: Read + Write,
     A: TunnelAuditSink,
@@ -737,102 +672,6 @@ where
         }
     }
 
-    /// Run the raw-L3 forward loop: inspect each guest IPv4 packet, decide
-    /// allow/drop against the admitted policy + DNS pins, and forward only the
-    /// admitted packets into `packet_path` (a real host TUN in production). A
-    /// denied packet is audited and dropped and never touches the packet path.
-    /// Requires the worker's `packet_policy` to be [`TunnelPacketPolicy::L3Forward`].
-    pub fn run_until_shutdown_l3_forward_with_packet_path<P>(
-        &mut self,
-        packet_path: &mut P,
-    ) -> Result<TunnelWorkerOutcome, TunnelWorkerError>
-    where
-        P: HostPacketPath,
-    {
-        let gate = match &self.config.packet_policy {
-            TunnelPacketPolicy::L3Forward { gate, .. } => gate.clone(),
-            _ => {
-                return Err(TunnelWorkerError::InvalidConfig(
-                    "run_until_shutdown_l3_forward_with_packet_path requires an l3_forward packet policy",
-                ));
-            }
-        };
-        loop {
-            let frame = self
-                .session
-                .read_frame()
-                .map_err(TunnelWorkerError::transport)?;
-            match frame.header.frame_type {
-                FrameType::Packet => {
-                    if let Some(outcome) =
-                        self.handle_l3_forward_packet(frame, &gate, packet_path)?
-                    {
-                        self.record_audit(TunnelAuditEvent::SessionClosed {
-                            outcome: outcome.clone(),
-                            stats: self.stats,
-                        })?;
-                        return Ok(outcome);
-                    }
-                }
-                other => {
-                    if let Some(outcome) = self.handle_control(other, &frame.payload)? {
-                        self.record_audit(TunnelAuditEvent::SessionClosed {
-                            outcome: outcome.clone(),
-                            stats: self.stats,
-                        })?;
-                        return Ok(outcome);
-                    }
-                }
-            }
-        }
-    }
-
-    fn handle_l3_forward_packet<P>(
-        &mut self,
-        frame: OwnedTunnelFrame,
-        gate: &L3ForwardPolicy,
-        packet_path: &mut P,
-    ) -> Result<Option<TunnelWorkerOutcome>, TunnelWorkerError>
-    where
-        P: HostPacketPath,
-    {
-        let payload_len =
-            u64::try_from(frame.payload.len()).expect("packet length always fits u64");
-        if let Some(outcome) = self.account_and_check_quota(frame.header.sequence, payload_len)? {
-            return Ok(Some(outcome));
-        }
-
-        let flow_id = frame.header.flow_id;
-        let sequence = frame.header.sequence;
-        let bytes = frame.payload.len();
-        match gate.decide_packet(&frame.payload) {
-            L3Decision::Allow => {
-                self.stats.guest_packets_l3_allowed =
-                    self.stats.guest_packets_l3_allowed.saturating_add(1);
-                self.stats.guest_bytes_l3_allowed = self
-                    .stats
-                    .guest_bytes_l3_allowed
-                    .saturating_add(payload_len);
-                // Only admitted packets reach the packet path; the gate decides
-                // before any byte is written to the host TUN.
-                self.forward_via_packet_path(frame, payload_len, packet_path)
-            }
-            L3Decision::Drop(reason) => {
-                self.stats.guest_packets_dropped =
-                    self.stats.guest_packets_dropped.saturating_add(1);
-                self.stats.guest_bytes_dropped =
-                    self.stats.guest_bytes_dropped.saturating_add(payload_len);
-                self.record_audit(TunnelAuditEvent::PacketL3Dropped {
-                    flow_id,
-                    sequence,
-                    bytes,
-                    reason,
-                })?;
-                Ok(None)
-            }
-        }
-    }
-
     fn handle_packet(
         &mut self,
         frame: OwnedTunnelFrame,
@@ -877,9 +716,7 @@ where
     }
 
     /// Hand one guest packet to a host packet path, updating stats + audit and
-    /// failing closed on a path error. Shared by the plain forward loop and the
-    /// L3-gated forward loop, which reach this only after the gate admits the
-    /// packet.
+    /// failing closed on a path error.
     fn forward_via_packet_path(
         &mut self,
         frame: OwnedTunnelFrame,
@@ -1041,232 +878,11 @@ where
     }
 }
 
-impl<S, A> HostTunnelWorker<S, A>
+impl<S, A> HostNetworkTunnelWorker<S, A>
 where
     S: Read + Write + AsRawFd,
     A: TunnelAuditSink,
 {
-    /// Read one reply packet off the host TUN and frame it back to the guest.
-    /// Returns `Ok(None)` on a delivered packet, `Ok(Some(outcome))` when this
-    /// reply spends the shared per-session quota (fail closed), and a
-    /// `PacketPath` error on an empty or oversize device read.
-    fn pump_one_host_tun_to_guest<D>(
-        &mut self,
-        packet_path: &mut HostTunPacketPath<D>,
-        flow_id: u32,
-        sequence: u64,
-    ) -> Result<Option<TunnelWorkerOutcome>, TunnelWorkerError>
-    where
-        D: host_tun::PacketDevice,
-    {
-        let max_len = usize::try_from(self.config.expected_session.maximum_frame_size)
-            .expect("u32 frame size always fits usize on supported targets");
-        let mut packet = vec![0_u8; max_len + 1];
-        let read = packet_path
-            .device_mut()
-            .read_packet(&mut packet)
-            .map_err(|err| TunnelWorkerError::PacketPath(err.to_string()))?;
-        if read == 0 {
-            return Err(TunnelWorkerError::PacketPath(format!(
-                "host packet path {} returned an empty packet",
-                packet_path.device().interface_name()
-            )));
-        }
-        if read > max_len {
-            return Err(TunnelWorkerError::PacketPath(format!(
-                "host packet path {} exceeded negotiated frame size {}",
-                packet_path.device().interface_name(),
-                max_len
-            )));
-        }
-        let read_len = u64::try_from(read).expect("packet len fits u64");
-        // Reverse-direction bytes count against the same per-session budget as
-        // guest egress; fail closed before delivering once the budget is spent.
-        if let Some(outcome) = self.account_and_check_quota(sequence, read_len)? {
-            return Ok(Some(outcome));
-        }
-        packet.truncate(read);
-        self.session
-            .send_packet(0, flow_id, sequence, packet)
-            .map_err(TunnelWorkerError::transport)?;
-        self.stats.host_packets_delivered = self.stats.host_packets_delivered.saturating_add(1);
-        self.stats.host_bytes_delivered = self.stats.host_bytes_delivered.saturating_add(read_len);
-        self.record_audit(TunnelAuditEvent::PacketDeliveredToGuest {
-            flow_id,
-            sequence,
-            bytes: read,
-            interface_name: packet_path.device().interface_name().to_string(),
-        })?;
-        Ok(None)
-    }
-
-    /// Service one poll wakeup on either the guest session fd or the host TUN
-    /// fd. A `gate` gates the guest→device direction (admitted packets forward,
-    /// denied packets audit + drop); with no gate the guest→device direction is
-    /// an unconditional forward. The device→guest reverse direction is always
-    /// ungated — the host kernel only produces replies for admitted flows.
-    pub fn pump_tun_relay_ready<D>(
-        &mut self,
-        packet_path: &mut HostTunPacketPath<D>,
-        flow_id: u32,
-        next_sequence: &mut u64,
-        guest_ready: bool,
-        host_ready: bool,
-        gate: Option<&L3ForwardPolicy>,
-    ) -> Result<HostRelayProgress, TunnelWorkerError>
-    where
-        D: host_tun::PacketDevice,
-    {
-        let mut progress = HostRelayProgress::default();
-        if guest_ready {
-            let frame = self
-                .session
-                .read_frame()
-                .map_err(TunnelWorkerError::transport)?;
-            match frame.header.frame_type {
-                FrameType::Packet => {
-                    let handled = match gate {
-                        Some(gate) => self.handle_l3_forward_packet(frame, gate, packet_path)?,
-                        None => self.handle_packet(frame, packet_path)?,
-                    };
-                    if let Some(outcome) = handled {
-                        progress.outcome = Some(outcome);
-                        return Ok(progress);
-                    }
-                    progress.guest_packets = 1;
-                }
-                other => {
-                    if let Some(outcome) = self.handle_control(other, &frame.payload)? {
-                        progress.outcome = Some(outcome);
-                        return Ok(progress);
-                    }
-                }
-            }
-        }
-        if host_ready {
-            match self.pump_one_host_tun_to_guest(packet_path, flow_id, *next_sequence) {
-                Ok(None) => {
-                    *next_sequence = next_sequence.saturating_add(1);
-                    progress.host_packets = 1;
-                }
-                Ok(Some(outcome)) => {
-                    progress.outcome = Some(outcome);
-                    return Ok(progress);
-                }
-                Err(TunnelWorkerError::PacketPath(detail)) => {
-                    progress.outcome = Some(self.close_for_packet_path_failure(detail)?);
-                    return Ok(progress);
-                }
-                Err(other) => return Err(other),
-            }
-        }
-        Ok(progress)
-    }
-
-    /// Bidirectional relay with no egress gate: every guest packet forwards
-    /// straight to the host TUN and every host reply frames back to the guest.
-    pub fn run_blocking_tun_relay_loop<D>(
-        &mut self,
-        packet_path: &mut HostTunPacketPath<D>,
-        flow_id: u32,
-        next_sequence: u64,
-    ) -> Result<TunnelWorkerOutcome, TunnelWorkerError>
-    where
-        D: host_tun::PacketDevice + AsRawFd,
-    {
-        self.run_blocking_relay_loop_gated(packet_path, flow_id, next_sequence, None)
-    }
-
-    /// Bidirectional relay with the admitted raw-L3 gate on the guest→device
-    /// direction: only admitted packets reach the host TUN, replies frame back
-    /// ungated, and both directions share the per-session quota. Requires the
-    /// worker's `packet_policy` to be [`TunnelPacketPolicy::L3Forward`].
-    pub fn run_blocking_l3_relay_loop<D>(
-        &mut self,
-        packet_path: &mut HostTunPacketPath<D>,
-        flow_id: u32,
-        next_sequence: u64,
-    ) -> Result<TunnelWorkerOutcome, TunnelWorkerError>
-    where
-        D: host_tun::PacketDevice + AsRawFd,
-    {
-        let gate = match &self.config.packet_policy {
-            TunnelPacketPolicy::L3Forward { gate, .. } => gate.clone(),
-            _ => {
-                return Err(TunnelWorkerError::InvalidConfig(
-                    "run_blocking_l3_relay_loop requires an l3_forward packet policy",
-                ));
-            }
-        };
-        self.run_blocking_relay_loop_gated(packet_path, flow_id, next_sequence, Some(&gate))
-    }
-
-    fn run_blocking_relay_loop_gated<D>(
-        &mut self,
-        packet_path: &mut HostTunPacketPath<D>,
-        flow_id: u32,
-        mut next_sequence: u64,
-        gate: Option<&L3ForwardPolicy>,
-    ) -> Result<TunnelWorkerOutcome, TunnelWorkerError>
-    where
-        D: host_tun::PacketDevice + AsRawFd,
-    {
-        loop {
-            let mut fds = [
-                libc::pollfd {
-                    fd: self.session.stream.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: packet_path.as_raw_fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
-            // SAFETY: `fds` points to valid pollfd storage for exactly two fds,
-            // and timeout -1 intentionally blocks until one side is ready.
-            let rc = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, -1) };
-            if rc < 0 {
-                return Err(TunnelWorkerError::transport(anyhow::Error::new(
-                    std::io::Error::last_os_error(),
-                )));
-            }
-            if (fds[0].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
-                return Err(TunnelWorkerError::Transport(format!(
-                    "guest tunnel session poll failed with revents=0x{:x}",
-                    fds[0].revents
-                )));
-            }
-            if (fds[1].revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL)) != 0 {
-                let outcome = self.close_for_packet_path_failure(format!(
-                    "host packet path poll failed with revents=0x{:x}",
-                    fds[1].revents
-                ))?;
-                self.record_audit(TunnelAuditEvent::SessionClosed {
-                    outcome: outcome.clone(),
-                    stats: self.stats,
-                })?;
-                return Ok(outcome);
-            }
-            let progress = self.pump_tun_relay_ready(
-                packet_path,
-                flow_id,
-                &mut next_sequence,
-                (fds[0].revents & libc::POLLIN) != 0,
-                (fds[1].revents & libc::POLLIN) != 0,
-                gate,
-            )?;
-            if let Some(outcome) = progress.outcome {
-                self.record_audit(TunnelAuditEvent::SessionClosed {
-                    outcome: outcome.clone(),
-                    stats: self.stats,
-                })?;
-                return Ok(outcome);
-            }
-        }
-    }
-
     fn close_for_packet_path_failure(
         &mut self,
         detail: String,
@@ -1422,13 +1038,6 @@ pub enum GuestSessionEvent {
     Control,
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct HostRelayProgress {
-    pub guest_packets: u64,
-    pub host_packets: u64,
-    pub outcome: Option<TunnelWorkerOutcome>,
-}
-
 fn decode_to_anyhow(context: &'static str, err: DecodeError) -> anyhow::Error {
     anyhow::Error::new(err).context(context)
 }
@@ -1467,8 +1076,6 @@ pub enum TunnelWorkerError {
     InvalidNetworkConfig(mvm_core::protocol::network_tunnel::ControlMessageError),
     #[error("host-authored initial credit is invalid: {0}")]
     InvalidInitialCredit(mvm_core::protocol::network_tunnel::ControlMessageError),
-    #[error("host-authored packet policy is invalid: {0}")]
-    InvalidPacketPolicy(String),
     #[error("tunnel session bootstrap failed: {0}")]
     Session(TunnelSessionError),
     #[error("transport failure: {0}")]
@@ -1577,7 +1184,7 @@ mod tests {
             },
             limits: TunnelWorkerLimits::default(),
         };
-        let worker = HostTunnelWorker::new(host, NoopTunnelAuditSink, config).unwrap();
+        let worker = HostNetworkTunnelWorker::new(host, NoopTunnelAuditSink, config).unwrap();
         assert_eq!(
             worker.config.network_config.host_entries,
             vec![TunnelHostEntry {
@@ -1761,81 +1368,6 @@ mod tests {
         events: Vec<TunnelAuditEvent>,
     }
 
-    #[derive(Debug)]
-    struct FakePacketPath {
-        interface_name: String,
-        writes: Vec<Vec<u8>>,
-        short_write_to: Option<usize>,
-    }
-
-    impl FakePacketPath {
-        fn forwarding(interface_name: &str) -> Self {
-            Self {
-                interface_name: interface_name.to_string(),
-                writes: Vec::new(),
-                short_write_to: None,
-            }
-        }
-
-        fn short_write(interface_name: &str, bytes: usize) -> Self {
-            Self {
-                interface_name: interface_name.to_string(),
-                writes: Vec::new(),
-                short_write_to: Some(bytes),
-            }
-        }
-    }
-
-    impl host_tun::PacketDevice for FakePacketPath {
-        fn interface_name(&self) -> &str {
-            &self.interface_name
-        }
-
-        fn read_packet(&mut self, _buf: &mut [u8]) -> Result<usize> {
-            bail!("read_packet is not used in this test helper")
-        }
-
-        fn write_packet(&mut self, packet: &[u8]) -> Result<usize> {
-            self.writes.push(packet.to_vec());
-            Ok(self.short_write_to.unwrap_or(packet.len()))
-        }
-    }
-
-    #[derive(Debug)]
-    struct StreamPacketDevice {
-        interface_name: String,
-        stream: UnixStream,
-    }
-
-    impl StreamPacketDevice {
-        fn new(interface_name: &str, stream: UnixStream) -> Self {
-            Self {
-                interface_name: interface_name.to_string(),
-                stream,
-            }
-        }
-    }
-
-    impl host_tun::PacketDevice for StreamPacketDevice {
-        fn interface_name(&self) -> &str {
-            &self.interface_name
-        }
-
-        fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize> {
-            self.stream.read(buf).map_err(anyhow::Error::new)
-        }
-
-        fn write_packet(&mut self, packet: &[u8]) -> Result<usize> {
-            self.stream.write(packet).map_err(anyhow::Error::new)
-        }
-    }
-
-    impl AsRawFd for StreamPacketDevice {
-        fn as_raw_fd(&self) -> std::os::fd::RawFd {
-            self.stream.as_raw_fd()
-        }
-    }
-
     impl TunnelAuditSink for RecordingAuditSink {
         type Error = std::convert::Infallible;
 
@@ -1849,7 +1381,7 @@ mod tests {
     fn worker_bootstraps_and_drops_guest_packets_under_default_deny() {
         let (guest, host) = UnixStream::pair().unwrap();
         let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
+            let mut worker = HostNetworkTunnelWorker::new(
                 host,
                 RecordingAuditSink::default(),
                 TunnelWorkerConfig {
@@ -1932,7 +1464,7 @@ mod tests {
     fn worker_enforces_packet_quota_and_sends_shutdown() {
         let (guest, host) = UnixStream::pair().unwrap();
         let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
+            let mut worker = HostNetworkTunnelWorker::new(
                 host,
                 RecordingAuditSink::default(),
                 TunnelWorkerConfig {
@@ -1978,114 +1510,6 @@ mod tests {
         host_thread.join().unwrap();
     }
 
-    #[test]
-    fn worker_can_forward_guest_packets_into_host_packet_path() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::DropAll,
-                    limits: TunnelWorkerLimits::default(),
-                },
-            )
-            .unwrap();
-            let mut packet_path = HostTunPacketPath::new(FakePacketPath::forwarding("mvmht0"));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_until_shutdown_with_packet_path(&mut packet_path)
-                .unwrap();
-            assert_eq!(
-                outcome,
-                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
-            );
-            assert_eq!(packet_path.device().writes, vec![vec![9, 8, 7]]);
-            assert_eq!(worker.stats().guest_packets_forwarded, 1);
-            assert_eq!(worker.stats().guest_bytes_forwarded, 3);
-            assert!(matches!(
-                worker.audit().events[1],
-                TunnelAuditEvent::PacketForwarded {
-                    flow_id: 55,
-                    sequence: 2,
-                    bytes: 3,
-                    ref interface_name,
-                } if interface_name == "mvmht0"
-            ));
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-        guest.send_packet(0, 55, 2, vec![9, 8, 7]).unwrap();
-        guest
-            .send_control(
-                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
-                0,
-                0,
-                3,
-            )
-            .unwrap();
-        host_thread.join().unwrap();
-    }
-
-    #[test]
-    fn worker_fails_closed_when_host_packet_path_short_writes() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::DropAll,
-                    limits: TunnelWorkerLimits::default(),
-                },
-            )
-            .unwrap();
-            let mut packet_path = HostTunPacketPath::new(FakePacketPath::short_write("mvmht0", 2));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_until_shutdown_with_packet_path(&mut packet_path)
-                .unwrap();
-            assert_eq!(outcome, TunnelWorkerOutcome::PacketPathFailed);
-            assert_eq!(worker.stats().host_control_frames_sent, 3);
-            assert!(matches!(
-                worker.audit().events[1],
-                TunnelAuditEvent::SessionClosed {
-                    outcome: TunnelWorkerOutcome::PacketPathFailed,
-                    ..
-                }
-            ));
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-        guest.send_packet(0, 55, 2, vec![9, 8, 7]).unwrap();
-        let error = guest.recv_control().unwrap();
-        assert!(matches!(
-            error,
-            TunnelControlMessage::Error(TunnelErrorFrame {
-                code: TunnelErrorCode::Internal,
-                ..
-            })
-        ));
-        let shutdown = guest.recv_control().unwrap();
-        assert_eq!(
-            shutdown,
-            TunnelControlMessage::Shutdown(TunnelShutdownReason::HostError)
-        );
-        host_thread.join().unwrap();
-    }
-
     fn l3_gate(host: &str, port: u16, pinned_ips: &[&str]) -> crate::net_l3::L3ForwardPolicy {
         use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
         use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
@@ -2115,7 +1539,7 @@ mod tests {
     fn l3_gate_drops_unparseable_packet_and_audits() {
         let (guest, host) = UnixStream::pair().unwrap();
         let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
+            let mut worker = HostNetworkTunnelWorker::new(
                 host,
                 RecordingAuditSink::default(),
                 TunnelWorkerConfig {
@@ -2169,7 +1593,7 @@ mod tests {
     fn l3_gate_allows_pinned_packet_and_audits_but_still_drops() {
         let (guest, host) = UnixStream::pair().unwrap();
         let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
+            let mut worker = HostNetworkTunnelWorker::new(
                 host,
                 RecordingAuditSink::default(),
                 TunnelWorkerConfig {
@@ -2219,474 +1643,6 @@ mod tests {
                 3,
             )
             .unwrap();
-        host_thread.join().unwrap();
-    }
-
-    #[test]
-    fn host_tun_forward_injects_only_admitted_packets() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::L3Forward {
-                        gate: l3_gate("api.example.com", 443, &["93.184.216.34"]),
-                        interface_name: Some("mvmht0".to_string()),
-                    },
-                    limits: TunnelWorkerLimits::default(),
-                },
-            )
-            .unwrap();
-            let mut packet_path = HostTunPacketPath::new(FakePacketPath::forwarding("mvmht0"));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_until_shutdown_l3_forward_with_packet_path(&mut packet_path)
-                .unwrap();
-            assert_eq!(
-                outcome,
-                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
-            );
-            // Exactly the admitted packet is written to the device; the denied
-            // one never reaches it.
-            assert_eq!(
-                packet_path.device().writes,
-                vec![ipv4_tcp_packet("93.184.216.34", 443)]
-            );
-            assert_eq!(worker.stats().guest_packets_forwarded, 1);
-            assert_eq!(worker.stats().guest_packets_l3_allowed, 1);
-            // The denied packet is counted as dropped, not forwarded.
-            assert_eq!(worker.stats().guest_packets_dropped, 1);
-            assert!(worker.audit().events.iter().any(|event| matches!(
-                event,
-                TunnelAuditEvent::PacketForwarded { interface_name, .. }
-                    if interface_name == "mvmht0"
-            )));
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-        // Admitted destination — forwarded to the device.
-        guest
-            .send_packet(0, 55, 2, ipv4_tcp_packet("93.184.216.34", 443))
-            .unwrap();
-        // Unpinned destination — dropped, never written to the device.
-        guest
-            .send_packet(0, 55, 3, ipv4_tcp_packet("203.0.113.7", 443))
-            .unwrap();
-        guest
-            .send_control(
-                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
-                0,
-                0,
-                4,
-            )
-            .unwrap();
-        host_thread.join().unwrap();
-    }
-
-    #[test]
-    fn denied_packet_never_reaches_host_tun() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::L3Forward {
-                        gate: l3_gate("api.example.com", 443, &["93.184.216.34"]),
-                        interface_name: Some("mvmht0".to_string()),
-                    },
-                    limits: TunnelWorkerLimits::default(),
-                },
-            )
-            .unwrap();
-            let mut packet_path = HostTunPacketPath::new(FakePacketPath::forwarding("mvmht0"));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_until_shutdown_l3_forward_with_packet_path(&mut packet_path)
-                .unwrap();
-            assert_eq!(
-                outcome,
-                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
-            );
-            // The denied packet produced zero device writes.
-            assert!(packet_path.device().writes.is_empty());
-            assert_eq!(worker.stats().guest_packets_forwarded, 0);
-            assert_eq!(worker.stats().guest_packets_dropped, 1);
-            assert!(worker.audit().events.iter().any(|event| matches!(
-                event,
-                TunnelAuditEvent::PacketL3Dropped {
-                    reason: crate::net_l3::L3DropReason::UnpinnedDst,
-                    ..
-                }
-            )));
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-        guest
-            .send_packet(0, 55, 2, ipv4_tcp_packet("203.0.113.7", 443))
-            .unwrap();
-        guest
-            .send_control(
-                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
-                0,
-                0,
-                3,
-            )
-            .unwrap();
-        host_thread.join().unwrap();
-    }
-
-    #[test]
-    fn worker_run_blocking_tun_relay_loop_relays_both_directions() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let (device_host, mut device_peer) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::DropAll,
-                    limits: TunnelWorkerLimits::default(),
-                },
-            )
-            .unwrap();
-            let mut packet_path =
-                HostTunPacketPath::new(StreamPacketDevice::new("mvmht0", device_host));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_blocking_tun_relay_loop(&mut packet_path, 0, 10)
-                .unwrap();
-            assert_eq!(
-                outcome,
-                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
-            );
-            assert_eq!(worker.stats().guest_packets_forwarded, 1);
-            assert_eq!(worker.stats().host_packets_delivered, 1);
-            assert!(worker.audit().events.iter().any(|event| matches!(
-                event,
-                TunnelAuditEvent::PacketForwarded { flow_id: 55, sequence: 2, bytes: 3, interface_name }
-                    if interface_name == "mvmht0"
-            )));
-            assert!(worker.audit().events.iter().any(|event| matches!(
-                event,
-                TunnelAuditEvent::PacketDeliveredToGuest { flow_id: 0, sequence: 10, bytes: 3, interface_name }
-                    if interface_name == "mvmht0"
-            )));
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-
-        guest.send_packet(0, 55, 2, vec![1, 2, 3]).unwrap();
-        let mut guest_packet = [0_u8; 3];
-        device_peer.read_exact(&mut guest_packet).unwrap();
-        assert_eq!(&guest_packet, &[1, 2, 3]);
-
-        device_peer.write_all(&[4, 5, 6]).unwrap();
-        let frame = guest.recv_packet().unwrap();
-        assert_eq!(frame.header.flow_id, 0);
-        assert_eq!(frame.header.sequence, 10);
-        assert_eq!(frame.payload, vec![4, 5, 6]);
-
-        guest
-            .send_control(
-                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
-                0,
-                0,
-                3,
-            )
-            .unwrap();
-        host_thread.join().unwrap();
-    }
-
-    #[test]
-    fn host_tun_reply_packets_frame_back_to_guest() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let (device_host, mut device_peer) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::L3Forward {
-                        gate: l3_gate("api.example.com", 443, &["93.184.216.34"]),
-                        interface_name: Some("mvmht0".to_string()),
-                    },
-                    limits: TunnelWorkerLimits::default(),
-                },
-            )
-            .unwrap();
-            let mut packet_path =
-                HostTunPacketPath::new(StreamPacketDevice::new("mvmht0", device_host));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_blocking_l3_relay_loop(&mut packet_path, 0, 10)
-                .unwrap();
-            assert_eq!(
-                outcome,
-                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
-            );
-            assert_eq!(worker.stats().host_packets_delivered, 1);
-            assert_eq!(worker.stats().host_bytes_delivered, 3);
-            assert!(worker.audit().events.iter().any(|event| matches!(
-                event,
-                TunnelAuditEvent::PacketDeliveredToGuest {
-                    flow_id: 0,
-                    sequence: 10,
-                    bytes: 3,
-                    interface_name,
-                } if interface_name == "mvmht0"
-            )));
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-
-        // A reply arrives on the host TUN and is framed back to the guest.
-        device_peer.write_all(&[4, 5, 6]).unwrap();
-        let frame = guest.recv_packet().unwrap();
-        assert_eq!(frame.header.flow_id, 0);
-        assert_eq!(frame.header.sequence, 10);
-        assert_eq!(frame.payload, vec![4, 5, 6]);
-
-        guest
-            .send_control(
-                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
-                0,
-                0,
-                3,
-            )
-            .unwrap();
-        host_thread.join().unwrap();
-    }
-
-    #[test]
-    fn l3_relay_loop_gates_guest_forward_direction() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let (device_host, mut device_peer) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::L3Forward {
-                        gate: l3_gate("api.example.com", 443, &["93.184.216.34"]),
-                        interface_name: Some("mvmht0".to_string()),
-                    },
-                    limits: TunnelWorkerLimits::default(),
-                },
-            )
-            .unwrap();
-            let mut packet_path =
-                HostTunPacketPath::new(StreamPacketDevice::new("mvmht0", device_host));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_blocking_l3_relay_loop(&mut packet_path, 0, 10)
-                .unwrap();
-            assert_eq!(
-                outcome,
-                TunnelWorkerOutcome::GuestShutdown(TunnelShutdownReason::GuestStopping)
-            );
-            // Only the admitted guest packet reached the device; the denied one
-            // was dropped by the gate before any byte was written.
-            assert_eq!(worker.stats().guest_packets_forwarded, 1);
-            assert_eq!(worker.stats().guest_packets_dropped, 1);
-            assert_eq!(worker.stats().host_packets_delivered, 1);
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-
-        // Admitted destination is forwarded to the device.
-        guest
-            .send_packet(0, 55, 2, ipv4_tcp_packet("93.184.216.34", 443))
-            .unwrap();
-        let mut admitted = [0_u8; 24];
-        device_peer.read_exact(&mut admitted).unwrap();
-        assert_eq!(admitted.to_vec(), ipv4_tcp_packet("93.184.216.34", 443));
-
-        // Denied destination is dropped by the gate, never written to the device.
-        guest
-            .send_packet(0, 55, 3, ipv4_tcp_packet("203.0.113.7", 443))
-            .unwrap();
-
-        // A reply still frames back to the guest, proving the reverse path runs
-        // alongside the gated forward path.
-        device_peer.write_all(&[4, 5, 6]).unwrap();
-        let reply = guest.recv_packet().unwrap();
-        assert_eq!(reply.header.sequence, 10);
-        assert_eq!(reply.payload, vec![4, 5, 6]);
-
-        guest
-            .send_control(
-                TunnelControlMessage::Shutdown(TunnelShutdownReason::GuestStopping),
-                0,
-                0,
-                4,
-            )
-            .unwrap();
-        host_thread.join().unwrap();
-    }
-
-    #[test]
-    fn reverse_path_respects_worker_limits() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let (device_host, mut device_peer) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::L3Forward {
-                        gate: l3_gate("api.example.com", 443, &["93.184.216.34"]),
-                        interface_name: Some("mvmht0".to_string()),
-                    },
-                    // One packet of reverse budget: the second reply must fail closed.
-                    limits: TunnelWorkerLimits {
-                        max_packets: 1,
-                        max_bytes: 1024,
-                    },
-                },
-            )
-            .unwrap();
-            let mut packet_path =
-                HostTunPacketPath::new(StreamPacketDevice::new("mvmht0", device_host));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_blocking_l3_relay_loop(&mut packet_path, 0, 10)
-                .unwrap();
-            assert_eq!(outcome, TunnelWorkerOutcome::QuotaExceeded);
-            // The first reply was delivered; the second spent the quota and was
-            // never framed back.
-            assert_eq!(worker.stats().host_packets_delivered, 1);
-            assert_eq!(worker.stats().guest_packets_seen, 2);
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-
-        // First reply is delivered; wait for it before sending the second so the
-        // stream device doesn't coalesce both into one read.
-        device_peer.write_all(&[4, 5, 6]).unwrap();
-        let frame = guest.recv_packet().unwrap();
-        assert_eq!(frame.payload, vec![4, 5, 6]);
-
-        // Second reply exceeds the packet budget and fails closed.
-        device_peer.write_all(&[7, 8, 9]).unwrap();
-        let error = guest.recv_control().unwrap();
-        assert!(matches!(
-            error,
-            TunnelControlMessage::Error(TunnelErrorFrame {
-                code: TunnelErrorCode::QuotaExceeded,
-                ..
-            })
-        ));
-        let shutdown = guest.recv_control().unwrap();
-        assert_eq!(
-            shutdown,
-            TunnelControlMessage::Shutdown(TunnelShutdownReason::PolicyDenied)
-        );
-        host_thread.join().unwrap();
-    }
-
-    #[test]
-    fn reverse_path_quota_exhaustion_shuts_down() {
-        let (guest, host) = UnixStream::pair().unwrap();
-        let (device_host, mut device_peer) = UnixStream::pair().unwrap();
-        let host_thread = std::thread::spawn(move || {
-            let mut worker = HostTunnelWorker::new(
-                host,
-                RecordingAuditSink::default(),
-                TunnelWorkerConfig {
-                    expected_session: expected(),
-                    network_config: network_config(),
-                    initial_credit: initial_credit(),
-                    packet_policy: TunnelPacketPolicy::L3Forward {
-                        gate: l3_gate("api.example.com", 443, &["93.184.216.34"]),
-                        interface_name: Some("mvmht0".to_string()),
-                    },
-                    // Two-byte reverse byte budget: a single 3-byte reply blows it.
-                    limits: TunnelWorkerLimits {
-                        max_packets: 10,
-                        max_bytes: 2,
-                    },
-                },
-            )
-            .unwrap();
-            let mut packet_path =
-                HostTunPacketPath::new(StreamPacketDevice::new("mvmht0", device_host));
-            worker.bootstrap(7, 8, 9).unwrap();
-            let outcome = worker
-                .run_blocking_l3_relay_loop(&mut packet_path, 0, 10)
-                .unwrap();
-            assert_eq!(outcome, TunnelWorkerOutcome::QuotaExceeded);
-            // The reply's bytes spent the budget before delivery, so nothing was
-            // framed back to the guest.
-            assert_eq!(worker.stats().host_packets_delivered, 0);
-            assert_eq!(worker.stats().guest_bytes_seen, 3);
-            assert!(worker.audit().events.iter().any(|event| matches!(
-                event,
-                TunnelAuditEvent::SessionClosed {
-                    outcome: TunnelWorkerOutcome::QuotaExceeded,
-                    ..
-                }
-            )));
-        });
-
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
-        let _ack = guest.negotiate(hello(), 1).unwrap();
-        let _config = guest.recv_network_config().unwrap();
-        let _credit = guest.recv_control().unwrap();
-
-        // One oversize-for-quota reply arrives; the loop fails closed with the
-        // shared ERROR + SHUTDOWN control frames.
-        device_peer.write_all(&[4, 5, 6]).unwrap();
-        let error = guest.recv_control().unwrap();
-        assert!(matches!(
-            error,
-            TunnelControlMessage::Error(TunnelErrorFrame {
-                code: TunnelErrorCode::QuotaExceeded,
-                ..
-            })
-        ));
-        let shutdown = guest.recv_control().unwrap();
-        assert_eq!(
-            shutdown,
-            TunnelControlMessage::Shutdown(TunnelShutdownReason::PolicyDenied)
-        );
         host_thread.join().unwrap();
     }
 }

@@ -16,10 +16,9 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-#[cfg(target_os = "linux")]
-use mvm_hostd::network_tunnel::HostTunPacketPath;
 use mvm_hostd::network_tunnel::{
-    HostTunnelWorker, TunnelAuditEvent, TunnelAuditSink, TunnelPacketPolicy, TunnelWorkerConfig,
+    HostNetworkTunnelWorker, TunnelAuditEvent, TunnelAuditSink, TunnelPacketPolicy,
+    TunnelWorkerConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -38,9 +37,9 @@ enum ListenerConfig {
     Vsock { port: u32 },
 }
 
-// The forwarding loops poll the session fd alongside the TUN fd, so the stream
-// must expose its raw fd. Both concrete streams (`UnixStream` and the vsock
-// `File`) are `AsRawFd`; thread that through the boxed trait object.
+// The egress loop polls the guest session fd, so the stream must expose its raw
+// fd. Both concrete streams (`UnixStream` and the vsock `File`) are `AsRawFd`;
+// thread that through the boxed trait object.
 trait ReadWrite: Read + Write + AsRawFd {}
 
 impl<T> ReadWrite for T where T: Read + Write + AsRawFd {}
@@ -169,14 +168,14 @@ fn main() -> Result<()> {
     let audit = JsonlAuditSink::open(&config.audit_jsonl_path)?;
     let (stream, cleanup_uds_path) = listener.accept()?;
     let packet_policy = config.worker.packet_policy.clone();
-    // The macOS userspace stack needs the admitted gate; grab it before the
-    // worker consumes the config (the outer match moves `interface_name`).
-    #[cfg(target_os = "macos")]
-    let macos_l3_gate = match &config.worker.packet_policy {
+    // The userspace stack needs the admitted gate; grab it before the worker
+    // consumes the config (the outer match moves `interface_name`).
+    #[cfg(unix)]
+    let l3_gate = match &config.worker.packet_policy {
         TunnelPacketPolicy::L3Forward { gate, .. } => Some(gate.clone()),
         _ => None,
     };
-    let mut worker = HostTunnelWorker::new(stream, audit, config.worker)
+    let mut worker = HostNetworkTunnelWorker::new(stream, audit, config.worker)
         .context("create host network tunnel worker")?;
     worker
         .bootstrap(1, 2, 3)
@@ -191,34 +190,15 @@ fn main() -> Result<()> {
             interface_name: Some(interface_name),
             ..
         } => {
-            #[cfg(target_os = "linux")]
+            // One forwarder on every host: terminate admitted guest flows in an
+            // in-process userspace stack and bridge each to an ordinary host
+            // socket — no OS network device, no NAT. `interface_name` names no
+            // host device here; its presence only selected forward (vs the
+            // gate-only mode below).
+            let _ = &interface_name;
+            #[cfg(unix)]
             {
-                let device = mvm_hostd::host_tun::HostTunDevice::open_named(&interface_name)
-                    .with_context(|| {
-                        format!("open host tunnel device for interface {interface_name}")
-                    })?;
-                mvm_hostd::host_tun::setup_host_tun_egress(&interface_name).with_context(|| {
-                    format!("set up host TUN egress + NAT for {interface_name}")
-                })?;
-                // Graceful-stop defense in depth: a caught SIGTERM/SIGINT tears
-                // down NAT before exit. A hard SIGKILL is uncatchable and is
-                // reaped by the backend's spawn-side sweep instead.
-                mvm_hostd::host_tun::install_egress_teardown_on_stop_signal(interface_name.clone());
-                let mut packet_path = HostTunPacketPath::new(device);
-                let result = worker.run_blocking_l3_relay_loop(&mut packet_path, 0, 4);
-                // Tear down NAT + the gateway address regardless of loop outcome.
-                if let Err(err) = mvm_hostd::host_tun::teardown_host_tun_egress(&interface_name) {
-                    tracing::warn!(%interface_name, error = %err, "host TUN egress teardown failed");
-                }
-                result.context("run host network tunnel L3 forward")?;
-            }
-            #[cfg(target_os = "macos")]
-            {
-                // macOS has no unprivileged kernel NAT; terminate admitted guest
-                // TCP flows in an in-process userspace stack and bridge each to a
-                // host socket. `interface_name` is unused here — no OS device.
-                let _ = interface_name;
-                let gate = macos_l3_gate
+                let gate = l3_gate
                     .as_ref()
                     .expect("matched an l3_forward policy above");
                 let mut egress = mvm_hostd::smoltcp_egress::SmoltcpEgress::new(
@@ -228,17 +208,14 @@ fn main() -> Result<()> {
                         ..mvm_hostd::smoltcp_egress::EgressConfig::default()
                     },
                 )
-                .context("create macOS userspace TCP egress stack")?;
+                .context("create userspace TCP/IP egress stack")?;
                 egress
                     .run(&mut worker)
-                    .context("run macOS userspace TCP egress")?;
+                    .context("run userspace TCP/IP egress stack")?;
             }
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            #[cfg(not(unix))]
             {
-                let _ = interface_name;
-                anyhow::bail!(
-                    "l3_forward host egress is only supported on Linux (kernel TUN) and macOS (userspace stack)"
-                );
+                anyhow::bail!("l3_forward host egress requires a unix host");
             }
         }
         TunnelPacketPolicy::L3Forward {
@@ -248,24 +225,6 @@ fn main() -> Result<()> {
             worker
                 .run_until_shutdown_l3_gate()
                 .context("run host network tunnel L3 gate")?;
-        }
-        TunnelPacketPolicy::HostTun { interface_name } => {
-            #[cfg(target_os = "linux")]
-            {
-                let device = mvm_hostd::host_tun::HostTunDevice::open_named(&interface_name)
-                    .with_context(|| {
-                        format!("open host tunnel device for interface {interface_name}")
-                    })?;
-                let mut packet_path = HostTunPacketPath::new(device);
-                worker
-                    .run_blocking_tun_relay_loop(&mut packet_path, 0, 4)
-                    .context("run host tunnel relay loop")?;
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = interface_name;
-                anyhow::bail!("host_tun packet policy is only supported on Linux");
-            }
         }
     }
     if let Some(path) = cleanup_uds_path {
@@ -283,7 +242,7 @@ mod tests {
 
     /// The exact wire shape `network_tunnel_spawn` emits for an admitted
     /// allow-list: the packet policy is `l3_forward` carrying the policy + pins
-    /// nested under `gate`, plus a per-VM host TUN interface name.
+    /// nested under `gate`, plus the opaque forward selector.
     fn l3_forward_worker_config_json() -> serde_json::Value {
         let policy = NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
         let mut pins = DnsPinRegistry::new();
