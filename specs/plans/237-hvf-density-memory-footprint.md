@@ -116,6 +116,31 @@ dropping the idle supervisor from a hundreds-of-MiB shape to the current
   `substitution endpoint closed stdout without a ready handshake` and no
   matching Plan 237 processes left after cleanup.
 
+**2026-07-11 validation follow-up**
+
+- Fresh worktree validation is green for the required target
+  `mvm-oci-init` zigbuild, the full `mvm-guest` test suite, and the focused
+  `mvm-cli` stale-cache/rematerialization tests.
+- The live Alpine smoke command completed successfully from isolated `/tmp`
+  state after seeding the isolated cache with the already-built workload
+  kernel; the v0.17.0 release checksum asset was still missing, so an unseeded
+  cold cache refused the hash-verified kernel download before boot.
+- The density harness now fails fast when generated HVF agent socket paths
+  would exceed the macOS Unix socket limit. This prevents a long artifact/data
+  directory from spending minutes on prepull/build and then producing
+  misleading guest-agent launch failures.
+- The density harness also refuses active local build/runtime contamination by
+  default, recording the matching processes before any prepull/build work. The
+  guard can be bypassed with `MVM_HVF_DENSITY_ALLOW_BUSY_HOST=1`, but bypassed
+  runs are not acceptable as clean baseline evidence.
+- Clean baseline publication remains open. A long-path 1/5/10/25 attempt
+  proved cleanup for waves 1, 5, 10, and the failed wave 25, but wave 25 had
+  guest-agent socket path failures and could not be used as clean evidence. A
+  short-path rerun was aborted before measurement because unrelated Rust builds
+  started during prepull, again triggering the density-run stop condition. A
+  follow-up attempt on the rebased branch was refused by the new preflight
+  because unrelated `cargo`/`rustc`/`clang` work was still active on the host.
+
 **Validation**
 
 - `cargo zigbuild --release --target aarch64-unknown-linux-musl -p mvm-guest --bin mvm-oci-init`

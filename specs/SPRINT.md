@@ -48,6 +48,24 @@ plan 25 sequences the work into six independently-shippable workstreams.
       --workspace`, the focused `mvm-build` shell-context and Stage 0 tests,
       and the live signed-image witness under
       `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`.
+- [x] 2026-07-11 Plan 237 Phase 0 validation follow-up: fresh worktree
+      validation is green for the required target musl `mvm-oci-init`
+      zigbuild, full `mvm-guest` test suite, and focused `mvm-cli`
+      stale-cache/rematerialization tests. The live Alpine `ps aux` smoke
+      passed from isolated `/tmp` state after seeding the isolated cache with
+      the already-built workload kernel; unseeded cold-cache release download
+      still refused the missing v0.17.0 checksum asset before boot. The density
+      harness now fails fast when the generated HVF agent socket path would
+      exceed the macOS Unix socket limit, validated with `bash -n` plus the
+      previous long artifact path. Clean 1/5/10/25 density publication remains
+      open: the long-path run cleaned waves 1, 5, 10, and failed wave 25 with
+      no leaked matching processes, but wave 25 was invalid due socket path
+      failures; the short-path rerun was aborted before measurement because
+      unrelated Rust builds started during prepull. The harness now also
+      refuses active local build/runtime contamination before prepull/build
+      unless `MVM_HVF_DENSITY_ALLOW_BUSY_HOST=1` is set, and the rebased branch
+      hit that guard because unrelated `cargo`/`rustc`/`clang` work was still
+      active on the host.
 - [x] 2026-07-10 Plan 237 Phase 0 first PR: the shared guest network helper
       used by OCI guest init now casts ioctl requests through the target musl
       `libc::Ioctl` type, stale cached OCI image records can re-materialize
