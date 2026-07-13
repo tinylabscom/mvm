@@ -11,7 +11,7 @@
 //! use). A Secure Enclave / TPM, when present, strengthens this to "host
 //! never sees the key" through the *same* interface — no DX change.
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use mvm_sdk::ir::{AuthType, SecretRef};
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};

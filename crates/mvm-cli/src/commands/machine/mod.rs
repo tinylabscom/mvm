@@ -1057,7 +1057,7 @@ fn absolutize_manifest_volume_spec(spec: &str, base_dir: &Path) -> Result<String
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 fn profile_allows_dev_init(profile: &str) -> bool {

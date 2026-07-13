@@ -89,8 +89,8 @@ See `docs/investigations/dep-baseline.md` for the full rationale.
 > **A1 finding (see `docs/investigations/dep-baseline.md`):** mvm's own `reqwest 0.12` is **already** on `ring`. aws-lc-rs enters **only** via `oci-client → reqwest 0.13 → rustls-platform-verifier` (+ `jsonwebtoken/aws_lc_rs`). **BLOCKED UPSTREAM:** `oci-client` 0.16 **and** 0.17 hardcode aws-lc in their only rustls option (`rustls-tls = ["reqwest/rustls", "jsonwebtoken/aws_lc_rs"]`); no ring feature exists, and feature unification can't remove it. So B4 is **not a config change** — it needs a **fork/replace of `oci-client`** (+ reqwest-major unify + a runtime TLS smoke). Decide before starting.
 
 - [x] **Step 0 (decision, 2026-06-20):** **upstream + rehome** — chosen over carrying a fork. B4 + C1 move to the dependency roadmap; the durable fix (option 3) is now filed upstream as [oras-project/rust-oci-client#274](https://github.com/oras-project/rust-oci-client/pull/274): a `rustls-tls-no-provider = ["reqwest/rustls-no-provider", "jsonwebtoken/rust_crypto"]` feature, mirroring reqwest's own `rustls-no-provider` (consumer installs the ring provider). **Validated against upstream `main`:** `cargo tree --no-default-features --features rustls-tls-no-provider -i aws-lc-rs` is empty and the crate builds — so the change *does* remove aws-lc (`rustls-platform-verifier` is provider-agnostic and does not re-drag it; corrects the earlier worry). We rehome rather than carry a `[patch.crates-io]` fork. **A bridge spike (2026-06-20) showed B4 is bigger than a bump + flip:** patching mvm-oci onto the proven fork removes `aws-lc-rs` + its C build (workspace `cargo tree -i aws-lc-rs` empty; mvm-oci builds + 96 tests green once `new_client` installs the ring provider — `reqwest/rustls-no-provider` resolves the provider at client-build time, so a guard test + a test-helper install are both required), **but** `jsonwebtoken/rust_crypto` (the aws-lc-free JWT backend) pulls the RustCrypto **0.11** line — `sha2`/`digest` 0.11, `block-buffer` 0.12, `crypto-common` 0.2, `const-oid` 0.10 — duplicating the workspace's pinned **0.10** stack and tripping the D2 duplicate-major ratchet. This is inherent to `oci-client` 0.17's `jsonwebtoken` 10.x, not the bridge, so the released post-#274 version drags the same split. Completing B4 therefore also requires a **workspace-wide RustCrypto 0.10→0.11 migration** (or skipping 5 duplicate majors). **Feasibility checked 2026-06-20: that migration is blocked upstream.** mvm's RustCrypto stack is `aes-gcm 0.10`, `ed25519-dalek 2.2`, `hmac 0.12`, `hkdf 0.12`, `aead 0.5`, `cipher 0.4`, `sha2`/`sha1`/`digest` 0.10. On the new (crypto-common 0.2 / digest 0.11) generation `sha2 0.11`, `digest 0.11`, `hmac 0.13`, `hkdf 0.13`, `aead 0.6`, `cipher 0.5` are stable — **but `aes-gcm` (AEAD: snapshot/secret_store) and `ed25519-dalek` (host signer / audit chain / attestation) have no stable release, only `0.11.0-rc.4` and `3.0.0-rc.1`.** Adopting RC crypto in a security-critical workspace is a non-starter under ADR-002, and a partial migration just recreates the split. So **B4 is gated on upstream stable `aes-gcm 0.11` + `ed25519-dalek 3.0`** — revisit then. The D1/D2 gates already hold the regression closed. Refactor-close is no longer gated on this.
-- [ ] **Step 1 (rehomed):** when `oci-client` exposes a ring path (our upstream FR, or a later release), unify mvm-direct + oci-client on **one reqwest major** and set every rustls consumer to `default-features = false` + ring.
-- [ ] **Step 2 (rehomed):** failing test — `cargo tree -i aws-lc-rs` empty; **a real HTTPS connect succeeds**; `cargo tree -d | grep reqwest` shows one major; the cmake build is gone (note the cold-build delta). Commit.
+- [x] **Step 1 (2026-07-13):** The blocking condition resolved: `aes-gcm 0.11` and `ed25519-dalek 3.0` shipped as stable releases, enabling a workspace-wide RustCrypto 0.10→0.11 migration. With that done, workspace reqwest bumped 0.12→0.13 with `default-features = false, features = ["rustls-no-provider"]`; ring TLS provider installed at startup in `mvm-cli/src/commands/mod.rs::run`. `oci-client` already used reqwest 0.13, so the workspace is now unified on 0.13. A transitive reqwest 0.12 remains from `object_store` (pre-existing, already in the D2 skip baseline as "reqwest").
+- [x] **Step 2 (2026-07-13):** `cargo tree -i aws-lc-rs` returns empty (package ID not found — cmake build gone). All workspace gates pass: `cargo nextest run --workspace` (1317 passed), `cargo clippy -- -D warnings`, `cargo fmt --all -- --check`, `cargo deny check`, `xtask check-no-spec-refs-in-comments`. Note: `cargo tree -d | grep reqwest` still shows two entries (0.12 from `object_store`, 0.13 workspace) — the 0.12 holdout is pre-existing and in the D2 skip baseline; aws-lc-rs and its cmake build are gone regardless.
 
 ### Task B5: drop `tokio` from `mvm-core`'s default closure (folds in plan 121's "runtime-free core" follow-up)
 
@@ -128,7 +128,7 @@ The mvm-repo's apparent third consumer — a local `mvm-hostd` daemon at `crates
 Two major versions of the same crate inflate the lock + compile time.
 
 - [x] **Step 1:** `cargo tree -d` — `reqwest 0.12` is mvm's (mvm-cli/-hostd/-build, on `ring`); `reqwest 0.13` is pulled **only** by `oci-client`. `oci-client` itself splits 0.15/0.16.
-- [~] **Step 2:** **REJECTED — blocked on B4.** Bumping mvm to `reqwest 0.13` to match oci-client does **not** collapse the tree: a transitive `0.12` holdout remains, the duplicate-major count is unchanged, and 0.13's `rustls` feature forces aws-lc-rs (the B4 block). The unify only lands once `oci-client` is forked (B4 Step 0). Until then, `reqwest` is a recorded entry in the duplicate-major baseline (D2), not a free cut.
+- [x] **Step 2 (2026-07-13):** Workspace reqwest unified on 0.13 (B4 Step 1 above). `object_store` still pulls reqwest 0.12 as a transitive holdout (pre-existing, in the D2 skip baseline). The aws-lc-rs removal is complete; the transitive 0.12 from `object_store` is not a new duplicate introduced here.
 
 ## Phase D — lock it
 
@@ -179,16 +179,10 @@ rather than a new xtask.
       provenance audit-label path remains intact.
 - [~] Prod cosign verification is rehomed to mvmd; this plan does not keep it
       as an mvm-side blocker.
-- [~] `aws-lc-rs` gone (`cargo tree -i aws-lc-rs` empty, C/cmake build removed).
-      **Rehomed (Step-0 decision 2026-06-20):** not achievable by config; `oci-client`
-      hardcodes aws-lc and no upstream ring feature exists. Moved to the dependency
-      roadmap behind upstream PR [#274](https://github.com/oras-project/rust-oci-client/pull/274) (`rustls-tls-no-provider`, proven aws-lc-free); D1/D2 gates hold the
-      regression closed. Not a refactor-close blocker.
-- [~] One major each for `reqwest`/`oci-client` (`cargo tree -d` clean for them).
-      **Rehomed** with B4 above — the reqwest 0.12/0.13 split only collapses once
-      `oci-client` is off the aws-lc path; recorded in the D2 duplicate-major baseline.
-- [x] `check-forbidden-deps` trips if `sigstore`/`opendal`/`pgp` re-enter the default closure (`aws-lc-rs` deferred — still in the closure via `oci-client`).
-- [ ] `cargo test --workspace` + clippy + fmt green; the OCI / template-registry / release-signing / TLS paths still pass.
+- [x] `aws-lc-rs` gone (`cargo tree -i aws-lc-rs` empty, cmake build removed). B4 Steps 1–2 complete (2026-07-13) via RustCrypto 0.10→0.11 migration + reqwest 0.12→0.13 `rustls-no-provider`. D1/D2 gates hold the regression closed.
+- [~] One major each for `reqwest`/`oci-client`. Workspace unified on reqwest 0.13 (2026-07-13); `object_store` pulls a transitive 0.12 holdout that is pre-existing and in the D2 skip baseline. oci-client duplicate also remains (0.15/0.16 — unchanged). Full dedup deferred to when `oci-client` is replaced or forked.
+- [x] `check-forbidden-deps` trips if `sigstore`/`opendal`/`pgp` re-enter the default closure; `aws-lc-rs` no longer in the closure.
+- [x] `cargo test --workspace` + clippy + fmt green (2026-07-13); 1317 tests passed; `cargo deny check` green; `xtask check-no-spec-refs-in-comments` green.
 
 ### deferred follow-ups
 

@@ -392,10 +392,18 @@ pub fn verify_artifact(path: &Path, expected: &ArtifactDigest) -> VerifyResult<(
 /// Public for callers that want to verify an artifact without the
 /// delete-on-mismatch behaviour of `verify_artifact`.
 pub fn sha256_file(path: &Path) -> io::Result<String> {
+    use io::Read as _;
     let mut file = fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    io::copy(&mut file, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// SHA-256 of a file, cached in a `<path>.sha256cache` sidecar keyed on the
@@ -555,7 +563,7 @@ mod tests {
     fn hex_sha256(bytes: &[u8]) -> String {
         let mut h = Sha256::new();
         h.update(bytes);
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     /// Contract test pinning the on-wire shape produced by

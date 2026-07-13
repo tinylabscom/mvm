@@ -86,7 +86,11 @@ mod tests {
     #[test]
     fn bind_created_emits_a_verifiable_entry() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-B");

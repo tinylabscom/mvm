@@ -116,7 +116,7 @@ pub fn workload_build_fingerprint(
         workspace_digest.as_bytes(),
     );
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Directory holding `fingerprint -> revision` cache records
@@ -224,7 +224,7 @@ fn hash_source_tree(root: &Path) -> Result<String> {
         hasher.update(b"\0");
         hasher.update(&bytes);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Recursively collect regular-file paths under `root`, sorted, skipping

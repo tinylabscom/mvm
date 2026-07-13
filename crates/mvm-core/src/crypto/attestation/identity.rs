@@ -35,7 +35,6 @@
 
 use anyhow::{Context, Result, bail};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use rand::rngs::OsRng;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -137,7 +136,9 @@ impl IdentityKey {
 }
 
 fn generate_new(secret_path: &Path, public_path: &Path) -> Result<IdentityKey> {
-    let signing = SigningKey::generate(&mut OsRng);
+    let mut __ed_seed = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+    let signing = SigningKey::from_bytes(&__ed_seed);
     let verifying = signing.verifying_key();
 
     // Write secret half mode 0600. `create_new` refuses if a
@@ -312,7 +313,9 @@ mod tests {
         let dir = fresh_dir();
         load_or_init_at(dir.path()).expect("init");
 
-        let other = SigningKey::generate(&mut OsRng).verifying_key();
+        let mut __ed_seed2 = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed2);
+        let other = SigningKey::from_bytes(&__ed_seed2).verifying_key();
         let public = dir.path().join(PUBLIC_FILENAME);
         std::fs::write(&public, other.to_bytes()).unwrap();
 

@@ -103,8 +103,7 @@ impl KeyId {
     /// Derive the key_id from a verifying-key's bytes.
     pub fn from_pubkey(pk: &VerifyingKey) -> Self {
         let bytes = pk.to_bytes();
-        let digest = Sha256::digest(bytes);
-        let hex = format!("{digest:x}");
+        let hex = hex::encode(Sha256::digest(bytes));
         Self(hex[..32].to_string())
     }
 
@@ -113,8 +112,7 @@ impl KeyId {
     /// id is only an identifier for revocation keying and audit — never a lookup
     /// into a key store.
     pub fn from_identity(identity: &str) -> Self {
-        let digest = Sha256::digest(identity.as_bytes());
-        let hex = format!("{digest:x}");
+        let hex = hex::encode(Sha256::digest(identity.as_bytes()));
         Self(hex[..32].to_string())
     }
 
@@ -279,7 +277,7 @@ impl BundleManifest {
 /// Compute lowercase-hex SHA-256 of arbitrary bytes. Mirrors the
 /// hex-digest pattern used in `mvm-core::manifest::canonical_key_for_path`.
 pub fn sha256_hex(data: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(data))
+    hex::encode(Sha256::digest(data))
 }
 
 /// Pin from an `ExecutionPlan` to a specific signed bundle. Captures
@@ -1351,7 +1349,11 @@ mod tests {
     }
 
     fn fresh_key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        }
     }
 
     fn make_manifest(key_id: KeyId, artifacts: Vec<BundleArtifact>) -> BundleManifest {

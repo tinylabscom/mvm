@@ -203,10 +203,10 @@ aho-corasick = "1"
 regex = { version = "1", default-features = false, features = ["perf", "std", "unicode-case", "unicode-perl"] }
 
 # Crypto
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 base64 = "0.22"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
-hmac = "0.12"
+ed25519-dalek = "3"
+hmac = "0.13"
 rand = "0.8"
 # Plan 129 Stage 2 (ADR-006): mint the per-VM name-constrained egress CA /
 # intermediate / leaf certs for transparent https substitution. 0.13+ for the
@@ -218,7 +218,7 @@ rcgen = { version = "0.14", default-features = false, features = ["ring", "pem",
 # becomes a compile error. Plan 63 W2 — `SecretBox<T>` pass on every
 # `KeyProvider` / `WrappedKey` / snapshot-HMAC-key consumer.
 secrecy = { version = "0.10", features = ["serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 
 # Serialization
@@ -233,7 +233,7 @@ clap_mangen = "0.2"
 colored = "3"
 
 # HTTP client (for CLI upgrade)
-reqwest = { version = "0.13", features = ["blocking", "json", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["blocking", "json", "rustls-no-provider"], default-features = false }
 
 # Plan 129 Stage 2 — the egress terminator's server-side TLS (terminate the
 # guest's https to bound hosts under the per-VM name-constrained intermediate).

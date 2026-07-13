@@ -648,7 +648,11 @@ mod verify_cert_tests {
     }
 
     fn sign(receipt: &DestructionReceipt) -> (SignedDestructionReceipt, SigningKey) {
-        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let signed = sign_destruction_receipt(receipt, &key);
         (signed, key)
     }
@@ -733,7 +737,11 @@ mod verify_cert_tests {
         let (signed, _signer_key) = sign(&sample_receipt());
         let dir = write_cert_file(&signed);
         // Plant a DIFFERENT pubkey on disk.
-        let other = SigningKey::generate(&mut rand::rngs::OsRng);
+        let other = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let pubkey_path = write_pubkey_file(&other, dir.path());
         let err = verify_cert(
             dir.path().join("cert.json").to_str().unwrap(),
@@ -804,7 +812,11 @@ mod verify_cert_tests {
         // own tenant.
         let chain_dir = dir.join("audit");
         std::fs::create_dir_all(&chain_dir).unwrap();
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         let signer = FileAuditSigner::open(signing_key, &chain_dir).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -927,7 +939,11 @@ mod verify_cert_tests {
         let dir = tempdir().unwrap();
         let chain_dir = dir.path().join("audit");
         std::fs::create_dir_all(&chain_dir).unwrap();
-        let signing_key = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing_key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         let signer = FileAuditSigner::open(signing_key, &chain_dir).unwrap();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()

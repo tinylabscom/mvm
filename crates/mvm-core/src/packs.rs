@@ -79,7 +79,7 @@ impl Sha256Hex {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Self {
-        Self(format!("{:x}", Sha256::digest(bytes)))
+        Self(hex::encode(Sha256::digest(bytes)))
     }
 
     pub fn as_str(&self) -> &str {
@@ -795,7 +795,7 @@ fn hash_file(path: &Path) -> Result<(Sha256Hex, u64), String> {
         total = total.saturating_add(read as u64);
         hasher.update(&buffer[..read]);
     }
-    Ok((Sha256Hex(format!("{:x}", hasher.finalize())), total))
+    Ok((Sha256Hex(hex::encode(hasher.finalize())), total))
 }
 
 fn is_sha256_hex(value: &str) -> bool {

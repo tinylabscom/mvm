@@ -275,7 +275,12 @@ mod tests {
         let report_path = report_dir.path().join("report.json");
         export_at(identity_dir.path(), Some(report_path.clone())).expect("export");
 
-        let other = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng).verifying_key();
+        let other = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        }
+        .verifying_key();
         let trust_path = report_dir.path().join("trust.pub");
         std::fs::write(&trust_path, other.to_bytes()).unwrap();
 

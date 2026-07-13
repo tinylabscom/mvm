@@ -672,7 +672,11 @@ mod tests {
     use std::io::Cursor;
 
     fn test_keypair() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        }
     }
 
     fn write_fixture(dir: &Path, name: &str, body: &[u8]) -> PathBuf {

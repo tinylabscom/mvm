@@ -1892,7 +1892,7 @@ mod runtime_overlay_attach_tests {
 
     fn sha256_hex(bytes: &[u8]) -> String {
         let digest = Sha256::digest(bytes);
-        format!("{digest:x}")
+        hex::encode(digest)
     }
 
     fn write_fixture(dir: &std::path::Path, name: &str, bytes: &[u8]) {
@@ -2932,7 +2932,11 @@ mod admit_plan_tests {
 
     #[test]
     fn bundle_pin_from_archive_recovers_signature_and_sha() {
-        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         let (archive, key_id) = make_bundle_for_pin(&sk);
         let pin = bundle_pin_from_archive(&archive, key_id.clone()).expect("recovers pin");
         assert_eq!(pin.bundle_sha256, mvm_core::plan::bundle_sha256(&archive));
@@ -2959,7 +2963,11 @@ mod admit_plan_tests {
             tar.finish().unwrap();
         }
         let archive = buf.into_inner();
-        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         let key_id = mvm_core::plan::KeyId::from_pubkey(&sk.verifying_key());
         let err = bundle_pin_from_archive(&archive, key_id).expect_err("must fail");
         let msg = format!("{err:#}");

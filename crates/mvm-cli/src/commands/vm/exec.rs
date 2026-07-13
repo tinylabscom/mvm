@@ -1390,7 +1390,7 @@ fn load_receipt_pubkey(path: Option<&Path>) -> Result<VerifyingKey> {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    format!("{digest:x}")
+    hex::encode(digest)
 }
 
 #[cfg(test)]
@@ -1885,7 +1885,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let receipt_path = dir.path().join("receipt.json");
         let pubkey_path = dir.path().join("host.pub");
-        let signing = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         std::fs::write(&pubkey_path, signing.verifying_key().to_bytes()).expect("pubkey");
 
         let args = run_args(RunProfile::Standard);
@@ -1929,7 +1933,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let receipt_path = dir.path().join("receipt.json");
         let pubkey_path = dir.path().join("host.pub");
-        let signing = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let signing = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         std::fs::write(&pubkey_path, signing.verifying_key().to_bytes()).expect("pubkey");
 
         let args = run_args(RunProfile::Standard);

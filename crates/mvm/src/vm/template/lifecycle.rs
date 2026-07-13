@@ -1322,7 +1322,7 @@ pub fn sha256_hex(path: &std::path::Path) -> Result<String> {
         std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let mut hasher = sha2::Sha256::new();
     hasher.update(&bytes);
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Download a template revision's artifacts from the registry to a local directory.

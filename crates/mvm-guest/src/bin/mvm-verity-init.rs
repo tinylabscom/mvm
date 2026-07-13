@@ -683,7 +683,7 @@ mod linux {
         }
         let hash_blocks = hash_size / HASH_BLOCK_SIZE;
         let tree_blocks = verity_tree_block_count(data_blocks, HASH_BLOCK_SIZE);
-        if hash_blocks >= tree_blocks + 1 {
+        if hash_blocks > tree_blocks {
             Ok(1)
         } else if hash_blocks >= tree_blocks {
             Ok(0)

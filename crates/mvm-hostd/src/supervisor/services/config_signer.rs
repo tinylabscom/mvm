@@ -31,7 +31,11 @@ impl ConfigSigner {
     pub fn generate() -> Self {
         let mut rng = OsRng;
         Self {
-            signing_key: SigningKey::generate(&mut rng),
+            signing_key: {
+                let mut __ed_seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+                SigningKey::from_bytes(&__ed_seed)
+            },
         }
     }
 
@@ -98,7 +102,11 @@ mod tests {
         // Ed25519 is deterministic-from-key — same SigningKey + same
         // payload always produces the same signature bytes.
         let mut rng = rand::rngs::OsRng;
-        let sk = SigningKey::generate(&mut rng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let signer_a = ConfigSigner::from_signing_key(sk.clone());
         let signer_b = ConfigSigner::from_signing_key(sk);
         let payload = b"deterministic";

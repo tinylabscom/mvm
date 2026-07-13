@@ -55,7 +55,7 @@ fn combined_hash_hex() -> String {
         h.update(bin.name.as_bytes());
         h.update(bin.sha256_hex.as_bytes());
     }
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 fn verify_sha(path: &Path, expected_hex: &str) -> std::io::Result<bool> {
@@ -63,7 +63,7 @@ fn verify_sha(path: &Path, expected_hex: &str) -> std::io::Result<bool> {
     let bytes = std::fs::read(path)?;
     let mut h = Sha256::new();
     h.update(&bytes);
-    Ok(format!("{:x}", h.finalize()) == expected_hex)
+    Ok(hex::encode(h.finalize()) == expected_hex)
 }
 
 fn write_atomic(target: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {

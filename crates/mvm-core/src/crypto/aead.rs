@@ -8,8 +8,8 @@
 //!
 //! Wire: `nonce (12) ‖ ciphertext ‖ tag (16)`.
 
-use aes_gcm::aead::{Aead, KeyInit, OsRng};
-use aes_gcm::{AeadCore, Aes256Gcm, Nonce};
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Nonce};
 use zeroize::Zeroize;
 
 /// Nonce size for AES-256-GCM: 96 bits / 12 bytes.
@@ -60,9 +60,8 @@ impl Key {
 
     /// Fresh random key drawn from the OS CSPRNG.
     pub fn random() -> Self {
-        let generic = Aes256Gcm::generate_key(&mut OsRng);
         let mut bytes = [0u8; KEY_SIZE];
-        bytes.copy_from_slice(&generic);
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
         Key(bytes)
     }
 
@@ -120,7 +119,9 @@ impl Drop for Key {
 /// error is exceeding GCM's ~64 GiB message ceiling, which would OOM first.
 pub fn seal(key: &Key, plaintext: &[u8]) -> Vec<u8> {
     let cipher = Aes256Gcm::new(&key.0.into());
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+    let mut nonce_arr = [0u8; NONCE_SIZE];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce_arr);
+    let nonce = Nonce::from(nonce_arr);
     let ciphertext = cipher
         .encrypt(&nonce, plaintext)
         .expect("AES-256-GCM seal of an in-memory buffer cannot fail");
@@ -141,10 +142,12 @@ pub fn open(key: &Key, framed: &[u8]) -> Result<Vec<u8>, AeadError> {
         return Err(AeadError::TooShort { got: framed.len() });
     }
     let (nonce_bytes, ciphertext) = framed.split_at(NONCE_SIZE);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = Nonce::from(
+        <[u8; NONCE_SIZE]>::try_from(nonce_bytes).expect("split_at(NONCE_SIZE) guarantees length"),
+    );
     let cipher = Aes256Gcm::new(&key.0.into());
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| AeadError::Auth)
 }
 

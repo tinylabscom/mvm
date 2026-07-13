@@ -5491,7 +5491,11 @@ mod tests {
     // ========================================================================
 
     fn test_keypair() -> SigningKey {
-        SigningKey::generate(&mut rand::rngs::OsRng)
+        {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        }
     }
 
     #[test]

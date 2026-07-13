@@ -282,7 +282,11 @@ mod tests {
     use std::collections::BTreeMap;
 
     fn fresh_key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        }
     }
 
     fn make_entry(tenant: &str, event: &str) -> AuditEntry {

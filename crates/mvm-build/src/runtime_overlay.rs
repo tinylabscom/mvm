@@ -1467,10 +1467,18 @@ fn parse_checksums_manifest(body: &str) -> std::collections::HashMap<String, Str
 /// Stream `path` through SHA-256, returning the lowercase hex digest.
 pub(crate) fn compute_file_sha256(path: &Path) -> std::io::Result<String> {
     use sha2::{Digest, Sha256};
+    use std::io::Read as _;
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(format!("{:x}", hasher.finalize()))
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Stream `path` through SHA-256 and compare to `expected`. On
@@ -2906,7 +2914,7 @@ short  bar.ext4
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(bytes);
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     #[cfg(feature = "pure-mkfs")]
