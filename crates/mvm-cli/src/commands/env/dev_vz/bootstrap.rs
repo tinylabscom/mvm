@@ -853,12 +853,11 @@ pub(in crate::commands) mod attested_builder_pack {
             std::fs::write(dest.join("cmdline.txt"), SYNTHESIZED_BUILDER_VM_CMDLINE)
                 .context("writing synthesized builder pack cmdline.txt")?;
         }
-        for name in [mvm_build::builder_pack::CLOSURE_FILE] {
-            let src = pack_root.join(name);
-            if src.exists() {
-                std::fs::copy(&src, dest.join(name))
-                    .with_context(|| format!("copying builder pack artifact {name}"))?;
-            }
+        let name = mvm_build::builder_pack::CLOSURE_FILE;
+        let src = pack_root.join(name);
+        if src.exists() {
+            std::fs::copy(&src, dest.join(name))
+                .with_context(|| format!("copying builder pack artifact {name}"))?;
         }
         std::fs::write(
             dest.join("manifest.json"),

@@ -29,41 +29,11 @@ fn ensure_extracted_is_idempotent() {
     assert_eq!(dir1, dir2);
 }
 
-// The boot guard must reject a stub build and admit a real one. The expected
-// verdict is whatever this binary was compiled with, so the test is valid in
-// both modes.
 #[test]
-fn ensure_extracted_for_boot_matches_build_mode() {
-    use mvm_cli::host_binaries::embedded::EMBEDDED;
-    use mvm_cli::host_binaries::extract::ensure_extracted_for_boot;
-
+fn embedded_binaries_are_real_for_vm_boot() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let res = ensure_extracted_for_boot(tmp.path());
-    let is_stub_build = EMBEDDED.iter().any(|b| b.bytes.is_empty());
-    let source_checkout = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .is_some_and(|workspace_root| workspace_root.join("crates/mvm-build").is_dir());
-    if is_stub_build {
-        if source_checkout {
-            match res {
-                Ok(_) => {}
-                Err(err) => {
-                    let msg = err.to_string();
-                    assert!(
-                        msg.contains("cargo-zigbuild failed")
-                            || msg.contains("No such file or directory"),
-                        "source checkout stub build should source-build host binaries when the toolchain is present; got {msg}"
-                    );
-                }
-            }
-        } else {
-            assert!(
-                res.is_err(),
-                "installed stub build must be refused for VM boot"
-            );
-        }
-    } else {
-        assert!(res.is_ok(), "real build must extract for VM boot");
-    }
+    let boot = mvm_cli::host_binaries::extract::ensure_boot_host_binaries(tmp.path())
+        .expect("boot host binaries extract");
+    assert!(!boot.stage0_init.is_empty(), "stage0-init must be embedded");
+    assert!(boot.dir.join("stage0-init").is_file());
 }
