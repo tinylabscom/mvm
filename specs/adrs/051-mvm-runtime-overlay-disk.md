@@ -59,6 +59,16 @@ read-only at `/mvm/runtime` inside the guest. Service launches
 inject the language-specific path env vars (`PYTHONPATH`,
 `NODE_PATH`, …) before forking the workload.
 
+**The host does not attach an unchecked cache entry.** Before any
+backend threads the overlay paths into a boot config, mvm
+re-hashes the cached `overlay.ext4`, `overlay.verity`,
+`overlay.roothash`, and `VERSION` files and compares them to the
+recorded SHA-256 manifest stored beside the artifact in
+`~/.cache/mvm/runtime-overlay/<version>/<arch>/`. A mismatch is an
+admission-time error that forces a rebuild or re-download. The
+guest then mounts only the dm-verity device, never the raw ext4
+payload directly.
+
 ### Overlay contents (per-arch, ~10-20 MB)
 
 ```text
@@ -117,6 +127,11 @@ Identical to rootfs verity:
 - Sidecar emitted alongside the overlay ext4 as part of the
   release artifacts: `runtime-overlay-{arch}-{version}.ext4`,
   `.verity`, `.roothash`.
+- The cached artifact also carries a local `checksums-sha256.txt`
+  over the canonical cache filenames (`overlay.ext4`,
+  `overlay.verity`, `overlay.roothash`, `VERSION`). mvm rechecks
+  those hashes before attach so a drifted cache entry cannot be
+  mounted.
 - mvmctl picks the overlay whose `VERSION` matches the running
   `mvmctl` semver. Mismatched versions are an admission-time
   error, not a silent boot.
@@ -180,7 +195,9 @@ the issue.
   (W3 verity shipped 2026-04-30 with two drives already; three
   is on the edge of what's tested).
 - An additional release artifact per arch
-  (`runtime-overlay-{arch}.ext4` + `.verity` + `.roothash`).
+  (`runtime-overlay-{arch}.tar.gz` + `.tar.gz.sha256`), whose
+  contents are still the canonical `overlay.ext4` + `.verity` +
+  `.roothash` + `VERSION` set.
   Adds ~10-20 MB per arch to the release payload.
 - `/mvm` path reservation is a contract with users. Documented
   on the public `oci-ingest` status row; admission-time check

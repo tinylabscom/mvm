@@ -21,12 +21,15 @@ Contents:
 - `overlay.verity`
 - `overlay.roothash`
 - `VERSION`
+- `checksums-sha256.txt`
 
 Rules:
 
 - Only **guest-executed** runtime binaries belong here.
 - The guest mounts this artifact **read-only** on admitted overlay-backed
   backends.
+- The host re-verifies every cached runtime-overlay file against
+  `checksums-sha256.txt` before attach.
 - The runtime is **version-matched** to the host `mvmctl` release, not "latest
   in cache".
 - Running VMs do **not** hot-remount a new overlay.
@@ -50,6 +53,7 @@ Before cutting or approving the RC tag:
    exact ship candidate or on release assets built from it.
 5. Confirm release docs still say:
    - readonly mount
+   - host-side checksum revalidation before attach
    - version-matched, not latest
    - stopped VMs restart onto new runtime
    - running VMs do not hot-remount
@@ -59,22 +63,18 @@ Before cutting or approving the RC tag:
 The release pipeline must publish the runtime overlay assets for each supported
 architecture:
 
-- `runtime-overlay-aarch64.ext4`
-- `runtime-overlay-aarch64.verity`
-- `runtime-overlay-aarch64.roothash`
-- `runtime-overlay-aarch64.VERSION`
-- `runtime-overlay-aarch64-checksums-sha256.txt`
-- `runtime-overlay-x86_64.ext4`
-- `runtime-overlay-x86_64.verity`
-- `runtime-overlay-x86_64.roothash`
-- `runtime-overlay-x86_64.VERSION`
-- `runtime-overlay-x86_64-checksums-sha256.txt`
+- `runtime-overlay-aarch64.tar.gz`
+- `runtime-overlay-aarch64.tar.gz.sha256`
+- `runtime-overlay-x86_64.tar.gz`
+- `runtime-overlay-x86_64.tar.gz.sha256`
 
 Verify:
 
 1. The release tag version matches the workspace version.
-2. The published `runtime-overlay-<arch>.VERSION` file matches that release.
-3. `mvmctl build runtime-overlay build --source download` resolves the expected
+2. Extracting `runtime-overlay-<arch>.tar.gz` yields `overlay.ext4`,
+   `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`.
+3. The inner `VERSION` file matches that release.
+4. `mvmctl build runtime-overlay build --source download` resolves the expected
    asset set into `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
 
 ## Rollout procedure
@@ -133,11 +133,13 @@ to the following:
 > This release ships the readonly guest-runtime overlay as a first-class
 > versioned artifact under `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
 > Only guest-executed runtime binaries live in that overlay; host-side helpers
-> remain in the host bundle. Admitted overlay-backed backends mount the runtime
-> artifact read-only. Running VMs keep the runtime they booted with until
-> restart; stopped VMs pick up the new version-matched runtime on the next
-> start/restart. Linux rootfs-backed libkrun builder use remains fail-closed and
-> is not silently admitted.
+> remain in the host bundle. Before attach, `mvmctl` re-verifies the cached
+> overlay files against the recorded SHA-256 manifest; admitted overlay-backed
+> backends then mount only the readonly, verity-validated runtime device.
+> Running VMs keep the runtime they booted with until restart; stopped VMs pick
+> up the new version-matched runtime on the next start/restart. Linux
+> rootfs-backed libkrun builder use remains fail-closed and is not silently
+> admitted.
 
 If the release must be rolled back, pair the binary downgrade with a VM restart
 so restarted guests resolve the matching older runtime overlay.

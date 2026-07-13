@@ -49,6 +49,10 @@ The practical rule is simple:
 ## Mount contract
 
 - The runtime overlay is mounted read-only at `/mvm/runtime`.
+- The host must verify the cached overlay artifact against its recorded
+  SHA-256 manifest before attach.
+- The guest must mount only the verified dm-verity mapping, never the raw
+  `overlay.ext4` block device directly.
 - Workloads must not depend on `/mvm/runtime` as an application search path.
 - The workload rootfs remains the source of truth for workload binaries and
   workload libraries.
@@ -117,6 +121,8 @@ against the stricter boundary:
   `/mvm/runtime`.
 - No binary needed before overlay mount is classified as an overlay payload.
 - The overlay remains readonly on every admitted backend.
+- A runtime overlay cache entry with missing or mismatched checksums is refused
+  before boot.
 - The rootfs/image remains the only owner of workload execution semantics.
 
 ## Code-audit checklist

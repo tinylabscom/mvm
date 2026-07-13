@@ -208,9 +208,11 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > the shared read-only cache artifact under
 > `~/.cache/mvm/runtime-overlay/<version>/<arch>/`; host-executed binaries stay
 > outside it. Every admitted backend/tier either mounts that artifact read-only
-> with real proof or refuses the unsupported path fail-closed. Stopped VMs pick
-> up updated version-matched overlays on restart; running VMs keep the runtime
-> they booted with. The current candidate has green host
+> with real proof or refuses the unsupported path fail-closed. The cache now
+> carries a per-artifact `checksums-sha256.txt`, and required-overlay boots
+> re-verify that manifest before attach so drifted cache bytes cannot be
+> mounted. Stopped VMs pick up updated version-matched overlays on restart;
+> running VMs keep the runtime they booted with. The current candidate has green host
 > `cargo check --workspace --offline`, `cargo clippy --workspace --all-targets
 > --offline -- -D warnings`, and `cargo test --workspace --offline` gates, and
 > the Linux/KVM `cargo test -p mvm-build --lib --offline` witness has been

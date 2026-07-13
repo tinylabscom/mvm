@@ -44,6 +44,9 @@ overlay** that is mounted inside the guest at `/mvm/runtime`.
 - The overlay is mounted read-only in the guest. A backend that cannot provide
   that read-only contract must stay on the fallback policy instead of using
   `RequiredOverlay`.
+- Before attach, mvm re-verifies the cached `overlay.ext4`, `overlay.verity`,
+  `overlay.roothash`, and `VERSION` files against the recorded
+  `checksums-sha256.txt` manifest and refuses the boot on any mismatch.
 - The artifact is shared across microVMs from the local cache under
   `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
 
@@ -157,5 +160,6 @@ On the host (on Linux) or inside the builder VM (on macOS), mvm stores data at:
 
 The shared guest-runtime overlay cache lives separately under
 `~/.cache/mvm/runtime-overlay/<version>/<arch>/` and contains the sealed
-`overlay.ext4`, `overlay.verity`, and version metadata reused by every VM that
-boots that runtime version.
+`overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and
+`checksums-sha256.txt` metadata reused by every VM that boots that runtime
+version.

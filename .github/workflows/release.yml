@@ -412,12 +412,12 @@ jobs:
   # per-image rootfs. Built per-arch from `nix/images/runtime-overlay/`.
   #
   # The host-side `RuntimeOverlayResolver`
-  # (`crates/mvm-build/src/runtime_overlay.rs`) installs these into
-  # `~/.cache/mvm/runtime-overlay/<mvmctl-version>/<arch>/` under the
-  # canonical names (`overlay.ext4`, `overlay.verity`,
-  # `overlay.roothash`, `VERSION`); the release artifact names carry
-  # the arch suffix so the combined release-asset pool doesn't
-  # collide between aarch64 and x86_64.
+  # (`crates/mvm-build/src/runtime_overlay.rs`) downloads one
+  # arch-qualified tarball plus a tarball sha256 sidecar, then
+  # installs the extracted canonical names (`overlay.ext4`,
+  # `overlay.verity`, `overlay.roothash`, `VERSION`,
+  # `checksums-sha256.txt`) into
+  # `~/.cache/mvm/runtime-overlay/<mvmctl-version>/<arch>/`.
   runtime-overlay-image:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}
@@ -443,31 +443,35 @@ jobs:
           nix build "./nix/images/runtime-overlay#packages.${SYSTEM}.default" \
             --no-link --print-out-paths > /tmp/store-path.txt
           STORE_PATH=$(head -1 /tmp/store-path.txt)
-          mkdir -p staging
+          mkdir -p "staging/runtime-overlay-${ARCH}"
           # cp -L so `overlay.*` resolve through nix-store symlinks
           # into the actual blobs; the artifact uploader doesn't
           # follow symlinks.
-          cp -L "$STORE_PATH/overlay.ext4"     "staging/runtime-overlay-${ARCH}.ext4"
-          cp -L "$STORE_PATH/overlay.verity"   "staging/runtime-overlay-${ARCH}.verity"
-          cp -L "$STORE_PATH/overlay.roothash" "staging/runtime-overlay-${ARCH}.roothash"
-          cp -L "$STORE_PATH/VERSION"          "staging/runtime-overlay-${ARCH}.VERSION"
-          cd staging
-          sha256sum "runtime-overlay-${ARCH}.ext4" \
-                    "runtime-overlay-${ARCH}.verity" \
-                    "runtime-overlay-${ARCH}.roothash" \
-                    "runtime-overlay-${ARCH}.VERSION" \
-            > "runtime-overlay-${ARCH}-checksums-sha256.txt"
+          cp -L "$STORE_PATH/overlay.ext4"     "staging/runtime-overlay-${ARCH}/overlay.ext4"
+          cp -L "$STORE_PATH/overlay.verity"   "staging/runtime-overlay-${ARCH}/overlay.verity"
+          cp -L "$STORE_PATH/overlay.roothash" "staging/runtime-overlay-${ARCH}/overlay.roothash"
+          cp -L "$STORE_PATH/VERSION"          "staging/runtime-overlay-${ARCH}/VERSION"
+          (
+            cd "staging/runtime-overlay-${ARCH}"
+            sha256sum overlay.ext4 overlay.verity overlay.roothash VERSION \
+              > checksums-sha256.txt
+          )
+          tar -C "staging/runtime-overlay-${ARCH}" \
+            -czf "staging/runtime-overlay-${ARCH}.tar.gz" \
+            overlay.ext4 overlay.verity overlay.roothash VERSION checksums-sha256.txt
+          (
+            cd staging
+            sha256sum "runtime-overlay-${ARCH}.tar.gz" \
+              > "runtime-overlay-${ARCH}.tar.gz.sha256"
+          )
 
       - name: Upload runtime overlay image artifacts
         uses: actions/upload-artifact@v7
         with:
           name: runtime-overlay-image-${{ matrix.arch }}
           path: |
-            staging/runtime-overlay-${{ matrix.arch }}.ext4
-            staging/runtime-overlay-${{ matrix.arch }}.verity
-            staging/runtime-overlay-${{ matrix.arch }}.roothash
-            staging/runtime-overlay-${{ matrix.arch }}.VERSION
-            staging/runtime-overlay-${{ matrix.arch }}-checksums-sha256.txt
+            staging/runtime-overlay-${{ matrix.arch }}.tar.gz
+            staging/runtime-overlay-${{ matrix.arch }}.tar.gz.sha256
 
   # Plan 158: the bundled default microVM image `mvmctl up`/`exec` boots when
   # no --flake/--template/--image is given. Ships the PROD variant only
@@ -732,11 +736,8 @@ jobs:
             artifacts/builder-vm-*.pack-manifest.json.bundle
             artifacts/builder-vm-*.sbom.txt
             artifacts/builder-vm-*-checksums-sha256.txt
-            artifacts/runtime-overlay-*.ext4
-            artifacts/runtime-overlay-*.verity
-            artifacts/runtime-overlay-*.roothash
-            artifacts/runtime-overlay-*.VERSION
-            artifacts/runtime-overlay-*-checksums-sha256.txt
+            artifacts/runtime-overlay-*.tar.gz
+            artifacts/runtime-overlay-*.tar.gz.sha256
             artifacts/default-microvm-vmlinux-*
             artifacts/default-microvm-rootfs-*
             artifacts/default-microvm-meta-*

@@ -28,7 +28,7 @@ SBOM `sbom.cdx.json` (+ `.bundle`).
 Per arch (`aarch64`, `x86_64`), each with a `*-checksums-sha256.txt`:
 
 - **builder-vm** — `builder-vm-vmlinux-<arch>`, `builder-vm-rootfs-<arch>.ext4`, optional `.cmdline.txt` / `.manifest.json`
-- **runtime-overlay** — `runtime-overlay-<arch>.{ext4,verity,roothash,VERSION}`
+- **runtime-overlay** — `runtime-overlay-<arch>.tar.gz` containing `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`
 - **default-microvm** (prod variant) — `default-microvm-vmlinux-<arch>`, `default-microvm-rootfs-<arch>.{ext4,verity,roothash}`, `default-microvm-meta-<arch>.json`
 
 Image `*.manifest.json` files are cosign-signed (`.bundle`) per ADR-005 so

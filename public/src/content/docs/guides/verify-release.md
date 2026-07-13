@@ -106,18 +106,19 @@ the same release. To verify it manually:
 VERSION=v0.18.0
 ARCH=aarch64   # or x86_64
 
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.ext4"
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.verity"
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.roothash"
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.VERSION"
-curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}-checksums-sha256.txt"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.tar.gz"
+curl -LO "https://github.com/tinylabscom/mvm/releases/download/${VERSION}/runtime-overlay-${ARCH}.tar.gz.sha256"
 
-grep "runtime-overlay-${ARCH}" "runtime-overlay-${ARCH}-checksums-sha256.txt" | sha256sum --check
+shasum -a 256 --check "runtime-overlay-${ARCH}.tar.gz.sha256"
+tar xzf "runtime-overlay-${ARCH}.tar.gz"
+sha256sum --check checksums-sha256.txt
 ```
 
-When `mvmctl build runtime-overlay build --source download` installs these
-assets into `~/.cache/mvm/runtime-overlay/<version>/<arch>/`, it expects the
-same version-matched set.
+When `mvmctl build runtime-overlay build --source download` installs this
+payload into `~/.cache/mvm/runtime-overlay/<version>/<arch>/`, it first
+verifies the tarball, then verifies the extracted inner files against the
+embedded `checksums-sha256.txt`, and later required-overlay boots recheck those
+cached file hashes before attach. A drifted cache entry is refused.
 
 ## Runtime overlay update model
 
