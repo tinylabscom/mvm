@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-use super::super::env::dev_vz::{ensure_default_microvm_image, ensure_workload_kernel};
+use super::super::env::dev_vz::{
+    assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
+};
 use super::Cli;
 use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
@@ -747,6 +749,10 @@ fn build_exec_request(
                 // verity-sealed, so the kernel must carry dm-verity; the builder
                 // kernel (which drops it) is never a stand-in.
                 let kernel_path = ensure_workload_kernel(prod)?;
+                // Enforce that invariant host-side: a kernel with no dm-verity
+                // support would panic the guest in early init opening
+                // /dev/mapper/control, with no host signal. Fail fast instead.
+                assert_workload_kernel_supports_verity(&kernel_path)?;
                 crate::exec::ImageSource::Prebuilt {
                     kernel_path,
                     rootfs_path: cached.rootfs_path.display().to_string(),

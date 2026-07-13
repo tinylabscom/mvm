@@ -120,6 +120,47 @@ fn workload_kernel_never_reuses_the_non_verity_builder_kernel() {
 }
 
 #[test]
+fn kernel_carries_dm_verity_flags_only_a_readable_marker_free_kernel() {
+    // A readable kernel carrying any device-mapper/dm-verity symbol → supported.
+    let verity = b"boot Linux version 6.6.0 ... dm_table_create ... verity_ctr ...".to_vec();
+    assert_eq!(kernel_carries_dm_verity(&verity), Some(true));
+    let dm_only = b"Linux version 6.6 device-mapper: ioctl:".to_vec();
+    assert_eq!(kernel_carries_dm_verity(&dm_only), Some(true));
+
+    // A readable kernel with no dm marker at all → the builder-kernel signature.
+    // This is the only case that fails the launch guard.
+    let builder = b"Linux version 6.6.0 (nixbld) rootwait console=hvc0 target_type".to_vec();
+    assert_eq!(kernel_carries_dm_verity(&builder), Some(false));
+
+    // Not a recognizable kernel (compressed Image, truncated file, junk) →
+    // inconclusive; the guard must never reject on `None`.
+    assert_eq!(kernel_carries_dm_verity(b"\x1f\x8b\x08 gzip payload"), None);
+    assert_eq!(kernel_carries_dm_verity(b""), None);
+    assert_eq!(kernel_carries_dm_verity(b"device-mapper"), None);
+}
+
+#[test]
+fn assert_workload_kernel_supports_verity_rejects_a_marker_free_kernel() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A readable kernel with no dm-verity symbol is refused with a clear message.
+    let bad = tmp.path().join("builder-vmlinux");
+    std::fs::write(&bad, b"Linux version 6.6.0 (nixbld) console=hvc0 rootwait").unwrap();
+    let err = assert_workload_kernel_supports_verity(bad.to_str().unwrap()).unwrap_err();
+    assert!(
+        err.to_string().contains("dm-verity"),
+        "unexpected error: {err}"
+    );
+
+    // A dm-verity-capable kernel passes; an unrecognized blob passes (inconclusive).
+    let good = tmp.path().join("workload-vmlinux");
+    std::fs::write(&good, b"Linux version 6.6.0 dm_table_create verity_ctr").unwrap();
+    assert!(assert_workload_kernel_supports_verity(good.to_str().unwrap()).is_ok());
+    let opaque = tmp.path().join("compressed-image");
+    std::fs::write(&opaque, b"\x1f\x8b\x08 not a decodable kernel").unwrap();
+    assert!(assert_workload_kernel_supports_verity(opaque.to_str().unwrap()).is_ok());
+}
+
+#[test]
 #[cfg(feature = "builder-vm")]
 fn build_heartbeat_emits_while_alive_and_stops_on_drop() {
     use std::sync::Arc;
