@@ -1184,7 +1184,14 @@ mod tests {
         let libkrun = vm_vsock_port_socket_at(&state_dir, 5252);
         let console = vm_vz_vsock_port_socket_at(&state_dir, 20001);
 
-        for path in [&substitution, &agent, &hvf_agent, &broker, &libkrun, &console] {
+        for path in [
+            &substitution,
+            &agent,
+            &hvf_agent,
+            &broker,
+            &libkrun,
+            &console,
+        ] {
             assert!(
                 fits_unix_socket_path(path),
                 "socket path must fit AF_UNIX budget ({} bytes): {}",
