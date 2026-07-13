@@ -554,6 +554,32 @@ fn prepare_builder_transport_disks(
     Ok((input_disk, output_disk))
 }
 
+/// Stage a filtered copy of `src` for the disk-transport `work` input.
+///
+/// On a source checkout, `src` (`BuilderMounts::flake_src` /
+/// `BuilderShellJob::work_dir`) can be the repo root, which carries
+/// `target/`, `.worktrees/`, `.git/`, and other build/VCS scratch —
+/// tens of GB that the guest's RAM-capped extraction tmpfs can't
+/// absorb. Reuses the same `WORKSPACE_SNAPSHOT_SKIP` exclusion the
+/// mvm-workspace snapshot (`stage_job_dir`'s `mvm-src` staging) already
+/// applies, rather than forking a second skip list.
+///
+/// Returns the `TempDir` holding the filtered copy; callers must keep
+/// it alive until the disk-transport pack that reads it completes.
+fn stage_filtered_work_input(src: &Path) -> Result<tempfile::TempDir, BuilderVmError> {
+    let staged = tempfile::TempDir::new().map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("creating filtered work staging dir: {e}"))
+    })?;
+    crate::builder_vm_runtime::copy_dir_filtered(src, staged.path()).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "staging filtered work input {} -> {}: {e}",
+            src.display(),
+            staged.path().display()
+        ))
+    })?;
+    Ok(staged)
+}
+
 fn extract_builder_transport_output(
     output_disk: &Path,
     artifact_out: &Path,
@@ -970,6 +996,10 @@ impl LibkrunBuilderVm {
         let runtime_overlay = cached_runtime_overlay_ext4();
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
+        // `job.work_dir` can be the repo root on a source checkout; stage a
+        // filtered copy so `target/`/`.worktrees/`/`.git/` never ride the
+        // input tar. `work_staging` must outlive this call.
+        let work_staging = stage_filtered_work_input(&job.work_dir)?;
         let (input_disk, output_disk) = prepare_builder_transport_disks(
             &vm_state_dir,
             &[
@@ -979,7 +1009,7 @@ impl LibkrunBuilderVm {
                 },
                 InputTree {
                     name: "work",
-                    src: &job.work_dir,
+                    src: work_staging.path(),
                 },
             ],
             u64::from(BUILDER_OUTPUT_DISK_MIB) << 20,
@@ -1434,6 +1464,12 @@ impl BuilderVm for LibkrunBuilderVm {
         let runtime_overlay = cached_runtime_overlay_ext4();
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
+        // `mounts.flake_src` is the repo root itself on a source checkout
+        // (the "local-mvm override" invariant): stage a filtered copy so
+        // `target/`/`.worktrees/`/`.git/` never ride the input tar into the
+        // guest's RAM-capped extraction tmpfs. `work_staging` must outlive
+        // this call.
+        let work_staging = stage_filtered_work_input(&mounts.flake_src)?;
         let (input_disk, output_disk) = prepare_builder_transport_disks(
             &vm_state_dir,
             &[
@@ -1443,7 +1479,7 @@ impl BuilderVm for LibkrunBuilderVm {
                 },
                 InputTree {
                     name: "work",
-                    src: &mounts.flake_src,
+                    src: work_staging.path(),
                 },
                 InputTree {
                     name: "mvm-bins",
@@ -4941,6 +4977,69 @@ mod tests {
             cmd.matches(r#"--override-input mvm/mvm-workspace "path:$MVM_SRC""#)
                 .count(),
             3
+        );
+    }
+
+    #[test]
+    fn stage_filtered_work_input_excludes_scratch_dirs_and_keeps_source() {
+        // A source checkout's `work` input (`BuilderMounts::flake_src` /
+        // `BuilderShellJob::work_dir`) can be the repo root itself, which
+        // carries `target/` (Rust build output), `.worktrees/` (sibling
+        // checkouts), and `.git/` (full history) — tens of GB unfiltered.
+        // Staging through the same exclusion the mvm-workspace snapshot
+        // uses must prune all three while keeping real source files, or
+        // the packed input overflows the guest's RAM-capped extraction
+        // tmpfs ("No space left on device").
+        let scratch = TempDir::new().unwrap();
+        let src = scratch.path().join("repo");
+        std::fs::create_dir_all(src.join("target/debug")).unwrap();
+        std::fs::write(src.join("target/debug/junk"), "x").unwrap();
+        std::fs::create_dir_all(src.join(".worktrees/other-branch")).unwrap();
+        std::fs::write(src.join(".worktrees/other-branch/junk"), "x").unwrap();
+        std::fs::create_dir_all(src.join(".git")).unwrap();
+        std::fs::write(src.join(".git/HEAD"), "ref: refs/heads/main").unwrap();
+        std::fs::create_dir_all(src.join("crates/mvm-build/src")).unwrap();
+        std::fs::write(src.join("crates/mvm-build/src/lib.rs"), "// real source").unwrap();
+
+        let staged = stage_filtered_work_input(&src).expect("stage ok");
+
+        assert!(
+            !staged.path().join("target").exists(),
+            "target/ must be pruned from the work input"
+        );
+        assert!(
+            !staged.path().join(".worktrees").exists(),
+            ".worktrees/ must be pruned from the work input"
+        );
+        assert!(
+            !staged.path().join(".git").exists(),
+            ".git/ must be pruned from the work input"
+        );
+        assert_eq!(
+            std::fs::read_to_string(staged.path().join("crates/mvm-build/src/lib.rs")).unwrap(),
+            "// real source"
+        );
+
+        // Prove the exclusion survives the actual disk-transport pack —
+        // this tar is what rides into the guest.
+        let image = scratch.path().join("input.img");
+        pack_input_disk(
+            &[InputTree {
+                name: "work",
+                src: staged.path(),
+            }],
+            &image,
+            512,
+        )
+        .unwrap();
+        let dest = scratch.path().join("unpacked");
+        read_output_disk(&image, &dest).unwrap();
+        assert!(!dest.join("work/target").exists());
+        assert!(!dest.join("work/.worktrees").exists());
+        assert!(!dest.join("work/.git").exists());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("work/crates/mvm-build/src/lib.rs")).unwrap(),
+            "// real source"
         );
     }
 
