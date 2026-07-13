@@ -2,6 +2,7 @@ use crate::OciError;
 use crate::reference::ImageReference;
 use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, WWW_AUTHENTICATE};
 use secrecy::{ExposeSecret, SecretString};
+use std::sync::Once;
 
 const DOCKER_HUB_REGISTRY: &str = "docker.io";
 const DOCKER_HUB_LEGACY_REGISTRY: &str = "index.docker.io";
@@ -82,7 +83,15 @@ pub struct RegistryClient {
 }
 
 impl RegistryClient {
+    fn install_rustls_provider() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
     pub fn new(config: ClientConfig, auth: RegistryAuthConfig) -> Self {
+        Self::install_rustls_provider();
         Self {
             http: reqwest::Client::new(),
             config,
