@@ -226,7 +226,7 @@ fn runtime_backend_check(plat: platform::Platform) -> Check {
         Platform::Wsl2 => "WSL2 — a workload runtime needs nested /dev/kvm; without it \
              only `qemu` (dev/test only, no claim-10) runs"
             .to_string(),
-        Platform::MacOS => "macOS — `vz` (macOS 26+) or `libkrun` (macOS 13-25) \
+        Platform::MacOS => "macOS — `hvf` (macOS 26+ Apple Silicon) or `libkrun` (macOS 13-25) \
              workload backends, selectable via `--hypervisor`"
             .to_string(),
         Platform::Windows => "Windows — no local microVM workload path yet".to_string(),
@@ -774,8 +774,8 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
     if !report.all_ok {
         let missing: Vec<&Check> = report.checks.iter().filter(|c| !c.ok).collect();
         ui::warn("\nIssues found:");
-        for m in &missing {
-            ui::info(&format!("  {} — {}", m.name, m.info));
+        for line in issue_summary_lines(&missing) {
+            ui::warn(&line);
         }
 
         // Provide category-specific guidance
@@ -783,10 +783,10 @@ pub fn run(json: bool, workflow: Option<DoctorWorkflow>) -> Result<()> {
         let has_managed = missing.iter().any(|c| c.category == "tools");
 
         if has_prerequisites {
-            ui::info("\nPrerequisites missing: Install Rust from https://rustup.rs");
+            ui::notice("\nPrerequisites missing: Install Rust from https://rustup.rs");
         }
         if has_managed {
-            ui::info("\nManaged tools missing: Run 'mvmctl bootstrap' to install");
+            ui::notice("\nManaged tools missing: Run 'mvmctl bootstrap' to install");
         }
 
         anyhow::bail!("doctor found issues");
@@ -827,6 +827,13 @@ fn render_text(report: &DoctorReport) {
     render_balloon_support(&report.balloon_support);
     render_warm_start_support(&report.warm_start);
     render_capability_table(&report.capability_table);
+}
+
+fn issue_summary_lines(missing: &[&Check]) -> Vec<String> {
+    missing
+        .iter()
+        .map(|check| format!("  {} — {}", check.name, check.info))
+        .collect()
 }
 
 /// Enumerate every backend's `capabilities().balloon`. The doctor
@@ -3556,6 +3563,52 @@ mod tests {
         // `all_ok` over the filtered set is `true`.
         let all_ok_filtered = filtered.iter().all(|c| c.ok);
         assert!(all_ok_filtered);
+    }
+
+    #[test]
+    fn issue_summary_lines_include_every_failed_check() {
+        let missing = [
+            Check {
+                name: "cargo",
+                category: "prerequisites",
+                ok: false,
+                info: "missing".into(),
+            },
+            Check {
+                name: "disk space",
+                category: "platform",
+                ok: false,
+                info: "only 2 GiB free".into(),
+            },
+        ];
+        let refs: Vec<&Check> = missing.iter().collect();
+
+        let lines = issue_summary_lines(&refs);
+
+        assert_eq!(
+            lines,
+            vec![
+                "  cargo — missing".to_string(),
+                "  disk space — only 2 GiB free".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_backend_check_macos_reports_hvf_not_vz() {
+        let c = runtime_backend_check(Platform::MacOS);
+        assert!(c.ok);
+        assert!(c.info.contains("`hvf`"), "got: {}", c.info);
+        assert!(
+            c.info.contains("`libkrun`"),
+            "expected libkrun fallback in macOS summary; got: {}",
+            c.info
+        );
+        assert!(
+            !c.info.contains("`vz`"),
+            "stale Vz wording must not remain in runtime backend summary: {}",
+            c.info
+        );
     }
 
     // ── builder-backend check format on Linux ──
