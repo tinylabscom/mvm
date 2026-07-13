@@ -244,6 +244,165 @@ is *almost* right, extend or generalize it — don't fork a second copy.
 When in doubt, find the existing pattern in the codebase and follow it exactly —
 match the surrounding naming, idiom, and module layout. Consistency is a feature.
 
+## Rust Best Practices
+
+Standing guidelines for every Rust change in this repo — write new code toward
+them and pull existing code their way as you touch it. Where a dedicated section
+already states a stricter rule (Clippy suppressions, `unwrap()`, reuse-first),
+that section governs; the points below extend it, never relax it.
+
+### API & type design
+
+- Prefer a struct with a builder over a function with many inputs — this is also
+  how we kill `clippy::too_many_arguments` at the source (see "Clippy: Zero
+  Warnings, Always" and "Reuse First").
+- Implement a trait where there is more than one version of a behavior; don't
+  scatter a `match` across call sites.
+- Never add a duplicative function for a feature that already exists — find the
+  helper and extend it (see "Reuse First").
+- Accept borrowed types in signatures: `&str` over `String`, `&[T]` over
+  `Vec<T>`, `impl AsRef<Path>` over `PathBuf`. Return owned types only when the
+  caller needs ownership.
+- Use the newtype pattern instead of stringly-typed or primitive-obsessed APIs
+  (`UserId(u64)`, not a bare `u64`).
+- Make invalid states unrepresentable: enums over boolean flags and option-soup
+  structs.
+- Derive `Debug`, `Clone`, `PartialEq`, `Default` where they make sense; add
+  `#[must_use]` where a dropped return value is a bug.
+- Keep visibility minimal — default private, `pub(crate)` before `pub`. Mark
+  public enums/structs `#[non_exhaustive]` when their variants/fields may grow.
+- Match exhaustively; avoid `_ =>` catch-alls on enums we own so a new variant
+  breaks the build at every site that must handle it.
+
+### Idioms & error handling
+
+- Propagate with `Result`/`Option` and `?`. Never `unwrap()` in production;
+  `.expect("message")` only where an invariant makes failure impossible (see
+  "No `unwrap()` in Production Code").
+- `thiserror` for library error types; `anyhow`/`eyre` only at application
+  boundaries. Never `Box<dyn Error>` in a public API.
+- Carry context on errors (`.with_context(...)` / `.map_err(...)`) rather than
+  letting a bare I/O error bubble up.
+- Prefer iterators and combinators over index loops; `if let` / `let else` over
+  nested matches where it reads clearer.
+- Minimize macros — reach for functions and the standard conversion traits
+  (`From`, `TryFrom`, `AsRef`) first.
+- Take `&self` over `&mut self`, and non-mutating APIs, where possible.
+- Prefer `Cow<'_, str>` when a function sometimes borrows and sometimes
+  allocates.
+- Confine `unsafe` to small blocks, each with a `// SAFETY:` comment justifying
+  every invariant it relies on.
+- Avoid `as` for lossy numeric casts — use `TryFrom` / `try_into()` and handle
+  the error. Where arithmetic can overflow, choose the behavior explicitly
+  (`checked_*` / `saturating_*` / `wrapping_*`) rather than leaning on a
+  debug-only panic.
+- Prefer `.get()` / `.first()` / `.last()` over slice indexing in fallible
+  contexts; index only where the bound is locally provable.
+- Library code returns `Result` rather than panicking on bad input. Where a
+  panic is a deliberate contract, document it under a `# Panics` heading.
+- Avoid mutable global state; when a global is genuinely needed use
+  `std::sync::OnceLock` / `LazyLock`, not `lazy_static` or `once_cell`.
+- Use RAII guard types (`Drop`) for cleanup instead of teardown functions a
+  caller can forget — but never rely on `Drop` for correctness across a
+  `mem::forget`.
+- Scope any `#[allow(...)]` to the smallest item and say why in a comment — but
+  the standing rule is to fix the lint, not suppress it, and
+  `#[allow(clippy::too_many_arguments)]` is banned outright (see "Clippy: Zero
+  Warnings, Always").
+
+### Dependencies & tooling
+
+- Keep the dependency set small; audit a crate's transitive tree before adding
+  it, and keep crates current so semver drift doesn't accumulate.
+- Run `cargo audit` (advisories), `cargo deny` (licenses, bans, duplicate
+  versions), and `cargo machete` (unused deps).
+- Run clippy aggressively: `cargo clippy --workspace --all-targets
+  --all-features -- -D warnings`. Prefer enabling `clippy::pedantic` /
+  `clippy::nursery` through the `[lints]` table and allowing individual lints
+  with justification over disabling whole groups.
+- Enforce `cargo fmt --check` in CI; never hand-format.
+- Declare and test against an explicit MSRV (`rust-version` in `Cargo.toml`).
+- Gate optional functionality behind cargo features and keep default features
+  minimal — e.g. `mvm-core` carries no async runtime by default; `tokio` is
+  opt-in behind a feature.
+
+### Async (Tokio)
+
+- No blocking calls in an async context: `tokio::fs` over `std::fs`; offload
+  CPU-bound work with `spawn_blocking` or a dedicated pool (`rayon`).
+- Bound concurrency explicitly with `tokio::sync::Semaphore` / `JoinSet` instead
+  of spawning unbounded tasks.
+- Race futures with `tokio::select!` and keep every branch cancellation-safe;
+  document cancellation safety on public async functions.
+- Never hold a `std::sync::Mutex` guard — or any lock — across an `.await`. Use
+  `tokio::sync::Mutex` only when unavoidable, and prefer channels over shared
+  mutable state.
+- Don't mark a function `async` if it never awaits; keep async functions small
+  to avoid state-machine bloat.
+- Pin futures correctly — `Box::pin` over `Box::new`, and `std::pin::pin!` /
+  `pin_mut!` for stack pinning when reusing a future across loop iterations.
+- Propagate cancellation and shutdown gracefully (`CancellationToken`); don't
+  orphan or leak tasks on drop.
+
+### Serialization, data & security
+
+- Treat a serialized format as public API: pin field names with
+  `#[serde(rename_all = ...)]`, put `#[serde(deny_unknown_fields)]` on inbound
+  types where forward-compat isn't required (already the standing rule for every
+  host↔guest type), and version wire formats deliberately.
+- Validate at the boundary, then trust the type — deserialize into strict domain
+  types (newtypes, enums), not loosely-typed maps threaded through the codebase.
+- Never derive a plain `Debug` on a type holding secrets; redact the fields or
+  wrap it. Zeroize key material on drop (`zeroize`) and compare secrets in
+  constant time (`subtle`). See "Privacy & Security".
+- Never log secrets, tokens, or PII; audit `tracing` fields at the boundary
+  where they enter.
+- Handle time explicitly: store and compute in UTC, convert to local only at
+  presentation, and use a monotonic clock (`Instant`) for durations — never
+  wall-clock time.
+
+### Performance
+
+- Readability first; measure before optimizing.
+- Avoid needless `.clone()` / `.to_owned()`, and if a clone is required say why
+  in a comment. Watch for accidental `String` allocation in hot paths.
+- Pre-allocate with `Vec::with_capacity` / `String::with_capacity` when the size
+  is known up front.
+- Don't reach for `Arc<Mutex<T>>` by default — only after a simpler ownership
+  structure has genuinely failed.
+- Benchmark performance-sensitive code with `criterion` and keep the benchmarks
+  in the repo.
+
+### Testing & documentation
+
+- Give every public item a `///` doc comment, with a runnable example where
+  practical — it doubles as a doctest (`cargo test --workspace --doc`).
+- Unit tests alongside the code (`#[cfg(test)]`), integration tests in `tests/`,
+  and property tests (`proptest`) for parsing/serialization. Test the error
+  paths, not just the happy path; `unwrap()` is fine inside tests. (See
+  "Definition of Done" and "Test Expectations".)
+- Use `tracing` with structured fields, not `println!`/`log`; instrument async
+  functions with `#[tracing::instrument]` where spans aid debugging.
+- Keep `cargo doc --no-deps` warning-free (`#![warn(missing_docs)]` on
+  libraries).
+- Run Miri (`cargo +nightly miri test`) over any code that contains `unsafe`.
+- Fuzz anything that parses untrusted input (`cargo-fuzz`) and keep the corpus
+  in the repo.
+- Make tests deterministic: no sleeps for synchronization (use channels/notify),
+  and inject clocks and randomness so a test can control them.
+
+### Release & supply chain
+
+- Commit `Cargo.lock` for binaries and applications so builds reproduce.
+- Run `cargo-semver-checks` before publishing any library release to catch an
+  accidental breaking change.
+- Tune the release profile deliberately: `lto = "thin"` (or `"fat"` for a final
+  binary), `codegen-units = 1`, `strip = true`; consider `panic = "abort"` for a
+  binary that doesn't need unwinding.
+- Keep CI green across the matrix that matters — stable + MSRV, and the feature
+  combinations that matter (`cargo hack --feature-powerset` for a many-feature
+  library).
+
 ## No Placeholders in Plans or Code
 
 **NEVER** write placeholders in plans, ADRs, or code that ships. This includes:
