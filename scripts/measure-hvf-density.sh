@@ -36,6 +36,7 @@ Useful overrides:
   MVM_HVF_DENSITY_MVMCTL=/path/mvmctl       mvmctl binary override
   MVM_HVF_SUPERVISOR_PATH=/path/supervisor  supervisor binary override
   MVM_SUBSTITUTION_ENDPOINT_PATH=/path/bin  endpoint binary override
+  MVM_HVF_DENSITY_ALLOW_BUSY_HOST=1         skip active build/runtime preflight
   MVM_HVF_DENSITY_ALLOW_UNSUPPORTED=1       bypass macOS arm64 host guard
 
 Artifacts include command logs, VM names, launch failures, ps RSS snapshots,
@@ -114,6 +115,40 @@ if [[ "${#longest_agent_socket}" -ge 104 ]]; then
   echo "  ${longest_agent_socket}" >&2
   echo "choose a shorter MVM_HVF_DENSITY_OUT_DIR or MVM_HVF_DENSITY_DATA_DIR, for example /tmp/p237d" >&2
   exit 65
+fi
+
+busy_host_processes="${OUT_DIR}/busy-host-processes.txt"
+capture_busy_host_processes() {
+  ps axww -o pid=,ppid=,comm=,args= | awk '
+    {
+      args = $0
+      if (args ~ /measure-hvf-density.sh/) next
+      if (args ~ /awk /) next
+      if (args ~ /(^|[[:space:]\/])(cargo|rustc|clang)([[:space:]]|$)/) {
+        print
+        found = 1
+        next
+      }
+      if (args ~ /(mvm-hvf-supervisor|mvmctl|mvm-substitution-endpoint|mvm-host-agent)/) {
+        print
+        found = 1
+        next
+      }
+    }
+    END {
+      exit found ? 0 : 1
+    }
+  '
+}
+
+if [[ "${MVM_HVF_DENSITY_ALLOW_BUSY_HOST:-0}" != "1" ]]; then
+  if capture_busy_host_processes >"${busy_host_processes}"; then
+    echo "refusing: active build or MVM runtime processes would contaminate the density baseline" >&2
+    echo "see ${busy_host_processes}" >&2
+    echo "wait for the host to become idle, or set MVM_HVF_DENSITY_ALLOW_BUSY_HOST=1 to bypass" >&2
+    exit 72
+  fi
+  : >"${busy_host_processes}"
 fi
 
 run_env=(

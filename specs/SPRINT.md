@@ -61,7 +61,11 @@ plan 25 sequences the work into six independently-shippable workstreams.
       open: the long-path run cleaned waves 1, 5, 10, and failed wave 25 with
       no leaked matching processes, but wave 25 was invalid due socket path
       failures; the short-path rerun was aborted before measurement because
-      unrelated Rust builds started during prepull.
+      unrelated Rust builds started during prepull. The harness now also
+      refuses active local build/runtime contamination before prepull/build
+      unless `MVM_HVF_DENSITY_ALLOW_BUSY_HOST=1` is set, and the rebased branch
+      hit that guard because unrelated `cargo`/`rustc`/`clang` work was still
+      active on the host.
 - [x] 2026-07-10 Plan 237 Phase 0 first PR: the shared guest network helper
       used by OCI guest init now casts ioctl requests through the target musl
       `libc::Ioctl` type, stale cached OCI image records can re-materialize

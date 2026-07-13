@@ -129,11 +129,17 @@ dropping the idle supervisor from a hundreds-of-MiB shape to the current
   would exceed the macOS Unix socket limit. This prevents a long artifact/data
   directory from spending minutes on prepull/build and then producing
   misleading guest-agent launch failures.
+- The density harness also refuses active local build/runtime contamination by
+  default, recording the matching processes before any prepull/build work. The
+  guard can be bypassed with `MVM_HVF_DENSITY_ALLOW_BUSY_HOST=1`, but bypassed
+  runs are not acceptable as clean baseline evidence.
 - Clean baseline publication remains open. A long-path 1/5/10/25 attempt
   proved cleanup for waves 1, 5, 10, and the failed wave 25, but wave 25 had
   guest-agent socket path failures and could not be used as clean evidence. A
   short-path rerun was aborted before measurement because unrelated Rust builds
-  started during prepull, again triggering the density-run stop condition.
+  started during prepull, again triggering the density-run stop condition. A
+  follow-up attempt on the rebased branch was refused by the new preflight
+  because unrelated `cargo`/`rustc`/`clang` work was still active on the host.
 
 **Validation**
 
