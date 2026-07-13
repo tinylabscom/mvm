@@ -12,6 +12,7 @@
 //! that responsibility lives in `hardened_client_builder`, exercised
 //! by the inline unit tests in `http_hardening.rs`.
 
+use std::sync::Once;
 use std::time::Duration;
 
 use mvm_hostd::supervisor::tools::http_hardening::read_capped;
@@ -41,6 +42,7 @@ async fn fetch_from_test_server(
     max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
     let port = spawn_one_shot_server(response_body).await;
+    install_rustls_provider();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -51,6 +53,13 @@ async fn fetch_from_test_server(
         .await
         .map_err(|e| format!("connect: {e}"))?;
     read_capped(response, max_bytes).await
+}
+
+fn install_rustls_provider() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
 }
 
 #[tokio::test]
