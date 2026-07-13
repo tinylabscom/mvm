@@ -31,11 +31,21 @@ are gated with a clear error today (Plan 248 T4).
 
 ## WS-B — Builder-store robustness (the corruption/space failure we hit)
 
-**Problem.** A corrupted persistent builder nix-store (ext4 checksum failures → mounts
-read-only) makes **every** flake build fail hard with a cryptic "guest did not write
-result", on both backends. Recovery today is a manual `rm -rf ~/.cache/mvm/builder-vm` +
-full rebuild. The store also grows unbounded, and a crashed build leaves its multi-GB
-`input.img` transient behind (the reaper only runs on `cache prune` / next launch).
+**Problem.** `machine run --flake` / `machine build` fail hard with a cryptic "guest did
+not write result" from **two independent builder-VM faults**, observed live on macOS-26:
+- **(i) Store corruption.** A corrupted persistent nix-store (`EXT4-fs error … Directory
+  block failed checksum` → mounts read-only) fails every build. Recovery today is a manual
+  `rm -rf ~/.cache/mvm/builder-vm` + full rebuild. The store also grows unbounded (seen at
+  111 GB), and a crashed build leaves its multi-GB `input.img` transient behind (the reaper
+  only runs on `cache prune` / next launch).
+- **(ii) virtiofs share failure → disk-transport no-space.** Even with a **fresh** store,
+  the libkrun builder's virtiofs shares don't attach (`virtio-fs: tag <work>/<out>/<job>/
+  <mvm-bins> not found` → EINVAL), forcing the disk-transport fallback (`tar x /dev/vdc`),
+  which then fails `No space left on device` staging the closure → read-only → no result.
+  This is a transport-attach + input-disk-sizing bug, distinct from (i), and blocks
+  `--flake` builds on this host regardless of store health. Root-cause the virtiofs
+  tag-not-found on the libkrun builder (supervisor share config vs. libkrun version), and
+  size the disk-transport input/store for real closures.
 
 **Design.**
 1. **Detect + auto-recover a bad store.** When the builder guest reports a read-only /
@@ -50,7 +60,7 @@ full rebuild. The store also grows unbounded, and a crashed build leaves its mul
 4. **`mvmctl doctor` surfaces store health** (size, last-known-good, corruption flag) and
    `mvmctl cache repair` gains a builder-store path.
 
-**Tasks (sketch):** console marker for read-only/corrupt store; host detect + `e2fsck`/rebuild recovery; eager transient reap; store size cap + GC; doctor/cache-repair surface. **Effort: medium.**
+**Tasks (sketch):** console marker for read-only/corrupt store; host detect + `e2fsck`/rebuild recovery; eager transient reap; store size cap + GC; doctor/cache-repair surface; **root-cause the libkrun virtiofs tag-not-found and size the disk-transport input/store (fault ii)**. **Effort: medium.**
 
 ## WS-C — Air-gapped builder-image import (successor to the removed `mvmctl dev import-image`)
 
