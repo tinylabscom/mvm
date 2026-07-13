@@ -63,7 +63,6 @@ mod tests {
     use crate::supervisor::verify_audit_chain;
     use ed25519_dalek::SigningKey;
     use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta, ContentBlob};
-    use rand::rngs::OsRng;
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> mvm_core::plan::ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()

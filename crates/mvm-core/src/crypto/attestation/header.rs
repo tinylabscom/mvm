@@ -194,7 +194,6 @@ mod tests {
     use super::*;
     use crate::crypto::attestation::provider::HwProviderKind;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
 
     fn fresh_key() -> SigningKey {
         {

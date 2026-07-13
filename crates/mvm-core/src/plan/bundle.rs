@@ -1335,7 +1335,6 @@ pub fn signature_from_base64(s: &str) -> Option<[u8; 64]> {
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
     use std::collections::HashMap;
 
     /// In-memory trust store for tests. Production uses

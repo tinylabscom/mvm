@@ -55,7 +55,11 @@ async fn populate_tenant(
 async fn operator_destroys_three_workloads_auditor_verifies_all_three() {
     let dir = tempdir().unwrap();
     let mgr = FsOverlayManager::with_root(dir.path()).unwrap();
-    let signing_key = { let mut __ed_seed = [0u8; 32]; rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed); SigningKey::from_bytes(&__ed_seed) };
+    let signing_key = {
+        let mut __ed_seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        SigningKey::from_bytes(&__ed_seed)
+    };
     let verifying_key = signing_key.verifying_key();
 
     let workloads = ["build-runner", "code-eval", "test-runner"];
@@ -108,7 +112,11 @@ async fn operator_destroys_three_workloads_auditor_verifies_all_three() {
 async fn auditor_refuses_certificate_with_tampered_tenant_field() {
     let dir = tempdir().unwrap();
     let mgr = FsOverlayManager::with_root(dir.path()).unwrap();
-    let key = { let mut __ed_seed = [0u8; 32]; rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed); SigningKey::from_bytes(&__ed_seed) };
+    let key = {
+        let mut __ed_seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        SigningKey::from_bytes(&__ed_seed)
+    };
     let vk = key.verifying_key();
 
     populate_tenant(&mgr, "acme", &["build"], 512).await;
@@ -136,8 +144,16 @@ async fn auditor_refuses_certificate_with_tampered_tenant_field() {
 async fn auditor_refuses_certificate_signed_by_wrong_pubkey() {
     let dir = tempdir().unwrap();
     let mgr = FsOverlayManager::with_root(dir.path()).unwrap();
-    let operator_key = { let mut __ed_seed = [0u8; 32]; rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed); SigningKey::from_bytes(&__ed_seed) };
-    let attacker_key = { let mut __ed_seed = [0u8; 32]; rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed); SigningKey::from_bytes(&__ed_seed) };
+    let operator_key = {
+        let mut __ed_seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        SigningKey::from_bytes(&__ed_seed)
+    };
+    let attacker_key = {
+        let mut __ed_seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        SigningKey::from_bytes(&__ed_seed)
+    };
 
     populate_tenant(&mgr, "acme", &["build"], 256).await;
     let receipt = mgr.destroy_overlay("acme", "build").await.unwrap();
@@ -161,7 +177,11 @@ async fn auditor_refuses_certificate_signed_by_wrong_pubkey() {
 async fn auditor_can_verify_against_certs_embedded_pubkey() {
     let dir = tempdir().unwrap();
     let mgr = FsOverlayManager::with_root(dir.path()).unwrap();
-    let key = { let mut __ed_seed = [0u8; 32]; rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed); SigningKey::from_bytes(&__ed_seed) };
+    let key = {
+        let mut __ed_seed = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+        SigningKey::from_bytes(&__ed_seed)
+    };
 
     populate_tenant(&mgr, "acme", &["build"], 100).await;
     let receipt = mgr.destroy_overlay("acme", "build").await.unwrap();

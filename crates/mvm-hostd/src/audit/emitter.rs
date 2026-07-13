@@ -385,7 +385,6 @@ impl AuditEmitter {
 mod tests {
     use super::*;
     use crate::supervisor::verify_audit_chain;
-    use rand::rngs::OsRng;
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()

@@ -300,7 +300,6 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
 
     fn make_snap(dir: &Path) -> SnapshotFiles {
         std::fs::write(dir.join("vmstate.bin"), b"vmstate-bytes-here").unwrap();

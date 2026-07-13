@@ -86,7 +86,6 @@ mod tests {
     use crate::policy::bundle::{PolicyId, TenantOverlay};
     use crate::policy::policies::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
     use std::collections::BTreeMap;
 
     fn sample_bundle() -> PolicyBundle {

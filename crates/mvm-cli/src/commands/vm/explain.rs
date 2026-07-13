@@ -286,7 +286,6 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::ExecutionPlan;
     use mvm_hostd::audit::emitter::AuditEmitter;
-    use rand::rngs::OsRng;
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()

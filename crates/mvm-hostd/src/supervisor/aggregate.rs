@@ -1023,7 +1023,6 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::*;
-    use rand::rngs::OsRng;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 

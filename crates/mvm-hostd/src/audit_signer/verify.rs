@@ -146,7 +146,6 @@ pub fn verify_workload_chain(
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-    use rand::rngs::OsRng;
     use tempfile::tempdir;
 
     use super::*;

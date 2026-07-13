@@ -668,7 +668,6 @@ fn entry_path_string<R: Read>(entry: &tar::Entry<'_, R>) -> Result<String, Artif
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
     use std::io::Cursor;
 
     fn test_keypair() -> SigningKey {
