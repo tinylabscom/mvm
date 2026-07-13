@@ -85,3 +85,22 @@ WS-B (robustness) is the highest-value-per-effort — it turns a hard, cryptic, 
 failure into a self-healing one, and it's what bit the live check. WS-A (substrate) is the
 largest and unblocks two commands; do it once WS-B makes the builder reliable to iterate
 on. WS-C is small and independent. Each is its own PR.
+
+
+---
+
+## Discovered during WS-B PR-1 validation (2026-07-12) — a 3rd, separate `--flake` blocker
+
+Live-testing PR-1 (fault ii fixed: input no longer overflows, the real nix build now runs)
+uncovered a **third** independent bug that still blocks `machine run --flake` for SDK flakes,
+in the nix image build — NOT builder-store robustness, NOT PR-1 (which touches no `nix/`):
+
+    mvm-rootfs-tree-exit-code> cp: cannot create regular file
+      '…/mvm-rootfs-tree-…/usr/local/bin/mvm-addon-dns': No such file or directory
+
+The `mkGuest` rootfs-tree derivation `cp`s guest binaries into `usr/local/bin/` without the
+parent dir existing. `nix/lib/mk-guest.nix` was last changed by #1658 (Plan 213 SP3, seeded
+closure) and #1613 (runtime overlay) — the regression is in one of those. Likely a one-line
+`mkdir -p $out/usr/local/bin` in the rootfs-tree buildCommand, but it needs its own
+investigation (the overlay reworked rootfs assembly). **Own fix — file separately.** Until it
+lands, `machine run --flake` stays blocked here even with PR-1 + a clean store.

@@ -335,8 +335,10 @@ fn stage_filtered_workspace(workspace: &Path, mvm_src: &Path) -> std::io::Result
 }
 
 /// Recursive copy that prunes `WORKSPACE_SNAPSHOT_SKIP` basenames (and
-/// `result-*` symlinks) at any depth.
-fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// `result-*` symlinks) at any depth. `pub(crate)` so the disk-transport
+/// `work` input staging (`libkrun_builder`) can reuse this exclusion
+/// instead of forking a second skip list.
+pub(crate) fn copy_dir_filtered(src: &Path, dst: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;

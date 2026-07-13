@@ -212,9 +212,10 @@ fn parse_user_volumes_cmdline(cmdline: &str) -> Vec<UserVolMount> {
     out
 }
 
-/// Disk-transport config parsed from the kernel cmdline. The hvf VMM has no
-/// virtio-fs, so the builder moves the job in and the artifacts out over raw
-/// disks (tar-on-a-block-device) instead of virtio-fs shares.
+/// Disk-transport config parsed from the kernel cmdline. A Rootfs-image
+/// libkrun builder VM moves the job in and the artifacts out over raw disks
+/// (tar-on-a-block-device) rather than virtio-fs shares; the hvf VMM has no
+/// virtio-fs at all, so this is its only option.
 /// `mvm.builder_transport=disk` enables it; `mvm.builder_input=` /
 /// `mvm.builder_output=` name the block devices (defaulting to the vdc/vdd
 /// convention). Absent ⇒ `None`, and the init keeps the virtio-fs path unchanged.
@@ -1467,15 +1468,22 @@ mod linux {
         // Threads write into the same `Mutex<BootTimings>`;
         // contention is a non-issue (a handful of writes per
         // boot, none on the hot path).
-        // Disk-transport mode (the hvf VMM has no virtio-fs): decided once
-        // from the cmdline. `None` keeps the virtio-fs builder path unchanged.
+        // Disk-transport mode: decided once from the cmdline. `None` keeps
+        // the virtio-fs builder path unchanged; `Some` means the host
+        // staged `/job`/`/work`/`/mvm-bins` on a raw block device instead
+        // (every Rootfs-image libkrun builder run, plus the hvf VMM, which
+        // has no virtio-fs at all) — the fixed virtio-fs share attempts
+        // below would just fail with "tag not found" noise.
         let disk_transport = crate::parse_disk_transport_cmdline(
             &std::fs::read_to_string("/proc/cmdline").unwrap_or_default(),
         );
+        let disk_transport_active = disk_transport.is_some();
 
         let track_b = {
             let timings = Arc::clone(&timings);
-            std::thread::spawn(move || setup_modules_and_virtiofs(&timings, anchor))
+            std::thread::spawn(move || {
+                setup_modules_and_virtiofs(&timings, anchor, disk_transport_active)
+            })
         };
         let track_c = {
             let timings = Arc::clone(&timings);
@@ -2835,8 +2843,18 @@ mod linux {
     /// Independent track that runs concurrently
     /// with `setup_nix_store`. Loads the `fuse` + `virtiofs`
     /// kernel modules (themselves fanned out across two threads),
-    /// then mounts the three virtio-fs shares.
-    fn setup_modules_and_virtiofs(timings: &Arc<Mutex<BootTimings>>, anchor: Instant) {
+    /// then mounts the three virtio-fs shares — unless disk-transport
+    /// staged those inputs onto a raw block device instead, in which case
+    /// the host never declared these virtio-fs shares and the mount
+    /// attempts would just fail with "tag not found".
+    /// `--volume` user shares still ride virtio-fs regardless (a
+    /// separate mechanism from the job's own input/output transport), so
+    /// the modprobes and [`mount_user_volumes`] always run.
+    fn setup_modules_and_virtiofs(
+        timings: &Arc<Mutex<BootTimings>>,
+        anchor: Instant,
+        disk_transport_active: bool,
+    ) {
         append_init_breadcrumb("setup_modules_and_virtiofs_enter", "start");
         // Load FUSE + virtio-fs kernel modules before mounting the
         // host-exported shares. Stock nixpkgs kernel ships these as
@@ -2868,12 +2886,24 @@ mod linux {
         // `/job/cmd.sh` if `/job` was supplied. Per-share errors
         // print to stderr but don't fail init — the failing share
         // surfaces as a normal file-not-found inside cmd.sh.
-        for (tag, target) in VIRTIOFS_MOUNTS {
-            if let Err(e) = mount_virtiofs(tag, target) {
-                append_init_breadcrumb("virtiofs_mount_error", &format!("{tag}->{target}: {e}"));
-                eprintln!("mvm-host-vm-init: virtio-fs '{tag}' -> {target} failed: {e}");
-            } else {
-                append_init_breadcrumb("virtiofs_mount_ok", &format!("{tag}->{target}"));
+        //
+        // Skipped entirely under disk-transport: the host never declares
+        // these tags in that mode (`stage_disk_transport_input` populates
+        // `/job`/`/work`/`/mvm-bins` from the raw input disk instead), so
+        // every attempt would fail with "tag not found".
+        if disk_transport_active {
+            append_init_breadcrumb("virtiofs_mounts_skipped", "disk-transport active");
+        } else {
+            for (tag, target) in VIRTIOFS_MOUNTS {
+                if let Err(e) = mount_virtiofs(tag, target) {
+                    append_init_breadcrumb(
+                        "virtiofs_mount_error",
+                        &format!("{tag}->{target}: {e}"),
+                    );
+                    eprintln!("mvm-host-vm-init: virtio-fs '{tag}' -> {target} failed: {e}");
+                } else {
+                    append_init_breadcrumb("virtiofs_mount_ok", &format!("{tag}->{target}"));
+                }
             }
         }
         // User-supplied volumes (`--volume` / MVM_VOLUMES),
@@ -2933,22 +2963,25 @@ mod linux {
             .map_err(|e| format!("mount virtiofs {tag} -> {target}: {e}"))
     }
 
-    /// Disk-transport staging root (tmpfs). The input disk's tar is extracted
-    /// here so `/job`, `/work`, `/mvm-bins` become writable bind targets — the
+    /// Disk-transport staging root. The input disk's tar is extracted here
+    /// so `/job`, `/work`, `/mvm-bins` become writable bind targets — the
     /// virtio-fs path binds host dirs, but the disk path must leave `/job`
-    /// writable so `write_result` can drop `/job/result`.
-    const DISK_INPUT_STAGE: &str = "/run/builder-input";
+    /// writable so `write_result` can drop `/job/result`. Lives on the
+    /// persistent nix-store disk rather than a RAM tmpfs: a tmpfs defaults to
+    /// roughly half of guest RAM, and a large `work` tree (even filtered)
+    /// can overflow it — the same reason [`OUT_DIR`]'s backing directory
+    /// below is on this disk, not tmpfs.
+    const DISK_INPUT_STAGE: &str = "/nix-store/builder-input";
 
     /// Populate `/job`, `/work`, `/mvm-bins`, and (when the host packed one)
     /// `/closure-seed` from the input disk, and back `/out` with a writable
     /// dir on the persistent nix-store disk. This is the disk-transport
-    /// equivalent of the virtio-fs shares, for the hvf VMM (which has no
-    /// virtio-fs). A tmpfs `/out` would be capped by guest RAM — too small
-    /// for a built rootfs — so `/out` lives on the big nix-store disk.
+    /// equivalent of the virtio-fs shares — the primary transport for a
+    /// Rootfs-image libkrun builder VM, and the only option for the hvf VMM
+    /// (which has no virtio-fs).
     fn stage_disk_transport_input(t: &crate::DiskTransport) -> Result<(), String> {
         std::fs::create_dir_all(DISK_INPUT_STAGE)
             .map_err(|e| format!("mkdir {DISK_INPUT_STAGE}: {e}"))?;
-        mount_fs("tmpfs", DISK_INPUT_STAGE, "tmpfs")?;
         // Extract the input tar straight off the raw block device; tar stops at
         // the archive EOF marker before the disk's zero padding.
         let status = Command::new("/bin/busybox")

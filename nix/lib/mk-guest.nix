@@ -1151,20 +1151,19 @@ let
     ln -sf /etc/ssl/certs/ca-bundle.crt "$out/etc/ssl/certs/ca-certificates.crt"
     chmod 0644 "$out/etc/ssl/certs/ca-bundle.crt"
 
+    # /usr/local/bin must exist before ANY of the conditional binary cp blocks
+    # below: addon-dns and exit-report are baked regardless of runtimeLean, so
+    # a lean/overlay rootfs skips the agent block yet still cp's into this dir.
+    # Keep the mkdir unconditional here, not inside the non-lean agent block.
+    mkdir -p "$out/usr/local/bin"
+
     ${if runtimeLean then ""
     else ''
       # mvm-guest-agent — installed under /usr/local/bin so /init can
       # exec it on dev-tier fallback paths. Mode 0555 so the agent can't
       # rewrite itself; ownership is the build-time user (Nix sandbox has no
       # root) — a later layer binds /etc + /usr read-only at boot to make
-      # this load-bearing.
-      #
-      # mkdir before the cp: when `packages = []` the directory-creation
-      # block below is a no-op, so /usr/local/bin doesn't exist yet and
-      # the cp fails with "No such file or directory". That was the
-      # latent bug that broke release.yml's dev-image lane and the
-      # ch-linux bootcheck before this fix.
-      mkdir -p "$out/usr/local/bin"
+      # this load-bearing. (/usr/local/bin is created unconditionally above.)
       cp ${agentBinary} "$out/usr/local/bin/mvm-guest-agent"
       chmod 0555 "$out/usr/local/bin/mvm-guest-agent"
 

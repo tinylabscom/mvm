@@ -1,9 +1,10 @@
-//! Disk-only job/artifact transport for the hvf-VMM builder.
+//! Disk-only job/artifact transport for the builder VM.
 //!
-//! The libkrun/vz builder moves the job in and the artifacts out over virtio-fs
-//! shares (host directories). The hvf VMM has no virtio-fs, and the host is
-//! macOS — which can neither format nor read an ext4 — so the transport must
-//! never require host-side access to a guest filesystem.
+//! A Rootfs-image libkrun builder VM — the common `machine build` / `machine
+//! run --flake` case — moves the job in and the artifacts out this way. So
+//! does the hvf VMM, which has no virtio-fs at all; since its host is macOS,
+//! which can neither format nor read an ext4, the transport must never
+//! require host-side access to a guest filesystem.
 //!
 //! The transport is therefore a **tar written raw onto a disk image**, no
 //! filesystem on the transport disks:
