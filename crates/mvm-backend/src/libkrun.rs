@@ -442,9 +442,8 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // `<state_dir>/vsock-<port>.sock`. Conditional so non-tunnel launches and the
     // warm-standby base don't register an inert port.
     if config.network_tunnel.is_some() {
-        krun = krun.add_host_listen_port(
-            mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
-        );
+        krun = krun
+            .add_host_listen_port(mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT);
     }
     if libkrun_verity_enabled(config) {
         krun.initramfs_path =
@@ -2247,17 +2246,22 @@ mod tests {
 
     #[test]
     fn validate_libkrun_network_policy_accepts_deny_all() {
-        validate_libkrun_network_policy(&mvm_core::network_policy::NetworkPolicy::deny_all(), false)
-            .expect("deny-all must remain valid for libkrun");
+        validate_libkrun_network_policy(
+            &mvm_core::network_policy::NetworkPolicy::deny_all(),
+            false,
+        )
+        .expect("deny-all must remain valid for libkrun");
     }
 
     #[test]
     fn validate_libkrun_network_policy_refuses_egress_without_a_tunnel() {
-        let err =
-            validate_libkrun_network_policy(&mvm_core::network_policy::NetworkPolicy::preset(
+        let err = validate_libkrun_network_policy(
+            &mvm_core::network_policy::NetworkPolicy::preset(
                 mvm_core::network_policy::NetworkPreset::Dev,
-            ), false)
-            .expect_err("libkrun outbound egress with no tunnel must fail closed");
+            ),
+            false,
+        )
+        .expect_err("libkrun outbound egress with no tunnel must fail closed");
         assert!(
             err.to_string().contains("bounded userspace L3 tunnel"),
             "unexpected error: {err:#}"
