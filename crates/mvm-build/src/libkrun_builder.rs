@@ -980,7 +980,7 @@ impl LibkrunBuilderVm {
         let supervisor_path = resolve_supervisor_path()?;
         let image = match &self.image_override {
             Some(image) => image.clone(),
-            None => ensure_builder_vm_image()?,
+            None => ensure_builder_vm_image_for_libkrun()?,
         };
         let nix_store_lock = acquire_nix_store_image_lock(
             &builder_vm_cache_dir(),
@@ -1451,7 +1451,7 @@ impl BuilderVm for LibkrunBuilderVm {
         //    image cache without first downloading it.
         let image = match &self.image_override {
             Some(image) => image.clone(),
-            None => ensure_builder_vm_image()?,
+            None => ensure_builder_vm_image_for_libkrun()?,
         };
 
         // 5. Allocate / locate the persistent `/nix-store`
@@ -1736,7 +1736,7 @@ impl LibkrunBuilderBackend {
     /// installed" at the call site rather than at first run.
     pub fn new() -> Result<Self, BuilderVmError> {
         let supervisor_path = resolve_supervisor_path()?;
-        let image = ensure_builder_vm_image()?;
+        let image = ensure_builder_vm_image_for_libkrun()?;
         Ok(Self {
             supervisor_path,
             image,
@@ -2208,13 +2208,30 @@ pub fn steady_state_rootfs_builder_unavailable_reason_for(
     }
 }
 
-fn ensure_rootfs_builder_supported_on_host() -> Result<(), BuilderVmError> {
-    if let Some(reason) =
-        steady_state_rootfs_builder_unavailable_reason_for(mvm_core::platform::current())
-    {
-        return Err(BuilderVmError::LibkrunUnavailable(reason.to_string()));
+/// Refuse to boot the steady-state rootfs-backed builder under libkrun on
+/// hosts where that image is known not to reach userspace (Linux/KVM). This
+/// restriction is libkrun-specific: the qemu and hvf builders load the same
+/// cached image without it, so the guard belongs on the libkrun boot path,
+/// not on the shared image loader. Parameterised on the platform so it is
+/// unit-testable off the host it guards.
+fn ensure_steady_state_libkrun_builder_supported_on(
+    plat: mvm_core::platform::Platform,
+) -> Result<(), BuilderVmError> {
+    match steady_state_rootfs_builder_unavailable_reason_for(plat) {
+        Some(reason) => Err(BuilderVmError::LibkrunUnavailable(reason.to_string())),
+        None => Ok(()),
     }
-    Ok(())
+}
+
+/// Resolve the steady-state builder VM image for a libkrun boot, failing
+/// closed on hosts the libkrun builder does not support. The single libkrun
+/// chokepoint: `run_build`, `run_shell_script`, the persistent VM start, and
+/// the `VmBackendForBuilder` constructor all route steady-state image
+/// resolution through here. Stage 0 and other callers that supply an explicit
+/// image override never reach this path.
+fn ensure_builder_vm_image_for_libkrun() -> Result<BuilderVmImage, BuilderVmError> {
+    ensure_steady_state_libkrun_builder_supported_on(mvm_core::platform::current())?;
+    ensure_builder_vm_image()
 }
 
 fn seed_builder_vm_image_from_default_cache(arch_dir: &Path) -> Result<bool, BuilderVmError> {
@@ -2525,8 +2542,6 @@ fn load_builder_vm_image_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, B
     let kernel_path = arch_dir.join("vmlinux");
     let rootfs_path = arch_dir.join("rootfs.ext4");
     let cmdline = validate_builder_vm_image_cache(arch_dir)?;
-
-    ensure_rootfs_builder_supported_on_host()?;
 
     Ok(BuilderVmImage::new(kernel_path, rootfs_path, cmdline))
 }
@@ -4148,7 +4163,7 @@ impl LibkrunPersistentHostVm {
         let supervisor_path = resolve_supervisor_path()?;
         let image = match &self.image_override {
             Some(image) => image.clone(),
-            None => ensure_builder_vm_image()?,
+            None => ensure_builder_vm_image_for_libkrun()?,
         };
         // Acquire the cross-process flock on the nix-store image
         // for the persistent VM's lifetime. Concurrent
@@ -5411,33 +5426,13 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn ensure_builder_vm_image_refuses_rootfs_builder_cache_on_linux_native() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let scratch = TempDir::new().unwrap();
-        env.set("XDG_CACHE_HOME", scratch.path());
+    fn steady_state_libkrun_builder_guard_fails_closed_only_on_linux_native() {
+        use mvm_core::platform::Platform;
 
-        let arch_dir = scratch
-            .path()
-            .join("mvm")
-            .join("builder-vm")
-            .join(host_arch_tag());
-        std::fs::create_dir_all(&arch_dir).unwrap();
-        std::fs::write(arch_dir.join("vmlinux"), b"kernel").unwrap();
-        std::fs::write(arch_dir.join("rootfs.ext4"), b"rootfs").unwrap();
-        std::fs::write(
-            arch_dir.join("cmdline.txt"),
-            "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\n",
-        )
-        .unwrap();
-        std::fs::write(
-            arch_dir.join("manifest.json"),
-            r#"{"cache_contract_version":3,"runtime_overlay_ready":true,"vsock_egress_ready":true}"#,
-        )
-        .unwrap();
-
-        let err = ensure_builder_vm_image().unwrap_err();
+        // Linux/KVM: the rootfs-backed libkrun builder image does not reach
+        // userspace, so the libkrun boot path must fail closed and point at qemu.
+        let err = ensure_steady_state_libkrun_builder_supported_on(Platform::LinuxNative)
+            .expect_err("libkrun steady-state builder must fail closed on Linux/KVM");
         match err {
             BuilderVmError::LibkrunUnavailable(message) => {
                 assert!(
@@ -5447,6 +5442,20 @@ mod tests {
                 assert!(message.contains("qemu builder"), "got {message}");
             }
             other => panic!("expected LibkrunUnavailable, got {other:?}"),
+        }
+
+        // Every other host permits the libkrun steady-state builder — the guard
+        // is scoped to the one platform whose boot is known to hang, not applied
+        // to the shared image loader that qemu and hvf also use.
+        for plat in [
+            Platform::MacOS,
+            Platform::LinuxNoKvm,
+            Platform::Wsl2,
+            Platform::Windows,
+        ] {
+            ensure_steady_state_libkrun_builder_supported_on(plat).unwrap_or_else(|e| {
+                panic!("{plat:?} should permit the libkrun builder, got {e:?}")
+            });
         }
     }
 
@@ -5478,46 +5487,22 @@ mod tests {
         let arch_dir = cache_root.join("builder-vm").join(&arch);
         let expected_cmdline = "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init";
 
-        #[cfg(target_os = "linux")]
-        {
-            let err = ensure_builder_vm_image()
-                .expect_err("Linux/KVM should fail closed after helper bootstrap");
-            match err {
-                BuilderVmError::LibkrunUnavailable(message) => {
-                    assert!(
-                        message.contains("rootfs-backed libkrun builder"),
-                        "got {message}"
-                    );
-                    assert!(message.contains("qemu builder"), "got {message}");
-                }
-                other => panic!("expected LibkrunUnavailable, got {other:?}"),
+        // Backend-agnostic loader: the auto-bootstrap helper populates the
+        // cache and the shared image load succeeds on every host, including
+        // Linux/KVM (qemu/hvf boot the same image). The libkrun steady-state
+        // guard is exercised separately on the libkrun boot path.
+        let image = ensure_builder_vm_image().expect("auto-bootstrap should populate cache");
+        match image {
+            BuilderVmImage::Rootfs {
+                kernel_path,
+                rootfs_path,
+                cmdline,
+            } => {
+                assert_eq!(kernel_path, arch_dir.join("vmlinux"));
+                assert_eq!(rootfs_path, arch_dir.join("rootfs.ext4"));
+                assert_eq!(cmdline, expected_cmdline);
             }
-            assert_eq!(std::fs::read(arch_dir.join("vmlinux")).unwrap(), b"kernel");
-            assert_eq!(
-                std::fs::read(arch_dir.join("rootfs.ext4")).unwrap(),
-                b"rootfs"
-            );
-            assert_eq!(
-                std::fs::read_to_string(arch_dir.join("cmdline.txt")).unwrap(),
-                format!("{expected_cmdline}\n")
-            );
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            let image = ensure_builder_vm_image().expect("auto-bootstrap should populate cache");
-            match image {
-                BuilderVmImage::Rootfs {
-                    kernel_path,
-                    rootfs_path,
-                    cmdline,
-                } => {
-                    assert_eq!(kernel_path, arch_dir.join("vmlinux"));
-                    assert_eq!(rootfs_path, arch_dir.join("rootfs.ext4"));
-                    assert_eq!(cmdline, expected_cmdline);
-                }
-                BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
-            }
+            BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
         }
     }
 
@@ -5558,44 +5543,23 @@ mod tests {
             .join("builder-vm")
             .join(&arch);
 
-        #[cfg(target_os = "linux")]
-        {
-            let err = ensure_builder_vm_image().expect_err(
-                "Linux native steady-state builder image should fail closed after seeding",
-            );
-            match err {
-                BuilderVmError::LibkrunUnavailable(message) => {
-                    assert!(
-                        message.contains("rootfs-backed libkrun builder is not supported"),
-                        "unexpected error: {message}"
-                    );
-                }
-                other => panic!("expected LibkrunUnavailable, got {other:?}"),
+        // Seeding from the default cache populates the isolated cache and the
+        // shared loader returns the image on every host, Linux/KVM included.
+        let image = ensure_builder_vm_image().expect("seed from default cache");
+        assert_eq!(
+            std::fs::read(target_arch_dir.join("manifest.json")).unwrap(),
+            std::fs::read(source_arch_dir.join("manifest.json")).unwrap()
+        );
+        match image {
+            BuilderVmImage::Rootfs {
+                kernel_path,
+                rootfs_path,
+                ..
+            } => {
+                assert_eq!(kernel_path, target_arch_dir.join("vmlinux"));
+                assert_eq!(rootfs_path, target_arch_dir.join("rootfs.ext4"));
             }
-            assert_eq!(
-                std::fs::read(target_arch_dir.join("manifest.json")).unwrap(),
-                std::fs::read(source_arch_dir.join("manifest.json")).unwrap()
-            );
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            let image = ensure_builder_vm_image().expect("seed from default cache");
-            assert_eq!(
-                std::fs::read(target_arch_dir.join("manifest.json")).unwrap(),
-                std::fs::read(source_arch_dir.join("manifest.json")).unwrap()
-            );
-            match image {
-                BuilderVmImage::Rootfs {
-                    kernel_path,
-                    rootfs_path,
-                    ..
-                } => {
-                    assert_eq!(kernel_path, target_arch_dir.join("vmlinux"));
-                    assert_eq!(rootfs_path, target_arch_dir.join("rootfs.ext4"));
-                }
-                BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
-            }
+            BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
         }
     }
 
@@ -5649,51 +5613,31 @@ mod tests {
             .join("builder-vm")
             .join(&arch);
 
-        #[cfg(target_os = "linux")]
-        {
-            let err = ensure_builder_vm_image()
-                .expect_err("stale default cache should still fail closed on Linux");
-            match err {
-                BuilderVmError::LibkrunUnavailable(message) => {
-                    assert!(
-                        message.contains("rootfs-backed libkrun builder is not supported"),
-                        "unexpected error: {message}"
-                    );
-                }
-                other => panic!("expected LibkrunUnavailable, got {other:?}"),
-            }
-            assert_eq!(
-                std::fs::read_to_string(target_arch_dir.join("manifest.json"))
-                    .unwrap()
-                    .trim(),
-                "{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}"
-            );
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            let image = ensure_builder_vm_image().expect("stale default cache should fall through");
-            assert_eq!(
-                std::fs::read_to_string(target_arch_dir.join("manifest.json"))
-                    .unwrap()
-                    .trim(),
-                "{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}"
-            );
-            match image {
-                BuilderVmImage::Rootfs {
-                    kernel_path,
-                    rootfs_path,
+        // Backend-agnostic loader: the stale default cache is skipped, the
+        // helper repopulates the isolated cache, and the shared image load
+        // succeeds on every host, Linux/KVM included — the libkrun steady-state
+        // guard is enforced on the libkrun boot path, not here.
+        let image = ensure_builder_vm_image().expect("stale default cache should fall through");
+        assert_eq!(
+            std::fs::read_to_string(target_arch_dir.join("manifest.json"))
+                .unwrap()
+                .trim(),
+            "{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}"
+        );
+        match image {
+            BuilderVmImage::Rootfs {
+                kernel_path,
+                rootfs_path,
+                cmdline,
+            } => {
+                assert_eq!(kernel_path, target_arch_dir.join("vmlinux"));
+                assert_eq!(rootfs_path, target_arch_dir.join("rootfs.ext4"));
+                assert_eq!(
                     cmdline,
-                } => {
-                    assert_eq!(kernel_path, target_arch_dir.join("vmlinux"));
-                    assert_eq!(rootfs_path, target_arch_dir.join("rootfs.ext4"));
-                    assert_eq!(
-                        cmdline,
-                        "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init"
-                    );
-                }
-                BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
+                    "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init"
+                );
             }
+            BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
         }
     }
 
