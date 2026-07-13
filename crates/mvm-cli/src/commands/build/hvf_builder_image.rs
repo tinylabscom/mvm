@@ -319,7 +319,7 @@ mod tests {
     #[test]
     #[ignore = "live: needs macOS/Apple Silicon with the CLI-resolved HVF builder image path"]
     fn live_resolved_hvf_builder_runtime_overlay_is_read_only() {
-        let (kernel_path, rootfs_path) =
+        let (kernel_path, rootfs_path, _closure_nar) =
             resolve_hvf_builder_image().expect("HVF builder image must resolve");
 
         let tmp = tempfile::tempdir().expect("tempdir");
