@@ -112,13 +112,20 @@ fn vsock_egress_cmdline_token(config: &VmStartConfig, state_dir: &Path) -> Optio
     .then(|| "mvm.vsock_egress=1".to_string())
 }
 
-fn validate_libkrun_network_policy(policy: &mvm_core::network_policy::NetworkPolicy) -> Result<()> {
-    if !policy.allows_egress() {
+fn validate_libkrun_network_policy(
+    policy: &mvm_core::network_policy::NetworkPolicy,
+    has_tunnel: bool,
+) -> Result<()> {
+    // Egress is served by the userspace L3 tunnel (a bounded allow-list). Deny-all
+    // needs no tunnel; a bounded allow-list gets one. The only unserved case is
+    // unrestricted allow-all, which has no finite gate to hand the forwarder.
+    if !policy.allows_egress() || has_tunnel {
         return Ok(());
     }
     bail!(
-        "libkrun does not support outbound workload egress in the current direct-path architecture; \
-         boot with deny-all networking or choose a backend that implements the no-NIC host-vsock-proxy egress path"
+        "libkrun serves outbound egress only through the bounded userspace L3 tunnel (an explicit \
+         allow-list); unrestricted allow-all egress has no finite gate on this backend. \
+         Name destinations with --allow-host, boot deny-all networking, or choose another backend"
     );
 }
 
@@ -407,6 +414,15 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
+    // The userspace L3 egress tunnel: tell the guest (via mvm-guest-netinit →
+    // mvm-guest-netd) to stand up its TUN and pump packets to the host worker
+    // over vsock. Present only for an admitted allow-list run.
+    if let Some(tunnel) = config.network_tunnel.as_ref()
+        && let Some(token) = mvm_core::vm_backend::encode_network_tunnel_cmdline(tunnel)
+    {
+        cmdline.push(' ');
+        cmdline.push_str(&token);
+    }
     // Workload-independent KrunContext (kernel + resources + vsock + gateway), shared
     // verbatim with the standby spawn so the two paths can't drift. The cold path
     // then sets the workload rootfs + user volumes below.
@@ -421,6 +437,15 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     krun = krun
         .with_kernel_format(kernel_format)
         .with_console_output(vm_console_log(&config.name).display().to_string());
+    // A tunnel run adds the guest→worker vsock port: libkrun proxies the guest's
+    // connect to the UDS the tunnel worker bound (before start_enter) at
+    // `<state_dir>/vsock-<port>.sock`. Conditional so non-tunnel launches and the
+    // warm-standby base don't register an inert port.
+    if config.network_tunnel.is_some() {
+        krun = krun.add_host_listen_port(
+            mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
+        );
+    }
     if libkrun_verity_enabled(config) {
         krun.initramfs_path =
             libkrun_effective_initrd(config).map(|p| p.to_string_lossy().into_owned());
@@ -773,7 +798,7 @@ impl VmBackend for LibkrunBackend {
                 libkrun_sys::install_hint()
             );
         }
-        validate_libkrun_network_policy(&config.network_policy)?;
+        validate_libkrun_network_policy(&config.network_policy, config.network_tunnel.is_some())?;
         ensure_libkrun_runtime_source_supported(config)?;
 
         // Early kernel-path check. `build_supervisor_config`
@@ -1198,7 +1223,10 @@ impl VmBackend for LibkrunBackend {
         handle: &StandbyHandle,
         claim: &StandbyClaim,
     ) -> std::result::Result<VmId, StandbyError> {
-        validate_libkrun_network_policy(&claim.network_policy)
+        // A warm standby was booted without a tunnel; an egress run forces cold
+        // boot (`use_snapshot = false` when a tunnel is configured) so it never
+        // lands here, and a stray egress claim fails closed → fails open to cold.
+        validate_libkrun_network_policy(&claim.network_policy, false)
             .map_err(|e| StandbyError::ClaimFailed(e.to_string()))?;
         let attach = standby_attach_config(claim, handle.binding_nonce.clone())?;
         let mut stream = UnixStream::connect(&handle.control_socket).map_err(|e| {
@@ -2219,21 +2247,34 @@ mod tests {
 
     #[test]
     fn validate_libkrun_network_policy_accepts_deny_all() {
-        validate_libkrun_network_policy(&mvm_core::network_policy::NetworkPolicy::deny_all())
+        validate_libkrun_network_policy(&mvm_core::network_policy::NetworkPolicy::deny_all(), false)
             .expect("deny-all must remain valid for libkrun");
     }
 
     #[test]
-    fn validate_libkrun_network_policy_refuses_outbound_egress() {
+    fn validate_libkrun_network_policy_refuses_egress_without_a_tunnel() {
         let err =
             validate_libkrun_network_policy(&mvm_core::network_policy::NetworkPolicy::preset(
                 mvm_core::network_policy::NetworkPreset::Dev,
-            ))
-            .expect_err("libkrun outbound workload egress must fail closed");
+            ), false)
+            .expect_err("libkrun outbound egress with no tunnel must fail closed");
         assert!(
-            err.to_string().contains("direct-path architecture"),
+            err.to_string().contains("bounded userspace L3 tunnel"),
             "unexpected error: {err:#}"
         );
+    }
+
+    #[test]
+    fn validate_libkrun_network_policy_accepts_egress_served_by_a_tunnel() {
+        // An admitted allow-list run gets a network tunnel; egress is then served
+        // by the userspace L3 forwarder, so validation must pass.
+        validate_libkrun_network_policy(
+            &mvm_core::network_policy::NetworkPolicy::preset(
+                mvm_core::network_policy::NetworkPreset::Dev,
+            ),
+            true,
+        )
+        .expect("egress served by a tunnel must be accepted");
     }
 
     #[test]

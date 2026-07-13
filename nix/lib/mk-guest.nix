@@ -956,6 +956,12 @@ let
   # can attempt egress.
   mvmGuestNetinitBinary = "${guestAgentPkg}/bin/mvm-guest-netinit";
 
+  # Userspace L3 egress pump. netinit spawns it only when the
+  # `mvm.network_tunnel=` cmdline token is present; it opens the guest TUN
+  # and relays packets to the host tunnel worker over vsock. Inert (never
+  # spawned) without the token, so it is safe to bake into every rootfs.
+  mvmGuestNetdBinary = "${guestAgentPkg}/bin/mvm-guest-netd";
+
   # In-guest addon DNS resolver. Loopback-only UDP server that serves
   # exact configured addon hostnames and forwards everything else to
   # the pre-rewrite upstream resolver snapshot. Activated by /init
@@ -1175,6 +1181,11 @@ let
       # time beyond the CAP_NET_ADMIN that PID 1 already has.
       cp ${mvmGuestNetinitBinary} "$out/usr/local/bin/mvm-guest-netinit"
       chmod 0555 "$out/usr/local/bin/mvm-guest-netinit"
+
+      # Userspace L3 egress pump, spawned by netinit only under the
+      # `mvm.network_tunnel=` cmdline token. Same 0555 mode as netinit.
+      cp ${mvmGuestNetdBinary} "$out/usr/local/bin/mvm-guest-netd"
+      chmod 0555 "$out/usr/local/bin/mvm-guest-netd"
     ''}
 
     # In-guest addon DNS resolver. Baked into every workload rootfs
@@ -1424,7 +1435,7 @@ rootfsImage.overrideAttrs (old: {
     # downstream derivations (verity-initrd, per-service launch line
     # in `mkServiceBlock`) can reach `mvm-seccomp-apply` and
     # `mvm-verity-init` without re-running the cargo build.
-    inherit guestAgentPkg seccompApplyBinary verityInitBinary mvmGuestNetinitBinary;
+    inherit guestAgentPkg seccompApplyBinary verityInitBinary mvmGuestNetinitBinary mvmGuestNetdBinary;
     inherit addonDnsPkg mvmAddonDnsBinary;
   };
 })
