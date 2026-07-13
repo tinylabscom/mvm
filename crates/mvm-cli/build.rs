@@ -1,7 +1,5 @@
 #[path = "build_aux_helpers.rs"]
 mod build_aux_helpers;
-#[path = "build_embed_mode.rs"]
-mod build_embed_mode;
 #[path = "src/host_binaries/toolchain.rs"]
 mod host_binaries_toolchain;
 
@@ -62,43 +60,16 @@ fn main() {
     // plain-`cargo build` fast-path was once tried on the false premise that
     // the bins are C-free; it broke CI, which has no musl-gcc.)
 
-    // Build policy:
-    // - `MVM_SKIP_EMBED_BINARIES=1` always skips the nested cross-compile.
-    // - `MVM_EMBED_BINARIES=1` always performs the real embed, even in dev/test.
-    // - `release-artifact-bootstrap` embeds real binaries for packaged
-    //   mvmctl artifacts.
-    // - Otherwise, source builds bake zero-byte stubs and runtime paths either
-    //   use a warm cache or build the missing helper binaries from the source
-    //   checkout on demand.
-    //
-    // This keeps production artifacts self-contained without putting the
-    // nested cross-compile in every `cargo run --release` source-build path.
-    let skip_embed = should_skip_embed_binaries();
-    println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
-    println!("cargo:rerun-if-env-changed=MVM_EMBED_BINARIES");
-    if skip_embed {
-        println!(
-            "cargo:warning=embedding zero-byte host-vm stubs for this non-release build; \
-             set MVM_EMBED_BINARIES=1 to force real embedded binaries"
-        );
-    }
-    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_RELEASE_ARTIFACT_BOOTSTRAP");
-
     for name in manifest.iter() {
         let out_file = bins_out.join(name);
-        if skip_embed {
-            std::fs::write(&out_file, b"")
-                .unwrap_or_else(|e| panic!("write stub {}: {e}", out_file.display()));
-        } else {
-            run_cargo_zigbuild(
-                &workspace_root,
-                &host_target_dir,
-                name,
-                &pin.target,
-                &pin.zig,
-                &out_file,
-            );
-        }
+        run_cargo_zigbuild(
+            &workspace_root,
+            &host_target_dir,
+            name,
+            &pin.target,
+            &pin.zig,
+            &out_file,
+        );
         let sha = sha256_hex(&out_file);
         entries.push((name.clone(), out_file.clone(), sha));
         println!(
@@ -111,17 +82,14 @@ fn main() {
     // Embedded alongside the host bins so an end-user mvmctl with no source
     // checkout can inject the full OCI runtime set into a `run --image` rootfs.
     // Built in one cargo invocation; they ride the same `EMBEDDED` array and are
-    // looked up by name. Honors MVM_SKIP_EMBED_BINARIES (zero-byte stubs) — a stub
-    // build can't materialize an OCI run, same as the host bins.
-    if !skip_embed {
-        run_guest_zigbuild(
-            &workspace_root,
-            &host_target_dir,
-            &pin.target,
-            &pin.zig,
-            &bins_out,
-        );
-    }
+    // looked up by name.
+    run_guest_zigbuild(
+        &workspace_root,
+        &host_target_dir,
+        &pin.target,
+        &pin.zig,
+        &bins_out,
+    );
     for name in [
         "mvm-guest-agent",
         "mvm-guest-netinit",
@@ -130,10 +98,6 @@ fn main() {
         "mvm-verity-init",
     ] {
         let out_file = bins_out.join(name);
-        if skip_embed {
-            std::fs::write(&out_file, b"")
-                .unwrap_or_else(|e| panic!("write stub {}: {e}", out_file.display()));
-        }
         let sha = sha256_hex(&out_file);
         entries.push((name.to_string(), out_file, sha));
     }
@@ -194,16 +158,6 @@ fn emit_rerun_for_tree(root: &Path) {
     }
 }
 
-fn should_skip_embed_binaries() -> bool {
-    build_embed_mode::should_skip_embed_binaries(
-        std::env::var("MVM_SKIP_EMBED_BINARIES").ok().as_deref(),
-        std::env::var("MVM_EMBED_BINARIES").ok().as_deref(),
-        std::env::var("CARGO_FEATURE_RELEASE_ARTIFACT_BOOTSTRAP")
-            .ok()
-            .as_deref(),
-    )
-}
-
 /// Compile the native per-VM host helpers into a dedicated target dir under
 /// OUT_DIR and export that dir as `MVM_AUX_BIN_DIR`, so `cargo run` produces
 /// them during its build phase rather than mvmctl shelling out to `cargo` at
@@ -220,7 +174,6 @@ fn build_native_aux_helpers(workspace_root: &Path, out_dir: &Path) {
     // `env!("MVM_AUX_BIN_DIR")` compiles in mvm-cli; resolution `is_file`-checks
     // each candidate, so a dir with missing bins is harmless.
     println!("cargo:rustc-env=MVM_AUX_BIN_DIR={}", bin_dir.display());
-    println!("cargo:rerun-if-env-changed=MVM_SKIP_EMBED_BINARIES");
     println!(
         "cargo:rerun-if-changed={}",
         workspace_root.join("crates/mvm-vm-host/src").display()
@@ -242,12 +195,8 @@ fn build_native_aux_helpers(workspace_root: &Path, out_dir: &Path) {
         workspace_root.join("crates/deps/libkrun-sys/src").display()
     );
 
-    let skip = build_aux_helpers::should_skip_aux_helpers(
-        std::env::var("MVM_SKIP_EMBED_BINARIES").ok().as_deref(),
-    );
     let libkrun_present = libkrun_header_present();
-    for spec in build_aux_helpers::aux_helper_specs(&target_os, &target_arch, libkrun_present, skip)
-    {
+    for spec in build_aux_helpers::aux_helper_specs(&target_os, &target_arch, libkrun_present) {
         run_cargo_native_build(workspace_root, &aux_target, &profile, &spec);
     }
 }
@@ -325,7 +274,7 @@ fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
 fn read_rust_manifest(root: &Path) -> Vec<String> {
     let src =
         std::fs::read_to_string(root.join("crates/mvm-cli/src/host_binaries/manifest.rs")).unwrap();
-    build_aux_helpers::parse_host_binary_names(&src)
+    read_quoted_field_block(&src, "HOST_BINARIES", "name:")
 }
 
 /// Parse the bare-string array `pub const SEED_BINARIES: &[&str] = &[ ... ]`
@@ -334,15 +283,28 @@ fn read_rust_manifest(root: &Path) -> Vec<String> {
 fn read_seed_binaries(root: &Path) -> Vec<String> {
     let src =
         std::fs::read_to_string(root.join("crates/mvm-cli/src/host_binaries/manifest.rs")).unwrap();
-    let Some(start) = src.find("SEED_BINARIES") else {
-        return Vec::new();
-    };
-    // Everything from the declaration to the array terminator `];`.
+    read_quoted_strings_block(&src, "SEED_BINARIES")
+}
+
+fn read_manifest_section<'a>(src: &'a str, name: &str) -> &'a str {
+    let start = src
+        .find(name)
+        .unwrap_or_else(|| panic!("{name} declaration in manifest.rs"));
     let rest = &src[start..];
     let end = rest.find("];").map(|i| i + 2).unwrap_or(rest.len());
-    let block = &rest[..end];
+    &rest[..end]
+}
+
+fn read_quoted_field_block(src: &str, section: &str, field: &str) -> Vec<String> {
+    read_manifest_section(src, section)
+        .lines()
+        .filter_map(|line| build_aux_helpers::extract_quoted_after(line, field))
+        .collect()
+}
+
+fn read_quoted_strings_block(src: &str, section: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut s = block;
+    let mut s = read_manifest_section(src, section);
     while let Some(q1) = s.find('"') {
         let after = &s[q1 + 1..];
         let Some(q2) = after.find('"') else { break };
@@ -385,6 +347,7 @@ fn run_cargo_zigbuild(
     .env_remove("RUSTC_WRAPPER")
     .env_remove("RUSTC_WORKSPACE_WRAPPER")
     .current_dir(root);
+    apply_zigbuild_env(&mut cmd, target_dir);
     // Pin the zig binary cargo-zigbuild uses. Left to PATH, a Homebrew-upgraded
     // zig (newer than the pin) fails downstream with a cryptic `CacheCheckFailed`.
     if let Some(zig) = pinned_zig_path_or_fail(zig_pin) {
@@ -447,6 +410,7 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
     .env_remove("RUSTC_WRAPPER")
     .env_remove("RUSTC_WORKSPACE_WRAPPER")
     .current_dir(root);
+    apply_zigbuild_env(&mut cmd, target_dir);
     if let Some(zig) = pinned_zig_path_or_fail(zig_pin) {
         cmd.env("CARGO_ZIGBUILD_ZIG_PATH", zig);
     }
@@ -472,6 +436,37 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         std::fs::copy(&built, &dest)
             .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), dest.display()));
     }
+}
+
+fn apply_zigbuild_env(cmd: &mut Command, target_dir: &Path) {
+    // Keep cargo-zigbuild and Zig caches scoped under the dedicated nested
+    // target root instead of platform-global defaults like
+    // `~/Library/Caches/cargo-zigbuild`, which makes source builds depend on
+    // unrelated host cache permissions and breaks sandboxed verification.
+    let zigbuild_cache_dir = zigbuild_cache_dir(target_dir);
+    let zig_global_cache_dir = zig_global_cache_dir(target_dir);
+    std::fs::create_dir_all(&zigbuild_cache_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", zigbuild_cache_dir.display()));
+    std::fs::create_dir_all(&zig_global_cache_dir)
+        .unwrap_or_else(|e| panic!("create {}: {e}", zig_global_cache_dir.display()));
+    cmd.env("CARGO_ZIGBUILD_CACHE_DIR", zigbuild_cache_dir);
+    cmd.env("ZIG_GLOBAL_CACHE_DIR", zig_global_cache_dir);
+}
+
+fn zigbuild_cache_dir(target_dir: &Path) -> PathBuf {
+    scoped_tool_cache_dir("cargo-zigbuild", target_dir)
+}
+
+fn zig_global_cache_dir(target_dir: &Path) -> PathBuf {
+    scoped_tool_cache_dir("zig", target_dir)
+}
+
+fn scoped_tool_cache_dir(tool: &str, target_dir: &Path) -> PathBuf {
+    target_dir
+        .parent()
+        .unwrap_or(target_dir)
+        .join("tool-cache")
+        .join(tool)
 }
 
 fn sha256_hex(p: &Path) -> String {
@@ -565,6 +560,38 @@ mod tests {
         assert_eq!(
             configured_embed_tools_from(None, Some("/toolchain/bin/rustc".to_string())),
             Some(("cargo".to_string(), "/toolchain/bin/rustc".to_string()))
+        );
+    }
+
+    #[test]
+    fn zigbuild_cache_dirs_live_next_to_nested_target_dir() {
+        let target_dir = Path::new("/tmp/build/out/host-vm-target");
+        assert_eq!(
+            zigbuild_cache_dir(target_dir),
+            PathBuf::from("/tmp/build/out/tool-cache/cargo-zigbuild")
+        );
+        assert_eq!(
+            zig_global_cache_dir(target_dir),
+            PathBuf::from("/tmp/build/out/tool-cache/zig")
+        );
+    }
+
+    #[test]
+    fn host_binary_manifest_excludes_bootstrap_support_entries() {
+        let src = r#"
+pub const HOST_BINARIES: &[HostBinary] = &[
+    HostBinary { name: "mvm-host-vm-init", install_path: "/sbin/mvm-host-vm-init", mode: 0o755 },
+    HostBinary { name: "mvm-builderd", install_path: "/sbin/mvm-builderd", mode: 0o755 },
+];
+pub const SEED_BINARIES: &[&str] = &["stage0-init"];
+pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary {
+    package: "mvm-guest-helpers",
+    name: "mvm-egress-client",
+}];
+"#;
+        assert_eq!(
+            read_quoted_field_block(src, "HOST_BINARIES", "name:"),
+            vec!["mvm-host-vm-init".to_string(), "mvm-builderd".to_string()]
         );
     }
 }

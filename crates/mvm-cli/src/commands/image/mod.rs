@@ -781,8 +781,7 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
 }
 
 /// The guest-agent binaries embedded in this mvmctl at build time (build.rs).
-/// `None` when this build baked zero-byte stubs, in which case the run path
-/// falls back to a source-checkout cross-compile.
+/// `None` only if a required embedded binary is unexpectedly missing.
 fn embedded_guest_binaries() -> Option<mvm_build::run_image::PrebuiltGuestBinaries<'static>> {
     let find = |name: &str| {
         crate::host_binaries::embedded::EMBEDDED

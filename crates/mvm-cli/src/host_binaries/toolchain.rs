@@ -128,7 +128,7 @@ fn ziglang_zig_path(zig_pin: &str) -> Option<String> {
         .output()
         .ok()?;
     if !ver.status.success() || String::from_utf8_lossy(&ver.stdout).trim() != zig_pin {
-        return None;
+        return home_dir().and_then(|home| ziglang_mise_path(zig_pin, &home));
     }
     let path = Command::new("python3")
         .args([
@@ -138,10 +138,13 @@ fn ziglang_zig_path(zig_pin: &str) -> Option<String> {
         .output()
         .ok()?;
     if !path.status.success() {
-        return None;
+        return home_dir().and_then(|home| ziglang_mise_path(zig_pin, &home));
     }
     let p = String::from_utf8_lossy(&path.stdout).trim().to_string();
-    (!p.is_empty()).then_some(p)
+    if zig_path_matches(&p, zig_pin) {
+        return Some(p);
+    }
+    home_dir().and_then(|home| ziglang_mise_path(zig_pin, &home))
 }
 
 fn zig_on_path_matches(zig_pin: &str) -> bool {
@@ -157,6 +160,39 @@ fn configured_embed_tools() -> Option<(String, String)> {
         std::env::var("MVM_EMBED_CARGO").ok(),
         std::env::var("MVM_EMBED_RUSTC").ok(),
     )
+}
+
+fn zig_path_matches(path: &str, zig_pin: &str) -> bool {
+    !path.trim().is_empty()
+        && Command::new(path)
+            .arg("version")
+            .output()
+            .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == zig_pin)
+            .unwrap_or(false)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+pub(crate) fn ziglang_mise_path(zig_pin: &str, home: &Path) -> Option<String> {
+    let installs = home.join(".local/share/mise/installs/python");
+    let python_installs = std::fs::read_dir(installs).ok()?;
+    for python_install in python_installs.flatten() {
+        let lib_dir = python_install.path().join("lib");
+        let python_libs = match std::fs::read_dir(&lib_dir) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+        for python_lib in python_libs.flatten() {
+            let candidate = python_lib.path().join("site-packages/ziglang/zig");
+            let candidate_string = candidate.display().to_string();
+            if zig_path_matches(&candidate_string, zig_pin) {
+                return Some(candidate_string);
+            }
+        }
+    }
+    None
 }
 
 fn configured_embed_tools_from(
@@ -188,4 +224,50 @@ fn rustc_has_target(rustc: &str, target: &str) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ziglang_mise_path_finds_matching_installed_zig() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let zig = tmp.path().join(
+            ".local/share/mise/installs/python/3.12.10/lib/python3.12.10/site-packages/ziglang",
+        );
+        std::fs::create_dir_all(&zig).expect("mkdir zig dir");
+        let zig_bin = zig.join("zig");
+        std::fs::write(&zig_bin, "#!/bin/sh\necho 0.13.0\n").expect("write zig");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&zig_bin).expect("stat zig").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&zig_bin, perms).expect("chmod zig");
+        }
+
+        let found = ziglang_mise_path("0.13.0", tmp.path()).expect("find zig");
+        assert!(found.ends_with("/ziglang/zig"));
+    }
+
+    #[test]
+    fn ziglang_mise_path_rejects_wrong_version() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let zig = tmp.path().join(
+            ".local/share/mise/installs/python/3.12.10/lib/python3.12.10/site-packages/ziglang",
+        );
+        std::fs::create_dir_all(&zig).expect("mkdir zig dir");
+        let zig_bin = zig.join("zig");
+        std::fs::write(&zig_bin, "#!/bin/sh\necho 0.14.0\n").expect("write zig");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&zig_bin).expect("stat zig").permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&zig_bin, perms).expect("chmod zig");
+        }
+
+        assert!(ziglang_mise_path("0.13.0", tmp.path()).is_none());
+    }
 }
