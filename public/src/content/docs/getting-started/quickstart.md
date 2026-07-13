@@ -6,8 +6,8 @@ description: Get a microVM running in under 5 minutes.
 :::tip[Looking for the shortest path to "it's running"?]
 [First-Use Happy Paths](/getting-started/happy-paths/) lists a
 three-command sequence for each mvm audience: OCI-image CLI users,
-flake CLI users, Python SDK users, TypeScript SDK users, and prebuilt
-bundle operators. Each path is paired with
+flake CLI users, manifest CLI users, Python SDK users, TypeScript SDK
+users, and prebuilt bundle operators. Each path is paired with
 `mvmctl doctor --workflow <name>` so the preflight only flags blockers
 your audience actually has.
 :::

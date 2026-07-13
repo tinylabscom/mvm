@@ -3,7 +3,7 @@ title: First-Use Happy Paths
 description: Three-command paths to get a microVM running for each mvm audience.
 ---
 
-mvm has five primary audiences. Each one has a **three-command happy
+mvm has six primary audiences. Each one has a **three-command happy
 path** that takes you from "I have a thing to run" to "it's running
 under mvm." Pair each path with `mvmctl doctor --workflow <name>` to
 preflight only the host requirements that matter for your audience —
@@ -13,6 +13,7 @@ nothing more, nothing less.
 |---|---|---|
 | [CLI user with an OCI image](#cli-image-user) | `--workflow cli-run` | Run a command in a transient image-backed microVM. |
 | [CLI user with a flake](#cli-user) | `--workflow cli-run` | Boot a microVM from a Nix flake. |
+| [CLI user with a manifest](#manifest-user) | `--workflow cli-run` | Build and boot a manifest-backed microVM. |
 | [Python SDK user](#python-sdk) | `--workflow python-sdk` | Run a `@mvm.app()`-decorated Python script. |
 | [TypeScript / Node SDK user](#typescript-sdk) | `--workflow typescript-sdk` | Run an `mvm.app()` TypeScript app. |
 | [Prebuilt bundle operator](#bundle-run) | `--workflow bundle-run` | Launch a signed `.mvmpkg` artifact. |
@@ -79,6 +80,31 @@ source checkout); subsequent runs reuse the warm builder. Skip the
   demand.
 - `disk space < N GiB` → free space on `~/.mvm/` (default cache
   location); `mvmctl cache info` shows what's there.
+
+## <a id="manifest-user"></a>CLI user with a manifest
+
+You already have an `mvm.toml` / `Mvmfile.toml` and want to build and boot the
+microVM it describes.
+
+```bash
+mvmctl doctor --workflow cli-run                # preflight
+mvmctl build                                    # discover manifest + build
+mvmctl machine run --manifest .                 # boot the built microVM
+```
+
+This is the shortest path when the project is already modeled as a manifest.
+The manifest selects the source (`flake` or `image`) plus sizing, while
+`mvmctl build` and `mvmctl machine run --manifest .` reuse the same project
+slot across runs.
+
+**Failure recovery:**
+
+- `manifest not found` → run from the project directory or pass an explicit
+  manifest path.
+- `host nix not required` errors → none expected. Manifest-backed flake builds
+  still run inside the builder VM, not on the host.
+- `drift detected` → the manifest's source or profile changed; rebuild or force
+  the update after confirming the new target is intentional.
 
 ## <a id="python-sdk"></a>Python SDK user
 
