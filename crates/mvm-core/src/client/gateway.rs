@@ -378,6 +378,14 @@ impl MvmClient for GatewayBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Once;
+
+    fn install_rustls_provider() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
 
     fn guard(u: &str) -> Result<()> {
         endpoint_guard(&Url::parse(u).unwrap())
@@ -407,6 +415,7 @@ mod tests {
     }
 
     fn cfg(base: &str) -> GatewayConfig {
+        install_rustls_provider();
         GatewayConfig {
             base_url: base.into(),
             token: "mvmd_org_deadbeef".into(),
@@ -421,12 +430,14 @@ mod tests {
 
     #[test]
     fn construction_accepts_https_and_loopback() {
+        install_rustls_provider();
         assert!(GatewayBackend::new(cfg("https://fleet.example.com")).is_ok());
         assert!(GatewayBackend::new(cfg("http://127.0.0.1:9090")).is_ok());
     }
 
     #[test]
     fn endpoint_join_preserves_guard() {
+        install_rustls_provider();
         let be = GatewayBackend::new(cfg("https://fleet.example.com")).unwrap();
         let url = be.endpoint("/api/v1/sandboxes").unwrap();
         assert_eq!(url.as_str(), "https://fleet.example.com/api/v1/sandboxes");
@@ -434,6 +445,7 @@ mod tests {
 
     #[test]
     fn debug_redacts_the_token() {
+        install_rustls_provider();
         let be = GatewayBackend::new(cfg("https://fleet.example.com")).unwrap();
         let s = format!("{be:?}");
         assert!(
@@ -530,6 +542,7 @@ mod tests {
 
     #[test]
     fn reconfigure_targets_the_reconfigure_endpoint() {
+        install_rustls_provider();
         let be = GatewayBackend::new(GatewayConfig {
             base_url: "https://fleet.example.com".into(),
             token: "t".into(),
