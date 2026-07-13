@@ -18,12 +18,9 @@ pub fn with_hints(result: Result<()>) -> Result<()> {
         } else if msg.contains("Permission denied") && msg.contains(".mvm") {
             ui::warn("Hint: Check directory permissions on ~/.mvm (set MVM_DATA_DIR to override).");
         } else if msg.contains("nix: command not found") || msg.contains("nix: not found") {
-            ui::warn("Hint: Nix is installed inside the dev VM. Run 'mvmctl dev shell' first.");
+            ui::warn("Hint: Nix runs inside the builder VM; builds invoke it automatically.");
         } else if msg.contains("dev VM is not running") || msg.contains("VM is not started") {
-            ui::warn(
-                "Hint: Start the dev environment with 'mvmctl dev up' or run 'mvmctl setup' \
-                 to initialise it first.",
-            );
+            ui::warn("Hint: Run 'mvmctl bootstrap' or 'mvmctl setup' to initialise it first.");
         } else if msg.contains("already exists") && msg.contains("template") {
             ui::warn("Hint: Use '--force' to overwrite the existing template.");
         } else if msg.contains("error: builder for") && msg.contains("failed with exit code") {
@@ -43,12 +40,12 @@ pub fn with_hints(result: Result<()>) -> Result<()> {
         } else if msg.contains("No space left on device") || msg.contains("ENOSPC") {
             ui::warn(
                 "Hint: Disk full. Run 'mvmctl doctor' to check space, \
-                 or run 'nix-collect-garbage -d' inside the dev VM.",
+                 or run 'nix-collect-garbage -d' inside the builder VM.",
             );
         } else if msg.contains("timed out") || msg.contains("connection refused") {
             ui::warn(
-                "Hint: The dev VM may be unresponsive. Try 'mvmctl dev status' or \
-                 restart with 'mvmctl dev down && mvmctl dev up'.",
+                "Hint: The builder VM may be unresponsive. Run 'mvmctl cache repair' to reset \
+                 its store, then 'mvmctl bootstrap' to rebuild it.",
             );
         } else if msg.contains("hash mismatch") && msg.contains("got:") {
             ui::warn(

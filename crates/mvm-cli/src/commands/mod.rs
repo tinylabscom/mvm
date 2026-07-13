@@ -84,9 +84,6 @@ pub(in crate::commands) enum Commands {
     /// Beginner microVM workflows (run an OCI image and more)
     #[command(display_order = 1)]
     Machine(machine::Args),
-    /// Manage the local dev VM
-    #[command(display_order = 2)]
-    Dev(env::dev::Args),
     /// Build-time commands (image, compile, validate, kernel)
     #[command(display_order = 3)]
     Build(build::group::Args),
@@ -119,7 +116,7 @@ pub(in crate::commands) enum Commands {
     /// Prepare the environment + pre-fetch the builder VM image
     ///
     /// Runs host-tooling setup and pre-acquires the builder VM image so the
-    /// first `dev up` is fast. Run automatically by install.sh unless
+    /// first build is fast. Run automatically by install.sh unless
     /// `MVM_SKIP_BUILDER_PREFETCH=1`.
     Bootstrap(bootstrap::Args),
     /// Internal: bootstrap only the builder VM image cache.

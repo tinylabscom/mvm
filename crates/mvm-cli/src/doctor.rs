@@ -117,7 +117,7 @@ fn builder_tool_skipped(name: &'static str, category: &'static str) -> Check {
         name,
         category,
         ok: true,
-        info: "skipped — dev VM not running; run `mvmctl dev up` to verify".into(),
+        info: "skipped — dev VM not running; run `mvmctl bootstrap` to verify".into(),
     }
 }
 
@@ -242,7 +242,7 @@ fn runtime_backend_check(plat: platform::Platform) -> Check {
 fn stage0_status_check() -> Check {
     use mvm_core::policy::audit::LocalAuditKind;
     let info = match mvm_core::policy::audit::read_last_stage0_event() {
-        None => "no Stage 0 recorded yet (run `mvmctl dev up`)".to_string(),
+        None => "no Stage 0 recorded yet (run `mvmctl bootstrap`)".to_string(),
         Some(ev) => {
             let outcome = match ev.kind {
                 LocalAuditKind::Stage0Boot => "boot (in progress or interrupted)",
@@ -274,12 +274,12 @@ fn builder_store_check() -> Check {
     // without removing anything.
     let info = match mvm_build::builder_vm::clear_builder_store(true) {
         Ok(s) if s.existed => format!(
-            "present ({:.1} GiB) at {} — if `dev up` fails with a dangling-store \
+            "present ({:.1} GiB) at {} — if `mvmctl bootstrap` fails with a dangling-store \
              error, run `mvmctl cache repair`",
             s.bytes_freed as f64 / (1024.0 * 1024.0 * 1024.0),
             s.path,
         ),
-        Ok(s) => format!("absent ({} — first `dev up` builds it)", s.path),
+        Ok(s) => format!("absent ({} — first `mvmctl bootstrap` builds it)", s.path),
         Err(e) => format!("could not stat builder store: {e}"),
     };
     Check {
@@ -354,7 +354,7 @@ fn builder_egress_check() -> Check {
             name: "builder egress",
             category: "platform",
             ok: true,
-            info: "no builder VM yet (run `mvmctl dev up`)".to_string(),
+            info: "no builder VM yet (run `mvmctl bootstrap`)".to_string(),
         };
     };
     let outcome = mvm_build::guest_net::classify_builder_net_bootstrap(&contents);
@@ -470,7 +470,7 @@ const BUILDERD_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_mi
 /// absence just means no builder VM is running, so `ok` stays true.
 fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
     let Ok(entries) = std::fs::read_dir(vms_root) else {
-        return "absent (no builder VM yet; run `mvmctl dev up`)".to_string();
+        return "absent (no builder VM yet; run `mvmctl bootstrap`)".to_string();
     };
     let mut lines = Vec::new();
     for entry in entries.flatten() {
@@ -497,7 +497,7 @@ fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
     }
     lines.sort();
     if lines.is_empty() {
-        return "absent (no builder daemon; run `mvmctl dev up`)".to_string();
+        return "absent (no builder daemon; run `mvmctl bootstrap`)".to_string();
     }
     lines.join("; ")
 }
@@ -2261,7 +2261,7 @@ fn security_dev_image_check() -> Check {
         info: if cached {
             format!("cached at {prebuilt_dir}")
         } else {
-            "not cached; next `mvmctl dev up` will download + hash-verify".to_string()
+            "not cached; next `mvmctl bootstrap` will download + hash-verify".to_string()
         },
     }
 }

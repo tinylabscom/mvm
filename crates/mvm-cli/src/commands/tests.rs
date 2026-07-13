@@ -13,7 +13,7 @@ use super::build::group as build_group;
 use super::catalog;
 use super::dispatch::TopLevelCommand;
 use super::env::group as env_group;
-use super::env::{cleanup, dev, init, uninstall};
+use super::env::{cleanup, init, uninstall};
 use super::image;
 use super::machine;
 use super::ops;
@@ -25,7 +25,6 @@ use audit::AuditAction;
 use cache::CacheAction;
 use catalog::CatalogAction;
 use config::ConfigAction;
-use dev::{DevAction, DevCacheAction};
 use image::ImageAction;
 
 use super::shared::{
@@ -3380,34 +3379,6 @@ fn test_cache_repair_force_flag() {
     }
 }
 
-#[test]
-fn test_dev_cache_inspect() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "cache", "inspect"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action:
-                Some(DevAction::Cache {
-                    action: DevCacheAction::Inspect { json },
-                }),
-        }) => assert!(!json),
-        _ => panic!("Expected Dev Cache Inspect command"),
-    }
-}
-
-#[test]
-fn test_dev_cache_inspect_json() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "cache", "inspect", "--json"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action:
-                Some(DevAction::Cache {
-                    action: DevCacheAction::Inspect { json },
-                }),
-        }) => assert!(json),
-        _ => panic!("Expected Dev Cache Inspect command"),
-    }
-}
-
 // --- Up --network flag tests (up retired; pin removal) ---
 
 #[test]
@@ -3480,97 +3451,6 @@ fn test_init_scaffold_with_prompt_flag() {
             assert!(catalog.is_none());
         }
         _ => panic!("Expected Init command"),
-    }
-}
-
-// --- Apple Container dev tests ---
-
-#[test]
-fn test_dev_down_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "down"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Down { reset, json }),
-        }) => {
-            assert!(!reset);
-            assert!(!json, "bare `dev down` defaults to text output");
-        }
-        _ => panic!("Expected Dev Down command"),
-    }
-}
-
-#[test]
-fn test_dev_down_json_and_reset_flags_parse() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "down", "--reset", "--json"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Down { reset, json }),
-        }) => {
-            assert!(reset);
-            assert!(json);
-        }
-        _ => panic!("Expected Dev Down command"),
-    }
-}
-
-#[test]
-fn test_dev_up_json_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "--json"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Up { json, .. }),
-        }) => assert!(json),
-        _ => panic!("Expected Dev Up command"),
-    }
-}
-
-#[test]
-fn test_dev_up_verbose_is_global_not_mount() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "up", "-v", "--json"]).unwrap();
-    assert_eq!(cli.verbose, 1);
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Up { volume, json, .. }),
-        }) => {
-            assert!(json);
-            assert!(volume.is_empty());
-        }
-        _ => panic!("Expected Dev Up command"),
-    }
-}
-
-#[test]
-fn test_dev_up_json_conflicts_with_shell() {
-    // `--json` is non-interactive by definition; `--shell` must be rejected.
-    let res = Cli::try_parse_from(["mvmctl", "dev", "up", "--json", "--shell"]);
-    assert!(res.is_err(), "`dev up --json --shell` must conflict");
-}
-
-#[test]
-fn test_dev_shell_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "shell"]);
-    assert!(cli.is_ok());
-}
-
-#[test]
-fn test_dev_status_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "status"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Status { json }),
-        }) => assert!(!json, "bare `dev status` defaults to text output"),
-        _ => panic!("Expected Dev Status command"),
-    }
-}
-
-#[test]
-fn test_dev_status_json_flag_parses() {
-    let cli = Cli::try_parse_from(["mvmctl", "dev", "status", "--json"]).unwrap();
-    match cli.command {
-        Commands::Dev(dev::Args {
-            action: Some(DevAction::Status { json }),
-        }) => assert!(json, "`--json` requests machine-readable output"),
-        _ => panic!("Expected Dev Status command"),
     }
 }
 
@@ -3958,7 +3838,6 @@ fn state_touching_commands_trigger_entry_convergence() {
     assert!(touches(&["mvmctl", "machine", "save", "myvm"]));
     assert!(touches(&["mvmctl", "machine", "restore", "ckpt-myvm"]));
     assert!(touches(&["mvmctl", "ls"]));
-    assert!(touches(&["mvmctl", "dev", "status"]));
 }
 
 #[test]
@@ -4003,18 +3882,6 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
     assert!(emits_machine_readable_stdout(&[
         "mvmctl", "ls", "--all", "--json"
     ]));
-    assert!(emits_machine_readable_stdout(&[
-        "mvmctl", "dev", "status", "--json"
-    ]));
-    assert!(emits_machine_readable_stdout(&[
-        "mvmctl", "dev", "up", "--json"
-    ]));
-    assert!(emits_machine_readable_stdout(&[
-        "mvmctl", "dev", "down", "--json"
-    ]));
-    assert!(emits_machine_readable_stdout(&[
-        "mvmctl", "dev", "cache", "inspect", "--json"
-    ]));
     // `mvmctl up` is retired; `run` survives hidden as the SDK transport and
     // keeps its `--json` reservation. The user-facing machine-readable channel
     // is `machine run --json`.
@@ -4036,7 +3903,6 @@ fn state_touching_json_commands_reserve_stdout_before_entry_convergence() {
     ]));
 
     assert!(!emits_machine_readable_stdout(&["mvmctl", "ls"]));
-    assert!(!emits_machine_readable_stdout(&["mvmctl", "dev", "status"]));
     // `mvmctl up` is retired; `up_removed` pins the removal separately.
 }
 
@@ -4084,7 +3950,6 @@ fn top_level_help_hides_infra() {
         help.contains("machine"),
         "machine must appear in top-level help"
     );
-    assert!(help.contains("dev"), "dev must appear in top-level help");
     assert!(
         help.contains("build"),
         "build must appear in top-level help"

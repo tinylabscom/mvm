@@ -516,7 +516,7 @@ pub(in crate::commands) mod attested_builder_pack {
             Err(error) => {
                 ui::warn(&format!(
                     "Ignoring malformed pack trust config ({error}); attested builder \
-                     packs stay inert and dev up falls back to the download."
+                     packs stay inert and the builder VM bootstrap falls back to the download."
                 ));
                 PackTrustConfig::default()
             }

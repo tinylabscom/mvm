@@ -119,31 +119,23 @@ fn connect_dev_vsock(vm_id: &str, port: u32) -> std::io::Result<std::os::unix::n
     std::os::unix::net::UnixStream::connect(sock)
 }
 
-/// Boot the dev daemon by re-executing this binary as `<exe> dev up`.
-///
-/// Blocks until `mvmctl dev up` returns (it exits once the proxy socket
-/// is reachable, which is exactly what callers need before retrying the
-/// connection). Inherits stderr so progress messages reach the user.
+/// Auto-starting the dev daemon used to re-exec this binary as `<exe> dev
+/// up`. That command was removed along with the interactive dev-VM
+/// surface, so there is no subprocess left to spawn here. This macOS
+/// `run_in_vm` shell-ops path still needs a way to bring the Linux
+/// execution environment up on demand, but that now has to go through the
+/// headless builder VM instead of a dev-VM re-exec, and that wiring
+/// doesn't exist yet — so fail closed with an explicit message instead of
+/// attempting a spawn that can only fail.
 fn start_dev_daemon(vm_id: &str) -> Result<()> {
-    let exe = std::env::current_exe().context("locating mvmctl binary for dev auto-start")?;
-    crate::base::ui::progress(&format!(
-        "dev VM '{vm_id}' is not running — auto-starting..."
-    ));
-    let status = Command::new(&exe)
-        .args(["dev", "up"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .with_context(|| format!("spawning '{} dev up'", exe.display()))?;
-    if !status.success() {
-        anyhow::bail!(
-            "'{} dev up' exited with {}",
-            exe.display(),
-            status.code().unwrap_or(-1),
-        );
-    }
-    Ok(())
+    anyhow::bail!(
+        "dev VM '{vm_id}' is not running and can no longer be auto-started: \
+         the interactive dev-VM command that used to boot it on demand was \
+         removed, and this macOS shell-ops path has not yet been migrated \
+         to boot the headless builder VM instead. Start the builder VM \
+         through another path first (for example a build that needs it), \
+         then retry."
+    )
 }
 
 /// Shell prelude that defines a no-op `sudo` function when the script
@@ -349,6 +341,17 @@ mod tests {
     fn test_dev_vm_env_name() {
         let env = DevVmEnv::new("mvm-dev");
         assert_eq!(env.vm_id, "mvm-dev");
+    }
+
+    #[test]
+    fn start_dev_daemon_fails_honestly_without_spawning() {
+        let err = start_dev_daemon("test-vm").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("test-vm"), "expected vm_id in message: {msg}");
+        assert!(
+            !msg.contains("dev up"),
+            "must not point callers at the removed dev-up command: {msg}"
+        );
     }
 
     #[test]

@@ -222,7 +222,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // `doctor` carry the live diagnosis.
             if std::path::Path::new(&cache_dir).join("builder-vm").is_dir() {
                 println!(
-                    "If `dev up`/`build` fails with a dangling-store or mount error, \
+                    "If `mvmctl bootstrap`/`build` fails with a dangling-store or mount error, \
                      run `mvmctl cache repair`."
                 );
             }
@@ -334,7 +334,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     repair.path
                 );
                 ui::notice(&format!(
-                    "Cleared builder store {} ({} freed). The next `mvmctl dev up` rebuilds it.",
+                    "Cleared builder store {} ({} freed). The next `mvmctl bootstrap` rebuilds it.",
                     repair.path,
                     human_bytes(repair.bytes_freed)
                 ));

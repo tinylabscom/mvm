@@ -1605,7 +1605,7 @@ pub(super) fn resolve_workload_kernel(
     anyhow::bail!(
         "image has no kernel ({vmlinux_path} missing) and the {hypervisor} backend \
          needs one; the builder-VM kernel fallback at {fallback} is also absent — \
-         run `mvmctl dev up` once to bootstrap it"
+         run `mvmctl bootstrap` once to populate it"
     )
 }
 
@@ -2779,13 +2779,16 @@ mod resolve_workload_kernel_tests {
     }
 
     #[test]
-    fn vz_both_missing_returns_error_mentioning_dev_up() {
+    fn vz_both_missing_returns_error_mentioning_bootstrap() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", tmp.path());
         let err = resolve_workload_kernel("/nonexistent/vmlinux", "vz").unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("dev up"), "expected 'dev up' in: {msg}");
+        assert!(
+            msg.contains("mvmctl bootstrap"),
+            "expected 'mvmctl bootstrap' in: {msg}"
+        );
         assert!(msg.contains("vz"), "expected hypervisor name in: {msg}");
     }
 }

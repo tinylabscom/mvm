@@ -472,9 +472,9 @@ pub enum BuilderVmError {
     #[error(
         "the builder VM's Nix store has a dangling/garbage-collected path — \
          a previous `nix-collect-garbage` removed a store path the cached builder \
-         image still references, so every `dev up` fails identically.\n\
+         image still references, so every `mvmctl bootstrap` fails identically.\n\
          Recover with:\n    mvmctl cache repair\n\
-         (or `rm -rf {cache_dir}`), then re-run `mvmctl dev up` — the builder \
+         (or `rm -rf {cache_dir}`), then re-run `mvmctl bootstrap` — the builder \
          image rebuilds from scratch.\n\
          Inner nix error: {detail}\nFull log: {log_path}"
     )]
@@ -1104,7 +1104,7 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("mvmctl cache repair")); // the first-class recovery
         assert!(msg.contains("rm -rf /home/u/.cache/mvm/builder-vm")); // manual fallback
-        assert!(msg.contains("dev up"));
+        assert!(msg.contains("mvmctl bootstrap"));
         assert!(msg.contains("dangling")); // distinct from a generic build failure
     }
 

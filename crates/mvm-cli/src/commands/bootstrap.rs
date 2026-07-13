@@ -1,7 +1,7 @@
 //! `mvmctl bootstrap` — prepare the local environment from scratch.
 //!
 //! Runs the host-tooling setup and **pre-acquires the builder VM image** so
-//! the first `mvmctl dev up` is fast: the expensive first-run image
+//! the first build is fast: the expensive first-run image
 //! download (release install) or local build (source checkout) is paid here,
 //! ahead of time, not on the hot path. Idempotent — a fast no-op when the
 //! environment is already set up and the image is cached.

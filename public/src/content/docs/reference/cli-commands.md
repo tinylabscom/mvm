@@ -22,7 +22,7 @@ verification under `trust`. Domains that already own their own subcommands
 
 | Group / top-level | Commands |
 |--------|----------|
-| Daily drivers (top-level) | `machine` (`run`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `dev`, `build`, `doctor`, `init`, `bootstrap` |
+| Daily drivers (top-level) | `machine` (`run`/`exec`/`console`/`logs`/`stop`/`forward`/…), `ls`, `build`, `doctor`, `init`, `bootstrap` |
 | `vm <sub>` | `pause`, `resume`, `snapshot`, `save`, `restore`, `checkpoint`, `cp`, `fs`, `proc`, `diff`, `wait`, `boot-report`, `set-ttl`, `forward`, `sandbox`, `session`, `volume` |
 | `build <sub>` | `image` (the former `build`), `compile`, `validate`, `kernel`, `runtime-overlay` |
 | `ops <sub>` | `metrics`, `bench`, `config`, `mcp` |
@@ -80,28 +80,9 @@ guest-RPC surface, fleet-shaped workflows).
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl bootstrap` | Prepare the environment: host tooling **and pre-fetch the builder VM image** so the first `dev up` is fast (no first-run download/build on the hot path). `install.sh` runs this automatically unless `MVM_SKIP_BUILDER_PREFETCH=1`. Idempotent — safe to re-run |
+| `mvmctl bootstrap` | Prepare the environment: host tooling **and pre-fetch the builder VM image** so the first build is fast (no first-run download/build on the hot path). `install.sh` runs this automatically unless `MVM_SKIP_BUILDER_PREFETCH=1`. Idempotent — safe to re-run |
 | `mvmctl bootstrap --production` | Production mode (skip Homebrew, assume Linux with apt) |
 | `mvmctl env bootstrap` | Same as `mvmctl bootstrap` (the `env`-grouped form) |
-| `mvmctl dev [up]` | Auto-bootstrap if needed, start dev VM, drop into shell. On macOS, the dev-image builder auto-detects the HVF builder on macOS 26+ Apple Silicon and retries with libkrun when the HVF builder path fails; native Linux hosts auto-detect the qemu builder for the default builder lane. |
-| `mvmctl dev up --project ~/dir` | Auto-bootstrap then cd into a project directory |
-| `mvmctl dev up --metrics-port PORT` | Bind a Prometheus metrics endpoint (0 = disabled) |
-| `mvmctl dev up --watch-config` | Reload ~/.mvm/config.toml automatically when it changes |
-| `mvmctl dev up --shell` (or `-s`) | Force opening an interactive shell after starting (the default behavior) |
-| `mvmctl dev up --no-shell` | Start the dev VM without attaching an interactive shell |
-| `mvmctl dev up --base <template[@revision]\|slot[@revision]\|bundle-sha>` | On the Vz backend, boot the dev VM from a built template/manifest-slot revision or installed bundle instead of the default dev image. Unknown or unbuilt bases fail before launch; changing the base of an already-running or parked dev VM requires `mvmctl dev down` first. |
-| `mvmctl dev down` | Stop the dev VM |
-| `mvmctl dev down --reset` | Also delete the cached dev image so the next `dev up` rebuilds from local source |
-| `mvmctl dev park` | Vz only: snapshot and stop the running dev VM so the next `dev up` restores from the parked state |
-| `mvmctl dev shell` | Open a shell in the running dev VM |
-| `mvmctl dev shell --project ~/dir` | Open shell and cd into a project directory |
-| `mvmctl dev status` | Show dev environment backend, running state, cached image paths, and safe builder-cache readiness reason |
-| `mvmctl dev status --json` | Emit schema-versioned dev status JSON; Vz pinned-base dev VMs include a `base` object with `id`, `revision`, and `rootfs_fingerprint`, while Linux-native hosts include typed KVM, Firecracker, and base-asset readiness labels |
-| `mvmctl dev cache inspect` | Inspect dev image and builder-cache readiness without rebuilding, booting, or printing local artifact paths |
-| `mvmctl dev cache inspect --json` | Emit the sanitized dev-cache inspection as structured JSON |
-| `mvmctl dev rebuild` | Stop, clear cache, and rebuild + restart the dev VM |
-| `mvmctl dev rebuild --shell` (or `-s`) | Open an interactive shell after rebuilding |
-| `mvmctl dev import-image <path>` | Side-load a pre-built dev image artifact into the cache (air-gapped install path; from plan 36 sealed builder image) |
 | `mvmctl doctor` | Run diagnostics + dependency checks + security posture, including per-tenant host-agent daemon state (folded in from the dropped `mvmctl security` verb) |
 | `mvmctl doctor --json` | Output diagnostics as JSON |
 | `mvmctl env update` | Check for and install mvmctl updates |
@@ -779,8 +760,10 @@ Build resolution order on first use:
 
 1. **Builder VM.** mvm bootstraps or reuses the project Linux builder VM,
    runs Nix evaluation and `nix build` inside it, and extracts the rootfs.
-   No host-side Nix is required, and you do not need to enter
-   `mvmctl dev shell` first.
+   No host-side Nix is required, and there is no interactive step to
+   perform first — the builder VM is headless and builds unattended.
+   `mvmctl bootstrap` can pre-warm it ahead of time if you'd rather not
+   wait on the first build.
 2. **Prebuilt artifacts (offline).** If the host is fully offline and the
    builder image is not available, mvm can use the prebuilt
    `default-microvm` artifacts from the GitHub release matching the
@@ -800,7 +783,7 @@ flow and the distinction between build time and runtime boot time.
 | `mvmctl cache prune --orphan-builds` | Also sweep orphaned builds — built artifacts whose source `mvm.toml` is gone (equivalent to `mvmctl manifest prune --orphans`) |
 | `mvmctl cache prune --orphan-dirs` | Also remove unrecognized top-level cache dirs (leftovers from a removed subsystem) |
 | `mvmctl cache prune --deep` | Reclaim regenerable caches too — Stage 0 blobs, the prebuilt default microVM image, pulled OCI layers (each costs a re-fetch/rebuild next time). Implies `--orphan-dirs` |
-| `mvmctl cache repair` | Clear a degraded builder VM store so the next `dev up`/`build` cold-rebuilds it. Refuses while a Stage 0 bootstrap is in flight; auto-stops a running dev builder first |
+| `mvmctl cache repair` | Clear a degraded builder VM store so the next build cold-rebuilds it. Refuses while a Stage 0 bootstrap is in flight; auto-stops a running builder VM first |
 | `mvmctl cache repair --force` | Clear the store even while a Stage 0 bootstrap lock is held (use only if the lock is stale, e.g. after a crash) |
 
 ## Security

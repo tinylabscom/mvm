@@ -133,21 +133,6 @@ test-ci:
 test-cargo:
     cargo test --workspace
 
-# Run the core-demo end-to-end smoke (libkrun builder + workload VM, minutes).
-# Builds `mvmctl` first — `cargo test -p mvm-cli` does NOT rebuild it:
-#   - `mvmctl` is the root-package binary the test execs via
-#     `Command::cargo_bin`. `-p mvm-cli` only rebuilds the mvm-cli *lib*;
-#     without this, the test silently runs a STALE mvmctl and changes to
-#     `crates/mvm-cli/src/commands/**` (e.g. the `up` agent-wait) never take
-#     effect — a false green.
-#   - `cargo build --bin mvmctl` also runs mvmctl's build script, which
-#     compiles the per-VM supervisor bins (incl. `mvm-libkrun-supervisor`) —
-#     so this one line covers them too, and no stale-supervisor gvproxy-orphan
-#     hazard remains.
-e2e-core-demo:
-    cargo build --bin mvmctl
-    MVM_E2E_SMOKE=1 MVM_BUILDER_BACKEND=libkrun cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
-
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
 # a targeted rebuild or CI.
