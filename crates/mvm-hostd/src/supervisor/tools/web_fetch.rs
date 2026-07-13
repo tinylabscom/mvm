@@ -42,6 +42,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Once;
 
 use async_trait::async_trait;
 use base64::Engine;
@@ -162,6 +163,13 @@ pub struct ReqwestHttpFetcher {
 }
 
 impl ReqwestHttpFetcher {
+    fn install_rustls_provider() {
+        static INSTALL: Once = Once::new();
+        INSTALL.call_once(|| {
+            let _ = rustls::crypto::ring::default_provider().install_default();
+        });
+    }
+
     /// Default timeout for one fetch round-trip (connect + read).
     /// Conservative — most legitimate fetches complete in <2 s; the
     /// 30 s upper bound forgives slow upstreams without letting a
@@ -221,6 +229,7 @@ impl ReqwestHttpFetcher {
         host: &str,
         safe_addresses: Vec<SocketAddr>,
     ) -> Result<reqwest::Client, FetchError> {
+        Self::install_rustls_provider();
         // Pin TLS to 1.3 minimum. Matches the
         // shared `http_hardening::hardened_client_builder` so
         // every reqwest-using surface in mvm-supervisor refuses
