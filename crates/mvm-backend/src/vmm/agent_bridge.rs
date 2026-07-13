@@ -75,6 +75,9 @@ impl AgentBridge {
     /// Create the host agent listener at `path` (replacing any stale socket).
     /// Non-blocking so [`Self::accept_new`] never stalls the run loop.
     pub fn bind(&mut self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let _ = std::fs::remove_file(path);
         let l = UnixListener::bind(path)?;
         l.set_nonblocking(true)?;

@@ -493,10 +493,15 @@ impl VmBackend for HvfBackend {
 
         // Interactive PTY runs (`machine run -it`) pre-open the console data
         // ports so the host can attach a shell; the supervisor binds them under
-        // `<state_dir>/vsock/`. Create the dir up front so the bind can't miss.
+        // the shared Vz-style console socket dir. Create that dir up front so
+        // the bind can't miss.
         let console_data_sockets = hvf_console_data_sockets(&state_dir, config.dev_console);
         if !console_data_sockets.is_empty() {
-            let vsock_dir = state_dir.join("vsock");
+            let vsock_dir = console_data_sockets[0]
+                .host_socket
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| anyhow!("console data socket missing parent directory"))?;
             std::fs::create_dir_all(&vsock_dir)
                 .with_context(|| format!("create console vsock dir {}", vsock_dir.display()))?;
         }
@@ -1205,9 +1210,7 @@ mod tests {
         for s in &socks {
             assert_eq!(
                 s.host_socket,
-                state
-                    .join("vsock")
-                    .join(mvm_core::config::vsock_socket_filename(s.guest_port)),
+                mvm_core::config::vm_vz_vsock_port_socket_at(state, s.guest_port),
             );
         }
     }

@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mvm_core::config::{vm_vsock_port_socket_at, vsock_socket_filename};
+use mvm_core::config::{vm_vsock_port_socket_at, vm_vz_vsock_port_socket_at};
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports};
 
@@ -115,19 +115,15 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
 }
 
 /// Build the per-port (port, host-UDS) list for the interactive console data
-/// range, rooted under `<state_dir>/vsock/` to match the Vz socket convention.
-/// Returns an empty vec when `dev_console` is false (claim 15: sealed prod
-/// boots carry no console listeners).
+/// range, rooted under the shared Vz-style socket helper (`<socket-dir>/vsock/`).
+/// Returns an empty vec when `dev_console` is false (claim 15: sealed prod boots
+/// carry no console listeners).
 pub fn console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<(u32, PathBuf)> {
     if !dev_console {
         return Vec::new();
     }
-    let vsock_dir = state_dir.join("vsock");
     dev_console_data_ports()
-        .map(|port| {
-            let path = vsock_dir.join(vsock_socket_filename(port));
-            (port, path)
-        })
+        .map(|port| (port, vm_vz_vsock_port_socket_at(state_dir, port)))
         .collect()
 }
 
@@ -440,8 +436,8 @@ mod tests {
         assert_eq!(*port, CONSOLE_PORT_BASE + 1);
         assert_eq!(
             path,
-            &PathBuf::from("/state/myvm/vsock/vsock-20001.sock"),
-            "path must be <state_dir>/vsock/vsock-<port>.sock"
+            &mvm_core::config::vm_vz_vsock_port_socket_at(state_dir, *port),
+            "path must follow the shared Vz-socket helper"
         );
 
         // Last port: CONSOLE_PORT_BASE + 128 = 20128
@@ -449,7 +445,7 @@ mod tests {
         assert_eq!(*last_port, CONSOLE_PORT_BASE + 128);
         assert_eq!(
             last_path,
-            &PathBuf::from("/state/myvm/vsock/vsock-20128.sock")
+            &mvm_core::config::vm_vz_vsock_port_socket_at(state_dir, *last_port)
         );
     }
 
