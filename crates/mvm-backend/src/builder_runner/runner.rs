@@ -290,6 +290,7 @@ mod tests {
                 job_dir: &job,
                 work_src: &work,
                 host_bin_dir: &bins,
+                runtime_overlay: None,
                 closure_nar: Some(&closure),
                 output_size: 1 << 20,
                 vcpus: 2,
