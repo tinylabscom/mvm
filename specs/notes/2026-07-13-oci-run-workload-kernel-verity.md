@@ -83,7 +83,13 @@ gaps worth addressing:
    non-prod (correctness, current fix) or boot non-prod unsealed (restores the
    dev-speed path, but is a larger change to rootfs materialization + the boot path).
    Whichever is chosen, kernel resolution and rootfs sealing must agree — that
-   agreement is the real invariant.
+   agreement is the real invariant. **Drafted** as a decision doc with verified
+   current-behaviour, both options, and exact touchpoints in
+   `specs/notes/2026-07-13-nonprod-oci-verity-sealing-decision.md` (recommends
+   Option 2, unsealed non-prod; awaiting a maintainer call). A key finding there:
+   the OCI path verity-boots dev via an *unconditional* `.with_verity()`
+   (`run_image.rs:412`), while `--flake` dev already boots unsealed — so the two
+   sources currently disagree for dev.
 
 4. **`mvmctl` gives no breadcrumb for kernel provenance.** — **DONE.**
    `ensure_workload_kernel` now emits one `Workload kernel: <cached|built locally|
