@@ -80,9 +80,10 @@ use crate::builder_vm::{
 // `shell_single_quote_escape` are imported only inside the test
 // module below.
 use crate::builder_vm_runtime::{
-    NixStoreImageLock, acquire_nix_store_image_lock, acquire_nix_store_image_lock_named,
-    builder_vm_timeout, finalize_flake_job, finalize_install_job, read_job_result_with_diagnostics,
-    shell_job_exit_error, stage_job_dir, stage_shell_job_dir, supervisor_exit_error,
+    CLOSURE_SEED_TAG, NixStoreImageLock, acquire_nix_store_image_lock,
+    acquire_nix_store_image_lock_named, builder_vm_timeout, finalize_flake_job,
+    finalize_install_job, read_job_result_with_diagnostics, shell_job_exit_error,
+    stage_closure_seed_dir, stage_job_dir, stage_shell_job_dir, supervisor_exit_error,
     verbose_from_env,
 };
 use crate::pipeline::build::BUILDER_OUTPUT_DISK_MIB;
@@ -538,7 +539,7 @@ fn prepare_builder_transport_disks(
 ) -> Result<(PathBuf, PathBuf), BuilderVmError> {
     let input_disk = vm_state_dir.join("input.img");
     let output_disk = vm_state_dir.join("output.img");
-    pack_input_disk(input_trees, &input_disk, BUILDER_INPUT_DISK_MIN).map_err(|e| {
+    pack_input_disk(input_trees, None, &input_disk, BUILDER_INPUT_DISK_MIN).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pack builder input disk {}: {e}",
             input_disk.display()
@@ -627,6 +628,11 @@ pub struct LibkrunBuilderVm {
     /// can build the real builder VM image without downloading a
     /// published builder-VM artifact.
     pub image_override: Option<BuilderVmImage>,
+    /// Optional seeded Nix store closure NAR, resolved alongside the
+    /// builder image when it carries one. `None` (the common case today)
+    /// attaches no closure-seed share, so every boot behaves exactly as
+    /// before this field existed. See [`LibkrunBuilderVm::with_closure_nar`].
+    pub closure_nar: Option<PathBuf>,
     /// Stream the guest `console.log` to stderr as the build runs.
     /// Set by the CLI from `--verbose`. Default false (heartbeat only).
     pub verbose: bool,
@@ -671,6 +677,7 @@ impl Default for LibkrunBuilderVm {
             memory_mib: DEFAULT_MEMORY_MIB,
             nix_store_mib: DEFAULT_NIX_STORE_MIB,
             image_override: None,
+            closure_nar: None,
             verbose: false,
         }
     }
@@ -699,6 +706,29 @@ impl LibkrunBuilderVm {
     pub fn with_image_override(mut self, image: BuilderVmImage) -> Self {
         self.image_override = Some(image);
         self
+    }
+
+    /// Attach a seeded Nix store closure NAR resolved from the builder
+    /// image cache, mirroring `HvfBuilderVm::with_closure_nar`. Every boot
+    /// after this call (Stage 0, a shell job, or a flake build) stages the
+    /// NAR into a dedicated share dir under the VM's state dir and attaches
+    /// it read-only at the `closure-seed` virtio-fs tag; omitting this call
+    /// (the default) attaches nothing, so a builder image without a
+    /// closure boots exactly as before this seam existed.
+    pub fn with_closure_nar(mut self, closure_nar: Option<PathBuf>) -> Self {
+        self.closure_nar = closure_nar;
+        self
+    }
+
+    /// Stage `self.closure_nar` under `vm_state_dir` and return the tag +
+    /// staged share dir for the caller to `add_virtio_fs` with, or `None`
+    /// when no closure was attached — the shared no-op path every
+    /// `run_build`-shaped method takes.
+    fn closure_seed_share(&self, vm_state_dir: &Path) -> Result<Option<PathBuf>, BuilderVmError> {
+        self.closure_nar
+            .as_deref()
+            .map(|nar| stage_closure_seed_dir(nar, vm_state_dir))
+            .transpose()
     }
 
     /// Stream guest console output to stderr during the build (`--verbose`).
@@ -826,6 +856,12 @@ impl LibkrunBuilderVm {
             // /mvm-bins inside the guest — stage0-init sets MVM_HOST_BIN_DIR
             // to it so the flake picks up the pre-built host-vm binaries.
             .add_virtio_fs("mvm-bins", path_to_str(host_bin_dir, "host_bin_dir")?);
+        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
+            krun = krun.add_virtio_fs(
+                CLOSURE_SEED_TAG,
+                path_to_str(&share_dir, "closure_seed_dir")?,
+            );
+        }
         krun = apply_builder_vsock_egress(krun);
         let _egress_endpoint = BuilderVsockEgressEndpoint::spawn(&vm_state_dir)?;
 
@@ -973,6 +1009,12 @@ impl LibkrunBuilderVm {
                 attachment.read_only,
             );
         }
+        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
+            krun = krun.add_virtio_fs(
+                CLOSURE_SEED_TAG,
+                path_to_str(&share_dir, "closure_seed_dir")?,
+            );
+        }
 
         for disk in &job.extra_disks {
             krun = krun.add_disk(
@@ -981,6 +1023,10 @@ impl LibkrunBuilderVm {
                 disk.read_only,
             );
         }
+        // Builder VMs are NIC-less: egress goes over the vsock relay below, so
+        // the libkrun networking mode must be the disconnected sink — the
+        // supervisor rejects anything else. Matches the Stage 0 path.
+        krun = apply_networking_mode(krun);
 
         if builder_uses_vsock_egress(&image)
             && runtime_overlay.is_none()
@@ -1430,6 +1476,16 @@ impl BuilderVm for LibkrunBuilderVm {
                 attachment.read_only,
             );
         }
+        if let Some(share_dir) = self.closure_seed_share(&vm_state_dir)? {
+            krun = krun.add_virtio_fs(
+                CLOSURE_SEED_TAG,
+                path_to_str(&share_dir, "closure_seed_dir")?,
+            );
+        }
+        // Builder VMs are NIC-less: egress goes over the vsock relay below, so
+        // the libkrun networking mode must be the disconnected sink — the
+        // supervisor rejects anything else. Matches the Stage 0 path.
+        krun = apply_networking_mode(krun);
 
         if builder_uses_vsock_egress(&image)
             && runtime_overlay.is_none()
@@ -5707,6 +5763,46 @@ mod tests {
     fn with_nix_store_mib_overrides() {
         let vm = LibkrunBuilderVm::default().with_nix_store_mib(8192);
         assert_eq!(vm.nix_store_mib, 8192);
+    }
+
+    #[test]
+    fn closure_nar_defaults_to_none_and_is_settable() {
+        let vm = LibkrunBuilderVm::default();
+        assert_eq!(vm.closure_nar, None);
+        let vm = LibkrunBuilderVm::default().with_closure_nar(Some(PathBuf::from("/nar")));
+        assert_eq!(vm.closure_nar, Some(PathBuf::from("/nar")));
+    }
+
+    #[test]
+    fn closure_seed_share_is_none_when_no_closure_attached() {
+        let vm_state_dir = tempfile::TempDir::new().unwrap();
+        let vm = LibkrunBuilderVm::default();
+        assert_eq!(
+            vm.closure_seed_share(vm_state_dir.path()).unwrap(),
+            None,
+            "no closure_nar attached means no share directory is staged"
+        );
+        // No stray closure-seed dir left behind either.
+        assert!(!vm_state_dir.path().join("closure-seed").exists());
+    }
+
+    #[test]
+    fn closure_seed_share_stages_the_nar_when_attached() {
+        let arch_dir = tempfile::TempDir::new().unwrap();
+        let nar = arch_dir.path().join("nix-closure.nar");
+        std::fs::write(&nar, b"closure-bytes").unwrap();
+        let vm_state_dir = tempfile::TempDir::new().unwrap();
+
+        let vm = LibkrunBuilderVm::default().with_closure_nar(Some(nar));
+        let share_dir = vm
+            .closure_seed_share(vm_state_dir.path())
+            .unwrap()
+            .expect("closure attached must stage a share dir");
+        assert_eq!(share_dir, vm_state_dir.path().join(CLOSURE_SEED_TAG));
+        assert_eq!(
+            std::fs::read(share_dir.join("nix-closure.nar")).unwrap(),
+            b"closure-bytes"
+        );
     }
 
     // ---------------------------------------------------------------

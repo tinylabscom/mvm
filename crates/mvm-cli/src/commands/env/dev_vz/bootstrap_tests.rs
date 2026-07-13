@@ -9,6 +9,7 @@ mod attested_builder_pack_tests {
     use chrono::{DateTime, TimeZone, Utc};
     use ed25519_dalek::{SigningKey, VerifyingKey};
 
+    use mvm_build::builder_pack::CLOSURE_FILE;
     use mvm_core::arch::GuestArch;
     use mvm_core::config::mvm_keys_dir;
     use mvm_core::pack_cache::{PackVerifyCtx, VerifiedPackDir, promote, resolve_pack};
@@ -106,6 +107,26 @@ mod attested_builder_pack_tests {
         assert!(
             validate_builder_vm_stage0_artifacts(&out_dir).is_ok(),
             "materialized dir must satisfy the installed-binary readiness gate"
+        );
+        // No closure NAR in the pack — the common case today — means no
+        // closure-seed file lands in the cache dir either.
+        assert!(!out_dir.join(CLOSURE_FILE).exists());
+    }
+
+    #[test]
+    fn materialize_copies_the_seeded_closure_nar_when_the_pack_carries_one() {
+        let pack = TempDir::new().expect("pack tempdir");
+        write_valid_builder_artifacts(pack.path());
+        std::fs::write(pack.path().join(CLOSURE_FILE), b"pretend-nar-bytes").expect("nar");
+        let out = TempDir::new().expect("out tempdir");
+        let out_dir = out.path().join("builder-vm").join("aarch64");
+        let verified = verified_pack_dir(pack.path());
+
+        materialize_builder_pack(&verified, &out_dir).expect("materialize");
+
+        assert_eq!(
+            std::fs::read(out_dir.join(CLOSURE_FILE)).expect("closure nar placed"),
+            b"pretend-nar-bytes"
         );
     }
 
@@ -601,6 +622,7 @@ mod attested_builder_pack_tests {
         BuildBuilderPackParams {
             vmlinux,
             rootfs,
+            closure: None,
             target_arch: GuestArch::host(),
             channel: "stable".to_string(),
             builder_identity: "release-ci".to_string(),

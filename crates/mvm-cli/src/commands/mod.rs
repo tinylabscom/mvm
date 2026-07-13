@@ -266,13 +266,12 @@ fn register_inhouse_builder() {
     // the CLI bridges the gap here.
     #[cfg(feature = "builder-vm")]
     mvm_build::builder_backend_select::register_hvf_builder(Box::new(|| {
-        let (kernel, rootfs) =
+        let (kernel, rootfs, closure_nar) =
             crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()?;
-        Ok(
-            Box::new(mvm_backend::builder_runner::hvf_builder::HvfBuilderVm::new(
-                kernel, rootfs,
-            )) as Box<dyn mvm_build::builder_vm::BuilderVm>,
-        )
+        Ok(Box::new(
+            mvm_backend::builder_runner::hvf_builder::HvfBuilderVm::new(kernel, rootfs)
+                .with_closure_nar(closure_nar),
+        ) as Box<dyn mvm_build::builder_vm::BuilderVm>)
     }));
 }
 

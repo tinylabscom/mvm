@@ -8,9 +8,10 @@
 //! The transport is therefore a **tar written raw onto a disk image**, no
 //! filesystem on the transport disks:
 //!
-//! - Input: the host packs `{job, work, mvm-bins}` into a tar and writes it,
-//!   zero-padded to the disk size, at the input image. The guest reads the raw
-//!   disk and `tar x`.
+//! - Input: the host packs `{job, work, mvm-bins}` — plus, when the resolved
+//!   builder image carries one, an optional seeded Nix store closure NAR under
+//!   `closure-seed/` — into a tar and writes it, zero-padded to the disk size,
+//!   at the input image. The guest reads the raw disk and `tar x`.
 //! - Output: the guest packs its artifacts into a tar written raw onto the output
 //!   disk; the host reads the raw disk and `tar x` here.
 //!
@@ -25,6 +26,12 @@ use anyhow::{Context, Result};
 /// virtio-blk serves whole 512-byte sectors; transport images are sized up to a
 /// sector boundary so the guest sees an exact capacity.
 const SECTOR: u64 = 512;
+
+/// Archive directory the optional seeded-closure NAR rides under, mirroring
+/// the guest's `/closure-seed` mount point
+/// (`mvm-host-vm-init`'s `CLOSURE_SEED_NAR` contract). Kept in sync with the
+/// guest by convention, same as `job`/`work`/`mvm-bins` above.
+const CLOSURE_SEED_TAR_DIR: &str = "closure-seed";
 
 /// One named tree placed in the transport tar. `name` is the archive prefix the
 /// guest mounts/binds (e.g. `"job"`, `"work"`, `"mvm-bins"`); `src` is the host
@@ -42,8 +49,14 @@ fn sector_round_up(n: u64) -> u64 {
 /// Pack `inputs` into a tar and write it at `out_image`, zero-padded to at least
 /// `min_disk_size` (rounded up to a sector). `min_disk_size` is a floor: the disk
 /// always grows to hold the archive, so the inputs never overflow it.
+///
+/// `closure_nar`, when `Some`, is a single file (a builder pack's optional
+/// seeded Nix store closure) archived at `closure-seed/<file name>` alongside
+/// the input trees. `None` — the common case until a pack carries a closure —
+/// packs exactly the trees, unchanged from before this parameter existed.
 pub fn pack_input_disk(
     inputs: &[InputTree<'_>],
+    closure_nar: Option<&Path>,
     out_image: &Path,
     min_disk_size: u64,
 ) -> Result<()> {
@@ -53,6 +66,18 @@ pub fn pack_input_disk(
         for tree in inputs {
             b.append_dir_all(tree.name, tree.src)
                 .with_context(|| format!("archive '{}' from {}", tree.name, tree.src.display()))?;
+        }
+        if let Some(nar) = closure_nar {
+            // The guest imports a fixed path (`/closure-seed/<CLOSURE_FILE>`), so
+            // the tar entry name comes from `CLOSURE_FILE` regardless of what the
+            // source NAR happens to be called — otherwise a differently-named
+            // source silently lands the guest import a no-op.
+            let name = format!(
+                "{CLOSURE_SEED_TAR_DIR}/{}",
+                crate::builder_pack::CLOSURE_FILE
+            );
+            b.append_path_with_name(nar, &name)
+                .with_context(|| format!("archive closure NAR from {}", nar.display()))?;
         }
         b.finish().context("finish input tar")?;
     }
@@ -130,6 +155,7 @@ mod tests {
                     src: &work,
                 },
             ],
+            None,
             &image,
             1 << 20, // 1 MiB min
         )
@@ -157,6 +183,64 @@ mod tests {
     }
 
     #[test]
+    fn closure_nar_when_present_rides_the_input_disk_under_closure_seed() {
+        let dir = tempfile::tempdir().unwrap();
+        let job = dir.path().join("job");
+        fs::create_dir_all(&job).unwrap();
+        fs::write(job.join("cmd.sh"), b"#!/bin/sh\n").unwrap();
+        // Source deliberately NOT named `nix-closure.nar` — the tar entry name
+        // must still come from `CLOSURE_FILE` so the guest finds it.
+        let nar = dir.path().join("some-source.nar");
+        fs::write(&nar, b"pretend-nar-bytes").unwrap();
+
+        let image = dir.path().join("input.img");
+        pack_input_disk(
+            &[InputTree {
+                name: "job",
+                src: &job,
+            }],
+            Some(&nar),
+            &image,
+            1 << 20,
+        )
+        .unwrap();
+
+        let dest = dir.path().join("out");
+        read_output_disk(&image, &dest).unwrap();
+        assert_eq!(
+            fs::read(dest.join("closure-seed/nix-closure.nar")).unwrap(),
+            b"pretend-nar-bytes"
+        );
+    }
+
+    #[test]
+    fn no_closure_nar_means_no_closure_seed_entry() {
+        // The common case today: a builder image with no seeded closure packs
+        // exactly the input trees, with no `closure-seed/` directory at all —
+        // zero behavior change from before this parameter existed.
+        let dir = tempfile::tempdir().unwrap();
+        let job = dir.path().join("job");
+        fs::create_dir_all(&job).unwrap();
+        fs::write(job.join("cmd.sh"), b"#!/bin/sh\n").unwrap();
+
+        let image = dir.path().join("input.img");
+        pack_input_disk(
+            &[InputTree {
+                name: "job",
+                src: &job,
+            }],
+            None,
+            &image,
+            1 << 20,
+        )
+        .unwrap();
+
+        let dest = dir.path().join("out");
+        read_output_disk(&image, &dest).unwrap();
+        assert!(!dest.join("closure-seed").exists());
+    }
+
+    #[test]
     fn disk_grows_past_the_floor_to_hold_larger_inputs() {
         // A 512-byte floor can't hold a 4 KiB file's tar; the disk grows to fit.
         let dir = tempfile::tempdir().unwrap();
@@ -169,6 +253,7 @@ mod tests {
                 name: "big",
                 src: &big,
             }],
+            None,
             &image,
             512,
         )

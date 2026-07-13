@@ -823,9 +823,14 @@ pub(in crate::commands) mod attested_builder_pack {
 
     /// Copy the readiness-relevant builder-image files out of the verified pack.
     /// `vmlinux` + `rootfs.ext4` are required (a builder pack that omits them is
-    /// malformed). `cmdline.txt` is copied when present, otherwise synthesized to
-    /// the current canonical builder-vm cmdline. The cache's `manifest.json` is
-    /// always synthesized here because the pack envelope manifest
+    /// malformed). `cmdline.txt` and the seeded closure NAR
+    /// (`mvm_build::builder_pack::CLOSURE_FILE`) are optional and copied when
+    /// present. When the pack omits `cmdline.txt`, this synthesizes the current
+    /// canonical builder-vm cmdline. The closure NAR sits alongside the
+    /// readiness-gated files here so the HVF/libkrun boot paths — which resolve
+    /// it from this exact cache dir — pick it up without a separate lookup; it
+    /// plays no part in the readiness check itself. The cache's `manifest.json`
+    /// is always synthesized here because the pack envelope manifest
     /// (`pack-manifest.json`) is a different contract from the runtime cache
     /// manifest the builder loader validates.
     fn copy_builder_pack_artifacts(pack_root: &Path, dest: &Path) -> Result<()> {
@@ -847,6 +852,13 @@ pub(in crate::commands) mod attested_builder_pack {
         } else {
             std::fs::write(dest.join("cmdline.txt"), SYNTHESIZED_BUILDER_VM_CMDLINE)
                 .context("writing synthesized builder pack cmdline.txt")?;
+        }
+        for name in [mvm_build::builder_pack::CLOSURE_FILE] {
+            let src = pack_root.join(name);
+            if src.exists() {
+                std::fs::copy(&src, dest.join(name))
+                    .with_context(|| format!("copying builder pack artifact {name}"))?;
+            }
         }
         std::fs::write(
             dest.join("manifest.json"),

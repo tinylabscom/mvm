@@ -40,6 +40,10 @@ pub const ROOTHASH_FILE: &str = "rootfs.roothash";
 /// can be published as-is. Distinct from the cache's own `.pack-manifest.json`
 /// sidecar, and never a declared pack file.
 pub const MANIFEST_FILE: &str = "manifest.json";
+/// In-pack path of the optional seeded Nix store closure (a `nix-store
+/// --export` NAR of the dev-shell toolchain). Present only when the producer
+/// is given a closure to bundle; a pack without one stays valid.
+pub const CLOSURE_FILE: &str = "nix-closure.nar";
 
 /// The `vsock` capability every mvm builder pack requires of its host — the
 /// single control-plane transport an hvf builder VM exposes.
@@ -55,6 +59,11 @@ pub struct BuildBuilderPackParams {
     pub vmlinux: PathBuf,
     /// Source `rootfs.ext4` on disk; copied into the pack as [`ROOTFS_FILE`].
     pub rootfs: PathBuf,
+    /// Optional seeded Nix store closure NAR on disk; copied into the pack as
+    /// [`CLOSURE_FILE`] and hashed into `outputs.closure_hash` when present.
+    /// `None` leaves the pack exactly as before this field existed — closure
+    /// seeding is an accelerator, never a requirement.
+    pub closure: Option<PathBuf>,
     /// Architecture the artifacts target. Drives the manifest arch and the
     /// policy hash the host checks.
     pub target_arch: GuestArch,
@@ -171,12 +180,14 @@ pub fn build_builder_pack(
     // the honest sha256 of exactly what lands in the pack.
     let kernel_hash = sha256_file(&kernel_dest)?;
     let builder_image_hash = sha256_file(&rootfs_dest)?;
+    let (files, closure_hash) = stage_closure(&params.closure, out_dir)?;
 
     let manifest = PackBuilder::new(out_dir, builder_metadata(params), signing_key)
-        .files([KERNEL_FILE, ROOTFS_FILE])
+        .files(files)
         .output_hashes(PackOutputHashes {
             kernel_hash: Some(kernel_hash),
             builder_image_hash: Some(builder_image_hash),
+            closure_hash,
             ..Default::default()
         })
         .build()?;
@@ -222,12 +233,14 @@ pub fn build_keyless_builder_pack(
 
     let kernel_hash = sha256_file(&kernel_dest)?;
     let builder_image_hash = sha256_file(&rootfs_dest)?;
+    let (files, closure_hash) = stage_closure(&params.closure, out_dir)?;
 
     let manifest = PackBuilder::new_keyless(out_dir, builder_metadata(params), identity)
-        .files([KERNEL_FILE, ROOTFS_FILE])
+        .files(files)
         .output_hashes(PackOutputHashes {
             kernel_hash: Some(kernel_hash),
             builder_image_hash: Some(builder_image_hash),
+            closure_hash,
             ..Default::default()
         })
         .build()?;
@@ -386,6 +399,41 @@ fn copy_file(src: &Path, dest: &Path) -> Result<(), BuilderPackError> {
     Ok(())
 }
 
+/// Copy an optional closure NAR into `out_dir` as [`CLOSURE_FILE`] and hash it.
+/// Returns the kernel+rootfs file set extended with the closure when present,
+/// plus the resulting `closure_hash` — or the bare two-file set and `None`
+/// when `closure` is absent, leaving the pack exactly as before this field
+/// existed.
+fn stage_closure(
+    closure: &Option<PathBuf>,
+    out_dir: &Path,
+) -> Result<(Vec<&'static str>, Option<Sha256Hex>), BuilderPackError> {
+    match closure {
+        Some(src) => {
+            let dest = out_dir.join(CLOSURE_FILE);
+            copy_file(src, &dest)?;
+            let hash = sha256_file(&dest)?;
+            Ok((vec![KERNEL_FILE, ROOTFS_FILE, CLOSURE_FILE], Some(hash)))
+        }
+        None => Ok((vec![KERNEL_FILE, ROOTFS_FILE], None)),
+    }
+}
+
+/// Resolve the optional seeded closure NAR alongside a resolved builder
+/// image's per-arch cache dir (`builder_vm_cache_dir()/<arch>/`), the same
+/// dir every builder backend reads `vmlinux`/`rootfs.ext4` from. `None` is
+/// the common case today — a pack without a closure leaves the dir exactly
+/// as it was before this field existed, and every builder backend boots
+/// unchanged.
+///
+/// Shared by every builder-image resolver (hvf, libkrun, qemu) so the "does
+/// this arch dir carry a seeded closure" check has one definition instead of
+/// drifting per backend.
+pub fn closure_nar_path(arch_dir: &Path) -> Option<PathBuf> {
+    let nar = arch_dir.join(CLOSURE_FILE);
+    nar.is_file().then_some(nar)
+}
+
 /// Stream a file through SHA-256 so an arbitrarily large rootfs is never held in
 /// memory. Returns the lowercase-hex digest as a validated [`Sha256Hex`].
 fn sha256_file(path: &Path) -> Result<Sha256Hex, BuilderPackError> {
@@ -449,6 +497,7 @@ mod tests {
         BuildBuilderPackParams {
             vmlinux,
             rootfs,
+            closure: None,
             target_arch: GuestArch::host(),
             channel: CHANNEL.to_string(),
             builder_identity: "ci-builder".to_string(),
@@ -608,6 +657,86 @@ mod tests {
         let config = trust_config(&key, &[CHANNEL]);
         verify_pack_at(&manifest, out.path(), &policy, &config, &config)
             .expect("required outputs satisfied");
+    }
+
+    const CLOSURE_BYTES: &[u8] = b"nix-store-export-closure-bytes";
+
+    #[test]
+    fn builder_pack_with_closure_carries_closure_hash_and_file() {
+        let src = TempDir::new().expect("src tempdir");
+        let out = TempDir::new().expect("out tempdir");
+        let key = signing_key();
+
+        let closure_src = src.path().join("closure.nar");
+        fs::write(&closure_src, CLOSURE_BYTES).expect("write closure src");
+        let mut params = params_in(&src);
+        params.closure = Some(closure_src);
+
+        let manifest = build_builder_pack(&params, &key, out.path()).expect("produce pack");
+
+        assert_eq!(
+            manifest.outputs.closure_hash,
+            Some(Sha256Hex::from_bytes(CLOSURE_BYTES))
+        );
+        let files: Vec<&str> = manifest
+            .outputs
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert!(files.contains(&CLOSURE_FILE));
+        assert!(out.path().join(CLOSURE_FILE).exists());
+
+        let policy = host_policy(&[CHANNEL]);
+        let config = trust_config(&key, &[CHANNEL]);
+        let verified = verify_pack_at(&manifest, out.path(), &policy, &config, &config)
+            .expect("pack with closure verifies");
+        assert_eq!(verified.file_count, 3);
+    }
+
+    #[test]
+    fn builder_pack_without_closure_has_no_closure_hash_or_file() {
+        let src = TempDir::new().expect("src tempdir");
+        let out = TempDir::new().expect("out tempdir");
+        let key = signing_key();
+
+        // params_in() sets closure: None by default.
+        let manifest =
+            build_builder_pack(&params_in(&src), &key, out.path()).expect("produce pack");
+
+        assert_eq!(manifest.outputs.closure_hash, None);
+        let files: Vec<&str> = manifest
+            .outputs
+            .files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert!(!files.contains(&CLOSURE_FILE));
+        assert!(!out.path().join(CLOSURE_FILE).exists());
+
+        // Backward compatible: still verifies with the required-outputs gate
+        // for a Builder pack (closure_hash is not in that list).
+        let policy = host_policy(&[CHANNEL]);
+        let config = trust_config(&key, &[CHANNEL]);
+        let verified = verify_pack_at(&manifest, out.path(), &policy, &config, &config)
+            .expect("pack without closure still verifies");
+        assert_eq!(verified.file_count, 2);
+    }
+
+    #[test]
+    fn closure_nar_path_is_none_when_absent() {
+        let dir = TempDir::new().expect("arch dir");
+        assert_eq!(closure_nar_path(dir.path()), None);
+    }
+
+    #[test]
+    fn closure_nar_path_resolves_when_present() {
+        let dir = TempDir::new().expect("arch dir");
+        fs::write(dir.path().join(CLOSURE_FILE), CLOSURE_BYTES).expect("write nar");
+        assert_eq!(
+            closure_nar_path(dir.path()),
+            Some(dir.path().join(CLOSURE_FILE))
+        );
     }
 
     #[test]

@@ -22,13 +22,23 @@
 //! problem without aborting the build. Empty / unset env is treated
 //! the same as "no override."
 
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use crate::builder_health;
 use crate::builder_vm::{BuilderVm, BuilderVmError};
-use crate::libkrun_builder::LibkrunBuilderVm;
+use crate::libkrun_builder::{LibkrunBuilderVm, builder_vm_cache_dir, host_arch_tag};
 use crate::qemu_builder::QemuBuilderVm;
 use mvm_core::platform::{Platform, current};
+
+/// Resolve the optional seeded Nix store closure NAR for the live host's
+/// arch, the same per-arch cache dir every libkrun/qemu builder image read
+/// resolves against. `None` is the common case today (see
+/// `builder_pack::closure_nar_path`'s doc); a `LibkrunBuilderVm` attaches
+/// nothing and boots exactly as before this seam existed.
+fn closure_nar_for_host_arch() -> Option<PathBuf> {
+    crate::builder_pack::closure_nar_path(&builder_vm_cache_dir().join(host_arch_tag()))
+}
 
 /// Constructor for the hvf builder, registered by the CLI (which can name
 /// `HvfBuilderVm` and resolve its image). `mvm-build` sits below
@@ -187,7 +197,9 @@ pub fn resolve_builder_backend_with_override(
     flag: Option<BuilderBackendChoice>,
 ) -> Box<dyn BuilderVm> {
     match resolve_choice_with_override(flag) {
-        BuilderBackendChoice::Libkrun => Box::new(LibkrunBuilderVm::default()),
+        BuilderBackendChoice::Libkrun => {
+            Box::new(LibkrunBuilderVm::default().with_closure_nar(closure_nar_for_host_arch()))
+        }
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
         BuilderBackendChoice::Hvf => {
             // Delegate to the registered constructor; panic if not registered
@@ -209,7 +221,9 @@ pub fn try_resolve_builder_backend_with_override(
     flag: Option<BuilderBackendChoice>,
 ) -> Result<Box<dyn BuilderVm>, BuilderVmError> {
     match resolve_choice_with_override(flag) {
-        BuilderBackendChoice::Libkrun => Ok(Box::new(LibkrunBuilderVm::default())),
+        BuilderBackendChoice::Libkrun => Ok(Box::new(
+            LibkrunBuilderVm::default().with_closure_nar(closure_nar_for_host_arch()),
+        )),
         BuilderBackendChoice::Qemu => Ok(Box::new(QemuBuilderVm::new())),
         BuilderBackendChoice::Hvf => match HVF_CTOR.get() {
             Some(ctor) => ctor(),
@@ -246,9 +260,11 @@ pub fn resolve_stage0_backend_for_choice(
 ) -> Box<dyn BuilderVm> {
     match stage0_backend_choice(choice) {
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
-            Box::new(LibkrunBuilderVm::default().with_verbose(verbose))
-        }
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => Box::new(
+            LibkrunBuilderVm::default()
+                .with_verbose(verbose)
+                .with_closure_nar(closure_nar_for_host_arch()),
+        ),
     }
 }
 
@@ -688,6 +704,28 @@ mod tests {
         ] {
             assert_ne!(c.name(), "vz");
         }
+    }
+
+    #[test]
+    fn closure_nar_for_host_arch_is_none_when_the_arch_cache_dir_has_no_closure() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        assert_eq!(closure_nar_for_host_arch(), None);
+    }
+
+    #[test]
+    fn closure_nar_for_host_arch_resolves_when_the_arch_cache_dir_has_one() {
+        let scratch = tempfile::TempDir::new().unwrap();
+        let mut env = TestEnv::new();
+        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        let arch_dir = builder_vm_cache_dir().join(host_arch_tag());
+        std::fs::create_dir_all(&arch_dir).unwrap();
+        std::fs::write(arch_dir.join("nix-closure.nar"), b"nar-bytes").unwrap();
+        assert_eq!(
+            closure_nar_for_host_arch(),
+            Some(arch_dir.join("nix-closure.nar"))
+        );
     }
 
     #[test]

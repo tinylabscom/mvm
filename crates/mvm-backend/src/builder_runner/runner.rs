@@ -50,6 +50,10 @@ pub struct BuilderBuild<'a> {
     pub host_bin_dir: &'a Path,
     /// Optional read-only runtime overlay ext4 for the builder guest.
     pub runtime_overlay: Option<&'a Path>,
+    /// Optional seeded Nix store closure NAR, resolved from the builder
+    /// image when it carries one → the guest's `/closure-seed/<file>`. `None`
+    /// (the common case today) adds no share at all.
+    pub closure_nar: Option<&'a Path>,
     /// Output disk size in bytes; must exceed the artifact tar (rootfs + sidecars).
     pub output_size: u64,
     pub vcpus: u32,
@@ -107,6 +111,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
                     src: b.host_bin_dir,
                 },
             ],
+            b.closure_nar,
             &input_disk,
             INPUT_DISK_MIN,
         )?;
@@ -225,6 +230,7 @@ mod tests {
                 work_src: &work,
                 host_bin_dir: &bins,
                 runtime_overlay: None,
+                closure_nar: None,
                 output_size: 1 << 20,
                 vcpus: 2,
                 memory_mib: 1024,
@@ -242,5 +248,70 @@ mod tests {
         // mock guest, which writes nothing).
         assert!(tmp.path().join("vms/bld-unit/input.img").exists());
         assert!(outcome.output_dir.exists());
+    }
+
+    #[test]
+    fn build_rides_the_closure_nar_on_the_same_input_disk_when_present() {
+        // Attaching a seeded closure must never grow the disk layout — it
+        // rides inside the existing input.img tar, so the builder spec still
+        // boots exactly 4 disks.
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let job = tmp.path().join("job");
+        let work = tmp.path().join("work");
+        let bins = tmp.path().join("bins");
+        for d in [&job, &work, &bins] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(job.join("cmd.sh"), b"#!/bin/sh\nnix build\n").unwrap();
+        std::fs::write(work.join("flake.nix"), b"{}").unwrap();
+        std::fs::write(bins.join("mvm-host-vm-init"), b"ELF").unwrap();
+        let kernel = tmp.path().join("Image");
+        let rootfs = tmp.path().join("rootfs.ext4");
+        let nix_store = tmp.path().join("nix-store.img");
+        for f in [&kernel, &rootfs, &nix_store] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        let closure = tmp.path().join("nix-closure.nar");
+        std::fs::write(&closure, b"pretend-nar-bytes").unwrap();
+
+        let runner = BuilderRunner::new(MockDriver::default().reporting_status(VmStatus::Stopped));
+        let outcome = runner
+            .build(&BuilderBuild {
+                name: "bld-closure",
+                kernel: &kernel,
+                rootfs: &rootfs,
+                nix_store: &nix_store,
+                job_dir: &job,
+                work_src: &work,
+                host_bin_dir: &bins,
+                runtime_overlay: None,
+                closure_nar: Some(&closure),
+                output_size: 1 << 20,
+                vcpus: 2,
+                memory_mib: 1024,
+            })
+            .expect("build orchestrates against the mock driver");
+
+        assert!(outcome.stopped);
+        assert_eq!(runner.driver.booted_specs()[0].blocks.len(), 4);
+
+        // Extract the packed input disk directly to confirm the closure NAR
+        // landed under closure-seed/ alongside job/work/mvm-bins.
+        let extracted = tmp.path().join("extracted-input");
+        mvm_build::builder_disk_transport::read_output_disk(
+            &tmp.path().join("vms/bld-closure/input.img"),
+            &extracted,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(extracted.join("closure-seed/nix-closure.nar")).unwrap(),
+            b"pretend-nar-bytes"
+        );
     }
 }

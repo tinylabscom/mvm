@@ -24,8 +24,12 @@ fn main() {
 
     let home = std::env::var("HOME").unwrap();
     let dev = format!("{home}/.mvm/dev/current");
-    let kernel = PathBuf::from(format!("{dev}/vmlinux"));
-    let src_rootfs = PathBuf::from(format!("{dev}/rootfs.ext4"));
+    let kernel = PathBuf::from(
+        std::env::var("MVM_INJECT_KERNEL").unwrap_or_else(|_| format!("{dev}/vmlinux")),
+    );
+    let src_rootfs = PathBuf::from(
+        std::env::var("MVM_INJECT_SRC_ROOTFS").unwrap_or_else(|_| format!("{dev}/rootfs.ext4")),
+    );
     let musl = "target/aarch64-unknown-linux-musl/release";
     let patcher = PathBuf::from(format!("{musl}/mvm-rootfs-patcher"));
     let new_init = PathBuf::from(format!("{musl}/mvm-host-vm-init"));

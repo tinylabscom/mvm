@@ -1030,13 +1030,15 @@ let
     ${builtins.seq assertNoSshTemplateInputs assertNoSshClosureScript}
 
     # Standard FHS dirs the kernel + init expect. `/nix-store`,
-    # `/job`, `/out`, `/work`, `/mvm-bins` are mount points the libkrun
-    # builder VM needs pre-created — rootfs boots
-    # `ro` so `mvm-host-vm-init` can't `mkdir` them at runtime. `/mnt`,
+    # `/job`, `/out`, `/work`, `/mvm-bins`, `/closure-seed` are mount
+    # points the libkrun builder VM needs pre-created — rootfs boots
+    # `ro` so `mvm-host-vm-init` can't `mkdir` them at runtime.
+    # `/closure-seed` receives the optional pre-fetched toolchain closure
+    # NAR (empty + unused unless the host attaches one). `/mnt`,
     # `/data` are the user-volume mount roots (MountPathPolicy allow-roots,
     # alongside `/work`) — `/init` mounts `--volume` shares here and can't
     # mkdir on the ro rootfs either.
-    mkdir -p "$out"/{bin,sbin,etc,proc,sys,dev,tmp,run,var,root,home,nix/store,nix-store,etc/mvm,job,out,work,mvm-bins,mnt,data}
+    mkdir -p "$out"/{bin,sbin,etc,proc,sys,dev,tmp,run,var,root,home,nix/store,nix-store,etc/mvm,job,out,work,mvm-bins,closure-seed,mnt,data}
     chmod 1777 "$out/tmp"
     chmod 0755 "$out/run"
 

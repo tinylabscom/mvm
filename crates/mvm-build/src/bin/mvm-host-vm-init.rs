@@ -137,8 +137,9 @@ fn main() -> ExitCode {
 #[cfg(any(target_os = "linux", test))]
 fn virtiofs_tag_is_read_only(tag: &str) -> bool {
     // `work` is the user's source; `mvm-bins` is the embedded host
-    // binaries. Both are inputs the guest must not write back.
-    tag == "work" || tag == "mvm-bins"
+    // binaries; `closure-seed` is the optional seeded Nix store closure
+    // NAR. All three are inputs the guest must not write back.
+    tag == "work" || tag == "mvm-bins" || tag == "closure-seed"
 }
 
 /// One user-supplied volume to mount, decoded from the `mvm.uvols=`
@@ -541,6 +542,40 @@ fn agent_spawn_command(agent_bin: &Path) -> Command {
     c
 }
 
+// ============================================================================
+// Seeded closure import (content-keyed idempotency)
+// ============================================================================
+//
+// A builder pack may carry a `nix-closure.nar` — a `nix-store --export` of
+// the dev-shell toolchain closure. When the host wires that NAR into the
+// guest (a later slice), `linux::import_seeded_closure` imports it into
+// the persistent Nix store exactly once per closure *content*, not once
+// per boot: an unchanged closure across reboots is a no-op, but a pack
+// carrying a different closure re-imports. These two functions are the
+// pure decision logic that call site drives; they carry no filesystem or
+// process access so they're exercised on every host, not just Linux.
+
+/// Whether the closure identified by `closure_hash` still needs
+/// importing, given the idempotency marker's contents left by a prior
+/// boot (`None` — no marker, e.g. first boot or a freshly formatted
+/// persistent store). `Some(hash)` where `hash` (ignoring surrounding
+/// whitespace) equals `closure_hash` means this exact closure is already
+/// in the store; anything else — no marker, a stale hash, a different
+/// pack's closure — means it still needs importing.
+#[cfg(any(target_os = "linux", test))]
+fn closure_import_needed(marker_contents: Option<&str>, closure_hash: &str) -> bool {
+    marker_contents.map(str::trim) != Some(closure_hash)
+}
+
+/// The idempotency marker's on-disk body after successfully importing
+/// `closure_hash`. A later boot reads this back and compares it (via
+/// [`closure_import_needed`]) against the newly computed hash of
+/// whatever closure NAR is present that boot.
+#[cfg(any(target_os = "linux", test))]
+fn closure_marker_contents(closure_hash: &str) -> String {
+    closure_hash.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,8 +891,42 @@ mod tests {
     fn virtiofs_tag_policy_marks_input_shares_read_only() {
         assert!(virtiofs_tag_is_read_only("work"));
         assert!(virtiofs_tag_is_read_only("mvm-bins"));
+        assert!(virtiofs_tag_is_read_only("closure-seed"));
         assert!(!virtiofs_tag_is_read_only("out"));
         assert!(!virtiofs_tag_is_read_only("job"));
+    }
+
+    // ── seeded closure import (content-keyed idempotency) ──
+
+    #[test]
+    fn closure_import_needed_on_first_boot_with_no_marker() {
+        assert!(closure_import_needed(None, "abc123"));
+    }
+
+    #[test]
+    fn closure_import_needed_false_when_marker_matches_hash() {
+        assert!(!closure_import_needed(Some("abc123"), "abc123"));
+    }
+
+    #[test]
+    fn closure_import_needed_true_when_closure_content_changed() {
+        // A different pack's closure hashes differently — re-import even
+        // though a marker from a prior closure exists.
+        assert!(closure_import_needed(Some("abc123"), "def456"));
+    }
+
+    #[test]
+    fn closure_import_needed_tolerates_marker_whitespace() {
+        // The marker is written via `std::fs::write` with no trailing
+        // newline, but a defensive trim keeps hand-edited/foreign markers
+        // from forcing a spurious re-import.
+        assert!(!closure_import_needed(Some("abc123\n"), "abc123"));
+        assert!(!closure_import_needed(Some(" abc123 "), "abc123"));
+    }
+
+    #[test]
+    fn closure_marker_contents_records_the_imported_hash_verbatim() {
+        assert_eq!(closure_marker_contents("abc123"), "abc123");
     }
 
     #[test]
@@ -1072,6 +1141,32 @@ mod linux {
     const NIX_DB_LOADED_MARKER: &str = "/nix-store/.seed-db-loaded";
     const RUN_LIFECYCLE_LOG: &str = "/run/mvm-host-vm-init.lifecycle.log";
 
+    /// Guest-side path an optional seeded Nix store closure NAR is read
+    /// from. **Contract with the host wiring:** a host that resolved a
+    /// builder pack carrying a closure (`BuildBuilderPackParams.closure`
+    /// / `builder_pack::CLOSURE_FILE` = `"nix-closure.nar"`) attaches it
+    /// here as a read-only share before boot. Absent when the resolved
+    /// builder image carries no closure — the common case today — in
+    /// which case [`import_seeded_closure`] returns immediately. The
+    /// filename mirrors `CLOSURE_FILE` on purpose; keep the two in sync
+    /// if either moves.
+    const CLOSURE_SEED_NAR: &str = "/closure-seed/nix-closure.nar";
+
+    /// Parent directory of [`CLOSURE_SEED_NAR`] — the mount point the host
+    /// attaches the seeded closure at, whichever transport it uses (the
+    /// `closure-seed` virtio-fs tag on libkrun/qemu, the `closure-seed/`
+    /// disk-transport tar entry on the hvf VMM). A separate literal from
+    /// `CLOSURE_SEED_NAR` (not derived from it), matching how the other
+    /// fixed-share consts below are each declared independently; keep the
+    /// two in sync if either moves.
+    const CLOSURE_SEED_DIR: &str = "/closure-seed";
+
+    /// Content-keyed idempotency marker recording the sha256 of the
+    /// closure NAR most recently imported into the persistent store.
+    /// Lives next to [`NIX_DB_LOADED_MARKER`] — same invisibility to
+    /// nix-daemon, same "outside `store/` and `var/`" placement.
+    const CLOSURE_IMPORTED_MARKER: &str = "/nix-store/.seed-closure-imported";
+
     /// Per-job command staging dir (`/job/cmd.sh`, `/job/env`,
     /// `/job/result`). Mounted via virtio-fs from the host
     /// (`LibkrunBuilderVm` declares the `job` tag).
@@ -1099,11 +1194,16 @@ mod linux {
     /// `KrunContext::add_virtio_fs` declarations in
     /// `LibkrunBuilderVm::run_build`. Order doesn't matter; the
     /// guest mounts each by tag. `mvm-bins` is read-only (inputs).
+    /// `closure-seed` is only ever attached by the host when the
+    /// resolved builder image carries a seeded closure NAR — absent
+    /// otherwise, in which case the mount attempt below fails and logs
+    /// (best-effort, matching every other entry in this table).
     const VIRTIOFS_MOUNTS: &[(&str, &str)] = &[
         ("work", WORK_DIR),
         ("out", OUT_DIR),
         ("job", JOB_DIR),
         ("mvm-bins", HOST_BIN_DIR),
+        ("closure-seed", CLOSURE_SEED_DIR),
     ];
 
     /// Max stderr lines we capture into `/job/result`. Keeps
@@ -1474,6 +1574,19 @@ mod linux {
                 }
                 eprintln!("mvm-host-vm-init: runtime overlay mount warning (non-fatal): {e}");
             }
+        }
+        // Optional accelerator: a builder pack may carry a pre-fetched
+        // toolchain closure NAR. Import it into the persistent store once the
+        // store is set up (Track A) and its `/closure-seed` mount is in place —
+        // virtio-fs shares (Track B, joined above) for the libkrun/qemu VMMs,
+        // or the input-disk bind (staged just above) for the hvf VMM, which has
+        // no virtio-fs. Must run after staging so the NAR is actually visible;
+        // running it inside `setup_nix_store` would read `/closure-seed` before
+        // it is mounted and silently import nothing. Fail-open — the seed saves
+        // a fetch/eval, it is never a hard dependency, and the common case (no
+        // NAR attached) returns immediately without touching the filesystem.
+        if let Err(e) = import_seeded_closure() {
+            eprintln!("mvm-host-vm-init: import_seeded_closure warning (non-fatal): {e}");
         }
 
         // Fork the guest agent under setpriv so the builder/dev VM runs
@@ -2650,6 +2763,75 @@ mod linux {
         Ok(())
     }
 
+    /// Import [`CLOSURE_SEED_NAR`] into the persistent Nix store when
+    /// present and not already imported (content-keyed via
+    /// [`crate::closure_import_needed`]). Absent NAR — the common case
+    /// until the host-side attach lands — is a silent no-op: no log line,
+    /// no filesystem write, so this step stays off the critical path.
+    ///
+    /// Every error path returns `Err` rather than panicking; the caller
+    /// logs and continues booting regardless of what went wrong here.
+    fn import_seeded_closure() -> Result<(), String> {
+        let nar = Path::new(CLOSURE_SEED_NAR);
+        if !nar.is_file() {
+            return Ok(());
+        }
+
+        let hash = hash_nar_file(nar)?;
+        let marker = std::fs::read_to_string(CLOSURE_IMPORTED_MARKER).ok();
+        if !crate::closure_import_needed(marker.as_deref(), &hash) {
+            return Ok(());
+        }
+
+        eprintln!("mvm-host-vm-init: importing seeded closure {CLOSURE_SEED_NAR} ({hash})");
+        let file = std::fs::File::open(nar).map_err(|e| format!("open {CLOSURE_SEED_NAR}: {e}"))?;
+        let status = Command::new("/sbin/nix-store")
+            .arg("--import")
+            .stdin(file)
+            .status()
+            .map_err(|e| format!("spawn /sbin/nix-store --import: {e}"))?;
+        if !status.success() {
+            return Err(format!(
+                "nix-store --import exit {}",
+                status.code().unwrap_or(-1)
+            ));
+        }
+
+        std::fs::write(
+            CLOSURE_IMPORTED_MARKER,
+            crate::closure_marker_contents(&hash),
+        )
+        .map_err(|e| format!("write {CLOSURE_IMPORTED_MARKER}: {e}"))?;
+        Ok(())
+    }
+
+    /// Stream `path` through SHA-256 so an arbitrarily large closure NAR
+    /// (the design budget is content-defined — roughly 1 GB for the
+    /// dev-shell toolchain) is never held in memory at once. Mirrors
+    /// `builder_pack::sha256_file`'s streaming discipline; duplicated
+    /// rather than shared because this binary intentionally doesn't
+    /// depend on the `mvm-build` lib crate (every dependency here is
+    /// weighed against the static-linked init's size budget).
+    fn hash_nar_file(path: &Path) -> Result<String, String> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+
+        let mut file =
+            std::fs::File::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = file
+                .read(&mut buffer)
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            if read == 0 {
+                break;
+            }
+            hasher.update(&buffer[..read]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
     /// Independent track that runs concurrently
     /// with `setup_nix_store`. Loads the `fuse` + `virtiofs`
     /// kernel modules (themselves fanned out across two threads),
@@ -2757,11 +2939,12 @@ mod linux {
     /// writable so `write_result` can drop `/job/result`.
     const DISK_INPUT_STAGE: &str = "/run/builder-input";
 
-    /// Populate `/job`, `/work`, `/mvm-bins` from the input disk and back `/out`
-    /// with a writable dir on the persistent nix-store disk. This is the
-    /// disk-transport equivalent of the virtio-fs shares, for the hvf VMM
-    /// (which has no virtio-fs). A tmpfs `/out` would be capped by guest RAM —
-    /// too small for a built rootfs — so `/out` lives on the big nix-store disk.
+    /// Populate `/job`, `/work`, `/mvm-bins`, and (when the host packed one)
+    /// `/closure-seed` from the input disk, and back `/out` with a writable
+    /// dir on the persistent nix-store disk. This is the disk-transport
+    /// equivalent of the virtio-fs shares, for the hvf VMM (which has no
+    /// virtio-fs). A tmpfs `/out` would be capped by guest RAM — too small
+    /// for a built rootfs — so `/out` lives on the big nix-store disk.
     fn stage_disk_transport_input(t: &crate::DiskTransport) -> Result<(), String> {
         std::fs::create_dir_all(DISK_INPUT_STAGE)
             .map_err(|e| format!("mkdir {DISK_INPUT_STAGE}: {e}"))?;
@@ -2775,10 +2958,15 @@ mod linux {
         if !status.success() {
             return Err(format!("tar x {} exited {:?}", t.input_dev, status.code()));
         }
+        // Each entry is best-effort: the host only packs `closure-seed` when
+        // the resolved builder image carries a seeded closure, so its absence
+        // here is the common case, not an error — `import_seeded_closure`
+        // already treats a missing `CLOSURE_SEED_NAR` as a silent no-op.
         for (name, target) in [
             ("job", JOB_DIR),
             ("work", WORK_DIR),
             ("mvm-bins", HOST_BIN_DIR),
+            ("closure-seed", CLOSURE_SEED_DIR),
         ] {
             let src = format!("{DISK_INPUT_STAGE}/{name}");
             if Path::new(&src).exists() {
