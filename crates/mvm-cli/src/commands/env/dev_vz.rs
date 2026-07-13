@@ -39,10 +39,11 @@ use default_microvm::DefaultMicrovmVariant;
 #[cfg(test)]
 use default_microvm::{
     WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
-    resolve_workload_kernel_bootstrap,
+    kernel_carries_dm_verity, resolve_workload_kernel_bootstrap,
 };
 pub(crate) use default_microvm::{
-    ensure_default_microvm_image, ensure_workload_kernel, ensure_workload_verity_initrd,
+    assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
+    ensure_workload_verity_initrd,
 };
 use image_ops::validate_dev_image_artifacts;
 #[cfg(feature = "builder-vm")]

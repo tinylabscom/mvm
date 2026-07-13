@@ -2471,7 +2471,7 @@ fn handle_client(
 
         #[cfg(not(feature = "dev-shell"))]
         GuestRequest::Exec { .. } => GuestResponse::Error {
-            message: "exec not available: guest agent built without dev-shell feature".to_string(),
+            message: "exec not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access".to_string(),
         },
 
         #[cfg(feature = "dev-shell")]
@@ -2490,7 +2490,7 @@ fn handle_client(
 
         #[cfg(not(feature = "dev-shell"))]
         GuestRequest::ExecBatch { .. } => GuestResponse::Error {
-            message: "exec-batch not available: guest agent built without dev-shell feature"
+            message: "exec-batch not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                 .to_string(),
         },
 
@@ -2511,7 +2511,7 @@ fn handle_client(
 
         #[cfg(not(feature = "dev-shell"))]
         GuestRequest::RunCode { .. } => GuestResponse::Error {
-            message: "run-code not available: guest agent built without dev-shell feature"
+            message: "run-code not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                 .to_string(),
         },
 
@@ -2547,7 +2547,7 @@ fn handle_client(
 
         #[cfg(not(feature = "dev-shell"))]
         GuestRequest::RunDetached { .. } => GuestResponse::Error {
-            message: "run-detached not available: guest agent built without dev-shell feature"
+            message: "run-detached not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                 .to_string(),
         },
 
@@ -2638,7 +2638,7 @@ fn handle_client(
 
         #[cfg(not(feature = "dev-shell"))]
         GuestRequest::ConsoleOpen { .. } => GuestResponse::Error {
-            message: "console not available: guest agent built without dev-shell feature"
+            message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                 .to_string(),
         },
 
@@ -2666,7 +2666,7 @@ fn handle_client(
 
         #[cfg(not(feature = "dev-shell"))]
         GuestRequest::ConsoleClose { .. } => GuestResponse::Error {
-            message: "console not available: guest agent built without dev-shell feature"
+            message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                 .to_string(),
         },
 
@@ -2688,7 +2688,7 @@ fn handle_client(
 
         #[cfg(not(feature = "dev-shell"))]
         GuestRequest::ConsoleResize { .. } => GuestResponse::Error {
-            message: "console not available: guest agent built without dev-shell feature"
+            message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                 .to_string(),
         },
 
@@ -2827,7 +2827,7 @@ fn handle_client(
                 GuestResponse::ProcResult(mvm_guest::vsock::ProcResult::Error {
                     kind: mvm_guest::vsock::ProcErrorKind::UnsupportedInProduction,
                     message:
-                        "process control not available: guest agent built without dev-shell feature"
+                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                             .to_string(),
                 })
             }
@@ -2842,7 +2842,7 @@ fn handle_client(
                 GuestResponse::ProcResult(mvm_guest::vsock::ProcResult::Error {
                     kind: mvm_guest::vsock::ProcErrorKind::UnsupportedInProduction,
                     message:
-                        "process control not available: guest agent built without dev-shell feature"
+                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                             .to_string(),
                 })
             }
@@ -2862,7 +2862,7 @@ fn handle_client(
                 GuestResponse::ProcResult(mvm_guest::vsock::ProcResult::Error {
                     kind: mvm_guest::vsock::ProcErrorKind::UnsupportedInProduction,
                     message:
-                        "process control not available: guest agent built without dev-shell feature"
+                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                             .to_string(),
                 })
             }
@@ -2884,7 +2884,7 @@ fn handle_client(
                 GuestResponse::ProcResult(mvm_guest::vsock::ProcResult::Error {
                     kind: mvm_guest::vsock::ProcErrorKind::UnsupportedInProduction,
                     message:
-                        "process control not available: guest agent built without dev-shell feature"
+                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                             .to_string(),
                 })
             }
@@ -2903,7 +2903,7 @@ fn handle_client(
                 GuestResponse::ProcResult(mvm_guest::vsock::ProcResult::Error {
                     kind: mvm_guest::vsock::ProcErrorKind::UnsupportedInProduction,
                     message:
-                        "process control not available: guest agent built without dev-shell feature"
+                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                             .to_string(),
                 })
             }
@@ -2923,7 +2923,7 @@ fn handle_client(
                 GuestResponse::ProcWaitEvent(mvm_guest::vsock::ProcWaitEvent::Error {
                     kind: mvm_guest::vsock::ProcErrorKind::UnsupportedInProduction,
                     message:
-                        "process control not available: guest agent built without dev-shell feature"
+                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
                             .to_string(),
                 })
             }

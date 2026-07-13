@@ -43,6 +43,56 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     }
 }
 
+/// Whether a kernel image carries device-mapper + dm-verity support (needed to
+/// boot a verity-sealed rootfs). `None` when the input is not a readable,
+/// uncompressed kernel we can judge (a compressed `Image`, a truncated file, or
+/// any non-kernel blob) — callers must NOT block on `None`. `Some(false)` only
+/// when the kernel is readable yet carries no device-mapper/dm-verity symbol at
+/// all — the signature of a kernel built without `CONFIG_BLK_DEV_DM`/`DM_VERITY`
+/// (e.g. the builder kernel, which force-drops them).
+pub(super) fn kernel_carries_dm_verity(bytes: &[u8]) -> Option<bool> {
+    // Only an uncompressed vmlinux exposes symbol strings; anything else is
+    // inconclusive, and blocking on it would false-reject a valid kernel.
+    if !byte_contains(bytes, b"Linux version") {
+        return None;
+    }
+    // A dm-verity-capable kernel carries these device-mapper / dm-verity symbols
+    // (via KALLSYMS + the dm subsystem's log strings). A kernel built without the
+    // device-mapper umbrella carries none of them.
+    const MARKERS: &[&[u8]] = &[
+        b"device-mapper",
+        b"dm_bufio",
+        b"verity_ctr",
+        b"dm_table_create",
+        b"dm-verity",
+    ];
+    Some(MARKERS.iter().any(|m| byte_contains(bytes, m)))
+}
+
+fn byte_contains(haystack: &[u8], needle: &[u8]) -> bool {
+    needle.len() <= haystack.len() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Fail fast when a verity-sealed launch resolved a kernel with no dm-verity
+/// support. Without this the guest panics in early init opening
+/// `/dev/mapper/control` ("No such file or directory") with zero host signal —
+/// so surface a clear host-side error instead. Conservative: only a *readable*
+/// kernel with no dm-verity symbol at all trips it, so an unrecognized/compressed
+/// kernel is never wrongly rejected.
+pub(crate) fn assert_workload_kernel_supports_verity(kernel_path: &str) -> Result<()> {
+    let bytes = std::fs::read(kernel_path)
+        .with_context(|| format!("read resolved workload kernel {kernel_path}"))?;
+    if kernel_carries_dm_verity(&bytes) == Some(false) {
+        anyhow::bail!(
+            "resolved workload kernel {kernel_path} carries no device-mapper/dm-verity \
+             support, but the workload boots verity-sealed. It would panic the guest at boot \
+             (mvm-verity-init: open /dev/mapper/control: No such file or directory). This \
+             kernel cannot back a sealed workload — resolve or rebuild the workload kernel."
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn ensure_workload_verity_initrd() -> Result<String> {
     let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
