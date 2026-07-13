@@ -50,6 +50,6 @@ pub mod run;
 /// Userspace TCP/IP egress for the packet tunnel: terminate admitted guest
 /// flows in an in-process `smoltcp` stack and bridge each to an ordinary host
 /// socket. One forwarder on every host — no unprivileged kernel NAT required.
-#[cfg(unix)]
+#[cfg(all(unix, feature = "packet-forwarder"))]
 pub mod smoltcp_egress;
 pub mod supervisor;

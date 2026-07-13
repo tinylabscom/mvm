@@ -170,7 +170,7 @@ fn main() -> Result<()> {
     let packet_policy = config.worker.packet_policy.clone();
     // The userspace stack needs the admitted gate; grab it before the worker
     // consumes the config (the outer match moves `interface_name`).
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "packet-forwarder"))]
     let l3_gate = match &config.worker.packet_policy {
         TunnelPacketPolicy::L3Forward { gate, .. } => Some(gate.clone()),
         _ => None,
@@ -196,7 +196,7 @@ fn main() -> Result<()> {
             // host device here; its presence only selected forward (vs the
             // gate-only mode below).
             let _ = &interface_name;
-            #[cfg(unix)]
+            #[cfg(all(unix, feature = "packet-forwarder"))]
             {
                 let gate = l3_gate
                     .as_ref()
@@ -213,9 +213,11 @@ fn main() -> Result<()> {
                     .run(&mut worker)
                     .context("run userspace TCP/IP egress stack")?;
             }
-            #[cfg(not(unix))]
+            #[cfg(not(all(unix, feature = "packet-forwarder")))]
             {
-                anyhow::bail!("l3_forward host egress requires a unix host");
+                anyhow::bail!(
+                    "l3_forward host egress requires the packet-forwarder feature on a unix host"
+                );
             }
         }
         TunnelPacketPolicy::L3Forward {
