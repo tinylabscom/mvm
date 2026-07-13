@@ -497,7 +497,7 @@ pub fn resolve_manifest_config_path(path: &Path) -> Result<PathBuf> {
 pub fn key_for_manifest_identity(identity: &str) -> String {
     let mut hasher = sha2::Sha256::new();
     hasher.update(identity.as_bytes());
-    format!("{:x}", hasher.finalize())
+    hex::encode(hasher.finalize())
 }
 
 /// Canonical registry key for a manifest at `path`:

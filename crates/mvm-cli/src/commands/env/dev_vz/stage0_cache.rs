@@ -460,7 +460,7 @@ pub(super) fn builder_vm_source_fingerprint(builder_flake_dir: &str) -> Result<S
         hash_dir_recursive(&mut hasher, "nix/lib", &nix_lib)?;
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Fold one embedded host-binary's identity into the fingerprint.
@@ -675,7 +675,7 @@ fn builder_vm_artifact_digest_manifest(dir: &std::path::Path) -> Result<String> 
         }
         let bytes = std::fs::read(&path)
             .with_context(|| format!("reading builder VM artifact {}", path.display()))?;
-        lines.push(format!("{:x}  {name}", Sha256::digest(&bytes)));
+        lines.push(format!("{}  {name}", hex::encode(Sha256::digest(&bytes))));
     }
     Ok(format!("{}\n", lines.join("\n")))
 }

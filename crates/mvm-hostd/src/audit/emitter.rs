@@ -385,7 +385,6 @@ impl AuditEmitter {
 mod tests {
     use super::*;
     use crate::supervisor::verify_audit_chain;
-    use rand::rngs::OsRng;
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
@@ -399,7 +398,11 @@ mod tests {
         // Emit a full admitted→launched pair; both lines must reference
         // the same plan_id and live in the tenant's audit file.
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-A");
 
@@ -421,7 +424,11 @@ mod tests {
     #[test]
     fn audit_chain_verifies_clean() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-X");
@@ -435,7 +442,11 @@ mod tests {
     #[test]
     fn oci_provenance_event_is_chain_signed_with_required_labels() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-OCI");
@@ -490,7 +501,11 @@ mod tests {
         // witness). Emit one of each and assert both verify + carry the right
         // root_strategy + runtime_source_policy labels.
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
 
@@ -522,7 +537,11 @@ mod tests {
     #[test]
     fn grant_required_event_is_chain_signed_with_required_labels() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-GR");
@@ -558,7 +577,11 @@ mod tests {
         // signature is wrong (or rather, taken from a different key).
         // verify_audit_chain must refuse.
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key.clone(), dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-Z");
@@ -581,7 +604,11 @@ mod tests {
     #[test]
     fn emit_failed_records_class_and_message() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-F");
@@ -603,7 +630,11 @@ mod tests {
     #[test]
     fn emit_exited_writes_plan_exited_with_code() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-EX");
@@ -621,7 +652,11 @@ mod tests {
     fn audit_dir_is_created_with_0700_perms() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("audit-fresh");
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let _emitter = AuditEmitter::with_dir(key, &target).unwrap();
 
         #[cfg(unix)]
@@ -636,7 +671,11 @@ mod tests {
     fn policy_file_destination_gets_a_replicated_chain() {
         let dir = tempfile::tempdir().unwrap();
         let replica = dir.path().join("replica.jsonl");
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
@@ -657,7 +696,11 @@ mod tests {
     #[test]
     fn policy_requires_chain_signing() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let policy = mvm_core::policy::AuditPolicy {
             chain_signing: false,
             stream_destinations: Vec::new(),
@@ -672,7 +715,11 @@ mod tests {
     #[test]
     fn policy_refuses_unwired_replication_schemes() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec!["https://audit.example.com/ingest".to_string()],
@@ -687,7 +734,11 @@ mod tests {
     #[test]
     fn policy_refuses_relative_file_destinations() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let policy = mvm_core::policy::AuditPolicy {
             chain_signing: true,
             stream_destinations: vec!["file://relative/audit.jsonl".to_string()],
@@ -702,7 +753,11 @@ mod tests {
     #[test]
     fn verb_denied_entry_is_chained_and_verifies() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-VD");
@@ -750,7 +805,11 @@ mod tests {
     #[test]
     fn checkpoint_created_records_id_and_hash() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-C");
@@ -768,7 +827,11 @@ mod tests {
     #[test]
     fn checkpoint_forked_records_lineage() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-F");
@@ -786,7 +849,11 @@ mod tests {
     #[test]
     fn checkpoint_restored_records_id_and_vm() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-R");

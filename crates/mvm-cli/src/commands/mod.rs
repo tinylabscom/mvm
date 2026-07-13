@@ -197,6 +197,7 @@ pub fn cli_command() -> clap::Command {
 }
 
 pub fn run() -> Result<()> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let cli = Cli::parse();
     apply_startup_env(&cli);
     register_inhouse_builder();

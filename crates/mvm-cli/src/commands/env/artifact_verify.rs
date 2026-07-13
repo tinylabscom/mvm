@@ -128,12 +128,21 @@ pub(super) fn verify_artifact_hash(
     };
 
     use sha2::{Digest, Sha256};
+    use std::io::Read as _;
     let mut file = std::fs::File::open(path)
         .with_context(|| format!("Failed to open downloaded artifact at {path}"))?;
     let mut hasher = Sha256::new();
-    std::io::copy(&mut file, &mut hasher)
-        .with_context(|| format!("Failed to hash downloaded artifact at {path}"))?;
-    let actual = format!("{:x}", hasher.finalize());
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("Failed to hash downloaded artifact at {path}"))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    let actual = hex::encode(hasher.finalize());
 
     if actual != *expected {
         let _ = std::fs::remove_file(path);
@@ -236,7 +245,7 @@ mod tests {
     /// use this to derive matching expected values without rebuilding
     /// the production hash path.
     fn hex_sha256(bytes: &[u8]) -> String {
-        format!("{:x}", Sha256::digest(bytes))
+        hex::encode(Sha256::digest(bytes))
     }
 
     #[test]

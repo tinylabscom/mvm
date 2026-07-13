@@ -37,7 +37,11 @@ impl Keystore {
     /// Generate a fresh in-memory key from `OsRng`.
     pub fn generate() -> Self {
         let mut rng = OsRng;
-        let signing_key = SigningKey::generate(&mut rng);
+        let signing_key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let pub_key_bytes = signing_key.verifying_key().to_bytes().to_vec();
         Self {
             signing_key,

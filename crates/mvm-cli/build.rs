@@ -474,7 +474,7 @@ fn sha256_hex(p: &Path) -> String {
     let bytes = std::fs::read(p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
     let mut h = Sha256::new();
     h.update(&bytes);
-    format!("{:x}", h.finalize())
+    hex::encode(h.finalize())
 }
 
 fn render_embedded_rs(entries: &[(String, PathBuf, String)]) -> String {

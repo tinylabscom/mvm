@@ -2837,7 +2837,7 @@ mod linux {
             }
             hasher.update(&buffer[..read]);
         }
-        Ok(format!("{:x}", hasher.finalize()))
+        Ok(hex::encode(hasher.finalize()))
     }
 
     /// Independent track that runs concurrently

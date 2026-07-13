@@ -146,7 +146,6 @@ pub fn verify_workload_chain(
 #[cfg(test)]
 mod tests {
     use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-    use rand::rngs::OsRng;
     use tempfile::tempdir;
 
     use super::*;
@@ -169,7 +168,11 @@ mod tests {
     /// Returns the JSONL path + the signing key (so tests can craft adversarial
     /// lines and derive the verifying key).
     fn build(dir: &tempfile::TempDir, n: usize) -> (std::path::PathBuf, SigningKey) {
-        let sk = SigningKey::generate(&mut OsRng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let key_path = dir.path().join("chain.key");
         std::fs::write(&key_path, sk.to_bytes()).unwrap();
         let jsonl = dir.path().join("t-1.workload.jsonl");
@@ -228,7 +231,11 @@ mod tests {
     fn wrong_key_fails_signature() {
         let dir = tempdir().unwrap();
         let (path, _sk) = build(&dir, 1);
-        let other = SigningKey::generate(&mut OsRng);
+        let other = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let err = verify_workload_chain(&path, &vk(&other)).expect_err("wrong key must fail");
         assert!(
             matches!(err, WorkloadVerifyError::SignatureInvalid { line: 0 }),

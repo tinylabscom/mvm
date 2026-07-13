@@ -292,7 +292,7 @@ fn hash_file(path: &std::path::Path) -> std::io::Result<String> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Open the rootfs as an ext4 image and assert `/sbin/init` exists.
@@ -326,7 +326,7 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         let mut hasher = Sha256::new();
         hasher.update(content);
-        let hash = format!("{:x}", hasher.finalize());
+        let hash = hex::encode(hasher.finalize());
         (path, hash)
     }
 
@@ -608,7 +608,7 @@ mod tests {
                 let content = std::fs::read(&rootfs).unwrap();
                 let mut h = Sha256::new();
                 h.update(&content);
-                format!("{:x}", h.finalize())
+                hex::encode(h.finalize())
             };
             let size = std::fs::metadata(&rootfs).unwrap().len();
             MicrovmArtifact {
@@ -711,13 +711,13 @@ mod tests {
         let kernel_hash = {
             let mut h = Sha256::new();
             h.update(kernel_bytes);
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         };
         let rootfs_hash = {
             let content = std::fs::read(&rootfs_img).unwrap();
             let mut h = Sha256::new();
             h.update(&content);
-            format!("{:x}", h.finalize())
+            hex::encode(h.finalize())
         };
         let rootfs_size = std::fs::metadata(&rootfs_img).unwrap().len();
 

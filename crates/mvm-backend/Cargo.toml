@@ -60,6 +60,7 @@ mio.workspace = true
 secrecy.workspace = true
 
 anyhow.workspace = true
+hex.workspace = true
 thiserror = "1"
 uuid.workspace = true
 # `libc` for `kill(pid, 0)` liveness probes + SIGTERM/SIGKILL signaling

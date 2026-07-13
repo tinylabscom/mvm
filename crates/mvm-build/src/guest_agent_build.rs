@@ -357,7 +357,7 @@ pub fn guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAg
         h.update(std::fs::read(f)?);
         h.update([0u8]);
     }
-    Ok(format!("{:x}", h.finalize()))
+    Ok(hex::encode(h.finalize()))
 }
 
 /// Collect every regular file under `dir` (recursively) into `out`. Skips a
@@ -507,7 +507,7 @@ pub fn runtime_overlay_source_checkout_fingerprint(
             return Err(GuestAgentBuildError::OutputMissing(path));
         }
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 /// Install guest binaries from in-memory bytes (embedded in the host binary at

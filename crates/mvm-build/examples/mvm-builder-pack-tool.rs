@@ -347,7 +347,7 @@ fn load_signing_key(path: &Path) -> Result<SigningKey, String> {
 fn sbom_reference(path: &Path, uri_override: Option<&str>) -> Result<SbomReference, String> {
     use sha2::{Digest, Sha256};
     let bytes = fs::read(path).map_err(|e| format!("read sbom {}: {e}", path.display()))?;
-    let hex = format!("{:x}", Sha256::digest(&bytes));
+    let hex = hex::encode(Sha256::digest(&bytes));
     let uri = match uri_override {
         Some(uri) => uri.to_string(),
         None => format!("file://{}", path.display()),
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(reference.uri, "https://example.test/s.txt");
         assert_eq!(
             reference.sha256.as_str(),
-            format!("{:x}", sha2::Sha256::digest(b"sbom bytes"))
+            hex::encode(sha2::Sha256::digest(b"sbom bytes"))
         );
     }
 

@@ -194,10 +194,13 @@ mod tests {
     use super::*;
     use crate::crypto::attestation::provider::HwProviderKind;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
 
     fn fresh_key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        }
     }
 
     fn fresh_body(verifying: &VerifyingKey) -> AttestationBody {

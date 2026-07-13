@@ -867,7 +867,11 @@ mod tests {
         // enrol the pubkey in the trust store, hand admit_for_run a
         // matching pin + context.
         let dir = tempfile::tempdir().unwrap();
-        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         let (archive, pin) = make_test_bundle(&sk, b"kernel-bytes", b"rootfs-bytes");
         let mut map = HashMap::new();
         let key_id = BundleKeyId::from_pubkey(&sk.verifying_key());
@@ -896,7 +900,11 @@ mod tests {
         // admit path refuses rather than silently skipping the
         // re-verify step (fail closed, not fail open).
         let dir = tempfile::tempdir().unwrap();
-        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         let (_archive, pin) = make_test_bundle(&sk, b"k", b"r");
         let err = admit_for_run(
             &input_with_pin("vm-no-ctx", &pin),
@@ -913,7 +921,11 @@ mod tests {
     #[test]
     fn admit_with_unknown_publisher_in_trust_store_refuses() {
         let dir = tempfile::tempdir().unwrap();
-        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         let (archive, pin) = make_test_bundle(&sk, b"k", b"r");
         // Empty trust store — publisher's key_id is unknown locally.
         let trust = MapTrust(HashMap::new());
@@ -945,7 +957,11 @@ mod tests {
         // The bundle_sha256 cross-check catches it before the
         // signature verify even runs.
         let dir = tempfile::tempdir().unwrap();
-        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
+        };
         let (_archive_a, pin_a) = make_test_bundle(&sk, b"kA", b"rA");
         let (archive_b, _pin_b) = make_test_bundle(&sk, b"kB", b"rB");
         let mut map = HashMap::new();

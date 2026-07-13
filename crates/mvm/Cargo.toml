@@ -33,6 +33,7 @@ object_store = { version = "0.11", optional = true, default-features = false, fe
 ] }
 serde.workspace = true
 serde_json.workspace = true
+hex.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
 toml.workspace = true

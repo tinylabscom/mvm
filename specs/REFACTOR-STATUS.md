@@ -1,3 +1,5 @@
+**Additional 2026-07-13 — Plan 126 B4/C1 complete.** RustCrypto 0.10→0.11 migration (aes-gcm 0.11 + ed25519-dalek 3.0 stable, sha2/hmac/hkdf bumped); workspace reqwest 0.12→0.13 with `rustls-no-provider`; ring TLS provider installed at startup. `cargo tree -i aws-lc-rs` returns empty — aws-lc-rs and its cmake build are gone from the tree. All workspace gates pass: 1317 tests, clippy, fmt, `cargo deny check`, `xtask check-no-spec-refs-in-comments`.
+
 **Additional 2026-07-11 — Plan 242's current ship candidate has been
 revalidated in the worktree.**
 The code/docs contract is stable: guest-executed runtime binaries are
@@ -978,7 +980,7 @@ PLAN 219 — Agent verb grant delivery            🟡 LINUX LIVE PROOF BROAD; M
   [~] Live validation — Firecracker/Linux now proves pre-service grant staging, fail-closed sealed `require_grant:true`, restricted `VerbNotAuthorized`, allow-listed `UpdateIdleTimeoutAck`, listed sealed-image `RunEntrypoint` success (`"hello ari"` on `examples/python/hello-app`), the sealed-image `DevOnly` refusal, live caller-side `verb_denied`, and the grant-less regression; remaining: macOS HVF/libkrun witness.
   [ ] ADR-103 acceptance — still Proposed until maintainer accepts after live proof.
 
-PLAN 126 — Dependency reduction                 🟢 cuts+gates landed; aws-lc/reqwest-unify rehomed (oci-client-upstream-gated)
+PLAN 126 — Dependency reduction                 🟢 B4/C1 done (2026-07-13): RustCrypto 0.11 migration + aws-lc-rs removed; object_store reqwest 0.12 holdout pre-existing
   [x] A1 re-baseline
   [x] B5 drop tokio from mvm-core (PR-1)
   [x] B2 opendal → object_store (mvm template registry); opendal GONE,
@@ -987,13 +989,16 @@ PLAN 126 — Dependency reduction                 🟢 cuts+gates landed; aws-lc
       (mvmctl keeps the OCI provenance audit-label path)
   [~] B3 pgp (168) — SUPERSEDED by Plan 160 (drop Alpine seed); no Plan 126
       implementation target remains
-  [ ] B4 aws-lc-rs → ring — BLOCKED upstream (oci-client hardcodes aws-lc; needs a fork)
-  [~] C1 reqwest unify — REJECTED/blocked on B4 (0.13 forces aws-lc + transitive 0.12 holdout; no tree collapse)
+  [x] B4 aws-lc-rs → ring — DONE (2026-07-13): RustCrypto 0.10→0.11 migration
+      (aes-gcm 0.11 + ed25519-dalek 3.0 stable) unblocked B4; reqwest bumped to 0.13
+      rustls-no-provider; cargo tree -i aws-lc-rs empty; cmake build gone
+  [~] C1 reqwest unify — workspace unified on 0.13; object_store transitive 0.12 holdout
+      is pre-existing (in D2 skip baseline); oci-client 0.15/0.16 duplicate unchanged
   [x] D2 duplicate-major lock-gate — cargo-deny multiple-versions=deny + 23-crate baseline (ratchet); also
       un-broke the red cargo-deny/cargo-audit jobs: wildcard-paths, mvm-verify license, 2 unmaintained ignores,
       and FIXED RUSTSEC-2026-0119 (hickory-proto DoS) by bumping hickory-resolver 0.24→0.26 (collapsed its dup)
   [x] D1 forbidden-dep gate (check-forbidden-deps extension) — closure ban on
-      sigstore/opendal/pgp is wired; final measure recorded in dep-baseline.md
+      sigstore/opendal/pgp is wired; aws-lc-rs no longer in closure; final measure in dep-baseline.md
 
 PLAN 153 — CLI directory split                  ✅ DONE (subsumed into Plan 178)
   [x] image.rs → image/ ; catalog.rs → catalog/ (last two flat files)

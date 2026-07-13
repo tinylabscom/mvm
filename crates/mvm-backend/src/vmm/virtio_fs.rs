@@ -438,7 +438,7 @@ fn encode_attr(ino: u64, path: &Path) -> Option<Vec<u8>> {
     } else {
         S_IFREG
     };
-    let perm = (md.mode() & 0o7777) as u32;
+    let perm = md.mode() & 0o7777;
     let mut b = Vec::new();
     put_u64(&mut b, ino); // ino
     put_u64(&mut b, md.len()); // size

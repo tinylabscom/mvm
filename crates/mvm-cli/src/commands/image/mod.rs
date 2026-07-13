@@ -378,7 +378,7 @@ fn oci_runtime_tag() -> String {
         hasher.update(sha.as_bytes());
         hasher.update(b"\n");
     }
-    let digest = format!("{:x}", hasher.finalize());
+    let digest = hex::encode(hasher.finalize());
     format!("{}-guest-{}", env!("CARGO_PKG_VERSION"), &digest[..16])
 }
 

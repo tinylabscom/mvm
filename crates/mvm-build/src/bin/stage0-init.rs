@@ -253,12 +253,7 @@ mod linux {
                     // SAFETY: `finit_module(2)` reads the owned module fd and never
                     // outlives `file`; flags=0, empty params string.
                     let rc = unsafe {
-                        libc::syscall(
-                            libc::SYS_finit_module,
-                            file.as_raw_fd(),
-                            b"\0".as_ptr().cast::<libc::c_char>(),
-                            0,
-                        )
+                        libc::syscall(libc::SYS_finit_module, file.as_raw_fd(), c"".as_ptr(), 0)
                     };
                     if rc == 0 {
                         eprintln!("stage0-init: loaded guest vsock module {module}");

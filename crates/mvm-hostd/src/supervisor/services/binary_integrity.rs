@@ -330,7 +330,11 @@ mod tests {
     /// + a [`ReleaseKeyBundle`] containing the verifying key.
     fn sign_fixture(binary_bytes: &[u8]) -> (BinarySignature, ReleaseKeyBundle) {
         let mut rng = OsRng;
-        let signing_key = SigningKey::generate(&mut rng);
+        let signing_key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let verifying_key = signing_key.verifying_key();
         let signature = signing_key.sign(binary_bytes);
 
@@ -459,7 +463,11 @@ mod tests {
     #[test]
     fn signer_key_id_is_deterministic_for_a_given_key() {
         let mut rng = OsRng;
-        let sk = SigningKey::generate(&mut rng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = sk.verifying_key();
         let id_a = BinarySignature::key_id_for(&vk);
         let id_b = BinarySignature::key_id_for(&vk);
@@ -480,7 +488,11 @@ mod tests {
         assert!(bundle.is_empty());
 
         let mut rng = OsRng;
-        let sk = SigningKey::generate(&mut rng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let id = bundle.add(sk.verifying_key());
 
         assert_eq!(bundle.len(), 1);

@@ -156,6 +156,13 @@ skip = [
     # and the bump collapses no transitive duplicates. Revisit when
     # oci-client is forked.
     "reqwest",
+
+    # rand 0.8 (workspace direct) vs rand 0.10 (hickory-proto 0.26).
+    # hickory-proto already dragged rand 0.10 into the graph before
+    # the B4/C1 RustCrypto 0.11 migration; rand_core likewise.
+    # Not new duplicates — pre-existing, now documented.
+    "rand",
+    "rand_core",
 ]
 skip-tree = []
 

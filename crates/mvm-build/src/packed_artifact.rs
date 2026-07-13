@@ -668,11 +668,14 @@ fn entry_path_string<R: Read>(entry: &tar::Entry<'_, R>) -> Result<String, Artif
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use rand::rngs::OsRng;
     use std::io::Cursor;
 
     fn test_keypair() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        }
     }
 
     fn write_fixture(dir: &Path, name: &str, body: &[u8]) -> PathBuf {

@@ -300,7 +300,6 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
 
     fn make_snap(dir: &Path) -> SnapshotFiles {
         std::fs::write(dir.join("vmstate.bin"), b"vmstate-bytes-here").unwrap();
@@ -312,7 +311,11 @@ mod tests {
     }
 
     fn key() -> SigningKey {
-        SigningKey::generate(&mut OsRng)
+        {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        }
     }
 
     #[test]

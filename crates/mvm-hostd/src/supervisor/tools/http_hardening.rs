@@ -52,6 +52,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::Once;
 use std::time::Duration;
 
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
@@ -64,11 +65,19 @@ use crate::supervisor::ssrf_guard::SsrfGuard;
 /// legacy paths. All operator-likely upstreams support 1.3.
 pub const MIN_TLS_VERSION: reqwest::tls::Version = reqwest::tls::Version::TLS_1_3;
 
+fn install_rustls_provider() {
+    static INSTALL: Once = Once::new();
+    INSTALL.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
 /// Build a `reqwest::ClientBuilder` pre-configured with the
 /// no-redirect, SSRF-filtering, and TLS-1.3-floor hardening. Callers
 /// add their own per-tool config (headers, user-agent, etc.) before
 /// `.build()`.
 pub fn hardened_client_builder(timeout_secs: u64) -> reqwest::ClientBuilder {
+    install_rustls_provider();
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::none())
@@ -206,6 +215,7 @@ pub async fn resolve_ssrf_safe_ips(host: &str) -> Result<Vec<std::net::IpAddr>, 
 /// uses the URL's real port. Use this (not [`hardened_client_builder`]) when the
 /// forward target may be plain `http`.
 pub fn hardened_client_builder_no_dns(timeout_secs: u64) -> reqwest::ClientBuilder {
+    install_rustls_provider();
     reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_secs))
         .redirect(reqwest::redirect::Policy::none())

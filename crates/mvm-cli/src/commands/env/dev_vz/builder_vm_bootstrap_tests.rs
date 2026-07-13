@@ -898,17 +898,17 @@ fn fold_embedded_binary_identity_distinguishes_inputs() {
     let base = {
         let mut h = Sha256::new();
         fold_embedded_binary_identity(&mut h, "mvm-host-vm-init", "aa");
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     };
     let changed_hash = {
         let mut h = Sha256::new();
         fold_embedded_binary_identity(&mut h, "mvm-host-vm-init", "bb");
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     };
     let changed_name = {
         let mut h = Sha256::new();
         fold_embedded_binary_identity(&mut h, "mvm-egress-proxy", "aa");
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     };
 
     assert_ne!(
@@ -924,7 +924,7 @@ fn fold_embedded_binary_identity_distinguishes_inputs() {
     let glued = {
         let mut h = Sha256::new();
         fold_embedded_binary_identity(&mut h, "mvm-host-vm-initaa", "");
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     };
     assert_ne!(base, glued, "name/hash boundary must be unambiguous");
 }

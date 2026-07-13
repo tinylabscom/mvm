@@ -194,7 +194,7 @@ mod tests {
         let bytes = fs::read(path).unwrap();
         let mut h = Sha256::new();
         h.update(&bytes);
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     }
 
     fn build_sample(root: &Path) {

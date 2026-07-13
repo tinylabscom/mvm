@@ -188,7 +188,7 @@ impl TemplateRevision {
         hasher.update(self.flake_lock_hash.as_bytes());
         hasher.update(b":");
         hasher.update(self.profile.as_bytes());
-        format!("{:x}", hasher.finalize())
+        hex::encode(hasher.finalize())
     }
 }
 

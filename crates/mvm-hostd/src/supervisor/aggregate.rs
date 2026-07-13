@@ -535,7 +535,7 @@ impl Supervisor {
                     source: e,
                 },
             })?;
-        let manifest_sha = format!("{:x}", Sha256::digest(&manifest_bytes));
+        let manifest_sha = hex::encode(Sha256::digest(&manifest_bytes));
         if manifest_sha != binding.manifest_sha256 {
             return Err(SupervisorError::DepsVolumeManifestMismatch {
                 expected: binding.manifest_sha256.clone(),
@@ -1023,7 +1023,6 @@ mod tests {
     use chrono::{DateTime, TimeZone, Utc};
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::*;
-    use rand::rngs::OsRng;
     use std::collections::BTreeMap;
     use std::sync::Mutex;
 
@@ -1214,7 +1213,11 @@ mod tests {
     }
 
     fn sign_sample(plan: &ExecutionPlan) -> (SignedExecutionPlan, SigningKey, VerifyingKey) {
-        let sk = SigningKey::generate(&mut OsRng);
+        let sk = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = sk.verifying_key();
         let signed = sign_plan(plan, &sk, "test");
         (signed, sk, vk)
@@ -1370,7 +1373,11 @@ mod tests {
         let plan = sample_plan();
         let (signed, _sk, _vk) = sign_sample(&plan);
         let (_other_sk, other_vk) = {
-            let sk = SigningKey::generate(&mut OsRng);
+            let sk = {
+                let mut __ed_seed = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+                SigningKey::from_bytes(&__ed_seed)
+            };
             let vk = sk.verifying_key();
             (sk, vk)
         };
@@ -1612,11 +1619,19 @@ mod tests {
         // ledger keys on signer_id, not just nonce.
         let plan = sample_plan();
 
-        let sk_a = SigningKey::generate(&mut OsRng);
+        let sk_a = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk_a = sk_a.verifying_key();
         let signed_a = sign_plan(&plan, &sk_a, "alice");
 
-        let sk_b = SigningKey::generate(&mut OsRng);
+        let sk_b = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk_b = sk_b.verifying_key();
         let signed_b = sign_plan(&plan, &sk_b, "bob");
 
@@ -2405,7 +2420,7 @@ mod tests {
         )
         .expect("seal");
         fs::write(v.join(FILE_MANIFEST), &result.manifest_bytes).unwrap();
-        let manifest_sha = format!("{:x}", sha2::Sha256::digest(&result.manifest_bytes));
+        let manifest_sha = hex::encode(sha2::Sha256::digest(&result.manifest_bytes));
         (v, result, manifest_sha)
     }
 

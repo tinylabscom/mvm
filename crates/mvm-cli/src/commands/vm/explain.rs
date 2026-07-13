@@ -286,7 +286,6 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use mvm_core::plan::ExecutionPlan;
     use mvm_hostd::audit::emitter::AuditEmitter;
-    use rand::rngs::OsRng;
 
     fn fixture_plan(tenant: &str, plan_id: &str) -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
@@ -298,7 +297,11 @@ mod tests {
     #[test]
     fn collect_run_gathers_admitted_launched_exited_and_verifies_clean() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-explain-1");
@@ -326,7 +329,11 @@ mod tests {
     #[test]
     fn collect_run_matches_by_plan_id_prefix() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-abcdef123456");
@@ -340,7 +347,11 @@ mod tests {
     #[test]
     fn collect_run_matches_by_image_name() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-img-match");
@@ -355,7 +366,11 @@ mod tests {
     #[test]
     fn collect_run_errors_on_ambiguous_prefix() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         emitter
@@ -376,7 +391,11 @@ mod tests {
     #[test]
     fn collect_run_errors_when_no_match() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         emitter
@@ -393,7 +412,11 @@ mod tests {
     #[test]
     fn collect_run_errors_when_chain_file_missing() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let path = dir.path().join("local.jsonl");
         let err = collect_run(&path, &vk, "local", "anything").unwrap_err();
@@ -404,7 +427,11 @@ mod tests {
     #[test]
     fn collect_run_reports_tampered_chain_loudly_but_still_returns_the_run() {
         let dir = tempfile::tempdir().unwrap();
-        let key = SigningKey::generate(&mut OsRng);
+        let key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let vk = key.verifying_key();
         let emitter = AuditEmitter::with_dir(key, dir.path()).unwrap();
         let plan = fixture_plan("local", "plan-tamper");

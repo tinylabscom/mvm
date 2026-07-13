@@ -448,7 +448,7 @@ fn sha256_file(path: &Path) -> Result<Sha256Hex, BuilderPackError> {
         }
         hasher.update(&buffer[..read]);
     }
-    let hex = format!("{:x}", hasher.finalize());
+    let hex = hex::encode(hasher.finalize());
     Ok(Sha256Hex::new(hex)?)
 }
 

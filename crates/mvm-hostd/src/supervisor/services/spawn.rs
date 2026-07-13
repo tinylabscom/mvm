@@ -756,7 +756,11 @@ mod tests {
         std::fs::write(&binary_path, original).unwrap();
 
         let mut rng = OsRng;
-        let signing_key = SigningKey::generate(&mut rng);
+        let signing_key = {
+            let mut __ed_seed = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rng, &mut __ed_seed);
+            SigningKey::from_bytes(&__ed_seed)
+        };
         let verifying_key = signing_key.verifying_key();
         let signature = signing_key.sign(original);
 

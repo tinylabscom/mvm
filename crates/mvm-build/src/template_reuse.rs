@@ -53,7 +53,7 @@ pub(crate) fn reuse_template_artifacts(
         h.update(rev_meta.flake_lock_hash.as_bytes());
         h.update(b":");
         h.update(spec.profile.as_bytes());
-        format!("{:x}", h.finalize())
+        hex::encode(h.finalize())
     };
     if rev_meta.cache_key() != pool_cache_key {
         env.log_warn("Template cache key mismatch (profile/flake.lock); skipping reuse");

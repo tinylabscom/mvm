@@ -299,7 +299,7 @@ fn hash_file(path: &Path) -> Result<String, ArtifactError> {
         }
         hasher.update(&buf[..n]);
     }
-    Ok(format!("{:x}", hasher.finalize()))
+    Ok(hex::encode(hasher.finalize()))
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -351,7 +351,7 @@ mod tests {
         std::fs::write(&p, content).unwrap();
         let mut h = Sha256::new();
         h.update(content);
-        (p, format!("{:x}", h.finalize()))
+        (p, hex::encode(h.finalize()))
     }
 
     // Minimal ELF magic header (first 4 bytes only matter for sniff).
