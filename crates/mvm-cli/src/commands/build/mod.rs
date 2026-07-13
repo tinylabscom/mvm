@@ -14,7 +14,7 @@ pub(super) mod kernel;
 /// host-side `LibkrunPersistentHostVm` and
 /// `PersistentBuilderSupervisor` together via three subcommands
 /// (start / submit / stop) so contributors can exercise the
-/// dispatch path end-to-end without going through `mvmctl dev up`.
+/// dispatch path end-to-end without going through a full build.
 /// Gated on the `builder-vm` feature because the host-side types
 /// it dispatches into (`LibkrunPersistentHostVm` etc.) only
 /// exist with that feature — `mvm-cli`'s default features include

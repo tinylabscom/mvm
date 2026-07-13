@@ -1139,7 +1139,7 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
         // listener socket behind — the stop path doesn't unlink it —
         // and add_vsock_port2(listen=true) binds here, failing EEXIST
         // (rc -17) on the stale file. Pre-unlink, mirroring the native-gateway
-        // bridge socket above. Keeps `dev up` idempotent across runs.
+        // bridge socket above. Keeps repeated builder VM starts idempotent.
         let _ = std::fs::remove_file(&socket);
         krun.add_vsock_port2(port, &socket, /* listen = */ true)?;
     }

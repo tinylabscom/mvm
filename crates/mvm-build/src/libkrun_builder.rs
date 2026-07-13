@@ -747,7 +747,7 @@ impl LibkrunBuilderVm {
     /// block rootfs, its root is virtio-fs via `krun_set_root`). The
     /// guest mounts it at `/nix` (formatting on first boot), so the slim
     /// kernel + Rust host binaries are built once and reused across
-    /// `dev up` runs instead of recompiled into a throwaway tmpfs every
+    /// bootstrap runs instead of recompiled into a throwaway tmpfs every
     /// time. ext4 is case-sensitive, which is also why the old in-RAM
     /// tmpfs existed (APFS case-insensitivity breaks Nix substitution) —
     /// the disk keeps that property and adds persistence.
@@ -802,7 +802,7 @@ impl LibkrunBuilderVm {
 
         // Persistent, host-locked Nix store for the image build. Sparse
         // image, formatted in-guest on first boot; survives across
-        // `dev up` runs so the slim kernel + Rust toolchain closure are
+        // bootstrap runs so the slim kernel + Rust toolchain closure are
         // built once. Dedicated filename (not the builder's
         // `nix-store-<arch>.img`) so the flock never contends with a
         // concurrent `mvmctl build`. The guard must outlive the
@@ -2450,7 +2450,7 @@ fn load_builder_vm_image_from_cache(arch_dir: &Path) -> Result<BuilderVmImage, B
 
 /// Filename of Stage 0's dedicated persistent Nix-store image,
 /// `nix-store-stage0-<arch>.img`. Distinct from the steady-state
-/// builder's `nix-store-<arch>.img` so a `dev up` bootstrap and a
+/// builder's `nix-store-<arch>.img` so a builder VM bootstrap and a
 /// concurrent `mvmctl build` never contend on the same flock — see
 /// [`acquire_nix_store_image_lock_named`]. Lives in
 /// [`builder_vm_cache_dir`] and matches `cache info`'s
@@ -3987,7 +3987,7 @@ pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
 ///
 /// ## Not yet wired
 ///
-/// - `mvmctl dev up` integration is what actually constructs one of
+/// - The builder VM bootstrap integration is what actually constructs one of
 ///   these against the dev session's lifecycle.
 /// - Per-job namespace isolation inside the dispatch loop.
 #[cfg(feature = "builder-vm")]
@@ -4801,9 +4801,9 @@ mod tests {
         //     supervisor starts but exits before the requested job runs →
         //     SupervisorExited
         // All five are legitimate "environment gap" surfaces. The
-        // fourth is what `mvmctl dev up` reports to operators with
-        // a populated cache; the first three are what `mvmctl dev
-        // up` reports before the Stage 0 bootstrap completes.
+        // fourth is what `mvmctl bootstrap` reports to operators with
+        // a populated cache; the first three are what `mvmctl bootstrap`
+        // reports before the Stage 0 bootstrap completes.
         let scratch = TempDir::new().unwrap();
         let mounts = ok_mounts(&scratch);
         let err = LibkrunBuilderVm::default()

@@ -36,7 +36,7 @@ pub(in crate::commands) enum CacheAction {
         /// mid-run, plus their `~/.cache/mvm/builder-vm/vms/<id>/` cache
         /// directories — so dead microVMs don't accumulate. The sweep is
         /// liveness-aware: a running VM (a detached `up -d`, the persistent dev
-        /// builder, any in-flight `dev up`) is spared; only already-dead
+        /// builder, any in-flight builder VM bootstrap) is spared; only already-dead
         /// helpers are reaped. Pass this to prune disk only, touching no
         /// processes.
         #[arg(long)]
@@ -71,8 +71,8 @@ pub(in crate::commands) enum CacheAction {
         json: bool,
     },
     /// Repair a degraded builder VM store. Clears
-    /// `~/.cache/mvm/builder-vm/` so the next `dev up`/`build` cold-rebuilds it.
-    /// Use this when `dev up` keeps failing with a dangling-store error
+    /// `~/.cache/mvm/builder-vm/` so the next `mvmctl bootstrap`/`build` cold-rebuilds it.
+    /// Use this when a build keeps failing with a dangling-store error
     /// (`error: path '/nix/store/…-source/flake.nix' does not exist`).
     Repair {
         /// Print what would be freed without removing anything
@@ -83,7 +83,7 @@ pub(in crate::commands) enum CacheAction {
         json: bool,
         /// Clear the store even while a Stage 0 bootstrap is in flight. By
         /// default repair refuses if the Stage 0 advisory lock is held (another
-        /// `dev up`/`build` is mid-bootstrap) so it never yanks the store from
+        /// build is mid-bootstrap) so it never yanks the store from
         /// an active build. Only pass this if you are certain the lock is stale
         /// (e.g. left by a crashed run).
         #[arg(long)]
@@ -297,7 +297,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             use super::super::env::dev_vz;
 
             // Guard 1 — never yank the store from an in-flight bootstrap. A
-            // held Stage 0 lock means another `dev up`/`build` is mid-bootstrap.
+            // held Stage 0 lock means another build is mid-bootstrap.
             // `--force` overrides (for a stale lock left by a crash).
             if !force && dev_vz::stage0_bootstrap_in_flight() {
                 anyhow::bail!(
@@ -424,7 +424,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // Sweep orphaned Stage 0 staging dirs first.
             // They live under `~/.cache/mvm/builder-vm/.<arch>.stage0-*`
             // (or the legacy `<arch>-staging` shape) and are left
-            // behind by crashed `mvmctl dev up` invocations. The sweep
+            // behind by crashed builder VM bootstrap invocations. The sweep
             // takes the Stage 0 advisory lock to avoid racing a live
             // bootstrap; if the lock is held it skips silently and we
             // proceed with the temp-file sweep.

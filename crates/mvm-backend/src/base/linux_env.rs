@@ -105,8 +105,8 @@ fn is_stdin_tty() -> bool {
     unsafe { libc::isatty(std::io::stdin().as_raw_fd()) == 1 }
 }
 
-/// Name of the dev VM. `mvmctl dev up` boots it as the libkrun dev VM
-/// under `~/.mvm/vms/mvm-dev`; this is the display name the dev env carries.
+/// Name of the dev VM: it runs as the libkrun dev VM under
+/// `~/.mvm/vms/mvm-dev`; this is the display name the dev env carries.
 const DEV_VM_NAME: &str = "mvm-dev";
 
 /// Connect to the libkrun dev VM's guest-agent vsock through its per-port

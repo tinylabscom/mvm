@@ -214,7 +214,7 @@ fn download_release(version: &str, target: &str, tmp_dir: &Path) -> Result<()> {
 /// set it in CI.
 ///
 /// Gated to `builder-vm`: the only callers (`mvmctl kernel build`'s
-/// download arm + the `dev up --kernel-source` bootstrap) live behind
+/// download arm + the `mvmctl bootstrap --kernel-source` path) live behind
 /// that feature.
 #[cfg(feature = "builder-vm")]
 pub(crate) fn download_kernel(arch: &str, variant: &str, dest: &Path) -> Result<()> {

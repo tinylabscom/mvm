@@ -5,7 +5,7 @@
 //!   cargo build --example libkrun-smoke -p mvm-libkrun --features libkrun-sys
 //!
 //! Run (defaults pull from `~/.mvm/dev/current/`, the dev-VM artifacts
-//! shipped by `mvmctl dev up`):
+//! materialized by `mvmctl bootstrap`):
 //!   target/debug/examples/libkrun-smoke
 //!
 //! Override any path:

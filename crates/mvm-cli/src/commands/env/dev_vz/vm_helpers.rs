@@ -11,7 +11,7 @@ pub(in crate::commands) struct ReapOutcome {
 }
 
 /// Reap orphaned per-VM helpers left behind by killed
-/// `mvmctl dev up` runs. Covers each backend's supervisor
+/// mvmctl runs. Covers each backend's supervisor
 /// (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`).
 ///
 /// mvmctl spawns the active backend's supervisor binary, which in turn
@@ -45,7 +45,7 @@ pub(in crate::commands) struct ReapOutcome {
 ///    `dev down` / `stop <name>`. On an ephemeral per-job builder dir,
 ///    an alive launchd-parented supervisor is a build whose CLI crashed
 ///    and should be SIGTERM'd. Without the managed carve-out the startup
-///    sweep kills the live dev VM on every `up` / `dev up` / `ls`.
+///    sweep kills the live dev VM on every `cache prune` / `image pull`.
 /// 2. **Helper phase.** Any argv-scanned grandchildren whose argv
 ///    carries the dir's unique basename. A helper's fate follows its
 ///    supervisor: if Phase 1 found the VM live every helper is spared;
@@ -68,9 +68,9 @@ pub(in crate::commands) fn reap_orphaned_vm_helpers(dry_run: bool) -> Result<Rea
     reap_orphaned_vm_helpers_both_roots(/* remove_builder_dirs = */ true, dry_run)
 }
 
-/// Best-effort orphan-helper sweep run at the start of `mvmctl dev up`
-/// / `mvmctl up`. The next launch reaps the previous run's corpses:
-/// startup is the robust trigger because an abnormal exit (^C, SIGKILL,
+/// Best-effort orphan-helper sweep run at the start of `mvmctl image pull`
+/// and the OCI run-image path. The next launch reaps the previous run's
+/// corpses: startup is the robust trigger because an abnormal exit (^C, SIGKILL,
 /// crash, the libkrun `krun_start_enter` `exit()`) is exactly when the CLI
 /// can't self-clean and reparents its helpers to launchd.
 ///

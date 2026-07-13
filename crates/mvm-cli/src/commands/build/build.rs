@@ -318,7 +318,7 @@ fn build_flake(
 
     // A steady-state `mvmctl build` runs the user's nix build
     // inside the builder VM, which needs the layer-1 builder image (vmlinux +
-    // rootfs.ext4) in cache. `dev up` bootstraps it on macOS, but the native-
+    // rootfs.ext4) in cache. `mvmctl bootstrap` bootstraps it on macOS, but the native-
     // Linux dev path never does — so ensure it here (Stage 0 honours the
     // selected builder backend; a cached image is a no-op). Without this the
     // first `mvmctl build` on a fresh Linux host fails in `ensure_builder_vm_image`.

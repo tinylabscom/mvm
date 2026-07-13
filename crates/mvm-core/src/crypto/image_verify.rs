@@ -7,7 +7,7 @@
 //! content hashes) so the input bytes are recoverable from the signed
 //! manifest alone.
 //!
-//! This module is consumed by mvmctl on `dev up` and by mvmd on pool image
+//! This module is consumed by mvmctl (e.g. `mvmctl up`) and by mvmd on pool image
 //! verification. The typed `VerifyError` contract lets mvmd's reconciliation
 //! loop pattern-match outcomes instead of crash-looping on `anyhow::Error`.
 

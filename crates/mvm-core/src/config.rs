@@ -7,7 +7,7 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release
 /// binary, firecracker-ci kernel/rootfs). `std::env::consts::ARCH` is the arch
 /// mvmctl was compiled for == the arch it runs on, so the downloaded binaries
-/// match the host. (Was hardcoded `"aarch64"` — wrong on x86_64: `dev up`
+/// match the host. (Was hardcoded `"aarch64"` — wrong on x86_64: a build
 /// fetched the aarch64 firecracker on an x86_64 host → "Exec format error".)
 pub const ARCH: &str = std::env::consts::ARCH;
 
@@ -100,7 +100,7 @@ pub fn mvm_data_dir_strict() -> std::io::Result<std::path::PathBuf> {
 /// mode `0700` and return its path. Idempotent: if the dir already
 /// exists with looser perms, chmod it to `0700` so a host that was
 /// created before this lockdown still gets locked down on the next
-/// `dev up`.
+/// run.
 ///
 /// `~/.mvm` holds the dev VM's GC root, the host-backed Nix store
 /// disk image, the per-VM `vsock.sock` proxy listener path, build

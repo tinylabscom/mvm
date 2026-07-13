@@ -61,7 +61,7 @@ pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
 /// How long [`spawn`] waits for the native gateway's listener socket to appear
 /// on disk. The gateway creates the file within ~tens of milliseconds on
 /// macOS Apple Silicon (no `bind(2)` blocking). 500ms is generous
-/// without measurably slowing `dev up`.
+/// without measurably slowing builder VM startup.
 pub const SOCKET_READY_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Default MAC for the guest's `eth0`. Locally-administered (bit
@@ -272,8 +272,8 @@ pub fn spawn(
     // via `Command::output()`) blocks forever — the gateway keeps the pipe
     // open for the life of the VM (and beyond, since libkrun's exit() on
     // guest shutdown skips `NativeGatewayHandle::Drop`, orphaning it). That fd
-    // inheritance is exactly what hung `core_demo_e2e`: `dev up`'s build
-    // VM powered down, mvmctl exited, but the orphaned gateway held the
+    // inheritance is exactly what hung `core_demo_e2e`: the builder VM
+    // powered down, mvmctl exited, but the orphaned gateway held the
     // pipe so `output()` never saw EOF.
     //
     // Redirect both streams to a per-VM capture file instead. This still

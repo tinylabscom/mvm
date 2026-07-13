@@ -88,7 +88,7 @@ fn dev_builds_dir() -> String {
     format!("{}/dev/builds", mvm_core::config::mvm_data_dir())
 }
 
-/// Path the CLI writes when `dev up` notices the host-backed Nix
+/// Path the CLI writes when a build notices the host-backed Nix
 /// store has grown past the GC threshold. Lives under the data dir
 /// because the data dir is the only path the dev VM and the host
 /// agree on (via the `datadir` VirtioFS share mounted at the same
@@ -342,7 +342,7 @@ fn dev_build_via_shell_env(
     }
 
     // Honour the host-side GC sentinel before any new build work
-    // touches the store. The CLI's `dev up` writes
+    // touches the store. The CLI writes
     // `~/.mvm/dev/nix-store-needs-gc` (mounted at the same path
     // inside the VM via the datadir share) when the upper layer's
     // allocated bytes cross threshold; we collect garbage exactly
@@ -746,7 +746,7 @@ fn dev_build_with_builder_vm<B: crate::builder_vm::BuilderVm + ?Sized>(
     std::fs::create_dir_all(&staging).with_context(|| format!("creating staging dir {staging}"))?;
 
     // dev_build_with_builder_vm is called for
-    // user-flake builds (mvmctl build / dev up against the user's flake).
+    // user-flake builds (mvmctl build against the user's flake).
     // User flakes do not embed host-vm binaries, so /mvm-bins is unused
     // here. A temp dir satisfies validate_mounts' directory-exists check.
     let host_bins_tmp =

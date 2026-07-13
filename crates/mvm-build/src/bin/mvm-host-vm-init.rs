@@ -1069,7 +1069,7 @@ mod tests {
         assert_eq!(parse_ext4_recorded_size_bytes(&sb), None);
     }
 
-    /// Regression for the May 2026 `mvmctl dev up` failure: a
+    /// Regression for the May 2026 builder VM bootstrap failure: a
     /// stale 64 GiB ext4 image got re-attached to a `/dev/vdb`
     /// libkrun exposed as 64 GiB − 64 KiB. The kernel rejected
     /// mount with `EINVAL: bad geometry: block count 16777216
@@ -2029,7 +2029,7 @@ mod linux {
     fn run_dispatch_loop(mut cold_boot_timings: Option<BootTimings>) -> i32 {
         // No accept timeout — the dispatch loop is persistent and
         // blocks waiting for the supervisor's next submit. The
-        // outer `mvmctl dev down` signals shutdown via a
+        // outer `mvmctl persistent-builder stop` signals shutdown via a
         // `HostVmRequest::Shutdown` frame on a fresh connection.
         // Bring up the workload-vsock forwarder before
         // the dispatch loop. It runs for the VM's lifetime on its own
@@ -2876,7 +2876,7 @@ mod linux {
                 append_init_breadcrumb("virtiofs_mount_ok", &format!("{tag}->{target}"));
             }
         }
-        // User-supplied volumes (`mvmctl dev up -v …` / MVM_VOLUMES),
+        // User-supplied volumes (`--volume` / MVM_VOLUMES),
         // declared by the host on the kernel cmdline. Best-effort, same
         // as the fixed shares above — a failed user mount logs and
         // continues so it can never wedge PID 1.

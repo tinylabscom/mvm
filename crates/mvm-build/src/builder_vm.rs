@@ -466,8 +466,8 @@ pub enum BuilderVmError {
     HvfVmmFailed { detail: String },
 
     /// The persistent builder Nix store has a dangling/GC'd path — every build
-    /// re-evals to the same missing path and fails identically, so `dev up`
-    /// appears to "loop". Distinguished from a generic build failure so
+    /// re-evals to the same missing path and fails identically, so builds
+    /// appear to "loop". Distinguished from a generic build failure so
     /// the user gets the one-line recovery instead of an opaque nix error.
     #[error(
         "the builder VM's Nix store has a dangling/garbage-collected path — \
@@ -545,7 +545,7 @@ pub struct BuilderStoreRepair {
 }
 
 /// Recover a degraded builder Nix store by removing the builder-VM cache
-/// dir so the next `dev up` / `build` cold-rebuilds it clean — the documented
+/// dir so the next `mvmctl bootstrap` / `build` cold-rebuilds it clean — the documented
 /// `rm -rf ~/.cache/mvm/builder-vm` recovery as a first-class operation. The
 /// whole dir goes (store image + per-VM dirs + job dirs): the store image is the
 /// degraded piece, and the kernel/rootfs/jobs are all rebuildable. `dry_run`
