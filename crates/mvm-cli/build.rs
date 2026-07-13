@@ -325,13 +325,7 @@ fn resolve_target_for_arch(toolchain: &toml::Value, arch: &str) -> String {
 fn read_rust_manifest(root: &Path) -> Vec<String> {
     let src =
         std::fs::read_to_string(root.join("crates/mvm-cli/src/host_binaries/manifest.rs")).unwrap();
-    let mut out = Vec::new();
-    for line in src.lines() {
-        if let Some(n) = extract_quoted_after(line, "name:") {
-            out.push(n);
-        }
-    }
-    out
+    build_aux_helpers::parse_host_binary_names(&src)
 }
 
 /// Parse the bare-string array `pub const SEED_BINARIES: &[&str] = &[ ... ]`
@@ -359,14 +353,6 @@ fn read_seed_binaries(root: &Path) -> Vec<String> {
 }
 
 /// Extract the first double-quoted string on `line` that appears after `key`.
-fn extract_quoted_after(line: &str, key: &str) -> Option<String> {
-    let i = line.find(key)? + key.len();
-    let rest = &line[i..];
-    let q1 = rest.find('"')? + 1;
-    let q2 = rest[q1..].find('"')?;
-    Some(rest[q1..q1 + q2].to_string())
-}
-
 fn run_cargo_zigbuild(
     root: &Path,
     target_dir: &Path,
@@ -530,15 +516,6 @@ mod tests {
             strip_glibc("aarch64-unknown-linux-gnu"),
             "aarch64-unknown-linux-gnu"
         );
-    }
-
-    #[test]
-    fn extract_quoted_after_basic() {
-        assert_eq!(
-            extract_quoted_after(r#"        name: "mvm-host-vm-init","#, "name:"),
-            Some("mvm-host-vm-init".to_string())
-        );
-        assert_eq!(extract_quoted_after("no key here", "name:"), None);
     }
 
     #[test]
