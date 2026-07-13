@@ -16,7 +16,7 @@ For sandbox-parity claims, the detailed status table lives in [Sandbox parity st
 | `runtime-sdk-lifecycle` | Planned | Python, TypeScript, and Rust lifecycle APIs pass shared create/exec/files/logs/snapshot/stop tests. |
 | `secure-sandbox-product-parity` | Planned | [Plan 114](https://github.com/tinylabscom/mvm/blob/main/specs/plans/114-secure-sandbox-product-parity.md) tracks parity capability by capability without copying another product's runtime architecture. |
 | `builder-vm-secure-builds` | Shipped | [Builder VM](/guides/builder-vm/) documents host-orchestrated Linux builds; source-checkout cache reuse and bootstrap policy are covered by current CLI behavior. |
-| `persistent-builder-dx` | Preview | Low-level `persistent-builder` controls and build routing exist; top-level `cargo run -- dev up` and `cargo run -- build` docs must match the actual command behavior before this becomes Shipped. |
+| `persistent-builder-dx` | Preview | Low-level `persistent-builder` controls and build routing exist; top-level `cargo run -- bootstrap` and `cargo run -- build` docs must match the actual command behavior before this becomes Shipped. |
 | `cold-mode-snapshot-recovery` | Preview | Firecracker sealed pause/resume and pool Sleeping/Running paths exist; full-VM save/restore is currently unsupported on macOS (Firecracker-only, on Linux) pending HVF save/restore. Docs must name backend support and restore semantics. |
 | `platform-linux-macos` | Shipped | Local docs name Linux execution and macOS as the supported targets and keep Windows in the future/issue-tracked bucket. |
 | `platform-windows` | Planned | Windows docs link [mvm#428](https://github.com/tinylabscom/mvm/issues/428) and avoid implying shipped local runtime support. |

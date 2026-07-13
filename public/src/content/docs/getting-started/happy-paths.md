@@ -3,7 +3,7 @@ title: First-Use Happy Paths
 description: Three-command paths to get a microVM running for each mvm audience.
 ---
 
-mvm has six primary audiences. Each one has a **three-command happy
+mvm has five primary audiences. Each one has a **three-command happy
 path** that takes you from "I have a thing to run" to "it's running
 under mvm." Pair each path with `mvmctl doctor --workflow <name>` to
 preflight only the host requirements that matter for your audience —
@@ -16,12 +16,11 @@ nothing more, nothing less.
 | [Python SDK user](#python-sdk) | `--workflow python-sdk` | Run a `@mvm.app()`-decorated Python script. |
 | [TypeScript / Node SDK user](#typescript-sdk) | `--workflow typescript-sdk` | Run an `mvm.app()` TypeScript app. |
 | [Prebuilt bundle operator](#bundle-run) | `--workflow bundle-run` | Launch a signed `.mvmpkg` artifact. |
-| [`mvmctl dev` user](#dev-shell) | `--workflow dev-shell` | Drop into a builder-VM shell for tinkering. |
 
 The preflight filter (plan 74 W5 / ADR-050 §1) only fails on missing
 prerequisites your workflow actually needs. A bundle operator no
 longer sees a "missing `cargo`" failure they don't care about; a
-`mvmctl dev` user no longer needs host rustup.
+flake CLI user isn't blocked by SDK-only prerequisites they don't need.
 
 ## <a id="cli-image-user"></a>CLI user with an OCI image
 
@@ -74,7 +73,7 @@ source checkout); subsequent runs reuse the warm builder. Skip the
 
 - `host nix not required` errors → none expected. mvm's builder VM
   owns Nix; the host doesn't need it.
-- `dev VM not running — run mvmctl dev up to verify` → that's just
+- `dev VM not running; run mvmctl bootstrap to verify` → that's just
   doctor telling you tool checks were skipped because the builder
   VM is asleep. It's not a failure; `mvmctl machine run` boots it on
   demand.
@@ -154,32 +153,6 @@ remain.
 - `bundle pin missing` (audit-chain admission) → the supervisor's
   signed-plan path failed to find a matching `PlanArtifact`. Pull
   a fresh copy from the publisher.
-
-## <a id="dev-shell"></a>`mvmctl dev` user
-
-You want a shell with a real Linux toolchain — for building, testing,
-or just exploring.
-
-```bash
-mvmctl doctor --workflow dev-shell              # preflight (no host rust needed)
-mvmctl dev                                      # boot + drop into shell
-# inside the shell: do work; exit / Ctrl+D returns you to the host
-```
-
-`mvmctl dev` auto-bootstraps the first time (downloads the dev image
-or builds it locally from `nix/images/dev-shell/`). Your project
-directory is bind-mounted at `/work`. Background services keep
-running after you exit; `mvmctl dev down` stops them.
-
-**Failure recovery:**
-
-- `builder VM image missing` → `mvmctl dev up` downloads or builds
-  it. From a source checkout, the in-repo flakes are always
-  preferred over published artifacts.
-- `dev shell exited immediately with no command output` → check
-  `~/.mvm/dev/console.log` for the kernel/init transcript. Plan
-  72 W5.D documented the nine bring-up bugs that produced this
-  symptom; if you hit one of them the log names it.
 
 ## See also
 

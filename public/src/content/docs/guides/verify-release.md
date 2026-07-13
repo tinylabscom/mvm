@@ -179,9 +179,9 @@ A compromised CDN or GitHub Releases page cannot forge a valid signature without
 
 ## Verifying the Dev Image and Builder Image Manifests (plan 36)
 
-Starting with the plan-36 work, every release also publishes a cosign-keyless-signed manifest for the dev image (consumed by `mvmctl dev up`) and the builder image (consumed by mvmd's pool-build pipeline). The manifest is the trust anchor — it carries SHA-256 of every image artifact, the Nix store hash, the source git SHA, and the SHA-256 of every flake lockfile, all bound by one cosign signature.
+Starting with the plan-36 work, every release also publishes a cosign-keyless-signed manifest for the dev image (consumed automatically whenever the builder VM image is fetched — via `mvmctl bootstrap` or auto-bootstrap on the first build) and the builder image (consumed by mvmd's pool-build pipeline). The manifest is the trust anchor — it carries SHA-256 of every image artifact, the Nix store hash, the source git SHA, and the SHA-256 of every flake lockfile, all bound by one cosign signature.
 
-mvmctl verifies these automatically on every `mvmctl dev up`. To verify manually:
+mvmctl verifies these automatically every time it fetches the builder VM image. To verify manually:
 
 ```bash
 VERSION=v0.14.0  # replace with the release you're verifying
@@ -207,11 +207,11 @@ jq -r '.artifacts[] | "\(.sha256)  \(.name)"' "${VARIANT}-image-${ARCH}.manifest
 
 ### Air-gapped install
 
-`mvmctl dev import-image` runs the same verification against local files for hosts that can't reach github.com. See [Air-gapped Bootstrap](airgapped-bootstrap) for the operator workflow.
+Air-gapped hosts that can't reach github.com need this same verification run against local files instead of a network fetch. See [Air-gapped Bootstrap](airgapped-bootstrap) for the current status of that path.
 
 ### Recall (revocation list)
 
-A separate `revocations` release tag publishes a cosign-signed `revoked-versions.json`. mvmctl checks this list on every `dev up` and refuses to use any image whose version is recalled. The recall reason is surfaced verbatim in the failure message, pointing at the upgrade path.
+A separate `revocations` release tag publishes a cosign-signed `revoked-versions.json`. mvmctl checks this list every time it fetches or verifies the builder VM image and refuses to use any image whose version is recalled. The recall reason is surfaced verbatim in the failure message, pointing at the upgrade path.
 
 ```bash
 curl -LO "https://github.com/tinylabscom/mvm/releases/download/revocations/revoked-versions.json"

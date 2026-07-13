@@ -121,7 +121,7 @@ mvmctl automatically detects your platform at startup and selects the best VM ba
 There is no Docker or container backend on the runtime path. A `qemu`
 (microvm.nix) backend exists for local dev/test only and is never auto-selected.
 
-You don't need Nix on the host. On first build, mvm bootstraps or reuses a Linux builder VM, runs Nix evaluation and `nix build` inside it, and extracts the rootfs back. You run `mvmctl build` from the host; you do not need to enter a dev shell first. See [Builder VM](/guides/builder-vm/) for the full model.
+You don't need Nix on the host. On first build, mvm bootstraps or reuses a Linux builder VM, runs Nix evaluation and `nix build` inside it, and extracts the rootfs back. You run `mvmctl build` from the host; the builder VM is headless, so there is no shell to enter first. See [Builder VM](/guides/builder-vm/) for the full model.
 
 ### First-Time Setup
 
@@ -133,7 +133,7 @@ mvmctl init
 
 This walks through platform detection, dependency installation (Firecracker on Linux; the `slp/krun` Homebrew trio for libkrun on macOS 13–25, nothing extra for the HVF backend on macOS 26+), default network setup, and XDG directory creation. Use `--non-interactive` for scripted environments.
 
-Running `mvmctl dev` or `mvmctl bootstrap` also handles setup automatically -- they detect your platform, select the backend, and stage the builder microVM image on first use.
+Running `mvmctl bootstrap` also handles setup automatically -- it detects your platform, selects the backend, and stages the builder microVM image ahead of time (builds trigger the same staging automatically if you skip this step).
 
 You can force a specific backend with `--hypervisor`:
 

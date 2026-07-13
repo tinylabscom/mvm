@@ -51,7 +51,7 @@ mvmctl build              # reads mvm.toml; builds the named flake target
 mvmctl run                # builds (if needed) + boots
 ```
 
-`mvmctl build` is a host command. You run it from macOS or Linux, and mvm sends the Linux-only Nix work into the builder VM. You do not need to enter `mvmctl dev shell` first. The shell is for debugging the build environment manually, not a prerequisite for normal builds.
+`mvmctl build` is a host command. You run it from macOS or Linux, and mvm sends the Linux-only Nix work into the builder VM. The builder VM is headless, so there's no shell to enter first — debug a failed build from its log instead (`-v` streams it live; a failure names the log path).
 
 `mvmctl` selects the runtime backend automatically when you boot the finished image. Use `--hypervisor` on runtime commands when you want to force a specific runtime backend:
 
@@ -114,7 +114,7 @@ Independent of the sealed/accessible distinction, mvm exposes two **runtime life
 
 | Mode | What it means | When to use |
 |---|---|---|
-| `attached` | VM lifecycle bound to the calling process — Ctrl-C / process exit sends SIGTERM to the VM. | `mvmctl run` interactive, `mvmctl dev` shell sessions, test harnesses that want deterministic teardown. |
+| `attached` | VM lifecycle bound to the calling process — Ctrl-C / process exit sends SIGTERM to the VM. | `mvmctl run` interactive, test harnesses that want deterministic teardown. |
 | `detached` | VM survives caller exit — only `mvmctl machine stop` (or `VmBackend::stop`) terminates it. | `mvmctl machine run` (background), production agents, CI fixtures that boot once and run multiple phases. |
 
 The default is `detached`. Override:
@@ -199,7 +199,7 @@ nix flake check --no-build
 
 ## Cross-platform notes
 
-mvm runs Nix builds inside the project builder VM and copies the finished kernel/rootfs artifacts back to the host cache. You don't need host-side Nix, and you don't need to enter a dev shell before building.
+mvm runs Nix builds inside the project builder VM and copies the finished kernel/rootfs artifacts back to the host cache. You don't need host-side Nix, and the builder VM is headless -- there's no shell to enter before building.
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
 - **macOS**: the host `mvmctl build` command orchestrates a Linux builder VM. The resulting runtime image boots on the HVF backend by default on macOS 26+ (Hypervisor.framework, vsock-only), or libkrun on macOS 13–25.

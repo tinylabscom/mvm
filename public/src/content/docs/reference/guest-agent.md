@@ -170,7 +170,7 @@ sent to a sealed-prod agent are rejected before any handler runs:
 | Profile | Effective verb set | Used by |
 |---------|-------------------|---------|
 | `sealed-prod` (default) | Lifecycle, status, entrypoint, sleep/wake, volume mount/unmount, idle-timeout updates. The full ADR-002 production-safe surface. | Production images. The policy file lives on a dm-verity rootfs (ADR-002 §W3) so the profile cannot be widened at runtime. |
-| `dev` | `sealed-prod` plus shell `Exec`, process RPC, filesystem RPC, console PTY, port forwarding, and `RunCode`. | `mvmctl dev` images and any image built with `dev-shell` feature. |
+| `dev` | `sealed-prod` plus shell `Exec`, process RPC, filesystem RPC, console PTY, port forwarding, and `RunCode`. | Accessible (`entrypoint.shell`) images, and any image built with the `dev-shell` feature. |
 | `builder` | Reserved for builder-only verbs. The current builder agent speaks a separate `BuilderRequest` protocol, so this profile is wire-stable but unused for the tenant agent. | Future builder VM agent if/when its verbs land on the tenant wire. |
 
 Rejected requests return a typed `UnsupportedInProfile` response:

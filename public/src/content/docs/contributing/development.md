@@ -13,12 +13,12 @@ description: Getting started as a contributor to mvm.
 ### Do I need to install libkrun?
 
 It depends on your machine. The builder VM (the Linux guest that runs
-`nix build` inside `mvmctl build` / `up` / `dev`) auto-selects its host
+`nix build` inside `mvmctl build` / `machine run`) auto-selects its host
 VMM:
 
 | Host | libkrun (`slp/krun/*`) needed? |
 |---|---|
-| macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). `mvmctl dev up` only retries libkrun if the HVF path fails. |
+| macOS 26+ Apple Silicon | **No** — auto-detect picks the **HVF** builder (Hypervisor.framework, ships with the OS, no Homebrew deps). The auto-fallback retries libkrun automatically if the HVF path fails. |
 | macOS 13–25 Apple Silicon | **Yes** — `brew install slp/krun/libkrun slp/krun/libkrunfw`. |
 | Linux + `/dev/kvm` | **No** — auto-detect picks the **QEMU** builder, so libkrun is not part of the default builder path on native Linux hosts. |
 
@@ -36,7 +36,7 @@ git clone https://github.com/tinylabscom/mvm.git
 cd mvm
 cargo build
 cargo run -- doctor     # reports the builder backend + anything missing
-cargo run -- dev        # auto-bootstrap + drop into the builder-VM shell
+cargo run -- bootstrap  # pre-warm the builder VM (optional -- builds auto-bootstrap it too)
 ```
 
 Or run the bootstrap script on a fresh machine:
@@ -58,8 +58,8 @@ just runtime-overlay-build
 # Run CLI
 just run -- --help
 
-# Dev mode (auto-bootstraps the dev VM + Firecracker)
-just run -- dev
+# Pre-warm the builder VM (optional -- builds auto-bootstrap it too)
+just run -- bootstrap
 
 # Release build (stripped, LTO)
 just release-build
@@ -76,15 +76,15 @@ The builder-VM and workload microVM kernels are slim custom Linux
 builds: one shared config in `nix/images/kernel/base.nix` plus a
 per-variant delta (`workload.nix` adds dm-verity; `builder.nix` adds
 the nix-build sandbox + egress-lockdown bits). Because the config is
-custom, `cache.nixos.org` has no substitute, so the first `dev up` on a
+custom, `cache.nixos.org` has no substitute, so the first builder VM boot on a
 fresh machine compiles the kernel from source (3-10 min, memory-heavy).
 
 `mvmctl build kernel build` makes that compile explicit and one-time, so
-it stops hijacking your first `dev up`:
+it stops hijacking your first builder VM boot:
 
 ```bash
 # Compile the builder kernel once into the cache + persistent nix store.
-# The next `dev up` reuses it (substituted, not rebuilt).
+# The next builder VM boot reuses it (substituted, not rebuilt).
 just run -- build kernel build --which builder
 
 # Or both kernels:
@@ -96,7 +96,7 @@ VM on a published kernel (once a release has shipped one):
 
 ```bash
 # Build only the rootfs locally; fetch + hash-verify the kernel.
-just run -- --kernel-source download dev up
+just run -- --kernel-source download bootstrap
 # `auto` downloads if available, else compiles in-image (the default).
 ```
 
@@ -183,7 +183,7 @@ just ci
 
 ### Gated E2E: the core-demo regression guard
 
-`crates/mvm-cli/tests/core_demo_e2e.rs` exercises the whole `dev up → compile → up → vsock ping` spine end-to-end. It boots the persistent builder VM, lowers `examples/python/hello-app/app.py` to a flake, builds + boots the workload microVM, and waits for the guest agent to answer over vsock. Default-skips so it doesn't fire on routine `cargo test` runs; gate is `MVM_E2E_SMOKE=1`:
+`crates/mvm-cli/tests/core_demo_e2e.rs` exercises the whole `bootstrap → compile → up → vsock ping` spine end-to-end. It boots the persistent builder VM, lowers `examples/python/hello-app/app.py` to a flake, builds + boots the workload microVM, and waits for the guest agent to answer over vsock. Default-skips so it doesn't fire on routine `cargo test` runs; gate is `MVM_E2E_SMOKE=1`:
 
 ```bash
 # Local run — requires libkrun + libkrunfw on pre-26 macOS, or

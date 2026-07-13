@@ -15,16 +15,16 @@ macOS 26+ (AS):    mvmctl machine run  -->  HVF microVM (Hypervisor.framework, v
 macOS 13-25 (AS):  mvmctl machine run  -->  libkrun microVM
 ```
 
-| Layer | Access command | Has your project files? |
-|-------|---------------|------------------------|
+| Layer | Access | Has your project files? |
+|-------|--------|------------------------|
 | Host | Your normal terminal | Yes |
-| Dev VM (macOS) | `mvmctl dev` or `mvmctl dev shell` | Yes (~ mounted read/write) |
-| MicroVM | (headless, no SSH) | No (isolated filesystem) |
+| Builder VM (macOS) | Headless -- no shell. Runs `nix build` on your behalf, driven by `mvmctl build` / `mvmctl machine run` | Only for the duration of a build job |
+| MicroVM | Headless, no SSH -- `mvmctl machine console` attaches only to images built with a shell entrypoint | No (isolated filesystem) |
 
-MicroVMs are **headless workloads** with no SSH access -- they communicate via vsock only.
+MicroVMs are **headless workloads** with no SSH access -- they communicate via vsock only. The builder VM is headless too: there's no interactive shell into it, on any platform.
 
 :::note
-On Linux with `/dev/kvm`, the dev-VM layer is skipped entirely -- Firecracker runs directly. On macOS Apple Silicon, microVMs run on the HVF backend (macOS 26+) or libkrun (macOS 13–25). There is no Docker or container runtime path.
+On Linux with `/dev/kvm`, the builder-VM layer is skipped entirely -- Firecracker runs directly. On macOS Apple Silicon, microVMs run on the HVF backend (macOS 26+) or libkrun (macOS 13–25). There is no Docker or container runtime path.
 :::
 
 ## Scaffold a project

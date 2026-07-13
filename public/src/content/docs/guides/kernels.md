@@ -38,7 +38,7 @@ kernel cache entry.
 
 The compiled or downloaded kernel is cached at
 `~/.cache/mvm/builder-vm/<arch>/kernels/<variant>/vmlinux` and reused by every
-later `dev up`.
+later builder VM boot.
 
 When the kernel was compiled locally, the cache directory also carries a
 resolved `config` sidecar and `kernel-metrics-<arch>.json`, so you can inspect

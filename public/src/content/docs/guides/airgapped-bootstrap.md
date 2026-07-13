@@ -5,18 +5,32 @@ description: How to run mvmctl in environments that can't reach github.com witho
 
 # Air-gapped Bootstrap
 
+:::caution[Air-gapped import command removed]
+`mvmctl dev import-image` — the command this guide was written around — was
+removed along with the rest of the interactive `mvmctl dev` command surface,
+and there is currently no successor command for importing a verified builder
+image from local files on a host that can't reach `github.com`. The
+verification pipeline it drove (cosign + SHA-256 + version-pin + max-age +
+revocation checks) is kept below as reference for what a headless successor
+needs to reproduce. If you operate air-gapped hosts, track this gap before
+relying on anything past this notice.
+:::
+
 mvmctl normally fetches its dev image (kernel + rootfs) and the
 project's [cosign-signed manifest](verify-release) from GitHub
-Releases. In regulated, government, or otherwise air-gapped
-environments where the host can't reach `github.com`, plan 36 ships
-a sanctioned trusted path: `mvmctl dev import-image` runs the same
-cosign signature + SHA-256 + version-pin + max-age + revocation
+Releases automatically, as part of `mvmctl bootstrap` or the first
+`mvmctl build` / `mvmctl machine run`. In regulated, government, or
+otherwise air-gapped environments where the host can't reach
+`github.com`, plan 36 shipped a sanctioned trusted path — the
+now-removed `mvmctl dev import-image` — that ran the same cosign
+signature + SHA-256 + version-pin + max-age + revocation
 verification pipeline against operator-provided local files.
 
-This is the *only* recommended way to run mvmctl in an air-gapped
-host. Setting `MVM_SKIP_HASH_VERIFY=1` to bypass the network fetch
+That was the *only* recommended way to run mvmctl in an air-gapped
+host, and the underlying principle still holds now that the command
+is gone: setting `MVM_SKIP_HASH_VERIFY=1` to bypass the network fetch
 disables the supply-chain check entirely, which is exactly the
-unsafe escape this path exists to discourage.
+unsafe escape this path existed to discourage.
 
 ## What you need
 
@@ -67,9 +81,10 @@ cosign verify-blob \
   "dev-image-${ARCH}.manifest.json"
 ```
 
-Expect `Verified OK`. mvmctl re-runs this check during `import-image`,
-so this step is optional — it just gives you a fast-fail before
-transferring 200 MB of rootfs over a slow side channel.
+Expect `Verified OK`. This step was optional even when `import-image`
+existed (mvmctl re-ran the same check on import) — it just gives you
+a fast-fail before transferring 200 MB of rootfs over a slow side
+channel.
 
 ### 3. Transfer to the air-gapped host
 
@@ -78,9 +93,11 @@ host — whatever your environment allows. The four files must arrive
 together; any one being modified or replaced in transit will fail
 verification on import.
 
-### 4. Import on the air-gapped host
+### 4. Import on the air-gapped host (command removed)
 
 ```bash
+# This command no longer exists — kept to document the pipeline a
+# successor needs to reproduce.
 mvmctl dev import-image \
   --manifest dev-image-aarch64.manifest.json \
   --bundle   dev-image-aarch64.manifest.json.bundle \
@@ -88,7 +105,7 @@ mvmctl dev import-image \
   --rootfs   dev-rootfs-aarch64.ext4
 ```
 
-mvmctl runs the full verification pipeline:
+This ran the full verification pipeline:
 
 1. Cosign-verify the manifest signature against the project's
    release-workflow OIDC identity.
@@ -100,9 +117,9 @@ mvmctl runs the full verification pipeline:
    digests.
 6. Copy the verified bytes into `~/.mvm/dev/prebuilt/v{version}/`.
 
-On success, the next `mvmctl dev up` boots the dev VM from the
-imported artifacts without re-running verification or touching the
-network.
+On success, the imported artifacts became the cache mvm's next
+builder VM boot would use, without re-running verification or
+touching the network.
 
 ## Revocation list in air-gapped environments
 
@@ -135,13 +152,14 @@ cp revoked-versions.json.bundle ~/.cache/mvm/revocations/
 touch ~/.cache/mvm/revocations/revoked-versions.json
 ```
 
-`mvmctl dev up` will read the cached file, cosign-verify it, and
-enforce any matching recall.
+The next builder VM fetch (`mvmctl bootstrap`, or auto-bootstrap on
+a build) reads the cached file, cosign-verifies it, and enforces any
+matching recall.
 
-## Failure modes
+## Failure modes (historical — `mvmctl dev import-image`)
 
-`mvmctl dev import-image` fails closed. The most common errors and
-what they mean:
+`mvmctl dev import-image` failed closed when it existed. The most
+common errors and what they meant, kept for reference:
 
 | Error wording | Cause | Fix |
 |--------------|-------|-----|

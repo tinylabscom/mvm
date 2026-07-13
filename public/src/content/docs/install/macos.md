@@ -86,7 +86,7 @@ If you configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/sta
 mvmctl doctor
 ```
 
-`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, the dev path uses the HVF builder; source image builds auto-detect the builder backend (HVF on macOS 26+ Apple Silicon), and `mvmctl dev up` retries with libkrun when the HVF builder path fails. Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
+`doctor` reports the active backend and libkrun availability. On an Apple Silicon Mac with macOS 26+, builds auto-detect the builder backend (HVF on macOS 26+ Apple Silicon), and the auto-fallback retries with libkrun when the HVF builder path fails. Explicit `--builder` / `MVM_BUILDER_BACKEND` overrides still win.
 
 ## First microVM
 

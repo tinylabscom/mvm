@@ -15,7 +15,6 @@ macOS is a supported local development target. Linux-specific build and runtime 
 ## Useful commands
 
 ```sh
-mvmctl dev status
 mvmctl doctor
 mvmctl machine logs <name>
 mvmctl boot-report <name>

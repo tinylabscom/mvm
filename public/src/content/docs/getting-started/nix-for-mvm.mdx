@@ -197,8 +197,9 @@ mvm.lib.${system}.mkGuest {
 Search for packages at [search.nixos.org/packages](https://search.nixos.org/packages) or from the command line:
 
 ```bash
-# Inside the dev shell (mvmctl dev)
-# Use 2>/dev/null to hide nixpkgs deprecation warnings
+# Requires optional host-side Nix (see Installation) -- the builder VM
+# is headless, so there's no shell to run this inside. Use 2>/dev/null
+# to hide nixpkgs deprecation warnings.
 nix search nixpkgs python 2>/dev/null
 nix search nixpkgs "node.*22" 2>/dev/null
 ```

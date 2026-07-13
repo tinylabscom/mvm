@@ -3,33 +3,29 @@ title: Troubleshooting
 description: Common issues and their solutions.
 ---
 
-## Builder VM and Dev Shell Issues
+## Builder VM Issues
 
-The builder VM is the Linux environment mvmctl uses for Nix evaluation and image builds. You normally do not enter it yourself: `mvmctl build --flake .` is a host command that stages work for the builder VM and copies artifacts back to the host cache. `mvmctl dev shell` is only for manual debugging. See [Builder VM](/guides/builder-vm/) for the full model.
+The builder VM is the Linux environment mvmctl uses for Nix evaluation and image builds. You never enter it: `mvmctl machine build --flake .` is a host command that stages work for the builder VM and copies artifacts back to the host cache. The builder VM is headless — debug a failed build from its log instead of a shell. See [Builder VM](/guides/builder-vm/) for the full model.
 
-### "Dev VM is not running"
+### Builder VM cache looks stuck or corrupted
 
-```
-Error: Dev VM is not running. Start it with: mvmctl dev up
-```
-
-**Fix**: `mvmctl dev up` (idempotent — installs Firecracker if missing, no-ops otherwise).
-
-### Dev VM is stuck
+The builder VM is managed automatically — there's no explicit "start it"
+step, and no `dev up` / `dev down` to cycle it. If a build behaves as though
+the builder VM's cache is wedged (stale store, half-built image), repair
+the cache instead:
 
 ```bash
-mvmctl dev down
-mvmctl dev up
+mvmctl cache repair
 ```
 
-If that fails, rebuild from scratch:
-```bash
-mvmctl dev rebuild
-```
+`cache repair` clears the degraded builder VM store so the next build
+cold-rebuilds it; it auto-stops a running builder VM first, and refuses
+while a Stage 0 bootstrap is in flight (`--force` only if that lock is
+stale, e.g. after a crash).
 
-Or for a full reset:
+For a full reset:
 ```bash
-mvmctl uninstall
+mvmctl env uninstall
 mvmctl bootstrap
 ```
 
@@ -46,10 +42,10 @@ mvmctl doctor
 # directories and probes each daemon's control socket.
 ```
 
-- **Daemon absent / socket not answering**: the builder VM may not be up. Run
-  `mvmctl dev up`, then re-check `mvmctl doctor`.
-- **Still not ready after `dev up`**: recycle the builder VM with `mvmctl dev
-  down && mvmctl dev up`; if it persists, `mvmctl dev rebuild`.
+- **Daemon absent / socket not answering**: the builder VM may not be up yet.
+  Run `mvmctl bootstrap`, then re-check `mvmctl doctor`.
+- **Still not ready after `bootstrap`**: repair the builder VM's cache with
+  `mvmctl cache repair`, then let the next build re-warm it.
 
 A build job can be cancelled from the host; the daemon stops the in-flight
 operation and returns a cancellation result rather than leaving a wedged build.
@@ -70,10 +66,10 @@ isolation) can panic in the libkrun guest during virtio device activation,
 before userspace. The Stage 0 device topology is identical to a warm build, so
 this is not a device-count problem; it surfaces in the upstream VMM's
 device-activation path under the bundled Stage 0 kernel. It does **not** occur on
-a normal cold `mvmctl dev up` against the default cache.
+a normal cold `mvmctl bootstrap` against the default cache.
 
 **Fix**: Don't run a builder bootstrap against a fully-isolated empty cache. Use
-the default cache, or pre-warm the builder once (`mvmctl dev up` with the default
+the default cache, or pre-warm the builder once (`mvmctl bootstrap` with the default
 cache) before pointing a test at an isolated `MVM_DATA_DIR`. If you must isolate,
 let the run share the default `MVM_CACHE_DIR` so the builder VM image and nix
 store are reused rather than rebuilt from zero. A contributor host with
@@ -95,11 +91,11 @@ mvmctl machine logs <name> --hypervisor   # Firecracker logs
 
 **Cause**: Insufficient permissions or TAP device name collision.
 
-**Fix**:
-```bash
-# Check for orphaned TAP devices (inside the dev VM)
-mvmctl dev shell -- ip link show | grep tap
-```
+**Fix**: There's no shell into the builder VM anymore to inspect its TAP
+interface directly. `mvmctl doctor` reports the active network backend; if
+you suspect a wedged TAP allocation, `mvmctl cache repair` clears the
+builder VM's store (stopping a running builder VM first), so the next
+build starts from a clean network setup.
 
 ### Instance won't start after sleep
 
@@ -116,13 +112,14 @@ mvmctl machine run --flake <project-dir> --name <name> -d
 ### Nix build fails
 
 ```bash
-# Re-run the normal host-orchestrated build.
-mvmctl build --flake .
-
-# If you need an interactive Linux debug environment:
-mvmctl dev shell
-nix build .#default
+# Re-run the normal host-orchestrated build, streaming the Nix log live.
+mvmctl machine build --flake . -v
 ```
+
+There's no interactive Linux debug environment to drop into — the `-v`
+output above is the same `nix build` transcript a shell session would have
+shown you. A failed build's error message also names the on-disk log path
+if you want the full transcript after the fact.
 
 ### "Cache miss" rebuilds
 
@@ -148,16 +145,21 @@ mvmctl build --flake .
 error: No space left on device
 ```
 
-**Cause**: The Nix store or dev VM disk is full.
+**Cause**: The Nix store or builder VM disk is full.
 
 **Fix**:
 ```bash
 # Check Nix store size (mvmctl doctor warns if >20 GiB)
 mvmctl doctor
 
-# For manual cleanup inside a debug shell:
-mvmctl dev shell
-nix-collect-garbage -d
+# Clear the builder VM's store entirely (no shell to run a surgical
+# nix-collect-garbage inside it anymore; the next build re-populates
+# only what it needs).
+mvmctl cache repair
+
+# Also reclaim host-side regenerable caches (Stage 0 blobs, the
+# default microVM image, pulled OCI layers).
+mvmctl cache prune --deep
 ```
 
 ### Hash mismatch (fixed-output derivation)
@@ -284,27 +286,37 @@ mvmctl machine stop  <N>          # tear it down (prompts; add --yes to skip)
 
 ### MicroVM has no internet
 
-```bash
-# Inside the dev VM, check NAT rules
-mvmctl dev shell -- sudo iptables -t nat -L
+There's no shell into the builder or workload VM to check NAT rules or TAP
+devices directly anymore. Start with:
 
-# Check the TAP device exists
-mvmctl dev shell -- ip link show tap0
+```bash
+mvmctl doctor              # reports the active network backend
+mvmctl machine logs <name> # guest console output, including boot-time network setup
 ```
+
+Workload networking is deny-by-default; if the guest simply has no policy
+grant, see [Network egress policy](/guides/network-egress-policy/) for
+`--net` / `--allow-host`.
 
 ### Can't access project files inside microVM
 
-The Firecracker microVM has an **isolated filesystem**. Use `mvmctl dev shell` to access the dev VM where your home directory is mounted, or pass host shares with `--mount`.
+The Firecracker microVM has an **isolated filesystem** by design. Pass host
+directories in explicitly with `--mount` (`mvmctl machine run --mount
+HOST:GUEST`) — there's no shell into a build-time VM to reach them another way.
 
 ## Performance Issues
 
-### Dev VM is slow
+### Builder VM feels slow
 
-Adjust resources (or persist the override with `mvmctl config set dev_vm_cpus 8 && mvmctl config set dev_vm_mem_gib 16`):
+Adjust its default resources:
 ```bash
-mvmctl dev down
-mvmctl dev up --cpus 8 --memory 16
+mvmctl ops config set dev_vm_cpus 8
+mvmctl ops config set dev_vm_mem_gib 16
 ```
+
+There's no explicit up/down cycle to apply it — the new sizing takes effect
+the next time the builder VM (re)boots, which `mvmctl bootstrap` or your
+next build triggers for you.
 
 ### Wrong backend selected
 
@@ -411,7 +423,7 @@ Plan 36 pins `manifest.version` to `mvmctl --version` exactly. Either:
 
 SHA-256 of the downloaded artifact doesn't match the manifest's recorded digest. Possible causes, in order:
 
-1. Mid-flight corruption — retry `mvmctl dev up` to re-download.
+1. Mid-flight corruption — retry `mvmctl bootstrap` to re-download.
 2. Mirror/CDN cache poisoning — rare but real; open a security issue with the SHA-256 you got vs what the manifest says.
 3. The release was re-uploaded after the manifest was signed (publishing process bug) — wait for the next tag.
 
