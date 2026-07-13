@@ -1855,14 +1855,25 @@ mod runtime_overlay_attach_tests {
         let layout =
             RuntimeOverlayResolver::new(cache.to_path_buf(), version.to_string()).layout(arch);
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
+        let overlay_ext4 = valid_overlay_ext4_bytes(version, true);
+        let sidecar = b"verity-bytes";
+        let roothash = format!("{}\n", "a".repeat(64));
+        let version_text = format!("{version}\n");
+        std::fs::write(&layout.overlay_ext4, &overlay_ext4).unwrap();
+        std::fs::write(&layout.sidecar, sidecar).unwrap();
+        std::fs::write(&layout.roothash_file, &roothash).unwrap();
+        std::fs::write(&layout.version_file, &version_text).unwrap();
         std::fs::write(
-            &layout.overlay_ext4,
-            valid_overlay_ext4_bytes(version, true),
+            &layout.checksum_manifest_file,
+            format!(
+                "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
+                sha256_hex(&overlay_ext4),
+                sha256_hex(sidecar),
+                sha256_hex(roothash.as_bytes()),
+                sha256_hex(version_text.as_bytes()),
+            ),
         )
         .unwrap();
-        std::fs::write(&layout.sidecar, b"verity-bytes").unwrap();
-        std::fs::write(&layout.roothash_file, format!("{}\n", "a".repeat(64))).unwrap();
-        std::fs::write(&layout.version_file, format!("{version}\n")).unwrap();
         if let Some(workspace_root) =
             crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
         {
@@ -1888,6 +1899,38 @@ mod runtime_overlay_attach_tests {
         std::fs::write(dir.join(name), bytes).unwrap();
     }
 
+    fn runtime_overlay_archive_bytes(
+        ext4_bytes: &[u8],
+        verity_bytes: &[u8],
+        roothash_bytes: &[u8],
+        version_bytes: &[u8],
+    ) -> Vec<u8> {
+        let checksums = format!(
+            "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
+            sha256_hex(ext4_bytes),
+            sha256_hex(verity_bytes),
+            sha256_hex(roothash_bytes),
+            sha256_hex(version_bytes),
+        );
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        append_archive_file(&mut tar, "overlay.ext4", ext4_bytes);
+        append_archive_file(&mut tar, "overlay.verity", verity_bytes);
+        append_archive_file(&mut tar, "overlay.roothash", roothash_bytes);
+        append_archive_file(&mut tar, "VERSION", version_bytes);
+        append_archive_file(&mut tar, "checksums-sha256.txt", checksums.as_bytes());
+        let encoder = tar.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(u64::try_from(bytes.len()).unwrap());
+        header.set_cksum();
+        tar.append_data(&mut header, path, bytes).unwrap();
+    }
+
     fn seed_release_fixture(base: &std::path::Path, version: &str, arch: GuestArch) {
         let names = mvm_build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch(arch);
         let release_dir = base.join(format!("v{version}"));
@@ -1897,24 +1940,18 @@ mod runtime_overlay_attach_tests {
         let verity_bytes = b"downloaded-verity";
         let roothash_text = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
         let version_text = format!("{version}\n");
-
-        write_fixture(&release_dir, &names.ext4, ext4_bytes);
-        write_fixture(&release_dir, &names.verity, verity_bytes);
-        write_fixture(&release_dir, &names.roothash, roothash_text);
-        write_fixture(&release_dir, &names.version, version_text.as_bytes());
-
-        let checksums = format!(
-            "{}  {}\n{}  {}\n{}  {}\n{}  {}\n",
-            sha256_hex(ext4_bytes),
-            names.ext4,
-            sha256_hex(verity_bytes),
-            names.verity,
-            sha256_hex(roothash_text),
-            names.roothash,
-            sha256_hex(version_text.as_bytes()),
-            names.version
+        let archive_bytes = runtime_overlay_archive_bytes(
+            ext4_bytes,
+            verity_bytes,
+            roothash_text,
+            version_text.as_bytes(),
         );
-        write_fixture(&release_dir, &names.checksums, checksums.as_bytes());
+        write_fixture(&release_dir, &names.archive, &archive_bytes);
+        write_fixture(
+            &release_dir,
+            &names.archive_checksum,
+            format!("{}  {}\n", sha256_hex(&archive_bytes), names.archive).as_bytes(),
+        );
     }
 
     #[test]
