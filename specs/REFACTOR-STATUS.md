@@ -6,7 +6,9 @@ centralized into the shared read-only cache artifact under
 either mounts that artifact read-only with real proof or refuses the
 unsupported path fail-closed; stopped VMs pick up newer version-matched
 overlays on restart, while running VMs keep the runtime they booted with. The
-current closeout slice also fixes the exact-current candidate witnesses by
+cache now carries a recorded `checksums-sha256.txt`, and required-overlay
+boots re-verify those cached bytes before attach. The current closeout slice
+also fixes the exact-current candidate witnesses by
 aligning the SDK/fixture receipt posture tests with the current vsock-only
 libkrun contract and isolating the `mvm-build` library tests from shared
 env/cache races. Fresh host gates are green on the current candidate, and the

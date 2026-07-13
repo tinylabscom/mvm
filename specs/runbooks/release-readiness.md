@@ -109,11 +109,8 @@ matches the product contract before tagging.
 
 Release artifacts that must exist per architecture:
 
-- `runtime-overlay-<arch>.ext4`
-- `runtime-overlay-<arch>.verity`
-- `runtime-overlay-<arch>.roothash`
-- `runtime-overlay-<arch>.VERSION`
-- `runtime-overlay-<arch>-checksums-sha256.txt`
+- `runtime-overlay-<arch>.tar.gz`
+- `runtime-overlay-<arch>.tar.gz.sha256`
 
 The operator confirms:
 
@@ -121,9 +118,12 @@ The operator confirms:
    `~/.cache/mvm/runtime-overlay/<version>/<arch>/`
 2. only **guest-executed** runtime binaries belong in the overlay
 3. admitted backends mount it read-only
-4. running VMs do not hot-remount
-5. stopped VMs adopt a new version-matched overlay only on restart
-6. unsupported Linux rootfs-backed libkrun builder use is fail-closed
+4. the tarball contains `overlay.ext4`, `overlay.verity`,
+   `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`
+5. the host re-verifies cached overlay files before attach
+6. running VMs do not hot-remount
+7. stopped VMs adopt a new version-matched overlay only on restart
+8. unsupported Linux rootfs-backed libkrun builder use is fail-closed
 
 The release workflow itself publishes the overlay assets, but the
 operator still verifies the contract by checking the docs and

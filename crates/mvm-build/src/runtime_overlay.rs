@@ -166,6 +166,39 @@ pub enum RuntimeOverlayError {
     #[error("checksum manifest at {checksums_url} did not list an entry for {name}")]
     ChecksumMissing { name: String, checksums_url: String },
 
+    /// The checksum manifest lacked an entry for one of the canonical
+    /// runtime-overlay files. Always fail closed — both cached and freshly
+    /// downloaded/extracted overlays must prove per-file integrity before
+    /// attach/install.
+    #[error(
+        "runtime overlay checksum manifest at {manifest_path:?} did not \
+         list an entry for {name}"
+    )]
+    ChecksumManifestMissing {
+        manifest_path: PathBuf,
+        name: String,
+    },
+
+    /// One of the runtime-overlay files drifted from the checksum recorded in
+    /// the manifest. Refuse to attach/install the artifact.
+    #[error(
+        "runtime overlay integrity mismatch for {name}: expected sha256 \
+         {expected}, computed {actual}"
+    )]
+    ChecksumManifestMismatch {
+        name: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// The downloaded runtime-overlay tarball was malformed or unsafe to
+    /// extract. Always fail closed — tar extraction is an attack surface.
+    #[error("runtime overlay archive invalid at {archive_path:?}: {reason}")]
+    InvalidArchive {
+        archive_path: PathBuf,
+        reason: String,
+    },
+
     #[cfg(feature = "pure-mkfs")]
     #[error("direct runtime overlay build failed: {reason}")]
     DirectBuildFailed { reason: String },
@@ -183,6 +216,7 @@ pub struct RuntimeOverlayLayout {
     pub sidecar: PathBuf,
     pub roothash_file: PathBuf,
     pub version_file: PathBuf,
+    pub checksum_manifest_file: PathBuf,
     pub local_source_fingerprint_file: PathBuf,
     pub local_build_epoch_file: PathBuf,
     pub arch: GuestArch,
@@ -202,6 +236,7 @@ impl RuntimeOverlayLayout {
             sidecar: artifact_dir.join("overlay.verity"),
             roothash_file: artifact_dir.join("overlay.roothash"),
             version_file: artifact_dir.join("VERSION"),
+            checksum_manifest_file: artifact_dir.join(CHECKSUM_MANIFEST_FILE),
             local_source_fingerprint_file: artifact_dir.join(LOCAL_SOURCE_FINGERPRINT_FILE),
             local_build_epoch_file: artifact_dir.join(LOCAL_BUILD_EPOCH_FILE),
             artifact_dir,
@@ -242,6 +277,7 @@ const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/egress-client",
     "/VERSION",
 ];
+const CHECKSUM_MANIFEST_FILE: &str = "checksums-sha256.txt";
 const LOCAL_SOURCE_FINGERPRINT_FILE: &str = "SOURCE_FINGERPRINT";
 const LOCAL_BUILD_EPOCH_FILE: &str = "BUILD_EPOCH";
 const LOCAL_BUILD_EPOCH: &str = "1";
@@ -483,6 +519,12 @@ impl RuntimeOverlayResolver {
             &self.expected_version,
             arch,
         )?;
+        check_exists(
+            &layout.checksum_manifest_file,
+            &layout.artifact_dir,
+            &self.expected_version,
+            arch,
+        )?;
 
         let version = read_version_file(&layout.version_file)?;
         if version != self.expected_version {
@@ -492,6 +534,7 @@ impl RuntimeOverlayResolver {
             });
         }
 
+        verify_cached_artifact_integrity(&layout)?;
         let roothash = read_and_validate_roothash(&layout.roothash_file)?;
         validate_overlay_payload(&layout.overlay_ext4)?;
 
@@ -685,6 +728,57 @@ fn read_and_validate_roothash(path: &Path) -> Result<String, RuntimeOverlayError
         });
     }
     Ok(trimmed.to_string())
+}
+
+fn verify_cached_artifact_integrity(
+    layout: &RuntimeOverlayLayout,
+) -> Result<(), RuntimeOverlayError> {
+    verify_manifest_checksums(
+        &layout.checksum_manifest_file,
+        [
+            ("overlay.ext4", &layout.overlay_ext4),
+            ("overlay.verity", &layout.sidecar),
+            ("overlay.roothash", &layout.roothash_file),
+            ("VERSION", &layout.version_file),
+        ],
+    )
+}
+
+fn verify_extracted_overlay_integrity(dir: &Path) -> Result<(), RuntimeOverlayError> {
+    verify_manifest_checksums(
+        &dir.join(CHECKSUM_MANIFEST_FILE),
+        [
+            ("overlay.ext4", &dir.join("overlay.ext4")),
+            ("overlay.verity", &dir.join("overlay.verity")),
+            ("overlay.roothash", &dir.join("overlay.roothash")),
+            ("VERSION", &dir.join("VERSION")),
+        ],
+    )
+}
+
+fn verify_manifest_checksums<const N: usize>(
+    manifest_path: &Path,
+    entries: [(&str, &Path); N],
+) -> Result<(), RuntimeOverlayError> {
+    let body = std::fs::read_to_string(manifest_path)?;
+    let expected = parse_checksums_manifest(&body);
+    for (name, path) in entries {
+        let Some(expected_hash) = expected.get(name) else {
+            return Err(RuntimeOverlayError::ChecksumManifestMissing {
+                manifest_path: manifest_path.to_path_buf(),
+                name: name.to_string(),
+            });
+        };
+        let actual = compute_file_sha256(path)?;
+        if actual != *expected_hash {
+            return Err(RuntimeOverlayError::ChecksumManifestMismatch {
+                name: name.to_string(),
+                expected: expected_hash.clone(),
+                actual,
+            });
+        }
+    }
+    Ok(())
 }
 
 // =================================================================
@@ -1036,6 +1130,7 @@ pub fn install_overlay_into_cache(
     install_file_with_perms(&source.sidecar, &staging.join("overlay.verity"))?;
     install_file_with_perms(&source.roothash_file, &staging.join("overlay.roothash"))?;
     install_file_with_perms(&source_version_file, &staging.join("VERSION"))?;
+    write_checksum_manifest(&staging)?;
     std::fs::write(
         staging.join(LOCAL_BUILD_EPOCH_FILE),
         format!("{LOCAL_BUILD_EPOCH}\n"),
@@ -1067,6 +1162,7 @@ fn all_required_files_present(layout: &RuntimeOverlayLayout) -> bool {
         && layout.sidecar.is_file()
         && layout.roothash_file.is_file()
         && layout.version_file.is_file()
+        && layout.checksum_manifest_file.is_file()
 }
 
 fn staging_dir_name(arch: GuestArch) -> String {
@@ -1080,6 +1176,23 @@ fn staging_dir_name(arch: GuestArch) -> String {
 fn install_file_with_perms(src: &Path, dst: &Path) -> Result<(), RuntimeOverlayError> {
     std::fs::copy(src, dst)?;
     set_cache_perms(dst)?;
+    Ok(())
+}
+
+fn write_checksum_manifest(dir: &Path) -> Result<(), RuntimeOverlayError> {
+    let entries = [
+        ("overlay.ext4", dir.join("overlay.ext4")),
+        ("overlay.verity", dir.join("overlay.verity")),
+        ("overlay.roothash", dir.join("overlay.roothash")),
+        ("VERSION", dir.join("VERSION")),
+    ];
+    let mut body = String::new();
+    for (name, path) in entries {
+        let digest = compute_file_sha256(&path)?;
+        body.push_str(&format!("{digest}  {name}\n"));
+    }
+    std::fs::write(dir.join(CHECKSUM_MANIFEST_FILE), body)?;
+    set_cache_perms(&dir.join(CHECKSUM_MANIFEST_FILE))?;
     Ok(())
 }
 
@@ -1123,11 +1236,8 @@ pub(crate) const SKIP_HASH_VERIFY_ENV: &str = "MVM_SKIP_HASH_VERIFY";
 /// download network path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeOverlayArtifactNames {
-    pub ext4: String,
-    pub verity: String,
-    pub roothash: String,
-    pub version: String,
-    pub checksums: String,
+    pub archive: String,
+    pub archive_checksum: String,
 }
 
 impl RuntimeOverlayArtifactNames {
@@ -1140,11 +1250,8 @@ impl RuntimeOverlayArtifactNames {
     pub fn for_arch(arch: GuestArch) -> Self {
         let a = arch.to_string();
         Self {
-            ext4: format!("runtime-overlay-{a}.ext4"),
-            verity: format!("runtime-overlay-{a}.verity"),
-            roothash: format!("runtime-overlay-{a}.roothash"),
-            version: format!("runtime-overlay-{a}.VERSION"),
-            checksums: format!("runtime-overlay-{a}-checksums-sha256.txt"),
+            archive: format!("runtime-overlay-{a}.tar.gz"),
+            archive_checksum: format!("runtime-overlay-{a}.tar.gz.sha256"),
         }
     }
 }
@@ -1160,14 +1267,15 @@ pub fn release_base_url(version: &str) -> String {
     format!("{}/v{version}", base.trim_end_matches('/'))
 }
 
-/// Download the runtime overlay for `version` + `arch` from the
-/// published GitHub Release, SHA-256-verify each artifact, and
-/// install into `cache_root` under the canonical layout
+/// Download the runtime overlay tarball for `version` + `arch` from the
+/// published GitHub Release, SHA-256-verify the archive, safely extract it,
+/// re-verify each inner artifact against the archive's embedded
+/// `checksums-sha256.txt`, and install into `cache_root` under the canonical layout
 /// `<cache_root>/runtime-overlay/<version>/<arch>/`.
 ///
 /// Mirrors the integrity pattern of `download_dev_image` /
-/// `download_builder_vm_image`: fetch the checksums file first;
-/// reject downloads whose hash isn't pre-committed there; honor
+/// `download_builder_vm_image`: fetch the archive checksum first; reject
+/// downloads whose hash isn't pre-committed there; honor
 /// `MVM_SKIP_HASH_VERIFY=1` only as a documented emergency
 /// rotation escape (never set in CI).
 ///
@@ -1180,49 +1288,31 @@ pub fn download_runtime_overlay(
 ) -> Result<RuntimeOverlayArtifact, RuntimeOverlayError> {
     let names = RuntimeOverlayArtifactNames::for_arch(arch);
     let base = release_base_url(version);
-    let checksums_url = format!("{base}/{}", names.checksums);
+    let archive_checksum_url = format!("{base}/{}", names.archive_checksum);
 
-    // Step 1: fetch the checksum manifest before touching the
-    // artifacts. The manifest is the trust anchor even before
-    // signed manifests catch up; fetching it first
-    // means a missing manifest aborts before we waste bandwidth
-    // on the (potentially large) ext4.
-    let expected = fetch_expected_hashes(
-        &checksums_url,
-        &[&names.ext4, &names.verity, &names.roothash, &names.version],
-    )?;
+    // Step 1: fetch the archive checksum sidecar before touching the tarball.
+    // The archive is the transport unit; a missing checksum aborts before we
+    // spend bandwidth on the payload.
+    let expected = fetch_expected_hashes(&archive_checksum_url, &[&names.archive])?;
 
-    // Step 2: download into a temp dir, naming files locally
-    // under their canonical names so `install_overlay_into_cache`
-    // (which expects `overlay.{ext4,verity,roothash}` + `VERSION`
-    // side-by-side) can consume the temp dir directly.
+    // Step 2: download the tarball into a temp dir, verify the tarball's
+    // checksum, then safely extract it into canonical filenames so
+    // `install_overlay_into_cache` can consume the extracted directory
+    // directly.
     let tmp = tempfile::tempdir()?;
     let stage = tmp.path();
-
-    let ext4_local = stage.join("overlay.ext4");
-    let verity_local = stage.join("overlay.verity");
-    let roothash_local = stage.join("overlay.roothash");
-    let version_local = stage.join("VERSION");
-
-    curl_download(&format!("{base}/{}", names.ext4), &ext4_local)?;
-    verify_file_sha256(&ext4_local, &names.ext4, expected.get(&names.ext4))?;
-
-    curl_download(&format!("{base}/{}", names.verity), &verity_local)?;
-    verify_file_sha256(&verity_local, &names.verity, expected.get(&names.verity))?;
-
-    curl_download(&format!("{base}/{}", names.roothash), &roothash_local)?;
-    verify_file_sha256(
-        &roothash_local,
-        &names.roothash,
-        expected.get(&names.roothash),
-    )?;
-
-    curl_download(&format!("{base}/{}", names.version), &version_local)?;
-    verify_file_sha256(&version_local, &names.version, expected.get(&names.version))?;
+    let archive_local = stage.join(&names.archive);
+    curl_download(&format!("{base}/{}", names.archive), &archive_local)?;
+    verify_file_sha256(&archive_local, &names.archive, expected.get(&names.archive))?;
+    extract_runtime_overlay_archive(&archive_local, stage)?;
+    verify_extracted_overlay_integrity(stage)?;
 
     // Step 3: read the roothash text so the returned
     // `RuntimeOverlayArtifact` carries the value the backend
     // bakes into the kernel cmdline (`mvm.runtime_roothash=…`).
+    let ext4_local = stage.join("overlay.ext4");
+    let verity_local = stage.join("overlay.verity");
+    let roothash_local = stage.join("overlay.roothash");
     let roothash = parse_roothash_text(&roothash_local)?;
 
     // Step 4: hand off to the existing atomic installer. It
@@ -1243,6 +1333,93 @@ pub fn download_runtime_overlay(
         cache_root,
         &InstallOptions { overwrite: true },
     )
+}
+
+fn extract_runtime_overlay_archive(
+    archive_path: &Path,
+    stage: &Path,
+) -> Result<(), RuntimeOverlayError> {
+    let file = std::fs::File::open(archive_path)?;
+    let decoder = flate2::read::GzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let mut seen = std::collections::BTreeSet::new();
+
+    for entry in archive
+        .entries()
+        .map_err(|e| RuntimeOverlayError::InvalidArchive {
+            archive_path: archive_path.to_path_buf(),
+            reason: format!("read tar entries: {e}"),
+        })?
+    {
+        let mut entry = entry.map_err(|e| RuntimeOverlayError::InvalidArchive {
+            archive_path: archive_path.to_path_buf(),
+            reason: format!("read tar entry: {e}"),
+        })?;
+        let path = entry
+            .path()
+            .map_err(|e| RuntimeOverlayError::InvalidArchive {
+                archive_path: archive_path.to_path_buf(),
+                reason: format!("read tar path: {e}"),
+            })?
+            .into_owned();
+        let Some(name) = canonical_archive_member_name(&path) else {
+            return Err(RuntimeOverlayError::InvalidArchive {
+                archive_path: archive_path.to_path_buf(),
+                reason: format!("unsafe or unexpected path {:?}", path.display()),
+            });
+        };
+        match entry.header().entry_type() {
+            tar::EntryType::Regular => {
+                let dest = stage.join(name);
+                let mut out = std::fs::File::create(&dest)?;
+                std::io::copy(&mut entry, &mut out)?;
+                set_cache_perms(&dest)?;
+                seen.insert(name.to_string());
+            }
+            tar::EntryType::Directory => {}
+            other => {
+                return Err(RuntimeOverlayError::InvalidArchive {
+                    archive_path: archive_path.to_path_buf(),
+                    reason: format!(
+                        "unsupported tar entry type {other:?} for {:?}",
+                        path.display()
+                    ),
+                });
+            }
+        }
+    }
+
+    for required in [
+        "overlay.ext4",
+        "overlay.verity",
+        "overlay.roothash",
+        "VERSION",
+        CHECKSUM_MANIFEST_FILE,
+    ] {
+        if !seen.contains(required) && !stage.join(required).is_file() {
+            return Err(RuntimeOverlayError::InvalidArchive {
+                archive_path: archive_path.to_path_buf(),
+                reason: format!("missing required archive member {required}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn canonical_archive_member_name(path: &Path) -> Option<&'static str> {
+    let mut components = path.components();
+    let component = match (components.next(), components.next()) {
+        (Some(std::path::Component::Normal(name)), None) => name,
+        _ => return None,
+    };
+    match component.to_str()? {
+        "overlay.ext4" => Some("overlay.ext4"),
+        "overlay.verity" => Some("overlay.verity"),
+        "overlay.roothash" => Some("overlay.roothash"),
+        "VERSION" => Some("VERSION"),
+        CHECKSUM_MANIFEST_FILE => Some(CHECKSUM_MANIFEST_FILE),
+        _ => None,
+    }
 }
 
 /// HTTP GET the per-release `sha256sum`-format checksums file and
@@ -1420,6 +1597,17 @@ mod tests {
         for (name, contents) in with_files {
             std::fs::write(artifact_dir.join(name), contents).unwrap();
         }
+        let have_all_canonical_files = [
+            "overlay.ext4",
+            "overlay.verity",
+            "overlay.roothash",
+            "VERSION",
+        ]
+        .iter()
+        .all(|name| artifact_dir.join(name).is_file());
+        if have_all_canonical_files {
+            write_checksum_manifest(&artifact_dir).unwrap();
+        }
         tmp
     }
 
@@ -1524,6 +1712,10 @@ mod tests {
             layout.version_file,
             PathBuf::from("/cache/runtime-overlay/0.14.0/aarch64/VERSION")
         );
+        assert_eq!(
+            layout.checksum_manifest_file,
+            PathBuf::from("/cache/runtime-overlay/0.14.0/aarch64/checksums-sha256.txt")
+        );
         assert_eq!(layout.arch, GuestArch::Aarch64);
         assert_eq!(layout.version, "0.14.0");
     }
@@ -1558,6 +1750,38 @@ mod tests {
         match err {
             RuntimeOverlayError::ArtifactIncomplete { missing, .. } => {
                 assert!(missing.ends_with("overlay.ext4"), "missing={missing:?}");
+            }
+            other => panic!("expected ArtifactIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_fails_when_checksum_manifest_missing() {
+        let cache = make_cache(
+            "0.14.0",
+            GuestArch::Aarch64,
+            &[
+                ("overlay.ext4", &valid_overlay_ext4_bytes(true)),
+                ("overlay.verity", b"sidecar"),
+                ("overlay.roothash", format!("{FAKE_ROOTHASH}\n").as_bytes()),
+                ("VERSION", b"0.14.0\n"),
+            ],
+        );
+        std::fs::remove_file(
+            cache
+                .path()
+                .join("runtime-overlay/0.14.0/aarch64")
+                .join(CHECKSUM_MANIFEST_FILE),
+        )
+        .unwrap();
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
+        match err {
+            RuntimeOverlayError::ArtifactIncomplete { missing, .. } => {
+                assert!(
+                    missing.ends_with(CHECKSUM_MANIFEST_FILE),
+                    "missing={missing:?}"
+                );
             }
             other => panic!("expected ArtifactIncomplete, got {other:?}"),
         }
@@ -1748,6 +1972,55 @@ mod tests {
                 assert_eq!(missing_path, "/egress-client");
             }
             other => panic!("expected PayloadIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_cache_when_overlay_bytes_drift_from_checksum_manifest() {
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
+        let cache = TempDir::new().unwrap();
+        let installed =
+            install_overlay_into_cache(&source, cache.path(), &InstallOptions::default())
+                .expect("install");
+        std::fs::write(&installed.overlay_ext4, b"tampered-overlay-bytes").unwrap();
+
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
+        match err {
+            RuntimeOverlayError::ChecksumManifestMismatch { name, .. } => {
+                assert_eq!(name, "overlay.ext4");
+            }
+            other => panic!("expected ChecksumManifestMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_rejects_cache_when_checksum_manifest_entry_missing() {
+        let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
+        let cache = TempDir::new().unwrap();
+        let installed =
+            install_overlay_into_cache(&source, cache.path(), &InstallOptions::default())
+                .expect("install");
+        let manifest_path = installed
+            .overlay_ext4
+            .parent()
+            .expect("artifact dir")
+            .join(CHECKSUM_MANIFEST_FILE);
+        let ext4_hash = compute_file_sha256(&installed.overlay_ext4).unwrap();
+        let sidecar_hash = compute_file_sha256(&installed.sidecar).unwrap();
+        std::fs::write(
+            &manifest_path,
+            format!("{ext4_hash}  overlay.ext4\n{sidecar_hash}  overlay.verity\n"),
+        )
+        .unwrap();
+
+        let resolver = RuntimeOverlayResolver::new(cache.path().to_path_buf(), "0.14.0".into());
+        let err = resolver.resolve(GuestArch::Aarch64).unwrap_err();
+        match err {
+            RuntimeOverlayError::ChecksumManifestMissing { name, .. } => {
+                assert_eq!(name, "overlay.roothash");
+            }
+            other => panic!("expected ChecksumManifestMissing, got {other:?}"),
         }
     }
 
@@ -1980,6 +2253,11 @@ mod tests {
         let build_epoch =
             std::fs::read_to_string(expected_dir.join(LOCAL_BUILD_EPOCH_FILE)).unwrap();
         assert_eq!(build_epoch.trim(), LOCAL_BUILD_EPOCH);
+        let checksums = std::fs::read_to_string(expected_dir.join(CHECKSUM_MANIFEST_FILE)).unwrap();
+        assert!(checksums.contains("overlay.ext4"));
+        assert!(checksums.contains("overlay.verity"));
+        assert!(checksums.contains("overlay.roothash"));
+        assert!(checksums.contains("VERSION"));
     }
 
     #[test]
@@ -2235,6 +2513,11 @@ mod tests {
             &installed.overlay_ext4,
             &installed.sidecar,
             &installed.roothash_file,
+            &installed
+                .overlay_ext4
+                .parent()
+                .expect("artifact dir")
+                .join(CHECKSUM_MANIFEST_FILE),
         ] {
             let mode = std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode, 0o644, "cache file {p:?} must be 0644 (got {mode:o})");
@@ -2282,26 +2565,20 @@ mod tests {
     #[test]
     fn artifact_names_match_release_yml_naming_aarch64() {
         let names = RuntimeOverlayArtifactNames::for_arch(GuestArch::Aarch64);
-        assert_eq!(names.ext4, "runtime-overlay-aarch64.ext4");
-        assert_eq!(names.verity, "runtime-overlay-aarch64.verity");
-        assert_eq!(names.roothash, "runtime-overlay-aarch64.roothash");
-        assert_eq!(names.version, "runtime-overlay-aarch64.VERSION");
+        assert_eq!(names.archive, "runtime-overlay-aarch64.tar.gz");
         assert_eq!(
-            names.checksums,
-            "runtime-overlay-aarch64-checksums-sha256.txt"
+            names.archive_checksum,
+            "runtime-overlay-aarch64.tar.gz.sha256"
         );
     }
 
     #[test]
     fn artifact_names_match_release_yml_naming_x86_64() {
         let names = RuntimeOverlayArtifactNames::for_arch(GuestArch::X86_64);
-        assert_eq!(names.ext4, "runtime-overlay-x86_64.ext4");
-        assert_eq!(names.verity, "runtime-overlay-x86_64.verity");
-        assert_eq!(names.roothash, "runtime-overlay-x86_64.roothash");
-        assert_eq!(names.version, "runtime-overlay-x86_64.VERSION");
+        assert_eq!(names.archive, "runtime-overlay-x86_64.tar.gz");
         assert_eq!(
-            names.checksums,
-            "runtime-overlay-x86_64-checksums-sha256.txt"
+            names.archive_checksum,
+            "runtime-overlay-x86_64.tar.gz.sha256"
         );
     }
 
@@ -2341,16 +2618,16 @@ mod tests {
     #[test]
     fn parse_checksums_manifest_accepts_sha256sum_canonical() {
         let body = "\
-0000000000000000000000000000000000000000000000000000000000000001  runtime-overlay-aarch64.ext4
-0000000000000000000000000000000000000000000000000000000000000002  runtime-overlay-aarch64.verity
+0000000000000000000000000000000000000000000000000000000000000001  runtime-overlay-aarch64.tar.gz
+0000000000000000000000000000000000000000000000000000000000000002  runtime-overlay-aarch64.tar.gz.sha256
 ";
         let map = parse_checksums_manifest(body);
         assert_eq!(
-            map.get("runtime-overlay-aarch64.ext4").unwrap(),
+            map.get("runtime-overlay-aarch64.tar.gz").unwrap(),
             "0000000000000000000000000000000000000000000000000000000000000001"
         );
         assert_eq!(
-            map.get("runtime-overlay-aarch64.verity").unwrap(),
+            map.get("runtime-overlay-aarch64.tar.gz.sha256").unwrap(),
             "0000000000000000000000000000000000000000000000000000000000000002"
         );
     }
@@ -2359,10 +2636,10 @@ mod tests {
     fn parse_checksums_manifest_strips_binary_mode_star() {
         // `sha256sum -b` emits `<hash> *<file>` for binary mode.
         // Both modes must parse identically.
-        let body = "0000000000000000000000000000000000000000000000000000000000000003 *runtime-overlay-x86_64.ext4";
+        let body = "0000000000000000000000000000000000000000000000000000000000000003 *runtime-overlay-x86_64.tar.gz";
         let map = parse_checksums_manifest(body);
         assert_eq!(
-            map.get("runtime-overlay-x86_64.ext4").unwrap(),
+            map.get("runtime-overlay-x86_64.tar.gz").unwrap(),
             "0000000000000000000000000000000000000000000000000000000000000003"
         );
     }
@@ -2422,13 +2699,13 @@ short  bar.ext4
     }
 
     /// End-to-end download flow against a `file://` fixture: stage
-    /// the four artifacts + a checksums file on disk under names
-    /// matching the release-pipeline layout, point
+    /// a tarball + archive checksum sidecar under names matching the
+    /// release-pipeline layout, point
     /// `MVM_OVERLAY_BASE_URL` at the fixture dir, and assert the
     /// installer materializes everything correctly into the cache.
     /// Exercises every code path except the actual GitHub network
-    /// hop — same wire format, same checksums verification, same
-    /// atomic install.
+    /// hop — same wire format, same archive verification, same
+    /// inner-manifest verification, same atomic install.
     ///
     /// `file://` URLs work with curl (`-fSL`) the same way HTTP
     /// URLs do, so the test exercises the exact code path
@@ -2444,38 +2721,30 @@ short  bar.ext4
         std::fs::create_dir_all(&release_dir).unwrap();
 
         // Fixture bytes — the actual contents don't matter for the
-        // download path, only their sha256.
+        // download path, only their checksums.
         let ext4_bytes = b"fake-ext4-bytes";
         let verity_bytes = b"fake-verity-sidecar";
         let roothash_text = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
         let version_text = "9.9.9\n";
-        write_fixture(&release_dir, "runtime-overlay-aarch64.ext4", ext4_bytes);
-        write_fixture(&release_dir, "runtime-overlay-aarch64.verity", verity_bytes);
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.roothash",
+        let archive_bytes = runtime_overlay_archive_bytes(
+            ext4_bytes,
+            verity_bytes,
             roothash_text.as_bytes(),
-        );
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.VERSION",
             version_text.as_bytes(),
         );
-
-        let checksums = format!(
-            "{}  runtime-overlay-aarch64.ext4\n\
-             {}  runtime-overlay-aarch64.verity\n\
-             {}  runtime-overlay-aarch64.roothash\n\
-             {}  runtime-overlay-aarch64.VERSION\n",
-            sha256_hex(ext4_bytes),
-            sha256_hex(verity_bytes),
-            sha256_hex(roothash_text.as_bytes()),
-            sha256_hex(version_text.as_bytes()),
+        write_fixture(
+            &release_dir,
+            "runtime-overlay-aarch64.tar.gz",
+            &archive_bytes,
         );
         write_fixture(
             &release_dir,
-            "runtime-overlay-aarch64-checksums-sha256.txt",
-            checksums.as_bytes(),
+            "runtime-overlay-aarch64.tar.gz.sha256",
+            format!(
+                "{}  runtime-overlay-aarch64.tar.gz\n",
+                sha256_hex(&archive_bytes)
+            )
+            .as_bytes(),
         );
 
         let base_url = format!("file://{}", upstream.path().display());
@@ -2519,32 +2788,31 @@ short  bar.ext4
         let release_dir = upstream.path().join("v9.9.9");
         std::fs::create_dir_all(&release_dir).unwrap();
 
-        let real_bytes = b"the-real-ext4-bytes";
-        let tampered_bytes = b"tampered!";
-        // Manifest commits to `real_bytes`'s hash but the served
-        // ext4 file is the tampered version.
-        write_fixture(&release_dir, "runtime-overlay-aarch64.ext4", tampered_bytes);
-        write_fixture(&release_dir, "runtime-overlay-aarch64.verity", b"v");
-        write_fixture(
-            &release_dir,
-            "runtime-overlay-aarch64.roothash",
+        let expected_archive_bytes = runtime_overlay_archive_bytes(
+            b"the-real-ext4-bytes",
+            b"v",
             b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+            b"9.9.9\n",
         );
-        write_fixture(&release_dir, "runtime-overlay-aarch64.VERSION", b"9.9.9\n");
-        let checksums = format!(
-            "{}  runtime-overlay-aarch64.ext4\n\
-             {}  runtime-overlay-aarch64.verity\n\
-             {}  runtime-overlay-aarch64.roothash\n\
-             {}  runtime-overlay-aarch64.VERSION\n",
-            sha256_hex(real_bytes),
-            sha256_hex(b"v"),
-            sha256_hex(b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"),
-            sha256_hex(b"9.9.9\n"),
+        let tampered_archive_bytes = runtime_overlay_archive_bytes(
+            b"tampered!",
+            b"v",
+            b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n",
+            b"9.9.9\n",
         );
         write_fixture(
             &release_dir,
-            "runtime-overlay-aarch64-checksums-sha256.txt",
-            checksums.as_bytes(),
+            "runtime-overlay-aarch64.tar.gz",
+            &tampered_archive_bytes,
+        );
+        write_fixture(
+            &release_dir,
+            "runtime-overlay-aarch64.tar.gz.sha256",
+            format!(
+                "{}  runtime-overlay-aarch64.tar.gz\n",
+                sha256_hex(&expected_archive_bytes)
+            )
+            .as_bytes(),
         );
 
         let base_url = format!("file://{}", upstream.path().display());
@@ -2556,7 +2824,7 @@ short  bar.ext4
         let err = result.expect_err("tampered ext4 must reject");
         match err {
             RuntimeOverlayError::ChecksumMismatch { name, .. } => {
-                assert_eq!(name, "runtime-overlay-aarch64.ext4");
+                assert_eq!(name, "runtime-overlay-aarch64.tar.gz");
             }
             other => panic!("expected ChecksumMismatch, got {other:?}"),
         }
@@ -2564,8 +2832,8 @@ short  bar.ext4
         assert!(!cache.path().join("runtime-overlay/9.9.9/aarch64").exists());
     }
 
-    /// A checksums manifest missing one of the wanted entries
-    /// aborts before any artifact is fetched.
+    /// An archive checksum sidecar missing the tarball entry aborts before the
+    /// archive is fetched.
     #[test]
     fn download_runtime_overlay_rejects_missing_checksum_entry() {
         let mut env = TestEnv::new();
@@ -2573,15 +2841,13 @@ short  bar.ext4
         let upstream = TempDir::new().unwrap();
         let release_dir = upstream.path().join("v9.9.9");
         std::fs::create_dir_all(&release_dir).unwrap();
-        // Manifest only lists three of four required entries.
+        // Sidecar lists the wrong name, not the archive we need.
         let checksums = "\
-0000000000000000000000000000000000000000000000000000000000000001  runtime-overlay-aarch64.ext4
-0000000000000000000000000000000000000000000000000000000000000002  runtime-overlay-aarch64.verity
-0000000000000000000000000000000000000000000000000000000000000003  runtime-overlay-aarch64.roothash
+0000000000000000000000000000000000000000000000000000000000000001  runtime-overlay-aarch64-not-it.tar.gz
 ";
         write_fixture(
             &release_dir,
-            "runtime-overlay-aarch64-checksums-sha256.txt",
+            "runtime-overlay-aarch64.tar.gz.sha256",
             checksums.as_bytes(),
         );
 
@@ -2591,13 +2857,45 @@ short  bar.ext4
         let result = download_runtime_overlay("9.9.9", GuestArch::Aarch64, cache.path());
         env.remove("MVM_OVERLAY_BASE_URL");
 
-        let err = result.expect_err("missing VERSION entry must reject");
+        let err = result.expect_err("missing archive checksum entry must reject");
         match err {
             RuntimeOverlayError::ChecksumMissing { name, .. } => {
-                assert_eq!(name, "runtime-overlay-aarch64.VERSION");
+                assert_eq!(name, "runtime-overlay-aarch64.tar.gz");
             }
             other => panic!("expected ChecksumMissing, got {other:?}"),
         }
+    }
+
+    fn runtime_overlay_archive_bytes(
+        ext4_bytes: &[u8],
+        verity_bytes: &[u8],
+        roothash_bytes: &[u8],
+        version_bytes: &[u8],
+    ) -> Vec<u8> {
+        let checksums = format!(
+            "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
+            sha256_hex(ext4_bytes),
+            sha256_hex(verity_bytes),
+            sha256_hex(roothash_bytes),
+            sha256_hex(version_bytes),
+        );
+        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+        append_archive_file(&mut tar, "overlay.ext4", ext4_bytes);
+        append_archive_file(&mut tar, "overlay.verity", verity_bytes);
+        append_archive_file(&mut tar, "overlay.roothash", roothash_bytes);
+        append_archive_file(&mut tar, "VERSION", version_bytes);
+        append_archive_file(&mut tar, CHECKSUM_MANIFEST_FILE, checksums.as_bytes());
+        let encoder = tar.into_inner().unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        header.set_size(u64::try_from(bytes.len()).unwrap());
+        header.set_cksum();
+        tar.append_data(&mut header, path, bytes).unwrap();
     }
 
     fn write_fixture(dir: &Path, name: &str, bytes: &[u8]) {

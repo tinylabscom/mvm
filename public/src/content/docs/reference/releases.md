@@ -26,23 +26,27 @@ GitHub Release:
 | `cargo install mvmctl` | source from crates.io (CLI binary only; no adjacent helper bundle) |
 | `mvmctl update` | the tarball for the latest release, in-place swap |
 | `mvmctl kernel build --source download` | `vmlinux-<arch>-<variant>` + `kernel-<arch>-checksums-sha256.txt`, pinned to the binary's own release tag |
-| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.{ext4,verity,roothash,VERSION}` + `runtime-overlay-<arch>-checksums-sha256.txt`, installed into `~/.cache/mvm/runtime-overlay/<version>/<arch>/` |
+| `mvmctl build runtime-overlay build --source download` | `runtime-overlay-<arch>.tar.gz` + `runtime-overlay-<arch>.tar.gz.sha256`; the tarball contains `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and `checksums-sha256.txt`, installed into `~/.cache/mvm/runtime-overlay/<version>/<arch>/` |
 
 ## Runtime overlay release assets
 
 Every release publishes the shared guest-runtime overlay alongside the CLI
 tarballs and the default images:
 
-- `runtime-overlay-<arch>.ext4`
-- `runtime-overlay-<arch>.verity`
-- `runtime-overlay-<arch>.roothash`
-- `runtime-overlay-<arch>.VERSION`
-- `runtime-overlay-<arch>-checksums-sha256.txt`
+- `runtime-overlay-<arch>.tar.gz`
+- `runtime-overlay-<arch>.tar.gz.sha256`
 
 Those assets are the readonly, version-matched guest-runtime payload consumed by
 overlay-backed boots. They are not an optional side channel or a developer-only
 cache convenience; they are part of the shipped release surface for the
 backends that admit `RequiredOverlay`.
+
+The tarball itself is hash-verified before extraction. Inside it, the canonical
+payload is still per-file checked: `overlay.ext4`, `overlay.verity`,
+`overlay.roothash`, `VERSION`, and an inner `checksums-sha256.txt`. When
+`mvmctl` installs that payload into `~/.cache/mvm/runtime-overlay/<version>/<arch>/`,
+every required-overlay boot re-hashes those cached files before attach and
+refuses to mount the overlay if the cache entry has drifted.
 
 Only **guest-executed** runtime binaries belong in this artifact. Host-side
 helpers and supervisors still ship in the `mvmctl-<target>.tar.gz` bundle next
@@ -53,7 +57,8 @@ to `mvmctl`.
 Operationally, runtime-overlay updates are a **release + restart** story:
 
 - A fresh boot on an admitted backend resolves the runtime overlay for the
-  running `mvmctl` version and mounts it read-only inside the guest.
+  running `mvmctl` version, re-verifies the cached artifact checksums, and
+  mounts it read-only inside the guest.
 - A stopped VM picks up the newer version-matched overlay on its next
   `machine start` or `machine restart`.
 - A running VM keeps the overlay version it already booted with until restart.
