@@ -1,8 +1,5 @@
-pub mod audit;
 pub mod jailer;
-pub mod metadata;
 pub mod seccomp;
-pub mod signing;
 
 // Re-export pure-logic modules from mvm-core::crypto for backward compatibility
 pub use mvm_core::crypto::command_gate;

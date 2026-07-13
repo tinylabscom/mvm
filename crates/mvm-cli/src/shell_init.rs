@@ -118,43 +118,6 @@ pub fn print_shell_init() -> Result<()> {
     Ok(())
 }
 
-/// Ensure the shell init block is present in the Lima VM's ~/.bashrc.
-///
-/// Lima VMs have a separate home directory from the host, so the host's
-/// shell config modifications are not visible inside the VM. This function
-/// runs inside the VM to patch the VM's own ~/.bashrc.
-pub fn ensure_shell_init_in_vm() -> Result<()> {
-    use mvm::shell;
-
-    let kv_root = match detect_kv_root() {
-        Ok(p) => p,
-        Err(e) => {
-            ui::warn(&format!("Skipping VM shell init: {e}"));
-            return Ok(());
-        }
-    };
-
-    let block = generate_block(&kv_root.display().to_string());
-    let escaped_marker = MARKER_START.replace('"', r#"\""#);
-    let escaped_block = block.replace('\\', r"\\").replace('"', r#"\""#);
-
-    // Idempotent: only append if marker not already present
-    let script = format!(
-        r#"
-        if grep -qF '{marker}' ~/.bashrc 2>/dev/null; then
-            true
-        else
-            printf '\n{block}\n' >> ~/.bashrc
-        fi
-        "#,
-        marker = escaped_marker,
-        block = escaped_block,
-    );
-
-    shell::run_in_vm(&script).map(|_| ())?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
