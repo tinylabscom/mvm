@@ -260,13 +260,11 @@ pub fn resolve_stage0_backend_for_choice(
 ) -> Box<dyn BuilderVm> {
     match stage0_backend_choice(choice) {
         BuilderBackendChoice::Qemu => Box::new(QemuBuilderVm::new()),
-        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => {
-            Box::new(
-                LibkrunBuilderVm::default()
-                    .with_verbose(verbose)
-                    .with_closure_nar(closure_nar_for_host_arch()),
-            )
-        }
+        BuilderBackendChoice::Libkrun | BuilderBackendChoice::Hvf => Box::new(
+            LibkrunBuilderVm::default()
+                .with_verbose(verbose)
+                .with_closure_nar(closure_nar_for_host_arch()),
+        ),
     }
 }
 

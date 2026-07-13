@@ -596,8 +596,7 @@ fn run_build_qemu(
 fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, BuilderVmError> {
     use crate::builder_vm_runtime::{
         acquire_nix_store_image_lock, builder_vm_timeout, read_job_result_with_diagnostics,
-        stage_closure_seed_dir, stage_shell_job_dir,
-        shell_job_exit_error,
+        shell_job_exit_error, stage_closure_seed_dir, stage_shell_job_dir,
     };
     use crate::libkrun_builder::{
         BuilderVmImage, DEFAULT_NIX_STORE_MIB, builder_vm_cache_dir, ensure_builder_vm_image,
