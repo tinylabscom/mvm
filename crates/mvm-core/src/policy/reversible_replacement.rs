@@ -88,7 +88,10 @@ impl ReversibleReplacementAction {
     pub fn replaces_on(&self, surface: RewriteSurface) -> bool {
         self.enabled
             && if self.replace_surfaces.is_empty() {
-                matches!(surface, RewriteSurface::RequestHeader | RewriteSurface::RequestBody)
+                matches!(
+                    surface,
+                    RewriteSurface::RequestHeader | RewriteSurface::RequestBody
+                )
             } else {
                 self.replace_surfaces.contains(&surface)
             }
@@ -97,7 +100,10 @@ impl ReversibleReplacementAction {
     pub fn reinjects_on(&self, surface: RewriteSurface) -> bool {
         self.enabled
             && if self.reinject_surfaces.is_empty() {
-                matches!(surface, RewriteSurface::ResponseHeader | RewriteSurface::ResponseBody)
+                matches!(
+                    surface,
+                    RewriteSurface::ResponseHeader | RewriteSurface::ResponseBody
+                )
             } else {
                 self.reinject_surfaces.contains(&surface)
             }

@@ -119,7 +119,7 @@ fn handed_placeholders_never_contain_the_secret_value() {
         secret_store,
         forward_timeout_secs: 30,
         redaction: mvm_core::policy::RedactionPolicy::default(),
-            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
+        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         tls_intermediate: None,
         recorder: None,
     })

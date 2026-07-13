@@ -101,8 +101,14 @@ pub async fn emit_rewrite_proof(
                 ("phase".to_string(), phase.to_string()),
                 ("flow_id".to_string(), proof.flow_id.0.clone()),
                 ("event_index".to_string(), proof.event_index.to_string()),
-                ("class".to_string(), format!("{:?}", proof.class).to_ascii_lowercase()),
-                ("surface".to_string(), format!("{:?}", proof.surface).to_ascii_lowercase()),
+                (
+                    "class".to_string(),
+                    format!("{:?}", proof.class).to_ascii_lowercase(),
+                ),
+                (
+                    "surface".to_string(),
+                    format!("{:?}", proof.surface).to_ascii_lowercase(),
+                ),
                 (
                     "field_name".to_string(),
                     proof.field_name.clone().unwrap_or_default(),
@@ -119,10 +125,7 @@ pub async fn emit_rewrite_proof(
                     "rewritten_hmac_sha256".to_string(),
                     proof.rewritten_hmac_sha256.clone(),
                 ),
-                (
-                    "policy_decision".to_string(),
-                    proof.policy_decision.clone(),
-                ),
+                ("policy_decision".to_string(), proof.policy_decision.clone()),
                 (
                     "authorization_decision".to_string(),
                     proof.authorization_decision.clone(),

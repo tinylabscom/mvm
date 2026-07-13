@@ -2314,7 +2314,8 @@ mod server_tests {
             "Bearer sk-live-zzz"
         );
         assert!(
-            !seen.headers
+            !seen
+                .headers
                 .iter()
                 .find(|(name, _)| name == "x-user")
                 .unwrap()
@@ -2339,9 +2340,7 @@ mod server_tests {
                 );
                 let body = String::from_utf8(B64.decode(body_b64).unwrap()).unwrap();
                 assert!(body.contains("+14155550123"));
-                assert!(body.contains(
-                    "sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-                ));
+                assert!(body.contains("sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
             }
             WireResponse::Refused { message } => panic!("unexpected refusal: {message}"),
         }
@@ -2357,7 +2356,10 @@ mod server_tests {
 
         #[async_trait]
         impl Forwarder for RephrasingForwarder {
-            async fn forward(&self, _req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+            async fn forward(
+                &self,
+                _req: PreparedRequest,
+            ) -> Result<ForwardResponse, ForwardError> {
                 Ok(ForwardResponse {
                     status: 200,
                     headers: vec![],

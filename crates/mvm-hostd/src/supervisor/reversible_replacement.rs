@@ -34,7 +34,11 @@ impl ReplacementEngine {
         Self { proof_key }
     }
 
-    pub fn start_flow(&self, tenant: &str, action: &ReversibleReplacementAction) -> ReplacementFlow {
+    pub fn start_flow(
+        &self,
+        tenant: &str,
+        action: &ReversibleReplacementAction,
+    ) -> ReplacementFlow {
         let mut flow_bytes = [0u8; 16];
         rand::thread_rng().fill_bytes(&mut flow_bytes);
         ReplacementFlow {
@@ -252,14 +256,17 @@ impl ReplacementFlow {
             ));
         }
         if self.action.handles_class(SensitiveClass::Pii) {
-            spans.extend(self.pii.match_spans_with_categories(payload).into_iter().map(
-                |PiiMatch { name, start, end }| DetectedSpan {
-                    class: SensitiveClass::Pii,
-                    category: name,
-                    start,
-                    end,
-                },
-            ));
+            spans.extend(
+                self.pii
+                    .match_spans_with_categories(payload)
+                    .into_iter()
+                    .map(|PiiMatch { name, start, end }| DetectedSpan {
+                        class: SensitiveClass::Pii,
+                        category: name,
+                        start,
+                        end,
+                    }),
+            );
         }
         spans.sort_by(|left, right| {
             left.start
@@ -375,7 +382,8 @@ mod tests {
         let engine = ReplacementEngine::new();
         let mut flow = engine.start_flow("tenant-a", &enabled_action());
         let mut headers = vec![("x-user".into(), "alice@example.com".into())];
-        let mut body = b"call +14155550123 with sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec();
+        let mut body =
+            b"call +14155550123 with sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_vec();
         let replace = flow.replace_request(&mut headers, &mut body);
         assert_eq!(replace.len(), 3);
         assert!(!headers[0].1.contains("alice@example.com"));
