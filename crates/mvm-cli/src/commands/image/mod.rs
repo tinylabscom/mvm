@@ -473,9 +473,9 @@ fn resolve_or_pull_run_image_with(
     materialize: RuntimeMaterializer,
 ) -> Result<ResolvedOciRunImage> {
     // Rootfs materialization can fall back to a builder VM when the in-process
-    // ext4 writer cannot faithfully emit a tree. `up` / `dev up` reap previous
-    // helper processes at startup; the run-image path is the other place a
-    // builder VM can spawn, so give it the same sweep before we might add one.
+    // ext4 writer cannot faithfully emit a tree. `mvmctl image pull` reaps
+    // previous helper processes at startup; the run-image path is the other
+    // place a builder VM can spawn, so give it the same sweep before we might add one.
     crate::commands::env::dev_vz::sweep_orphaned_vm_helpers_on_startup();
 
     // Local sources route to their own ingest; a registry reference falls

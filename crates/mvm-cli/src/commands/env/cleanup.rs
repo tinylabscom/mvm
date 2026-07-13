@@ -43,7 +43,7 @@ pub(in crate::commands) struct Args {
     pub all: bool,
 
     /// Also wipe `~/.cache/mvm` (Stage 0 staging, builder VM artifacts).
-    /// All cache contents are regenerable; the next `dev up` rebuilds them.
+    /// All cache contents are regenerable; the next build rebuilds them.
     #[arg(long)]
     pub cache: bool,
     /// Wipe `~/.cache/mvm` PLUS regenerable subdirs of `~/.mvm`

@@ -30,7 +30,7 @@ pub(in crate::commands) struct Args {
     /// legacy slot name). If omitted, the bundled
     /// `nix/images/default-tenant/` image is used (built via Nix on first use,
     /// cached at `~/.cache/mvm/default-microvm/`). Each invocation boots a
-    /// fresh transient microVM — never the long-running `mvmctl dev` VM.
+    /// fresh transient microVM — never the long-running builder VM.
     #[arg(short = 'm', long)]
     pub manifest: Option<String>,
     /// Internal (not a CLI flag): warm-pool size for this run, carried

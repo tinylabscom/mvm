@@ -247,7 +247,7 @@ pub fn spawn(scratch_dir: &std::path::Path) -> Result<PasstHandle, PasstError> {
     // it died, surface that instead of letting libkrun fail with
     // a cryptic socket error later. 50ms is enough to catch the
     // immediate exits (missing arg, spawn failure) without
-    // measurably slowing dev up.
+    // measurably slowing builder VM startup.
     std::thread::sleep(Duration::from_millis(50));
     let mut child = child;
     if let Some(status) = child.try_wait().map_err(PasstError::Spawn)? {

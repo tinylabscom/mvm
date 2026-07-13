@@ -319,8 +319,8 @@ pub enum LocalAuditKind {
     // --- Stage 0 builder VM bootstrap lifecycle ---
     //
     // Three events bracket the per-host Stage 0 lifecycle so a
-    // contributor can answer "did `dev up` actually run Stage 0 last
-    // night, and how did it land?" after the fact. We emit into the
+    // contributor can answer "did the builder VM bootstrap actually run
+    // Stage 0 last night, and how did it land?" after the fact. We emit into the
     // shared local audit log (rather than a separate
     // `~/.mvm/audit/stage0.jsonl`) because (a) every
     // other contributor-side event already lands there, (b) the
@@ -331,7 +331,7 @@ pub enum LocalAuditKind {
     // Detail formats are space-separated key=value pairs to match
     // every other call site (the macro can't emit JSON without a
     // wider schema change). SHAs are intentionally omitted — hashing
-    // a 700 MiB rootfs on every `dev up` is too expensive for an
+    // a 700 MiB rootfs on every builder VM bootstrap is too expensive for an
     // audit event; the seed label + source fingerprint prefix are
     // enough to correlate against the build cache.
     //

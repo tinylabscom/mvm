@@ -501,7 +501,7 @@ printf '%s\n' "$NIX_OUT" > /job/store-path
 # reachable only through the transient build root — so without this the next
 # build recompiles the kernel and re-pulls the base closure.
 #
-# Key the root by build kind so alternating builder-vm-image (dev up / stage0)
+# Key the root by build kind so alternating builder-vm-image (bootstrap / stage0)
 # and workload (machine run) builds don't evict each other's closure. Two
 # bounded fixed names keep the store bounded — the cap GC still frees a
 # superseded closure within a kind, and an unchanged derivation is a store hit
@@ -998,7 +998,7 @@ pub fn finalize_flake_job(
         let derivation_tail = read_last_bytes_of(&stderr_log, 4 * 1024)
             .unwrap_or_else(|_| String::from("<nix-stderr.log not present on host>"));
 
-        // A dangling/GC'd store path makes every `dev up` fail identically
+        // A dangling/GC'd store path makes every build fail identically
         // (the user re-runs and "loops"). Detect that exact nix signature and
         // return the one-line recovery instead of the opaque build error.
         if let Some(line) = crate::builder_vm::dangling_store_path_line(&derivation_tail)
@@ -1371,7 +1371,7 @@ pub fn acquire_nix_store_image_lock(
 /// Stage 0 (the builder-VM *image* build) uses this to key a dedicated
 /// `nix-store-stage0-<arch>.img` separate from the steady-state
 /// builder's `nix-store-<arch>.img`. Two reasons for the split: the
-/// flock would otherwise serialize a `dev up` bootstrap against any
+/// flock would otherwise serialize the builder VM bootstrap against any
 /// concurrent `mvmctl build` in another session, and the bootstrap's
 /// kernel/Rust-toolchain closure has no reason to share a store with
 /// user-workload builds. Both images live in the same cache dir and
@@ -2337,7 +2337,7 @@ mod tests {
         assert!(gc_idx > meta_idx, "GC tail must follow output emission");
 
         // The warm gcroot must be keyed by build kind so alternating
-        // builder-vm-image (dev up / stage0) and workload (machine run) builds
+        // builder-vm-image (bootstrap / stage0) and workload (machine run) builds
         // don't evict each other's closure. Two bounded roots
         // (mvm-warm-builder / mvm-warm-workload), classified from $NIX_OUT's
         // derivation name, registered BEFORE the GC; the pre-fix single

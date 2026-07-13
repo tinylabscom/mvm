@@ -5,9 +5,9 @@
 //! deltas). Because the
 //! config is custom, `cache.nixos.org` has no substitute, so a fresh
 //! machine compiles from source — the slow, memory-heavy step a first
-//! `mvmctl dev up` otherwise hits implicitly. This command makes that
+//! build otherwise hits implicitly. This command makes that
 //! compile explicit and one-time: build the kernel once into the
-//! persistent nix store, and every later `dev up` reuses it.
+//! persistent nix store, and every later build reuses it.
 //!
 //! `--source download` (fetch a hash-verified published prebuilt) lands
 //! with the kernel-build publish workflow, which is what produces the

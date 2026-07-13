@@ -118,12 +118,18 @@ pub enum RootfsError {
     BuilderVm(#[from] crate::builder_vm::BuilderVmError),
 
     #[cfg(feature = "pure-mkfs")]
-    #[error("walking unpacked tree at {path}: {source}")]
+    #[error("walking directory tree at {path}: {source}")]
     PureWalk {
         path: PathBuf,
         #[source]
         source: std::io::Error,
     },
+
+    #[cfg(feature = "pure-mkfs")]
+    #[error(
+        "host path {0} is a device, FIFO, or socket special file the ext4 writer cannot represent"
+    )]
+    UnsupportedNodeType(PathBuf),
 
     #[cfg(feature = "pure-mkfs")]
     #[error("building ext4 image in-process: {0}")]
@@ -385,7 +391,7 @@ pub fn materialize_ext4_pure(
             input.unpacked_root.clone(),
         ));
     }
-    let nodes = collect_nodes(&input.unpacked_root)?;
+    let nodes = collect_nodes(&input.unpacked_root, UnsupportedNodePolicy::Skip)?;
     // The run path's cache dir (`.../rootfs/<key>/`) may not exist yet — the
     // builder-VM path created it via `allocate_sparse_image`, so the pure path
     // must create it too before writing the image + its sidecars.
@@ -395,7 +401,8 @@ pub fn materialize_ext4_pure(
             source,
         })?;
     }
-    let size_bytes = stream_pure_ext4_output(&nodes, &input.output)?;
+    let size_bytes =
+        stream_pure_ext4_output(&nodes, &input.output, &mvm_ext4::BuildOptions::default())?;
     let verity_root_hash = maybe_emit_verity_sidecars(input)?;
 
     Ok(MaterializedExt4 {
@@ -406,15 +413,47 @@ pub fn materialize_ext4_pure(
 }
 
 #[cfg(feature = "pure-mkfs")]
+/// Materialize a pre-collected node list into an in-process ext4 image at
+/// `output`, stamping `volume_name` into the superblock so a guest can
+/// `mount LABEL=<volume_name>` it.
+///
+/// Used by callers that mount the resulting image by label rather than boot
+/// from it — e.g. the `--add-dir` host-directory share. Unlike
+/// [`materialize_ext4_pure`], the caller supplies its own `nodes` (built from
+/// a bare host directory via [`collect_nodes`] rather than an OCI-unpacked
+/// rootfs tree), and there is no size estimate or verity sidecar: both are
+/// boot-rootfs concerns this kind of image doesn't have.
+pub fn materialize_ext4_pure_labeled(
+    nodes: &[mvm_ext4::Node],
+    output: &std::path::Path,
+    volume_name: &[u8],
+) -> Result<MaterializedExt4, RootfsError> {
+    if let Some(parent) = output.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| RootfsError::WriteOutput {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    let options = mvm_ext4::BuildOptions::default().with_volume_name(volume_name);
+    let size_bytes = stream_pure_ext4_output(nodes, output, &options)?;
+    Ok(MaterializedExt4 {
+        path: output.to_path_buf(),
+        size_bytes,
+        verity_root_hash: None,
+    })
+}
+
+#[cfg(feature = "pure-mkfs")]
 fn stream_pure_ext4_output(
     nodes: &[mvm_ext4::Node],
     output: &std::path::Path,
+    options: &mvm_ext4::BuildOptions,
 ) -> Result<u64, RootfsError> {
     let mut file = std::fs::File::create(output).map_err(|source| RootfsError::WriteOutput {
         path: output.to_path_buf(),
         source,
     })?;
-    let size_bytes = match mvm_ext4::emit_image(nodes, |offset, bytes| {
+    let size_bytes = match mvm_ext4::emit_image_with_options(nodes, options, |offset, bytes| {
         file.seek(SeekFrom::Start(offset))
             .and_then(|_| file.write_all(bytes))
     }) {
@@ -493,11 +532,31 @@ fn emit_verity_sidecars_for_image(
 }
 
 #[cfg(feature = "pure-mkfs")]
+/// How [`collect_nodes`] handles a host inode kind the ext4 [`mvm_ext4::Node`]
+/// enum has no variant for (device, FIFO, socket).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsupportedNodePolicy {
+    /// Omit the node from the image. Correct for an OCI rootfs: those special
+    /// files are re-created by devtmpfs at boot, so leaving them out of the
+    /// image is the intended behavior, not a loss.
+    Skip,
+    /// Fail the walk instead of silently dropping the node. Used by callers
+    /// materializing a user-supplied host directory (e.g. `--add-dir`),
+    /// where an omitted file would leave the guest with less than what the
+    /// user asked to share.
+    Reject,
+}
+
+#[cfg(feature = "pure-mkfs")]
 /// Walk `root` into a flat `Node` list (guest-absolute paths), symlink-aware
 /// (never follows). Directories and their descendants, regular files (contents
 /// read in), and symlinks are captured; other inode types (fifo/socket/device)
-/// are skipped — an OCI rootfs mounts devtmpfs for those.
-fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsError> {
+/// are handled per `on_unsupported`, since the `Node` enum has no way to
+/// represent them.
+pub fn collect_nodes(
+    root: &std::path::Path,
+    on_unsupported: UnsupportedNodePolicy,
+) -> Result<Vec<mvm_ext4::Node>, RootfsError> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -551,6 +610,13 @@ fn collect_nodes(root: &std::path::Path) -> Result<Vec<mvm_ext4::Node>, RootfsEr
                     data,
                     xattrs,
                 });
+            } else {
+                match on_unsupported {
+                    UnsupportedNodePolicy::Skip => {}
+                    UnsupportedNodePolicy::Reject => {
+                        return Err(RootfsError::UnsupportedNodeType(path));
+                    }
+                }
             }
         }
     }
@@ -805,7 +871,7 @@ mod tests {
         std::fs::write(src.path().join("etc/hosts"), b"127.0.0.1 localhost\n").unwrap();
         std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
 
-        let nodes = collect_nodes(src.path()).expect("collect nodes");
+        let nodes = collect_nodes(src.path(), UnsupportedNodePolicy::Skip).expect("collect nodes");
         let dense = mvm_ext4::build_image(&nodes).expect("dense ext4 image");
 
         let out = tempfile::tempdir().unwrap();
@@ -828,7 +894,7 @@ mod tests {
         std::fs::write(&shadow, b"root:*:19793:0:99999:7:::\n").unwrap();
         std::fs::set_permissions(&shadow, std::fs::Permissions::from_mode(0o0)).unwrap();
 
-        let nodes = collect_nodes(src.path()).expect("collect nodes");
+        let nodes = collect_nodes(src.path(), UnsupportedNodePolicy::Skip).expect("collect nodes");
         let node = nodes
             .into_iter()
             .find_map(|node| match node {
@@ -847,6 +913,68 @@ mod tests {
             .mode()
             & 0o7777;
         assert_eq!(restored_mode, 0);
+    }
+
+    #[cfg(all(feature = "pure-mkfs", unix))]
+    #[test]
+    fn collect_nodes_skip_vs_reject_policy_for_unsupported_node_types() {
+        let src = tempfile::tempdir().unwrap();
+        let sock_path = src.path().join("weird.sock");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(&sock_path).expect("bind a real test socket");
+
+        // OCI-rootfs-style walk: devtmpfs recreates these at boot, so silently
+        // omitting the node from the image is correct, not a loss.
+        let nodes = collect_nodes(src.path(), UnsupportedNodePolicy::Skip).expect("skip policy");
+        assert!(
+            nodes.is_empty(),
+            "a socket must be silently omitted under Skip, got {nodes:?}"
+        );
+
+        // Host-directory-share-style walk (`--add-dir`): a dropped file would
+        // silently diverge from what the user asked to share, so fail closed.
+        let err = collect_nodes(src.path(), UnsupportedNodePolicy::Reject)
+            .expect_err("a socket must be rejected, not silently dropped");
+        assert!(
+            matches!(err, RootfsError::UnsupportedNodeType(_)),
+            "expected UnsupportedNodeType, got {err:?}"
+        );
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn materialize_ext4_pure_labeled_stamps_the_volume_name() {
+        let out = tempfile::tempdir().unwrap();
+        let out_path = out.path().join("extra.ext4");
+        let nodes = vec![mvm_ext4::Node::File {
+            path: "/hello".into(),
+            mode: 0o644,
+            data: b"hi\n".to_vec(),
+            xattrs: Vec::new(),
+        }];
+
+        let mat = materialize_ext4_pure_labeled(&nodes, &out_path, b"mvm-extra-0")
+            .expect("labeled materialize");
+        assert_eq!(mat.path, out_path);
+        assert!(
+            mat.verity_root_hash.is_none(),
+            "labeled images are mounted by label, not booted — no verity sidecar"
+        );
+
+        // Same superblock offset the mvm-ext4 writer's own test checks
+        // (`s_volume_name` at byte 0x78 into the superblock, which starts at
+        // byte 1024): the label written here must be the exact bytes the
+        // guest's `mount LABEL=mvm-extra-0` will match against.
+        let label: &[u8] = b"mvm-extra-0";
+        let image = std::fs::read(&out_path).unwrap();
+        let field_start = 1024 + 0x78;
+        assert_eq!(&image[field_start..field_start + label.len()], label);
+        assert!(
+            image[field_start + label.len()..field_start + 16]
+                .iter()
+                .all(|&b| b == 0),
+            "the volume_name field's unused tail must stay zero-padded"
+        );
     }
 
     #[cfg(feature = "pure-mkfs")]

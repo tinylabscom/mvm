@@ -506,7 +506,7 @@ pub(in crate::commands) mod attested_builder_pack {
 
     /// Load the on-disk trust config, folding both the absent and the malformed
     /// case into the inert empty config. A missing file is the expected default;
-    /// a broken file must never brick `dev up`, so we warn and stay inert — the
+    /// a broken file must never brick the builder VM bootstrap, so we warn and stay inert — the
     /// pack path then trusts nothing and falls through to the plain download. It
     /// can never trust an unverified pack, so failing open here is safe.
     fn load_host_pack_trust() -> PackTrustConfig {
@@ -673,8 +673,8 @@ pub(in crate::commands) mod attested_builder_pack {
     /// the local cache when it verifies. Both the fetch and the promote step
     /// are fail-open: any error is logged and swallowed here, never
     /// propagated, so [`attempt_attested_builder_pack`] always falls
-    /// back to the plain checksum download rather than hard-failing `dev up`
-    /// on a network hiccup or a broken publish.
+    /// back to the plain checksum download rather than hard-failing the
+    /// builder VM bootstrap on a network hiccup or a broken publish.
     #[cfg(feature = "manifest-verify")]
     fn fetch_and_promote_release_builder_pack(arch: &str, ctx: &PackVerifyCtx<'_>) {
         let staging = match fetch_release_builder_pack_staging(arch) {
@@ -944,7 +944,7 @@ fn bootstrap_builder_vm_image_via_root_dir_stage0(
     // on a published, hash-verified kernel — build only the rootfs and
     // pair the kernel in, skipping the in-image kernel compile. Unset or
     // `compile` → the normal `default` build (kernel compiled in-image;
-    // also the cheaper single-boot path, so `dev up --kernel-source
+    // also the cheaper single-boot path, so `mvmctl bootstrap --kernel-source
     // compile` deliberately stays on it).
     let external_kernel: Option<std::path::PathBuf> = match resolve_kernel_source() {
         Some(KernelSource::Download) => {

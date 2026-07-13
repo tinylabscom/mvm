@@ -38,7 +38,7 @@ pub enum DoctorWorkflow {
     /// Operator launching a prebuilt `.mvmpkg` bundle. No host
     /// build tooling required.
     BundleRun,
-    /// `mvmctl dev` flow — drops the operator into a builder-VM
+    /// Builder-VM shell workflow — drops the operator into a builder-VM
     /// shell. Builder tooling + platform capabilities only;
     /// no host-side rust toolchain required.
     DevShell,
@@ -63,7 +63,7 @@ impl DoctorWorkflow {
             // so a bundle-running operator isn't blocked by a
             // missing `cargo` they don't need.
             Self::BundleRun => &["platform", "security", "disk"],
-            // `mvmctl dev` is the bootstrap-time flow; the host
+            // The dev-shell workflow is the bootstrap-time flow; the host
             // doesn't need rustup/cargo for it (the dev VM owns
             // the build toolchain). Drop `prerequisites`.
             Self::DevShell => &["tools", "platform", "security", "disk"],

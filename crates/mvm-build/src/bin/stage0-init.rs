@@ -713,7 +713,7 @@ mod linux {
     /// purity check. A build that was interrupted mid-flight (power-off, OOM, a
     /// store fault) leaves the dir behind on the persistent guest root, and
     /// because the root is reused across boots whenever its seed marker matches,
-    /// every later `dev up` then fails with
+    /// every later bootstrap then fails with
     /// `error: home directory "/homeless-shelter" exists`. Remove a stale one
     /// before invoking nix so a crashed prior run self-heals instead of wedging
     /// the bootstrap. `root` is the filesystem root (`/` in the guest; a tempdir
@@ -761,7 +761,7 @@ mod linux {
 
     /// `nix build` the builder-VM flake, then copy kernel + rootfs to /out.
     /// The host-side contract (`/out/stage0-build.conf`, output modes) is the
-    /// same one `dev up` / `kernel build` write.
+    /// same one `mvmctl bootstrap` / `kernel build` write.
     fn build_and_copy() -> Result<(), String> {
         let nix = find_seed_bin("nix")?;
         let cacert = find_seed_cacert()?;

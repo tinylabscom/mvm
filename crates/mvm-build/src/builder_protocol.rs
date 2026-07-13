@@ -1,7 +1,7 @@
 //! Wire types for the long-lived host VM's vsock dispatch channel.
 //!
 //! The host dispatches Nix-build jobs over vsock into a persistent
-//! libkrun VM, boot-once-per-`mvmctl dev`-session. The channel is a
+//! libkrun VM, booted once per builder session. The channel is a
 //! backend-agnostic dispatch surface — the same long-lived libkrun VM
 //! serves both Nix builds and nested Firecracker workload spawns. The
 //! `Workload*` variants below are stubbed (the guest-side arm panics
@@ -117,7 +117,7 @@ pub enum HostVmRequest {
     },
 
     /// Tell the guest's dispatch loop to exit cleanly. Triggered
-    /// by `mvmctl dev down` or the supervisor's idle timer.
+    /// by `mvmctl persistent-builder stop` or the supervisor's idle timer.
     ///
     /// Empty struct variant rather than unit so
     /// `#[serde(deny_unknown_fields)]` actually rejects extra

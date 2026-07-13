@@ -639,7 +639,7 @@ fn sweep_skips_when_stage0_lock_is_held() {
 }
 
 /// Sweep on a non-existent root is a no-op. Exercises
-/// the early-return for fresh hosts that have never run `dev up`.
+/// the early-return for fresh hosts that have never bootstrapped.
 #[test]
 fn sweep_is_noop_when_root_missing() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1051,7 +1051,7 @@ fn builder_vm_source_cache_status_reports_safe_reason_codes() {
 
 // Fix A — `build_image_via_libkrun` writes the same fingerprint +
 // artifact-digest + provenance sidecars the Layer-1 cache uses, so the
-// next `dev up` fast-paths past the builder VM. Round-trip: a sidecar
+// next build fast-paths past the builder VM. Round-trip: a sidecar
 // write for a fingerprint reads back as a hit for that fingerprint and a
 // miss for any other — which is exactly the gate `ensure_dev_image`
 // consults before deciding to rebuild.

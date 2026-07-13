@@ -14,9 +14,9 @@
 //! - **`stop`** — sends `HostVmRequest::Shutdown` to the dispatch
 //!   loop, waits for the supervisor child to exit cleanly.
 //!
-//! This is deliberately separate from `mvmctl dev up`. The
-//! lifecycle binding (`mvmctl dev up` auto-starts the persistent
-//! supervisor) lands in a follow-up. Once it does, `mvmctl dev up`
+//! This is deliberately separate from the builder VM bootstrap. The
+//! lifecycle binding (the bootstrap auto-starting the persistent
+//! supervisor) lands in a follow-up. Once it does, the bootstrap
 //! becomes a thin caller of the same
 //! `LibkrunPersistentHostVm::start()` this verb invokes.
 //!
@@ -29,7 +29,7 @@
 //!
 //! ## What's deferred
 //!
-//! - Auto-start from `mvmctl dev up` (post-merge follow-up).
+//! - Auto-start from the builder VM bootstrap (post-merge follow-up).
 //! - `mvmctl build` routing into the persistent supervisor when a
 //!   session is active (`submit` now produces real artifacts, so
 //!   the routing target exists).

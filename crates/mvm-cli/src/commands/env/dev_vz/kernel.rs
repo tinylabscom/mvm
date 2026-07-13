@@ -47,7 +47,7 @@ impl KernelVariant {
 /// image, from `MVM_KERNEL_SOURCE` (set by the global `--kernel-source`
 /// flag). `download` boots the builder VM on a published, hash-verified
 /// kernel — building only the rootfs locally and pairing the kernel in,
-/// so a fresh `dev up` skips the multi-minute kernel compile. Unset →
+/// so a fresh bootstrap skips the multi-minute kernel compile. Unset →
 /// the default `nix build default` path (kernel compiled in-image).
 #[cfg(feature = "builder-vm")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

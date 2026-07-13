@@ -19,8 +19,8 @@
 //!   substrate ⇒ supervisor calls `run_supervisor` (the legacy
 //!   path) and fails downstream at libkrun's
 //!   `krun_start_enter` (rc -22 because the fake kernel/rootfs
-//!   don't exist). Confirms the back-compat path for `mvmctl dev`,
-//!   session VMs, and template restore.
+//!   don't exist). Confirms the back-compat path for the builder VM
+//!   bootstrap, session VMs, and template restore.
 //!
 //! ## How to run
 //!

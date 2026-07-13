@@ -166,23 +166,6 @@ fn validate_legacy_template_name(id: &str) -> Result<()> {
     validate_template_name(id).with_context(|| format!("Invalid template name: {id:?}"))
 }
 
-/// Run a shell command in the VM and check its exit code.
-/// Returns an error with stderr context if the command fails.
-fn vm_exec(script: &str) -> Result<()> {
-    let out = shell::run_in_vm(script)?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let first_line = script.lines().next().unwrap_or(script);
-        return Err(anyhow!(
-            "Command failed (exit {}): {}\n  command: {}",
-            out.status.code().unwrap_or(-1),
-            stderr,
-            first_line,
-        ));
-    }
-    Ok(())
-}
-
 #[instrument(skip_all, fields(template_id = %spec.template_id))]
 pub fn template_create(spec: &TemplateSpec) -> Result<()> {
     validate_legacy_template_name(&spec.template_id)?;
@@ -241,17 +224,6 @@ pub fn template_delete(id: &str, force: bool) -> Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && force => Ok(()),
         Err(e) => Err(e).with_context(|| format!("Failed to delete template {}", id)),
     }
-}
-
-/// Initialize an on-disk template directory layout (empty artifacts, no spec).
-/// Safe to call multiple times; existing contents are preserved.
-#[instrument(skip_all, fields(template_id = id))]
-pub fn template_init(id: &str) -> Result<()> {
-    let dir = template_dir(id);
-    let artifacts = format!("{}/artifacts/revisions", dir);
-    vm_exec(&format!("mkdir -p {dir} {artifacts}"))
-        .with_context(|| format!("Failed to initialize template directory {}", dir))?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +908,8 @@ pub fn template_build_from_manifest(
         "if [ -f {flake}/flake.lock ]; then nix hash path {flake}/flake.lock; else echo ''; fi",
         flake = persisted.flake_ref
     ))
+    // On a tier with no Linux builder to run this against, the call itself
+    // errors here and silently degrades to the revision hash below.
     .unwrap_or_default()
     .trim()
     .to_string();
@@ -1008,6 +982,10 @@ pub fn template_build_from_manifest(
 /// On failure, the original hash is restored.
 #[instrument(skip_all, fields(flake_ref))]
 fn update_fod_hash(flake_ref: &str) -> Result<()> {
+    crate::linux_env::require_guest_exec_available(
+        "recomputing the fixed-output-derivation hash needs a real 'nix build'",
+    )?;
+
     ui::info("Recomputing fixed-output derivation hash...");
 
     // Save original hash for recovery.
@@ -1615,6 +1593,25 @@ mod tests {
             created_at: "2026-06-16T00:00:00Z".to_string(),
             updated_at: "2026-06-16T00:00:00Z".to_string(),
         }
+    }
+
+    /// `update_fod_hash` needs a real Linux builder to run `nix build`
+    /// against; on the macOS 26+ tier (no builder to dispatch to) it must
+    /// fail closed with an actionable error up front rather than failing
+    /// deep inside a doomed `run_in_vm` call. Host-conditioned: only
+    /// asserts on the tier it actually applies to.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn update_fod_hash_fails_closed_on_vz_default_tier() {
+        if !mvm_core::platform::current().is_vz_default_tier() {
+            return;
+        }
+        let err = update_fod_hash("/nonexistent/flake")
+            .expect_err("must fail closed with no builder available");
+        assert!(
+            err.to_string().contains("fixed-output-derivation"),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

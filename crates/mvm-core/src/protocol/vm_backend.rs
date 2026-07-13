@@ -224,7 +224,7 @@ pub struct VmStartConfig {
     /// backends activate the gateway audit substrate (bridge factory +
     /// chain-signed audit emit). `None` keeps the legacy
     /// `run_supervisor` path for callers
-    /// without admission (`mvmctl dev` Stage 0 builder, session VMs,
+    /// without admission (the builder VM bootstrap, session VMs,
     /// template restore).
     pub tenant_id: Option<String>,
     /// JSON-encoded `SignedExecutionPlan` envelope. Carried as a
@@ -628,7 +628,7 @@ pub enum VmStatus {
 /// for:
 ///
 ///   - `mvmctl run` followed by `mvmctl exec` in the same shell.
-///   - `mvmctl dev` interactive sessions where the user expects the
+///   - Interactive foreground sessions where the user expects the
 ///     VM to disappear when they Ctrl-C.
 ///   - Test harnesses that want deterministic teardown.
 ///
