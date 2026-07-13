@@ -86,37 +86,36 @@ fn explicit_source_build_request_builds_workload_kernel_locally() {
 }
 
 #[test]
-fn find_reusable_builder_kernel_detects_builder_image_vmlinux() {
+fn workload_kernel_never_reuses_the_non_verity_builder_kernel() {
     let tmp = tempfile::tempdir().unwrap();
     let cache = tmp.path().to_str().unwrap();
     let arch = "aarch64";
-    // Absent → None (the builder image was never built).
-    assert_eq!(find_reusable_builder_kernel(cache, arch), None);
 
-    // The builder image's kernel lives at `builder-vm/<arch>/vmlinux`; it is a
-    // valid reuse source for a non-sealed launch (boots a plain rootfs).
+    // A builder-image kernel on disk must NOT satisfy the workload kernel: the
+    // builder kernel force-drops device-mapper + dm-verity, but every workload
+    // boots through the verity initrd, so reusing it panics the guest at boot.
+    // It is also not a workload-kernel cache candidate.
     let dir = tmp.path().join(format!("builder-vm/{arch}"));
     std::fs::create_dir_all(&dir).unwrap();
-    let vmlinux = dir.join("vmlinux");
-    std::fs::write(&vmlinux, b"vmlinux").unwrap();
-    assert_eq!(
-        find_reusable_builder_kernel(cache, arch).as_deref(),
-        Some(vmlinux.to_str().unwrap())
-    );
-
-    // The builder kernel is NOT a workload-kernel cache candidate, so reuse is
-    // a deliberate separate step — the cache lookup still misses here.
+    std::fs::write(dir.join("vmlinux"), b"vmlinux").unwrap();
     assert!(find_cached_workload_kernel(cache, arch, false).is_none());
     assert!(find_cached_workload_kernel(cache, arch, true).is_none());
+
+    // With no workload/default kernel cached, resolution builds it (source
+    // checkout) or downloads it (installed) — never the builder kernel, in
+    // either dev or prod.
+    let dest = format!("{cache}/builder-vm/{arch}/kernels/workload/vmlinux");
+    assert_eq!(
+        resolve_workload_kernel_bootstrap(cache, arch, false, true),
+        WorkloadKernelBootstrap::BuildLocal(dest.clone())
+    );
     assert_eq!(
         resolve_workload_kernel_bootstrap(cache, arch, false, false),
-        WorkloadKernelBootstrap::ReusableBuilder(vmlinux.to_str().unwrap().to_string())
+        WorkloadKernelBootstrap::Download(dest.clone())
     );
     assert_eq!(
         resolve_workload_kernel_bootstrap(cache, arch, true, false),
-        WorkloadKernelBootstrap::Download(format!(
-            "{cache}/builder-vm/{arch}/kernels/workload/vmlinux"
-        ))
+        WorkloadKernelBootstrap::Download(dest)
     );
 }
 
