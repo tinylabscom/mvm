@@ -1,7 +1,8 @@
 # OCI-run workload kernel vs dm-verity: boot panic + infra follow-ups
 
 **Date:** 2026-07-13
-**Status:** symptom fixed (PR #1684); deeper follow-ups open below.
+**Status:** symptom fixed (PR #1684); follow-ups 1 + 4 landed (host-side verity
+guard + kernel-provenance breadcrumb, #1689 + this change), 2 mitigated, 3 open.
 **Live-repro:** `mvmctl machine run --image busybox --allow-host google.com` on
 macOS 26 Apple Silicon (HVF workload backend), source-checkout mvmctl.
 
@@ -56,29 +57,35 @@ to a reachable agent** on HVF.
 The shipped fix removes the wrong-kernel reuse, but the episode exposes structural
 gaps worth addressing:
 
-1. **No host-side kernel↔rootfs agreement check.** The mismatch surfaced only as a
-   guest kernel panic on the serial console — the host had zero signal. A verity-
-   sealed launch should assert, host-side and before boot, that the resolved kernel
-   supports dm-verity, and fail fast with a clear message instead of panicking the
-   guest. Encode the invariant: **a verity-sealed rootfs requires a dm-verity
-   kernel.**
+1. **No host-side kernel↔rootfs agreement check.** — **DONE (#1689).** The mismatch
+   surfaced only as a guest kernel panic on the serial console; the host had zero
+   signal. `assert_workload_kernel_supports_verity` now runs in the `--image` launch
+   path right after kernel resolution: it reads the resolved kernel and fails fast
+   with a clear host-side message when the kernel carries no device-mapper/dm-verity
+   symbol at all. The check (pure `kernel_carries_dm_verity`) is conservative — only
+   a *readable, marker-free* kernel trips it, so a compressed/unrecognized kernel is
+   never wrongly rejected. Invariant encoded: **a verity-sealed rootfs requires a
+   dm-verity kernel.**
 
-2. **The other reuse candidate may have the same latent bug.** `find_cached_workload_kernel`
-   still adds `default-microvm/dev/vmlinux` as a **non-prod** candidate. If that
-   dev default-microvm kernel is not dm-verity-capable, a cached-dev-kernel run
-   reproduces the identical panic via a different path. Verify the dev default
-   kernel carries dm-verity, or exclude it for verity-sealed launches.
+2. **The other reuse candidate may have the same latent bug.** — **mitigated (#1689),
+   root question open.** `find_cached_workload_kernel` still adds `default-microvm/dev/vmlinux`
+   as a **non-prod** candidate. The #1689 launch guard now catches a non-verity
+   cached-dev kernel at boot with a clear error instead of a panic, so the identical
+   failure mode no longer reaches the guest. Still open: confirm the dev
+   default-microvm kernel actually carries dm-verity (so the guard never fires on a
+   legitimate dev run), or exclude it for verity-sealed launches.
 
-3. **Should non-prod OCI runs verity-seal at all?** The builder-kernel reuse existed
-   because non-prod dev runs were assumed to boot *unsealed* (a plain rootfs on the
-   builder kernel — fast, no kernel build). Today they verity-seal, so the fix now
-   forces a workload-kernel build (3–5 min cold) on the first non-prod run. Decide
-   the intended dev-tier contract: keep verity on non-prod (correctness, current
-   fix) or boot non-prod unsealed (restores the dev-speed path, but is a larger
-   change to rootfs materialization + the boot path). Whichever is chosen, kernel
-   resolution and rootfs sealing must agree — that agreement is the real invariant.
+3. **Should non-prod OCI runs verity-seal at all?** — **open (design decision).** The
+   builder-kernel reuse existed because non-prod dev runs were assumed to boot
+   *unsealed* (a plain rootfs on the builder kernel — fast, no kernel build). Today
+   they verity-seal, so the fix now forces a workload-kernel build (3–5 min cold) on
+   the first non-prod run. Decide the intended dev-tier contract: keep verity on
+   non-prod (correctness, current fix) or boot non-prod unsealed (restores the
+   dev-speed path, but is a larger change to rootfs materialization + the boot path).
+   Whichever is chosen, kernel resolution and rootfs sealing must agree — that
+   agreement is the real invariant.
 
-4. **`mvmctl` gives no `-v` breadcrumb for kernel provenance.** During diagnosis it
-   was not observable which kernel variant a run resolved. A one-line log
-   ("workload kernel: built / cached / downloaded at <path>") would have made this
-   a one-shot diagnosis instead of a source dig.
+4. **`mvmctl` gives no breadcrumb for kernel provenance.** — **DONE.**
+   `ensure_workload_kernel` now emits one `Workload kernel: <cached|built locally|
+   downloaded|reused cached (local build failed)> at <path>` line per resolution, so
+   which kernel variant a run resolved is observable without a source dig.

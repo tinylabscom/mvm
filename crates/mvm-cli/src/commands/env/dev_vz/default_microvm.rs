@@ -22,25 +22,28 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     let arch = builder_vm_host_arch();
     let resolved =
         resolve_workload_kernel_bootstrap(&cache, arch, prod, find_builder_vm_flake().is_ok());
-    match resolved {
-        WorkloadKernelBootstrap::Cached(path) => Ok(path),
+    // Name which kernel variant a run resolved and where it came from. Without
+    // this breadcrumb a wrong-kernel boot (e.g. a non-verity kernel under a
+    // verity-sealed rootfs) is invisible host-side until the guest panics.
+    let (provenance, path) = match resolved {
+        WorkloadKernelBootstrap::Cached(path) => ("cached", path),
         WorkloadKernelBootstrap::BuildLocal(path) => {
             ui::info("Building workload kernel locally (source checkout)...");
-            build_workload_kernel_locally()
-                .map(|built| built.display().to_string())
-                .or_else(|e| {
-                    if std::path::Path::new(&path).is_file() {
-                        Ok(path)
-                    } else {
-                        Err(e)
-                    }
-                })
+            match build_workload_kernel_locally() {
+                Ok(built) => ("built locally", built.display().to_string()),
+                Err(_) if std::path::Path::new(&path).is_file() => {
+                    ("reused cached (local build failed)", path)
+                }
+                Err(e) => return Err(e),
+            }
         }
         WorkloadKernelBootstrap::Download(dest) => {
             download_workload_kernel(arch, &dest)?;
-            Ok(dest)
+            ("downloaded", dest)
         }
-    }
+    };
+    ui::info(&format!("Workload kernel: {provenance} at {path}"));
+    Ok(path)
 }
 
 /// Whether a kernel image carries device-mapper + dm-verity support (needed to
