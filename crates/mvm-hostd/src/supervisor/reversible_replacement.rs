@@ -56,7 +56,7 @@ impl ReplacementEngine {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct DetectedSpan {
     class: SensitiveClass,
     category: &'static str,
@@ -64,7 +64,7 @@ struct DetectedSpan {
     end: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct TokenEntry {
     token: OpaqueRewriteToken,
     class: SensitiveClass,

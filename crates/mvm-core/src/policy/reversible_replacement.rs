@@ -31,9 +31,15 @@ pub enum ReversibleFallback {
 }
 
 /// Opaque request-scoped token handed to an external sink.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct OpaqueRewriteToken(pub String);
+
+impl std::fmt::Debug for OpaqueRewriteToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpaqueRewriteToken(REDACTED)")
+    }
+}
 
 /// Correlation id for one owned request/response flow.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]

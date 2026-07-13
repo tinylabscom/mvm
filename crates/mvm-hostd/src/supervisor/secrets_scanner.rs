@@ -196,7 +196,7 @@ pub struct SecretsScanner {
 }
 
 /// One validated secret match span.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct SecretMatch {
     pub name: &'static str,
     pub start: usize,
