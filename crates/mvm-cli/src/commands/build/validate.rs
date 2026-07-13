@@ -121,7 +121,8 @@ fn ensure_guest_exec_available() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    #[cfg(target_os = "macos")]
+    use super::ensure_guest_exec_available;
 
     /// Host-conditioned: only asserts on the tier it actually applies to
     /// (macOS 26+, where there's no builder for the `run_in_vm` fallback to
