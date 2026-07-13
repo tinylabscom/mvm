@@ -172,9 +172,13 @@ pure-mkfs = ["dep:xattr"]
 dev-shell = []
 # libkrun-direct builder VM launcher. Pulls the
 # `mvm-libkrun` FFI crate which itself gates the underlying
-# `libkrun-sys` bindings.
+# `libkrun-sys` bindings. Implies `pure-mkfs`: Stage 0 packs its `/work`
+# share onto an in-process ext4 disk (`libkrun_builder::run_stage0_impl`)
+# rather than virtio-fs, so any crate compiling this module needs the pure
+# writer too — including an isolated `-p` build that never asks for
+# `pure-mkfs` on its own (e.g. the per-VM supervisor crate).
 contributor-bootstrap = []
-builder-vm = ["dep:libkrun-sys", "dep:mvm-network"]
+builder-vm = ["dep:libkrun-sys", "dep:mvm-network", "pure-mkfs"]
 
 [lints]
 workspace = true

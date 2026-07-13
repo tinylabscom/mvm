@@ -4,7 +4,12 @@
 //! `/nix/store` + this binary as `/init` — no Alpine, no apk, no busybox.
 //!
 //! **libkrun** (macOS/aarch64): the seed root arrives over virtiofs
-//! (`krun_set_root`) on libkrunfw's bundled kernel; shares are virtio-fs; we
+//! (`krun_set_root`) on libkrunfw's bundled kernel; `/out` and `/mvm-bins`
+//! stay virtio-fs, while `/work` prefers an ext4 disk identified by volume
+//! label (`nix build` reading a large workspace tree through
+//! virtio-fs-over-FUSE exhausts libkrun's virtio-fs handle pool — "Too many
+//! open files" — so the host packs it onto a block device instead; falls
+//! back to the old `"work"` virtio-fs tag when no such disk is attached); we
 //! copy the seed `/nix/store` into a tmpfs and bind it over `/nix` (virtiofs
 //! writes fail under FUSE); outbound fetches go through the shared vsock
 //! egress proxy. Proven E2E on aarch64.
@@ -40,11 +45,28 @@ fn main() -> ExitCode {
 #[cfg(target_os = "linux")]
 mod linux {
     use sha2::{Digest, Sha256};
+    use std::io::Read as _;
     use std::net::{SocketAddr, TcpStream};
     use std::os::fd::AsRawFd;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, ExitCode, ExitStatus, Stdio};
     use std::time::{Duration, Instant};
+
+    /// Byte offset of the ext4 superblock from the start of a filesystem
+    /// image (the boot-sector region ext4 always skips).
+    const EXT4_SUPERBLOCK_OFFSET: usize = 1024;
+    /// `s_magic`, little-endian `0xEF53`, at superblock offset 0x38.
+    const EXT4_MAGIC_OFFSET_IN_SUPERBLOCK: usize = 0x38;
+    const EXT4_MAGIC_LE: [u8; 2] = [0x53, 0xEF];
+    /// `s_volume_name`: 16 raw, NUL-padded bytes at superblock offset 0x78 —
+    /// what `mvm-ext4`'s writer stamps via `BuildOptions::with_volume_name`.
+    const EXT4_VOLUME_NAME_OFFSET_IN_SUPERBLOCK: usize = 0x78;
+    const EXT4_VOLUME_NAME_LEN: usize = 16;
+    /// Fixed set of virtio-blk candidates Stage 0 ever attaches. Small and
+    /// explicit rather than a `/sys/class/block` walk — a RootDir guest never
+    /// has more than a handful of disks, and a missing candidate is just a
+    /// failed `File::open` (cheap, non-fatal).
+    const STAGE0_DISK_CANDIDATES: &[&str] = &["/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd"];
 
     const VSOCK_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
@@ -398,30 +420,28 @@ mod linux {
             if qemu { "qemu" } else { "libkrun" }
         );
 
-        // Host shares. libkrun presents them over virtio-fs by tag; QEMU as
-        // ext4 block disks (the initramfs already loaded virtio_blk for the
-        // ext4 root, so vdb/vdc/vdd enumerate with no extra modules — no
-        // virtiofsd, no 9p). Order matches the device order on the QEMU
-        // cmdline (vda=seed root, then work/out/mvm-bins).
-        let shares: &[(&str, &str, &str)] = if qemu {
-            &[
+        // Host shares. QEMU presents all three as ext4 block disks (the
+        // initramfs already loaded virtio_blk for the ext4 root, so
+        // vdb/vdc/vdd enumerate with no extra modules — no virtiofsd, no
+        // 9p); order matches the device order on the QEMU cmdline (vda=seed
+        // root, then work/out/mvm-bins). libkrun presents `/out` and
+        // `/mvm-bins` over virtio-fs by tag; `/work` prefers an ext4 disk
+        // too (`mount_libkrun_work_share`) — a large workspace read through
+        // virtio-fs-over-FUSE exhausts libkrun's virtio-fs handle pool
+        // (`nix build` fails with "Too many open files"), so the host packs
+        // it onto a block device whenever it attaches one.
+        if qemu {
+            mount_shares(&[
                 ("/dev/vdb", "/work", "ext4"),
                 ("/dev/vdc", "/out", "ext4"),
                 ("/dev/vdd", "/mvm-bins", "ext4"),
-            ]
+            ])?;
         } else {
-            &[
-                ("work", "/work", "virtiofs"),
+            mount_libkrun_work_share()?;
+            mount_shares(&[
                 ("out", "/out", "virtiofs"),
                 ("mvm-bins", "/mvm-bins", "virtiofs"),
-            ]
-        };
-        for (source, target, fstype) in shares {
-            std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
-            mount_fs(source, target, fstype)?;
-            if !is_mountpoint(target) {
-                return Err(format!("{target} ({fstype}) mount did not take"));
-            }
+            ])?;
         }
 
         if qemu {
@@ -1016,6 +1036,116 @@ mod linux {
         .map_err(|e| format!("mount {source} -> {target} ({fstype}): {e}"))
     }
 
+    /// Like [`mount_fs`], but read-only. The host attaches the `/work` ext4
+    /// disk read-only at the libkrun layer (`krun_add_disk`'s `read_only`
+    /// flag), and a Linux block device that reports itself read-only refuses
+    /// a plain read-write mount — so this must pass `MS_RDONLY` rather than
+    /// reusing `mount_fs`. Mirrors the existing read-only virtio-fs mounts
+    /// the steady-state builder guest already does for the same `/work`
+    /// share (`mvm-host-vm-init`'s `virtiofs_mount_flags`).
+    fn mount_fs_ro(source: &str, target: &str, fstype: &str) -> Result<(), String> {
+        use nix::mount::{MsFlags, mount};
+        mount(
+            Some(source),
+            target,
+            Some(fstype),
+            MsFlags::MS_RDONLY,
+            None::<&str>,
+        )
+        .map_err(|e| format!("mount {source} -> {target} ({fstype}) read-only: {e}"))
+    }
+
+    /// Decode the ext4 volume label (`s_volume_name`) from the first
+    /// superblock in `buf`, matching the layout `mvm-ext4`'s writer stamps
+    /// (`BuildOptions::with_volume_name`). `None` when `buf` is too short,
+    /// the ext4 magic doesn't match (not ext4, or a zeroed/absent device),
+    /// or the label is empty or not valid UTF-8.
+    fn ext4_volume_label_from_superblock(buf: &[u8]) -> Option<String> {
+        let magic_off = EXT4_SUPERBLOCK_OFFSET + EXT4_MAGIC_OFFSET_IN_SUPERBLOCK;
+        let label_off = EXT4_SUPERBLOCK_OFFSET + EXT4_VOLUME_NAME_OFFSET_IN_SUPERBLOCK;
+        if buf.len() < label_off + EXT4_VOLUME_NAME_LEN {
+            return None;
+        }
+        if buf[magic_off..magic_off + EXT4_MAGIC_LE.len()] != EXT4_MAGIC_LE {
+            return None;
+        }
+        let raw = &buf[label_off..label_off + EXT4_VOLUME_NAME_LEN];
+        let end = raw.iter().position(|&b| b == 0).unwrap_or(raw.len());
+        if end == 0 {
+            return None;
+        }
+        std::str::from_utf8(&raw[..end]).ok().map(str::to_string)
+    }
+
+    /// Read just enough of `path` to decode an ext4 volume label. `None` on
+    /// any I/O error — missing device, device shorter than a superblock, or
+    /// (via [`ext4_volume_label_from_superblock`]) not ext4 at all.
+    fn read_ext4_volume_label(path: &Path) -> Option<String> {
+        let probe_len =
+            EXT4_SUPERBLOCK_OFFSET + EXT4_VOLUME_NAME_OFFSET_IN_SUPERBLOCK + EXT4_VOLUME_NAME_LEN;
+        let mut buf = vec![0u8; probe_len];
+        std::fs::File::open(path).ok()?.read_exact(&mut buf).ok()?;
+        ext4_volume_label_from_superblock(&buf)
+    }
+
+    /// Probe `candidates` in order for the first whose ext4 superblock
+    /// carries `label`. Content-addressed rather than position-addressed:
+    /// correct regardless of which candidate the host actually attached the
+    /// labeled disk as (see `libkrun_builder::pack_stage0_work_disk` on the
+    /// host side).
+    fn find_labeled_ext4_disk(candidates: &[&str], label: &str) -> Option<PathBuf> {
+        for candidate in candidates.iter().copied() {
+            let path = Path::new(candidate);
+            if read_ext4_volume_label(path).as_deref() == Some(label) {
+                return Some(path.to_path_buf());
+            }
+        }
+        None
+    }
+
+    /// Mounts `/work` for the libkrun backend. Prefers the ext4 disk
+    /// carrying [`mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL`] — the host
+    /// packs the workspace onto a block device because `nix build` reading
+    /// a large tree through virtio-fs-over-FUSE exhausts libkrun's
+    /// virtio-fs handle pool ("Too many open files"). Falls back to the
+    /// `"work"` virtio-fs tag when no such disk is attached, the shape
+    /// every caller used before this disk existed.
+    fn mount_libkrun_work_share() -> Result<(), String> {
+        std::fs::create_dir_all("/work").map_err(|e| format!("create /work: {e}"))?;
+        let label = mvm_build::rootfs::STAGE0_WORK_EXT4_LABEL;
+        match find_labeled_ext4_disk(STAGE0_DISK_CANDIDATES, label) {
+            Some(dev) => {
+                let dev = dev.to_string_lossy().into_owned();
+                mount_fs_ro(&dev, "/work", "ext4")?;
+                eprintln!("stage0-init: mounted /work from ext4 disk {dev} (label {label:?})");
+            }
+            None => {
+                mount_fs("work", "/work", "virtiofs")?;
+                eprintln!("stage0-init: mounted /work from virtiofs (no {label:?} disk attached)");
+            }
+        }
+        if !is_mountpoint("/work") {
+            return Err("/work (ext4-or-virtiofs) mount did not take".to_string());
+        }
+        Ok(())
+    }
+
+    /// Create + mount each `(source, target, fstype)` share in order,
+    /// verifying the mount took. Shared by the QEMU shares (all ext4) and
+    /// the libkrun `/out` + `/mvm-bins` shares (virtio-fs); `/work` on
+    /// libkrun goes through [`mount_libkrun_work_share`] instead, since it
+    /// picks its own source/fstype/flags.
+    fn mount_shares(shares: &[(&str, &str, &str)]) -> Result<(), String> {
+        for (source, target, fstype) in shares {
+            std::fs::create_dir_all(target).map_err(|e| format!("create {target}: {e}"))?;
+            mount_fs(source, target, fstype)?;
+            if !is_mountpoint(target) {
+                return Err(format!("{target} ({fstype}) mount did not take"));
+            }
+        }
+        Ok(())
+    }
+
     fn mount_fs_idempotent(source: &str, target: &str, fstype: &str) -> Result<(), String> {
         // The nix seed rootfs is minimal (no /tmp, /run, …) and `mount(2)`
         // needs the target dir to exist — create it first.
@@ -1172,10 +1302,116 @@ mod linux {
     #[cfg(test)]
     mod tests {
         use super::{
-            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into, run_streaming,
+            VSOCK_EGRESS_NO_PROXY, VSOCK_EGRESS_PROXY_URL, copy_artifacts_into,
+            ext4_volume_label_from_superblock, find_labeled_ext4_disk, run_streaming,
         };
         use std::os::unix::fs::symlink;
         use std::process::Command;
+
+        #[test]
+        fn ext4_volume_label_from_superblock_rejects_too_short_buffers() {
+            assert_eq!(ext4_volume_label_from_superblock(&[]), None);
+            assert_eq!(ext4_volume_label_from_superblock(&[0u8; 1024]), None);
+        }
+
+        #[test]
+        fn ext4_volume_label_from_superblock_rejects_wrong_magic() {
+            let mut buf = vec![0u8; 1024 + 0x78 + 16];
+            buf[1024 + 0x38] = 0xAA;
+            buf[1024 + 0x38 + 1] = 0xBB;
+            buf[1024 + 0x78..1024 + 0x78 + 8].copy_from_slice(b"mvm-work");
+            assert_eq!(ext4_volume_label_from_superblock(&buf), None);
+        }
+
+        #[test]
+        fn ext4_volume_label_from_superblock_rejects_empty_label() {
+            let mut buf = vec![0u8; 1024 + 0x78 + 16];
+            buf[1024 + 0x38] = 0x53;
+            buf[1024 + 0x38 + 1] = 0xEF;
+            // Label bytes left all-zero.
+            assert_eq!(ext4_volume_label_from_superblock(&buf), None);
+        }
+
+        #[test]
+        fn ext4_volume_label_from_superblock_decodes_a_nul_padded_label() {
+            let mut buf = vec![0u8; 1024 + 0x78 + 16];
+            buf[1024 + 0x38] = 0x53;
+            buf[1024 + 0x38 + 1] = 0xEF;
+            buf[1024 + 0x78..1024 + 0x78 + 8].copy_from_slice(b"mvm-work");
+            assert_eq!(
+                ext4_volume_label_from_superblock(&buf),
+                Some("mvm-work".to_string())
+            );
+        }
+
+        #[test]
+        fn ext4_volume_label_from_superblock_decodes_a_full_16_byte_label() {
+            // No trailing NUL at all — the full field is label content.
+            let mut buf = vec![0u8; 1024 + 0x78 + 16];
+            buf[1024 + 0x38] = 0x53;
+            buf[1024 + 0x38 + 1] = 0xEF;
+            buf[1024 + 0x78..1024 + 0x78 + 16].copy_from_slice(b"0123456789abcdef");
+            assert_eq!(
+                ext4_volume_label_from_superblock(&buf),
+                Some("0123456789abcdef".to_string())
+            );
+        }
+
+        #[test]
+        fn ext4_volume_label_round_trips_through_the_real_writer() {
+            // Validate against `mvm-ext4`'s actual writer (not just a synthetic
+            // byte layout assumption) so a future change to the on-disk
+            // superblock format fails this test instead of silently
+            // desynchronizing the host writer and the guest reader.
+            let nodes = vec![mvm_ext4::Node::Dir {
+                path: "/a".to_string(),
+                mode: 0o755,
+                xattrs: vec![],
+            }];
+            let options = mvm_ext4::BuildOptions::default().with_volume_name(b"mvm-work");
+            let image = mvm_ext4::build_image_with_options(&nodes, &options).expect("build image");
+            assert_eq!(
+                ext4_volume_label_from_superblock(&image),
+                Some("mvm-work".to_string())
+            );
+        }
+
+        #[test]
+        fn find_labeled_ext4_disk_picks_the_matching_candidate_regardless_of_position() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut labeled = vec![0u8; 1024 + 0x78 + 16];
+            labeled[1024 + 0x38] = 0x53;
+            labeled[1024 + 0x38 + 1] = 0xEF;
+            labeled[1024 + 0x78..1024 + 0x78 + 8].copy_from_slice(b"mvm-work");
+            let other = vec![0u8; 1024 + 0x78 + 16]; // no magic at all — e.g. an empty/unformatted disk
+
+            // The labeled device is the SECOND candidate — the scan must not
+            // assume it's always first (content-addressed, not position-addressed).
+            let first = dir.path().join("first");
+            let second = dir.path().join("second");
+            std::fs::write(&first, &other).expect("write first");
+            std::fs::write(&second, &labeled).expect("write second");
+
+            let first_str = first.to_str().expect("utf8 path");
+            let second_str = second.to_str().expect("utf8 path");
+            let found = find_labeled_ext4_disk(&[first_str, second_str], "mvm-work");
+            assert_eq!(found, Some(second));
+        }
+
+        #[test]
+        fn find_labeled_ext4_disk_returns_none_when_nothing_matches() {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let unformatted = dir.path().join("unformatted");
+            std::fs::write(&unformatted, vec![0u8; 1024 + 0x78 + 16]).expect("write");
+            let missing = dir.path().join("does-not-exist");
+
+            let unformatted_str = unformatted.to_str().expect("utf8 path");
+            let missing_str = missing.to_str().expect("utf8 path");
+            assert_eq!(
+                find_labeled_ext4_disk(&[missing_str, unformatted_str], "mvm-work"),
+                None
+            );
+        }
 
         #[test]
         fn purge_stale_nix_builder_home_removes_leftover_and_tolerates_absence() {
