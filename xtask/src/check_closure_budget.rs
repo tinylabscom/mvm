@@ -30,7 +30,11 @@ const BUDGET_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// closeout branch; the vsock-only builder/runtime path now ships a slightly
 /// larger audited default closure. Lower it freely as deps drop; raising it
 /// must be justified in the change that does.
-const CLOSURE_BUDGET: usize = 271;
+///
+/// 270 (was 271): the userspace egress forwarder (smoltcp) is scoped behind the
+/// mvm-hostd `packet-forwarder` feature that the CLI does not link, and retiring
+/// the host-TUN + kernel-NAT path net-dropped one crate from the default closure.
+const CLOSURE_BUDGET: usize = 270;
 
 pub fn run(workspace: &Path) -> Result<()> {
     let count = default_closure_crate_count(workspace)?;

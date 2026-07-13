@@ -103,12 +103,12 @@ tracing-subscriber.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 rustix = { version = "1.1", features = ["fs"] }
-
-# macOS userspace TCP/IP egress: terminate guest tunnel flows in-process and
-# bridge each admitted flow to a host socket (no unprivileged kernel NAT on
-# macOS). Linux uses the kernel TUN + NAT path instead, so this is macOS-only.
-[target.'cfg(target_os = "macos")'.dependencies]
-smoltcp.workspace = true
+# Userspace TCP/IP egress: terminate guest tunnel flows in an in-process stack
+# and bridge each admitted flow to an ordinary host socket. One forwarder on
+# every host — no unprivileged kernel NAT required anywhere. Optional + behind
+# `packet-forwarder` so consumers that only spawn the worker bin (the CLI) do
+# not link the stack.
+smoltcp = { workspace = true, optional = true }
 
 # mvm-jailer-lite confinement: seccomp + landlock are Linux-only.
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -130,8 +130,13 @@ mvm-verify = { path = "../mvm-verify" }
 ctor = "0.2"
 
 [features]
-default = []
+default = ["packet-forwarder"]
 custom-dns = ["dep:hickory-resolver"]
+# The in-process userspace egress forwarder (smoltcp) that the
+# mvm-network-tunnel-worker bin runs. Default-on so the worker builds in a
+# normal workspace build; a consumer that only spawns the worker (mvm-cli) sets
+# default-features = false to keep the stack out of its closure.
+packet-forwarder = ["dep:smoltcp"]
 
 [lints]
 workspace = true

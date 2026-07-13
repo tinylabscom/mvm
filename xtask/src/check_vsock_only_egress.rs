@@ -29,7 +29,6 @@ const GUARDED_PATHS: &[&str] = &[
     "crates/mvm-guest/src/network_tunnel.rs",
     "crates/mvm-guest/src/guest_tun.rs",
     "crates/mvm-hostd/src/network_tunnel.rs",
-    "crates/mvm-hostd/src/host_tun.rs",
 ];
 
 /// Tokens that signal a guest NIC / userspace net gateway on the data path.
