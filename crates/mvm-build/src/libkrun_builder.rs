@@ -769,7 +769,7 @@ impl LibkrunBuilderVm {
     /// VM artifacts to `/out`, then powers off cleanly.
     ///
     /// Attaches a dedicated persistent `nix-store-stage0-<arch>.img` as
-    /// the guest's only virtio-blk device (`/dev/vda` — Stage 0 has no
+    /// the guest's first virtio-blk device (`/dev/vda` — Stage 0 has no
     /// block rootfs, its root is virtio-fs via `krun_set_root`). The
     /// guest mounts it at `/nix` (formatting on first boot), so the slim
     /// kernel + Rust host binaries are built once and reused across
@@ -777,6 +777,14 @@ impl LibkrunBuilderVm {
     /// time. ext4 is case-sensitive, which is also why the old in-RAM
     /// tmpfs existed (APFS case-insensitivity breaks Nix substitution) —
     /// the disk keeps that property and adds persistence.
+    ///
+    /// The workspace source travels as a second virtio-blk device rather
+    /// than a virtio-fs share (see [`pack_stage0_work_disk`]): `nix build`
+    /// reading a large workspace tree through virtio-fs-over-FUSE exhausts
+    /// libkrun's virtio-fs handle pool (`nix build` fails with "Too many
+    /// open files"). `stage0-init` identifies the disk by its ext4 volume
+    /// label rather than by enumeration order, and falls back to the old
+    /// `"work"` virtio-fs tag when no such disk is attached.
     ///
     /// On success the caller still validates that the expected artifacts
     /// (`vmlinux`, `rootfs.ext4`) landed in `artifact_out`; this only
@@ -864,20 +872,31 @@ impl LibkrunBuilderVm {
             );
         }
 
+        // Pack the workspace onto an ext4 disk instead of exporting it over
+        // virtio-fs: `nix build` opening every file in a large workspace tree
+        // through virtio-fs-over-FUSE exhausts libkrun's virtio-fs handle
+        // pool (EMFILE, "Too many open files"), which reliably fails the
+        // Stage 0 build. `stage0-init` mounts it by ext4 volume label.
+        let work_disk = pack_stage0_work_disk(workspace_dir, &vm_state_dir)?;
+
         let mut krun = krun_context_for_image(&vm_name, &image)?
             .with_resources(self.vcpus, self.memory_mib)
             .with_console_output(path_to_str(&console_log, "console_log")?)
             .with_vsock_socket_dir(path_to_str(&vm_state_dir, "vm_state_dir")?)
-            // Persistent /nix store disk — the only block device on a RootDir
-            // guest, so it enumerates as /dev/vda. `stage0-init` mounts and
-            // reuses it when it is ext4, formats it when the seed carries
-            // mkfs.ext4, and otherwise falls back to the tmpfs seed copy.
+            // Persistent /nix store disk — the first block device attached
+            // to a RootDir guest, so it enumerates as /dev/vda. `stage0-init`
+            // mounts and reuses it when it is ext4, formats it when the seed
+            // carries mkfs.ext4, and otherwise falls back to the tmpfs seed
+            // copy.
             .add_disk(
                 "nix-store",
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,
                 false,
             )
-            .add_virtio_fs("work", path_to_str(workspace_dir, "workspace_dir")?)
+            // Read-only: `stage0-init` invokes `nix build --no-write-lock-file`
+            // against a flake that already carries a committed lock, so
+            // nothing ever writes back into the workspace tree.
+            .add_disk("work", path_to_str(&work_disk, "work_disk")?, true)
             .add_virtio_fs("out", path_to_str(artifact_out, "artifact_out")?)
             // /mvm-bins inside the guest — stage0-init sets MVM_HOST_BIN_DIR
             // to it so the flake picks up the pre-built host-vm binaries.
@@ -1299,6 +1318,36 @@ impl LibkrunBuilderVm {
         }
         Ok(())
     }
+}
+
+/// Pack `workspace_dir` into a read-only ext4 disk for the Stage 0 `/work`
+/// mount, carrying [`crate::rootfs::STAGE0_WORK_EXT4_LABEL`] so
+/// `stage0-init` can find it by content instead of by device-enumeration
+/// order. Stages a filtered copy first (dropping `target/`, `.git/`, …
+/// — [`crate::qemu_builder::WORK_TREE_EXCLUDE_DIRS`], the same list the
+/// QEMU Stage 0 path drops) so the pure writer never packs a multi-gigabyte
+/// `target/` for nothing, then discards the filtered copy once it's on
+/// disk. The image itself is left under `vm_state_dir` for the same
+/// existing reaper that already prunes stale Stage 0 VM state (console
+/// logs, sockets, …).
+fn pack_stage0_work_disk(
+    workspace_dir: &std::path::Path,
+    vm_state_dir: &std::path::Path,
+) -> Result<PathBuf, BuilderVmError> {
+    let staged = vm_state_dir.join("work-src");
+    crate::qemu_builder::copy_tree_filtered(
+        workspace_dir,
+        &staged,
+        crate::qemu_builder::WORK_TREE_EXCLUDE_DIRS,
+    )?;
+    let image_path = vm_state_dir.join("work.ext4");
+    let input = crate::rootfs::MaterializeExt4Input::new(staged.clone(), image_path.clone(), 0)
+        .with_volume_label(crate::rootfs::STAGE0_WORK_EXT4_LABEL);
+    let result = crate::rootfs::materialize_ext4_pure(&input)
+        .map_err(|e| BuilderVmError::ExtractionFailed(format!("packing /work ext4 disk: {e}")));
+    let _ = std::fs::remove_dir_all(&staged);
+    result?;
+    Ok(image_path)
 }
 
 #[cfg(test)]
@@ -4140,6 +4189,12 @@ impl LibkrunPersistentHostVm {
                 path_to_str(nix_store_lock.path(), "nix_store_img")?,
                 false,
             )
+            // Left on virtio-fs deliberately, unlike Stage 0's `/work`
+            // (`pack_stage0_work_disk`): this is the long-lived persistent
+            // VM, so `/work` has to keep reflecting live host edits across
+            // the session — a packed ext4 snapshot would need repacking on
+            // every change. Revisit if a large workspace ever hits the same
+            // virtio-fs handle exhaustion here.
             .add_virtio_fs("work", path_to_str(&self.workspace_root, "workspace_root")?)
             .add_virtio_fs("out", path_to_str(&job_dir, "job_dir")?)
             .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)

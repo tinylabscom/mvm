@@ -112,6 +112,12 @@ const QEMU_STAGE0_OUT_ARTIFACT_NAMES: &[&str] = &[
     "nix-stderr.log",
 ];
 
+/// Directories `copy_tree_filtered` drops when staging a `/work` tree for
+/// packing — the heavy build/VCS dirs the nix workspace filter ignores
+/// anyway. Shared with the libkrun Stage 0 path (`libkrun_builder`), which
+/// packs `/work` onto an ext4 disk the same way this QEMU path does.
+pub(crate) const WORK_TREE_EXCLUDE_DIRS: &[&str] = &["target", ".git", ".claude", "node_modules"];
+
 /// Ext4 image sizes (sparse — `set_len` + `mkfs.ext4 -d` only touch real
 /// content). The seed disk holds the whole build closure nix downloads.
 const SEED_IMG_BYTES: u64 = 30 * 1024 * 1024 * 1024;
@@ -181,11 +187,7 @@ fn run_stage0_qemu(
     // workspace filter ignores anyway (`target/`, `.git`, …) — otherwise a
     // multi-GB `target/` would bloat the disk + pack time for nothing.
     let work_src = work.join("work-src");
-    copy_tree_filtered(
-        workspace_dir,
-        &work_src,
-        &["target", ".git", ".claude", "node_modules"],
-    )?;
+    copy_tree_filtered(workspace_dir, &work_src, WORK_TREE_EXCLUDE_DIRS)?;
     pack_ext4(&work_src, &vdb, dir_stats(&work_src).work_ext4_size_bytes())?;
     let _ = std::fs::remove_dir_all(&work_src);
     pack_ext4(artifact_out, &vdc, OUT_IMG_BYTES)?;
@@ -273,7 +275,13 @@ fn run_stage0_qemu(
 /// Recursively copy `src` into `dst`, skipping any directory whose name is in
 /// `exclude` (at any depth). Files copied, symlinks recreated. Used to stage a
 /// `/work` tree without the heavy `target/`/`.git` dirs before packing it.
-fn copy_tree_filtered(src: &Path, dst: &Path, exclude: &[&str]) -> Result<(), BuilderVmError> {
+/// `pub(crate)` so the libkrun Stage 0 path can stage its own filtered
+/// `/work` copy with the same walk instead of a second implementation.
+pub(crate) fn copy_tree_filtered(
+    src: &Path,
+    dst: &Path,
+    exclude: &[&str],
+) -> Result<(), BuilderVmError> {
     std::fs::create_dir_all(dst).map_err(|e| io_err("creating staging dir", dst, e))?;
     let mut stack = vec![(src.to_path_buf(), dst.to_path_buf())];
     while let Some((from, to)) = stack.pop() {

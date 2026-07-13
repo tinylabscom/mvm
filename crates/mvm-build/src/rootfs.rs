@@ -21,6 +21,15 @@ const DEFAULT_SIZE_MULTIPLIER_NUMERATOR: u64 = 3;
 const DEFAULT_SIZE_MULTIPLIER_DENOMINATOR: u64 = 2;
 const DEFAULT_GUEST_OUTPUT_DEVICE: &str = "/dev/vdc";
 
+/// ext4 volume label stamped on the libkrun Stage 0 `/work` disk
+/// (`libkrun_builder::run_stage0_impl`) so `stage0-init` can find it by
+/// content instead of by device-enumeration order. ext4's on-disk
+/// `s_volume_name` field caps at 16 bytes; kept well under that. Lives here
+/// (ungated) rather than behind `pure-mkfs` so the Stage 0 guest binary,
+/// which only needs the string and not the writer, can reference it
+/// regardless of which features its own build enables.
+pub const STAGE0_WORK_EXT4_LABEL: &str = "mvm-work";
+
 /// Inputs for [`materialize_ext4`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MaterializeExt4Input {
@@ -36,6 +45,12 @@ pub struct MaterializeExt4Input {
     /// turns it on to make OCI block roots sealed across both the pure and
     /// builder-VM materializers.
     pub emit_verity: bool,
+    /// ext4 volume label (`s_volume_name`) to stamp on the pure-path image,
+    /// truncated to 16 bytes by the underlying writer. `None` (the default)
+    /// leaves the field zeroed, unchanged from before this option existed.
+    /// Only consulted by [`materialize_ext4_pure`] — the builder-VM path
+    /// (`materialize_ext4`) doesn't stamp a label.
+    pub volume_label: Option<String>,
 }
 
 impl MaterializeExt4Input {
@@ -45,12 +60,21 @@ impl MaterializeExt4Input {
             output,
             uncompressed_size_bytes,
             emit_verity: false,
+            volume_label: None,
         }
     }
 
     /// Opt into dm-verity sidecar emission on the pure path.
     pub fn with_verity(mut self) -> Self {
         self.emit_verity = true;
+        self
+    }
+
+    /// Stamp an ext4 volume label on the pure-path image (e.g.
+    /// [`STAGE0_WORK_EXT4_LABEL`]), so a guest can mount it by content
+    /// instead of by device path.
+    pub fn with_volume_label(mut self, label: impl Into<String>) -> Self {
+        self.volume_label = Some(label.into());
         self
     }
 }
@@ -401,8 +425,13 @@ pub fn materialize_ext4_pure(
             source,
         })?;
     }
-    let size_bytes =
-        stream_pure_ext4_output(&nodes, &input.output, &mvm_ext4::BuildOptions::default())?;
+    // Stage-0 /work is mounted by label; every other caller leaves
+    // volume_label None and gets the unchanged default-options image.
+    let build_options = match &input.volume_label {
+        Some(label) => mvm_ext4::BuildOptions::default().with_volume_name(label.as_bytes()),
+        None => mvm_ext4::BuildOptions::default(),
+    };
+    let size_bytes = stream_pure_ext4_output(&nodes, &input.output, &build_options)?;
     let verity_root_hash = maybe_emit_verity_sidecars(input)?;
 
     Ok(MaterializedExt4 {
@@ -861,6 +890,40 @@ mod tests {
         assert!(mat.verity_root_hash.is_none());
         assert!(!out.path().join("rootfs.verity").exists());
         assert!(!out.path().join("rootfs.roothash").exists());
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn pure_materialize_without_a_label_leaves_volume_name_zeroed() {
+        // Regression guard for the `with_volume_label` plumbing: a caller that
+        // never opts in must get byte-identical output to before the option
+        // existed — an all-zero `s_volume_name`.
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let out_path = out.path().join("rootfs.ext4");
+        let input = MaterializeExt4Input::new(src.path().to_path_buf(), out_path.clone(), 0);
+
+        materialize_ext4_pure(&input).expect("pure materialize");
+        let img = std::fs::read(&out_path).unwrap();
+        assert_eq!(&img[1024 + 0x78..1024 + 0x88], &[0u8; 16]);
+    }
+
+    #[cfg(feature = "pure-mkfs")]
+    #[test]
+    fn pure_materialize_with_a_label_stamps_the_ext4_volume_name() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let out_path = out.path().join("rootfs.ext4");
+        let input = MaterializeExt4Input::new(src.path().to_path_buf(), out_path.clone(), 0)
+            .with_volume_label(STAGE0_WORK_EXT4_LABEL);
+
+        materialize_ext4_pure(&input).expect("pure materialize");
+        let img = std::fs::read(&out_path).unwrap();
+        let mut expected = [0u8; 16];
+        expected[..STAGE0_WORK_EXT4_LABEL.len()].copy_from_slice(STAGE0_WORK_EXT4_LABEL.as_bytes());
+        assert_eq!(&img[1024 + 0x78..1024 + 0x88], &expected);
     }
 
     #[cfg(feature = "pure-mkfs")]
