@@ -27,7 +27,7 @@ keys
 # tracked; this one is a build artifact that can run into the hundreds
 # of megabytes per arch.
 nix/images/dev-prebuilt/
-# Plan 86 / ADR-054: docker-build artifact symlink from
+# Plan 86 / ADR-005: docker-build artifact symlink from
 # `nix build --out-link .ur-seed-result`. Points into Docker's /nix/store
 # and is meaningless on the host.
 .ur-seed-result

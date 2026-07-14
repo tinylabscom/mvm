@@ -372,7 +372,7 @@ All notable changes to mvm are documented in this file.
 - **machine**: Auto-generate a name for `machine create` when omitted
 - **machine**: Batch `machine stop <name>...`
 - **machine**: Batch `machine start <name>...`
-- **verb-grant**: Stage A — launcher-gated enforcement flip (ADR-107, #1381 item 3)
+- **verb-grant**: Stage A — launcher-gated enforcement flip (ADR-005, #1381 item 3)
 - **run**: Virtiofs-root tier gate + backend capability (Plan 223 A4/A1)
 - **machine**: Aligned `machine ls` table with header + AGE column
 - **mvm-client**: Add inspect/create/start/remove to the MvmClient trait
@@ -625,9 +625,9 @@ All notable changes to mvm are documented in this file.
 - Mvm-client facade design + mvmd cloud-readiness assessment (research)
 - ADR-105 + Plan 218 — converge SDK/facade machine-driving on MvmClient
 - **plan**: Plan 221 — in-process rootfs materialization (no subprocess)
-- **adr**: ADR-106 — Phase-A/Phase-B build boundary (Plan 221 B0)
-- **adr**: ADR-107 virtiofs-root integrity decision + Plan 223 impl plan
-- **claims**: Scope claim 3 to block+ext4 backends; note virtiofs-root posture (ADR-107)
+- **adr**: ADR-005 — Phase-A/Phase-B build boundary (Plan 221 B0)
+- **adr**: ADR-005 virtiofs-root integrity decision + Plan 223 impl plan
+- **claims**: Scope claim 3 to block+ext4 backends; note virtiofs-root posture (ADR-005)
 - **adr**: ADR-002 — attested launch anchor for real verb-grant key separation
 - **plan**: Plan 227 — instant-resume sandboxes over a vsock-only auditable data plane
 - **plan**: Plan 228 — release 0.17.0 (HVF default, working & documented)
@@ -751,7 +751,7 @@ All notable changes to mvm are documented in this file.
 - **sdk-python**: Migrate live-mode Sandbox ops to `machine` verbs
 - **build**: Stream typed mvm-builderd build progress to stderr (no more silent "hang")
 - **builder**: Page-align the libkrun builder kernel (Linux KVM rc -22)
-- **stage0**: Bump seed Nix 2.31.1 → 2.34.7 (lock-matching narHash; fixes ADR-096 regression)
+- **stage0**: Bump seed Nix 2.31.1 → 2.34.7 (lock-matching narHash; fixes ADR-005 regression)
 - **kernel**: Harden --boot-check — force libkrun + builder-image precondition
 - **cli**: Name a manifest/source change in the machine-recreate diff
 - **builder**: Pin builder VM materialize toolchain as a GC root so cap-GC can't reap mkfs.ext4
@@ -1072,7 +1072,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **hostd**: Consolidate supervisor/broker/signers/jailer into mvm-hostd
 - **vm-host**: Consolidate per-VM supervisors into mvm-vm-host (cfg-gated [[bin]]s)
 - **guest**: Consolidate addon-dns + vsock-bridge into mvm-guest-helpers
-- **build**: Move host-vm-init + egress-proxy into mvm-build [[bin]]s (ADR-065)
+- **build**: Move host-vm-init + egress-proxy into mvm-build [[bin]]s (ADR-005)
 - **core**: Dedup length-prefixed framing into core::framing (B4 Option A)
 - **core**: Route mvm-core data-dir derivations through a strict resolver (plan 121 B4)
 - **cli,hostd,build**: Route data/cache-dir derivations through canonical resolvers (plan 121 B4)
@@ -1238,7 +1238,7 @@ ossified around Firecracker. v2 is a 13-crate workspace built around:
 - **Lima removed entirely** — direct host execution on Linux; Apple
   Container or libkrun on macOS
 - **Busybox as PID 1** in guests (replaces NixOS+systemd; meets the
-  ≤300 ms cold-boot p50 floor recorded in ADR-013)
+  ≤300 ms cold-boot p50 floor recorded in ADR-005)
 - **`ExecutionPlan`-shaped substrate** for the supervisor / audit /
   policy work in plans 37 and 60 Phases 2–10
 
@@ -1248,7 +1248,7 @@ ossified around Firecracker. v2 is a 13-crate workspace built around:
   `mvm-plan`, `mvm-policy`, `mvm-supervisor`, `mvm-providers`,
   `mvm-backend`, `mvm-base`, `mvm`, `mvm-build`, `mvm-guest`,
   `mvm-cli`, `mvm-mcp` (plus root `mvmctl` facade and `xtask`)
-- `AnyBackend` dispatch with `auto_select()` per ADR-013: Linux+KVM →
+- `AnyBackend` dispatch with `auto_select()` per ADR-005: Linux+KVM →
   Firecracker; macOS 26+ on Apple Silicon → Apple Container or
   libkrun; KVM-less Linux / older macOS / Intel → libkrun;
   Cloud Hypervisor opt-in for VFIO/GPU

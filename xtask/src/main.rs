@@ -247,7 +247,7 @@ fn main() -> Result<()> {
                 "  check-require-grant-token-allowlist     assert mvm.require_grant=1 appears only in the four backend builders + mvm-guest/vsock.rs"
             );
             eprintln!(
-                "  check-mvm-host-binaries-sync            Plan 115 / ADR-065: assert Rust manifest and Nix attrset agree"
+                "  check-mvm-host-binaries-sync            Plan 115 / ADR-005: assert Rust manifest and Nix attrset agree"
             );
             eprintln!(
                 "  perf <subcommand>                       Plan 60 Phase 9 perf gates (rootfs-size, boot)"

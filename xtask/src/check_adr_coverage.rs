@@ -45,7 +45,7 @@ fn parse_adr_filename(name: &str) -> Option<(u32, String)> {
 }
 
 /// In-code reference pattern: `ADR-N`, `ADR-NN`, or `ADR-NNN`.
-/// Matches `ADR-002`, `ADR-013`, `ADR-7`, etc. Case-sensitive on
+/// Matches `ADR-002`, `ADR-014`, `ADR-7`, etc. Case-sensitive on
 /// `ADR` so we don't pick up `adr-`-prefixed filenames.
 ///
 /// mvm ADR numbers are 1–3 digits. Cross-repo references like
@@ -346,10 +346,10 @@ mod tests {
 
     #[test]
     fn extract_adr_refs_finds_padded_and_unpadded() {
-        let body = "See ADR-013 for the pivot; ADR-2 the security \
+        let body = "See ADR-014 for the pivot; ADR-2 the security \
                     posture; ADR-038 for CI policy.";
         let refs = extract_adr_refs(body);
-        assert_eq!(refs, vec![13, 2, 38]);
+        assert_eq!(refs, vec![14, 2, 38]);
     }
 
     #[test]
@@ -362,9 +362,9 @@ mod tests {
     fn extract_adr_refs_handles_section_suffix() {
         // ADR refs in code often carry a section suffix; our extractor
         // pulls just the number.
-        let body = "ADR-002 §W4.3 / ADR-013§\"Boot budget\"";
+        let body = "ADR-002 §W4.3 / ADR-014§\"Boot budget\"";
         let refs = extract_adr_refs(body);
-        assert_eq!(refs, vec![2, 13]);
+        assert_eq!(refs, vec![2, 14]);
     }
 
     #[test]
@@ -377,11 +377,11 @@ mod tests {
         let refs = extract_adr_refs(body);
         assert!(refs.is_empty(), "4-digit ADR refs must be skipped");
 
-        // Mixed: mvm ADR-013 alongside mvmd ADR-0007 — only the
+        // Mixed: mvm ADR-014 alongside mvmd ADR-0007 — only the
         // 3-digit mvm form should land in the output.
-        let mixed = "ADR-013 plus mvmd ADR-0007 in the same line";
+        let mixed = "ADR-014 plus mvmd ADR-0007 in the same line";
         let refs = extract_adr_refs(mixed);
-        assert_eq!(refs, vec![13]);
+        assert_eq!(refs, vec![14]);
     }
 
     /// Build the literal `ADR-N` token at runtime so this source file

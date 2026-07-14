@@ -611,7 +611,7 @@ opt-level = 3
 [workspace.metadata.mvm.toolchain]
 # Pinned cross-compile toolchain for the embedded host-vm binaries
 # baked into mvmctl. Bump in lockstep across this file and CI to keep
-# the embedded payload reproducible (Plan 115 / ADR-065 claim 11).
+# the embedded payload reproducible (Plan 115 / ADR-005 claim 11).
 #
 # musl, not gnu: these binaries run as PID 1 / early services inside the
 # builder VM, whose minimal NixOS-derived rootfs ships no FHS dynamic

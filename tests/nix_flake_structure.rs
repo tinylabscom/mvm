@@ -40,12 +40,12 @@ fn flake_nix_exists_and_imports_microvm_nix() {
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("nix/flake.nix must be present: {e}"));
 
-    // ADR-013 invariant: the flake imports microvm.nix as the foundation.
+    // ADR-005 invariant: the flake imports microvm.nix as the foundation.
     // Any future PR that drops this input violates the ADR.
     assert!(
         content.contains("microvm-nix/microvm.nix"),
         "nix/flake.nix must reference microvm-nix/microvm.nix as an input \
-         (per ADR-013); content excerpt: {}",
+         (per ADR-005); content excerpt: {}",
         &content[..content.len().min(200)]
     );
 
@@ -67,7 +67,7 @@ fn flake_nix_exists_and_imports_microvm_nix() {
     assert!(
         content.contains("lib") && content.contains("mkGuest"),
         "nix/flake.nix must expose lib.<system>.mkGuest as the \
-         user-facing API (per ADR-013 + plan 60). Got: ...{}",
+         user-facing API (per ADR-005 + plan 60). Got: ...{}",
         &content[..content.len().min(200)]
     );
 
@@ -498,7 +498,7 @@ fn minimal_profile_exists_and_has_required_settings() {
     assert!(
         content.contains("microvm.hypervisor") || content.contains("hypervisor"),
         "minimal profile must declare a microvm.hypervisor (defaults \
-         to firecracker per ADR-013)"
+         to firecracker per ADR-005)"
     );
 
     // system.stateVersion is mandatory for any NixOS module — a
@@ -942,7 +942,7 @@ fn cryptsetup_pin_is_shared_by_builder_vm_and_runtime_overlay() {
 fn flake_lock_pins_microvm_input_by_hash() {
     // The flake.lock must exist and pin the microvm.nix input by
     // commit hash, not by tag or branch — that's the supply-chain
-    // gate from ADR-013 §"Threat model impact" / plan 60 §"Code
+    // gate from ADR-005 §"Threat model impact" / plan 60 §"Code
     // review gate." A PR that removes flake.lock or drops the
     // microvm pin breaks this assertion.
     let path = nix_dir().join("flake.lock");

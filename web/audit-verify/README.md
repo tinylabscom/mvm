@@ -20,7 +20,7 @@ needed to use or test the verifier — all of the logic lives in the
 If you ever do want the browser bundle, build it **inside the builder/dev
 VM** (`mvmctl dev`), never with a host toolchain — same invariant as
 every other build in this repo: builder tools never live on the host
-(ADR-013, ADR-014). The wasm32 target + `wasm-pack` belong in that guest,
+(ADR-005, ADR-014). The wasm32 target + `wasm-pack` belong in that guest,
 not on a contributor's machine. The output (`pkg/*.js` + `…_bg.wasm`) is
 what `index.html` imports; serve the directory statically and the page is
 fully offline after load — nothing you paste leaves the tab.

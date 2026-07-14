@@ -411,7 +411,7 @@ pub enum BuilderVmError {
     #[error(
         "libkrun-as-Linux-builder bootstrap is in flight; \
          the libkrun builder path does not use host Nix; \
-         see ADR-013 §\"Linux builder via libkrun (no Lima)\" \
+         see ADR-005 §\"Linux builder via libkrun (no Lima)\" \
          for the design and Sprint 50 for the schedule. \
          Rebuild or restart the project builder VM before retrying."
     )]
