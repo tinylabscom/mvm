@@ -28,7 +28,7 @@ All notable changes to mvm are documented in this file.
   checkpoint/fork` is temporarily unsupported on macOS pending HVF save/restore
   (Plan 226 WS-E); the macOS-26 dev VM temporarily falls back to libkrun.
 
-### ADR-082
+### ADR-004
 - Rust-native egress gateway replaces the vendored Go gateway (Proposed)
 
 ### Added
@@ -174,7 +174,7 @@ All notable changes to mvm are documented in this file.
 - **dev**: Add `dev up --json` lifecycle envelope (plan 189 WS-3)
 - **pool**: Vz saved-standby warm pool — up claims a prebooted standby
 - **pool**: Vz warm pool self-replenishes via a detached re-warm
-- **net**: MVM_NETWORKING=native gateway flag (ADR-082 Phase 1)
+- **net**: MVM_NETWORKING=native gateway flag (ADR-004 Phase 1)
 - **sdk**: Generate host↔guest protocol type stubs from protocol-v0.json (plan 124 D1.2a)
 - **backend**: WorkloadBackend type-bar — core security features non-skippable (Plan 197 Phase 1)
 - **guest**: Machine-readable host↔guest RPC request→response contract (plan 124 D1.2 step 2a)
@@ -864,7 +864,7 @@ All notable changes to mvm are documented in this file.
 - **secrets**: E2e substitution over real AF_VSOCK loopback (plan 129)
 - **plan-152**: WS-B Swift↔Rust supervisor parity gate (P1: boot)
 - **storage**: S3 MountProvider coverage without S3 (plan 123 B4)
-- **network**: Add rvproxy↔gvproxy gateway parity gate (ADR-082 / Plan 193 WS-1.5)
+- **network**: Add rvproxy↔gvproxy gateway parity gate (ADR-004 / Plan 193 WS-1.5)
 - **core**: Migrate mvm-core env tests onto TestEnv + close out Plan 182
 - **hostd,build**: Migrate env tests onto TestEnv (Plan 185 tail)
 - **build**: Migrate libkrun_builder + builder_vm_runtime onto TestEnv (Plan 185)
