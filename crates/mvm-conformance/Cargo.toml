@@ -1,0 +1,23 @@
+[package]
+name = "mvm-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Dev-only cucumber-rs BDD conformance harness. Runs the Gherkin scenarios under features/suites/ against the real mvmctl binary (and, as later suites land, the mvm-client facade). Not a dependency of any shipped crate."
+
+[[bin]]
+name = "mvm-conformance"
+path = "src/main.rs"
+
+[dependencies]
+cucumber.workspace = true
+tokio.workspace = true
+# Cross-workspace `mvmctl` binary resolution — the same mechanism
+# crates/mvm-cli/tests/cli.rs already uses, so a scenario keeps working
+# through a crate rename as long as the produced binary is still named
+# `mvmctl`.
+assert_cmd.workspace = true
+
+[lints]
+workspace = true

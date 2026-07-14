@@ -90,6 +90,12 @@ members = [
     # which is excluded from this workspace to keep wasm-bindgen out of
     # the main build).
     "crates/mvm-verify",
+    # The dev-only cucumber-rs BDD conformance harness: runs the Gherkin
+    # scenarios under features/suites/ against the built mvmctl binary and
+    # (as later suites land) the mvm-client facade. Never a dependency of
+    # any shipped crate — it stands alone like xtask, so it sits outside
+    # the host/user product-surface feature aggregation.
+    "crates/mvm-conformance",
     "xtask",
 ]
 # cargo-fuzz crates have to be excluded from the main workspace because
@@ -384,6 +390,10 @@ mvm-backend = { path = "crates/mvm-backend", version = "0.18.0", default-feature
 # Dev dependencies
 assert_cmd = "2"
 predicates = "3"
+# The dev-only BDD conformance harness (crates/mvm-conformance). Default
+# features bring the step-attribute macros only — no JSON/JUnit/tracing
+# output writers, which this harness doesn't use.
+cucumber = "0.23"
 
 # Root facade crate — re-exports all workspace libraries and provides the `mvmctl` binary
 [package]

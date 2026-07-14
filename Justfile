@@ -149,6 +149,14 @@ test-ci:
 test-cargo:
     cargo test --workspace
 
+# BDD conformance suite (cucumber-rs): builds mvmctl, then runs every
+# Gherkin scenario under features/suites/ against it. Scenarios tagged
+# `@wip` describe not-yet-implemented coverage and are filtered out by the
+# runner, so this stays green as later suites land their steps.
+bdd:
+    cargo build --bin mvmctl
+    cargo run -p mvm-conformance
+
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for
 # a targeted rebuild or CI.
@@ -186,8 +194,8 @@ lint: fmt-check clippy
 
 # ── CI Gate ──────────────────────────────────────────────────────────────
 
-# Full CI gate: lint + test + doctests (nextest skips doctests).
-ci: lint test test-doc
+# Full CI gate: lint + test + doctests (nextest skips doctests) + BDD.
+ci: lint test test-doc bdd
 
 # Alias for ci
 preflight: ci
