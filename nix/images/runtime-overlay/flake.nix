@@ -1,5 +1,5 @@
 {
-  description = "mvm runtime overlay disk — verity-sealed ext4 carrying the guest agent + seccomp shim + netinit + runner, mounted at /mvm/runtime in every microVM (ADR-051)";
+  description = "mvm runtime overlay disk — verity-sealed ext4 carrying the guest agent + seccomp shim + netinit + netd + runner, mounted at /mvm/runtime in every microVM (ADR-051)";
 
   # ── Why this flake exists ─────────────────────────────────────────
   #
@@ -7,9 +7,11 @@
   # boot — Nix-built rootfs and OCI-pulled rootfs alike. The
   # overlay carries the in-VM binaries mvm controls (the guest
   # agent, the per-service seccomp shim, the function-workload
-  # runner, and `mvm-guest-netinit` which installs
-  # kernel blackhole routes for `MANDATORY_DENY_RANGES` so OCI-
-  # imported workloads get Layer 1 network defense too) plus a
+  # runner, `mvm-guest-netinit` which installs kernel blackhole
+  # routes for `MANDATORY_DENY_RANGES` so OCI-imported workloads
+  # get Layer 1 network defense too, and `mvm-guest-netd` — the
+  # in-guest tunnel packet pump the OCI RuntimeLean egress path
+  # drives) plus a
   # placeholder for the per-language SDK runtime libraries the
   # vsock substitution depends on (the libraries
   # themselves land later; this flake reserves the
@@ -309,7 +311,7 @@
             # Staging tree — the eventual filesystem root inside the
             # overlay ext4. The kernel mounts this at /mvm/runtime
             # inside the guest, so the *FS root* contains
-            # /agent, /seccomp-apply, /netinit, /runner,
+            # /agent, /seccomp-apply, /netinit, /netd, /runner,
             # /egress-client, /addon-dns, /exit-report, /sdk-py/,
             # /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"

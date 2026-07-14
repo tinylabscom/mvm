@@ -3087,5 +3087,12 @@ short  bar.ext4
         assert!(artifact.sidecar.is_file());
         assert_eq!(artifact.version, "1.2.3");
         assert_eq!(artifact.roothash.len(), 64);
+
+        // The staged overlay carries every required guest path, netd included —
+        // OCI RuntimeLean runs resolve the tunnel packet pump at /mvm/runtime/netd.
+        validate_overlay_payload(&artifact.overlay_ext4)
+            .expect("direct overlay carries all required guest paths");
+        let fs = ext4_view::Ext4::load_from_path(&artifact.overlay_ext4).unwrap();
+        assert!(fs.exists("/netd").unwrap(), "overlay must stage /netd");
     }
 }

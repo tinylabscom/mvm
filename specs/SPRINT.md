@@ -86,6 +86,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `cargo check --workspace`, focused reversible-replacement tests,
       `cargo test --workspace --no-fail-fast`, and `cargo clippy --workspace
       --all-targets -- -D warnings`.
+- [x] 2026-07-13 OCI workload-kernel UX follow-up: a cold source checkout no
+      longer auto-builds the workload kernel as a hidden side effect of
+      `machine run --image ...` before the guest starts. The OCI launch path
+      now warns and fails fast with an explicit create hint instead, naming
+      both `mvmctl kernel build --which workload` and `just kernel-workload`.
+      The same slice also exposes the existing kernel builder at the top level
+      as `mvmctl kernel build`, which matches the help text and the runtime
+      error hints. Validation in the worktree: focused `mvm-cli` parser/message
+      tests, `cargo check -p mvm-cli -p mvm-build --all-targets`, and
+      `cargo clippy -p mvm-cli -p mvm-build --all-targets -- -D warnings`.
 - [x] 2026-07-11 Plan 237 Phase 0 validation follow-up: fresh worktree
       validation is green for the required target musl `mvm-oci-init`
       zigbuild, full `mvm-guest` test suite, and focused `mvm-cli`

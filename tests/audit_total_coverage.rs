@@ -425,6 +425,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     // Build / artifact / registry. Plan 178 (D1) — image/compile/validate/
     // kernel grouped under `build <sub>`.
     ("build", AuditPosture::DelegatesToSub(BUILD_SUB)),
+    ("kernel", AuditPosture::DelegatesToSub(KERNEL_SUB)),
     ("manifest", AuditPosture::DelegatesToSub(MANIFEST_SUB)),
     ("storage", AuditPosture::DelegatesToSub(STORAGE_SUB)),
     ("persistent-builder", AuditPosture::InteractiveOrControl),

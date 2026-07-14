@@ -4,7 +4,7 @@
 //! VM is stopped (non-fatal if it isn't running), then rebooted on the new
 //! kernel. With `--flake` the source is rebuilt and the spec recreated; without
 //! it the stored spec is rebooted as-is on the (optionally pinned) kernel,
-//! preserving its volumes/config. Use after `mvmctl build kernel build --which
+//! preserving its volumes/config. Use after `mvmctl kernel build --which
 //! workload` lands a patched kernel in the cache.
 
 use anyhow::Result;

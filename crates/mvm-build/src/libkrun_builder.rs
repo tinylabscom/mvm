@@ -968,7 +968,7 @@ impl LibkrunBuilderVm {
         let exit_code =
             match spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose) {
                 Ok(code) => code,
-                Err(BuilderVmError::NixBuildFailed(_))
+                Err(BuilderVmError::GuestHalted { .. })
                     if stage0_guest_halt_completed_successfully(&console_log, artifact_out) =>
                 {
                     0
@@ -1160,20 +1160,35 @@ impl LibkrunBuilderVm {
         } else {
             None
         };
-        let exit_code =
-            spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose)?;
-        if exit_code != 0 {
-            if let Some(rx) = guest_agent_rx {
-                tracing::info!(
-                    summary = %describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT),
-                    "builder guest-agent socket observation"
-                );
+        let wait_result =
+            spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose);
+        // A clean exit and the poweroff-fallback halt both fall through to the
+        // authoritative on-disk job result read below; only a non-zero
+        // supervisor exit or a VMM-level failure short-circuits. The
+        // fall-through path drains the observation threads alongside its own
+        // result cross-validation, so only the short-circuit arms drain here.
+        match post_wait_action(wait_result) {
+            PostWaitAction::FinalizeFromDisk { halted } => {
+                if halted {
+                    tracing::debug!(
+                        "builder guest halted at job end; deferring to the on-disk job result"
+                    );
+                }
             }
-            log_vsock_response_outcome(vsock_rx, None);
-            if let Some(endpoint) = &egress_endpoint {
-                endpoint.reap();
+            PostWaitAction::FailSupervisorExit(code) => {
+                drain_builder_observations(guest_agent_rx, vsock_rx);
+                if let Some(endpoint) = &egress_endpoint {
+                    endpoint.reap();
+                }
+                return Err(supervisor_exit_error(code, &vm_state_dir));
             }
-            return Err(supervisor_exit_error(exit_code, &vm_state_dir));
+            PostWaitAction::Propagate(error) => {
+                drain_builder_observations(guest_agent_rx, vsock_rx);
+                if let Some(endpoint) = &egress_endpoint {
+                    endpoint.reap();
+                }
+                return Err(error);
+            }
         }
 
         extract_builder_transport_output(&output_disk, &job.artifact_out, &job_dir)?;
@@ -1661,34 +1676,38 @@ impl BuilderVm for LibkrunBuilderVm {
         // cmd.sh redirects to the host-readable `<job_dir>/nix-stderr.log`.
         let _job_log =
             crate::builder_vm_runtime::JobLogStreamer::start(job_dir.join("nix-stderr.log"));
-        let exit_code =
-            spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose)?;
-        if exit_code != 0 {
-            if let Some(rx) = guest_agent_rx {
-                tracing::info!(
-                    summary = %describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT),
-                    "builder guest-agent socket observation"
-                );
+        let wait_result =
+            spawn_supervisor_and_wait(&supervisor_path, &cfg, &vm_state_dir, self.verbose);
+        // The observation threads must be drained on every exit path (each
+        // consumes its receiver). The per-variant finalize below is the
+        // authoritative success/failure gate, so a clean exit and the
+        // poweroff-fallback halt both fall through to it; only a non-zero
+        // supervisor exit or a VMM-level failure short-circuits. `None` to the
+        // drain skips file/vsock cross-validation (not wired per-variant here).
+        match post_wait_action(wait_result) {
+            PostWaitAction::FinalizeFromDisk { halted } => {
+                if halted {
+                    tracing::debug!(
+                        "builder guest halted at job end; deferring to the on-disk build result"
+                    );
+                }
+                drain_builder_observations(guest_agent_rx, vsock_rx);
             }
-            log_vsock_response_outcome(vsock_rx, None);
-            if let Some(endpoint) = &egress_endpoint {
-                endpoint.reap();
+            PostWaitAction::FailSupervisorExit(code) => {
+                drain_builder_observations(guest_agent_rx, vsock_rx);
+                if let Some(endpoint) = &egress_endpoint {
+                    endpoint.reap();
+                }
+                return Err(supervisor_exit_error(code, &vm_state_dir));
             }
-            return Err(supervisor_exit_error(exit_code, &vm_state_dir));
+            PostWaitAction::Propagate(error) => {
+                drain_builder_observations(guest_agent_rx, vsock_rx);
+                if let Some(endpoint) = &egress_endpoint {
+                    endpoint.reap();
+                }
+                return Err(error);
+            }
         }
-        // The flake / install finalize paths don't return a
-        // structured exit_code from the file before they branch on
-        // variant-specific shapes (Flake reads `/job/result`,
-        // Install reads `/out/result.json`). We log without the file
-        // cross-validation here; per-variant cross-validation is not
-        // wired at this site.
-        if let Some(rx) = guest_agent_rx {
-            tracing::info!(
-                summary = %describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT),
-                "builder guest-agent socket observation"
-            );
-        }
-        log_vsock_response_outcome(vsock_rx, None);
         extract_builder_transport_output(&output_disk, &mounts.artifact_out, &job_dir)?;
 
         // 9. Per-variant result parsing + artifact validation.
@@ -3494,10 +3513,10 @@ fn spawn_supervisor_and_wait(
         Ok(WaitOutcome::GuestHalted {
             halt_line,
             console_log_path,
-        }) => Err(BuilderVmError::NixBuildFailed(format!(
-            "builder VM build failed — the guest halted ({halt_line}). Console tail:\n{}\nFull log: {console_log_path}",
-            read_console_tail(&console_log_path, 15),
-        ))),
+        }) => Err(BuilderVmError::GuestHalted {
+            halt_line,
+            console_log_path,
+        }),
         Ok(WaitOutcome::Timeout) => Err(BuilderVmError::NixBuildFailed(format!(
             "builder VM exceeded {} seconds wall-clock; killed. Console log at {}/console.log.",
             timeout.as_secs(),
@@ -3507,6 +3526,60 @@ fn spawn_supervisor_and_wait(
             "wait on supervisor child: {e}"
         ))),
     }
+}
+
+/// The follow-up a single-shot build path takes once
+/// [`spawn_supervisor_and_wait`] returns. The authoritative build result is
+/// written to the output disk, so both a clean power-off and the
+/// poweroff-fallback halt defer to the caller's fail-closed finalize; only a
+/// non-zero supervisor exit or a VMM-level failure short-circuits.
+#[derive(Debug)]
+enum PostWaitAction {
+    /// Read the output disk and let the caller's fail-closed finalize decide
+    /// success or failure. `halted` records whether the guest reached this via
+    /// the poweroff-fallback halt (worth a diagnostic log) rather than a clean
+    /// power-off.
+    FinalizeFromDisk { halted: bool },
+    /// The supervisor process itself exited non-zero — surface its exit code.
+    FailSupervisorExit(i32),
+    /// A VMM-level failure (kernel panic, timeout, spawn/wait error). There is
+    /// no build result to read, so propagate it unchanged.
+    Propagate(BuilderVmError),
+}
+
+/// Decide what a single-shot build path does with a `spawn_supervisor_and_wait`
+/// outcome. Pure so the branch decision is unit-testable without spawning a VM.
+/// A guest halt is deferred to the on-disk result exactly like a clean exit:
+/// the rootfs-backed builder kernel has no power-off method, so the guest's
+/// end-of-job power-off falls back to a halt that is not itself a build failure.
+fn post_wait_action(outcome: Result<i32, BuilderVmError>) -> PostWaitAction {
+    match outcome {
+        Ok(0) => PostWaitAction::FinalizeFromDisk { halted: false },
+        Ok(code) => PostWaitAction::FailSupervisorExit(code),
+        Err(BuilderVmError::GuestHalted { .. }) => {
+            PostWaitAction::FinalizeFromDisk { halted: true }
+        }
+        Err(other) => PostWaitAction::Propagate(other),
+    }
+}
+
+/// Drain the two background observation threads started before the supervisor
+/// (the guest-agent socket observer and the vsock response listener). Each
+/// consumes its receiver, so this runs once per build on whichever exit path
+/// the supervisor took. Passing `None` for the file exit code skips the
+/// file/vsock cross-validation — callers holding an authoritative exit code
+/// cross-validate at their own call site instead.
+fn drain_builder_observations(
+    guest_agent_rx: Option<std::sync::mpsc::Receiver<VsockSocketObservation>>,
+    vsock_rx: std::sync::mpsc::Receiver<crate::builder_protocol::HostVmResponseRead>,
+) {
+    if let Some(rx) = guest_agent_rx {
+        tracing::info!(
+            summary = %describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT),
+            "builder guest-agent socket observation"
+        );
+    }
+    log_vsock_response_outcome(vsock_rx, None);
 }
 
 /// Spawn a background thread that reads the
@@ -6194,6 +6267,67 @@ mod tests {
             !stage0_guest_halt_completed_successfully(&console, &out),
             "artifact leftovers must not mask a real build failure"
         );
+    }
+
+    #[test]
+    fn guest_halted_display_names_halt_line_and_console_path() {
+        let err = BuilderVmError::GuestHalted {
+            halt_line: "reboot: Power off not available: System halted instead".to_string(),
+            console_log_path: "/tmp/mvm-builder/console.log".to_string(),
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("reboot: Power off not available: System halted instead"),
+            "display should surface the halt line: {rendered}"
+        );
+        assert!(
+            rendered.contains("/tmp/mvm-builder/console.log"),
+            "display should name the console log path: {rendered}"
+        );
+    }
+
+    #[test]
+    fn post_wait_action_defers_clean_exit_to_the_on_disk_result() {
+        assert!(matches!(
+            post_wait_action(Ok(0)),
+            PostWaitAction::FinalizeFromDisk { halted: false }
+        ));
+    }
+
+    #[test]
+    fn post_wait_action_defers_guest_halt_to_the_on_disk_result() {
+        // The rootfs-backed builder kernel halts instead of powering off at job
+        // end; that halt is the normal shutdown, so the on-disk result decides.
+        let outcome = Err(BuilderVmError::GuestHalted {
+            halt_line: "System halted instead".to_string(),
+            console_log_path: "/tmp/console.log".to_string(),
+        });
+        assert!(matches!(
+            post_wait_action(outcome),
+            PostWaitAction::FinalizeFromDisk { halted: true }
+        ));
+    }
+
+    #[test]
+    fn post_wait_action_fails_on_nonzero_supervisor_exit() {
+        assert!(matches!(
+            post_wait_action(Ok(7)),
+            PostWaitAction::FailSupervisorExit(7)
+        ));
+    }
+
+    #[test]
+    fn post_wait_action_propagates_vmm_level_errors() {
+        // A kernel panic (or timeout) is not a clean shutdown — there is no
+        // build result on disk, so it must propagate rather than defer.
+        let outcome = Err(BuilderVmError::SeedKernelPanic {
+            panic_line: "Kernel panic - not syncing: attempted to kill init".to_string(),
+            console_log_path: "/tmp/console.log".to_string(),
+        });
+        assert!(matches!(
+            post_wait_action(outcome),
+            PostWaitAction::Propagate(BuilderVmError::SeedKernelPanic { .. })
+        ));
     }
 
     #[cfg(unix)]

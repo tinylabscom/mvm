@@ -1074,6 +1074,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
         "session",
         args.cpus,
         args.memory_mib,
+        &mvm_core::network_policy::NetworkPolicy::deny_all(),
         Some(&admit),
     ) {
         Ok(vm) => {

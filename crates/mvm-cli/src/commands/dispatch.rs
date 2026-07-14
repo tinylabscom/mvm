@@ -23,6 +23,7 @@ impl TopLevelCommand for Commands {
             Commands::Doctor(a) => env::doctor::run(cli, a, cfg),
             Commands::Prepare(a) => vm::prepare::run(a),
             Commands::Build(a) => build::group::run(cli, a, cfg),
+            Commands::Kernel(a) => build::kernel::run(cli, a, cfg),
             Commands::Manifest(a) => manifest::run(cli, a, cfg),
             Commands::Image(a) => image::run(cli, a, cfg),
             Commands::Pack(a) => pack::run(cli, a, cfg),

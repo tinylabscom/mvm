@@ -66,7 +66,7 @@ mod builder_backend_attempt_order_tests {
 mod default_microvm_tests {
     use super::{
         WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
-        resolve_workload_kernel_bootstrap,
+        missing_workload_kernel_message, resolve_workload_kernel_bootstrap,
     };
 
     #[test]
@@ -158,6 +158,15 @@ mod default_microvm_tests {
                 "x86_64"
             ))
         );
+    }
+
+    #[test]
+    fn missing_workload_kernel_message_points_to_explicit_create_commands() {
+        let msg =
+            missing_workload_kernel_message("/cache/builder-vm/aarch64/kernels/workload/vmlinux");
+        assert!(msg.contains("mvmctl kernel build --which workload"));
+        assert!(msg.contains("just kernel-workload"));
+        assert!(msg.contains("dm-verity-capable workload kernel"));
     }
 }
 

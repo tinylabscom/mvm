@@ -481,6 +481,28 @@ fn build_runtime_overlay_subcommand_parses() {
 }
 
 #[test]
+fn top_level_kernel_build_subcommand_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "kernel", "build", "--which", "workload"])
+        .expect("kernel build must parse");
+    let Commands::Kernel(_) = cli.command else {
+        panic!("expected top-level kernel command");
+    };
+}
+
+#[test]
+fn nested_kernel_build_subcommand_still_parses() {
+    let cli = Cli::try_parse_from(["mvmctl", "build", "kernel", "build", "--which", "workload"])
+        .expect("nested kernel build must keep parsing");
+    let Commands::Build(bg) = cli.command else {
+        panic!("expected build group");
+    };
+    assert!(
+        matches!(bg.action, build_group::BuildCmd::Kernel(_)),
+        "expected nested kernel build command"
+    );
+}
+
+#[test]
 fn test_resolve_flake_ref_remote_passthrough() {
     let resolved = resolve_flake_ref("github:user/repo").unwrap();
     assert_eq!(resolved, "github:user/repo");
