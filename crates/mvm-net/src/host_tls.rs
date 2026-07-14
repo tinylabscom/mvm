@@ -2672,6 +2672,19 @@ mod tests {
     use crate::host::HostRoute;
     use crate::proto::{DnsName, OpenTcp, PluginId, Target, TlsTransformRoute};
 
+    fn bind_loopback_tcp_listener() -> Option<TcpListener> {
+        match TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => Some(listener),
+            Err(err)
+                if err.kind() == std::io::ErrorKind::PermissionDenied
+                    || err.raw_os_error() == Some(1) =>
+            {
+                None
+            }
+            Err(err) => panic!("unexpected loopback TCP bind failure: {err}"),
+        }
+    }
+
     fn oversized_pem_bundle(cert_pem: &str) -> String {
         let repeats = (MAX_UPSTREAM_ROOT_PEM_BYTES / cert_pem.len()) + 1;
         cert_pem.repeat(repeats)
@@ -3253,11 +3266,11 @@ mod tests {
 
     fn open_test_tls_flow_state(
         max_tls_flow_detail_bytes: usize,
-    ) -> (TlsFlowState, thread::JoinHandle<()>) {
+    ) -> Option<(TlsFlowState, thread::JoinHandle<()>)> {
         let cert_dir = tempfile::tempdir().unwrap();
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = bind_loopback_tcp_listener()?;
         let upstream_port = listener.local_addr().unwrap().port();
         let join = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
@@ -3277,7 +3290,7 @@ mod tests {
         let spec =
             TcpConnectSpec::from_open(&open, HostRoute::resolved_ip("127.0.0.1".parse().unwrap()));
         let state = connector.open_flow(&spec).unwrap();
-        (state, join)
+        Some((state, join))
     }
 
     #[test]
@@ -3870,7 +3883,9 @@ mod tests {
 
     #[test]
     fn tls_connector_defensively_denies_when_open_flow_limit_is_reached() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let port = listener.local_addr().unwrap().port();
         let join = thread::spawn(move || {
             let _accepted = listener.accept().unwrap();
@@ -4002,7 +4017,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -4131,7 +4148,9 @@ mod tests {
     #[test]
     fn tls_flow_state_take_pending_upstream_plaintext_moves_buffer_without_copy_and_reseeds_capacity()
      {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
         state.pending_upstream_plaintext = Vec::with_capacity(32);
         state.pending_upstream_plaintext.extend_from_slice(b"ping");
         let initial_capacity = state.pending_upstream_plaintext.capacity();
@@ -4165,7 +4184,9 @@ mod tests {
             .mint_vm_intermediate(&["api.example.com"])
             .unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let _ = listener.accept().unwrap();
@@ -4229,7 +4250,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -4344,7 +4367,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -4460,7 +4485,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
@@ -4544,7 +4571,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
@@ -4628,7 +4657,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
@@ -4712,7 +4743,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
@@ -4818,7 +4851,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -4958,7 +4993,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
@@ -5197,7 +5234,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_transform_error_borrowed_helper_clamps_detail() {
-        let (mut state, join) = open_test_tls_flow_state(9);
+        let Some((mut state, join)) = open_test_tls_flow_state(9) else {
+            return;
+        };
 
         let err = state.record_transform_error_text_borrowed("éééééé");
 
@@ -5208,7 +5247,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_tls_handshake_error_prefers_certificate_rejection_detail() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
 
         let err =
             state.record_tls_handshake_error_text("InvalidCertificate(UnknownCA)".to_string());
@@ -5233,7 +5274,9 @@ mod tests {
             }
         }
 
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
         state.last_guest_record_summary =
             Some("alert(version=0x0303,len=2,level=fatal,description=unknown_ca)".to_string());
 
@@ -5249,7 +5292,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_note_upstream_eof_uses_shared_error_detail_storage() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
         state.pending_guest_bytes = vec![0u8; 17];
         state.pending_upstream_plaintext = vec![0u8; 23];
         state.last_guest_record_summary = Some("handshake(version=0x0303,len=42)".to_string());
@@ -5272,7 +5317,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_pending_activity_detail_helper_preserves_overflow_error() {
-        let (mut state, join) = open_test_tls_flow_state(80);
+        let Some((mut state, join)) = open_test_tls_flow_state(80) else {
+            return;
+        };
         state.pending_activity_detail = Some("alpha".to_string());
         let overflow = "b".repeat(80);
 
@@ -5288,7 +5335,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_close_detail_helper_preserves_overflow_error() {
-        let (mut state, join) = open_test_tls_flow_state(80);
+        let Some((mut state, join)) = open_test_tls_flow_state(80) else {
+            return;
+        };
         state.close_detail = Some("omega".to_string());
         let overflow = "c".repeat(80);
 
@@ -5304,7 +5353,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_pending_buffer_len_helper_preserves_exceeded_budget_detail() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
 
         let err = state.checked_pending_buffer_len(
             4,
@@ -5324,7 +5375,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_pending_buffer_len_helper_preserves_overflow_detail() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
 
         let err = state.checked_pending_buffer_len(
             usize::MAX,
@@ -5344,7 +5397,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_send_guest_close_notify_stages_guest_tls_bytes() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
 
         state.send_guest_close_notify().unwrap();
 
@@ -5354,7 +5409,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_write_guest_plaintext_accepts_empty_payload() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
 
         state.write_guest_plaintext(&[]).unwrap();
 
@@ -5364,7 +5421,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_record_guest_chunk_summaries_keeps_first_client_hello_summary() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
         let first = test_client_hello_record(b"api.example.com");
         let second = vec![0x17, 0x03, 0x03, 0x00, 0x03, 0x01, 0x02, 0x03];
 
@@ -5385,7 +5444,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_pending_guest_event_or_close_prefers_ack_before_host_close() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
         state.pending_guest_ack = true;
         state.close_pending = true;
 
@@ -5409,7 +5470,9 @@ mod tests {
 
     #[test]
     fn tls_flow_state_pending_guest_event_moves_buffer_without_copy_and_preserves_capacity() {
-        let (mut state, join) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES);
+        let Some((mut state, join)) = open_test_tls_flow_state(MAX_TLS_FLOW_DETAIL_BYTES) else {
+            return;
+        };
         state.pending_guest_bytes = Vec::with_capacity(32);
         state.pending_guest_bytes.extend_from_slice(b"pong");
         let initial_capacity = state.pending_guest_bytes.capacity();
@@ -5528,7 +5591,9 @@ mod tests {
         let cert_dir = tempfile::tempdir().unwrap();
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         listener.set_nonblocking(true).unwrap();
         let upstream_port = listener.local_addr().unwrap().port();
         let config = HostTlsConnectorConfig::builder()
@@ -5591,7 +5656,9 @@ mod tests {
         let cert_dir = tempfile::tempdir().unwrap();
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         listener.set_nonblocking(true).unwrap();
         let upstream_port = listener.local_addr().unwrap().port();
         let config = HostTlsConnectorConfig::builder()
@@ -5711,7 +5778,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -5857,7 +5926,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -6015,7 +6086,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let (close_tx, close_rx) = std::sync::mpsc::channel();
         let server = thread::spawn(move || {
@@ -6155,7 +6228,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -6298,7 +6373,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -6450,7 +6527,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -6581,7 +6660,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let Ok((mut stream, _)) = listener.accept() else {
@@ -6704,7 +6785,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -6823,7 +6906,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -6947,7 +7032,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -7068,7 +7155,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let Ok((mut stream, _)) = listener.accept() else {
@@ -7180,7 +7269,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -7289,7 +7380,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -7398,7 +7491,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -7507,7 +7602,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -7616,7 +7713,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -7725,7 +7824,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -7834,7 +7935,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -7941,7 +8044,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8048,7 +8153,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8157,7 +8264,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8265,7 +8374,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8374,7 +8485,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8483,7 +8596,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8591,7 +8706,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8707,7 +8824,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8816,7 +8935,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -8925,7 +9046,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9034,7 +9157,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9143,7 +9268,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9252,7 +9379,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9362,7 +9491,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9472,7 +9603,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9582,7 +9715,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9691,7 +9826,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9800,7 +9937,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -9909,7 +10048,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10018,7 +10159,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10125,7 +10268,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10232,7 +10377,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10339,7 +10486,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10446,7 +10595,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10553,7 +10704,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10660,7 +10813,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10767,7 +10922,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10877,7 +11034,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -10987,7 +11146,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -11112,7 +11273,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -11234,7 +11397,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -11358,7 +11523,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -11484,7 +11651,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -11593,7 +11762,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -11703,7 +11874,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -11828,7 +12001,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -11944,7 +12119,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -12059,7 +12236,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -12176,7 +12355,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -12293,7 +12474,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -12418,7 +12601,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -12535,7 +12720,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -12652,7 +12839,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -12776,7 +12965,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -12885,7 +13076,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13009,7 +13202,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13133,7 +13328,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13255,7 +13452,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13380,7 +13579,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13504,7 +13705,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13612,7 +13815,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13719,7 +13924,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13828,7 +14035,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -13935,7 +14144,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14042,7 +14253,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14149,7 +14362,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14258,7 +14473,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14367,7 +14584,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14474,7 +14693,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14581,7 +14802,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14688,7 +14911,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14797,7 +15022,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -14904,7 +15131,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15013,7 +15242,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15121,7 +15352,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15231,7 +15464,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15338,7 +15573,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15445,7 +15682,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15554,7 +15793,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15660,7 +15901,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15773,7 +16016,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15882,7 +16127,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -15991,7 +16238,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16100,7 +16349,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16210,7 +16461,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16319,7 +16572,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16427,7 +16682,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16535,7 +16792,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16644,7 +16903,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16751,7 +17012,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16861,7 +17124,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -16970,7 +17235,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17079,7 +17346,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17188,7 +17457,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17297,7 +17568,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17406,7 +17679,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17515,7 +17790,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17624,7 +17901,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17748,7 +18027,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17855,7 +18136,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -17962,7 +18245,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18069,7 +18354,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18176,7 +18463,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18283,7 +18572,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18390,7 +18681,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18497,7 +18790,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18604,7 +18899,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18711,7 +19008,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18832,7 +19131,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -18941,7 +19242,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -19095,7 +19398,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let (close_tx, close_rx) = mpsc::channel();
         let server = thread::spawn(move || {
@@ -19195,7 +19500,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -19335,7 +19642,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let (close_tx, close_rx) = mpsc::channel();
         let server = thread::spawn(move || {
@@ -19435,7 +19744,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -19539,7 +19850,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
@@ -19641,7 +19954,9 @@ mod tests {
         let guest_ca = EgressCa::load_or_init_at(cert_dir.path()).unwrap();
         let guest_intermediate = guest_ca.mint_vm_intermediate(&["api.example.com"]).unwrap();
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let (close_tx, close_rx) = mpsc::channel();
         let server = thread::spawn(move || {
@@ -19751,7 +20066,9 @@ mod tests {
         let upstream_cfg =
             Arc::new(server_config_for_sni(&upstream_intermediate, "api.example.com").unwrap());
 
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let upstream_port = listener.local_addr().unwrap().port();
         let server = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();

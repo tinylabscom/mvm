@@ -3178,6 +3178,8 @@ impl HostNetworkPolicy for MvmCoreNetworkPolicy {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::net::{Ipv4Addr, TcpListener, UdpSocket};
+    use std::path::Path;
 
     use super::*;
     use crate::proto::{
@@ -3204,6 +3206,65 @@ mod tests {
     fn open_tcp(host: &str, port: u16) -> OpenTcp {
         OpenTcp::new(flow_id(11), Target::new(host, port).unwrap())
             .with_tls_policy(TlsPolicy::HostDecision)
+    }
+
+    fn loopback_bind_supported<F, T>(bind: F, target: &str) -> Option<T>
+    where
+        F: FnOnce() -> std::io::Result<T>,
+    {
+        match bind() {
+            Ok(value) => Some(value),
+            Err(err)
+                if err.kind() == std::io::ErrorKind::PermissionDenied
+                    || err.raw_os_error() == Some(1) =>
+            {
+                None
+            }
+            Err(err) => panic!("unexpected loopback bind failure for {target}: {err}"),
+        }
+    }
+
+    fn bind_loopback_udp_socket() -> Option<UdpSocket> {
+        loopback_bind_supported(
+            || UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)),
+            "127.0.0.1:0/udp",
+        )
+    }
+
+    fn bind_loopback_tcp_listener() -> Option<TcpListener> {
+        loopback_bind_supported(|| TcpListener::bind(("127.0.0.1", 0)), "127.0.0.1:0/tcp")
+    }
+
+    fn icmp_echo_supported() -> bool {
+        let ping_path = ["/sbin/ping", "/bin/ping"]
+            .into_iter()
+            .find(|candidate| Path::new(candidate).is_file())
+            .unwrap_or("ping");
+        match Command::new(ping_path)
+            .arg("-c")
+            .arg("1")
+            .arg("-s")
+            .arg("0")
+            .arg("127.0.0.1")
+            .stdin(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) => {
+                if output.status.success() {
+                    return true;
+                }
+                let detail = ping_output_detail(&output);
+                !(detail.contains("Operation not permitted")
+                    || detail.contains("operation not permitted"))
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::PermissionDenied
+                    || err.raw_os_error() == Some(1) =>
+            {
+                false
+            }
+            Err(err) => panic!("unexpected ping probe failure: {err}"),
+        }
     }
 
     #[derive(Debug, Clone)]
@@ -5583,7 +5644,9 @@ mod tests {
     #[cfg(feature = "host-std")]
     #[test]
     fn expired_udp_flow_is_pruned_before_new_udp_flow_limit_check() {
-        let listener = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let Some(listener) = bind_loopback_udp_socket() else {
+            return;
+        };
         listener
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -5653,7 +5716,9 @@ mod tests {
     #[cfg(feature = "host-std")]
     #[test]
     fn expired_udp_flow_is_pruned_before_tcp_open_limit_check() {
-        let listener = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let Some(listener) = bind_loopback_udp_socket() else {
+            return;
+        };
         listener
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -5707,7 +5772,9 @@ mod tests {
     #[cfg(feature = "host-std")]
     #[test]
     fn drain_messages_prunes_idle_udp_flows() {
-        let listener = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let Some(listener) = bind_loopback_udp_socket() else {
+            return;
+        };
         listener
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -5989,11 +6056,12 @@ mod tests {
     #[cfg(feature = "host-std")]
     #[test]
     fn allowed_udp_datagram_roundtrip_returns_host_response_bytes() {
-        use std::net::UdpSocket;
         use std::thread;
         use std::time::Duration;
 
-        let listener = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let Some(listener) = bind_loopback_udp_socket() else {
+            return;
+        };
         listener
             .set_read_timeout(Some(Duration::from_secs(1)))
             .unwrap();
@@ -6065,11 +6133,12 @@ mod tests {
     #[cfg(feature = "host-std")]
     #[test]
     fn udp_drain_failure_emits_failed_delivery_audit_and_reclaims_flow() {
-        use std::net::UdpSocket;
         use std::thread;
         use std::time::Duration;
 
-        let unused = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let Some(unused) = bind_loopback_udp_socket() else {
+            return;
+        };
         let port = unused.local_addr().unwrap().port();
         drop(unused);
 
@@ -6174,6 +6243,9 @@ mod tests {
     #[cfg(feature = "host-std")]
     #[test]
     fn allowed_icmp_loopback_replies() {
+        if !icmp_echo_supported() {
+            return;
+        }
         let mut authority = authority(StaticPolicy::allow_all());
         let icmp = IcmpEchoRequest {
             query_id: query_id(22),
@@ -6312,10 +6384,11 @@ mod tests {
     #[test]
     fn std_tcp_connector_uses_resolved_route_and_forwards_bytes() {
         use std::io::Read;
-        use std::net::TcpListener;
         use std::thread;
 
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let port = listener.local_addr().unwrap().port();
         let join = thread::spawn(move || {
             let (mut stream, peer) = listener.accept().unwrap();
@@ -6361,11 +6434,12 @@ mod tests {
     #[test]
     fn std_tcp_connector_emits_ack_event_after_guest_data() {
         use std::io::Read;
-        use std::net::TcpListener;
         use std::thread;
         use std::time::Duration;
 
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let port = listener.local_addr().unwrap().port();
         let join = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -6418,11 +6492,12 @@ mod tests {
     #[test]
     fn std_tcp_connector_reuses_read_buffer_after_host_response() {
         use std::io::{Read, Write};
-        use std::net::TcpListener;
         use std::thread;
         use std::time::Duration;
 
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let port = listener.local_addr().unwrap().port();
         let join = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
@@ -6501,10 +6576,11 @@ mod tests {
     #[cfg(feature = "host-std")]
     #[test]
     fn std_tcp_connector_close_removes_flow_order_refs_for_closed_flow() {
-        use std::net::TcpListener;
         use std::thread;
 
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let port = listener.local_addr().unwrap().port();
         let join = thread::spawn(move || {
             let (_stream, _) = listener.accept().unwrap();
@@ -6545,11 +6621,12 @@ mod tests {
     #[cfg(feature = "host-std")]
     #[test]
     fn std_tcp_connector_defensively_denies_when_open_flow_limit_is_reached() {
-        use std::net::TcpListener;
         use std::thread;
         use std::time::Duration;
 
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let Some(listener) = bind_loopback_tcp_listener() else {
+            return;
+        };
         let port = listener.local_addr().unwrap().port();
         let join = thread::spawn(move || {
             let _accepted = listener.accept().unwrap();

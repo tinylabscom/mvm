@@ -1863,6 +1863,39 @@ mod tests {
 
     const NOW: &str = "2030-01-01T00:00:00Z";
 
+    fn uds_tempdir() -> tempfile::TempDir {
+        let base = if cfg!(target_os = "macos") {
+            Path::new("/private/tmp")
+        } else {
+            Path::new("/tmp")
+        };
+        tempfile::Builder::new()
+            .prefix("mvm-netd-uds-")
+            .tempdir_in(base)
+            .expect("create UDS tempdir")
+    }
+
+    fn uds_bind_supported(dir: &Path) -> bool {
+        let probe = dir.join("uds-bind-probe.sock");
+        match std::os::unix::net::UnixListener::bind(&probe) {
+            Ok(listener) => {
+                drop(listener);
+                let _ = std::fs::remove_file(&probe);
+                true
+            }
+            Err(err)
+                if err.kind() == std::io::ErrorKind::PermissionDenied
+                    || err.raw_os_error() == Some(1) =>
+            {
+                false
+            }
+            Err(err) => panic!(
+                "unexpected UDS bind probe failure at {}: {err}",
+                probe.display()
+            ),
+        }
+    }
+
     fn deny_all_config() -> HostNetdConfig {
         HostNetdConfig::builder()
             .network_policy(mvm_core::policy::network_policy::NetworkPolicy::deny_all())
@@ -4038,13 +4071,11 @@ mod tests {
 
     #[test]
     fn host_netd_listen_uds_accepts_one_authority_stream() {
-        let dir = std::env::temp_dir().join(format!(
-            "mvm-netd-listen-{}-{}",
-            std::process::id(),
-            unique_test_suffix()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let socket = dir.join("netd.sock");
+        let dir = uds_tempdir();
+        if !uds_bind_supported(dir.path()) {
+            return;
+        }
+        let socket = dir.path().join("netd.sock");
         let config = deny_all_config();
         let server_socket = socket.clone();
         let server = std::thread::spawn(move || {
@@ -4088,7 +4119,6 @@ mod tests {
         let audit_line = std::str::from_utf8(&audit).unwrap();
         let audit_json: serde_json::Value = serde_json::from_str(audit_line.trim()).unwrap();
         assert_eq!(audit_json["event"], "handshake_accepted");
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -4444,11 +4474,5 @@ mod tests {
                 Capability::StreamTransforms,
             ]
         ));
-    }
-
-    fn unique_test_suffix() -> String {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(0);
-        NEXT.fetch_add(1, Ordering::Relaxed).to_string()
     }
 }
