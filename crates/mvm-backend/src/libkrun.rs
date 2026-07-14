@@ -2305,7 +2305,7 @@ mod tests {
         match err {
             StandbyError::ClaimFailed(msg) => {
                 assert!(
-                    msg.contains("direct-path architecture"),
+                    msg.contains("bounded userspace L3 tunnel"),
                     "unexpected error: {msg}"
                 );
             }
