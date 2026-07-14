@@ -20,6 +20,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: publish-sdk
@@ -110,7 +111,6 @@ jobs:
     uses: ./.github/workflows/publish-pypi.yml
     with:
       dry_run: false
-    secrets: inherit
 
   publish_pypi_dry_run:
     if: ${{ github.event_name != 'release' }}
@@ -118,7 +118,6 @@ jobs:
     uses: ./.github/workflows/publish-pypi.yml
     with:
       dry_run: true
-    secrets: inherit
 
   publish_npm_release:
     if: ${{ github.event_name == 'release' }}
@@ -126,7 +125,8 @@ jobs:
     uses: ./.github/workflows/publish-npm.yml
     with:
       dry_run: false
-    secrets: inherit
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish_npm_dry_run:
     if: ${{ github.event_name != 'release' }}
@@ -134,4 +134,5 @@ jobs:
     uses: ./.github/workflows/publish-npm.yml
     with:
       dry_run: true
-    secrets: inherit
+    secrets:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
