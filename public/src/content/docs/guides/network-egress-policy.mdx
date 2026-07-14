@@ -132,8 +132,18 @@ Validation rules:
   policy explicitly supports them;
 - allow only expected ports for each tool capability;
 - keep DNS policy explicit when the workload depends on names;
+- treat outbound detect/replace and inbound plaintext reinjection as separate
+  policy decisions;
 - store the grant decision with the audit/run identifier;
 - return policy denial distinctly from transport or guest command failure.
+
+If a tool path is allowed to send secrets or user data to a remote service,
+prefer runtime-owned mediation over raw pass-through. On owned cleartext paths,
+the runtime can detect secrets and structured PII, replace them with opaque
+flow-scoped tokens, and restore the original bytes only when the exact token
+returns on the owned response path. Do not claim this as general content
+reconstruction: paraphrased or transformed remote output should stay redacted
+or tokenized.
 
 ## Browser and desktop automation
 
