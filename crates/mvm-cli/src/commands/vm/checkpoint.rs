@@ -5,7 +5,8 @@
 //!
 //! Rootfs resolution is backend-neutral: every backend that calls
 //! `record_from_rootfs` at start time writes the rootfs path into mode.json,
-//! which `resolve_quiesced_vm_rootfs` reads as its primary source.
+//! which `resolve_quiesced_vm_rootfs` reads as its primary source.  The Vz
+//! supervisor-config fallback remains for VMs started before this was wired in.
 
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -15,9 +16,11 @@ use clap::Args as ClapArgs;
 use serde::Serialize;
 
 use mvm_backend::checkpoint::{
-    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, capture_fs_quick,
-    capture_vm_full, checkpoint_is_vz, fork_checkpoint, fork_vm_full_fc,
+    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, RestoreParams,
+    capture_fs_quick, capture_vm_full, checkpoint_is_vz, fork_checkpoint, fork_vm_full,
+    fork_vm_full_fc, restore_checkpoint,
 };
+use mvm_backend::vz::supervisor_config_path;
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::SnapshotCapability;
@@ -35,7 +38,7 @@ pub(in crate::commands) struct CheckpointArgs {
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct SaveArgs {
-    /// Name of the running VM to save.
+    /// Name of the running Vz VM to save.
     #[arg(value_parser = clap_vm_name)]
     pub name: String,
     /// Optional human label recorded on the checkpoint.
@@ -193,6 +196,14 @@ pub(in crate::commands) fn run_restore(_cli: &Cli, args: RestoreArgs) -> Result<
 }
 
 #[derive(Serialize)]
+struct CheckpointRestoreJson<'a> {
+    schema_version: u8,
+    action: &'static str,
+    vm_name: &'a str,
+    checkpoint: &'a CheckpointMeta,
+}
+
+#[derive(Serialize)]
 struct CheckpointRemoveJson<'a> {
     schema_version: u8,
     action: &'static str,
@@ -242,14 +253,15 @@ fn now_unix() -> u64 {
 /// error explaining why a checkpoint can't be taken.
 ///
 /// "Quiesced" means the VM is not running, OR the pause verb has written a
-/// pause marker that matches the live supervisor pid (vCPUs and virtio queues
-/// quiesced). A live, unpaused VM is refused: an fs_quick checkpoint has no
-/// memory, so the rootfs must be in a clean, deterministic state.
+/// `vz.paused` marker that matches the live supervisor pid (vCPUs and virtio
+/// queues quiesced). A live, unpaused VM is refused: an fs_quick checkpoint has
+/// no memory, so the rootfs must be in a clean, deterministic state.
 ///
 /// Resolution order (first match wins):
 /// 1. Per-instance `rootfs.ext4` CoW clone in `vm_state_dir(name)`.
 /// 2. `mode.json` `rootfs_path` field (backend-neutral; written by every
 ///    backend that calls `record_from_rootfs` at start time).
+/// 3. Vz supervisor-config fallback (for VMs predating the mode.json field).
 fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
     if !vm_is_quiesced(name) {
         bail!("stop or pause VM '{name}' before checkpointing");
@@ -277,6 +289,22 @@ fn resolve_quiesced_vm_rootfs(name: &str) -> Result<PathBuf> {
         return Ok(path);
     }
 
+    // Vz persists its full supervisor config at launch; the rootfs disk's
+    // path points at the bootable image.  Kept for VMs started before the
+    // mode.json rootfs_path field was added.
+    if let Some(path) = vz_rootfs_from_supervisor_config(&state_dir)? {
+        if !path.exists() {
+            bail!(
+                "fs_quick checkpoint needs the VM's instance rootfs ({}), which is \
+                 removed when the VM is stopped on this backend. Pause instead: \
+                 `mvmctl vm pause {name}`, checkpoint, then `mvmctl vm resume {name}` \
+                 — or use `--class vm-full` on a running VM.",
+                path.display()
+            );
+        }
+        return Ok(path);
+    }
+
     bail!("fs_quick checkpoint is not supported for this VM's backend");
 }
 
@@ -294,18 +322,38 @@ fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Option<PathBuf>>
     Ok(meta.rootfs_path.map(PathBuf::from))
 }
 
+/// Read the persisted Vz supervisor config and return the `rootfs` disk path,
+/// if the config exists and names one. Absent config → `Ok(None)` (let the
+/// caller fall through to the unsupported-backend error).
+fn vz_rootfs_from_supervisor_config(state_dir: &std::path::Path) -> Result<Option<PathBuf>> {
+    let cfg_path = state_dir.join("supervisor-config.json");
+    let bytes = match std::fs::read(&cfg_path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", cfg_path.display())),
+    };
+    let cfg: mvm_build::vz::SupervisorConfig = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing {}", cfg_path.display()))?;
+    let rootfs = cfg
+        .disks
+        .iter()
+        .find(|d| d.id == "rootfs")
+        .map(|d| PathBuf::from(&d.path));
+    Ok(rootfs)
+}
+
 /// Best-effort liveness: a VM is "running" iff one of its per-backend PID
 /// files names a live process. Mirrors the per-backend `kill(pid, 0)` probe.
 ///
-/// NOTE: libkrun writes its pid file into `vm_state_dir(name)`
-/// (`~/.mvm/vms/<name>/libkrun.pid`). Firecracker writes `fc.pid`
+/// NOTE: libkrun and Vz write their pid files into `vm_state_dir(name)`
+/// (`~/.mvm/vms/<name>/libkrun.pid`, `vz.pid`). Firecracker writes `fc.pid`
 /// into the VMS_DIR-based per-VM directory (`~/microvm/vms/<name>/fc.pid`)
 /// which is a separate tree — probing `vm_state_dir/<name>/fc.pid` is always
 /// a miss for a live FC VM and must not be done here.
 fn vm_is_running(name: &str) -> bool {
     let state_dir = vm_state_dir(name);
-    // libkrun.pid lives under vm_state_dir (the host metadata store).
-    let state_dir_running = ["libkrun.pid"]
+    // vz.pid and libkrun.pid live under vm_state_dir (the host metadata store).
+    let state_dir_running = ["vz.pid", "libkrun.pid"]
         .iter()
         .filter_map(|f| std::fs::read_to_string(state_dir.join(f)).ok())
         .filter_map(|s| s.trim().parse::<libc::pid_t>().ok())
@@ -333,19 +381,36 @@ fn vm_is_running(name: &str) -> bool {
 
 /// fs_quick clones the instance rootfs, so the guest must not be writing:
 /// either the VM is stopped, or it is paused (vCPUs and virtio queues quiesced
-/// — the FC pause verb stamps the fc pid into `fc.paused`; resume and any path
-/// that replaces the process removes or invalidates the marker). A
+/// — the Vz pause verb stamps the supervisor pid into `vz.paused`; the FC
+/// pause verb stamps the fc pid into `fc.paused`; resume and any path that
+/// replaces the process removes or invalidates the marker). A
 /// running-but-paused VM keeps its pid alive, so `vm_is_running` alone would
 /// incorrectly refuse the checkpoint without these marker checks.
 fn vm_is_quiesced(name: &str) -> bool {
     if !vm_is_running(name) {
         return true;
     }
-    fc_pause_marker_matches_live_pid(name)
+    vz_pause_marker_matches_live_pid(name) || fc_pause_marker_matches_live_pid(name)
 }
 
-/// `machine pause` snapshot-seals FC but leaves the fc process running, so a
-/// live pid cannot
+/// A paused Vz VM keeps its supervisor pid alive, so pid-liveness
+/// alone reads as "running". The pause verb stamps the supervisor's
+/// pid into a marker; the marker only counts if it matches the live
+/// pid — a marker left behind by a crash or a re-launched VM names a
+/// dead or different supervisor and is ignored.
+fn vz_pause_marker_matches_live_pid(name: &str) -> bool {
+    let dir = vm_state_dir(name);
+    let (Ok(marker), Ok(pid)) = (
+        std::fs::read_to_string(dir.join("vz.paused")),
+        std::fs::read_to_string(dir.join("vz.pid")),
+    ) else {
+        return false;
+    };
+    !marker.trim().is_empty() && marker.trim() == pid.trim()
+}
+
+/// Firecracker analog of `vz_pause_marker_matches_live_pid`: `machine pause`
+/// snapshot-seals FC but leaves the fc process running, so a live pid cannot
 /// distinguish paused from running. The pause verb stamps the fc pid into
 /// `fc.paused` (under `vm_state_dir`); resume removes it. Quiesced iff the
 /// marker matches the live fc pid at its native location (`~/microvm/vms/<name>/fc.pid`).
@@ -362,22 +427,6 @@ fn fc_pause_marker_matches_live_pid(name: &str) -> bool {
 fn supervisor_config_digest(state_dir: &std::path::Path) -> String {
     let cfg_path = state_dir.join("supervisor-config.json");
     mvm_core::crypto::image_verify::sha256_file(&cfg_path).unwrap_or_default()
-}
-
-fn runtime_contract_for_checkpoint(
-    name: &str,
-) -> Result<(
-    Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
-    Option<String>,
-)> {
-    Ok(mvm_backend::base::runtime_meta::read(name)?
-        .map(|meta| {
-            (
-                Some(meta.runtime_source_policy),
-                meta.runtime_overlay_version,
-            )
-        })
-        .unwrap_or((None, None)))
 }
 
 fn ensure_save_restore_supported(action: &str) -> Result<()> {
@@ -397,7 +446,6 @@ fn ensure_save_restore_supported(action: &str) -> Result<()> {
 fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     let rootfs = resolve_quiesced_vm_rootfs(name)?;
     let state_dir = vm_state_dir(name);
-    let (runtime_source_policy, runtime_overlay_version) = runtime_contract_for_checkpoint(name)?;
     let store = CheckpointStore::open();
     let now = now_unix();
     let id = CheckpointId::new(format!("ckpt-{name}-{now}"));
@@ -409,8 +457,6 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
             vm_name: name.to_string(),
             rootfs,
             supervisor_config_digest: supervisor_config_digest(&state_dir),
-            runtime_source_policy,
-            runtime_overlay_version,
             tag,
             created_unix: now,
             quiesced: true,
@@ -439,9 +485,24 @@ fn create(name: &str, tag: Option<String>, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Capture the vm_full triple for the running VM. Firecracker (the sole
-/// full-VM capture backend) drives the pause/save/resume window. The caller
-/// has already verified the VM is running.
+/// Detect whether the running VM named `name` was started under the Vz
+/// backend. A live `vz.pid` under `vm_state_dir` is the canonical Vz marker
+/// (written at supervisor start). Returns `false` for all other backends
+/// (Firecracker, libkrun, HVF, …).
+fn vm_uses_vz_backend(name: &str) -> bool {
+    let pid_file = vm_state_dir(name).join("vz.pid");
+    if let Ok(s) = std::fs::read_to_string(&pid_file)
+        && let Ok(pid) = s.trim().parse::<libc::pid_t>()
+    {
+        // SAFETY: signal 0 probes existence only.
+        return unsafe { libc::kill(pid, 0) == 0 };
+    }
+    false
+}
+
+/// Dispatch the vm_full capture to the backend that owns the running VM.
+/// Vz VMs use `VzVmFullControl`; all other running VMs (Firecracker on Linux)
+/// use `FcVmFullControl`. The caller has already verified the VM is running.
 fn capture_vm_full_for_running_vm(
     name: &str,
     state_dir: &std::path::Path,
@@ -450,19 +511,25 @@ fn capture_vm_full_for_running_vm(
     tag: Option<String>,
     created_unix: u64,
 ) -> Result<mvm_core::checkpoint::CheckpointMeta> {
-    let (runtime_source_policy, runtime_overlay_version) = runtime_contract_for_checkpoint(name)?;
     let params = CaptureVmFullParams {
         id,
         vm_name: name.to_string(),
         supervisor_config_digest: supervisor_config_digest(state_dir),
-        runtime_source_policy,
-        runtime_overlay_version,
-        supervisor_config_src: None,
+        supervisor_config_src: if vm_uses_vz_backend(name) {
+            Some(supervisor_config_path(state_dir))
+        } else {
+            None
+        },
         tag,
         created_unix,
     };
-    let control = mvm_backend::firecracker::FcVmFullControl::new(name);
-    capture_vm_full(store, params, &control)
+    if vm_uses_vz_backend(name) {
+        let control = mvm_backend::vz::VzVmFullControl::new(name);
+        capture_vm_full(store, params, &control)
+    } else {
+        let control = mvm_backend::firecracker::FcVmFullControl::new(name);
+        capture_vm_full(store, params, &control)
+    }
 }
 
 /// `mvmctl checkpoint create --class vm-full <vm>`: capture a RUNNING VM's
@@ -520,6 +587,38 @@ pub(crate) fn bind_checkpoint_created(name: &str, meta: &mvm_core::checkpoint::C
     };
     if let Err(e) = mvm_hostd::audit::bind::bind_checkpoint_created(&emitter, &plan, meta) {
         tracing::warn!(error = %e, "audit emit_checkpoint_created failed (non-fatal)");
+    }
+}
+
+/// Best-effort: loads the persisted plan for `vm_name` and emits
+/// `checkpoint.restored` into the chain-signed audit log. Non-fatal —
+/// a restored checkpoint is already live; missing plan/signer/emitter
+/// is warned and skipped.
+pub(crate) fn bind_checkpoint_restored(vm_name: &str, meta: &mvm_core::checkpoint::CheckpointMeta) {
+    let plan = match super::plan_persist::read_plan(vm_name) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, vm = vm_name,
+                "no persisted plan; checkpoint.restored emitted without chain binding");
+            return;
+        }
+    };
+    let signer = match super::host_signer::load_or_init() {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "host signer unavailable; chain entry skipped");
+            return;
+        }
+    };
+    let emitter = match super::audit_chain::AuditEmitter::new(signer.signing) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::warn!(error = %e, "audit emitter unavailable; chain entry skipped");
+            return;
+        }
+    };
+    if let Err(e) = mvm_hostd::audit::bind::bind_checkpoint_restored(&emitter, &plan, meta) {
+        tracing::warn!(error = %e, "audit emit_checkpoint_restored failed (non-fatal)");
     }
 }
 
@@ -620,16 +719,41 @@ fn rm(id: &str, json: bool) -> Result<()> {
 }
 
 /// `mvmctl vm checkpoint restore <id>`: same-identity resume of a vm_full
-/// checkpoint. The restore mechanism is being re-homed onto the in-house HVF
-/// VMM and is unavailable on the current macOS/Linux backends; a clear,
-/// tracked error is returned rather than a partial resume.
-fn restore(id: &str, _json: bool) -> Result<()> {
-    // Validate the id so an obviously bad argument still errors clearly.
-    let _ = validated_checkpoint_id(id)?;
-    bail!(
-        "vm restore requires full-VM save/restore, which is being re-homed onto \
-         the in-house HVF VMM and is unavailable on this backend for now"
-    );
+/// checkpoint. The library verifies the manifest, then materializes the saved
+/// {rootfs, memory, machine-id} back into the original VM and resumes it.
+fn restore(id: &str, json: bool) -> Result<()> {
+    ensure_save_restore_supported("restore")?;
+    let checkpoint = validated_checkpoint_id(id)?;
+    let store = CheckpointStore::open();
+    let meta = store.read_meta(&checkpoint)?;
+
+    let backend = mvm_backend::vz::VzBackend;
+    restore_checkpoint(
+        &store,
+        RestoreParams {
+            checkpoint: checkpoint.clone(),
+            target_vm: meta.vm_name.clone(),
+        },
+        &backend,
+    )
+    .with_context(|| format!("restoring checkpoint {id:?}"))?;
+
+    bind_checkpoint_restored(&meta.vm_name, &meta);
+    if json {
+        crate::json_out::emit_json(&CheckpointRestoreJson {
+            schema_version: 1,
+            action: "restore",
+            vm_name: &meta.vm_name,
+            checkpoint: &meta,
+        })?;
+    } else {
+        ui::success(&format!(
+            "restored {} into vm '{}'",
+            checkpoint.as_str(),
+            meta.vm_name
+        ));
+    }
+    Ok(())
 }
 
 fn fork(
@@ -644,8 +768,8 @@ fn fork(
     let checkpoint = validated_checkpoint_id(id)?;
     let store = CheckpointStore::open();
     // Pick the fork arm by the parent's class: vm_full carries memory and must
-    // restore through the vm_full fork arm (which auto-boots the child); fs_quick
-    // is a rootfs-only clone that the operator can optionally boot with `--boot`.
+    // restore through `fork_vm_full` (which auto-boots the child); fs_quick is
+    // a rootfs-only clone that the operator can optionally boot with `--boot`.
     let parent = store.read_meta(&checkpoint)?;
     match parent.class {
         CheckpointClass::VmFull => {
@@ -826,45 +950,214 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
 
     let parent_meta = p.store.read_meta(p.checkpoint)?;
 
-    // Checkpoints captured under the removed Apple-Virtualization backend carry
-    // a supervisor-config.json blob. Their full-VM fork is being re-homed onto
-    // the in-house HVF VMM and is unavailable for now — refuse cleanly.
-    if checkpoint_is_vz(&parent_meta) {
-        anyhow::bail!(
-            "this vm_full checkpoint was captured under a backend that has been removed; \
-             its full-VM fork is being re-homed onto the in-house HVF VMM and is \
-             unavailable for now. Use an fs_quick fork instead."
-        );
+    // Dispatch to the FC path when the checkpoint carries no supervisor-config.json
+    // (FC checkpoints have {rootfs.ext4, memory.bin, vmstate.bin}; Vz checkpoints
+    // additionally carry supervisor-config.json).
+    if !checkpoint_is_vz(&parent_meta) {
+        // A forked child restores the parent's saved guest memory verbatim,
+        // which carries the parent's IP/MAC. VMGenID reseeds the guest RNG on
+        // restore but does not re-address the network, so a booted child would
+        // collide with its parent on the shared 172.16.0.x bridge. The host-tap
+        // side is remappable, but re-IP'ing the guest is a per-child network-model
+        // decision that is not yet settled — refuse cleanly rather than boot a
+        // colliding child. The restore mechanism stays reachable behind an
+        // explicit opt-in for isolated single-child testing on that model.
+        if !fc_vm_full_fork_experimental_enabled() {
+            anyhow::bail!(
+                "forking a vm_full checkpoint on Firecracker is not yet supported: the \
+                 forked child inherits the parent's guest IP/MAC from the saved memory \
+                 image and has no per-child network reconfiguration, so it would collide \
+                 with the parent on the shared bridge. Use an fs_quick fork, or set \
+                 MVM_FORK_VMFULL_FC_EXPERIMENTAL=1 to exercise the restore on an isolated \
+                 single-child network."
+            );
+        }
+        return fork_vm_full_arm_fc(ForkVmFullArmFcParams {
+            store: p.store,
+            checkpoint: p.checkpoint,
+            parent_meta,
+            child_vm_name,
+            dest_dir,
+            child_id,
+            now,
+            json: p.json,
+        });
     }
 
-    // Firecracker vm_full fork. A forked child restores the parent's saved guest
-    // memory verbatim, which carries the parent's IP/MAC. VMGenID reseeds the
-    // guest RNG on restore but does not re-address the network, so a booted child
-    // would collide with its parent on the shared 172.16.0.x bridge. The host-tap
-    // side is remappable, but re-IP'ing the guest is a per-child network-model
-    // decision that is not yet settled — refuse cleanly rather than boot a
-    // colliding child. The restore mechanism stays reachable behind an explicit
-    // opt-in for isolated single-child testing on that model.
-    if !fc_vm_full_fork_experimental_enabled() {
-        anyhow::bail!(
-            "forking a vm_full checkpoint on Firecracker is not yet supported: the \
-             forked child inherits the parent's guest IP/MAC from the saved memory \
-             image and has no per-child network reconfiguration, so it would collide \
-             with the parent on the shared bridge. Use an fs_quick fork, or set \
-             MVM_FORK_VMFULL_FC_EXPERIMENTAL=1 to exercise the restore on an isolated \
-             single-child network."
-        );
+    // Vz path: read the parent supervisor config to extract the saved machine shape
+    // (cpu_count / memory_mib). The restore must match these exactly.
+    let parent_cfg_path =
+        supervisor_config_path(&mvm_core::config::vm_state_dir(&parent_meta.vm_name));
+    let parent_cfg_bytes = std::fs::read(&parent_cfg_path).with_context(|| {
+        format!(
+            "reading parent supervisor config {}",
+            parent_cfg_path.display()
+        )
+    })?;
+    let parent_cfg: mvm_build::vz::SupervisorConfig = serde_json::from_slice(&parent_cfg_bytes)
+        .with_context(|| {
+            format!(
+                "parsing parent supervisor config {}",
+                parent_cfg_path.display()
+            )
+        })?;
+    let cpus = parent_cfg.resources.cpu_count;
+    let mem_mib = parent_cfg.resources.memory_mib;
+
+    // Admit a fresh plan for the child under the child's identity using the
+    // checkpoint's RECORDED rootfs sha (the child's materialized rootfs is a
+    // clone of that blob — same bytes). Re-hashing the multi-hundred-MB image
+    // here would double the fork latency for nothing: `fork_vm_full` runs
+    // `verify_content` over the same blob fail-closed before any supervisor
+    // spawns, so a tampered blob aborts the launch instead of booting
+    // mis-admitted.
+    let rootfs_blob = p.store.content_dir(p.checkpoint).join("rootfs.ext4");
+    let recorded_sha = parent_meta
+        .content
+        .iter()
+        .find(|b| b.name == "rootfs.ext4")
+        .map(|b| b.sha256.clone());
+    let tenant = super::tenant_resolution::resolve_tenant(None);
+    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::new();
+    let admission = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+        tenant: &tenant,
+        vm_name: &child_vm_name,
+        backend_name: "vz",
+        rootfs_path: &rootfs_blob,
+        build_provenance: None,
+        precomputed_image_sha256: recorded_sha,
+        cpus,
+        mem_mib,
+        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+        secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+        secrets: Vec::new(),
+        auth: mvm_core::plan::AuthPolicy::none(),
+        no_supervisor: false,
+        ledger: &ledger,
+        keys_dir: None,
+        audit_dir: None,
+        policy_dir: None,
+        bundle_pin: None,
+        deps_volume: None,
+        shares: Vec::new(),
+        redaction: mvm_core::policy::RedactionPolicy::default(),
+        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        agent_verb_override: vec![],
+        // A sealed baked-entrypoint child qualifies for an attenuated grant.
+        // Forks never carry trailing argv and are always prod-profile.
+        restrict_agent_verbs: super::agent_verbs::grant_eligible(
+            false,
+            false,
+            false,
+            super::agent_verbs::image_is_sealed(&rootfs_blob),
+        ),
+    })?;
+
+    // Serialize the admitted plan envelope so the backend can inject it into
+    // the child's SupervisorConfig before spawning.
+    let child_plan_json = admission.as_ref().map(|ctx| {
+        serde_json::to_string(&ctx.admitted.signed).expect("admitted plan is always serializable")
+    });
+    let child_tenant_id = admission
+        .as_ref()
+        .map(|ctx| ctx.admitted.plan.tenant.0.clone());
+
+    // Mint the child's verb-grant sidecar so the child supervisor config
+    // carries the correct grant on restore. The sidecar is also read back
+    // below for the post-restore grant delivery.
+    if let Some(ref plan_json_str) = child_plan_json {
+        let mint_cfg = mvm_core::vm_backend::VmStartConfig {
+            name: child_vm_name.clone(),
+            plan_json: Some(plan_json_str.clone()),
+            ..Default::default()
+        };
+        mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
     }
-    fork_vm_full_arm_fc(ForkVmFullArmFcParams {
-        store: p.store,
-        checkpoint: p.checkpoint,
-        parent_meta,
-        child_vm_name,
-        dest_dir,
-        child_id,
-        now,
-        json: p.json,
-    })
+
+    let spawner = mvm_backend::vz::VzChildSupervisorSpawner;
+    let fork_result = fork_vm_full(
+        p.store,
+        ForkParams {
+            checkpoint: p.checkpoint.clone(),
+            child_id,
+            child_vm_name: child_vm_name.clone(),
+            dest_dir,
+            created_unix: now,
+            child_plan_json,
+            child_tenant_id,
+        },
+        &spawner,
+    );
+    if let Err(ref e) = fork_result {
+        super::up::emit_failed_if(&admission, "fork-vm-full", e);
+    }
+    let meta = fork_result
+        .with_context(|| format!("forking vm_full checkpoint {:?}", p.checkpoint.as_str()))?;
+
+    bind_checkpoint_forked(p.checkpoint, &meta, &child_vm_name, p.store)?;
+    super::up::emit_launched_if(&admission, "vz");
+
+    // Best-effort: deliver the freshly-minted grant to the restored child
+    // agent. The agent survives a vm_full restore in memory; delivering the
+    // grant here re-pins it to the child's plan so it doesn't run
+    // class-gate-only. Mirrors warm_restore_instance's post-restore pattern.
+    if let Some(grant_env) = read_grant_envelope_for(&child_vm_name) {
+        let vsock_path = mvm_core::config::vm_vz_vsock_port_socket(
+            &child_vm_name,
+            mvm_guest::vsock::GUEST_AGENT_PORT,
+        );
+        let vsock_path_str = vsock_path.to_string_lossy().into_owned();
+        const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
+        let mut agent_ready = false;
+        for _ in 0..POLL_ATTEMPTS {
+            if mvm_guest::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
+                agent_ready = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        if agent_ready {
+            let token = mvm_core::crypto::vmgenid::fresh_generation_token(&child_vm_name).token;
+            match mvm_guest::vsock::post_restore_with_grant_at(
+                &vsock_path_str,
+                token,
+                Some(grant_env),
+            ) {
+                Ok(r) if r.acknowledged => {
+                    tracing::info!("fork post-restore grant delivered to '{child_vm_name}'")
+                }
+                Ok(_) => tracing::warn!(
+                    "fork post-restore grant delivery returned failure for '{child_vm_name}'"
+                ),
+                Err(e) => tracing::warn!(
+                    "fork post-restore grant delivery failed for '{child_vm_name}': {e}"
+                ),
+            }
+        } else {
+            tracing::warn!(
+                "fork post-restore: agent not reachable for '{child_vm_name}'; grant not delivered (VM is running)"
+            );
+        }
+    }
+
+    if p.json {
+        crate::json_out::emit_json(&CheckpointForkJson {
+            schema_version: 1,
+            action: "fork",
+            parent_id: p.checkpoint,
+            child_vm_name: &child_vm_name,
+            booted: true,
+            checkpoint: &meta,
+        })?;
+    } else {
+        ui::success(&format!(
+            "forked {} -> checkpoint {} (vm '{}', auto-booted)",
+            p.checkpoint.as_str(),
+            meta.id.as_str(),
+            child_vm_name
+        ));
+    }
+    Ok(())
 }
 
 /// Inputs for [`fork_vm_full_arm_fc`]. Grouped to stay under the
@@ -906,6 +1199,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         vm_name: &p.child_vm_name,
         backend_name: "firecracker",
         rootfs_path: &rootfs_blob,
+        build_provenance: None,
         precomputed_image_sha256: recorded_sha,
         cpus,
         mem_mib,
@@ -979,13 +1273,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
     // resumed the VMM with a zero VMGenID token before returning; this is the
     // real token + grant delivery, mirroring the Vz fork path and
     // `warm_restore_instance_from_path`'s own post-restore signal.
-    if let Some(mut grant_env) = read_grant_envelope_for(&p.child_vm_name) {
-        if let Some(parent_vm_name) = p.store.read_meta(p.checkpoint).ok().map(|m| m.vm_name)
-            && let Some((session_id, plan_nonce)) = grant_predecessor_from_vm_name(&parent_vm_name)
-        {
-            grant_env.predecessor_session_id = Some(session_id);
-            grant_env.predecessor_plan_nonce_hex = Some(plan_nonce.as_hex().to_string());
-        }
+    if let Some(grant_env) = read_grant_envelope_for(&p.child_vm_name) {
         match mvm_backend::microvm::resolve_running_vm_dir(&p.child_vm_name) {
             Ok(vm_dir) => {
                 let vsock_path_str = mvm_backend::microvm::firecracker_vsock_uds_path(&vm_dir);
@@ -1077,11 +1365,9 @@ struct BootForkedChildParams<'a> {
 /// The rootfs is the already-materialized instance file (`prepare_instance_rootfs`
 /// returns early when source == instance, so nothing gets clobbered).
 fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
-    use mvm_backend::backend::AnyBackend;
     use mvm_core::util::parse_human_size;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
-    let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
 
     // Resource shape: flag > parent plan > global defaults.
     let (parent_cpus, parent_mem) = parent_plan_resources(p.parent_checkpoint, p.store);
@@ -1097,7 +1383,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
 
     let tenant = super::tenant_resolution::resolve_tenant(None);
 
-    // The booted child needs a real kernel path; work-image boots ship none.
+    // The Vz backend needs a real kernel path; work-image boots ship none.
     // Fall back to the cached builder-VM kernel the same way `up` does.
     let vmlinux_placeholder = p
         .instance_rootfs
@@ -1115,6 +1401,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         vm_name: p.child_vm_name,
         backend_name: &effective_hypervisor,
         rootfs_path: p.instance_rootfs,
+        build_provenance: None,
         precomputed_image_sha256: None,
         cpus,
         mem_mib,
@@ -1153,16 +1440,6 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         memory_mib: mem_mib as u32,
         ..Default::default()
     };
-    start_config.runtime_source_policy = forked_child_checkpoint_runtime_source_policy(
-        &parent_meta,
-        &effective_hypervisor,
-        p.instance_rootfs,
-    )?;
-    super::up::attach_runtime_overlay_if_cached_version(
-        &mut start_config,
-        &effective_hypervisor,
-        parent_meta.runtime_overlay_version.as_deref(),
-    )?;
 
     if let Some(ctx) = admission.as_ref() {
         mvm_hostd::plan_admission::populate_audit_substrate(
@@ -1178,7 +1455,7 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)?;
     }
 
-    let backend = AnyBackend::from_hypervisor(&effective_hypervisor);
+    let backend = workload_backend_for_boot(&effective_hypervisor);
     if let Err(e) = backend.start(&start_config) {
         super::up::emit_failed_if(&admission, "backend-start", &e);
         return Err(e);
@@ -1194,6 +1471,10 @@ fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
     Ok(())
 }
 
+fn workload_backend_for_boot(hypervisor: &str) -> mvm_backend::backend::AnyBackend {
+    mvm_backend::backend::AnyBackend::from_workload_hypervisor(hypervisor)
+}
+
 /// Read the minted verb-grant sidecar for `vm_name` from its per-VM state dir.
 /// Returns `Some(envelope)` when the sidecar is present and parses correctly;
 /// `None` on any error (absent file, malformed JSON) — grant-less is the safe
@@ -1204,51 +1485,6 @@ fn read_grant_envelope_for(
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
     let bytes = std::fs::read(&path).ok()?;
     serde_json::from_slice(&bytes).ok()
-}
-
-fn forked_child_runtime_source_policy(
-    hypervisor: &str,
-    instance_rootfs: &std::path::Path,
-) -> mvm_core::vm_backend::RuntimeSourcePolicy {
-    mvm_core::vm_backend::select_runtime_source_policy(
-        mvm_core::vm_backend::RuntimeSourcePolicySelection {
-            backend_name: Some(hypervisor),
-            sealed: super::agent_verbs::image_is_sealed(instance_rootfs),
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-            launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-        },
-    )
-}
-
-fn forked_child_checkpoint_runtime_source_policy(
-    parent_meta: &mvm_core::checkpoint::CheckpointMeta,
-    hypervisor: &str,
-    instance_rootfs: &std::path::Path,
-) -> Result<mvm_core::vm_backend::RuntimeSourcePolicy> {
-    match (
-        parent_meta.runtime_source_policy,
-        parent_meta.runtime_overlay_version.as_deref(),
-    ) {
-        (Some(mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay), None) => {
-            bail!(
-                "checkpoint '{}' requires a runtime overlay but records no overlay version",
-                parent_meta.id
-            );
-        }
-        (Some(policy), _) => Ok(policy),
-        (None, _) => Ok(forked_child_runtime_source_policy(
-            hypervisor,
-            instance_rootfs,
-        )),
-    }
-}
-
-fn grant_predecessor_from_vm_name(vm_name: &str) -> Option<(String, mvm_core::plan::Nonce)> {
-    let envelope = read_grant_envelope_for(vm_name)?;
-    Some((
-        envelope.grant.session_id,
-        mvm_core::plan::Nonce::from_hex(&envelope.plan_nonce_hex).ok()?,
-    ))
 }
 
 /// Read the parent checkpoint's source VM plan and return (cpus, mem_mib).
@@ -1348,7 +1584,7 @@ mod tests {
         );
     }
 
-    // ── vm_is_quiesced ───────────────────────────────────────────────────
+    // ── vm_is_quiesced / vz_pause_marker_matches_live_pid ────────────────
 
     /// A VM with no PID files is stopped → quiesced regardless of markers.
     #[test]
@@ -1359,6 +1595,68 @@ mod tests {
         assert!(
             vm_is_quiesced("no-such-vm-stopped"),
             "stopped VM must be quiesced"
+        );
+    }
+
+    /// Running VM + matching `vz.paused` marker (pid matches `vz.pid`) → quiesced.
+    #[test]
+    fn running_with_matching_marker_is_quiesced() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let state_dir = mvm_core::config::vm_state_dir("pausedvm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        let pid_str = pid.to_string();
+        // Both files carry the same pid — the pause verb writes it this way.
+        std::fs::write(state_dir.join("vz.pid"), &pid_str).unwrap();
+        std::fs::write(state_dir.join("vz.paused"), &pid_str).unwrap();
+
+        assert!(
+            vm_is_quiesced("pausedvm"),
+            "running VM with matching pause marker must be quiesced"
+        );
+    }
+
+    /// Running VM + no `vz.paused` marker → not quiesced.
+    #[test]
+    fn running_without_marker_is_not_quiesced() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let state_dir = mvm_core::config::vm_state_dir("livevm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        std::fs::write(state_dir.join("vz.pid"), pid.to_string()).unwrap();
+        // No vz.paused written.
+
+        assert!(
+            !vm_is_quiesced("livevm"),
+            "running VM with no pause marker must not be quiesced"
+        );
+    }
+
+    /// Stale marker: `vz.paused` contains a pid that differs from `vz.pid`
+    /// (left behind by a crash or a re-launched supervisor) → not quiesced.
+    #[test]
+    fn running_with_stale_marker_is_not_quiesced() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+
+        let state_dir = mvm_core::config::vm_state_dir("relaunchedvm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let live_pid = unsafe { libc::getpid() };
+        // The marker was stamped with a different (old) pid.
+        let old_pid = live_pid.saturating_add(1);
+        std::fs::write(state_dir.join("vz.pid"), live_pid.to_string()).unwrap();
+        std::fs::write(state_dir.join("vz.paused"), old_pid.to_string()).unwrap();
+
+        assert!(
+            !vm_is_quiesced("relaunchedvm"),
+            "running VM with a stale pause marker (pid mismatch) must not be quiesced"
         );
     }
 
@@ -1457,6 +1755,77 @@ mod tests {
         );
     }
 
+    // ── resolve_quiesced_vm_rootfs: missing-rootfs error ─────────────────
+
+    /// When the supervisor-config rootfs path does not exist on disk after the VM
+    /// was stopped (Vz/apple_container teardown), the error explains the
+    /// pause-based workflow rather than cryptically failing on the path.
+    #[test]
+    fn missing_rootfs_produces_actionable_error() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_SHARE_DIR", tmp.path());
+
+        let state_dir = mvm_core::config::vm_state_dir("gone-vm");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        // Write a supervisor config pointing at a rootfs that does NOT exist.
+        let cfg = mvm_build::vz::SupervisorConfig {
+            name: "gone-vm".into(),
+            vm_state_dir: state_dir.to_string_lossy().into_owned(),
+            pid_file_name: None,
+            kernel: mvm_build::vz::KernelConfig {
+                path: "/abs/vmlinux".into(),
+                cmdline: "root=/dev/vda".into(),
+                initrd_path: None,
+            },
+            resources: mvm_build::vz::ResourceConfig {
+                cpu_count: 1,
+                memory_mib: 512,
+            },
+            disks: vec![mvm_build::vz::DiskConfig {
+                id: "rootfs".into(),
+                // Points at a path that was deleted on `mvmctl down`.
+                path: state_dir.join("rootfs.ext4").to_string_lossy().into_owned(),
+                read_only: true,
+            }],
+            virtio_fs: vec![],
+            vsock: mvm_build::vz::VsockConfig {
+                ports: vec![],
+                socket_dir: state_dir.to_string_lossy().into_owned(),
+                host_listen_ports: vec![],
+            },
+            console_output_path: None,
+            network: None,
+            balloon: None,
+            control_socket_path: None,
+            startup_mode: mvm_build::vz::StartupMode::Boot,
+            tenant_id: None,
+            plan: None,
+            bundle: None,
+            network_policy: None,
+            audit_dir: None,
+            gateway_audit_socket: None,
+            signing_key_path: None,
+            transparent_terminator_port: None,
+        };
+        let json = cfg.to_json().unwrap();
+        std::fs::write(state_dir.join("supervisor-config.json"), json).unwrap();
+
+        // VM is stopped (no pid file).
+        let err = resolve_quiesced_vm_rootfs("gone-vm").expect_err("missing rootfs must error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pause") && msg.contains("gone-vm"),
+            "error should mention pause workflow and VM name: {msg}"
+        );
+        assert!(
+            msg.contains("vm-full") || msg.contains("vm_full"),
+            "error should mention vm-full alternative: {msg}"
+        );
+    }
+
     // ── resolve_quiesced_vm_rootfs: mode.json rootfs_path resolution ─────
 
     /// A stopped VM whose mode.json carries `rootfs_path` pointing at an
@@ -1481,8 +1850,6 @@ mod tests {
             mode: mvm_backend::base::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-            runtime_overlay_version: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();
@@ -1511,8 +1878,6 @@ mod tests {
             mode: mvm_backend::base::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
-            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
-            runtime_overlay_version: None,
         };
         let json = serde_json::to_string(&meta).unwrap();
         std::fs::write(state_dir.join("mode.json"), json).unwrap();
@@ -1636,146 +2001,11 @@ mod tests {
     }
 
     #[test]
-    fn sealed_firecracker_forked_child_requires_overlay() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let sidecar = mvm_build::builder_vm::GuestSidecar {
-            name: "sealed".to_string(),
-            accessible: false,
-            sealed: true,
-            entrypoint_kind: "command".to_string(),
-            init_system: "busybox".to_string(),
-            expected_boot_ms: 300,
-            agent_binary: "real".to_string(),
-            rootless_entrypoint: true,
-            hypervisor: "firecracker".to_string(),
-            overlay_aware: true,
-            runtime_lean: true,
-        };
-        sidecar.write_to_dir(tmp.path()).unwrap();
-        assert_eq!(
-            forked_child_runtime_source_policy("firecracker", &rootfs),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn unsealed_firecracker_forked_child_requires_overlay() {
-        // A forked child is a block workload boot, so it requires the overlay
-        // whether or not its rootfs is sealed.
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let sidecar = mvm_build::builder_vm::GuestSidecar {
-            name: "dev".to_string(),
-            accessible: true,
-            sealed: false,
-            entrypoint_kind: "shell".to_string(),
-            init_system: "busybox".to_string(),
-            expected_boot_ms: 300,
-            agent_binary: "real".to_string(),
-            rootless_entrypoint: false,
-            hypervisor: "firecracker".to_string(),
-            overlay_aware: true,
-            runtime_lean: false,
-        };
-        sidecar.write_to_dir(tmp.path()).unwrap();
-        assert_eq!(
-            forked_child_runtime_source_policy("firecracker", &rootfs),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn forked_child_checkpoint_policy_prefers_recorded_policy() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let parent_meta = mvm_core::checkpoint::CheckpointMeta::builder(
-            CheckpointId::new("ckpt-parent"),
-            CheckpointClass::FsQuick,
-            "parentvm",
-        )
-        .content(vec![mvm_core::checkpoint::ContentBlob {
-            name: "rootfs.ext4".into(),
-            sha256: "abc".into(),
-        }])
-        .supervisor_config_digest("d")
-        .runtime_source_policy(Some(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-        ))
-        .runtime_overlay_version(Some("0.17.0".to_string()))
-        .created_unix(1)
-        .build();
-        assert_eq!(
-            forked_child_checkpoint_runtime_source_policy(&parent_meta, "firecracker", &rootfs)
-                .unwrap(),
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn forked_child_checkpoint_policy_rejects_required_overlay_without_version() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let parent_meta = mvm_core::checkpoint::CheckpointMeta::builder(
-            CheckpointId::new("ckpt-parent"),
-            CheckpointClass::FsQuick,
-            "parentvm",
-        )
-        .content(vec![mvm_core::checkpoint::ContentBlob {
-            name: "rootfs.ext4".into(),
-            sha256: "abc".into(),
-        }])
-        .supervisor_config_digest("d")
-        .runtime_source_policy(Some(
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-        ))
-        .created_unix(1)
-        .build();
-        let err =
-            forked_child_checkpoint_runtime_source_policy(&parent_meta, "firecracker", &rootfs)
-                .unwrap_err();
-        assert!(err.to_string().contains("records no overlay version"));
-    }
-
-    #[test]
-    fn forked_child_checkpoint_policy_falls_back_for_older_checkpoints() {
-        let tmp = tempfile::tempdir().unwrap();
-        let rootfs = tmp.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"fake").unwrap();
-        let sidecar = mvm_build::builder_vm::GuestSidecar {
-            name: "sealed".to_string(),
-            accessible: false,
-            sealed: true,
-            entrypoint_kind: "command".to_string(),
-            init_system: "busybox".to_string(),
-            expected_boot_ms: 300,
-            agent_binary: "real".to_string(),
-            rootless_entrypoint: true,
-            hypervisor: "firecracker".to_string(),
-            overlay_aware: true,
-            runtime_lean: true,
-        };
-        sidecar.write_to_dir(tmp.path()).unwrap();
-        let parent_meta = mvm_core::checkpoint::CheckpointMeta::builder(
-            CheckpointId::new("ckpt-parent"),
-            CheckpointClass::FsQuick,
-            "parentvm",
-        )
-        .content(vec![mvm_core::checkpoint::ContentBlob {
-            name: "rootfs.ext4".into(),
-            sha256: "abc".into(),
-        }])
-        .supervisor_config_digest("d")
-        .created_unix(1)
-        .build();
-        assert_eq!(
-            forked_child_checkpoint_runtime_source_policy(&parent_meta, "firecracker", &rootfs)
-                .unwrap(),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
+    fn boot_forked_child_uses_workload_backend_selector_for_hvf() {
+        let backend = workload_backend_for_boot("hvf");
+        assert!(
+            matches!(backend, mvm_backend::backend::AnyBackend::HvfRunner(_)),
+            "hvf child boot must route through the runner-backed workload path"
         );
     }
 
@@ -1856,8 +2086,6 @@ mod tests {
         let envelope = VerbGrantEnvelope {
             pubkey_hex: "aa".repeat(32),
             plan_nonce_hex: "bb".repeat(16),
-            predecessor_session_id: None,
-            predecessor_plan_nonce_hex: None,
             grant,
         };
         let json = serde_json::to_vec(&envelope).unwrap();
@@ -1868,41 +2096,6 @@ mod tests {
         let got = result.unwrap();
         assert_eq!(got.pubkey_hex, envelope.pubkey_hex);
         assert_eq!(got.plan_nonce_hex, envelope.plan_nonce_hex);
-    }
-
-    #[test]
-    fn grant_predecessor_from_vm_name_reads_session_and_nonce() {
-        use mvm_core::protocol::vm_backend::VerbGrantEnvelope;
-
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
-
-        let vm_name = "test-fork-grant-predecessor";
-        let state_dir = mvm_core::config::vm_state_dir(vm_name);
-        std::fs::create_dir_all(&state_dir).unwrap();
-
-        let nonce = mvm_core::plan::Nonce::from_bytes([7u8; 16]);
-        let envelope = VerbGrantEnvelope {
-            pubkey_hex: "aa".repeat(32),
-            plan_nonce_hex: nonce.as_hex().to_string(),
-            predecessor_session_id: None,
-            predecessor_plan_nonce_hex: None,
-            grant: mvm_core::plan::VerbGrant {
-                session_id: "parent-session".into(),
-                plan_nonce: nonce.clone(),
-                not_after: chrono::Utc::now() + chrono::Duration::hours(1),
-                verbs: vec![],
-                sig: vec![0u8; 64],
-            },
-        };
-        let json = serde_json::to_vec(&envelope).unwrap();
-        std::fs::write(state_dir.join("verb-grant.json"), &json).unwrap();
-
-        let (session_id, predecessor_nonce) =
-            grant_predecessor_from_vm_name(vm_name).expect("must read predecessor");
-        assert_eq!(session_id, "parent-session");
-        assert_eq!(predecessor_nonce, nonce);
     }
 
     // ── vm_full fork: --cpus/--memory refused ────────────────────────────────
@@ -2020,9 +2213,10 @@ mod tests {
 
     // ── ensure_save_restore_supported: backend-neutral gate ─────────────────
 
-    /// The platform's auto-selected backend satisfies SaveRestore iff its
-    /// snapshot_capability rank >= 2. This test checks the backend-neutral
-    /// satisfies logic the gate relies on.
+    /// The platform's auto-selected backend (FC on Linux, Vz/libkrun on macOS)
+    /// satisfies SaveRestore iff its snapshot_capability rank >= 2. This test
+    /// checks that the function resolves the real backend (not hardcoded Vz) and
+    /// that the error message is backend-neutral (no "Vz" in the message).
     #[test]
     fn save_restore_gate_error_is_backend_neutral() {
         // We can't run ensure_save_restore_supported directly because it checks
@@ -2041,6 +2235,55 @@ mod tests {
         assert!(
             !SnapshotCapability::Unsupported.satisfies(SnapshotCapability::SaveRestore),
             "Unsupported must not satisfy SaveRestore"
+        );
+    }
+
+    // ── vm_uses_vz_backend: marker-file detection ────────────────────────────
+
+    /// A VM whose vz.pid names the current process is detected as using Vz.
+    #[test]
+    fn vm_uses_vz_backend_detects_live_vz_pid() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+        let vm_name = "vz-backend-detect-test";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let pid = unsafe { libc::getpid() };
+        std::fs::write(state_dir.join("vz.pid"), pid.to_string()).unwrap();
+        assert!(
+            vm_uses_vz_backend(vm_name),
+            "live vz.pid must cause vm_uses_vz_backend to return true"
+        );
+    }
+
+    /// A VM with no vz.pid (e.g. FC) is not detected as Vz.
+    #[test]
+    fn vm_uses_vz_backend_false_when_no_vz_pid() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+        assert!(
+            !vm_uses_vz_backend("no-vz-backend-vm"),
+            "absent vz.pid must cause vm_uses_vz_backend to return false"
+        );
+    }
+
+    /// A VM with a stale vz.pid (process gone) is not detected as Vz.
+    #[test]
+    fn vm_uses_vz_backend_false_for_stale_pid() {
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        let tmp = tempfile::tempdir().unwrap();
+        env.set("MVM_DATA_DIR", tmp.path());
+        let vm_name = "vz-stale-pid-test";
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        std::fs::create_dir_all(&state_dir).unwrap();
+        // PID 1 is always init — not our process — so kill(1, 0) requires
+        // privilege and returns EPERM, not ESRCH. Use a PID that cannot exist.
+        std::fs::write(state_dir.join("vz.pid"), "99999999").unwrap();
+        assert!(
+            !vm_uses_vz_backend(vm_name),
+            "stale/unreachable vz.pid must cause vm_uses_vz_backend to return false"
         );
     }
 }

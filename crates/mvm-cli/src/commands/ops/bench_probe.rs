@@ -85,6 +85,7 @@ pub fn admit_probe_plan(
         reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         audit_labels: Default::default(),
         agent_verbs: None,
+        build_provenance: None,
     };
     let ledger = InMemoryNonceLedger::new();
     admit_for_run(&input, &SystemClock, &ledger, keys_dir, None).context("admitting probe plan")

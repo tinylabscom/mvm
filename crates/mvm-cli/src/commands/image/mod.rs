@@ -17,6 +17,7 @@ use mvm_oci::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 use mvm_core::domain::manifest::canonical_key_for_path;
 use mvm_core::user_config::MvmConfig;
@@ -28,7 +29,7 @@ mod inspect;
 mod ls;
 mod pull;
 mod rm;
-mod source;
+pub(in crate::commands) mod source;
 mod trust;
 
 use trust::{CosignCommandVerifier, CosignVerifier, default_require_signatures, registry_auth_for};
@@ -1405,6 +1406,10 @@ fn unpack_layer_bytes(layer: &LayerDescriptor, bytes: &[u8], unpacked_root: &Pat
             unpacked_root,
             &UnpackOptions::default(),
         )
+    } else if is_zstd_layer(&layer.media_type) {
+        let decoder =
+            ZstdDecoder::new(Cursor::new(bytes)).context("initialize zstd layer decoder")?;
+        unpack_layer(decoder, unpacked_root, &UnpackOptions::default())
     } else {
         unpack_layer(Cursor::new(bytes), unpacked_root, &UnpackOptions::default())
     }?;
@@ -1418,6 +1423,13 @@ fn is_gzip_layer(media_type: &str) -> bool {
     media_type.ends_with("+gzip")
         || media_type.ends_with(".gzip")
         || media_type.contains("tar.gzip")
+}
+
+fn is_zstd_layer(media_type: &str) -> bool {
+    media_type.ends_with("+zstd")
+        || media_type.ends_with(".zstd")
+        || media_type.contains("tar+zstd")
+        || media_type.contains("tar.zstd")
 }
 
 pub(super) fn list_rows(cache_root: &Path, registry: Option<&str>) -> Result<Vec<ImageListRow>> {
@@ -2011,6 +2023,14 @@ mod tests {
         buf
     }
 
+    fn single_file_layer_zstd(path: &str, body: &[u8]) -> Vec<u8> {
+        let mut tar = Builder::new(Vec::new());
+        tar.mode(tar::HeaderMode::Deterministic);
+        add_tar_entry(&mut tar, path, body);
+        let tar_bytes = tar.into_inner().expect("finish layer tar");
+        zstd::stream::encode_all(Cursor::new(tar_bytes), 0).expect("zstd encode")
+    }
+
     fn oci_archive_with_layer(layer: &[u8]) -> Vec<u8> {
         let platform = LinuxPlatform::for_current_arch();
         let layer_digest = digest_of(layer);
@@ -2083,6 +2103,36 @@ mod tests {
             err.to_string()
                 .contains("requires a digest-pinned reference"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn zstd_layer_media_type_is_detected() {
+        assert!(is_zstd_layer("application/vnd.oci.image.layer.v1.tar+zstd"));
+        assert!(is_zstd_layer(
+            "application/vnd.docker.image.rootfs.diff.tar.zstd"
+        ));
+        assert!(!is_zstd_layer(
+            "application/vnd.oci.image.layer.v1.tar+gzip"
+        ));
+    }
+
+    #[test]
+    fn unpack_layer_bytes_accepts_zstd_layers() {
+        let body = b"hello from zstd image layer\n";
+        let compressed = single_file_layer_zstd("bin/hello", body);
+        let layer = LayerDescriptor {
+            digest: digest_of(&compressed),
+            size: compressed.len() as u64,
+            media_type: "application/vnd.oci.image.layer.v1.tar+zstd".into(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        unpack_layer_bytes(&layer, &compressed, tmp.path()).expect("unpack zstd layer");
+
+        assert_eq!(
+            std::fs::read(tmp.path().join("bin/hello")).expect("read unpacked file"),
+            body
         );
     }
 
