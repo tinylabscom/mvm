@@ -43,6 +43,23 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D
       warnings`, `cargo test --workspace`, and the live TTY witness
       `MVM_DATA_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test /private/tmp/mvm-interactive-oci-dev-console-target/debug/mvmctl machine run --image alpine -it --allow-host google.com -- /bin/sh`, which reached `~ #`, ran `echo READY_FROM_ALPINE` plus `uname -a`, and exited cleanly.
+- [x] 2026-07-13 Plan 219 / Plan 236 macOS verb-grant witness harness: the
+      refreshed current-main branch now carries the missing disabled-by-default
+      HVF live-smoke harness for the last honest Plan 219 blocker. The new
+      `prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit`
+      target in `tests/oci_image_runner_smoke.rs` compiles the checked-in
+      `examples/python/hello-app`, boots a sealed `machine run --entrypoint -d`
+      session with only `ping` + `run-entrypoint` granted, asserts listed
+      `RunEntrypoint` success (`"hello ari"`), checks `console.log` for
+      `mvm-init: provisioned verb-grant` before
+      `mvm-guest-agent: control plane ready`, expects
+      `mvmctl machine set-timeout <vm> 349` to fail with
+      `update-idle-timeout`, and verifies the per-VM `verb_denied` workload
+      chain plus `mvmctl trust audit verify --tenant local`. Focused
+      validation is green with `cargo test --test oci_image_runner_smoke -- --nocapture`
+      and `cargo clippy --test oci_image_runner_smoke -- -D warnings`. The
+      production blocker is now the real host run/evidence, not the absence of
+      a reusable witness harness.
 - [x] 2026-07-11 Plan 236 OCI `--prod` live witness closeout: the
       source-checkout prod harness now forces `--kernel-source compile` so the
       local witness does not depend on a release-published workload-kernel
@@ -823,6 +840,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
       egress allowlist had omitted `crates.io`, `index.crates.io`, and
       `static.crates.io`, which could force Cargo vendoring in the no-guest-NIC
       builder path through host-generated `403`s. Focused `mvm-build`
+      tests/clippy are green after admitting those hosts, and the synced
+      current-main refresh branch `codex/plan236-plan219-proof-refresh` has now
+      started the remaining operator-surface / validation closeout slice too:
+      it adds `mvmctl machine set-timeout <name> <seconds>` as a named-machine
+      wrapper over the existing idle-timeout RPC, broadens the caller-side
+      denial audit so local capability-gate refusals are chained the same way
+      as guest-returned `VerbNotAuthorized`, and makes the two
+      `libkrun-sys` loopback-bind tests skip cleanly on hosts where the sandbox
+      forbids binding even `127.0.0.1`. Focused refreshed-branch validation is
+      green with `cargo fmt --all -- --check`, `cargo test -p mvm-cli
+      top_level_cli_routes_machine_set_timeout --offline`, and `cargo test -p
+      libkrun-sys free_loopback_port_is_in_range_and_bindable --lib --
+      --nocapture`. These improvements do not change the honest remaining Plan
+      219 blockers: macOS HVF/libkrun live proof and ADR-103 acceptance.
       tests/clippy are green after admitting those hosts, and a fresh
       `/private/tmp/m236h2` rerun now stays alive in the real workload-build
       path instead of reproducing the old immediate failure. A further
