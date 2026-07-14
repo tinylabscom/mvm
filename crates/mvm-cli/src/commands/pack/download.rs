@@ -115,10 +115,7 @@ pub(in crate::commands) mod builder {
         let ctx = PackVerifyCtx::keyless(&policy, &keyless, &inputs.trust);
 
         let staging = fetch_release_builder_pack_staging(arch_str)
-            .context("fetching the published builder pack")?
-            .context(
-                "published builder pack fetch is disabled by the local pack-trust fetch_mode policy",
-            )?;
+            .context("fetching the published builder pack")?;
 
         let manifest_path = staging.path().join("pack-manifest.json");
         let manifest_bytes = std::fs::read(&manifest_path).with_context(|| {

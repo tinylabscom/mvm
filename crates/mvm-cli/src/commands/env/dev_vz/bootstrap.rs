@@ -545,7 +545,7 @@ pub(in crate::commands) mod attested_builder_pack {
     /// carried by the embedded identity template, not by anything the operator
     /// configures — so it must be allowed independent of `pack-trust.json`.
     #[cfg(feature = "manifest-verify")]
-    pub(super) fn keyless_release_policy(base: &LocalPackPolicy) -> LocalPackPolicy {
+    pub(in crate::commands) fn keyless_release_policy(base: &LocalPackPolicy) -> LocalPackPolicy {
         let mut policy = base.clone();
         policy
             .allowed_channels
@@ -614,7 +614,9 @@ pub(in crate::commands) mod attested_builder_pack {
     /// renames it), so it need not share a filesystem with the pack cache,
     /// and its `Drop` cleans it up on any early return here.
     #[cfg(feature = "manifest-verify")]
-    fn fetch_release_builder_pack_staging(arch: &str) -> Result<tempfile::TempDir> {
+    pub(in crate::commands) fn fetch_release_builder_pack_staging(
+        arch: &str,
+    ) -> Result<tempfile::TempDir> {
         let staging = tempfile::Builder::new()
             .prefix("mvm-builder-pack-")
             .tempdir()
