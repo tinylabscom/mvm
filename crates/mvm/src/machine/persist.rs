@@ -69,7 +69,7 @@ pub struct MachineSpec {
     /// Liveness check declared via `--healthcheck` at `machine run` time.
     /// Recorded for inspection now; consumed by active probing later.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub health_check: Option<mvm_sdk::ir::HealthCheck>,
+    pub health_check: Option<mvm_ir::HealthCheck>,
 }
 
 fn is_false(value: &bool) -> bool {
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn machine_spec_roundtrips_health_check() {
         let mut spec = spec_fixture("web");
-        spec.health_check = Some(mvm_sdk::ir::HealthCheck {
+        spec.health_check = Some(mvm_ir::HealthCheck {
             command: vec!["/bin/sh".into(), "-lc".into(), "true".into()],
             interval_secs: 30,
             timeout_secs: 5,

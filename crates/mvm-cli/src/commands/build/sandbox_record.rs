@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
-use mvm_sdk::ir::Workload;
+use mvm_ir::Workload;
 use mvm_sdk::runtime::{
     Divergence, RuntimeRecording, compile_recording_with_findings, recording_sha256_hex,
     verify_recording_digest,

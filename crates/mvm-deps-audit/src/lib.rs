@@ -14,10 +14,10 @@
 //!
 //! The `volume_hash` is `sha256(content_sha256 || canonical(meta))`
 //! so any tamper to any of the artifacts (content, SBOM, fetch
-//! log, CVE result) invalidates `meta.json` → invalidates the
-//! volume hash → admission fails closed.
+//! log, CVE result) invalidates `meta.json` -> invalidates the
+//! volume hash -> admission fails closed.
 //!
-//! This module ships the pure-Rust primitives:
+//! This crate ships the pure-Rust primitives:
 //!
 //! - [`SbomFile`] / [`FetchLog`] / [`CveResult`] — typed wire
 //!   shapes for the sealed artifacts. The builder VM emits these;
@@ -32,15 +32,6 @@
 //!   and compares to the manifest. Used at admission time before
 //!   the workload boots; a mismatch raises
 //!   [`VolumeError::HashMismatch`] and the supervisor rejects.
-//!
-//! The *builder-VM-side* install pipeline (running pip / pnpm
-//! behind an egress allowlist, generating the SBOM via
-//! `cyclonedx-py` / `pnpm sbom`, capturing the fetch log,
-//! running `pip-audit` / `pnpm audit`) lives in `mvm-build` and
-//! lands once the builder VM actually boots. The
-//! audit gate stays *here* in the SDK so the same types are
-//! consumed by the CLI (`mvmctl deps audit`, `mvmctl deps inspect`)
-//! and the supervisor's admission path with no schema drift.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -49,61 +40,36 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// Schema version stamped into every `meta.json`. Bumped only on
-/// breaking changes; additive fields (new audit artifacts, e.g. a
-/// future signature file) stay at the same major.
+/// breaking changes; additive fields stay at the same major.
 pub const VOLUME_MANIFEST_SCHEMA_VERSION: u32 = 1;
 
-/// Canonical filename for each sealed artifact. Centralized so the
-/// builder VM, the host audit path, and the admission verifier all
-/// agree on the layout.
+/// Canonical filename for each sealed artifact.
 pub const FILE_CONTENT_DIR: &str = "content";
 pub const FILE_SBOM: &str = "sbom.cdx.json";
 pub const FILE_FETCH_LOG: &str = "fetch.log";
 pub const FILE_CVE: &str = "cve.json";
 pub const FILE_MANIFEST: &str = "meta.json";
 
-/// What ends up in `meta.json`. Field order is the canonical hash
-/// order — `serde_json::to_string` over a `BTreeMap`-backed value
-/// produces deterministic bytes the same way other mvm canonical
-/// IRs do.
+/// What ends up in `meta.json`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VolumeManifest {
-    /// Always `VOLUME_MANIFEST_SCHEMA_VERSION` on write; a `verify`
-    /// against an older or newer schema fails closed.
     pub schema_version: u32,
-    /// sha256 of the recursive content directory bytes — computed
-    /// the same way `verify_sealed_volume` re-derives it (see
-    /// `hash_dir`).
     pub content_sha256: String,
-    /// sha256 of `sbom.cdx.json` bytes verbatim.
     pub sbom_sha256: String,
-    /// sha256 of `fetch.log` bytes verbatim.
     pub fetch_log_sha256: String,
-    /// sha256 of `cve.json` bytes verbatim.
     pub cve_sha256: String,
-    /// ISO-8601 timestamp the volume was first sealed.
     pub created_at: String,
-    /// ISO-8601 timestamp of the last `mvmctl deps audit` rerun,
-    /// or equal to `created_at` if never re-audited.
     pub last_audit_at: String,
-    /// Optional caller-provided pointers (lockfile path, tool
-    /// version, etc.) for `mvmctl deps inspect`. Not part of the
-    /// hash; admission ignores these.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, String>,
 }
 
-/// Result of [`seal_volume`] — the volume hash that goes into the
-/// directory name, plus the canonical manifest bytes (so the
-/// caller can write them and verify the round-trip without
-/// re-canonicalizing).
+/// Result of [`seal_volume`].
 #[derive(Debug, Clone)]
 pub struct VolumeSealResult {
     pub volume_hash: String,
     pub manifest: VolumeManifest,
-    /// Canonical JSON bytes the caller should write to
-    /// `<dir>/meta.json`.
     pub manifest_bytes: Vec<u8>,
 }
 
@@ -158,16 +124,6 @@ pub enum VolumeError {
     },
 }
 
-/// Seal a freshly-built dep volume. Reads the content directory and
-/// the three sidecar files, computes their sha256s, builds the
-/// canonical `meta.json` shape, and returns the volume hash plus
-/// the manifest bytes. The caller writes the bytes to
-/// `<volume_dir>/meta.json` and (typically) renames the volume
-/// directory to its hash.
-///
-/// `created_at` / `last_audit_at` are caller-supplied so this
-/// function stays pure / clock-free. Production callers pass
-/// `chrono::Utc::now()`; tests pass a fixed string.
 pub fn seal_volume(
     content_dir: &Path,
     sbom: &Path,
@@ -189,16 +145,6 @@ pub fn seal_volume(
     )
 }
 
-/// Re-seal a dep volume after `mvmctl deps audit` re-runs the CVE
-/// scan. Identical to [`seal_volume`] except that `created_at` and
-/// `last_audit_at` are independent so the audit verb can preserve
-/// the original creation time while stamping the fresh re-audit
-/// timestamp.
-///
-/// Re-audit rewrites `cve.json` → the cve sha256 changes → the
-/// manifest hash changes → the volume hash changes. Callers
-/// atomically rename `<root>/<old_hash>/` → `<root>/<new_hash>/`
-/// once this function returns.
 pub fn reseal_volume(
     content_dir: &Path,
     sbom: &Path,
@@ -232,11 +178,6 @@ pub fn reseal_volume(
     })
 }
 
-/// Verify a sealed volume directory matches its manifest. Reads
-/// `meta.json`, recomputes the content/sbom/fetch_log/cve hashes
-/// from disk, and asserts they match. On success, returns the
-/// expected `volume_hash` so the caller can compare it against
-/// the directory name. Fails closed on any mismatch.
 pub fn verify_sealed_volume(volume_dir: &Path) -> Result<String, VolumeError> {
     if !volume_dir.exists() {
         return Err(VolumeError::Missing(volume_dir.to_path_buf()));
@@ -304,19 +245,10 @@ pub fn verify_sealed_volume(volume_dir: &Path) -> Result<String, VolumeError> {
         }
     }
 
-    // Canonicalize the manifest we just parsed and recompute the
-    // volume hash. This is the value `mvmctl deps audit` rewrites
-    // when re-running the CVE scan (the manifest changes →
-    // volume_hash changes); admission compares this against the
-    // ExecutionPlan's recorded hash.
     let canonical = canonical_json(&manifest)?;
     Ok(derive_volume_hash(&manifest.content_sha256, &canonical))
 }
 
-/// Compute the deterministic volume hash from the content sha256
-/// and the canonical manifest bytes. Pure function so callers
-/// (builder VM, admission verifier, audit re-runner) all agree
-/// on the value.
 pub fn derive_volume_hash(content_sha256: &str, manifest_bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(content_sha256.as_bytes());
@@ -335,10 +267,6 @@ fn artifact_name(kind: &str) -> &'static str {
     }
 }
 
-/// Recursively hash a directory's contents. Walks entries in
-/// sorted order (bytes-wise) so the same content produces the same
-/// hash on every filesystem; folds (relative_path, sha256(file))
-/// pairs into the rolling digest.
 fn hash_dir(dir: &Path) -> Result<String, VolumeError> {
     let mut entries = Vec::new();
     walk_sorted(dir, dir, &mut entries)?;
@@ -382,10 +310,6 @@ fn walk_sorted(
                 .into_owned();
             out.push((rel, p));
         }
-        // Symlinks intentionally skipped: a symlink-bearing dep
-        // closure that resolves outside the volume isn't
-        // reproducible. The builder VM's install path materializes
-        // every file inside the volume.
     }
     Ok(())
 }
@@ -416,9 +340,6 @@ fn hash_file_raw(path: &Path) -> Result<String, VolumeError> {
 }
 
 fn canonical_json(manifest: &VolumeManifest) -> Result<Vec<u8>, VolumeError> {
-    // serde_json with serde struct field order is deterministic.
-    // The schema's annotations field uses BTreeMap so its keys are
-    // sorted too.
     serde_json::to_vec(manifest).map_err(|source| VolumeError::ManifestParse {
         volume: PathBuf::from("<sealing>"),
         source,
@@ -433,26 +354,8 @@ fn hex(bytes: &[u8]) -> String {
     out
 }
 
-// Wire-shape sketches for the artifacts the builder VM emits. Kept
-// as type aliases over `serde_json::Value` for now — the SBOM
-// (CycloneDX 1.5), fetch log, and CVE scan output each have their
-// own external schemas (CycloneDX has a multi-thousand-line JSON
-// Schema; pip-audit's output is documented), and the v1 audit gate
-// only needs the *hashes* of these files, not field-level parsing.
-// When the supervisor's admission gates start reading specific CVE
-// severities directly, those types replace the alias.
-
-/// Stand-in for `sbom.cdx.json` contents. CycloneDX 1.5 is the
-/// canonical schema; the v1 audit gate hashes the bytes verbatim
-/// and doesn't field-parse.
 pub type SbomFile = serde_json::Value;
-
-/// Stand-in for `fetch.log` parsed contents. Production builds
-/// produce a newline-delimited URL list — the gate hashes the
-/// bytes; a future tool may parse it.
 pub type FetchLog = serde_json::Value;
-
-/// Stand-in for `cve.json` (pip-audit / pnpm-audit output).
 pub type CveResult = serde_json::Value;
 
 #[cfg(test)]
@@ -467,28 +370,26 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let tmp = tempfile::tempdir().unwrap();
+            let tmp = tempfile::tempdir().expect("fixture tempdir");
             let dir = tmp.path().to_path_buf();
             Self { _tmp: tmp, dir }
         }
 
-        /// Build a complete sealed volume layout at `<dir>/<name>/`
-        /// with deterministic content, then run `seal_volume` over
-        /// it. Returns the volume dir and the seal result.
         fn build_sealed(&self, name: &str) -> (PathBuf, VolumeSealResult) {
             let v = self.dir.join(name);
             let content = v.join(FILE_CONTENT_DIR);
-            fs::create_dir_all(&content).unwrap();
-            fs::write(content.join("a.txt"), b"alpha\n").unwrap();
-            fs::create_dir_all(content.join("sub")).unwrap();
-            fs::write(content.join("sub").join("b.txt"), b"beta\n").unwrap();
+            fs::create_dir_all(&content).expect("create content dir");
+            fs::write(content.join("a.txt"), b"alpha\n").expect("write a.txt");
+            fs::create_dir_all(content.join("sub")).expect("create nested content dir");
+            fs::write(content.join("sub").join("b.txt"), b"beta\n").expect("write b.txt");
 
             let sbom = v.join(FILE_SBOM);
-            fs::write(&sbom, br#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#).unwrap();
+            fs::write(&sbom, br#"{"bomFormat":"CycloneDX","specVersion":"1.5"}"#)
+                .expect("write sbom");
             let fl = v.join(FILE_FETCH_LOG);
-            fs::write(&fl, b"GET https://pypi.org/simple/requests/\n").unwrap();
+            fs::write(&fl, b"GET https://pypi.org/simple/requests/\n").expect("write fetch log");
             let cve = v.join(FILE_CVE);
-            fs::write(&cve, br#"{"results":[]}"#).unwrap();
+            fs::write(&cve, br#"{"results":[]}"#).expect("write cve");
 
             let result = seal_volume(
                 &content,
@@ -498,8 +399,8 @@ mod tests {
                 "2026-05-13T00:00:00Z",
                 BTreeMap::new(),
             )
-            .expect("seal");
-            fs::write(v.join(FILE_MANIFEST), &result.manifest_bytes).unwrap();
+            .expect("seal volume");
+            fs::write(v.join(FILE_MANIFEST), &result.manifest_bytes).expect("write manifest");
             (v, result)
         }
     }
@@ -508,7 +409,7 @@ mod tests {
     fn seal_then_verify_round_trips_to_same_hash() {
         let fx = Fixture::new();
         let (v, sealed) = fx.build_sealed("vol-a");
-        let verified = verify_sealed_volume(&v).expect("verify");
+        let verified = verify_sealed_volume(&v).expect("verify volume");
         assert_eq!(verified, sealed.volume_hash);
     }
 
@@ -527,9 +428,9 @@ mod tests {
     fn verify_detects_tampered_content() {
         let fx = Fixture::new();
         let (v, _) = fx.build_sealed("vol-tamper-content");
-        // Modify a content file *after* sealing.
-        fs::write(v.join(FILE_CONTENT_DIR).join("a.txt"), b"alpha-MODIFIED\n").unwrap();
-        let err = verify_sealed_volume(&v).unwrap_err();
+        fs::write(v.join(FILE_CONTENT_DIR).join("a.txt"), b"alpha-MODIFIED\n")
+            .expect("tamper content");
+        let err = verify_sealed_volume(&v).expect_err("content tamper must fail");
         assert!(
             matches!(err, VolumeError::HashMismatch { kind, .. } if kind == "content"),
             "got: {err}"
@@ -540,8 +441,8 @@ mod tests {
     fn verify_detects_tampered_sbom() {
         let fx = Fixture::new();
         let (v, _) = fx.build_sealed("vol-tamper-sbom");
-        fs::write(v.join(FILE_SBOM), b"{\"bomFormat\":\"FAKE\"}").unwrap();
-        let err = verify_sealed_volume(&v).unwrap_err();
+        fs::write(v.join(FILE_SBOM), b"{\"bomFormat\":\"FAKE\"}").expect("tamper sbom");
+        let err = verify_sealed_volume(&v).expect_err("sbom tamper must fail");
         assert!(matches!(err, VolumeError::HashMismatch { kind, .. } if kind == "sbom"));
     }
 
@@ -549,8 +450,8 @@ mod tests {
     fn verify_detects_tampered_cve() {
         let fx = Fixture::new();
         let (v, _) = fx.build_sealed("vol-tamper-cve");
-        fs::write(v.join(FILE_CVE), b"{\"results\":[\"FORGED\"]}").unwrap();
-        let err = verify_sealed_volume(&v).unwrap_err();
+        fs::write(v.join(FILE_CVE), b"{\"results\":[\"FORGED\"]}").expect("tamper cve");
+        let err = verify_sealed_volume(&v).expect_err("cve tamper must fail");
         assert!(matches!(err, VolumeError::HashMismatch { kind, .. } if kind == "cve"));
     }
 
@@ -558,8 +459,9 @@ mod tests {
     fn verify_detects_tampered_fetch_log() {
         let fx = Fixture::new();
         let (v, _) = fx.build_sealed("vol-tamper-fetch");
-        fs::write(v.join(FILE_FETCH_LOG), b"GET https://evil.example.com\n").unwrap();
-        let err = verify_sealed_volume(&v).unwrap_err();
+        fs::write(v.join(FILE_FETCH_LOG), b"GET https://evil.example.com\n")
+            .expect("tamper fetch log");
+        let err = verify_sealed_volume(&v).expect_err("fetch-log tamper must fail");
         assert!(matches!(err, VolumeError::HashMismatch { kind, .. } if kind == "fetch_log"));
     }
 
@@ -567,8 +469,8 @@ mod tests {
     fn verify_rejects_missing_manifest() {
         let fx = Fixture::new();
         let v = fx.dir.join("no-meta");
-        fs::create_dir_all(v.join(FILE_CONTENT_DIR)).unwrap();
-        let err = verify_sealed_volume(&v).unwrap_err();
+        fs::create_dir_all(v.join(FILE_CONTENT_DIR)).expect("create missing-manifest fixture");
+        let err = verify_sealed_volume(&v).expect_err("missing manifest must fail");
         assert!(
             matches!(err, VolumeError::ArtifactMissing { artifact, .. } if artifact == FILE_MANIFEST)
         );
@@ -578,7 +480,6 @@ mod tests {
     fn verify_rejects_unknown_schema_version() {
         let fx = Fixture::new();
         let (v, _) = fx.build_sealed("vol-schema");
-        // Forge a future-schema manifest.
         let bad = serde_json::json!({
             "schema_version": 999,
             "content_sha256": "0",
@@ -588,8 +489,8 @@ mod tests {
             "created_at": "x",
             "last_audit_at": "x",
         });
-        fs::write(v.join(FILE_MANIFEST), bad.to_string()).unwrap();
-        let err = verify_sealed_volume(&v).unwrap_err();
+        fs::write(v.join(FILE_MANIFEST), bad.to_string()).expect("write forged manifest");
+        let err = verify_sealed_volume(&v).expect_err("schema mismatch must fail");
         assert!(matches!(err, VolumeError::SchemaMismatch { .. }));
     }
 
@@ -597,8 +498,8 @@ mod tests {
     fn verify_rejects_missing_sealed_artifact() {
         let fx = Fixture::new();
         let (v, _) = fx.build_sealed("vol-missing");
-        fs::remove_file(v.join(FILE_SBOM)).unwrap();
-        let err = verify_sealed_volume(&v).unwrap_err();
+        fs::remove_file(v.join(FILE_SBOM)).expect("remove sbom");
+        let err = verify_sealed_volume(&v).expect_err("missing artifact must fail");
         assert!(
             matches!(err, VolumeError::ArtifactMissing { artifact, .. } if artifact == FILE_SBOM)
         );
@@ -631,15 +532,13 @@ mod tests {
                 m
             },
         };
-        let bytes = canonical_json(&m).unwrap();
-        let back: VolumeManifest = serde_json::from_slice(&bytes).unwrap();
+        let bytes = canonical_json(&m).expect("canonicalize manifest");
+        let back: VolumeManifest = serde_json::from_slice(&bytes).expect("parse manifest");
         assert_eq!(m, back);
     }
 
     #[test]
     fn manifest_rejects_unknown_fields() {
-        // `deny_unknown_fields` keeps a future field-name typo
-        // from being silently accepted by an older host.
         let bad = serde_json::json!({
             "schema_version": 1,
             "content_sha256": "a",
@@ -650,7 +549,7 @@ mod tests {
             "last_audit_at": "x",
             "future_field": 42,
         });
-        let err = serde_json::from_value::<VolumeManifest>(bad).unwrap_err();
+        let err = serde_json::from_value::<VolumeManifest>(bad).expect_err("unknown field");
         assert!(err.to_string().contains("future_field"));
     }
 }

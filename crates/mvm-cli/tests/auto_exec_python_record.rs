@@ -15,6 +15,7 @@
 
 use std::process::Command;
 
+use mvm_ir::Entrypoint;
 use tempfile::TempDir;
 
 /// Heredoc-style Python that emits a valid recording JSON to
@@ -83,7 +84,7 @@ fn auto_exec_python_script_emits_recording_and_compile_lowers_it() {
 
     assert_eq!(workload.id, "etl-test");
     match &workload.apps[0].entrypoints[0] {
-        mvm_sdk::ir::Entrypoint::Command { command, .. } => {
+        Entrypoint::Command { command, .. } => {
             assert_eq!(command, &vec!["python".to_string(), "run.py".into()]);
         }
         other => panic!("expected Command entrypoint, got {other:?}"),

@@ -34,6 +34,7 @@ use mvm_hostd::plan_admission::{
     AdmittedPlan, BundleAdmissionContext, InMemoryNonceLedger, SystemClock, admit_for_run,
     populate_audit_substrate, stash_plan_for_bridge, thread_tenant_id,
 };
+use mvm_ir::Workload;
 
 /// Inputs for [`admit_plan_for_boot`]. Grouped so the helper avoids
 /// the workspace `clippy::too_many_arguments = "deny"` ceiling and so
@@ -1019,13 +1020,13 @@ pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
 
 pub(super) fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
-) -> Result<Option<mvm_sdk::ir::Workload>> {
+) -> Result<Option<Workload>> {
     let Some(ir_path) = workload_ir_path else {
         return Ok(None);
     };
     let bytes = std::fs::read(ir_path)
         .with_context(|| format!("reading workload IR at {}", ir_path.display()))?;
-    let workload: mvm_sdk::ir::Workload = serde_json::from_slice(&bytes)
+    let workload: Workload = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing workload IR at {}", ir_path.display()))?;
     Ok(Some(workload))
 }

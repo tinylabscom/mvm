@@ -43,6 +43,25 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D
       warnings`, `cargo test --workspace`, and the live TTY witness
       `MVM_DATA_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test /private/tmp/mvm-interactive-oci-dev-console-target/debug/mvmctl machine run --image alpine -it --allow-host google.com -- /bin/sh`, which reached `~ #`, ran `echo READY_FROM_ALPINE` plus `uname -a`, and exited cleanly.
+- [x] 2026-07-13 Plan 253 complete: the worktree keeps the shared crate
+      separation and explicit `sdk-vX.Y.Z` release cadence while staying on a
+      single `mvmctl` CLI. The repo now carries `sdks/release.toml`, a
+      dedicated `.github/workflows/publish-sdk.yml` orchestrator with reusable
+      PyPI/npm publish jobs, registry preflight checks, package smoke tests,
+      and a CI `SDK release dry-run` lane. Published Python + TypeScript SDKs
+      resolve their CLI in the order `MVM_CLI_BIN -> mvmctl`, and the Rust-side
+      shared extraction landed with `crates/mvm-ir` and
+      `crates/mvm-deps-audit`, direct `mvm-cli` IR-only imports moved to
+      `mvm-ir`, and `xtask check-sdk-split` now proves the shared runtime/build
+      crates stay off `mvm-sdk` while `mvm-cli` retains the single-CLI
+      authoring path. Validation in the worktree includes
+      `cargo test -p mvm-deps-audit`, `cargo test -p mvm-build --test app_deps_orchestrator`,
+      `cargo test -p mvm-hostd deps_volume`, `cargo check -p mvm-cli -p xtask`,
+      `cargo test -p xtask check_sdk_split`, `cargo run -p xtask -- check-sdk-split`,
+      `cargo test -p mvm-cli --test auto_exec_python_record --test auto_exec_node_record`,
+      `cargo test -p mvm-cli lowers_secret_refs_from_app_and_entrypoint_envs`,
+      `uv run --directory sdks/python pytest tests/test_machine.py tests/test_sandbox.py`,
+      and `npm --prefix sdks/typescript run test -- machine.test.ts sandbox.test.ts`.
 - [x] 2026-07-13 Plan 219 / Plan 236 macOS verb-grant witness harness: the
       refreshed current-main branch now carries the missing disabled-by-default
       HVF live-smoke harness for the last honest Plan 219 blocker. The new

@@ -1,7 +1,7 @@
 //! Resolve a destination host to its reversible replacement action.
 
 use mvm_core::policy::{ReversibleReplacementAction, ReversibleReplacementPolicy};
-use mvm_sdk::ir::host_matches;
+use mvm_ir::host_matches;
 
 /// First matching profile wins; else the default action.
 pub fn resolve<'a>(

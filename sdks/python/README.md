@@ -121,9 +121,37 @@ vm.exec(["echo", "hello"])
 vm.stop()
 ```
 
-Set `MVM_CLI_BIN=/path/to/mvmctl` to point the SDK at a local or test CLI
-binary. CLI process failures raise `mv.MachineError` with `argv`, `exit_code`,
-and captured `stderr`.
+The SDK resolves its CLI in this order: `MVM_CLI_BIN`, then `mvmctl`.
+Published SDK packages use the ordinary `mvmctl` release; source-checkout
+users can still point `MVM_CLI_BIN` at a locally built `mvmctl`. CLI process
+failures raise `mv.MachineError` with `argv`,
+`exit_code`, and captured `stderr`.
+
+## Local SDK development
+
+When changing the Python SDK in this repo:
+
+```sh
+cargo build -p mvm-cli
+export MVM_CLI_BIN="$PWD/target/debug/mvmctl"
+uv venv
+. .venv/bin/activate
+uv pip install -e sdks/python
+```
+
+That gives you an editable SDK install from the checkout while keeping all
+machine/sandbox subprocess calls pinned to the worktree-built `mvmctl`.
+
+Useful local commands:
+
+```sh
+just sdk-build-python
+uv run --directory sdks/python pytest
+PYTHONPATH="$PWD/sdks/python" python3 app.py
+```
+
+Use `PYTHONPATH=...` when you want a zero-install checkout run; use the editable
+install when you want a more normal virtualenv workflow.
 
 ## Optional extras
 
@@ -133,8 +161,9 @@ pip install 'mvm[schema]'   # pydantic-based schema derivation from type hints
 
 ## Versioning
 
-The SDK version tracks the `mvmctl` toolchain version: a workload emitted by
-`mvm` X.Y.Z is consumed by `mvmctl` X.Y.Z. Install matching versions.
+Published SDK releases are cut explicitly from `sdk-vX.Y.Z` tags. The Python
+package and the TypeScript package share that SDK release version and are
+validated against `sdks/release.toml` before publishing.
 
 ## Links
 

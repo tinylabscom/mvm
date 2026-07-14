@@ -24,7 +24,7 @@ use url::Url;
 use mvm_core::crypto::secret_store::SecretStore;
 use mvm_core::plan::SecretBinding;
 use mvm_core::substitution_wire::{WireRequest, WireResponse};
-use mvm_sdk::ir::AuthType;
+use mvm_ir::AuthType;
 
 use crate::framing::{FrameError, read_json_frame, write_json_frame};
 use crate::keyholder::{
@@ -1489,7 +1489,7 @@ mod tests {
     use super::*;
     use crate::keyholder::{LocalResolver, SubstitutionRegistry};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
+    use mvm_ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -1515,7 +1515,7 @@ mod tests {
     }
 
     fn sigv4_ref(name: &str, hosts: &[&str], service: &str, region: &str) -> SecretRef {
-        use mvm_sdk::ir::Sigv4Params;
+        use mvm_ir::Sigv4Params;
         SecretRef {
             name: name.into(),
             mount: SecretMount::Env { var: "K".into() },
@@ -1907,7 +1907,7 @@ mod server_tests {
     use super::*;
     use crate::keyholder::LocalResolver;
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
+    use mvm_ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::sync::Mutex;
     use tempfile::tempdir;

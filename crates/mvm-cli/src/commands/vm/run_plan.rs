@@ -56,16 +56,15 @@
 //! handles statically.
 
 use anyhow::{Context, Result, bail};
+use mvm_ir::{App, Workload};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
-
-use crate::commands::build::trace_secret_scan::SecretFinding;
-use mvm_sdk::ir::{App, Workload};
 
 use super::managed_secrets::lower_app_secrets;
 use crate::commands::build::sandbox_record::{
     LoadedRecording, auto_exec_record_script, script_language_from_path,
 };
+use crate::commands::build::trace_secret_scan::SecretFinding;
 use mvm_core::plan::SynthesisInput;
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock, admit_for_run};
 

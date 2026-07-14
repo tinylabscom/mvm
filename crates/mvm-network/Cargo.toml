@@ -10,9 +10,8 @@ authors.workspace = true
 
 [dependencies]
 mvm-core.workspace = true
-# IR `NetworkMode` the registry resolves (A5). Acyclic: mvm-sdk does not
-# depend on mvm-network; its only mvm-* normal dep is mvm-core.
-mvm-sdk.workspace = true
+# IR `NetworkMode` the registry resolves (A5).
+mvm-ir.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

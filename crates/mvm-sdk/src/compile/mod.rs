@@ -41,7 +41,6 @@
 pub mod archive;
 pub(crate) mod data;
 pub mod deps;
-pub mod deps_audit;
 pub mod explain;
 pub mod flake;
 pub mod func_describe;
@@ -52,6 +51,8 @@ pub mod orchestrator;
 pub mod reachability;
 pub mod source;
 pub mod strip_framework;
+
+pub use mvm_deps_audit as deps_audit;
 
 pub use archive::{ArchiveError, archive_dir};
 pub use deps::{DepsError, validate_lockfiles};

@@ -111,14 +111,45 @@ vm.exec(["echo", "hello"]);
 vm.stop();
 ```
 
-Set `MVM_CLI_BIN=/path/to/mvmctl` to point the SDK at a local or test CLI
-binary. CLI process failures raise `MachineError` with `argv`, `exitCode`, and
-captured `stderr`.
+The SDK resolves its CLI in this order: `MVM_CLI_BIN`, then `mvmctl`.
+Published SDK packages use the ordinary `mvmctl` release; source-checkout
+users can still point `MVM_CLI_BIN` at a locally built `mvmctl`. CLI process
+failures raise `MachineError` with `argv`, `exitCode`, and captured `stderr`.
+
+## Local SDK development
+
+When changing the TypeScript SDK in this repo:
+
+```sh
+cargo build -p mvm-cli
+export MVM_CLI_BIN="$PWD/target/debug/mvmctl"
+just sdk-install-typescript
+just sdk-build-typescript
+```
+
+That keeps SDK subprocess calls pinned to the worktree-built `mvmctl` while
+producing the publishable package output in `sdks/typescript/dist/`.
+
+Useful local commands:
+
+```sh
+npm --prefix sdks/typescript run test
+npm --prefix sdks/typescript run build
+npm install "$PWD/sdks/typescript"
+```
+
+For publish-shape rehearsal, prefer packing and installing the tarball instead
+of importing source files directly:
+
+```sh
+npm --prefix sdks/typescript pack
+```
 
 ## Versioning
 
-The SDK version tracks the `mvmctl` toolchain version: a workload emitted by
-`@runmvm/mvm` X.Y.Z is consumed by `mvmctl` X.Y.Z. Install matching versions.
+Published SDK releases are cut explicitly from `sdk-vX.Y.Z` tags. The Python
+package and the TypeScript package share that SDK release version and are
+validated against `sdks/release.toml` before publishing.
 
 ## Links
 

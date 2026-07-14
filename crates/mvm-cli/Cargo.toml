@@ -18,9 +18,11 @@ mvm-backend = { workspace = true, default-features = false }
 mvm-mcp = { workspace = true, optional = true }
 mvm-oci.workspace = true
 mvm-hostd.workspace = true
-# `mvmctl compile` reads the Workload IR (mvm_sdk::ir) and routes it
-# through the compile pipeline.
+# `mvmctl` still owns authoring/runtime-record flows through `mvm-sdk`,
+# while obvious IR-only call sites depend directly on `mvm-ir`.
+mvm-ir.workspace = true
 mvm-sdk.workspace = true
+mvm-deps-audit.workspace = true
 anyhow.workspace = true
 # Real ext4 inode lookup for the Stage 0 post-build check (replaces the
 # old raw-byte substring scan over rootfs.ext4).

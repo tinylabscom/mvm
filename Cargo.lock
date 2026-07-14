@@ -1975,7 +1975,7 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-sdk",
+ "mvm-ir",
  "object_store",
  "rand 0.8.6",
  "secrecy",
@@ -2034,11 +2034,11 @@ dependencies = [
  "libkrun-sys",
  "lzma-rs",
  "mvm-core",
+ "mvm-deps-audit",
  "mvm-ext4",
  "mvm-guest",
  "mvm-guest-helpers",
  "mvm-network",
- "mvm-sdk",
  "nix",
  "rand 0.8.6",
  "reqwest 0.13.4",
@@ -2075,9 +2075,11 @@ dependencies = [
  "mvm-backend",
  "mvm-build",
  "mvm-core",
+ "mvm-deps-audit",
  "mvm-ext4",
  "mvm-guest",
  "mvm-hostd",
+ "mvm-ir",
  "mvm-mcp",
  "mvm-oci",
  "mvm-sdk",
@@ -2159,6 +2161,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-deps-audit"
+version = "0.18.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "mvm-ext4"
 version = "0.18.0"
 dependencies = [
@@ -2233,9 +2246,10 @@ dependencies = [
  "mvm",
  "mvm-backend",
  "mvm-core",
+ "mvm-deps-audit",
  "mvm-guest",
+ "mvm-ir",
  "mvm-network",
- "mvm-sdk",
  "mvm-verify",
  "rand 0.8.6",
  "regex",
@@ -2262,6 +2276,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-ir"
+version = "0.18.0"
+dependencies = [
+ "mvm-core",
+ "schemars",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+]
+
+[[package]]
 name = "mvm-mcp"
 version = "0.18.0"
 dependencies = [
@@ -2277,7 +2302,7 @@ name = "mvm-network"
 version = "0.18.0"
 dependencies = [
  "mvm-core",
- "mvm-sdk",
+ "mvm-ir",
  "serde_json",
 ]
 
@@ -2313,7 +2338,9 @@ dependencies = [
  "globset",
  "hex",
  "mvm-core",
+ "mvm-deps-audit",
  "mvm-guest",
+ "mvm-ir",
  "schemars",
  "serde",
  "serde_json",
@@ -2339,7 +2366,7 @@ dependencies = [
  "chrono",
  "futures",
  "mvm-core",
- "mvm-sdk",
+ "mvm-ir",
  "object_store",
  "serde_json",
  "sha2 0.11.0",

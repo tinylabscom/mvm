@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use mvm_sdk::ir::NetworkMode;
+use mvm_ir::NetworkMode;
 
 use crate::provider::{NetworkError, NetworkProvider};
 

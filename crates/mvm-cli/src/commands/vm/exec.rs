@@ -12,6 +12,7 @@ use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 
 use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
+use mvm_ir::HealthCheck;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -86,7 +87,7 @@ pub(in crate::commands) struct Args {
     /// Internal (not a CLI flag): the resolved healthcheck declaration,
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
-    pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
+    pub healthcheck: Option<HealthCheck>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -230,7 +231,7 @@ pub(in crate::commands) struct RunArgs {
     /// Internal (not a CLI flag): the resolved healthcheck declaration,
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
-    pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
+    pub healthcheck: Option<HealthCheck>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on

@@ -1,6 +1,8 @@
 [workspace]
 members = [
     "crates/mvm-core",
+    "crates/mvm-deps-audit",
+    "crates/mvm-ir",
     "crates/mvm-storage",
     # plan 123 Phase A — NetworkProvider trait + provisioning/policy seam.
     # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-backend
@@ -49,9 +51,8 @@ members = [
     # and loopback TCP to host-vsock bridge. Distributed service mesh,
     # tenant policy, and cryptographic routing belong in mvmd.
     # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
-    # mvm-sdk is the builder surface (it now also carries the
-    # canonical Workload IR as `mvm_sdk::ir`, folded from the former
-    # mvm-ir crate in plan 121 A3). The mvm-sdk-macros proc-macro crate
+    # mvm-sdk is the builder surface and re-exports the canonical
+    # Workload IR from `mvm-ir` as `mvm_sdk::ir`. The mvm-sdk-macros proc-macro crate
     # was removed (Plan 199 C) as an orphaned empty placeholder — re-add
     # it when the `#[mvm::function]`/`#[mvm::image]`/… bodies actually land.
     "crates/mvm-sdk",
@@ -348,6 +349,8 @@ tree-sitter-typescript = "0.23.2"
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
+mvm-deps-audit = { path = "crates/mvm-deps-audit", version = "0.18.0" }
+mvm-ir = { path = "crates/mvm-ir", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
 mvm-guest = { path = "crates/mvm-guest", version = "0.18.0" }
 mvm-guest-helpers = { path = "crates/mvm-guest-helpers", version = "0.18.0" }

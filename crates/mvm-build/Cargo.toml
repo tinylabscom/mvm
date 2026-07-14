@@ -77,13 +77,12 @@ mvm-guest.workspace = true
 # Optional + folded into `builder-vm`: the provider is gated with
 # `libkrun_builder`, so a default build pulls neither.
 mvm-network = { workspace = true, optional = true }
-# `install_app_deps` reuses
-# `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
-# for cache-hit verification. The orchestrator owns the cache
-# probe + miss-path placeholder; the audit primitives stay in
-# `mvm-sdk` so the supervisor and the builder VM go through the
-# same types.
-mvm-sdk.workspace = true
+# `install_app_deps` reuses the sealed-volume audit primitives for
+# cache-hit verification. The orchestrator owns the cache probe +
+# miss-path placeholder; the audit types stay in a dedicated leaf
+# crate so the supervisor and the builder VM go through the same
+# wire shapes without pulling the full SDK.
+mvm-deps-audit.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
 fs2.workspace = true

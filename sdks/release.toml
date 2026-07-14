@@ -1,0 +1,11 @@
+version = "0.15.1"
+tag_prefix = "sdk-v"
+cli_binary_names = ["mvmctl"]
+
+[python]
+name = "mvm"
+path = "sdks/python"
+
+[typescript]
+name = "@runmvm/mvm"
+path = "sdks/typescript"
