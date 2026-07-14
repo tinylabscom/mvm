@@ -42,7 +42,7 @@ jobs:
           SDK_EVENT_NAME: ${{ github.event_name }}
           SDK_RELEASE_TAG: ${{ github.event.release.tag_name }}
           SDK_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
-          SDK_CHECK_REGISTRY: ${{ github.event_name == 'workflow_call' && 'false' || 'true' }}
+          SDK_CHECK_REGISTRY: ${{ github.event_name == 'release' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           python - <<'PY'
