@@ -4440,6 +4440,17 @@ mod tests {
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Drop the per-run `mvm.hostepoch=<secs>` clock token the image cmdline
+    /// carries (its value is wall-clock-dependent), so exact-cmdline assertions
+    /// stay deterministic.
+    fn strip_hostepoch_token(cmdline: &str) -> String {
+        cmdline
+            .split_whitespace()
+            .filter(|t| !t.starts_with("mvm.hostepoch="))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     #[test]
     fn align_up_rounds_to_next_multiple() {
         assert_eq!(align_up(0, 4096), 0);
@@ -5425,7 +5436,7 @@ mod tests {
                 assert_eq!(kernel_path, kernel);
                 assert_eq!(rootfs_path, rootfs);
                 assert_eq!(
-                    cmdline,
+                    strip_hostepoch_token(&cmdline),
                     "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init"
                 );
             }
@@ -5508,7 +5519,7 @@ mod tests {
             } => {
                 assert_eq!(kernel_path, arch_dir.join("vmlinux"));
                 assert_eq!(rootfs_path, arch_dir.join("rootfs.ext4"));
-                assert_eq!(cmdline, expected_cmdline);
+                assert_eq!(strip_hostepoch_token(&cmdline), expected_cmdline);
             }
             BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
         }
@@ -5641,7 +5652,7 @@ mod tests {
                 assert_eq!(kernel_path, target_arch_dir.join("vmlinux"));
                 assert_eq!(rootfs_path, target_arch_dir.join("rootfs.ext4"));
                 assert_eq!(
-                    cmdline,
+                    strip_hostepoch_token(&cmdline),
                     "console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init"
                 );
             }
