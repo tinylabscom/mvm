@@ -1433,8 +1433,11 @@ mod linux {
         let Some(secs) = super::hostepoch_from_cmdline(cmdline) else {
             return;
         };
+        // Cast to the field's own type (`_`) rather than naming `libc::time_t`,
+        // which is deprecated on musl (it becomes 64-bit in musl 1.2.0) and would
+        // fail CI's `-D warnings`.
         let tv = libc::timeval {
-            tv_sec: secs as libc::time_t,
+            tv_sec: secs as _,
             tv_usec: 0,
         };
         // SAFETY: `tv` is a valid, fully-initialized timeval; the timezone arg is
