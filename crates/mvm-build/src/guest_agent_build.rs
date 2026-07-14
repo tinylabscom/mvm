@@ -136,6 +136,7 @@ pub struct RuntimeOverlayGuestBinaries {
     pub agent: PathBuf,
     pub agent_dev_shell: PathBuf,
     pub netinit: PathBuf,
+    pub netd: PathBuf,
     pub seccomp_apply: PathBuf,
     pub verity_init: PathBuf,
     pub runner: PathBuf,
@@ -148,6 +149,7 @@ pub struct RuntimeOverlayGuestLayout {
     pub agent: PathBuf,
     pub agent_dev_shell: PathBuf,
     pub netinit: PathBuf,
+    pub netd: PathBuf,
     pub seccomp_apply: PathBuf,
     pub verity_init: PathBuf,
     pub runner: PathBuf,
@@ -165,6 +167,7 @@ impl RuntimeOverlayGuestLayout {
             agent: dir.join("agent"),
             agent_dev_shell: dir.join("agent-dev-shell"),
             netinit: dir.join("netinit"),
+            netd: dir.join("netd"),
             seccomp_apply: dir.join("seccomp-apply"),
             verity_init: dir.join("verity-init"),
             runner: dir.join("runner"),
@@ -177,6 +180,7 @@ impl RuntimeOverlayGuestLayout {
         self.agent.is_file()
             && self.agent_dev_shell.is_file()
             && self.netinit.is_file()
+            && self.netd.is_file()
             && self.seccomp_apply.is_file()
             && self.verity_init.is_file()
             && self.runner.is_file()
@@ -188,6 +192,7 @@ impl RuntimeOverlayGuestLayout {
             agent: self.agent.clone(),
             agent_dev_shell: self.agent_dev_shell.clone(),
             netinit: self.netinit.clone(),
+            netd: self.netd.clone(),
             seccomp_apply: self.seccomp_apply.clone(),
             verity_init: self.verity_init.clone(),
             runner: self.runner.clone(),
@@ -558,6 +563,8 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--bin".to_string(),
         "mvm-guest-netinit".to_string(),
         "--bin".to_string(),
+        "mvm-guest-netd".to_string(),
+        "--bin".to_string(),
         "mvm-seccomp-apply".to_string(),
         "--bin".to_string(),
         "mvm-verity-init".to_string(),
@@ -572,6 +579,7 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     let output_dir = spec.output_dir();
     install_one(&output_dir.join("mvm-guest-agent"), &layout.agent)?;
     install_one(&output_dir.join("mvm-guest-netinit"), &layout.netinit)?;
+    install_one(&output_dir.join("mvm-guest-netd"), &layout.netd)?;
     install_one(&output_dir.join("mvm-seccomp-apply"), &layout.seccomp_apply)?;
     install_one(&output_dir.join("mvm-verity-init"), &layout.verity_init)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
@@ -1236,6 +1244,7 @@ mod tests {
         assert_eq!(layout.agent, layout.dir.join("agent"));
         assert_eq!(layout.agent_dev_shell, layout.dir.join("agent-dev-shell"));
         assert_eq!(layout.netinit, layout.dir.join("netinit"));
+        assert_eq!(layout.netd, layout.dir.join("netd"));
         assert_eq!(layout.seccomp_apply, layout.dir.join("seccomp-apply"));
         assert_eq!(layout.runner, layout.dir.join("runner"));
         assert_eq!(layout.egress_client, layout.dir.join("egress-client"));

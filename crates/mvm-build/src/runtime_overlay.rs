@@ -272,6 +272,7 @@ const REQUIRED_OVERLAY_GUEST_PATHS: &[&str] = &[
     "/agent",
     "/agent-dev-shell",
     "/netinit",
+    "/netd",
     "/seccomp-apply",
     "/runner",
     "/egress-client",
@@ -296,6 +297,7 @@ pub fn build_runtime_overlay_from_guest_binaries(
     stage_runtime_overlay_binary(&bins.agent, &root.join("agent"))?;
     stage_runtime_overlay_binary(&bins.agent_dev_shell, &root.join("agent-dev-shell"))?;
     stage_runtime_overlay_binary(&bins.netinit, &root.join("netinit"))?;
+    stage_runtime_overlay_binary(&bins.netd, &root.join("netd"))?;
     stage_runtime_overlay_binary(&bins.seccomp_apply, &root.join("seccomp-apply"))?;
     stage_runtime_overlay_binary(&bins.runner, &root.join("runner"))?;
     stage_runtime_overlay_binary(&bins.egress_client, &root.join("egress-client"))?;
@@ -1653,6 +1655,12 @@ mod tests {
                 xattrs: Vec::new(),
             },
             Node::File {
+                path: "/netd".into(),
+                mode: 0o555,
+                data: b"netd".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
                 path: "/seccomp-apply".into(),
                 mode: 0o555,
                 data: b"seccomp".to_vec(),
@@ -2936,6 +2944,7 @@ short  bar.ext4
             agent: make_bin("agent"),
             agent_dev_shell: make_bin("agent-dev-shell"),
             netinit: make_bin("netinit"),
+            netd: make_bin("netd"),
             seccomp_apply: make_bin("seccomp-apply"),
             runner: make_bin("runner"),
             egress_client: make_bin("egress-client"),
@@ -2954,5 +2963,12 @@ short  bar.ext4
         assert!(artifact.sidecar.is_file());
         assert_eq!(artifact.version, "1.2.3");
         assert_eq!(artifact.roothash.len(), 64);
+
+        // The staged overlay carries every required guest path, netd included —
+        // OCI RuntimeLean runs resolve the tunnel packet pump at /mvm/runtime/netd.
+        validate_overlay_payload(&artifact.overlay_ext4)
+            .expect("direct overlay carries all required guest paths");
+        let fs = ext4_view::Ext4::load_from_path(&artifact.overlay_ext4).unwrap();
+        assert!(fs.exists("/netd").unwrap(), "overlay must stage /netd");
     }
 }

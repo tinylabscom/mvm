@@ -1,5 +1,5 @@
 {
-  description = "mvm runtime overlay disk — verity-sealed ext4 carrying the guest agent + seccomp shim + netinit + runner, mounted at /mvm/runtime in every microVM (ADR-051)";
+  description = "mvm runtime overlay disk — verity-sealed ext4 carrying the guest agent + seccomp shim + netinit + netd + runner, mounted at /mvm/runtime in every microVM (ADR-051)";
 
   # ── Why this flake exists ─────────────────────────────────────────
   #
@@ -7,9 +7,11 @@
   # boot — Nix-built rootfs and OCI-pulled rootfs alike. The
   # overlay carries the in-VM binaries mvm controls (the guest
   # agent, the per-service seccomp shim, the function-workload
-  # runner, and `mvm-guest-netinit` which installs
-  # kernel blackhole routes for `MANDATORY_DENY_RANGES` so OCI-
-  # imported workloads get Layer 1 network defense too) plus a
+  # runner, `mvm-guest-netinit` which installs kernel blackhole
+  # routes for `MANDATORY_DENY_RANGES` so OCI-imported workloads
+  # get Layer 1 network defense too, and `mvm-guest-netd` — the
+  # in-guest tunnel packet pump the OCI RuntimeLean egress path
+  # drives) plus a
   # placeholder for the per-language SDK runtime libraries the
   # vsock substitution depends on (the libraries
   # themselves land later; this flake reserves the
@@ -287,7 +289,7 @@
             # Staging tree — the eventual filesystem root inside the
             # overlay ext4. The kernel mounts this at /mvm/runtime
             # inside the guest, so the *FS root* contains
-            # /agent, /seccomp-apply, /netinit, /runner,
+            # /agent, /seccomp-apply, /netinit, /netd, /runner,
             # /egress-client, /sdk-py/, /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"
             mkdir -p "$staging" "$staging/lib"
@@ -313,12 +315,14 @@
             cp ${guestDev}/bin/mvm-guest-agent "$staging/agent-dev-shell"
             cp ${guest}/bin/mvm-seccomp-apply "$staging/seccomp-apply"
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
+            cp ${guest}/bin/mvm-guest-netd       "$staging/netd"
             cp ${runner}/bin/mvm-runner "$staging/runner"
             cp ${egressClient}/bin/mvm-egress-client "$staging/egress-client"
             relocate_runtime_exe "$staging/agent"
             relocate_runtime_exe "$staging/agent-dev-shell"
             relocate_runtime_exe "$staging/seccomp-apply"
             relocate_runtime_exe "$staging/netinit"
+            relocate_runtime_exe "$staging/netd"
             relocate_runtime_exe "$staging/runner"
             relocate_runtime_exe "$staging/egress-client"
 
