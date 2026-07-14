@@ -1,6 +1,6 @@
 # Plan 251: Reversible replacement on owned request/response paths
 
-**Status:** Implemented; workspace-wide validation closeout pending a clean host pass
+**Status:** Complete
 **Date:** 2026-07-13
 **ADR:** [`../adrs/111-runtime-owned-reversible-replacement.md`](../adrs/111-runtime-owned-reversible-replacement.md)
 **Goal:** land the first runtime-owned detect -> replace -> reinject slice for
@@ -33,10 +33,7 @@ existing substitution/redaction posture.
 
 ## Validation
 
-- `cargo check --workspace` (green in this worktree session)
-- Focused reversible-replacement tests in `mvm-core` / `mvm-hostd` plus
-  isolated `cargo test -p mvm-guest --test entrypoint_execute -- --nocapture`
-  (green in this session)
-- `cargo test --workspace` and `cargo clippy --workspace --all-targets -- -D warnings`
-  still need a fresh host pass without PTY interference and without the
-  host-wide `ENOSPC` condition that interrupted the session reruns
+- `cargo check --workspace`
+- Focused reversible-replacement tests in `mvm-core` / `mvm-hostd`
+- `cargo test --workspace --no-fail-fast`
+- `cargo clippy --workspace --all-targets -- -D warnings`

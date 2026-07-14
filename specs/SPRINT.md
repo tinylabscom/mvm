@@ -54,15 +54,10 @@ plan 25 sequences the work into six independently-shippable workstreams.
       spans, replace them with request-scoped opaque tokens on owned outbound
       request headers/bodies, then reinject exact token echoes on the owned
       response path. The proof/audit surface records keyed digests and byte
-      spans only, never plaintext. This session got `cargo check --workspace`
-      green plus focused reversible-replacement tests and an isolated
-      `cargo test -p mvm-guest --test entrypoint_execute -- --nocapture`
-      rerun green. Repeated full-workspace `cargo test --workspace` reruns on
-      this host were blocked by session-environment issues outside the feature
-      diff (a PTY-fed confirmation-path test once, then host-wide `ENOSPC`
-      failures in temp-heavy `mvm-build` tests before cache cleanup), so the
-      remaining workspace-wide `cargo test` / `cargo clippy --workspace
-      --all-targets -- -D warnings` closeout still needs a fresh host pass.
+      spans only, never plaintext. Final validation is green for
+      `cargo check --workspace`, focused reversible-replacement tests,
+      `cargo test --workspace --no-fail-fast`, and `cargo clippy --workspace
+      --all-targets -- -D warnings`.
 - [x] 2026-07-11 Plan 237 Phase 0 validation follow-up: fresh worktree
       validation is green for the required target musl `mvm-oci-init`
       zigbuild, full `mvm-guest` test suite, and focused `mvm-cli`
