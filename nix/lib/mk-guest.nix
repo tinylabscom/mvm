@@ -116,17 +116,6 @@ in
 , dev            ? null
 , uids           ? null   # { agent = <int>; entrypoint = <int>; } — see below
 , extraFiles     ? { }
-# Whether to bake the `mvm-addon-dns` binary into the rootfs at
-# `/usr/local/bin/mvm-addon-dns`. The default (`true`) matches the
-# "always install + no-op when zone empty" contract that workload
-# microVMs rely on (see `specs/contracts/local-addon-dns.md`).
-# Builder/utility VMs whose `/init` doesn't run mkGuest's addon-dns
-# activation block (e.g. `nix/images/builder-vm/`, which substitutes
-# `mvm-host-vm-init` as PID 1) should pass `bakeAddonDns = false` to
-# skip the Rust compile of `mvm-addon-dns` during their rootfs build
-# — a meaningful saving in Stage 0 where the build runs on tmpfs and
-# competes with the kernel compile for memory.
-, bakeAddonDns   ? true
 # Whether to bake the `mvm-audit-probe` binary into the rootfs at
 # `/usr/local/bin/audit-probe`. Off by default — it is a test fixture, not a
 # production binary. A live-VM `host.audit.v1` round-trip fixture image sets
@@ -154,14 +143,6 @@ in
 # exits at boot → kernel panic. `null` (the default) keeps the legacy
 # single-file behaviour: PID 1 runs `/etc/mvm/entrypoint`.
 , bootCommand    ? null
-, runtimeLeanOverride ? null
-# Whether to bake the `mvm-exit-report` binary into the rootfs at
-# `/usr/local/bin/mvm-exit-report`. The default (`true`) matches the mkGuest
-# `/init` contract, which reports workload exit status before poweroff. VMs
-# that replace mkGuest's `/init` as PID 1 (for example the builder VM, which
-# runs `mvm-host-vm-init`) should set this `false` to avoid compiling an
-# unused guest-runtime fallback into the rootfs closure.
-, bakeExitReport ? true
 }:
 let
   entrypointKind = classifyEntrypoint entrypoint;
@@ -174,12 +155,6 @@ let
   # console-wiring fact (see `mvmMeta.withDevShell`) — distinct from the
   # accessible/sealed classification it happens to track.
   withDevShell = isDev;
-  # Sealed workload images now treat the verity-backed runtime overlay as the
-  # authoritative source for the guest-control binaries it already carries
-  # today. Dev-tier images keep the baked fallback until every local backend
-  # can attach the overlay.
-  runtimeLean =
-    if runtimeLeanOverride == null then isSealed else runtimeLeanOverride;
 
   extraFileLabel = path:
     let
@@ -253,29 +228,6 @@ let
   # Either way the binary is the production Rust build, not a stub.
   guestAgentPkg = pkgs.callPackage ../packages/mvm-guest-agent.nix {
     inherit mvmSrc withDevShell;
-  };
-
-  # ── mvm-addon-dns — in-guest loopback DNS resolver ─────────────
-  #
-  # Always baked into the rootfs (the "always-install + no-op when
-  # zone empty" pattern from `specs/contracts/local-addon-dns.md`);
-  # /init activates it only when a zone file is present, so a guest
-  # without addons keeps its baked /etc/resolv.conf byte-for-byte.
-  addonDnsPkg = pkgs.callPackage ../packages/mvm-addon-dns.nix {
-    inherit mvmSrc;
-  };
-
-  # Exit reporter — records workload exit status before poweroff.
-  # Baked unconditionally into every guest rootfs (prod and dev).
-  exitReportPkg = pkgs.callPackage ../packages/mvm-exit-report.nix {
-    inherit mvmSrc;
-  };
-
-  # Egress shim  — loopback SOCKS5 → host vsock egress gateway. Baked
-  # unconditionally (inert unless /init starts it when the boot env requests
-  # vsock-only egress); the guest's sole path off-VM under the no-NIC model.
-  egressClientPkg = pkgs.callPackage ../packages/mvm-egress-client.nix {
-    inherit mvmSrc;
   };
 
   # In-guest host.audit.v1 driver — test fixture, baked only when
@@ -631,15 +583,47 @@ let
       echo "mvm-init: provisioned verb-grant"
     fi
 
+    # Stage 2.476 — declared runtime-source policy. The host carries
+    # the per-boot runtime contract on the kernel cmdline; when
+    # omitted we keep the historical preferred-overlay compatibility
+    # behavior. Resolved here, ahead of Stage 2.48, so the addon-DNS
+    # activation ladder below can share the same policy gate as
+    # netinit / egress-client / agent further down.
+    MVM_RUNTIME_SOURCE_POLICY=$(/bin/busybox sed -n 's/.*\bmvm\.runtime_source_policy=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -z "$MVM_RUNTIME_SOURCE_POLICY" ]; then
+      MVM_RUNTIME_SOURCE_POLICY=prefer_overlay
+    fi
+
+    # Stage 2.477 — runtime overlay mount for non-verity boots. A sealed
+    # (verity) boot has its initramfs mount the runtime overlay at
+    # /mvm/runtime before switch_root; a plain dev boot has no initramfs, so
+    # the overlay rides a read-only virtio-blk device the host names on the
+    # kernel cmdline as `mvm.runtime_data=/dev/vdN`. Mount it here — before the
+    # addon-dns / netinit / egress-client / agent ladders below resolve any
+    # /mvm/runtime/<bin> — but only when /mvm/runtime is not already a
+    # mountpoint, so a verity boot that already mounted it is left untouched.
+    # Absent token ⇒ legacy boot; /mvm/runtime stays as baked. Non-fatal.
+    MVM_RUNTIME_DATA_DEV=$(/bin/busybox sed -n 's/.*\bmvm\.runtime_data=\([^ ]*\).*/\1/p' /proc/cmdline)
+    if [ -n "$MVM_RUNTIME_DATA_DEV" ] \
+      && ! /bin/busybox grep -q ' /mvm/runtime ' /proc/mounts 2>/dev/null; then
+      if /bin/busybox mount -t ext4 -o ro "$MVM_RUNTIME_DATA_DEV" /mvm/runtime 2>/dev/null; then
+        echo "mvm-init: mounted runtime overlay $MVM_RUNTIME_DATA_DEV at /mvm/runtime (ro)"
+      else
+        echo "mvm-init: warn: could not mount runtime overlay $MVM_RUNTIME_DATA_DEV at /mvm/runtime"
+      fi
+    fi
+
     # Stage 2.48 — local addon DNS bootstrap.
     #
     # The "always-install + no-op when zone empty" pattern from
-    # `specs/contracts/local-addon-dns.md`: the addon DNS binary is
-    # baked into every rootfs but only activated when a zone file
-    # was baked at /etc/mvm/addon_dns_zone.json (via mkGuest's
-    # `extraFiles`) or staged on the config-disk path before init
-    # runs. Guests without addons skip this block entirely, so
-    # /etc/resolv.conf stays byte-for-byte the build-time default.
+    # `specs/contracts/local-addon-dns.md`: the addon DNS binary rides
+    # the runtime overlay at /mvm/runtime/addon-dns (resolved via the
+    # same ladder netinit/egress-client/agent use below), and is only
+    # activated when a zone file was baked at
+    # /etc/mvm/addon_dns_zone.json (via mkGuest's `extraFiles`) or
+    # staged on the config-disk path before init runs. Guests without
+    # addons skip this block entirely, so /etc/resolv.conf stays
+    # byte-for-byte the build-time default.
     #
     # When activated, we:
     #   1. Copy the zone file into /run/mvm so reloads (SIGHUP) and
@@ -655,18 +639,34 @@ let
     #      over /etc/resolv.conf. Single-file bind-mounts survive the
     #      read-only /etc bind that will eventually land
     #      so this works on both dev and hardened images.
-    #   4. Fork mvm-addon-dns under setpriv to the agent uid with
-    #      CAP_NET_BIND_SERVICE preserved via ambient + inheritable
-    #      caps so it can bind UDP/53 on loopback only. The server
-    #      validates loopback + self-upstream constraints itself; we
-    #      do not pass any other privilege.
+    #   4. Resolve the binary from the overlay-resident
+    #      /mvm/runtime/addon-dns (required-overlay boots fail closed
+    #      if it is absent) — then fork it under setpriv
+    #      to the agent uid with CAP_NET_BIND_SERVICE preserved via
+    #      ambient + inheritable caps so it can bind UDP/53 on
+    #      loopback only. The server validates loopback +
+    #      self-upstream constraints itself; we do not pass any
+    #      other privilege.
     MVM_ADDON_DNS_ZONE_SRC=
     if [ -r /run/mvm/addon_dns_zone.json ]; then
       MVM_ADDON_DNS_ZONE_SRC=/run/mvm/addon_dns_zone.json
     elif [ -r /etc/mvm/addon_dns_zone.json ]; then
       MVM_ADDON_DNS_ZONE_SRC=/etc/mvm/addon_dns_zone.json
     fi
-    if [ -n "$MVM_ADDON_DNS_ZONE_SRC" ] && [ -x /usr/local/bin/mvm-addon-dns ]; then
+    MVM_ADDON_DNS_BIN=
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
+      if [ -x /usr/local/bin/mvm-addon-dns ]; then
+        MVM_ADDON_DNS_BIN=/usr/local/bin/mvm-addon-dns
+      fi
+    elif [ -x /mvm/runtime/addon-dns ]; then
+      MVM_ADDON_DNS_BIN=/mvm/runtime/addon-dns
+    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
+      echo "mvm-init: runtime overlay required but /mvm/runtime/addon-dns is missing"
+      exit 1
+    elif [ -x /usr/local/bin/mvm-addon-dns ]; then
+      MVM_ADDON_DNS_BIN=/usr/local/bin/mvm-addon-dns
+    fi
+    if [ -n "$MVM_ADDON_DNS_ZONE_SRC" ] && [ -n "$MVM_ADDON_DNS_BIN" ]; then
       /bin/busybox mkdir -p /run/mvm
       /bin/busybox chmod 0755 /run/mvm
       if [ "$MVM_ADDON_DNS_ZONE_SRC" != /run/mvm/addon_dns_zone.json ]; then
@@ -694,7 +694,7 @@ let
         --reuid=${toString agentUid} --regid=${toString agentUid} \
         --clear-groups --no-new-privs \
         --inh-caps=+net_bind_service --ambient-caps=+net_bind_service \
-        -- /usr/local/bin/mvm-addon-dns &
+        -- "$MVM_ADDON_DNS_BIN" &
     fi
 
     # Stage 2.55 — decode the vsock-egress opt-in. Backends that route outbound
@@ -706,14 +706,9 @@ let
       export MVM_VSOCK_EGRESS=1
     fi
 
-    # Stage 2.56 — declared runtime-source policy. The host carries the
-    # per-boot runtime contract on the kernel cmdline; when omitted we keep
-    # the historical preferred-overlay compatibility behavior.
-    MVM_RUNTIME_SOURCE_POLICY=$(/bin/busybox sed -n 's/.*\bmvm\.runtime_source_policy=\([^ ]*\).*/\1/p' /proc/cmdline)
-    if [ -z "$MVM_RUNTIME_SOURCE_POLICY" ]; then
-      MVM_RUNTIME_SOURCE_POLICY=prefer_overlay
-    fi
-
+    # Stage 2.56 — guest-side netinit. MVM_RUNTIME_SOURCE_POLICY was
+    # resolved earlier (ahead of the addon-DNS block, which needs it
+    # too); this is its first overlay-preferred / rootfs-only ladder.
     MVM_NETINIT_BIN=
     if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
       if [ -x /usr/local/bin/mvm-guest-netinit ]; then
@@ -721,6 +716,9 @@ let
       fi
     elif [ -x /mvm/runtime/netinit ]; then
       MVM_NETINIT_BIN=/mvm/runtime/netinit
+    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
+      echo "mvm-init: runtime overlay required but /mvm/runtime/netinit is missing"
+      exit 1
     elif [ -x /usr/local/bin/mvm-guest-netinit ]; then
       MVM_NETINIT_BIN=/usr/local/bin/mvm-guest-netinit
     fi
@@ -766,15 +764,15 @@ let
     # fails to start, the entrypoint still runs and the lack of
     # agent shows up in `mvmctl status`.
     #
-    # When the mvm runtime overlay is
-    # attached, `mvm-verity-init` bind-mounts it at /mvm/runtime
-    # before switch_root, so /mvm/runtime/agent is the canonical
-    # binary location. Prefer it over the baked-in copy at
-    # /usr/local/bin/mvm-guest-agent (which a future change drops
-    # entirely once every backend attaches the overlay). Both
-    # paths are exec-tested so a half-attached overlay (directory
-    # present, agent missing) still falls through to the baked-in
-    # path rather than booting agent-less.
+    # The agent rides the runtime overlay: on a verity boot
+    # `mvm-verity-init` bind-mounts it at /mvm/runtime before
+    # switch_root, and on a non-verity boot the overlay is mounted
+    # there directly, so /mvm/runtime/agent is the canonical binary
+    # location. mkGuest no longer bakes a /usr/local/bin fallback, so a
+    # required-overlay boot fails closed when the overlay agent is
+    # absent (a half-attached overlay never boots agent-less silently).
+    # The rootfs_only / prefer-overlay branches keep the legacy
+    # /usr/local/bin lookup for images that predate overlay-only.
     MVM_VARIANT=$(/bin/busybox cat /etc/mvm/variant 2>/dev/null || echo prod)
     MVM_AGENT_BIN=
     if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
@@ -870,8 +868,29 @@ let
     MVM_CODE=$?
     # Report the exit code to the host (best-effort), then power off —
     # never reboot. The host reads it from the control vsock port.
-    /usr/local/bin/mvm-exit-report "$MVM_CODE" || \
-      echo "mvm: exit-report failed (code=$MVM_CODE); powering off anyway"
+    # Resolve the binary the same overlay-preferred / rootfs-only way
+    # as netinit/egress-client/agent above: prefer the overlay-resident
+    # /mvm/runtime/exit-report; a required-overlay boot fails closed if
+    # it is absent.
+    MVM_EXIT_REPORT_BIN=
+    if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
+      if [ -x /usr/local/bin/mvm-exit-report ]; then
+        MVM_EXIT_REPORT_BIN=/usr/local/bin/mvm-exit-report
+      fi
+    elif [ -x /mvm/runtime/exit-report ]; then
+      MVM_EXIT_REPORT_BIN=/mvm/runtime/exit-report
+    elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
+      echo "mvm-init: runtime overlay required but /mvm/runtime/exit-report is missing"
+      exit 1
+    elif [ -x /usr/local/bin/mvm-exit-report ]; then
+      MVM_EXIT_REPORT_BIN=/usr/local/bin/mvm-exit-report
+    fi
+    if [ -n "$MVM_EXIT_REPORT_BIN" ]; then
+      "$MVM_EXIT_REPORT_BIN" "$MVM_CODE" || \
+        echo "mvm: exit-report failed (code=$MVM_CODE); powering off anyway"
+    else
+      echo "mvm: exit-report binary missing (code=$MVM_CODE); powering off anyway"
+    fi
     /bin/busybox sync
     /bin/busybox poweroff -f
   '');
@@ -923,23 +942,17 @@ let
   verbTrustFile = pkgs.writeText "mvm-verb-trust"
     ''{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}'';
 
-  # ── mvm-guest-agent — production Rust binary
+  # Side-binaries from the guest-agent derivation. The agent, netinit,
+  # addon-dns, exit-report, and egress-client the guest execs at boot now
+  # come exclusively from the mounted runtime overlay at `/mvm/runtime`, so
+  # mkGuest no longer bakes them into the rootfs. These two are still needed
+  # off the overlay path: `mvm-seccomp-apply` on the per-service launch line,
+  # and `mvm-verity-init` as PID 1 of the verity initramfs.
   #
-  # Built by `nix/packages/mvm-guest-agent.nix` from the workspace
-  # source at `mvmSrc`. The libkrun builder VM makes the
-  # real build host-Nix-free.
-  #
-  # The binary is the same one the workspace's
-  # `crates/mvm-guest/src/bin/mvm-guest-agent.rs` Cargo target builds
-  # — vsock RPC handler, worker-pool dispatcher, integration manifest
-  # consumer, system metrics surface. The `dev-shell` feature gate
-  # toggles `do_exec` between dev and prod images.
-  agentBinary = "${guestAgentPkg}/bin/mvm-guest-agent";
-
-  # `mvm-seccomp-apply` ships alongside the agent (same Cargo
-  # workspace member, same derivation). The per-service launch line
-  # in `mkServiceBlock` execs it via setpriv to apply the tier's
-  # seccomp filter before handing control to the workload.
+  # `mvm-seccomp-apply` ships in the same Cargo workspace member and
+  # derivation as the agent. The per-service launch line in
+  # `mkServiceBlock` execs it via setpriv to apply the tier's seccomp
+  # filter before handing control to the workload.
   seccompApplyBinary = "${guestAgentPkg}/bin/mvm-seccomp-apply";
 
   # `mvm-verity-init` is the PID 1 of the verity initramfs.
@@ -948,28 +961,6 @@ let
   # builder can reach it without duplicating the agent derivation.
   verityInitBinary = "${guestAgentPkg}/bin/mvm-verity-init";
 
-  # Guest-side network defense. `mvm-guest-netinit`
-  # installs kernel blackhole routes for `MANDATORY_DENY_RANGES`
-  # (cloud metadata, link-local, CGNAT, host loopback) inside the
-  # guest at boot. Run as root from `/init` BEFORE the agent forks
-  # under setpriv — the routes must exist before any workload code
-  # can attempt egress.
-  mvmGuestNetinitBinary = "${guestAgentPkg}/bin/mvm-guest-netinit";
-
-  # Userspace L3 egress pump. netinit spawns it only when the
-  # `mvm.network_tunnel=` cmdline token is present; it opens the guest TUN
-  # and relays packets to the host tunnel worker over vsock. Inert (never
-  # spawned) without the token, so it is safe to bake into every rootfs.
-  mvmGuestNetdBinary = "${guestAgentPkg}/bin/mvm-guest-netd";
-
-  # In-guest addon DNS resolver. Loopback-only UDP server that serves
-  # exact configured addon hostnames and forwards everything else to
-  # the pre-rewrite upstream resolver snapshot. Activated by /init
-  # only when a zone file is present so the no-addon path is
-  # unaffected. See `crates/mvm-addon-dns` for details.
-  mvmAddonDnsBinary = "${addonDnsPkg}/bin/mvm-addon-dns";
-  mvmExitReportBinary = "${exitReportPkg}/bin/mvm-exit-report";
-  mvmEgressClientBinary = "${egressClientPkg}/bin/mvm-egress-client";
   mvmAuditProbeBinary = "${auditProbePkg}/bin/audit-probe";
 
   # extraFiles — three accepted spec shapes per target path:
@@ -1157,67 +1148,12 @@ let
     ln -sf /etc/ssl/certs/ca-bundle.crt "$out/etc/ssl/certs/ca-certificates.crt"
     chmod 0644 "$out/etc/ssl/certs/ca-bundle.crt"
 
-    # /usr/local/bin must exist before ANY of the conditional binary cp blocks
-    # below: addon-dns and exit-report are baked regardless of runtimeLean, so
-    # a lean/overlay rootfs skips the agent block yet still cp's into this dir.
-    # Keep the mkdir unconditional here, not inside the non-lean agent block.
+    # /usr/local/bin must exist for the audit-probe fixture cp below (and any
+    # extraFiles the caller installs there). The guest-runtime binaries
+    # (agent, netinit, addon-dns, exit-report, egress-client) are no longer
+    # baked here — the guest sources them from the runtime overlay mounted at
+    # /mvm/runtime; see the resolution ladders in initScript.
     mkdir -p "$out/usr/local/bin"
-
-    ${if runtimeLean then ""
-    else ''
-      # mvm-guest-agent — installed under /usr/local/bin so /init can
-      # exec it on dev-tier fallback paths. Mode 0555 so the agent can't
-      # rewrite itself; ownership is the build-time user (Nix sandbox has no
-      # root) — a later layer binds /etc + /usr read-only at boot to make
-      # this load-bearing. (/usr/local/bin is created unconditionally above.)
-      cp ${agentBinary} "$out/usr/local/bin/mvm-guest-agent"
-      chmod 0555 "$out/usr/local/bin/mvm-guest-agent"
-
-      # Guest-side network defense. Same mode as the
-      # agent (0555: read+exec, not writable). /init runs this as
-      # uid 0 BEFORE forking the agent under setpriv, so the routes
-      # exist before any workload code can attempt egress. The
-      # binary itself does not need elevated capabilities at run
-      # time beyond the CAP_NET_ADMIN that PID 1 already has.
-      cp ${mvmGuestNetinitBinary} "$out/usr/local/bin/mvm-guest-netinit"
-      chmod 0555 "$out/usr/local/bin/mvm-guest-netinit"
-
-      # Userspace L3 egress pump, spawned by netinit only under the
-      # `mvm.network_tunnel=` cmdline token. Same 0555 mode as netinit.
-      cp ${mvmGuestNetdBinary} "$out/usr/local/bin/mvm-guest-netd"
-      chmod 0555 "$out/usr/local/bin/mvm-guest-netd"
-    ''}
-
-    # In-guest addon DNS resolver. Baked into every workload rootfs
-    # so /init can spawn it without a build-time mkGuest flag;
-    # activation is gated at boot on the presence of a zone file
-    # (see initScript). Gated on the `bakeAddonDns` arg so VMs whose
-    # `/init` doesn't run mkGuest's addon-dns activation block (e.g.
-    # `nix/images/builder-vm/`) can skip the Rust compile — the
-    # binary would never get invoked there, and on tmpfs-bound Stage
-    # 0 builds the parallel rustc run for it pushes the kernel
-    # compile into OOM territory.
-    ${if bakeAddonDns then ''
-      cp ${mvmAddonDnsBinary} "$out/usr/local/bin/mvm-addon-dns"
-      chmod 0555 "$out/usr/local/bin/mvm-addon-dns"
-    '' else ""}
-
-    ${if bakeExitReport then ''
-      # Exit reporter — baked by default because mkGuest's `/init`
-      # reports workload exit status through it before poweroff. Rootfses that
-      # replace mkGuest's PID 1 can opt out to keep the runtime contract on the
-      # mounted overlay instead of recompiling an unused fallback binary.
-      cp ${mvmExitReportBinary} "$out/usr/local/bin/mvm-exit-report"
-      chmod 0555 "$out/usr/local/bin/mvm-exit-report"
-    '' else ""}
-
-    ${if runtimeLean then ""
-    else ''
-      # Egress shim — dev/preferred-overlay fallback. Runtime-lean sealed
-      # roots source this from /mvm/runtime/egress-client instead.
-      cp ${mvmEgressClientBinary} "$out/usr/local/bin/mvm-egress-client"
-      chmod 0555 "$out/usr/local/bin/mvm-egress-client"
-    ''}
 
     # In-guest host.audit.v1 driver — test fixture, baked only when the
     # caller opts in. The production guest closure never carries it.
@@ -1416,9 +1352,11 @@ let
     # refuse to boot a workload whose rootfs is not overlay-aware
     # (e.g. an old cached template predating overlay support).
     overlayAware = true;
-    # True when the rootfs intentionally omits the baked agent/netinit pair
-    # and therefore depends on the runtime overlay contract at boot.
-    runtimeLean = runtimeLean;
+    # Always true: mkGuest no longer bakes the guest-runtime binaries into
+    # the rootfs, so every image depends on the runtime overlay contract at
+    # boot. The required-overlay admission gate reads this to refuse a rootfs
+    # that could silently degrade to a baked agent/netinit pair.
+    runtimeLean = true;
     sshTemplateBan = builtins.seq assertNoSshTemplateInputs true;
   };
 in
@@ -1435,7 +1373,6 @@ rootfsImage.overrideAttrs (old: {
     # downstream derivations (verity-initrd, per-service launch line
     # in `mkServiceBlock`) can reach `mvm-seccomp-apply` and
     # `mvm-verity-init` without re-running the cargo build.
-    inherit guestAgentPkg seccompApplyBinary verityInitBinary mvmGuestNetinitBinary mvmGuestNetdBinary;
-    inherit addonDnsPkg mvmAddonDnsBinary;
+    inherit guestAgentPkg seccompApplyBinary verityInitBinary;
   };
 })

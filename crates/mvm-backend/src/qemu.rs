@@ -112,14 +112,26 @@ fn ensure_qemu_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
     if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
         return Ok(());
     }
-    if !qemu_verity_enabled(config) {
+    // A sealed boot (verity metadata present) must be fully verity capable — a
+    // missing initrd fails closed rather than downgrading to an unverified root —
+    // and carries the dm-verity overlay triple its initramfs mounts. A non-verity
+    // dev boot instead mounts a plain read-only overlay from `/dev/vdb`.
+    let verity_intended = config.roothash.is_some() || config.verity_path.is_some();
+    if verity_intended {
+        if !qemu_verity_enabled(config) {
+            bail!(
+                "required-overlay qemu boot requires verity metadata plus an initrd \
+                 (`--initrd` or sibling rootfs.initrd)"
+            );
+        }
+        if qemu_runtime_overlay(config).is_none() {
+            bail!("required-overlay qemu boot requires the runtime overlay artifact triple");
+        }
+    } else if crate::microvm::non_verity_overlay_ext4(config).is_none() {
         bail!(
-            "required-overlay qemu boot requires verity metadata plus an initrd \
-             (`--initrd` or sibling rootfs.initrd)"
+            "required-overlay qemu boot requires the runtime overlay artifact triple \
+             (a non-verity boot mounts it as a plain read-only /dev/vdb)"
         );
-    }
-    if qemu_runtime_overlay(config).is_none() {
-        bail!("required-overlay qemu boot requires the runtime overlay artifact triple");
     }
     Ok(())
 }
@@ -153,6 +165,18 @@ fn qemu_cmdline(config: &VmStartConfig) -> String {
         cmdline.push(' ');
         cmdline.push_str(&verity_args);
     }
+    // Non-verity boots carry the runtime overlay as a plain read-only
+    // `/dev/vdb`; emit the token its `/init` mounts from. Verity boots already
+    // emitted the dm-verity variant above.
+    if !qemu_verity_enabled(config)
+        && let Some(overlay_args) = crate::microvm::build_runtime_overlay_cmdline_args(
+            None,
+            crate::microvm::non_verity_overlay_ext4(config).is_some(),
+        )
+    {
+        cmdline.push(' ');
+        cmdline.push_str(&overlay_args);
+    }
     cmdline.push(' ');
     cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
         config.runtime_source_policy,
@@ -185,7 +209,15 @@ fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
         }
         return drives;
     }
-    vec![format!("file={},if=virtio,format=raw", config.rootfs_path)]
+    let mut drives = vec![format!("file={},if=virtio,format=raw", config.rootfs_path)];
+    // A non-verity dev boot has no initramfs to mount the runtime overlay, so
+    // attach it as a plain read-only virtio-blk device right after the rootfs
+    // (=> /dev/vdb). The guest `/init` mounts it from the matching
+    // `mvm.runtime_data=` cmdline token.
+    if let Some(overlay) = crate::microvm::non_verity_overlay_ext4(config) {
+        drives.push(format!("file={overlay},if=virtio,format=raw,readonly=on"));
+    }
+    drives
 }
 
 impl VmBackend for QemuBackend {
@@ -998,6 +1030,46 @@ mod tests {
     }
 
     #[test]
+    fn qemu_non_verity_boot_attaches_runtime_overlay_as_vdb() {
+        // A plain dev rootfs (no verity) with a resolved overlay triple: the
+        // rootfs keeps /dev/vda read-write, the overlay rides /dev/vdb
+        // read-only, and the cmdline names the same device.
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        let drives = qemu_drive_args(&config);
+        assert_eq!(drives.len(), 2);
+        assert!(drives[0].contains("/tmp/rootfs.ext4"));
+        assert!(!drives[0].contains("readonly=on"));
+        assert!(drives[1].contains("/tmp/runtime.ext4"));
+        assert!(drives[1].contains("readonly=on"));
+
+        let cmdline = qemu_cmdline(&config);
+        assert!(cmdline.contains("root=/dev/vda"), "got: {cmdline}");
+        assert!(
+            cmdline.contains("mvm.runtime_data=/dev/vdb"),
+            "got: {cmdline}"
+        );
+        assert!(!cmdline.contains("mvm.runtime_hash="), "got: {cmdline}");
+    }
+
+    #[test]
+    fn qemu_non_verity_boot_without_overlay_stays_single_disk() {
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        assert_eq!(qemu_drive_args(&config).len(), 1);
+        assert!(!qemu_cmdline(&config).contains("mvm.runtime_data="));
+    }
+
+    #[test]
     fn required_overlay_qemu_support_rejects_missing_overlay_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
@@ -1038,5 +1110,20 @@ mod tests {
         };
         let err = ensure_qemu_runtime_source_supported(&config).unwrap_err();
         assert!(err.to_string().contains("rootfs.initrd"));
+    }
+
+    #[test]
+    fn required_overlay_qemu_support_accepts_non_verity_block_overlay() {
+        // A non-verity dev boot carrying the resolved overlay triple is served by
+        // the plain read-only /dev/vdb mount — no verity metadata or initrd.
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        assert!(ensure_qemu_runtime_source_supported(&config).is_ok());
     }
 }

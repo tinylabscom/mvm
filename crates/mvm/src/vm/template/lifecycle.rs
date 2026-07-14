@@ -822,12 +822,9 @@ pub fn template_build_from_manifest(
     let result =
         mvm_build::dev_build::dev_build(env, &persisted.flake_ref, Some(&persisted.profile), mode)?;
 
-    if let Err(e) = mvm_build::dev_build::ensure_guest_agent_if_needed(env, &result) {
-        ui::warn(&format!(
-            "Could not verify guest agent ({}). If built with mvm's mkGuest, the agent is already included.",
-            e
-        ));
-    }
+    // No post-build agent injection: every mkGuest image resolves its
+    // agent from the runtime overlay (or mkGuest's own bake) at boot,
+    // so there is nothing to verify or patch into the rootfs here.
 
     // Store artifacts under the slot's revision directory. Both the
     // finished dev build and the slot tree are host paths, so this is

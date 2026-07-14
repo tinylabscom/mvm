@@ -463,6 +463,9 @@ fn clone_builder_err(e: &BuilderVmError) -> BuilderVmError {
         BuilderVmError::HvfVmmFailed { detail } => BuilderVmError::HvfVmmFailed {
             detail: detail.clone(),
         },
+        BuilderVmError::RuntimeOverlayUnavailable(s) => {
+            BuilderVmError::RuntimeOverlayUnavailable(s.clone())
+        }
     }
 }
 
