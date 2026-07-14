@@ -15,8 +15,8 @@ mvm = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-backend = { workspace = true, default-features = false }
-mvm-net = { path = "../mvm-net", version = "0.17.0", default-features = false, features = ["host-netd"] }
-mvm-mcp.workspace = true
+mvm-net = { path = "../mvm-net", version = "0.18.0", default-features = false, features = ["host-netd"] }
+mvm-mcp = { workspace = true, optional = true }
 mvm-oci.workspace = true
 mvm-hostd.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_sdk::ir) and routes it
@@ -36,10 +36,8 @@ secrecy.workspace = true
 uuid.workspace = true
 clap.workspace = true
 reqwest.workspace = true
-clap_complete.workspace = true
+rustls.workspace = true
 libc.workspace = true
-indicatif.workspace = true
-inquire.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -57,22 +55,25 @@ tracing-subscriber.workspace = true
 which.workspace = true
 
 [build-dependencies]
+hex.workspace = true
 toml.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
+mvm-ext4.workspace = true
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
 sha2.workspace = true
 hex.workspace = true
-# core_demo_e2e uses libc::kill(-pgid, SIGKILL) to reap a timed-out
-# mvmctl process tree (supervisor + gvproxy) so the run can never hang.
+# Integration tests use libc::kill(-pgid, SIGKILL) to reap a timed-out
+# mvmctl process tree (supervisor + any legacy gateway helper) so the run can
+# never hang.
 libc.workspace = true
 
 [features]
-# `builder-vm` is default so `mvmctl dev up` prefers the libkrun-backed
+# `builder-vm` is default so builds prefer the libkrun-backed builder VM
 # builder VM with a persistent /nix store. Runtime gating via
 # `libkrun_sys::is_available()` still falls back cleanly when libkrun
 # isn't installed on the host.
@@ -82,6 +83,7 @@ contributor-bootstrap = [
     "mvm-build/contributor-bootstrap",
     "mvm-backend/contributor-bootstrap",
 ]
+mcp = ["dep:mvm-mcp"]
 builder-vm = ["mvm-build/builder-vm"]
 # In-process, pure-Rust rootfs materialization (no builder VM / mkfs) for the
 # `run --image` path. Default: the run path builds the ext4 image with the

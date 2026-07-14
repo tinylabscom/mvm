@@ -354,7 +354,6 @@ tree-sitter-typescript = "0.23.2"
 # here because member crates can't override that on a workspace-inherited
 # dependency unless the workspace entry already carries it. The root binary
 # opts back into user-facing defaults through its own `[features]` block.
-<<<<<<< HEAD
 mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
 mvm-guest = { path = "crates/mvm-guest", version = "0.18.0" }
@@ -365,25 +364,12 @@ mvm-oci = { path = "crates/mvm-oci", version = "0.18.0" }
 mvm-ext4 = { path = "crates/mvm-ext4", version = "0.18.0" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.18.0" }
 mvm-network = { path = "crates/mvm-network", version = "0.18.0" }
+mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
 # default-features = false drops `packet-forwarder` (the smoltcp egress stack) for
 # library consumers — only the mvm-network-tunnel-worker bin (mvm-hostd's own
 # target) needs it, so it stays out of every consumer's closure (notably mvmctl).
 mvm-hostd = { path = "crates/mvm-hostd", version = "0.18.0", default-features = false }
-=======
-mvm-core = { path = "crates/mvm-core", version = "0.17.0" }
-mvm-client = { path = "crates/mvm-client", version = "0.17.0" }
-mvm-guest = { path = "crates/mvm-guest", version = "0.17.0" }
-mvm-build = { path = "crates/mvm-build", version = "0.17.0", default-features = false }
-mvm = { path = "crates/mvm", version = "0.17.0", default-features = false }
-mvm-oci = { path = "crates/mvm-oci", version = "0.17.0" }
-mvm-ext4 = { path = "crates/mvm-ext4", version = "0.17.0" }
-mvm-storage = { path = "crates/mvm-storage", version = "0.17.0" }
-mvm-network = { path = "crates/mvm-network", version = "0.17.0" }
-mvm-net = { path = "crates/mvm-net", version = "0.17.0" }
-mvm-cli = { path = "crates/mvm-cli", version = "0.17.0", default-features = false }
-mvm-hostd = { path = "crates/mvm-hostd", version = "0.17.0" }
->>>>>>> 3e6f56b43 (Add vsock transparent networking foundation)
 
 # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
 mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.0" }
