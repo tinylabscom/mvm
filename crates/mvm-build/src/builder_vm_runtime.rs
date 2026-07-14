@@ -454,7 +454,17 @@ max-jobs = auto
 cores = 0
 auto-optimise-store = true
 substituters = https://cache.nixos.org/
-trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
+trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+# Resilience to a flaky builder-egress link: retry each substitute download a
+# few times, cap concurrent connections so large NARs don't starve/drop mid
+# transfer, and fall back to building a derivation from source when its binary
+# cache download keeps failing (a smaller, different fetch than the large
+# prebuilt NAR). Without this a single dropped NAR aborts the whole build.
+fallback = true
+download-attempts = 5
+http-connections = 8
+connect-timeout = 15
+stalled-download-timeout = 90"
 # Flake convention: workspace-path env var so flakes that reference
 # the workspace root don't depend on relative-path resolution
 # against the store-copied flake dir.
