@@ -28,14 +28,10 @@ pub(crate) fn ensure_workload_kernel(prod: bool) -> Result<String> {
     let (provenance, path) = match resolved {
         WorkloadKernelBootstrap::Cached(path) => ("cached", path),
         WorkloadKernelBootstrap::BuildLocal(path) => {
-            ui::info("Building workload kernel locally (source checkout)...");
-            match build_workload_kernel_locally() {
-                Ok(built) => ("built locally", built.display().to_string()),
-                Err(_) if std::path::Path::new(&path).is_file() => {
-                    ("reused cached (local build failed)", path)
-                }
-                Err(e) => return Err(e),
-            }
+            ui::warn(
+                "Workload kernel cache is cold; `machine run --image` will not build it implicitly.",
+            );
+            anyhow::bail!("{}", missing_workload_kernel_message(&path));
         }
         WorkloadKernelBootstrap::Download(dest) => {
             download_workload_kernel(arch, &dest)?;
@@ -185,16 +181,11 @@ pub(super) fn resolve_workload_kernel_bootstrap(
     }
 }
 
-#[cfg(feature = "builder-vm")]
-fn build_workload_kernel_locally() -> Result<std::path::PathBuf> {
-    super::build_kernel_via_stage0(super::KernelVariant::Workload, false)
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn build_workload_kernel_locally() -> Result<std::path::PathBuf> {
-    anyhow::bail!(
-        "building the workload kernel locally requires the `builder-vm` feature; \
-         use a release build with published kernels or rebuild mvmctl with builder-vm enabled"
+pub(super) fn missing_workload_kernel_message(expected_path: &str) -> String {
+    format!(
+        "workload kernel missing (expected at {expected_path}). \
+         `machine run --image` needs a dm-verity-capable workload kernel before the guest can boot. \
+         Create it once with `mvmctl kernel build --which workload` or `just kernel-workload`, then retry."
     )
 }
 

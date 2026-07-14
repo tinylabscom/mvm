@@ -56,7 +56,7 @@ pub enum KernelResolution {
     /// should still [`verify_fetched_kernel`] it against the pin before boot.
     Cached(PathBuf),
     /// Source checkout with no cached kernel — build it to this path
-    /// (`mvmctl build kernel build`). A source checkout is NEVER fetched: the
+    /// (`mvmctl kernel build`). A source checkout is NEVER fetched: the
     /// local-build invariant forbids depending on a published artifact.
     NeedsBuild(PathBuf),
     /// Installed binary with no cached kernel — fetch the published prebuilt
@@ -65,7 +65,7 @@ pub enum KernelResolution {
 }
 
 /// Per-arch, per-variant kernel cache path — the location
-/// `mvmctl build kernel build` writes and the boot path reads.
+/// `mvmctl kernel build` writes and the boot path reads.
 pub fn cached_kernel_path(cache_dir: &Path, arch: &str, variant: &str) -> PathBuf {
     cache_dir
         .join("builder-vm")

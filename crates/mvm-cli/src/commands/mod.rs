@@ -87,6 +87,9 @@ pub(in crate::commands) enum Commands {
     /// Build-time commands (image, compile, validate, kernel)
     #[command(display_order = 3)]
     Build(build::group::Args),
+    /// Build the custom microVM kernels (builder / workload)
+    #[command(display_order = 3)]
+    Kernel(build::kernel::Args),
     /// Scaffold a new project
     #[command(display_order = 4)]
     Init(env::init::Args),

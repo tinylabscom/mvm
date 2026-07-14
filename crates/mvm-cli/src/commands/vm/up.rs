@@ -1216,7 +1216,7 @@ pub(in crate::commands) struct Args {
     #[arg(long = "up-json")]
     pub up_json: bool,
     /// Pin the workload kernel to the locally-built slim kernel in the mvm
-    /// cache (`mvmctl build kernel build --which workload`). When set, the
+    /// cache (`mvmctl kernel build --which workload`). When set, the
     /// boot path uses the cached workload kernel instead of whatever the
     /// image shipped; the image's own kernel file is ignored. If the cache
     /// entry is absent, the boot fails with a clear build hint.
@@ -1660,7 +1660,7 @@ where
         KernelResolution::NeedsBuild(p) => {
             anyhow::bail!(
                 "kernel-pin: workload kernel not built yet (expected at {}); \
-                 run `mvmctl build kernel build --which workload` first",
+                 run `mvmctl kernel build --which workload` first",
                 p.display()
             )
         }
@@ -2815,7 +2815,7 @@ mod resolve_pinned_kernel_tests {
         let err = resolve_pinned_kernel(tmp.path(), "aarch64", true).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("mvmctl build kernel build"),
+            msg.contains("mvmctl kernel build"),
             "expected build hint in: {msg}"
         );
     }

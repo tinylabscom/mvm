@@ -90,6 +90,22 @@ runtime-overlay *ARGS:
 runtime-overlay-build *ARGS:
     just runtime-overlay {{ARGS}}
 
+# Build the publishable SDK artifacts without building the full Rust workspace.
+sdk-build: sdk-build-python sdk-build-typescript
+
+# Build the Python SDK wheel + sdist into sdks/python/dist/.
+sdk-build-python:
+    uv build sdks/python --out-dir sdks/python/dist
+
+# Install TypeScript SDK dependencies locally. Run once after a fresh clone or
+# whenever package-lock.json changes.
+sdk-install-typescript:
+    npm --prefix sdks/typescript ci
+
+# Build the TypeScript SDK into sdks/typescript/dist/.
+sdk-build-typescript:
+    npm --prefix sdks/typescript run build
+
 # ── Testing (nextest) ────────────────────────────────────────────────────
 
 # Run all tests
@@ -140,6 +156,10 @@ build-supervisors:
     cargo build -p mvm-hostd --bin mvm-substitution-endpoint
     cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
     cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys
+
+# Build the dm-verity-capable workload kernel into the local mvm cache.
+kernel-workload:
+    cargo run -- kernel build --which workload
 
 # Live macOS Apple-Silicon HVF proof for OCI --allow-host:
 #  1. exact `machine run --image ... --allow-host ... -- ps aux` path
