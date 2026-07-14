@@ -24,6 +24,21 @@ The caller-side `session set-timeout` path now audits real
 `verb_denied` witness is no longer just unit coverage. Remaining honest gaps:
 macOS HVF/libkrun live proof and ADR-103 acceptance.
 
+**Refresh 2026-07-13:** after syncing onto current `main`, the active closeout
+slice now lives on branch `codex/plan236-plan219-proof-refresh` instead of the
+old stale Plan 219 worktree. This refresh keeps the remaining blocker list
+honest while landing two small but real production-facing improvements on the
+current code line: `mvmctl machine set-timeout <name> <seconds>` now reaches
+the existing idle-timeout RPC for named machines, and
+`dispatch_update_idle_timeout` audits grant refusals that occur during both the
+local capability gate and the guest RPC response path. The same refresh also
+makes host validation deterministic on restricted macOS hosts by skipping the
+two `libkrun-sys` loopback-bind tests when the host sandbox denies even
+`127.0.0.1` binds. Focused validation on the refreshed branch is green:
+`cargo fmt --all -- --check`,
+`cargo test -p mvm-cli top_level_cli_routes_machine_set_timeout --offline`, and
+`cargo test -p libkrun-sys free_loopback_port_is_in_range_and_bindable --lib -- --nocapture`.
+
 **Live Firecracker proof 2026-07-10:** on Linux/KVM host `88.99.197.234`, the
 rebuilt sealed artifact `w6xigclqfmqrwpzfll5rdw7z68mb3z1g` now carries
 `{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}`

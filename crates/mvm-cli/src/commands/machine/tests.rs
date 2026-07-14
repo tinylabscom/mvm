@@ -87,6 +87,7 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
         MachineAction::Inspect(_) => "inspect",
         MachineAction::Shell(_) => "shell",
         MachineAction::Exec(_) => "exec",
+        MachineAction::SetTimeout(_) => "set-timeout",
         MachineAction::Logs(_) => "logs",
         MachineAction::Console(_) => "console",
         MachineAction::CheckArtifact(_) => "check-artifact",
@@ -1275,6 +1276,13 @@ fn exec_shell_and_stop_parse() {
         }
         other => panic!("expected shell action, got {other:?}"),
     }
+    match parse(&["set-timeout", "web", "60"]).expect("parse") {
+        MachineAction::SetTimeout(args) => {
+            assert_eq!(args.name, "web");
+            assert_eq!(args.seconds, 60);
+        }
+        other => panic!("expected set-timeout action, got {other:?}"),
+    }
     match parse(&["stop", "web"]).expect("parse") {
         MachineAction::Stop(args) => {
             assert_eq!(args.names, vec!["web"]);
@@ -2203,6 +2211,22 @@ fn top_level_cli_routes_machine_exec() {
                 assert_eq!(exec.argv, vec!["echo", "hi"]);
             }
             other => panic!("expected exec action, got {other:?}"),
+        },
+        other => panic!("expected Commands::Machine, got {other:?}"),
+    }
+}
+
+#[test]
+fn top_level_cli_routes_machine_set_timeout() {
+    let cli = Cli::try_parse_from(["mvmctl", "machine", "set-timeout", "web", "60"])
+        .expect("top-level parse");
+    match cli.command {
+        Commands::Machine(args) => match args.action {
+            MachineAction::SetTimeout(timeout) => {
+                assert_eq!(timeout.name, "web");
+                assert_eq!(timeout.seconds, 60);
+            }
+            other => panic!("expected set-timeout action, got {other:?}"),
         },
         other => panic!("expected Commands::Machine, got {other:?}"),
     }

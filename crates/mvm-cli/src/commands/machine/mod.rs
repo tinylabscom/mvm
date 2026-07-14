@@ -54,6 +54,7 @@ use super::vm::{console, down};
 use crate::commands::ssh_agent_proxy::{
     SSH_AGENT_GUEST_SOCKET, SshAgentProxyListen, reap_proxy, spawn_proxy, ssh_auth_sock_from_env,
 };
+use crate::ui;
 use lifecycle::{exec_machine, run_restart, run_start, shell_machine, stop_machine};
 #[cfg(test)]
 use receipt::verify_machine_start_receipt;
@@ -113,11 +114,14 @@ pub(in crate::commands) enum MachineAction {
     /// Run a command inside an already-started named machine
     #[command(display_order = 10)]
     Exec(MachineExecArgs),
+    /// Update the runtime idle timeout for a running machine
+    #[command(name = "set-timeout", display_order = 11)]
+    SetTimeout(MachineSetTimeoutArgs),
     /// Show console logs from a running VM
-    #[command(display_order = 11)]
+    #[command(display_order = 12)]
     Logs(super::vm::logs::Args),
     /// Interactive PTY console to a running VM (dev images only; claim-15 gated)
-    #[command(display_order = 12)]
+    #[command(display_order = 13)]
     Console(super::vm::console::Args),
     /// Verify a portable `.mvm` artifact and preview how `machine run` would
     /// admit it (arch, profile, seccomp, egress, volumes). Read-only: no
@@ -149,6 +153,7 @@ impl MachineAction {
             | MachineAction::Inspect(_)
             | MachineAction::Shell(_)
             | MachineAction::Exec(_)
+            | MachineAction::SetTimeout(_)
             | MachineAction::Logs(_)
             | MachineAction::Console(_)
             | MachineAction::CheckArtifact(_) => "machine",
@@ -813,6 +818,14 @@ pub(in crate::commands) struct MachineShellArgs {
 }
 
 #[derive(ClapArgs, Debug, Clone)]
+pub(in crate::commands) struct MachineSetTimeoutArgs {
+    /// Running VM name.
+    pub name: String,
+    /// New runtime idle timeout in seconds. Must be > 0.
+    pub seconds: u64,
+}
+
+#[derive(ClapArgs, Debug, Clone)]
 #[command(group(
     clap::ArgGroup::new("target")
         .required(true)
@@ -1417,6 +1430,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
+        MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
         MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
@@ -1426,6 +1440,19 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
     }
+}
+
+fn set_machine_timeout(args: MachineSetTimeoutArgs) -> Result<()> {
+    if args.seconds == 0 {
+        bail!("seconds must be > 0");
+    }
+
+    let (previous_secs, applied_secs) =
+        super::vm::session::dispatch_update_idle_timeout(&args.name, args.seconds)?;
+    ui::info(&format!(
+        "substrate idle timeout: {previous_secs}s -> {applied_secs}s"
+    ));
+    Ok(())
 }
 
 /// Resolve CLI flags into a patch, validating memory eagerly so a bad
