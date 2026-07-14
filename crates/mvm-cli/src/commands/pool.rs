@@ -24,7 +24,7 @@ use mvm_core::vm_backend::{
 use sha2::{Digest, Sha256};
 
 use super::Cli;
-use super::env::dev_vz::ensure_default_microvm_image;
+use super::env::builder_vm::ensure_default_microvm_image;
 use super::vm::host_signer;
 use mvm_hostd::plan_admission::stash_plan_for_bridge;
 

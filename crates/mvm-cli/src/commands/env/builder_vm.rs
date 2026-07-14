@@ -3,7 +3,7 @@
 
 // `pub(in crate::commands)`: the `attested_builder_pack` release-fetch +
 // verification-context helpers are reused by `commands::pack` (a sibling of
-// `env`, not a descendant of `dev_vz`) to implement `mvmctl pack
+// `env`, not a descendant of `builder_vm`) to implement `mvmctl pack
 // download/update builder` over the same trust construction, rather than
 // forking a second copy.
 pub(in crate::commands) mod bootstrap;
