@@ -48,6 +48,16 @@ plan 25 sequences the work into six independently-shippable workstreams.
       --workspace`, the focused `mvm-build` shell-context and Stage 0 tests,
       and the live signed-image witness under
       `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`.
+- [x] 2026-07-13 Plan 251 runtime-owned reversible replacement: `mvm-core`
+      now carries a signed `ReversibleReplacementPolicy`, `mvm-hostd` resolves
+      it per destination, and the host substitution proxy can detect secret/PII
+      spans, replace them with request-scoped opaque tokens on owned outbound
+      request headers/bodies, then reinject exact token echoes on the owned
+      response path. The proof/audit surface records keyed digests and byte
+      spans only, never plaintext. Final validation is green for
+      `cargo check --workspace`, focused reversible-replacement tests,
+      `cargo test --workspace --no-fail-fast`, and `cargo clippy --workspace
+      --all-targets -- -D warnings`.
 - [x] 2026-07-11 Plan 237 Phase 0 validation follow-up: fresh worktree
       validation is green for the required target musl `mvm-oci-init`
       zigbuild, full `mvm-guest` test suite, and focused `mvm-cli`

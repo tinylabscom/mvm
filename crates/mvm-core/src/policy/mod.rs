@@ -20,6 +20,7 @@ pub mod projection;
 pub mod projection_fs_env;
 pub mod redaction;
 pub mod resolver;
+pub mod reversible_replacement;
 pub mod signing;
 pub mod toml_loader;
 
@@ -41,4 +42,9 @@ pub use redaction::{
     EntropyMode, NameMode, RedactionAction, RedactionPolicy, RedactionProfile, SecretAction,
 };
 pub use resolver::{EffectivePolicy, EmergencyDeny, resolve};
+pub use reversible_replacement::{
+    OpaqueRewriteToken, ReversibleFallback, ReversibleReplacementAction,
+    ReversibleReplacementPolicy, ReversibleReplacementProfile, RewriteFlowId, RewriteProofRecord,
+    RewriteSurface, SensitiveClass,
+};
 pub use signing::{BundleVerifyError, SignedPolicyBundle, sign_bundle, verify_bundle};

@@ -1182,6 +1182,7 @@ mod tests {
             auth: AuthPolicy::none(),
             egress_policy: PolicyRef("agent-l7".to_string()),
             redaction: Default::default(),
+            reversible_replacement: Default::default(),
             tool_policy: PolicyRef("read-only".to_string()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec!["/artifacts".to_string()],
@@ -1899,6 +1900,7 @@ mod tests {
             body_cap_bytes: 0,
             disabled_inspectors: vec![],
             redaction: Default::default(),
+            reversible_replacement: Default::default(),
         }
     }
 

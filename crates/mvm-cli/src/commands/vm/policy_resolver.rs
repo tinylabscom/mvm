@@ -638,6 +638,7 @@ mod tests {
             auth: Default::default(),
             egress_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
             redaction: Default::default(),
+            reversible_replacement: Default::default(),
             tool_policy: PolicyRef(LOCAL_DEFAULT.to_string()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: Vec::new(),

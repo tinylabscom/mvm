@@ -1,15 +1,28 @@
 use std::io::Write;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 
+fn install_rustls_provider() {
+    static PROVIDER: OnceLock<()> = OnceLock::new();
+    PROVIDER.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+fn build_blocking_client(timeout: std::time::Duration) -> Result<reqwest::blocking::Client> {
+    install_rustls_provider();
+    reqwest::blocking::Client::builder()
+        .user_agent(concat!("mvmctl/", env!("CARGO_PKG_VERSION")))
+        .timeout(timeout)
+        .build()
+        .context("Failed to build HTTP client")
+}
+
 /// Fetch a URL and return the response body as a string.
 pub fn fetch_text(url: &str) -> Result<String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("mvmctl/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = build_blocking_client(std::time::Duration::from_secs(30))?;
 
     let resp = client
         .get(url)
@@ -27,11 +40,7 @@ pub fn fetch_text(url: &str) -> Result<String> {
 
 /// Fetch a URL and parse the response as JSON.
 pub fn fetch_json(url: &str) -> Result<serde_json::Value> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("mvmctl/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = build_blocking_client(std::time::Duration::from_secs(30))?;
 
     let resp = client
         .get(url)
@@ -50,11 +59,7 @@ pub fn fetch_json(url: &str) -> Result<serde_json::Value> {
 
 /// Download a URL to a file on disk. Shows no progress (use for small files).
 pub fn download_file(url: &str, dest: &Path) -> Result<()> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("mvmctl/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(600))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = build_blocking_client(std::time::Duration::from_secs(600))?;
 
     let resp = client
         .get(url)

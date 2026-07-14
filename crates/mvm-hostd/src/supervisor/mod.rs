@@ -77,6 +77,8 @@ pub mod proxy;
 pub mod raw_egress;
 pub mod reaper;
 pub mod redaction_resolve;
+pub mod reversible_replacement;
+pub mod reversible_replacement_resolve;
 /// Chain-signed `secret.substituted` / `secret.placeholder_dropped`
 /// audit events (claim 13: metadata only, never the secret value).
 pub mod secret_audit;

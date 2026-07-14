@@ -955,6 +955,7 @@ mod tests {
             auth: Default::default(),
             egress_policy: PolicyRef("local-default".into()),
             redaction: Default::default(),
+            reversible_replacement: Default::default(),
             tool_policy: PolicyRef("local-default".into()),
             artifact_policy: ArtifactPolicy {
                 capture_paths: vec![],

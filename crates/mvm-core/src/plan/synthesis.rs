@@ -155,6 +155,9 @@ pub struct SynthesisInput<'a> {
     /// Per-destination egress redaction authored by `--redact HOST[=audit]`.
     /// Default (all-off) preserves the curated-only baseline.
     pub redaction: crate::policy::RedactionPolicy,
+    /// Per-destination reversible replacement. Default (disabled) preserves the
+    /// current one-way-only behavior.
+    pub reversible_replacement: crate::policy::ReversibleReplacementPolicy,
     /// Caller-supplied audit labels merged into the synthesized plan's
     /// `audit_labels`. They serialize inside the signed payload and are
     /// inherited by every chain-signed audit entry. The profile-derived keys
@@ -260,6 +263,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         auth: input.auth.clone(),
         egress_policy,
         redaction: input.redaction.clone(),
+        reversible_replacement: input.reversible_replacement.clone(),
         tool_policy,
         artifact_policy: ArtifactPolicy {
             capture_paths: Vec::new(),
@@ -390,6 +394,7 @@ mod tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: crate::policy::RedactionPolicy::default(),
+            reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
             audit_labels: Default::default(),
             agent_verbs: None,
         }

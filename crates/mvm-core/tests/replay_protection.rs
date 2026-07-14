@@ -47,6 +47,7 @@ fn fixture_plan(nonce: [u8; 16]) -> ExecutionPlan {
         auth: Default::default(),
         egress_policy: PolicyRef("none".to_string()),
         redaction: Default::default(),
+        reversible_replacement: Default::default(),
         tool_policy: PolicyRef("none".to_string()),
         artifact_policy: ArtifactPolicy {
             capture_paths: vec![],

@@ -116,6 +116,13 @@ pub struct ExecutionPlan {
     #[serde(default)]
     pub redaction: crate::policy::RedactionPolicy,
 
+    /// Per-destination reversible replacement policy. Disabled by default; when
+    /// enabled for a destination, the runtime may replace detected secret / PII
+    /// bytes with opaque request-scoped tokens on owned outbound cleartext
+    /// paths, and exact-token reinject on the paired owned response path.
+    #[serde(default)]
+    pub reversible_replacement: crate::policy::ReversibleReplacementPolicy,
+
     /// Tool-call policy (which tools the model is allowed to invoke
     /// over the supervisor's vsock RPC).
     pub tool_policy: PolicyRef,

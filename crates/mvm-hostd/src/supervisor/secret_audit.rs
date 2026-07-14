@@ -11,6 +11,7 @@
 use mvm_sdk::ir::AuthType;
 
 use crate::supervisor::audit_recorder::{EventCategory, Recorder, RecorderError};
+use mvm_core::policy::RewriteProofRecord;
 
 fn auth_type_label(t: AuthType) -> &'static str {
     match t {
@@ -78,6 +79,58 @@ pub async fn emit_secret_placeholder_dropped(
             EventCategory::Secret,
             "secret.placeholder_dropped",
             [("destination".to_string(), destination.to_string())],
+        )
+        .await
+}
+
+/// Emit one `secret.rewrite_proof` metadata record for an owned replace or
+/// reinject event. The digests are keyed HMACs of the original and rewritten
+/// bytes; no plaintext crosses the audit chain.
+pub async fn emit_rewrite_proof(
+    recorder: &Recorder,
+    destination: &str,
+    phase: &str,
+    proof: &RewriteProofRecord,
+) -> Result<(), RecorderError> {
+    recorder
+        .record_unbound(
+            EventCategory::Secret,
+            "secret.rewrite_proof",
+            [
+                ("destination".to_string(), destination.to_string()),
+                ("phase".to_string(), phase.to_string()),
+                ("flow_id".to_string(), proof.flow_id.0.clone()),
+                ("event_index".to_string(), proof.event_index.to_string()),
+                (
+                    "class".to_string(),
+                    format!("{:?}", proof.class).to_ascii_lowercase(),
+                ),
+                (
+                    "surface".to_string(),
+                    format!("{:?}", proof.surface).to_ascii_lowercase(),
+                ),
+                (
+                    "field_name".to_string(),
+                    proof.field_name.clone().unwrap_or_default(),
+                ),
+                ("offset".to_string(), proof.offset.to_string()),
+                ("original_len".to_string(), proof.original_len.to_string()),
+                ("rewritten_len".to_string(), proof.rewritten_len.to_string()),
+                ("token_id".to_string(), proof.token_id.0.clone()),
+                (
+                    "original_hmac_sha256".to_string(),
+                    proof.original_hmac_sha256.clone(),
+                ),
+                (
+                    "rewritten_hmac_sha256".to_string(),
+                    proof.rewritten_hmac_sha256.clone(),
+                ),
+                ("policy_decision".to_string(), proof.policy_decision.clone()),
+                (
+                    "authorization_decision".to_string(),
+                    proof.authorization_decision.clone(),
+                ),
+            ],
         )
         .await
 }
@@ -193,6 +246,39 @@ mod tests {
         let chain = std::fs::read_to_string(&file).unwrap();
         assert!(chain.contains("secret.placeholder_dropped"));
         assert!(chain.contains("evil.example.com"));
+        assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn rewrite_proof_event_records_only_metadata_and_digests() {
+        let dir = tempdir().unwrap();
+        let file = dir.path().join("audit.jsonl");
+        let (recorder, vk) = recorder_at(&file);
+        let proof = RewriteProofRecord {
+            flow_id: mvm_core::policy::RewriteFlowId("flow-1".into()),
+            event_index: 1,
+            class: mvm_core::policy::SensitiveClass::Pii,
+            surface: mvm_core::policy::RewriteSurface::ResponseBody,
+            field_name: None,
+            offset: 3,
+            original_len: 12,
+            rewritten_len: 12,
+            token_id: mvm_core::policy::OpaqueRewriteToken("mvmr1_x".into()),
+            original_hmac_sha256: "abc".into(),
+            rewritten_hmac_sha256: "def".into(),
+            policy_decision: "replace:email".into(),
+            authorization_decision: "runtime_owned".into(),
+        };
+        emit_rewrite_proof(&recorder, "api.openai.com", "replace", &proof)
+            .await
+            .unwrap();
+
+        let chain = std::fs::read_to_string(&file).unwrap();
+        assert!(chain.contains("secret.rewrite_proof"));
+        assert!(chain.contains("flow-1"));
+        assert!(chain.contains("mvmr1_x"));
+        let payloads = entry_payloads(&chain);
+        assert!(!payloads.contains("alice@example.com"));
         assert_eq!(verify_audit_chain(&file, &vk).unwrap(), 1);
     }
 }

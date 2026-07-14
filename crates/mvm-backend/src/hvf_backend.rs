@@ -952,6 +952,7 @@ mod tests {
             deps_volume: None,
             shares: Vec::new(),
             redaction: RedactionPolicy::default(),
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             audit_labels: Default::default(),
             agent_verbs: None,
         };

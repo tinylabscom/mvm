@@ -34,8 +34,10 @@ use crate::keyholder::{
 };
 use crate::supervisor::audit_recorder::Recorder;
 use crate::supervisor::network::stages::{RedactingSubstitution, RedactionHits};
+use crate::supervisor::reversible_replacement::{ReplacementEngine, ReplacementFlow};
 use crate::supervisor::secret_audit::{
-    emit_secret_placeholder_dropped, emit_secret_redacted, emit_secret_substituted,
+    emit_rewrite_proof, emit_secret_placeholder_dropped, emit_secret_redacted,
+    emit_secret_substituted,
 };
 use crate::supervisor::tools::http_hardening::{
     hardened_client_builder_no_dns, resolve_ssrf_safe_ips,
@@ -500,6 +502,7 @@ pub struct FromPlanInputs<'a> {
     pub secret_store: Arc<dyn SecretStore>,
     pub forward_timeout_secs: u64,
     pub redaction: mvm_core::policy::RedactionPolicy,
+    pub reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy,
     pub tls_intermediate: Option<mvm_core::crypto::egress_ca::VmIntermediate>,
     pub recorder: Option<Recorder>,
 }
@@ -606,6 +609,7 @@ impl Forwarder for ReqwestForwarder {
 /// registry, the secret resolver, and the forward leg. Placeholders are minted
 /// at admission, so the registry is read-only while serving.
 pub struct SubstitutionService {
+    tenant: String,
     registry: Arc<SubstitutionRegistry>,
     resolver: Arc<dyn SecretResolver>,
     forwarder: Arc<dyn Forwarder>,
@@ -625,6 +629,10 @@ pub struct SubstitutionService {
     /// Per-destination redaction policy. Default = curated baseline (entropy +
     /// names off); a profile opts a destination into entropy/name redaction.
     redaction_policy: mvm_core::policy::RedactionPolicy,
+    /// Per-destination reversible replacement policy. Default = disabled.
+    reversible_replacement_policy: mvm_core::policy::ReversibleReplacementPolicy,
+    /// Request-scoped replacement / reinjection engine.
+    replacement_engine: ReplacementEngine,
     /// Claim-10 egress gate. When present, every outbound destination is checked
     /// against the VM's resolved network policy before any forward — an
     /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
@@ -639,6 +647,7 @@ impl SubstitutionService {
         forwarder: Arc<dyn Forwarder>,
     ) -> Self {
         Self {
+            tenant: "local".to_string(),
             registry,
             resolver,
             forwarder,
@@ -646,8 +655,15 @@ impl SubstitutionService {
             recorder: None,
             tls_intermediate: None,
             redaction_policy: mvm_core::policy::RedactionPolicy::default(),
+            reversible_replacement_policy: mvm_core::policy::ReversibleReplacementPolicy::default(),
+            replacement_engine: ReplacementEngine::new(),
             egress_gate: None,
         }
+    }
+
+    pub fn with_tenant(mut self, tenant: impl Into<String>) -> Self {
+        self.tenant = tenant.into();
+        self
     }
 
     /// Attach a per-destination redaction policy. Default leaves entropy + names
@@ -655,6 +671,14 @@ impl SubstitutionService {
     /// destinations into entropy/name redaction.
     pub fn with_redaction_policy(mut self, policy: mvm_core::policy::RedactionPolicy) -> Self {
         self.redaction_policy = policy;
+        self
+    }
+
+    pub fn with_reversible_replacement_policy(
+        mut self,
+        policy: mvm_core::policy::ReversibleReplacementPolicy,
+    ) -> Self {
+        self.reversible_replacement_policy = policy;
         self
     }
 
@@ -716,14 +740,16 @@ impl SubstitutionService {
             secret_store,
             forward_timeout_secs,
             redaction,
+            reversible_replacement,
             tls_intermediate,
             recorder,
         } = inputs;
         let (registry, handed) = assemble_registry(plan_secrets, tenant, bindings)?;
         let resolver: Arc<dyn SecretResolver> = Arc::new(LocalResolver::new(tenant, secret_store));
         let forwarder: Arc<dyn Forwarder> = Arc::new(ReqwestForwarder::new(forward_timeout_secs)?);
-        let mut service = Self::new(Arc::new(registry), resolver, forwarder);
+        let mut service = Self::new(Arc::new(registry), resolver, forwarder).with_tenant(tenant);
         service = service.with_redaction_policy(redaction);
+        service = service.with_reversible_replacement_policy(reversible_replacement);
         if let Some(intermediate) = tls_intermediate {
             service = service.with_tls_intermediate(intermediate);
         }
@@ -1135,6 +1161,16 @@ impl SubstitutionService {
                 crate::supervisor::redaction_resolve::resolve(&self.redaction_policy, d).clone()
             })
             .unwrap_or_default();
+        let replacement_action = destination
+            .as_deref()
+            .map(|d| {
+                crate::supervisor::reversible_replacement_resolve::resolve(
+                    &self.reversible_replacement_policy,
+                    d,
+                )
+                .clone()
+            })
+            .unwrap_or_default();
         // Fail closed: a body we can't scan in cleartext is a silent bypass. A
         // compressed body, or one over the scan cap, to a redaction-opted-in
         // destination is refused before any forward leg runs. Shared with the
@@ -1158,6 +1194,11 @@ impl SubstitutionService {
         // host-reserved) survives to be substituted, while an undeclared secret
         // the guest put in the body or a non-placeholder header is masked and
         // never reaches the wire.
+        let mut req = req;
+        let mut replacement_flow = self
+            .replacement_engine
+            .start_flow(&self.tenant, &replacement_action);
+        let replacement_proofs = self.replace_outbound(&mut req, &mut replacement_flow);
         let (req, redaction_hits) = self.redact_outbound(req, &action);
         let prepared = match prepare_request(&endpoint, req) {
             Ok(p) => p,
@@ -1174,8 +1215,13 @@ impl SubstitutionService {
             }
         };
         match self.forwarder.forward(prepared).await {
-            Ok(r) => {
+            Ok(mut r) => {
+                let reinject_proofs = replacement_flow.reinject_response(&mut r);
                 self.audit_substitutions(&substituted, destination.as_deref())
+                    .await;
+                self.audit_rewrite_proofs("replace", &replacement_proofs, destination.as_deref())
+                    .await;
+                self.audit_rewrite_proofs("reinject", &reinject_proofs, destination.as_deref())
                     .await;
                 self.audit_redactions(&redaction_hits, destination.as_deref())
                     .await;
@@ -1207,6 +1253,31 @@ impl SubstitutionService {
         let mut req = req;
         let hits = redact_request(&mut req, &self.redactor, action);
         (req, hits)
+    }
+
+    fn replace_outbound(
+        &self,
+        req: &mut ProxyRequest,
+        replacement_flow: &mut ReplacementFlow,
+    ) -> Vec<mvm_core::policy::RewriteProofRecord> {
+        let mut proofs = Vec::new();
+        for (name, value) in req.headers.iter_mut() {
+            if find_placeholder(value).is_some() {
+                continue;
+            }
+            let (rewritten, mut field_proofs) =
+                replacement_flow.replace_header_value(name.clone(), value.as_bytes());
+            if !field_proofs.is_empty() {
+                *value = String::from_utf8_lossy(&rewritten).into_owned();
+                proofs.append(&mut field_proofs);
+            }
+        }
+        let (rewritten_body, mut body_proofs) = replacement_flow.replace_body(&req.body);
+        if !body_proofs.is_empty() {
+            req.body = rewritten_body;
+            proofs.append(&mut body_proofs);
+        }
+        proofs
     }
 
     /// Emit one `secret.redacted { destination, categories }` entry when the
@@ -1252,6 +1323,22 @@ impl SubstitutionService {
         for (name, auth_type) in substituted {
             if let Err(e) = emit_secret_substituted(recorder, name, dest, *auth_type).await {
                 tracing::warn!(error = %e, secret = %name, "secret.substituted audit emit failed");
+            }
+        }
+    }
+
+    async fn audit_rewrite_proofs(
+        &self,
+        phase: &str,
+        proofs: &[mvm_core::policy::RewriteProofRecord],
+        destination: Option<&str>,
+    ) {
+        let (Some(recorder), Some(dest)) = (&self.recorder, destination) else {
+            return;
+        };
+        for proof in proofs {
+            if let Err(e) = emit_rewrite_proof(recorder, dest, phase, proof).await {
+                tracing::warn!(error = %e, "secret.rewrite_proof audit emit failed");
             }
         }
     }
@@ -1865,7 +1952,7 @@ mod server_tests {
         Arc<MockForwarder>,
         tempfile::TempDir,
     ) {
-        service_with_policy(value, hosts, None)
+        service_with_policies(value, hosts, None, None)
     }
 
     /// Like [`service_with`], but attaches `policy` (when `Some`) so a test can
@@ -1874,6 +1961,20 @@ mod server_tests {
         value: &str,
         hosts: &[&str],
         policy: Option<mvm_core::policy::RedactionPolicy>,
+    ) -> (
+        Arc<SubstitutionService>,
+        String,
+        Arc<MockForwarder>,
+        tempfile::TempDir,
+    ) {
+        service_with_policies(value, hosts, policy, None)
+    }
+
+    fn service_with_policies(
+        value: &str,
+        hosts: &[&str],
+        redaction_policy: Option<mvm_core::policy::RedactionPolicy>,
+        reversible_policy: Option<mvm_core::policy::ReversibleReplacementPolicy>,
     ) -> (
         Arc<SubstitutionService>,
         String,
@@ -1897,8 +1998,11 @@ mod server_tests {
             seen: Mutex::new(None),
         });
         let mut service = SubstitutionService::new(Arc::new(reg), resolver, forwarder.clone());
-        if let Some(policy) = policy {
+        if let Some(policy) = redaction_policy {
             service = service.with_redaction_policy(policy);
+        }
+        if let Some(policy) = reversible_policy {
+            service = service.with_reversible_replacement_policy(policy);
         }
         (Arc::new(service), ph, forwarder, dir)
     }
@@ -2125,6 +2229,190 @@ mod server_tests {
         assert_eq!(seen.body, b"{\"prompt\":\"hello world\"}");
     }
 
+    #[tokio::test]
+    async fn endpoint_replaces_and_reinjects_secret_and_pii_when_policy_enabled() {
+        use mvm_core::policy::{
+            ReversibleReplacementAction, ReversibleReplacementPolicy, ReversibleReplacementProfile,
+        };
+
+        struct EchoForwarder {
+            seen: Mutex<Option<PreparedRequest>>,
+        }
+
+        #[async_trait]
+        impl Forwarder for EchoForwarder {
+            async fn forward(&self, req: PreparedRequest) -> Result<ForwardResponse, ForwardError> {
+                *self.seen.lock().unwrap() = Some(req.clone());
+                let echoed_header = req
+                    .headers
+                    .iter()
+                    .find(|(name, _)| name == "x-user")
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default();
+                Ok(ForwardResponse {
+                    status: 200,
+                    headers: vec![("x-echo-user".into(), echoed_header)],
+                    body: req.body,
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let forwarder = Arc::new(EchoForwarder {
+            seen: Mutex::new(None),
+        });
+        let policy = ReversibleReplacementPolicy {
+            default: Default::default(),
+            profiles: vec![ReversibleReplacementProfile {
+                host: "api.openai.com".into(),
+                action: ReversibleReplacementAction {
+                    enabled: true,
+                    ..Default::default()
+                },
+            }],
+        };
+        let service = Arc::new(
+            SubstitutionService::new(Arc::new(reg), resolver, forwarder.clone())
+                .with_reversible_replacement_policy(policy),
+        );
+
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![
+                ("authorization".into(), format!("Bearer {ph}")),
+                ("x-user".into(), "alice@example.com".into()),
+            ],
+            body_b64: B64.encode(
+                b"Call +14155550123 with sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            ),
+        };
+
+        let resp = service.process(wire).await;
+        let seen = forwarder.seen.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            seen.headers
+                .iter()
+                .find(|(name, _)| name == "authorization")
+                .unwrap()
+                .1,
+            "Bearer sk-live-zzz"
+        );
+        assert!(
+            !seen
+                .headers
+                .iter()
+                .find(|(name, _)| name == "x-user")
+                .unwrap()
+                .1
+                .contains("alice@example.com")
+        );
+        let seen_body = String::from_utf8_lossy(&seen.body);
+        assert!(!seen_body.contains("+14155550123"));
+        assert!(!seen_body.contains("sk-aaaaaaaa"));
+
+        match resp {
+            WireResponse::Ok {
+                headers, body_b64, ..
+            } => {
+                assert_eq!(
+                    headers
+                        .iter()
+                        .find(|(name, _)| name == "x-echo-user")
+                        .unwrap()
+                        .1,
+                    "alice@example.com"
+                );
+                let body = String::from_utf8(B64.decode(body_b64).unwrap()).unwrap();
+                assert!(body.contains("+14155550123"));
+                assert!(body.contains("sk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+            }
+            WireResponse::Refused { message } => panic!("unexpected refusal: {message}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transformed_response_does_not_reinject_without_exact_token() {
+        use mvm_core::policy::{
+            ReversibleReplacementAction, ReversibleReplacementPolicy, ReversibleReplacementProfile,
+        };
+
+        struct RephrasingForwarder;
+
+        #[async_trait]
+        impl Forwarder for RephrasingForwarder {
+            async fn forward(
+                &self,
+                _req: PreparedRequest,
+            ) -> Result<ForwardResponse, ForwardError> {
+                Ok(ForwardResponse {
+                    status: 200,
+                    headers: vec![],
+                    body: b"please call the user later".to_vec(),
+                })
+            }
+        }
+
+        let dir = tempdir().unwrap();
+        let store = FileSecretStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBox::new(Box::new("sk-live-zzz".to_string())),
+            )
+            .unwrap();
+        let resolver: Arc<dyn SecretResolver> =
+            Arc::new(LocalResolver::new("local", Arc::new(store)));
+        let mut reg = SubstitutionRegistry::new();
+        let ph = reg
+            .mint(bearer_ref("openai", &["api.openai.com"]))
+            .as_str()
+            .to_string();
+        let policy = ReversibleReplacementPolicy {
+            default: Default::default(),
+            profiles: vec![ReversibleReplacementProfile {
+                host: "api.openai.com".into(),
+                action: ReversibleReplacementAction {
+                    enabled: true,
+                    ..Default::default()
+                },
+            }],
+        };
+        let service = Arc::new(
+            SubstitutionService::new(Arc::new(reg), resolver, Arc::new(RephrasingForwarder))
+                .with_reversible_replacement_policy(policy),
+        );
+        let wire = WireRequest {
+            method: "POST".into(),
+            url: "https://api.openai.com/v1".into(),
+            headers: vec![("authorization".into(), format!("Bearer {ph}"))],
+            body_b64: B64.encode(b"call +14155550123"),
+        };
+        let resp = service.process(wire).await;
+        match resp {
+            WireResponse::Ok { body_b64, .. } => {
+                assert_eq!(B64.decode(body_b64).unwrap(), b"please call the user later");
+            }
+            WireResponse::Refused { message } => panic!("unexpected refusal: {message}"),
+        }
+    }
+
     /// Build a claim-10 gate over an allow-list of literal `host:port` rules,
     /// each self-pinned so a literal-IP destination projects. `from_network_policy`
     /// fails closed on any projection error.
@@ -2300,6 +2588,7 @@ mod server_tests {
             secret_store,
             forward_timeout_secs: 30,
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             tls_intermediate: None,
             recorder: None,
         })
@@ -2368,6 +2657,7 @@ mod server_tests {
             secret_store,
             forward_timeout_secs: 30,
             redaction: policy,
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             tls_intermediate: None,
             recorder: None,
         })

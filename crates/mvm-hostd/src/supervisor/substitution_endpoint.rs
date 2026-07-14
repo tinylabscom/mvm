@@ -106,6 +106,11 @@ pub struct EndpointConfig {
     /// baseline; a profile opts a destination into entropy/name redaction.
     #[serde(default)]
     pub redaction: mvm_core::policy::RedactionPolicy,
+    /// Per-destination reversible replacement policy, carried from the signed
+    /// `ExecutionPlan.reversible_replacement`. Default (disabled) preserves the
+    /// current one-way-only behavior.
+    #[serde(default)]
+    pub reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy,
     /// Forward-leg (host → destination) timeout, seconds.
     #[serde(default = "default_forward_timeout_secs")]
     pub forward_timeout_secs: u64,
@@ -211,6 +216,7 @@ pub fn assemble(
             secret_store,
             forward_timeout_secs: cfg.forward_timeout_secs,
             redaction: cfg.redaction.clone(),
+            reversible_replacement: cfg.reversible_replacement.clone(),
             tls_intermediate,
             recorder,
         })?;
@@ -293,6 +299,7 @@ mod tests {
             secrets,
             transport: EndpointTransport::Vsock { port: 5253 },
             redaction: mvm_core::policy::RedactionPolicy::default(),
+            reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
             forward_timeout_secs: 30,
             secret_store_dir: Some(dir.join("secrets")),
             binding_store_dir: Some(dir.join("bindings")),

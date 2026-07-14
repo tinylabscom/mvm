@@ -108,6 +108,7 @@ pub fn admit_and_boot_local(
         deps_volume: None,
         shares: Vec::new(),
         redaction: Default::default(),
+        reversible_replacement: Default::default(),
         audit_labels: Default::default(),
         agent_verbs: None,
     };

@@ -1009,6 +1009,7 @@ fn drain_capped<R: Read + Send + 'static>(
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
 
     /// Create an isolated rootfs-like tree under a temp dir:
@@ -1039,8 +1040,24 @@ mod tests {
     }
 
     fn test_policy(marker: PathBuf, allowed_prefix: PathBuf, mode: u32) -> EntrypointPolicy {
-        let uid = nix_compat_geteuid();
-        let gid = nix_compat_getegid();
+        let (uid, gid) = marker
+            .is_file()
+            .then(|| std::fs::read_to_string(&marker).ok())
+            .flatten()
+            .and_then(|marker_body| {
+                marker_body
+                    .lines()
+                    .next()
+                    .map(str::trim)
+                    .filter(|line| line.starts_with('/'))
+                    .map(PathBuf::from)
+            })
+            .and_then(|wrapper_path| {
+                std::fs::symlink_metadata(&wrapper_path)
+                    .ok()
+                    .map(|metadata| (metadata.uid(), metadata.gid()))
+            })
+            .unwrap_or_else(|| (nix_compat_geteuid(), nix_compat_getegid()));
         // On macOS, /tmp resolves through a /private/... symlink, so
         // tempdir paths canonicalize away from their as-given form.
         // Match that resolution in the allowed_prefix so prefix checks

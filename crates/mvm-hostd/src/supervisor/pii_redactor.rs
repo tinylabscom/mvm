@@ -160,6 +160,14 @@ pub struct PiiRedactor {
     mode: Mode,
 }
 
+/// One validated PII match span.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PiiMatch {
+    pub name: &'static str,
+    pub start: usize,
+    pub end: usize,
+}
+
 impl PiiRedactor {
     /// Build from a custom rule list. Returns `Err` if any pattern
     /// fails to compile.
@@ -310,13 +318,25 @@ impl PiiRedactor {
     /// For callers that need positions, not just category names — e.g. the name
     /// detector's co-occurrence signal ("a name adjacent to other PII").
     pub fn match_spans(&self, body: &[u8]) -> Vec<(usize, usize)> {
+        self.match_spans_with_categories(body)
+            .into_iter()
+            .map(|m| (m.start, m.end))
+            .collect()
+    }
+
+    /// Validated match byte ranges with their category names.
+    pub fn match_spans_with_categories(&self, body: &[u8]) -> Vec<PiiMatch> {
         let candidate_indices: Vec<usize> = self.set.matches(body).into_iter().collect();
         let mut spans = Vec::new();
         for idx in candidate_indices {
             let rule = &self.rules[idx];
             for m in self.regexes[idx].find_iter(body) {
                 if match_passes_validator(rule, m.as_bytes()) {
-                    spans.push((m.start(), m.end()));
+                    spans.push(PiiMatch {
+                        name: rule.name,
+                        start: m.start(),
+                        end: m.end(),
+                    });
                 }
             }
         }
