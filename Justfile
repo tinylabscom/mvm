@@ -155,7 +155,7 @@ test-cargo:
 # runner, so this stays green as later suites land their steps.
 bdd:
     cargo build --bin mvmctl
-    cargo run -p mvm-conformance
+    cargo test -p mvm-conformance --test conformance
 
 # Build the per-VM host helper bins explicitly. mvmctl's build script already
 # compiles them during `cargo build`/`cargo run`; this is the manual route for

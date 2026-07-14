@@ -390,10 +390,6 @@ mvm-backend = { path = "crates/mvm-backend", version = "0.18.0", default-feature
 # Dev dependencies
 assert_cmd = "2"
 predicates = "3"
-# The dev-only BDD conformance harness (crates/mvm-conformance). Default
-# features bring the step-attribute macros only — no JSON/JUnit/tracing
-# output writers, which this harness doesn't use.
-cucumber = "0.23"
 
 # Root facade crate — re-exports all workspace libraries and provides the `mvmctl` binary
 [package]
