@@ -188,6 +188,26 @@
           mvmSrc = workspace;
         };
 
+      mvmAddonDnsFor = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        import (workspace + "/nix/packages/mvm-addon-dns.nix") {
+          inherit pkgs;
+          lib = pkgs.lib;
+          mvmSrc = workspace;
+        };
+
+      mvmExitReportFor = system:
+        let
+          pkgs = import nixpkgs { inherit system; };
+        in
+        import (workspace + "/nix/packages/mvm-exit-report.nix") {
+          inherit pkgs;
+          lib = pkgs.lib;
+          mvmSrc = workspace;
+        };
+
       # libmvm_host_services.so — the in-guest host-services FFI shared
       # object the language SDKs dlopen via ctypes/koffi. One JSON-in/
       # JSON-out C ABI over the broker clients; built for the glibc workload
@@ -266,6 +286,8 @@
           guestDev = mvmGuestDevFor system;
           runner = mvmRunnerFor system;
           egressClient = mvmEgressClientFor system;
+          addonDns = mvmAddonDnsFor system;
+          exitReport = mvmExitReportFor system;
           hostsvc = mvmHostServicesFfiFor system;
         in
         pkgs.runCommand "mvm-runtime-overlay-${system}"
@@ -290,7 +312,8 @@
             # overlay ext4. The kernel mounts this at /mvm/runtime
             # inside the guest, so the *FS root* contains
             # /agent, /seccomp-apply, /netinit, /netd, /runner,
-            # /egress-client, /sdk-py/, /sdk-ts/, /VERSION.
+            # /egress-client, /addon-dns, /exit-report, /sdk-py/,
+            # /sdk-ts/, /VERSION.
             staging="$TMPDIR/staging"
             mkdir -p "$staging" "$staging/lib"
 
@@ -318,6 +341,8 @@
             cp ${guest}/bin/mvm-guest-netd       "$staging/netd"
             cp ${runner}/bin/mvm-runner "$staging/runner"
             cp ${egressClient}/bin/mvm-egress-client "$staging/egress-client"
+            cp ${addonDns}/bin/mvm-addon-dns "$staging/addon-dns"
+            cp ${exitReport}/bin/mvm-exit-report "$staging/exit-report"
             relocate_runtime_exe "$staging/agent"
             relocate_runtime_exe "$staging/agent-dev-shell"
             relocate_runtime_exe "$staging/seccomp-apply"
@@ -325,6 +350,8 @@
             relocate_runtime_exe "$staging/netd"
             relocate_runtime_exe "$staging/runner"
             relocate_runtime_exe "$staging/egress-client"
+            relocate_runtime_exe "$staging/addon-dns"
+            relocate_runtime_exe "$staging/exit-report"
 
             # In-guest host-services FFI shared object. The language SDKs
             # (mvm.audit / mvm.host) dlopen this via ctypes/koffi; it is the

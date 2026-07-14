@@ -98,11 +98,16 @@ pub fn select_runtime_source_policy(
         }
         RuntimeSourceLaunchKind::BuilderDevVm => RuntimeSourcePolicy::PreferOverlay,
         RuntimeSourceLaunchKind::WorkloadImage => {
+            // Every block-rooted workload boot on a real backend sources its
+            // guest binaries from the runtime overlay — the overlay is the
+            // single source, so a missing overlay must fail closed (build or
+            // acquire), never silently fall back to a baked rootfs copy. Only
+            // the virtiofs-root shape (no block-attach path) and non-real
+            // backends keep the soft preference.
             if matches!(
                 selection.backend_name,
                 Some("firecracker" | "hvf" | "qemu" | "libkrun")
-            ) && selection.sealed
-                && selection.root_strategy != Some(RuntimeSourceRootStrategy::VirtiofsRoot)
+            ) && selection.root_strategy != Some(RuntimeSourceRootStrategy::VirtiofsRoot)
             {
                 RuntimeSourcePolicy::RequiredOverlay
             } else {
@@ -2067,11 +2072,13 @@ mod tests {
     }
 
     #[test]
-    fn select_runtime_source_policy_requires_overlay_for_sealed_firecracker_workloads() {
+    fn select_runtime_source_policy_requires_overlay_for_block_firecracker_workloads() {
+        // Block-rooted workload boots require the overlay whether or not the
+        // rootfs is sealed — the overlay is the single binary source.
         assert_eq!(
             select_runtime_source_policy(RuntimeSourcePolicySelection {
                 backend_name: Some("firecracker"),
-                sealed: true,
+                sealed: false,
                 root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
                 launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
             }),
@@ -2080,11 +2087,11 @@ mod tests {
     }
 
     #[test]
-    fn select_runtime_source_policy_requires_overlay_for_sealed_hvf_workloads() {
+    fn select_runtime_source_policy_requires_overlay_for_block_hvf_workloads() {
         assert_eq!(
             select_runtime_source_policy(RuntimeSourcePolicySelection {
                 backend_name: Some("hvf"),
-                sealed: true,
+                sealed: false,
                 root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
                 launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
             }),
@@ -2093,11 +2100,11 @@ mod tests {
     }
 
     #[test]
-    fn select_runtime_source_policy_requires_overlay_for_sealed_qemu_workloads() {
+    fn select_runtime_source_policy_requires_overlay_for_block_qemu_workloads() {
         assert_eq!(
             select_runtime_source_policy(RuntimeSourcePolicySelection {
                 backend_name: Some("qemu"),
-                sealed: true,
+                sealed: false,
                 root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
                 launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
             }),
@@ -2119,15 +2126,30 @@ mod tests {
     }
 
     #[test]
-    fn select_runtime_source_policy_requires_overlay_for_sealed_libkrun_workloads() {
+    fn select_runtime_source_policy_requires_overlay_for_block_libkrun_workloads() {
         assert_eq!(
             select_runtime_source_policy(RuntimeSourcePolicySelection {
                 backend_name: Some("libkrun"),
-                sealed: true,
+                sealed: false,
                 root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
                 launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
             }),
             RuntimeSourcePolicy::RequiredOverlay
+        );
+    }
+
+    #[test]
+    fn select_runtime_source_policy_keeps_virtiofs_workload_on_prefer_overlay() {
+        // The virtiofs-root shape has no block-attach path for the overlay, so
+        // it stays a soft preference even on a real backend.
+        assert_eq!(
+            select_runtime_source_policy(RuntimeSourcePolicySelection {
+                backend_name: Some("hvf"),
+                sealed: false,
+                root_strategy: Some(RuntimeSourceRootStrategy::VirtiofsRoot),
+                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
+            }),
+            RuntimeSourcePolicy::PreferOverlay
         );
     }
 

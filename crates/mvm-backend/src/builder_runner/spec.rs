@@ -85,6 +85,13 @@ pub fn builder_spec(inputs: &BuilderSpecInputs<'_>) -> VmmSpec {
     } else {
         BUILDER_CMDLINE.to_string()
     };
+    // Seed the RTC-less HVF builder guest's wall clock from the host: PID 1
+    // (mvm-host-vm-init) reads this token and calls settimeofday, so a cold Nix
+    // store's HTTPS fetch doesn't fail cert validation against a ~1970 clock.
+    let cmdline = format!(
+        "{cmdline} {}",
+        mvm_build::builder_vm::builder_hostepoch_cmdline_token()
+    );
 
     let mut blocks = vec![
         block(inputs.rootfs, 0, true),       // vda: rootfs, RO

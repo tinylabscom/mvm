@@ -354,14 +354,26 @@ fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result<()>
     if config.runtime_source_policy != mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
         return Ok(());
     }
-    if !libkrun_verity_enabled(config) {
+    // A sealed boot (verity metadata present) must be fully verity capable — a
+    // missing initrd fails closed rather than downgrading to an unverified root —
+    // and carries the dm-verity overlay triple its initramfs mounts. A non-verity
+    // dev boot instead mounts a plain read-only overlay from `/dev/vdb`.
+    let verity_intended = config.roothash.is_some() || config.verity_path.is_some();
+    if verity_intended {
+        if !libkrun_verity_enabled(config) {
+            bail!(
+                "required-overlay libkrun boot requires verity metadata plus an initrd \
+                 (`--initrd` or sibling rootfs.initrd)"
+            );
+        }
+        if libkrun_runtime_overlay(config).is_none() {
+            bail!("required-overlay libkrun boot requires the runtime overlay artifact triple");
+        }
+    } else if crate::microvm::non_verity_overlay_ext4(config).is_none() {
         bail!(
-            "required-overlay libkrun boot requires verity metadata plus an initrd \
-             (`--initrd` or sibling rootfs.initrd)"
+            "required-overlay libkrun boot requires the runtime overlay artifact triple \
+             (a non-verity boot mounts it as a plain read-only /dev/vdb)"
         );
-    }
-    if libkrun_runtime_overlay(config).is_none() {
-        bail!("required-overlay libkrun boot requires the runtime overlay artifact triple");
     }
     Ok(())
 }
@@ -399,6 +411,18 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     {
         cmdline.push(' ');
         cmdline.push_str(&verity_args);
+    }
+    // Non-verity boots carry the runtime overlay as a plain read-only
+    // `/dev/vdb`; emit the token its `/init` mounts from. Verity boots already
+    // emitted the dm-verity variant above.
+    if !libkrun_verity_enabled(config)
+        && let Some(overlay_args) = crate::microvm::build_runtime_overlay_cmdline_args(
+            None,
+            crate::microvm::non_verity_overlay_ext4(config).is_some(),
+        )
+    {
+        cmdline.push(' ');
+        cmdline.push_str(&overlay_args);
     }
     cmdline.push(' ');
     cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
@@ -467,6 +491,13 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         }
     } else {
         krun.rootfs_path = Some(config.rootfs_path.clone());
+        // A non-verity dev boot has no initramfs to mount the runtime overlay,
+        // so attach it as a plain read-only virtio-blk device. `rootfs_path`
+        // takes /dev/vda, so this first extra disk is /dev/vdb — the device the
+        // `mvm.runtime_data=` token names for the guest `/init`.
+        if let Some(overlay) = crate::microvm::non_verity_overlay_ext4(config) {
+            krun = krun.add_disk("runtime", overlay.to_string(), true);
+        }
     }
 
     // A dev-accessible managed machine (`machine run -t` / `machine shell` /
@@ -1661,6 +1692,44 @@ mod tests {
     }
 
     #[test]
+    fn libkrun_non_verity_boot_attaches_runtime_overlay_as_first_extra_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").unwrap();
+
+        // A plain dev rootfs (no verity) with a resolved overlay triple: the
+        // rootfs rides /dev/vda via `rootfs_path`, so the overlay is the first
+        // extra disk (=> /dev/vdb), read-only, matching the cmdline token.
+        let config = VmStartConfig {
+            name: "dev".into(),
+            rootfs_path: rootfs.display().to_string(),
+            kernel_path: Some("/tmp/vmlinux".into()),
+            cpus: 1,
+            memory_mib: 256,
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        let cfg = build_supervisor_config(&config, dir.path()).expect("build");
+        assert_eq!(
+            cfg.krun.rootfs_path.as_deref(),
+            Some(rootfs.to_string_lossy().as_ref())
+        );
+        assert_eq!(cfg.krun.extra_disks.len(), 1);
+        assert_eq!(cfg.krun.extra_disks[0].path, "/tmp/runtime.ext4");
+        assert!(cfg.krun.extra_disks[0].read_only);
+        let cmdline = cfg.krun.kernel_cmdline.as_deref().expect("cmdline");
+        assert!(cmdline.contains("root=/dev/vda"), "got: {cmdline}");
+        assert!(
+            cmdline.contains("mvm.runtime_data=/dev/vdb"),
+            "got: {cmdline}"
+        );
+        assert!(!cmdline.contains("mvm.runtime_hash="), "got: {cmdline}");
+    }
+
+    #[test]
     fn required_overlay_libkrun_support_rejects_missing_overlay_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
@@ -1701,6 +1770,21 @@ mod tests {
         };
         let err = ensure_libkrun_runtime_source_supported(&config).unwrap_err();
         assert!(err.to_string().contains("rootfs.initrd"));
+    }
+
+    #[test]
+    fn required_overlay_libkrun_support_accepts_non_verity_block_overlay() {
+        // A non-verity dev boot carrying the resolved overlay triple is served by
+        // the plain read-only /dev/vdb mount — no verity metadata or initrd.
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        assert!(ensure_libkrun_runtime_source_supported(&config).is_ok());
     }
 
     /// claim 1 (host-fs isolation): libkrun can't enforce a read-only virtio-fs

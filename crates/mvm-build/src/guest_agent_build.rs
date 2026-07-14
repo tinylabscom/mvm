@@ -141,6 +141,8 @@ pub struct RuntimeOverlayGuestBinaries {
     pub verity_init: PathBuf,
     pub runner: PathBuf,
     pub egress_client: PathBuf,
+    pub addon_dns: PathBuf,
+    pub exit_report: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +156,8 @@ pub struct RuntimeOverlayGuestLayout {
     pub verity_init: PathBuf,
     pub runner: PathBuf,
     pub egress_client: PathBuf,
+    pub addon_dns: PathBuf,
+    pub exit_report: PathBuf,
 }
 
 impl RuntimeOverlayGuestLayout {
@@ -172,6 +176,8 @@ impl RuntimeOverlayGuestLayout {
             verity_init: dir.join("verity-init"),
             runner: dir.join("runner"),
             egress_client: dir.join("egress-client"),
+            addon_dns: dir.join("addon-dns"),
+            exit_report: dir.join("exit-report"),
             dir,
         }
     }
@@ -185,6 +191,8 @@ impl RuntimeOverlayGuestLayout {
             && self.verity_init.is_file()
             && self.runner.is_file()
             && self.egress_client.is_file()
+            && self.addon_dns.is_file()
+            && self.exit_report.is_file()
     }
 
     fn binaries(&self) -> RuntimeOverlayGuestBinaries {
@@ -197,6 +205,8 @@ impl RuntimeOverlayGuestLayout {
             verity_init: self.verity_init.clone(),
             runner: self.runner.clone(),
             egress_client: self.egress_client.clone(),
+            addon_dns: self.addon_dns.clone(),
+            exit_report: self.exit_report.clone(),
         }
     }
 }
@@ -574,6 +584,10 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "mvm-guest-helpers".to_string(),
         "--bin".to_string(),
         "mvm-egress-client".to_string(),
+        "--bin".to_string(),
+        "mvm-addon-dns".to_string(),
+        "--bin".to_string(),
+        "mvm-exit-report".to_string(),
     ];
     run_zigbuild(&spec, cargo.as_os_str(), &prod_args)?;
     let output_dir = spec.output_dir();
@@ -584,6 +598,8 @@ fn build_runtime_overlay_guest_binaries_into_cache(
     install_one(&output_dir.join("mvm-verity-init"), &layout.verity_init)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
+    install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;
+    install_one(&output_dir.join("mvm-exit-report"), &layout.exit_report)?;
 
     let dev_agent_args = vec![
         "zigbuild".to_string(),
@@ -1248,6 +1264,8 @@ mod tests {
         assert_eq!(layout.seccomp_apply, layout.dir.join("seccomp-apply"));
         assert_eq!(layout.runner, layout.dir.join("runner"));
         assert_eq!(layout.egress_client, layout.dir.join("egress-client"));
+        assert_eq!(layout.addon_dns, layout.dir.join("addon-dns"));
+        assert_eq!(layout.exit_report, layout.dir.join("exit-report"));
     }
 
     #[test]

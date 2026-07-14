@@ -29,7 +29,7 @@ use crate::builder_vm_runtime::CLOSURE_SEED_TAG;
 #[cfg(feature = "builder-vm")]
 use crate::libkrun_builder::{
     BuilderEndpointTransport, BuilderShellJob, BuilderShellResult, BuilderVsockEgressEndpoint,
-    builder_runtime_overlay_attachment, cached_runtime_overlay_ext4,
+    builder_runtime_overlay_attachment, require_runtime_overlay_ext4,
 };
 
 /// QEMU-backed builder VM (Linux). Constructed with `::default()`; no I/O at
@@ -681,19 +681,27 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         virtiofsd.spawn(&virtiofsd_bin, virtiofsd_flavor, tag, &sock, dir)?;
     }
 
-    let runtime_overlay = cached_runtime_overlay_ext4();
+    // The QEMU builder is always a lean Rootfs builder, so the runtime overlay
+    // is required — fail closed rather than booting a builder whose guest agent
+    // can never launch (it bakes none of its guest binaries).
+    let runtime_overlay = require_runtime_overlay_ext4()
+        .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))?;
     let egress_port = allocate_qemu_builder_egress_port();
-    let cmdline = builder_runtime_overlay_attachment(
+    let overlay_cmdline = builder_runtime_overlay_attachment(
         &BuilderVmImage::Rootfs {
             kernel_path: kernel.clone(),
             rootfs_path: rootfs.clone(),
             cmdline: image_cmdline.clone(),
         },
-        runtime_overlay.as_deref(),
+        Some(runtime_overlay.as_path()),
     )
-    .map(|attachment| attachment.cmdline)
-    .map(|overlay_cmdline| qemu_build_cmdline(&overlay_cmdline, egress_port))
-    .unwrap_or_else(|| qemu_build_cmdline(&image_cmdline, egress_port));
+    .ok_or_else(|| {
+        BuilderVmError::RuntimeOverlayUnavailable(
+            "resolved runtime overlay did not produce a builder attachment".to_string(),
+        )
+    })?
+    .cmdline;
+    let cmdline = qemu_build_cmdline(&overlay_cmdline, egress_port);
     let guest_cid = allocate_qemu_builder_guest_cid();
     let timeout_secs = builder_vm_timeout()?.as_secs();
     let mem_arg = format!("{QEMU_BUILD_MEMORY_MIB}M");
@@ -713,12 +721,10 @@ fn run_shell_script_qemu(job: &BuilderShellJob) -> Result<BuilderShellResult, Bu
         "file={},if=virtio,format=raw",
         nix_store_lock.path().display()
     ));
-    if let Some(runtime_overlay) = runtime_overlay.as_deref() {
-        cmd.arg("-drive").arg(format!(
-            "file={},if=virtio,format=raw,readonly=on",
-            runtime_overlay.display()
-        ));
-    }
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        runtime_overlay.display()
+    ));
     for disk in &job.extra_disks {
         let read_only = if disk.read_only { ",readonly=on" } else { "" };
         cmd.arg("-drive").arg(format!(
@@ -921,19 +927,27 @@ fn run_build_qemu(
 
     // 9. Build the QEMU cmdline from the image's (swap hvc0→ttyS0, force
     //    eth0, mark the backend); `root=/dev/vda ro init=…` ride unchanged.
-    let runtime_overlay = cached_runtime_overlay_ext4();
+    // The QEMU builder is always a lean Rootfs builder, so the runtime overlay
+    // is required — fail closed rather than booting a builder whose guest agent
+    // can never launch (it bakes none of its guest binaries).
+    let runtime_overlay = require_runtime_overlay_ext4()
+        .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))?;
     let egress_port = allocate_qemu_builder_egress_port();
-    let cmdline = builder_runtime_overlay_attachment(
+    let overlay_cmdline = builder_runtime_overlay_attachment(
         &BuilderVmImage::Rootfs {
             kernel_path: kernel.clone(),
             rootfs_path: rootfs.clone(),
             cmdline: image_cmdline.clone(),
         },
-        runtime_overlay.as_deref(),
+        Some(runtime_overlay.as_path()),
     )
-    .map(|attachment| attachment.cmdline)
-    .map(|overlay_cmdline| qemu_build_cmdline(&overlay_cmdline, egress_port))
-    .unwrap_or_else(|| qemu_build_cmdline(&image_cmdline, egress_port));
+    .ok_or_else(|| {
+        BuilderVmError::RuntimeOverlayUnavailable(
+            "resolved runtime overlay did not produce a builder attachment".to_string(),
+        )
+    })?
+    .cmdline;
+    let cmdline = qemu_build_cmdline(&overlay_cmdline, egress_port);
     let guest_cid = allocate_qemu_builder_guest_cid();
 
     // 10. Launch QEMU, serial → console.log, wrapped in `timeout`.
@@ -959,12 +973,10 @@ fn run_build_qemu(
         "file={},if=virtio,format=raw",
         nix_store_lock.path().display()
     ));
-    if let Some(runtime_overlay) = runtime_overlay.as_deref() {
-        cmd.arg("-drive").arg(format!(
-            "file={},if=virtio,format=raw,readonly=on",
-            runtime_overlay.display()
-        ));
-    }
+    cmd.arg("-drive").arg(format!(
+        "file={},if=virtio,format=raw,readonly=on",
+        runtime_overlay.display()
+    ));
     // Shared memory backend required by vhost-user-fs (virtiofs). Its size
     // MUST equal `-m`.
     cmd.args([

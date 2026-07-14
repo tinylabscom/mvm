@@ -1839,6 +1839,18 @@ mod runtime_overlay_attach_tests {
                 xattrs: Vec::new(),
             },
             Node::File {
+                path: "/addon-dns".into(),
+                mode: 0o555,
+                data: b"addon-dns".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
+                path: "/exit-report".into(),
+                mode: 0o555,
+                data: b"exit-report".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
                 path: "/VERSION".into(),
                 mode: 0o444,
                 data: format!("{version}\n").into_bytes(),
@@ -2432,7 +2444,10 @@ mod runtime_source_policy_for_workload_boot_tests {
     }
 
     #[test]
-    fn firecracker_unsealed_boot_prefers_overlay() {
+    fn firecracker_unsealed_block_boot_requires_overlay() {
+        // Unsealed block workloads now require the overlay too — the overlay is
+        // the single source of guest binaries, so a missing overlay fails closed
+        // instead of falling back to the baked rootfs copy.
         assert_eq!(
             mvm_core::vm_backend::select_runtime_source_policy(
                 mvm_core::vm_backend::RuntimeSourcePolicySelection {
@@ -2442,7 +2457,7 @@ mod runtime_source_policy_for_workload_boot_tests {
                     launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
                 }
             ),
-            RuntimeSourcePolicy::PreferOverlay
+            RuntimeSourcePolicy::RequiredOverlay
         );
     }
 
