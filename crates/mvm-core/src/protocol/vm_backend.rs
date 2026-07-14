@@ -3,120 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
 
-/// Which guest-runtime source policy this boot declares.
-///
-/// This is intentionally a **contract field**, not a backend behavior switch by
-/// itself. The first rollout slice uses it to make the intended runtime source
-/// machine-readable in launch configs and audit events without changing any
-/// backend behavior yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RuntimeSourcePolicy {
-    /// This boot expects the mvm guest runtime to come from the sealed runtime
-    /// overlay, and should fail closed if that overlay is unavailable.
-    RequiredOverlay,
-    /// This boot prefers the runtime overlay when available, but currently keeps
-    /// a baked rootfs fallback for compatibility with backends/tier
-    /// combinations that have not flipped to required-overlay yet.
-    PreferOverlay,
-    /// This boot does not rely on the runtime overlay path at all; the guest
-    /// runtime is expected to come from the rootfs.
-    #[default]
-    RootfsOnly,
-}
-
-impl RuntimeSourcePolicy {
-    pub const fn audit_label(self) -> &'static str {
-        match self {
-            Self::RequiredOverlay => "required-overlay",
-            Self::PreferOverlay => "prefer-overlay",
-            Self::RootfsOnly => "rootfs-only",
-        }
-    }
-
-    pub const fn cmdline_value(self) -> &'static str {
-        match self {
-            Self::RequiredOverlay => "required_overlay",
-            Self::PreferOverlay => "prefer_overlay",
-            Self::RootfsOnly => "rootfs_only",
-        }
-    }
-
-    pub fn from_cmdline_value(value: &str) -> Option<Self> {
-        match value {
-            "required_overlay" => Some(Self::RequiredOverlay),
-            "prefer_overlay" => Some(Self::PreferOverlay),
-            "rootfs_only" => Some(Self::RootfsOnly),
-            _ => None,
-        }
-    }
-}
-
-/// Which kind of guest launch is selecting a runtime-source policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeSourceLaunchKind {
-    /// A workload image/rootfs whose launch path can attach the runtime overlay.
-    WorkloadImage,
-    /// A builder/dev VM image whose control plane still relies on the baked
-    /// rootfs path when no overlay is attached.
-    BuilderDevVm,
-    /// An injected/staged rootfs (for example the transient OCI run path).
-    /// Block-backed boots can still prefer the shared runtime overlay when the
-    /// backend can attach it; virtiofs-root keeps using the staged rootfs copy
-    /// until a real overlay mount exists on that launch shape.
-    InjectedRootfs,
-}
-
-/// The selected rootfs strategy for a workload boot, when the caller knows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeSourceRootStrategy {
-    VirtiofsRoot,
-    BlockExt4,
-}
-
-/// Inputs to the shared runtime-source policy selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RuntimeSourcePolicySelection<'a> {
-    pub backend_name: Option<&'a str>,
-    pub sealed: bool,
-    pub root_strategy: Option<RuntimeSourceRootStrategy>,
-    pub launch_kind: RuntimeSourceLaunchKind,
-}
-
-/// Shared runtime-source selector. This centralizes the rollout matrix so call
-/// sites stop inferring policy from whichever launch shape they happen to own.
-pub fn select_runtime_source_policy(
-    selection: RuntimeSourcePolicySelection<'_>,
-) -> RuntimeSourcePolicy {
-    match selection.launch_kind {
-        RuntimeSourceLaunchKind::InjectedRootfs => {
-            if selection.root_strategy == Some(RuntimeSourceRootStrategy::VirtiofsRoot) {
-                RuntimeSourcePolicy::RootfsOnly
-            } else {
-                RuntimeSourcePolicy::PreferOverlay
-            }
-        }
-        RuntimeSourceLaunchKind::BuilderDevVm => RuntimeSourcePolicy::PreferOverlay,
-        RuntimeSourceLaunchKind::WorkloadImage => {
-            // Every block-rooted workload boot on a real backend sources its
-            // guest binaries from the runtime overlay — the overlay is the
-            // single source, so a missing overlay must fail closed (build or
-            // acquire), never silently fall back to a baked rootfs copy. Only
-            // the virtiofs-root shape (no block-attach path) and non-real
-            // backends keep the soft preference.
-            if matches!(
-                selection.backend_name,
-                Some("firecracker" | "hvf" | "qemu" | "libkrun")
-            ) && selection.root_strategy != Some(RuntimeSourceRootStrategy::VirtiofsRoot)
-            {
-                RuntimeSourcePolicy::RequiredOverlay
-            } else {
-                RuntimeSourcePolicy::PreferOverlay
-            }
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // VmStartConfig — backend-agnostic VM launch configuration
 // ---------------------------------------------------------------------------
@@ -182,15 +68,6 @@ pub struct VmStartConfig {
     /// 64-char lowercase-hex root hash for the runtime overlay. Baked
     /// into the kernel cmdline as `mvm.runtime_roothash=<hex>`.
     pub runtime_overlay_roothash: Option<String>,
-    /// Resolved runtime-overlay artifact version for this boot. Persisted into
-    /// runtime metadata so lifecycle operations can reason about the exact
-    /// overlay the VM booted with rather than consulting mutable cache state.
-    pub runtime_overlay_version: Option<String>,
-    /// Declared guest-runtime source contract for this boot. The rollout starts
-    /// by making this explicit in launch configs and audit surfaces; later
-    /// slices will make selected backends fail closed when the policy is
-    /// `RequiredOverlay`.
-    pub runtime_source_policy: RuntimeSourcePolicy,
     /// Nix store revision hash.
     pub revision_hash: String,
     /// Original flake reference (for display / status).
@@ -229,7 +106,7 @@ pub struct VmStartConfig {
     /// backends activate the gateway audit substrate (bridge factory +
     /// chain-signed audit emit). `None` keeps the legacy
     /// `run_supervisor` path for callers
-    /// without admission (the builder VM bootstrap, session VMs,
+    /// without admission (`mvmctl dev` Stage 0 builder, session VMs,
     /// template restore).
     pub tenant_id: Option<String>,
     /// JSON-encoded `SignedExecutionPlan` envelope. Carried as a
@@ -273,12 +150,6 @@ pub struct VmStartConfig {
     /// interactive access to a sealed prod guest regardless of this flag, so
     /// the extra listeners are inert there.
     pub dev_console: bool,
-    /// Optional packet-tunnel runtime session to wire as a standing guest-dials
-    /// vsock port. When present, backends that expose per-port host UDS sockets
-    /// map it into the runtime exactly once so the guest network agent and the
-    /// future host worker share one explicit launch-time tunnel identity and
-    /// socket contract.
-    pub network_tunnel: Option<crate::protocol::network_tunnel::TunnelRuntimeConfig>,
 }
 
 /// A host:guest port mapping, backend-agnostic.
@@ -357,7 +228,7 @@ pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
 
 /// Encode the per-VM egress intermediate **cert** (PEM) as a single
 /// `mvm.egress_ca=pem:<body>` kernel-cmdline token, mirroring `mvm.uvols`.
-/// `/init` reconstructs the PEM, writes the cert to tmpfs
+/// `/init` reconstructs the PEM from the body, writes the cert to tmpfs
 /// (`/run/mvm/egress-ca.crt`), and points the guest's TLS trust at a combined
 /// bundle so a workload trusts host-terminated bound-host TLS. The fresh FC
 /// boot attaches no secrets drive, so the cmdline is the only per-VM channel to
@@ -367,9 +238,7 @@ pub fn encode_user_volumes_cmdline(volumes: &[VmVolume]) -> Option<String> {
 /// The token carries only the PEM body (no armor lines or embedded newlines),
 /// not a hex-encoded full PEM. That keeps the token compact enough for the
 /// workload cmdline budget while still staying a single space-free token that
-/// `/proc/cmdline` round-trips. Guest launchers accept the legacy hex-encoded
-/// full-PEM form too, so existing boots keep working while the host-side
-/// encoder moves to the compact format.
+/// `/proc/cmdline` round-trips.
 pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
     if cert_pem.is_empty() {
         return None;
@@ -388,13 +257,6 @@ pub fn encode_egress_ca_cmdline(cert_pem: &str) -> Option<String> {
         return None;
     }
     Some(format!("mvm.egress_ca=pem:{body}"))
-}
-
-/// `mvm.runtime_source_policy=<snake_case>` kernel-cmdline token. This lets the
-/// guest-side launcher distinguish required-overlay vs preferred-overlay boots
-/// without inventing a second policy channel.
-pub fn encode_runtime_source_policy_cmdline(policy: RuntimeSourcePolicy) -> String {
-    format!("mvm.runtime_source_policy={}", policy.cmdline_value())
 }
 
 /// Encode the per-run secret **placeholder** env as a single
@@ -420,47 +282,6 @@ pub fn encode_secret_env_cmdline(pairs: &[(String, String)]) -> Option<String> {
     Some(format!("mvm.secret_env={hex}"))
 }
 
-/// Encode the packet-tunnel runtime config as a single
-/// `mvm.network_tunnel=<hex(JSON)>` kernel-cmdline token. The JSON lives in the
-/// shared `mvm_core::protocol::network_tunnel` contract, and the hex encoding
-/// keeps the value a single space/newline-free token that `/proc/cmdline`
-/// round-trips for a sealed guest.
-pub fn encode_network_tunnel_cmdline(
-    config: &crate::protocol::network_tunnel::TunnelRuntimeConfig,
-) -> Option<String> {
-    config.validate().ok()?;
-    let json = serde_json::to_vec(config).ok()?;
-    let hex: String = json.iter().map(|b| format!("{b:02x}")).collect();
-    Some(format!("mvm.network_tunnel={hex}"))
-}
-
-/// Decode the hex value of a `mvm.network_tunnel=` cmdline token (the part
-/// after the `=`) into a validated [`TunnelRuntimeConfig`]. Unknown JSON fields
-/// and malformed hex fail closed.
-pub fn decode_network_tunnel_cmdline(
-    token_value_hex: &str,
-) -> anyhow::Result<crate::protocol::network_tunnel::TunnelRuntimeConfig> {
-    let bytes: Result<Vec<u8>, _> = (0..token_value_hex.len())
-        .step_by(2)
-        .map(|i| {
-            token_value_hex
-                .get(i..i + 2)
-                .ok_or_else(|| anyhow::anyhow!("odd-length hex"))
-                .and_then(|pair| {
-                    u8::from_str_radix(pair, 16)
-                        .map_err(|_| anyhow::anyhow!("non-hex byte at position {i}"))
-                })
-        })
-        .collect();
-    let bytes = bytes?;
-    let config: crate::protocol::network_tunnel::TunnelRuntimeConfig =
-        serde_json::from_slice(&bytes)?;
-    config
-        .validate()
-        .map_err(|e| anyhow::anyhow!("invalid tunnel runtime config: {e}"))?;
-    Ok(config)
-}
-
 /// Envelope carried in the `mvm.verb_grant=<hex(JSON)>` kernel-cmdline token.
 ///
 /// The host hex-encodes the JSON so the value is a single space/newline-free
@@ -479,11 +300,6 @@ pub fn decode_network_tunnel_cmdline(
 pub struct VerbGrantEnvelope {
     pub pubkey_hex: String,
     pub plan_nonce_hex: String,
-    /// When present on a restore-time re-pin envelope, proves which pinned
-    /// grant lineage the new grant is replacing. Boot-time cmdline envelopes
-    /// leave both predecessor fields absent.
-    pub predecessor_session_id: Option<String>,
-    pub predecessor_plan_nonce_hex: Option<String>,
     pub grant: crate::plan::VerbGrant,
 }
 
@@ -633,7 +449,7 @@ pub enum VmStatus {
 /// for:
 ///
 ///   - `mvmctl run` followed by `mvmctl exec` in the same shell.
-///   - Interactive foreground sessions where the user expects the
+///   - `mvmctl dev` interactive sessions where the user expects the
 ///     VM to disappear when they Ctrl-C.
 ///   - Test harnesses that want deterministic teardown.
 ///
@@ -747,13 +563,8 @@ pub struct VmCapabilities {
     /// Backend can restore a guest by eager copy-on-write (`MAP_PRIVATE`) of a
     /// snapshot RAM section — the primary local warm-restore path.
     pub eager_cow_restore: bool,
-    /// Guest has no host-routable NIC: nothing in the guest can reach the
-    /// network by IP. This is a reachability guarantee, not a device-count one
-    /// — a backend that attaches a virtio-net device but drains/sinks it with
-    /// no upstream route still satisfies this (libkrun), and so does a backend
-    /// that presents no NIC at all (HVF). Egress, when permitted, rides the
-    /// vsock proxy instead.
-    pub no_routable_guest_nic: bool,
+    /// Backend can run a guest with no virtio-net device (no guest NIC).
+    pub no_guest_nic: bool,
     /// Backend supports host/vsock-mediated networking (egress/ingress brokers
     /// over vsock) instead of a guest NIC.
     pub host_vsock_proxy: bool,
@@ -784,7 +595,7 @@ pub struct RequiredCapabilities {
     pub device_state_snapshot: bool,
     pub vcpu_state_snapshot: bool,
     pub vsock: bool,
-    pub no_routable_guest_nic: bool,
+    pub no_guest_nic: bool,
     pub host_vsock_proxy: bool,
     pub pty_exec: bool,
 }
@@ -820,11 +631,7 @@ impl VmCapabilities {
                 "vcpu_state_snapshot",
             ),
             (required.vsock, self.vsock, "vsock"),
-            (
-                required.no_routable_guest_nic,
-                self.no_routable_guest_nic,
-                "no_routable_guest_nic",
-            ),
+            (required.no_guest_nic, self.no_guest_nic, "no_guest_nic"),
             (
                 required.host_vsock_proxy,
                 self.host_vsock_proxy,
@@ -2058,141 +1865,6 @@ mod tests {
     }
 
     #[test]
-    fn encode_runtime_source_policy_cmdline_round_trips_as_single_token() {
-        let token = encode_runtime_source_policy_cmdline(RuntimeSourcePolicy::RequiredOverlay);
-        assert_eq!(token, "mvm.runtime_source_policy=required_overlay");
-        assert!(!token.contains(' '));
-        let value = token
-            .strip_prefix("mvm.runtime_source_policy=")
-            .expect("token prefix");
-        assert_eq!(
-            RuntimeSourcePolicy::from_cmdline_value(value),
-            Some(RuntimeSourcePolicy::RequiredOverlay)
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_requires_overlay_for_block_firecracker_workloads() {
-        // Block-rooted workload boots require the overlay whether or not the
-        // rootfs is sealed — the overlay is the single binary source.
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("firecracker"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_requires_overlay_for_block_hvf_workloads() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("hvf"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_requires_overlay_for_block_qemu_workloads() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("qemu"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_prefers_overlay_for_non_required_backends() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("vz"),
-                sealed: true,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_requires_overlay_for_block_libkrun_workloads() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("libkrun"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_keeps_virtiofs_workload_on_prefer_overlay() {
-        // The virtiofs-root shape has no block-attach path for the overlay, so
-        // it stays a soft preference even on a real backend.
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("hvf"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::VirtiofsRoot),
-                launch_kind: RuntimeSourceLaunchKind::WorkloadImage,
-            }),
-            RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_keeps_virtiofs_injected_rootfs_rootfs_only() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("hvf"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::VirtiofsRoot),
-                launch_kind: RuntimeSourceLaunchKind::InjectedRootfs,
-            }),
-            RuntimeSourcePolicy::RootfsOnly
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_prefers_overlay_for_block_injected_rootfs() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("hvf"),
-                sealed: false,
-                root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
-                launch_kind: RuntimeSourceLaunchKind::InjectedRootfs,
-            }),
-            RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
-    fn select_runtime_source_policy_keeps_builder_dev_on_prefer_overlay() {
-        assert_eq!(
-            select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: None,
-                sealed: false,
-                root_strategy: None,
-                launch_kind: RuntimeSourceLaunchKind::BuilderDevVm,
-            }),
-            RuntimeSourcePolicy::PreferOverlay
-        );
-    }
-
-    #[test]
     fn encode_user_volumes_cmdline_format() {
         let vols = vec![
             VmVolume {
@@ -2283,40 +1955,6 @@ mod tests {
         assert!(missing.contains(&"eager_cow_restore"));
         assert!(missing.contains(&"vsock"));
         assert!(!caps.satisfies(&required));
-    }
-
-    /// Capability-honesty selection over `no_routable_guest_nic`. A vsock-only
-    /// backend (libkrun / HVF advertise this guarantee) satisfies a run that
-    /// requires it, while a NIC-bearing backend (Firecracker / qemu) shortfalls
-    /// and the diagnostic names the field so selection fails closed with a
-    /// recovery hint instead of silently degrading onto a routable-NIC backend.
-    /// The concrete per-backend values are witnessed in the backend crate; this
-    /// pins the selection LOGIC over that renamed capability.
-    #[test]
-    fn no_routable_guest_nic_required_selects_only_vsock_only_backends() {
-        let required = RequiredCapabilities {
-            no_routable_guest_nic: true,
-            ..Default::default()
-        };
-
-        // libkrun / HVF shape: no host-routable guest NIC ⇒ satisfied.
-        let vsock_only = VmCapabilities {
-            no_routable_guest_nic: true,
-            ..VmCapabilities::default()
-        };
-        assert!(vsock_only.shortfall(&required).is_empty());
-        assert!(vsock_only.satisfies(&required));
-
-        // Firecracker / qemu shape: routable guest NIC ⇒ shortfall names the field.
-        let nic_bearing = VmCapabilities {
-            no_routable_guest_nic: false,
-            ..VmCapabilities::default()
-        };
-        assert_eq!(
-            nic_bearing.shortfall(&required),
-            vec!["no_routable_guest_nic"]
-        );
-        assert!(!nic_bearing.satisfies(&required));
     }
 
     #[test]
@@ -2586,8 +2224,6 @@ mod tests {
         let env = VerbGrantEnvelope {
             pubkey_hex: String::new(),
             plan_nonce_hex: nonce.as_hex().to_string(),
-            predecessor_session_id: None,
-            predecessor_plan_nonce_hex: None,
             grant,
         };
         assert!(encode_verb_grant_cmdline(&env).is_none());
@@ -2625,8 +2261,6 @@ mod tests {
         let env = VerbGrantEnvelope {
             pubkey_hex: pubkey_hex.clone(),
             plan_nonce_hex: plan_nonce_hex.clone(),
-            predecessor_session_id: None,
-            predecessor_plan_nonce_hex: None,
             grant: grant.clone(),
         };
 

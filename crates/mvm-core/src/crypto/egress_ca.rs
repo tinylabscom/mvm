@@ -23,7 +23,12 @@ use std::path::Path;
 
 use rcgen::{
     BasicConstraints, CertificateParams, DnType, GeneralSubtree, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, NameConstraints,
+    KeyUsagePurpose, NameConstraints, PKCS_RSA_SHA256,
+};
+use rsa::{
+    RsaPrivateKey,
+    pkcs8::{EncodePrivateKey, LineEnding},
+    rand_core::OsRng,
 };
 
 /// Errors minting or loading egress CA material. Opaque strings around the
@@ -102,7 +107,7 @@ impl EgressCa {
         &self,
         bound_hosts: &[&str],
     ) -> Result<VmIntermediate, EgressCaError> {
-        let key = KeyPair::generate()?;
+        let key = generate_rsa_signing_key_pair()?;
         let mut params = CertificateParams::new(Vec::<String>::new())?;
         params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
         params
@@ -174,13 +179,16 @@ impl VmIntermediate {
     /// conforming verifier when `sni` is outside the intermediate's
     /// `nameConstraints` (defense in depth — claim 12 is the real boundary).
     pub fn mint_leaf(&self, sni: &str) -> Result<Leaf, EgressCaError> {
-        let key = KeyPair::generate()?;
+        let key = generate_rsa_signing_key_pair()?;
         let mut params = CertificateParams::new(vec![sni.to_string()])?;
         params.is_ca = IsCa::ExplicitNoCa;
         params
             .distinguished_name
             .push(DnType::CommonName, sni.to_string());
-        params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
         params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
         // Signed by this intermediate (issuer DN + key from the delivered
         // intermediate cert, so the leaf chains to it).
@@ -218,7 +226,7 @@ fn dns_subtree(host: &str) -> GeneralSubtree {
 }
 
 fn mint_host_ca() -> Result<(String, KeyPair), EgressCaError> {
-    let key = KeyPair::generate()?;
+    let key = generate_rsa_signing_key_pair()?;
     let mut params = CertificateParams::new(Vec::<String>::new())?;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params
@@ -227,6 +235,17 @@ fn mint_host_ca() -> Result<(String, KeyPair), EgressCaError> {
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
     let cert = params.self_signed(&key)?;
     Ok((cert.pem(), key))
+}
+
+fn generate_rsa_signing_key_pair() -> Result<KeyPair, EgressCaError> {
+    let mut rng = OsRng;
+    let key =
+        RsaPrivateKey::new(&mut rng, 2048).map_err(|err| EgressCaError::Gen(err.to_string()))?;
+    let pem = key
+        .to_pkcs8_pem(LineEnding::LF)
+        .map_err(|err| EgressCaError::Gen(err.to_string()))?;
+    KeyPair::from_pkcs8_pem_and_sign_algo(pem.as_str(), &PKCS_RSA_SHA256)
+        .map_err(|err| EgressCaError::Parse(err.to_string()))
 }
 
 /// Write a private key file at mode 0400 (owner read-only) on Unix, via
@@ -264,6 +283,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), EgressCaError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rsa::pkcs8::DecodePrivateKey;
     use tempfile::tempdir;
 
     #[test]
@@ -325,6 +345,37 @@ mod tests {
         let leaf = rebuilt.mint_leaf("api.openai.com").unwrap();
         assert!(leaf.cert_pem.contains("BEGIN CERTIFICATE"));
         assert!(leaf.key_pem.contains("PRIVATE KEY"));
+    }
+
+    #[test]
+    fn minted_leaf_uses_rsa_private_key_material() {
+        let dir = tempdir().unwrap();
+        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
+        let inter = ca.mint_vm_intermediate(&["api.openai.com"]).unwrap();
+        let leaf = inter.mint_leaf("api.openai.com").unwrap();
+
+        let _parsed = rsa::RsaPrivateKey::from_pkcs8_pem(&leaf.key_pem)
+            .expect("leaf private key should be encoded as PKCS#8 RSA");
+    }
+
+    #[test]
+    fn minted_intermediate_uses_rsa_private_key_material() {
+        let dir = tempdir().unwrap();
+        let ca = EgressCa::load_or_init_at(dir.path()).unwrap();
+        let inter = ca.mint_vm_intermediate(&["api.openai.com"]).unwrap();
+
+        let _parsed = rsa::RsaPrivateKey::from_pkcs8_pem(&inter.key_pem())
+            .expect("intermediate private key should be encoded as PKCS#8 RSA");
+    }
+
+    #[test]
+    fn host_ca_uses_rsa_private_key_material() {
+        let dir = tempdir().unwrap();
+        EgressCa::load_or_init_at(dir.path()).unwrap();
+        let key_pem = fs::read_to_string(dir.path().join(CA_KEY_FILE)).unwrap();
+
+        let _parsed = rsa::RsaPrivateKey::from_pkcs8_pem(&key_pem)
+            .expect("host CA private key should be encoded as PKCS#8 RSA");
     }
 
     #[test]

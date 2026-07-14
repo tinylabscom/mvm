@@ -4,11 +4,10 @@
 //! Distinct from `mvmctl machine exec` (dev-only, arbitrary shell). This is
 //! the production-safe call surface — it dispatches the `RunEntrypoint` vsock
 //! verb, which the guest agent serves only by spawning the program named in
-//! `/etc/mvm/entrypoint`. There is no shell and no argv override. Env injection
-//! is limited to host-synthesized egress settings: either the substitution env
-//! (`HTTP_PROXY` + opaque placeholders) for secret-bearing workloads, or the
-//! loopback SOCKS5 vsock proxy env for plain vsock-egress workloads; never a
-//! raw secret value.
+//! `/etc/mvm/entrypoint`. There is no shell and no argv override. The only env
+//! injected is the substitution env — `HTTP_PROXY` + the opaque secret
+//! placeholders — and only when the VM's admitted plan carried secrets; never
+//! a raw secret value (those stay in the host substitution endpoint).
 //!
 //! Behaviour:
 //!   - boots a transient microVM from a registered template / manifest slot
@@ -55,9 +54,6 @@ pub(in crate::commands) struct EntrypointCall {
     /// ephemeral VM is admitted so the host spawns the substitution endpoint;
     /// the guest only ever holds the opaque `mvm-secret-<hex>` placeholder.
     pub from_workload_ir: Option<PathBuf>,
-    /// Explicit ProdSafe agent-verb override to mint into the admitted grant
-    /// for the transient entrypoint boot. Empty => use the computed default.
-    pub agent_verb_override: Vec<String>,
     /// Restore the session VM from its post-boot snapshot before the call.
     /// Wired but no-op in this build (session-pool plan).
     pub reset: bool,
@@ -79,174 +75,6 @@ pub(in crate::commands) struct EntrypointCall {
     /// is the running VM's name. Its substitution endpoint + boot-minted
     /// placeholders are reused; the VM is left running (no teardown).
     pub attach: bool,
-    /// Resolved egress policy for the transient entrypoint boot (from `--net` /
-    /// `--allow-host`). Threaded onto the admitted plan and onto
-    /// `VmStartConfig.network_tunnel` so a baked entrypoint enforces egress
-    /// identically to the transient argv path. Defaults to `deny_all`.
-    pub network_policy: mvm_core::network_policy::NetworkPolicy,
-}
-
-struct EntrypointAdmission {
-    context: super::up::AdmissionContext,
-    substrate: crate::exec::SessionAuditSubstrate,
-}
-
-struct EntrypointAdmissionParams<'a> {
-    rootfs: &'a std::path::Path,
-    vm_name: &'a str,
-    backend_name: &'a str,
-    cpus: u32,
-    mem_mib: u64,
-    lowered_secrets: &'a super::managed_secrets::LoweredPlanSecrets,
-    agent_verb_override: &'a [String],
-    keep_alive_dev: bool,
-    network_policy: mvm_core::network_policy::NetworkPolicy,
-}
-
-impl<'a> EntrypointAdmissionParams<'a> {
-    fn builder(
-        rootfs: &'a std::path::Path,
-        vm_name: &'a str,
-        backend_name: &'a str,
-    ) -> EntrypointAdmissionParamsBuilder<'a> {
-        EntrypointAdmissionParamsBuilder {
-            rootfs,
-            vm_name,
-            backend_name,
-            cpus: 1,
-            mem_mib: 256,
-            lowered_secrets: None,
-            agent_verb_override: &[],
-            keep_alive_dev: false,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-        }
-    }
-}
-
-struct EntrypointAdmissionParamsBuilder<'a> {
-    rootfs: &'a std::path::Path,
-    vm_name: &'a str,
-    backend_name: &'a str,
-    cpus: u32,
-    mem_mib: u64,
-    lowered_secrets: Option<&'a super::managed_secrets::LoweredPlanSecrets>,
-    agent_verb_override: &'a [String],
-    keep_alive_dev: bool,
-    network_policy: mvm_core::network_policy::NetworkPolicy,
-}
-
-impl<'a> EntrypointAdmissionParamsBuilder<'a> {
-    fn cpus(mut self, cpus: u32) -> Self {
-        self.cpus = cpus;
-        self
-    }
-
-    fn mem_mib(mut self, mem_mib: u64) -> Self {
-        self.mem_mib = mem_mib;
-        self
-    }
-
-    fn lowered_secrets(
-        mut self,
-        lowered_secrets: &'a super::managed_secrets::LoweredPlanSecrets,
-    ) -> Self {
-        self.lowered_secrets = Some(lowered_secrets);
-        self
-    }
-
-    fn agent_verb_override(mut self, agent_verb_override: &'a [String]) -> Self {
-        self.agent_verb_override = agent_verb_override;
-        self
-    }
-
-    fn keep_alive_dev(mut self, keep_alive_dev: bool) -> Self {
-        self.keep_alive_dev = keep_alive_dev;
-        self
-    }
-
-    fn network_policy(mut self, network_policy: mvm_core::network_policy::NetworkPolicy) -> Self {
-        self.network_policy = network_policy;
-        self
-    }
-
-    fn build(self) -> EntrypointAdmissionParams<'a> {
-        EntrypointAdmissionParams {
-            rootfs: self.rootfs,
-            vm_name: self.vm_name,
-            backend_name: self.backend_name,
-            cpus: self.cpus,
-            mem_mib: self.mem_mib,
-            lowered_secrets: self
-                .lowered_secrets
-                .expect("entrypoint admission params require lowered secrets"),
-            agent_verb_override: self.agent_verb_override,
-            keep_alive_dev: self.keep_alive_dev,
-            network_policy: self.network_policy,
-        }
-    }
-}
-
-fn admit_entrypoint_boot(
-    params: EntrypointAdmissionParams<'_>,
-) -> Result<Option<EntrypointAdmission>> {
-    let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
-    let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
-        tenant: "local",
-        vm_name: params.vm_name,
-        backend_name: params.backend_name,
-        rootfs_path: params.rootfs,
-        precomputed_image_sha256: None,
-        cpus: params.cpus,
-        mem_mib: params.mem_mib,
-        seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-        secret_release: params.lowered_secrets.secret_release,
-        secrets: params.lowered_secrets.secrets.clone(),
-        auth: mvm_core::plan::AuthPolicy::none(),
-        no_supervisor: false,
-        ledger: &ledger,
-        keys_dir: None,
-        audit_dir: None,
-        policy_dir: None,
-        bundle_pin: None,
-        deps_volume: None,
-        shares: vec![],
-        redaction: mvm_core::policy::RedactionPolicy::default(),
-        network_policy: params.network_policy.clone(),
-        agent_verb_override: params.agent_verb_override.to_vec(),
-        restrict_agent_verbs: !params.keep_alive_dev
-            && super::agent_verbs::image_is_sealed(params.rootfs),
-    })?;
-    let Some(ctx) = ctx else { return Ok(None) };
-
-    let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
-    let guest_profile = super::up::guest_profile_for_boot(params.keep_alive_dev, params.rootfs);
-    super::up::attach_guest_boot_config_for_plan(
-        &mut start_config,
-        &ctx.admitted.plan,
-        &ctx.host_signer_public_path,
-        guest_profile,
-    )?;
-    if super::up::persists_plan_before_start(params.backend_name) {
-        super::plan_persist::write_plan(params.vm_name, &ctx.admitted.plan)
-            .context("persisting admitted plan for the pre-start egress moat")?;
-    }
-    let plan_json = serde_json::to_string(&ctx.admitted.signed)
-        .context("serializing admitted plan for the session VM")?;
-    let bundle_json = ctx
-        .policy_bundle
-        .as_ref()
-        .map(serde_json::to_string)
-        .transpose()
-        .context("serializing admitted policy bundle for the session VM")?;
-    Ok(Some(EntrypointAdmission {
-        substrate: crate::exec::SessionAuditSubstrate {
-            tenant_id: ctx.admitted.plan.tenant.0.clone(),
-            plan_json,
-            bundle_json,
-            config_files: start_config.config_files,
-        },
-        context: ctx,
-    }))
 }
 
 pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
@@ -316,65 +144,91 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     ui::info(&format!(
         "entrypoint: booting {lifecycle_label} for template '{template_id}'"
     ));
-    let lowered_secrets = super::up::load_workload_ir(call.from_workload_ir.as_deref())?
-        .map(|w| super::managed_secrets::lower_workload_secrets(&w))
-        .filter(|lowered| !lowered.secrets.is_empty())
-        .unwrap_or_default();
-    let backend_name = mvm_backend::backend::AnyBackend::auto_select()
-        .name()
-        .to_string();
-    let admit_backend = backend_name.clone();
-    let cpus = call.cpus;
-    let mem = call.memory_mib as u64;
-    let agent_verb_override = call.agent_verb_override.clone();
-    let keep_alive_dev = call.keep_alive_dev;
-    let network_policy = call.network_policy.clone();
-    let admit_network_policy = network_policy.clone();
-    let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<super::up::AdmissionContext>>> =
-        std::rc::Rc::new(std::cell::RefCell::new(None));
-    let ctx_sink = std::rc::Rc::clone(&admit_ctx);
-    let admit = move |rootfs: &std::path::Path,
-                      vm_name: &str|
-          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
-        let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(rootfs, vm_name, &admit_backend)
-                .cpus(cpus)
-                .mem_mib(mem)
-                .lowered_secrets(&lowered_secrets)
-                .agent_verb_override(&agent_verb_override)
-                .keep_alive_dev(keep_alive_dev)
-                .network_policy(admit_network_policy.clone())
-                .build(),
-        )?;
-        let Some(admitted) = admitted else {
-            return Ok(None);
-        };
-        *ctx_sink.borrow_mut() = Some(admitted.context);
-        Ok(Some(admitted.substrate))
-    };
+    // If the workload declares secrets (its IR was passed via
+    // `--from-workload-ir`), admit the lowered plan so the ephemeral VM spawns
+    // the substitution endpoint. The closure runs admission inside
+    // `boot_session_vm` (the rootfs + vm_name it needs are generated there). No
+    // IR / no secrets ⇒ `None`, the unchanged plain-invoke path.
+    let admit_closure: Option<Box<crate::exec::SessionAdmit>> =
+        super::up::load_workload_ir(call.from_workload_ir.as_deref())?
+            .map(|w| super::managed_secrets::lower_workload_secrets(&w))
+            .filter(|lowered| !lowered.secrets.is_empty())
+            .map(|lowered| {
+                let secrets = lowered.secrets;
+                let secret_release = lowered.secret_release;
+                let backend_name = mvm_backend::backend::AnyBackend::auto_select()
+                    .name()
+                    .to_string();
+                let cpus = call.cpus;
+                let mem = call.memory_mib as u64;
+                Box::new(
+                    move |rootfs: &std::path::Path,
+                          vm_name: &str|
+                          -> Result<Option<crate::exec::SessionAuditSubstrate>> {
+                        let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+                        let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
+                            tenant: "local",
+                            vm_name,
+                            backend_name: &backend_name,
+                            rootfs_path: rootfs,
+                            build_provenance: None,
+                            precomputed_image_sha256: None,
+                            cpus,
+                            mem_mib: mem,
+                            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+                            secret_release,
+                            secrets: secrets.clone(),
+                            auth: mvm_core::plan::AuthPolicy::none(),
+                            no_supervisor: false,
+                            ledger: &ledger,
+                            keys_dir: None,
+                            audit_dir: None,
+                            policy_dir: None,
+                            bundle_pin: None,
+                            deps_volume: None,
+                            shares: vec![],
+                            redaction: mvm_core::policy::RedactionPolicy::default(),
+                            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+                            agent_verb_override: vec![],
+                            // --keep-alive-dev marks the session for subsequent session exec /
+                            // run-code (DevOnly verbs); those must not be blocked by an
+                            // attenuated ProdSafe grant. Additionally, the default grant is
+                            // only minted for a sealed image (mvm-meta.json `sealed: true`);
+                            // unsealed dev-shell or OCI images are not restricted.
+                            restrict_agent_verbs: !call.keep_alive_dev
+                                && super::agent_verbs::image_is_sealed(rootfs),
+                        })?;
+                        let Some(c) = ctx else { return Ok(None) };
+                        // Persist the bare admitted plan to the per-VM state dir
+                        // before boot. The macOS substitution endpoint decodes
+                        // its secret bindings from `<state_dir>/plan.json` inside
+                        // `backend.start()`; `boot_session_vm` only threads the
+                        // plan in-memory, so without this on-disk copy the
+                        // endpoint silently no-ops on vz/libkrun (the in-memory
+                        // thread alone never reaches the disk-reading decode).
+                        if super::up::persists_plan_before_start(&backend_name) {
+                            super::plan_persist::write_plan(vm_name, &c.admitted.plan)
+                                .context("persisting admitted plan for the pre-start egress moat")?;
+                        }
+                        let plan_json = serde_json::to_string(&c.admitted.signed)
+                            .context("serializing admitted plan for the session VM")?;
+                        Ok(Some(crate::exec::SessionAuditSubstrate {
+                            tenant_id: c.admitted.plan.tenant.0.clone(),
+                            plan_json,
+                            bundle_json: None,
+                        }))
+                    },
+                ) as Box<crate::exec::SessionAdmit>
+            });
 
-    let vm = match crate::exec::boot_session_vm(
+    let vm = crate::exec::boot_session_vm(
         &template_id,
         "invoke",
         call.cpus,
         call.memory_mib,
-        &network_policy,
-        Some(&admit),
-    ) {
-        Ok(vm) => {
-            let ctx = admit_ctx.borrow_mut().take();
-            super::up::emit_launched_if(&ctx, &backend_name);
-            if let Some(ctx) = ctx {
-                *admit_ctx.borrow_mut() = Some(ctx);
-            }
-            vm
-        }
-        Err(e) => {
-            let ctx = admit_ctx.borrow_mut().take();
-            super::up::emit_failed_if(&ctx, "backend-start", &e);
-            return Err(e).context("Booting VM for the entrypoint call");
-        }
-    };
+        admit_closure.as_deref(),
+    )
+    .context("Booting VM for the entrypoint call")?;
 
     // Register a session record so `mvmctl session ls`
     // sees the call (whether transient or warm). With `--keep-alive`
@@ -612,9 +466,11 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
         &mut stream,
         stdin,
         timeout_secs,
-        // Secret-bearing workloads route through the in-guest forward proxy;
-        // plain vsock-egress workloads route through the loopback SOCKS5 client.
-        workload_egress_env(vm_name),
+        // When the VM has a substitution endpoint (the admitted plan
+        // carried secrets), inject HTTP_PROXY + the opaque placeholder vars so
+        // the workload routes secret-bearing egress through the in-guest
+        // forward proxy → host endpoint. Empty when there are no secrets.
+        substitution_env(vm_name),
         |event| match event {
             mvm_guest::vsock::EntrypointEvent::Stdout { chunk } => {
                 let _ = std::io::stdout().write_all(chunk);
@@ -657,18 +513,6 @@ fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i3
     Ok(exit_code_for(&terminal))
 }
 
-/// The workload launch env that routes egress through the active vsock path.
-/// Secret-bearing workloads use the substitution endpoint env; plain workloads
-/// use the guest-local SOCKS5 client when the VM booted with vsock egress
-/// enabled. Empty when the VM has neither.
-fn workload_egress_env(vm_name: &str) -> Vec<(String, String)> {
-    let subst = substitution_env(vm_name);
-    if !subst.is_empty() {
-        return subst;
-    }
-    vsock_egress_env(vm_name)
-}
-
 /// The workload launch env that routes secret-bearing egress
 /// through the substitution endpoint. Reads the `(guest var, placeholder)`
 /// pairs the endpoint minted at boot (`vm_substitution_env_path`); when
@@ -682,62 +526,7 @@ fn substitution_env(vm_name: &str) -> Vec<(String, String)> {
         .ok()
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
-    with_egress_ca_env(
-        build_substitution_env(placeholders),
-        egress_ca_present(vm_name),
-    )
-}
-
-fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
-    if !mvm_core::config::vm_vsock_egress_marker_path(vm_name).is_file() {
-        return Vec::new();
-    }
-    mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
-}
-
-/// Whether the per-VM egress CA sidecar exists — i.e. egress substitution
-/// provisioned a CA whose PEM the launcher put on the guest kernel cmdline
-/// (`mvm.egress_ca=`) and the guest `/init` decoded to `/run/mvm/ca-bundle.crt`.
-fn egress_ca_present(vm_name: &str) -> bool {
-    mvm_core::config::vm_state_dir(vm_name)
-        .join("egress-intermediate.json")
-        .exists()
-}
-
-/// Point the workload's TLS stack at the guest-side egress CA bundle when one
-/// is provisioned. An OCI entrypoint runs under `env_clear()` + the request
-/// env, so — unlike a flake `/init` child that inherits the shell exports —
-/// these must ride the agent request env. Mirrors the mkGuest egress-ca
-/// exports (`SSL_CERT_FILE`/`CURL_CA_BUNDLE`/`REQUESTS_CA_BUNDLE` →
-/// combined bundle, `NODE_EXTRA_CA_CERTS` → the egress cert alone). No CA
-/// provisioned ⇒ env unchanged.
-fn with_egress_ca_env(
-    env: Vec<(String, String)>,
-    egress_ca_present: bool,
-) -> Vec<(String, String)> {
-    if !egress_ca_present {
-        return env;
-    }
-    let mut ca = vec![
-        (
-            "SSL_CERT_FILE".to_string(),
-            "/run/mvm/ca-bundle.crt".to_string(),
-        ),
-        (
-            "CURL_CA_BUNDLE".to_string(),
-            "/run/mvm/ca-bundle.crt".to_string(),
-        ),
-        (
-            "REQUESTS_CA_BUNDLE".to_string(),
-            "/run/mvm/ca-bundle.crt".to_string(),
-        ),
-        (
-            "NODE_EXTRA_CA_CERTS".to_string(),
-            "/run/mvm/egress-ca.crt".to_string(),
-        ),
-    ];
-    ca.extend(env);
-    ca
+    crate::egress_ca_env::inject_vm_egress_ca_env(vm_name, build_substitution_env(placeholders))
 }
 
 /// Pure half of [`substitution_env`]: given the endpoint's minted placeholder
@@ -831,123 +620,7 @@ mod auto_stdin_tests {
 
 #[cfg(test)]
 mod tests {
-    use crate::commands::vm::host_signer;
-    use crate::commands::vm::managed_secrets::LoweredPlanSecrets;
-    use mvm_core::util::test_env::TestEnv;
-
     use super::*;
-
-    #[test]
-    fn admit_entrypoint_boot_admits_sealed_images_even_without_secrets() {
-        use mvm_build::builder_vm::GuestSidecar;
-
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
-        let mut sidecar = GuestSidecar::for_oci_run("audit-probe", true, true);
-        sidecar.accessible = false;
-        sidecar.sealed = true;
-        sidecar.write_to_dir(dir.path()).expect("write sidecar");
-
-        let lowered_secrets = LoweredPlanSecrets::default();
-        let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof-sealed", "firecracker")
-                .cpus(1)
-                .mem_mib(256)
-                .lowered_secrets(&lowered_secrets)
-                .agent_verb_override(&["run-entrypoint".into(), "ping".into()])
-                .keep_alive_dev(false)
-                .build(),
-        )
-        .expect("admit entrypoint boot")
-        .expect("sealed entrypoint boot admitted");
-
-        let verbs = admitted
-            .context
-            .admitted
-            .plan
-            .agent_verbs
-            .as_ref()
-            .expect("sealed entrypoint plan should carry agent verbs");
-        assert!(verbs.iter().any(|v| v.as_str() == "run-entrypoint"));
-        assert!(verbs.iter().any(|v| v.as_str() == "ping"));
-        assert!(
-            admitted
-                .substrate
-                .config_files
-                .iter()
-                .any(|f| f.name == host_signer::PUBLIC_FILENAME),
-            "host signer pubkey must be attached when verb grants are present"
-        );
-        let policy_file = admitted
-            .substrate
-            .config_files
-            .iter()
-            .find(|f| f.name == crate::commands::vm::up::SECURITY_POLICY_FILENAME)
-            .expect("security policy must be attached");
-        let policy: mvm_core::security::SecurityPolicy =
-            serde_json::from_str(&policy_file.content).expect("parse security policy");
-        assert_eq!(policy.profile, mvm_core::security::AgentProfile::SealedProd);
-    }
-
-    #[test]
-    fn admit_entrypoint_boot_carries_resolved_allow_list_not_deny_all() {
-        use mvm_build::builder_vm::GuestSidecar;
-        use mvm_core::network_policy::{HostPort, NetworkPolicy};
-
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
-        let sidecar = GuestSidecar::for_oci_run("egress-probe", true, true);
-        sidecar.write_to_dir(dir.path()).expect("write sidecar");
-
-        // A literal-IP allow-list skips DNS resolution in the generated signed
-        // policy, so this exercises the real threading without a live resolver.
-        let policy = NetworkPolicy::allow_list(vec![HostPort::new("127.0.0.1", 443)]);
-        let lowered_secrets = LoweredPlanSecrets::default();
-        let admitted = admit_entrypoint_boot(
-            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof-allow", "firecracker")
-                .cpus(1)
-                .mem_mib(256)
-                .lowered_secrets(&lowered_secrets)
-                .agent_verb_override(&["run-entrypoint".into()])
-                .keep_alive_dev(false)
-                .network_policy(policy)
-                .build(),
-        )
-        .expect("admit entrypoint boot")
-        .expect("entrypoint boot admitted");
-
-        // deny_all resolves to `Some(empty)` rules → no generated bundle; the
-        // allow-list resolves to concrete L4 rules → a bundle that pins the host.
-        // Its presence proves the resolved policy survived rather than being
-        // hardcoded to deny_all.
-        let bundle = admitted
-            .context
-            .policy_bundle
-            .as_ref()
-            .expect("allow-list admission must generate a signed egress policy bundle");
-        assert!(
-            bundle
-                .egress
-                .allow_list
-                .iter()
-                .any(|(host, port)| host == "127.0.0.1" && *port == 443),
-            "generated egress bundle must carry the resolved allow-list host:port"
-        );
-        assert!(
-            bundle
-                .network
-                .l4
-                .iter()
-                .any(|r| r.dst_cidr == "127.0.0.1/32" && r.port_lo == 443 && r.port_hi == 443),
-            "generated network policy must carry the resolved L4 allow rule"
-        );
-    }
 
     #[test]
     fn test_exit_code_normal_exit_zero() {
@@ -1056,107 +729,5 @@ mod tests {
             env.iter()
                 .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret-abc123")
         );
-    }
-
-    #[test]
-    fn vsock_egress_env_empty_without_marker() {
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
-        assert!(super::vsock_egress_env("plain-vm").is_empty());
-    }
-
-    #[test]
-    fn vsock_egress_env_emits_http_proxy_vars_when_marker_present() {
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
-        let marker = mvm_core::config::vm_vsock_egress_marker_path("plain-vm");
-        std::fs::create_dir_all(marker.parent().expect("marker parent"))
-            .expect("mkdir marker parent");
-        std::fs::write(&marker, b"1").expect("write marker");
-
-        let env = super::vsock_egress_env("plain-vm");
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "ALL_PROXY" && v == "http://127.0.0.1:1080")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "HTTP_PROXY" && v == "http://127.0.0.1:1080")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "NO_PROXY" && v.contains("127.0.0.1"))
-        );
-    }
-
-    #[test]
-    fn workload_egress_env_prefers_substitution_env_over_plain_vsock_env() {
-        let mut env_guard = TestEnv::new();
-        let dir = tempfile::tempdir().expect("tempdir");
-        env_guard.set("MVM_DATA_DIR", dir.path());
-
-        let marker = mvm_core::config::vm_vsock_egress_marker_path("pref-vm");
-        std::fs::create_dir_all(marker.parent().expect("marker parent"))
-            .expect("mkdir marker parent");
-        std::fs::write(&marker, b"1").expect("write marker");
-        let subst = mvm_core::config::vm_substitution_env_path("pref-vm");
-        std::fs::create_dir_all(subst.parent().expect("subst parent")).expect("mkdir subst parent");
-        std::fs::write(
-            &subst,
-            serde_json::to_vec(&vec![("OPENAI_API_KEY", "mvm-secret-1")]).expect("json"),
-        )
-        .expect("write substitution env");
-
-        let env = super::workload_egress_env("pref-vm");
-        assert!(env.iter().any(|(k, _)| k == "HTTP_PROXY"));
-        assert!(
-            env.iter()
-                .all(|(_, v)| !v.starts_with("http://127.0.0.1:1080"))
-        );
-    }
-
-    #[test]
-    fn with_egress_ca_env_noop_when_absent() {
-        let base = vec![("HTTP_PROXY".to_string(), "http://x".to_string())];
-        assert_eq!(super::with_egress_ca_env(base.clone(), false), base);
-    }
-
-    #[test]
-    fn with_egress_ca_env_prepends_ca_vars_before_existing() {
-        let env = super::with_egress_ca_env(
-            vec![("OPENAI_API_KEY".to_string(), "mvm-secret".to_string())],
-            true,
-        );
-        // The TLS-trust vars point the workload at the guest-side bundle the
-        // /init decode wrote (the OCI entrypoint's env_clear means a shell
-        // export would not reach it).
-        assert_eq!(
-            env.iter()
-                .find(|(k, _)| k == "SSL_CERT_FILE")
-                .map(|(_, v)| v.as_str()),
-            Some("/run/mvm/ca-bundle.crt")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "CURL_CA_BUNDLE" && v == "/run/mvm/ca-bundle.crt")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "REQUESTS_CA_BUNDLE" && v == "/run/mvm/ca-bundle.crt")
-        );
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "NODE_EXTRA_CA_CERTS" && v == "/run/mvm/egress-ca.crt")
-        );
-        // Existing substitution vars are preserved after the CA prefix.
-        assert!(
-            env.iter()
-                .any(|(k, v)| k == "OPENAI_API_KEY" && v == "mvm-secret")
-        );
-        let ca_at = env.iter().position(|(k, _)| k == "SSL_CERT_FILE").unwrap();
-        let key_at = env.iter().position(|(k, _)| k == "OPENAI_API_KEY").unwrap();
-        assert!(ca_at < key_at, "CA vars must precede the placeholder vars");
     }
 }

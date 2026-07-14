@@ -13,7 +13,7 @@
 //! module only decides substitute/withhold and which header carries it. There
 //! is no path that delivers a secret into the guest.
 
-use crate::policy::secret_binding::SecretBinding;
+use crate::policy::secret_binding::{SecretBinding, target_host_matches};
 
 /// Why a bound secret was not substituted for a destination.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,11 +48,12 @@ impl SubstitutionVerdict {
 
 /// Decide whether `binding`'s secret may be substituted host-side for an egress
 /// to `dest_host`. Closed by default: substitution happens only when the
-/// destination exactly matches the binding's bound `target_host`, so a
+/// destination matches the binding's bound `target_host`, using the same exact
+/// or `*.` wildcard semantics the SDK's `SecretRef.allowed_hosts` uses, so a
 /// destination-bound credential can never reach an unbound host — and it is
 /// never sent to the guest under any outcome.
 pub fn decide_substitution(binding: &SecretBinding, dest_host: &str) -> SubstitutionVerdict {
-    if binding.target_host == dest_host {
+    if target_host_matches(&binding.target_host, dest_host) {
         SubstitutionVerdict::Substitute {
             header: binding.header.clone(),
         }
@@ -103,5 +104,22 @@ mod tests {
                 reason: WithholdReason::DestinationNotBound
             }
         );
+    }
+
+    #[test]
+    fn substitutes_for_matching_wildcard_subdomains_only() {
+        let binding = SecretBinding::new("OPENAI_API_KEY", "*.openai.com");
+        assert!(matches!(
+            decide_substitution(&binding, "api.openai.com"),
+            SubstitutionVerdict::Substitute { .. }
+        ));
+        assert!(matches!(
+            decide_substitution(&binding, "chat.api.openai.com"),
+            SubstitutionVerdict::Substitute { .. }
+        ));
+        assert!(matches!(
+            decide_substitution(&binding, "openai.com"),
+            SubstitutionVerdict::Withhold { .. }
+        ));
     }
 }

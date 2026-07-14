@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use mvm_core::config::mvm_data_dir_strict;
 use mvm_core::crypto::keystore::validate_shell_id;
+use mvm_core::policy::secret_binding::validate_target_host_pattern;
 use mvm_sdk::ir::{AuthType, Sigv4Params};
 use serde::{Deserialize, Serialize};
 
@@ -74,10 +75,20 @@ impl FileBindingStore {
         validate_shell_id(name).with_context(|| format!("invalid secret name {name:?}"))?;
         Ok(self.base.join(tenant).join(format!("{name}.json")))
     }
+
+    fn validate_meta(meta: &SecretBindingMeta) -> Result<()> {
+        for host in &meta.allowed_hosts {
+            validate_target_host_pattern(host).with_context(|| {
+                format!("invalid allowed_hosts entry {host:?} in secret binding metadata")
+            })?;
+        }
+        Ok(())
+    }
 }
 
 impl BindingStore for FileBindingStore {
     fn put(&self, tenant: &str, name: &str, meta: &SecretBindingMeta) -> Result<()> {
+        Self::validate_meta(meta)?;
         let path = self.path(tenant, name)?;
         let dir = path.parent().expect("path has tenant parent");
         fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
@@ -106,8 +117,10 @@ impl BindingStore for FileBindingStore {
         let path = self.path(tenant, name)?;
         match fs::read(&path) {
             Ok(bytes) => {
-                let meta = serde_json::from_slice(&bytes)
+                let meta: SecretBindingMeta = serde_json::from_slice(&bytes)
                     .with_context(|| format!("parsing binding {}", path.display()))?;
+                Self::validate_meta(&meta)
+                    .with_context(|| format!("validating binding metadata {}", path.display()))?;
                 Ok(Some(meta))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -195,5 +208,53 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = FileBindingStore::with_dir(dir.path());
         assert!(store.put("local", "../escape", &meta()).is_err());
+    }
+
+    #[test]
+    fn put_rejects_invalid_allowed_host_pattern() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        let err = store
+            .put(
+                "local",
+                "openai",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api_exam!ple.com".into()],
+                    sigv4: None,
+                },
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("invalid allowed_hosts entry \"api_exam!ple.com\""),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn get_rejects_invalid_allowed_host_pattern_from_disk() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        let tenant_dir = dir.path().join("local");
+        fs::create_dir_all(&tenant_dir).unwrap();
+        let path = tenant_dir.join("openai.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&SecretBindingMeta {
+                auth_type: AuthType::Bearer,
+                allowed_hosts: vec!["-api.example.com".into()],
+                sigv4: None,
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let err = store.get("local", "openai").unwrap_err();
+        let detail = format!("{err:#}");
+        assert!(
+            detail.contains("invalid allowed_hosts entry \"-api.example.com\""),
+            "got: {detail}"
+        );
     }
 }

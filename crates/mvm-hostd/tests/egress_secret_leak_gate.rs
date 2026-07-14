@@ -11,6 +11,7 @@
 //! artifact or the audit chain, the assertion names exactly which surface
 //! leaked.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -18,7 +19,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::SigningKey;
 use secrecy::SecretBox;
-use tempfile::tempdir;
+use tempfile::{Builder, tempdir};
 use tokio::net::{UnixListener, UnixStream};
 
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
@@ -43,6 +44,39 @@ const CANARY: &str = "CANARY-SECRET-VALUE-MUST-NOT-LEAK";
 
 /// 16 MiB — matches the endpoint's framing cap.
 const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
+
+fn uds_tempdir() -> tempfile::TempDir {
+    let base = if cfg!(target_os = "macos") {
+        Path::new("/private/tmp")
+    } else {
+        Path::new("/tmp")
+    };
+    Builder::new()
+        .prefix("mvm-hostd-subst-")
+        .tempdir_in(base)
+        .expect("create UDS tempdir")
+}
+
+fn uds_bind_supported(dir: &Path) -> bool {
+    let probe = dir.join("uds-bind-probe.sock");
+    match std::os::unix::net::UnixListener::bind(&probe) {
+        Ok(listener) => {
+            drop(listener);
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(err)
+            if err.kind() == std::io::ErrorKind::PermissionDenied
+                || err.raw_os_error() == Some(1) =>
+        {
+            false
+        }
+        Err(err) => panic!(
+            "unexpected UDS bind probe failure at {}: {err}",
+            probe.display()
+        ),
+    }
+}
 
 /// Records the request it was handed so a test can prove the destination — not
 /// the guest — received the substituted credential, without a network call.
@@ -111,6 +145,8 @@ fn handed_placeholders_never_contain_the_secret_value() {
         source: SecretSource::Keystore {
             address: "openai".into(),
         },
+        guest_mount: None,
+        allowed_hosts: vec![],
     }];
     let (_service, handed) = SubstitutionService::from_plan(FromPlanInputs {
         plan_secrets: &plan,
@@ -164,7 +200,10 @@ fn handed_placeholders_never_contain_the_secret_value() {
 /// service surface, as the standing leak-gate witness.
 #[tokio::test]
 async fn substitution_endpoint_refuses_unbound_destination() {
-    let dir = tempdir().unwrap();
+    let dir = uds_tempdir();
+    if !uds_bind_supported(dir.path()) {
+        return;
+    }
     let store = FileSecretStore::with_dir(dir.path().join("secrets"));
     store
         .put(
@@ -223,7 +262,10 @@ async fn substitution_endpoint_refuses_unbound_destination() {
 /// `secret.substituted` event (metadata) but never the canary value.
 #[tokio::test]
 async fn audit_chain_carries_no_secret_value() {
-    let dir = tempdir().unwrap();
+    let dir = uds_tempdir();
+    if !uds_bind_supported(dir.path()) {
+        return;
+    }
     let store = FileSecretStore::with_dir(dir.path().join("secrets"));
     store
         .put(

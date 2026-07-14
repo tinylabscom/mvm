@@ -11,10 +11,10 @@
 //! without `dev-shell`, so the handler is not present and `exec` returns
 //! "exec not available" regardless of any runtime configuration.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use mvm::vsock_transport;
 use mvm_backend::backend::AnyBackend;
-use mvm_core::vm_backend::{RequiredCapabilities, VmId, VmStartConfig, VmVolume};
+use mvm_core::vm_backend::{VmId, VmStartConfig, VmVolume};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -170,113 +170,6 @@ pub struct VirtiofsOciRoot {
     pub prod: bool,
 }
 
-pub fn runtime_source_policy_for(
-    image: &ImageSource,
-    backend_name: &str,
-    sealed: bool,
-    root_strategy: mvm_build::run_image::RootStrategy,
-) -> mvm_core::vm_backend::RuntimeSourcePolicy {
-    if matches!(
-        image,
-        ImageSource::Prebuilt {
-            virtiofs_oci_root: Some(_),
-            ..
-        }
-    ) && root_strategy == mvm_build::run_image::RootStrategy::BlockExt4
-    {
-        return mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay;
-    }
-    let launch_kind = match image {
-        ImageSource::Template(_) => mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-        ImageSource::Prebuilt { .. } => {
-            mvm_core::vm_backend::RuntimeSourceLaunchKind::InjectedRootfs
-        }
-    };
-    let root_strategy = match root_strategy {
-        mvm_build::run_image::RootStrategy::VirtiofsRoot => {
-            mvm_core::vm_backend::RuntimeSourceRootStrategy::VirtiofsRoot
-        }
-        mvm_build::run_image::RootStrategy::BlockExt4 => {
-            mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4
-        }
-    };
-    mvm_core::vm_backend::select_runtime_source_policy(
-        mvm_core::vm_backend::RuntimeSourcePolicySelection {
-            backend_name: Some(backend_name),
-            sealed,
-            root_strategy: Some(root_strategy),
-            launch_kind,
-        },
-    )
-}
-
-#[cfg(test)]
-mod runtime_source_policy_tests {
-    use super::*;
-
-    #[test]
-    fn templates_require_overlay_on_block_boots() {
-        // A block-rooted flake/template workload sources its guest binaries from
-        // the overlay, so it fails closed when the overlay is unavailable rather
-        // than silently falling back to the baked rootfs copy.
-        assert_eq!(
-            runtime_source_policy_for(
-                &ImageSource::Template("t".into()),
-                "libkrun",
-                false,
-                mvm_build::run_image::RootStrategy::BlockExt4,
-            ),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn prebuilt_oci_virtiofs_roots_stay_rootfs_only() {
-        let image = ImageSource::Prebuilt {
-            kernel_path: "/k".into(),
-            rootfs_path: "/r".into(),
-            initrd_path: None,
-            label: "oci".into(),
-            virtiofs_oci_root: Some(VirtiofsOciRoot {
-                tree_dir: "/tree".into(),
-                prod: false,
-            }),
-        };
-        assert_eq!(
-            runtime_source_policy_for(
-                &image,
-                "hvf",
-                false,
-                mvm_build::run_image::RootStrategy::VirtiofsRoot,
-            ),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly
-        );
-    }
-
-    #[test]
-    fn prebuilt_oci_block_roots_require_overlay() {
-        let image = ImageSource::Prebuilt {
-            kernel_path: "/k".into(),
-            rootfs_path: "/r".into(),
-            initrd_path: None,
-            label: "oci".into(),
-            virtiofs_oci_root: Some(VirtiofsOciRoot {
-                tree_dir: "/tree".into(),
-                prod: false,
-            }),
-        };
-        assert_eq!(
-            runtime_source_policy_for(
-                &image,
-                "hvf",
-                false,
-                mvm_build::run_image::RootStrategy::BlockExt4,
-            ),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-}
-
 /// The run-path tier gate: return the tree to boot as a virtiofs root, or `None`
 /// to use the block rootfs. `select_root_strategy` is the single authority — it
 /// can never yield virtiofs for a prod or sealed workload, nor on a
@@ -302,32 +195,6 @@ fn resolve_virtiofs_root(
         mvm_build::run_image::RootStrategy::VirtiofsRoot => Some(candidate.tree_dir.clone()),
         mvm_build::run_image::RootStrategy::BlockExt4 => None,
     }
-}
-
-fn effective_transient_initrd(
-    image: &ImageSource,
-    explicit_initrd: Option<&str>,
-    rootfs_path: &str,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-    root_strategy: mvm_build::run_image::RootStrategy,
-) -> Result<Option<String>> {
-    if let Some(path) = explicit_initrd {
-        return Ok(Some(path.to_string()));
-    }
-    if root_strategy != mvm_build::run_image::RootStrategy::BlockExt4 {
-        return Ok(None);
-    }
-    let ImageSource::Prebuilt {
-        virtiofs_oci_root: Some(_),
-        ..
-    } = image
-    else {
-        return Ok(None);
-    };
-    crate::commands::vm::up::persistent_oci_effective_initrd(
-        std::path::Path::new(rootfs_path),
-        runtime_source_policy,
-    )
 }
 
 /// All inputs to the orchestrator.
@@ -373,147 +240,6 @@ pub struct ExecRequest {
     /// Recorded liveness declaration (phase A: presence only). Persisted with a
     /// persistent machine so it survives + is inspectable; not yet probed.
     pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
-}
-
-pub(crate) fn select_exec_backend(
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Result<AnyBackend> {
-    let backend_override = explicit_hypervisor_override();
-    let backend_name = select_backend_name_for_egress(
-        backend_override.as_deref(),
-        image_requested,
-        network_policy,
-        "OCI --image runs with outbound egress enabled",
-    )?;
-    Ok(AnyBackend::from_hypervisor(&backend_name))
-}
-
-/// An explicit workload-backend override from the environment. The transient
-/// run path otherwise auto-detects the backend; this lets `MVM_HYPERVISOR`
-/// (or `MVM_BACKEND`) pin it — e.g. `libkrun`, whose vsock-tunnel egress path
-/// the auto-detected default would otherwise never select on this host. Every
-/// `select_exec_backend` call site reads the same value, so the admitted plan's
-/// backend and the boot backend agree.
-fn explicit_hypervisor_override() -> Option<String> {
-    ["MVM_HYPERVISOR", "MVM_BACKEND"]
-        .into_iter()
-        .filter_map(std::env::var_os)
-        .find_map(|raw| normalize_backend_override(&raw.to_string_lossy()))
-}
-
-/// Normalize a backend-override string (trim + lowercase); a blank value yields
-/// `None` so an empty env var is treated as "unset" rather than an invalid
-/// backend name.
-fn normalize_backend_override(raw: &str) -> Option<String> {
-    let value = raw.trim().to_ascii_lowercase();
-    (!value.is_empty()).then_some(value)
-}
-
-pub(crate) fn select_backend_name_for_egress(
-    backend_override: Option<&str>,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-    workload: &str,
-) -> Result<String> {
-    if let Some(backend_name) = backend_override {
-        validate_backend_for_egress(backend_name, image_requested, network_policy, workload)?;
-        return Ok(backend_name.to_string());
-    }
-
-    if !requires_vsock_proxy_backend(image_requested, network_policy) {
-        return Ok(AnyBackend::auto_select().name().to_string());
-    }
-
-    AnyBackend::select_capable_available(&vsock_proxy_backend_requirements())
-        .map(|backend| backend.name().to_string())
-        .map_err(|e| anyhow!("{workload} require a NIC-less host-vsock-proxy backend: {e}"))
-}
-
-pub(crate) fn validate_backend_for_egress(
-    backend_name: &str,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-    workload: &str,
-) -> Result<()> {
-    if !requires_vsock_proxy_backend(image_requested, network_policy) {
-        return Ok(());
-    }
-
-    let backend = AnyBackend::from_hypervisor(backend_name);
-    let missing = backend
-        .capabilities()
-        .shortfall(&vsock_proxy_backend_requirements());
-    if missing.is_empty() {
-        let available = backend
-            .is_available()
-            .with_context(|| format!("probing backend {backend_name} availability"))?;
-        if available {
-            return Ok(());
-        }
-        anyhow::bail!(
-            "{workload} require a NIC-less host-vsock-proxy backend; backend {backend_name} is unavailable on this host"
-        );
-    }
-
-    anyhow::bail!(
-        "{workload} require a NIC-less host-vsock-proxy backend; backend {backend_name} lacks [{}]",
-        missing.join(", ")
-    );
-}
-
-fn requires_vsock_proxy_backend(
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> bool {
-    image_requested && network_policy.allows_egress()
-}
-
-fn vsock_proxy_backend_requirements() -> RequiredCapabilities {
-    RequiredCapabilities {
-        vsock: true,
-        no_routable_guest_nic: true,
-        host_vsock_proxy: true,
-        ..Default::default()
-    }
-}
-
-pub(crate) fn validate_image_egress_backend(
-    backend: &AnyBackend,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Result<()> {
-    if !image_requested || !network_policy.allows_egress() {
-        return Ok(());
-    }
-    let caps = backend.capabilities();
-    if caps.vsock && caps.no_routable_guest_nic && caps.host_vsock_proxy {
-        return Ok(());
-    }
-    anyhow::bail!(
-        "OCI --image runs with outbound egress enabled require a NIC-less host-vsock-proxy backend; \
-         backend {} does not advertise {{vsock,no_routable_guest_nic,host_vsock_proxy}}",
-        backend.name()
-    );
-}
-
-pub(crate) fn validate_image_egress_backend_name(
-    backend_name: &str,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Result<()> {
-    let backend = AnyBackend::from_hypervisor(backend_name);
-    validate_image_egress_backend(&backend, image_requested, network_policy)
-}
-
-fn request_uses_vsock_proxy_backend(req: &ExecRequest) -> bool {
-    matches!(
-        &req.image,
-        ImageSource::Prebuilt {
-            virtiofs_oci_root: Some(_),
-            ..
-        }
-    ) && req.network_policy.allows_egress()
 }
 
 /// Build the IR healthcheck from the CLI flags. A shell command string becomes
@@ -749,6 +475,16 @@ pub fn build_guest_wrapper(req: &ExecRequest, add_dir_labels: &[String]) -> Stri
     script
 }
 
+fn build_guest_wrapper_for_vm(
+    vm_name: &str,
+    req: &ExecRequest,
+    add_dir_labels: &[String],
+) -> String {
+    let mut req = req.clone();
+    req.env = crate::egress_ca_env::inject_vm_egress_ca_env(vm_name, req.env);
+    build_guest_wrapper(&req, add_dir_labels)
+}
+
 /// Generate a transient VM name for an exec invocation.
 pub fn transient_vm_name() -> String {
     mvm_core::naming::generate_machine_name()
@@ -757,11 +493,11 @@ pub fn transient_vm_name() -> String {
 /// Whether a transient run should pre-open interactive console data sockets.
 ///
 /// `true` only when the caller requested a PTY (`pty`) AND the image is not
-/// sealed (`image_sealed == false`). A verity-backed OCI/dev image may still be
-/// interactive, so sealing/accessibility must follow the image sidecar rather
-/// than the presence of verity sidecars alone.
-pub fn transient_run_dev_console(pty: bool, image_sealed: bool) -> bool {
-    pty && !image_sealed
+/// verity-sealed (`verity_path.is_none()`). Sealed images carry no dev-shell
+/// agent, so pre-opening the sockets would be wasteful and misleading; the
+/// interactive attach is separately refused at `enforce_accessible_gate`.
+pub fn transient_run_dev_console(pty: bool, verity_path: Option<&str>) -> bool {
+    pty && verity_path.is_none()
 }
 
 /// Remove the transient `--add-dir` staging dir, but only when extras were
@@ -820,7 +556,7 @@ pub struct ExecOutput {
 /// CLI's interactive `mvmctl exec` keeps using [`run`] (streaming) so
 /// human ergonomics don't regress.
 pub fn run_captured(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<ExecOutput> {
-    run_inner(req, /* capture = */ true, admit, None, None)
+    run_inner(req, /* capture = */ true, admit, None)
         .map(|either| either.right().expect("capture mode returns ExecOutput"))
 }
 
@@ -830,16 +566,9 @@ pub fn run_captured_with_posture(
     req: ExecRequest,
     admit: Option<&SessionAdmit<'_>>,
     posture: &PostureSink,
-    runtime_source_policy: &RuntimeSourcePolicySink,
 ) -> Result<ExecOutput> {
-    run_inner(
-        req,
-        /* capture = */ true,
-        admit,
-        Some(posture),
-        Some(runtime_source_policy),
-    )
-    .map(|either| either.right().expect("capture mode returns ExecOutput"))
+    run_inner(req, /* capture = */ true, admit, Some(posture))
+        .map(|either| either.right().expect("capture mode returns ExecOutput"))
 }
 
 /// Run the request: boot, run, tear down.
@@ -848,7 +577,7 @@ pub fn run_captured_with_posture(
 /// agent unreachable, vsock error), returns an error; the VM is torn down
 /// best-effort before returning.
 pub fn run(req: ExecRequest, admit: Option<&SessionAdmit<'_>>) -> Result<i32> {
-    run_inner(req, /* capture = */ false, admit, None, None)
+    run_inner(req, /* capture = */ false, admit, None)
         .map(|either| either.left().expect("streaming mode returns exit code"))
 }
 
@@ -858,16 +587,9 @@ pub fn run_with_posture(
     req: ExecRequest,
     admit: Option<&SessionAdmit<'_>>,
     posture: &PostureSink,
-    runtime_source_policy: &RuntimeSourcePolicySink,
 ) -> Result<i32> {
-    run_inner(
-        req,
-        /* capture = */ false,
-        admit,
-        Some(posture),
-        Some(runtime_source_policy),
-    )
-    .map(|either| either.left().expect("streaming mode returns exit code"))
+    run_inner(req, /* capture = */ false, admit, Some(posture))
+        .map(|either| either.left().expect("streaming mode returns exit code"))
 }
 
 /// Tagged union for the two return shapes [`run`] and [`run_captured`]
@@ -897,16 +619,14 @@ impl<L, R> Either<L, R> {
 /// The command layer reads it after the run returns. `None` means the caller
 /// does not audit posture (MCP / session boots, which never reach virtiofs).
 pub type PostureSink = std::cell::Cell<mvm_build::run_image::RootStrategy>;
-pub type RuntimeSourcePolicySink = std::cell::Cell<mvm_core::vm_backend::RuntimeSourcePolicy>;
 
 fn run_inner(
     req: ExecRequest,
     capture: bool,
     admit: Option<&SessionAdmit<'_>>,
     posture: Option<&PostureSink>,
-    runtime_source_policy_sink: Option<&RuntimeSourcePolicySink>,
 ) -> Result<Either<i32, ExecOutput>> {
-    let backend = select_exec_backend(request_uses_vsock_proxy_backend(&req), &req.network_policy)?;
+    let backend = AnyBackend::auto_select_workload();
 
     // Phase timing (off unless `MVM_PHASE_TIMING` is set): capture a
     // host-monotonic mark at each run seam, then emit a one-line breakdown
@@ -1012,38 +732,20 @@ fn run_inner(
     // the single source of truth — the same value that drives the boot below —
     // so the `plan.boot_posture` entry can never diverge from what actually
     // booted.
-    let root_strategy = if virtiofs_root.is_some() {
-        mvm_build::run_image::RootStrategy::VirtiofsRoot
-    } else {
-        mvm_build::run_image::RootStrategy::BlockExt4
-    };
     if let Some(sink) = posture {
-        sink.set(root_strategy);
+        sink.set(if virtiofs_root.is_some() {
+            mvm_build::run_image::RootStrategy::VirtiofsRoot
+        } else {
+            mvm_build::run_image::RootStrategy::BlockExt4
+        });
     }
-    let runtime_source_policy = runtime_source_policy_for(
-        &req.image,
-        backend.name(),
-        verity_path.is_some(),
-        root_strategy,
-    );
-    if let Some(sink) = runtime_source_policy_sink {
-        sink.set(runtime_source_policy);
-    }
-    let effective_initrd = effective_transient_initrd(
-        &req.image,
-        initrd.as_deref(),
-        &rootfs,
-        runtime_source_policy,
-        root_strategy,
-    )?;
 
     let t_drives_ready = timing.then(std::time::Instant::now);
 
     // Pre-open console data sockets for interactive PTY runs against
-    // non-sealed images. OCI/dev images can carry verity sidecars and still be
-    // interactive, so the sidecar's sealed bit is the load-bearing signal here.
-    let image_sealed = crate::commands::vm::image_is_sealed(std::path::Path::new(&rootfs));
-    let dev_console = transient_run_dev_console(req.pty, image_sealed);
+    // non-sealed images. Sealed images carry no dev-shell agent; the
+    // enforce_accessible_gate will refuse the attach separately.
+    let dev_console = transient_run_dev_console(req.pty, verity_path.as_deref());
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
@@ -1056,7 +758,7 @@ fn run_inner(
         rootfs_path: rootfs.clone(),
         virtiofs_root,
         kernel_path: Some(vmlinux.clone()),
-        initrd_path: effective_initrd,
+        initrd_path: initrd.clone(),
         verity_path,
         roothash,
         dev_console,
@@ -1082,29 +784,9 @@ fn run_inner(
         secret_files: Vec::new(),
         runner_dir: None,
         network_policy: req.network_policy.clone(),
-        // Derive the userspace L3 egress tunnel from the resolved policy: an
-        // admitted allow-list gets a `mvm-network-tunnel-worker` (the smoltcp
-        // forwarder) whose gate enforces exactly those flows; deny-all /
-        // unrestricted return None (no forwarding tunnel). The identity is
-        // minted here so the guest cmdline token and the host worker's
-        // expected-session validate against identical values.
-        network_tunnel: mvm_backend::network_tunnel_for_launch(
-            &req.network_policy,
-            mvm_backend::TunnelLaunchIdentity {
-                tenant_id: "local".to_string(),
-                vm_id: vm_name.clone(),
-                boot_id: uuid::Uuid::new_v4().to_string(),
-                session_nonce: uuid::Uuid::new_v4().to_string(),
-            },
-        ),
         warm_pool_size: req.warm_pool_size,
-        runtime_source_policy,
         ..Default::default()
     };
-    // The tunnel worker spawns on the cold-boot path, not snapshot-restore.
-    if start_config.network_tunnel.is_some() {
-        use_snapshot = false;
-    }
 
     // Admit the transient run as a locally-signed workload. Setting
     // tenant_id + plan_json makes the libkrun/Vz supervisor spawn the gateway
@@ -1118,11 +800,8 @@ fn run_inner(
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
         start_config.bundle_json = sub.bundle_json;
-        start_config.config_files.extend(sub.config_files);
         use_snapshot = false;
     }
-    crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
-    crate::commands::vm::up::emit_runtime_source_status(&start_config);
     let t_admitted = timing.then(std::time::Instant::now);
 
     // Reap dead/expired standbys before claiming/booting. There is no daemon, so
@@ -1193,10 +872,9 @@ fn run_inner(
     {
         let interrupted = interrupted.clone();
         let vm_name = vm_name.clone();
-        let backend_name = backend.name().to_string();
         let _ = crate::signal::set_ctrlc_handler(move || {
             interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
-            let backend = AnyBackend::from_hypervisor(&backend_name);
+            let backend = AnyBackend::auto_select_workload();
             let _ = backend.stop_transient(&VmId(vm_name.clone()));
         });
     }
@@ -1304,7 +982,6 @@ fn restore_via_snapshot(
         runtime_overlay_path: start_config.runtime_overlay_path.clone(),
         runtime_overlay_verity_path: start_config.runtime_overlay_verity_path.clone(),
         runtime_overlay_roothash: start_config.runtime_overlay_roothash.clone(),
-        runtime_source_policy: start_config.runtime_source_policy,
         revision_hash: start_config.revision_hash.clone(),
         flake_ref: start_config.flake_ref.clone(),
         profile: start_config.profile.clone(),
@@ -1326,7 +1003,6 @@ fn restore_via_snapshot(
         // Inherit the resolved egress policy so a restored transient VM
         // enforces the same posture as a cold-boot one.
         network_policy: start_config.network_policy.clone(),
-        network_tunnel: start_config.network_tunnel.clone(),
     };
     let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
         mvm::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
@@ -1365,12 +1041,11 @@ fn run_in_guest(
     }
     // Agent reachable over vsock: the command is about to be dispatched.
     let vsock_ready = timing.then(std::time::Instant::now);
-    let wrapper = build_guest_wrapper(req, labels);
+    let wrapper = build_guest_wrapper_for_vm(vm_name, req, labels);
 
     if req.pty {
-        let pty = pty_console_request(req, labels, wrapper);
         let exit_code =
-            crate::commands::vm::console::run_pty_argv_for_exit(vm_name, pty.argv, pty.env)?;
+            crate::commands::vm::console::run_pty_command_for_exit(vm_name, wrapper, Vec::new())?;
         return Ok((Either::Left(exit_code), vsock_ready));
     }
 
@@ -1449,32 +1124,6 @@ fn run_in_guest(
     Ok((either, vsock_ready))
 }
 
-struct PtyConsoleRequest {
-    argv: Vec<String>,
-    env: Vec<(String, String)>,
-}
-
-fn pty_console_request(req: &ExecRequest, labels: &[String], wrapper: String) -> PtyConsoleRequest {
-    match &req.target {
-        ExecTarget::Inline { argv } if direct_pty_inline_argv(argv, req, labels) => {
-            PtyConsoleRequest {
-                argv: argv.clone(),
-                env: req.env.clone(),
-            }
-        }
-        _ => PtyConsoleRequest {
-            argv: vec!["/bin/sh".to_string(), "-lc".to_string(), wrapper],
-            env: Vec::new(),
-        },
-    }
-}
-
-fn direct_pty_inline_argv(req_argv: &[String], req: &ExecRequest, labels: &[String]) -> bool {
-    labels.is_empty()
-        && req.add_dirs.is_empty()
-        && req_argv.first().is_some_and(|argv0| argv0.starts_with('/'))
-}
-
 // ---------------------------------------------------------------------------
 // Warm-VM session primitives
 // ---------------------------------------------------------------------------
@@ -1503,8 +1152,7 @@ pub struct SessionVm {
 /// Boot a session microVM from a registered template. Snapshot-resume
 /// is taken when the template has one and the backend supports it
 /// (matches the eligibility rule in [`snapshot_eligible`] for the
-/// no-`--add-dir` case), unless an admission hook supplies per-boot
-/// state that must ride the fresh boot path.
+/// no-`--add-dir` case).
 ///
 /// `vm_name_prefix` becomes the human-readable part of the VM name —
 /// callers typically pass `"mcp-session-<short-id>"` so `mvmctl ls`
@@ -1520,7 +1168,6 @@ pub struct SessionAuditSubstrate {
     pub tenant_id: String,
     pub plan_json: String,
     pub bundle_json: Option<String>,
-    pub config_files: Vec<mvm_core::vm_backend::VmFile>,
 }
 
 /// Admission callback: given the resolved rootfs + the generated vm_name (both
@@ -1535,7 +1182,6 @@ pub fn boot_session_vm(
     vm_name_prefix: &str,
     cpus: u32,
     memory_mib: u32,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
     admit: Option<&SessionAdmit<'_>>,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
@@ -1545,16 +1191,19 @@ pub fn boot_session_vm(
         .ok()
         .flatten();
 
-    let backend = AnyBackend::auto_select();
+    let backend = AnyBackend::auto_select_workload();
     // Append the same nanosecond suffix transient_vm_name uses so
     // concurrent boots in the same session don't collide.
     let vm_name = format!("{}-{}", vm_name_prefix, transient_vm_name());
 
     let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
 
-    // Session VMs default to the legacy no-admission path. When `admit`
-    // returns a substrate, the plan-bearing fields below and any config-drive
-    // files it supplies are populated before `backend.start()`.
+    // Session VMs are short-lived MCP-driven boots that don't go through plan
+    // admission, so tenant_id / plan_json / bundle_json default to None (the
+    // libkrun supervisor stays on the legacy path). A secret-declaring
+    // ephemeral `invoke` lifts that: when `admit` returns a substrate, the
+    // three fields below are populated and the backend spawns the per-VM
+    // substitution endpoint (the guest holds only placeholders).
     let mut start_config = VmStartConfig {
         name: vm_name.clone(),
         rootfs_path: rootfs.clone(),
@@ -1575,67 +1224,25 @@ pub fn boot_session_vm(
         config_files: vec![],
         secret_files: vec![],
         runner_dir: None,
-        network_policy: network_policy.clone(),
-        // Derive the userspace L3 egress tunnel from the resolved policy, exactly
-        // as the transient argv path does: an admitted allow-list gets the smoltcp
-        // forwarder whose gate enforces those flows; deny-all / unrestricted return
-        // None (no forwarding tunnel), so plain session/MCP boots are unaffected.
-        // The identity is minted here so the guest cmdline token and the host
-        // worker's expected-session validate against identical values.
-        network_tunnel: mvm_backend::network_tunnel_for_launch(
-            network_policy,
-            mvm_backend::TunnelLaunchIdentity {
-                tenant_id: "local".to_string(),
-                vm_id: vm_name.clone(),
-                boot_id: uuid::Uuid::new_v4().to_string(),
-                session_nonce: uuid::Uuid::new_v4().to_string(),
-            },
-        ),
         ..Default::default()
     };
-
-    // Session VMs are always block-rooted template boots; resolve the overlay
-    // policy the same way the transient runner does so the runtime overlay is
-    // the single source of the guest agent + helpers here too (a missing
-    // required overlay is built/acquired by attach_runtime_overlay_if_cached,
-    // never silently replaced by a baked rootfs copy).
-    start_config.runtime_source_policy = mvm_core::vm_backend::select_runtime_source_policy(
-        mvm_core::vm_backend::RuntimeSourcePolicySelection {
-            backend_name: Some(backend.name()),
-            sealed: start_config.verity_path.is_some(),
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-            launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-        },
-    );
 
     // Admit the workload's lowered secrets (the closure runs
     // synthesize→sign→verify with the now-known rootfs + vm_name) and thread the
     // signed plan into the config so `backend.start` spawns the substitution
     // endpoint. Force a cold boot when secrets are present: snapshot-restore
     // bypasses the endpoint-spawn path. `None` admit ⇒ unchanged legacy path.
-    let mut admitted_workload = false;
+    let mut secret_workload = false;
     if let Some(admit_fn) = admit
         && let Some(sub) = admit_fn(std::path::Path::new(&rootfs), &vm_name)?
     {
         start_config.tenant_id = Some(sub.tenant_id);
         start_config.plan_json = Some(sub.plan_json);
         start_config.bundle_json = sub.bundle_json;
-        start_config.config_files.extend(sub.config_files);
-        admitted_workload = true;
-        if matches!(backend.name(), "firecracker" | "vz" | "libkrun" | "hvf") {
-            mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
-                .context("persisting admitted session plan before backend start")?;
-        }
+        secret_workload = true;
     }
 
-    crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
-
-    // The tunnel worker spawns on the cold-boot path, not snapshot-restore, so an
-    // egress-admitted session must cold-boot even when a snapshot exists.
-    let use_snapshot = !admitted_workload
-        && start_config.network_tunnel.is_none()
-        && snap_info.is_some()
-        && backend.capabilities().snapshots;
+    let use_snapshot = !secret_workload && snap_info.is_some() && backend.capabilities().snapshots;
     let booted = if use_snapshot {
         let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
         match restore_via_snapshot(&vm_name, env, snap, &start_config) {
@@ -1697,7 +1304,7 @@ pub fn dispatch_in_session(
         stdin: Vec::new(),
         healthcheck: None,
     };
-    let wrapper = build_guest_wrapper(&req, &[]);
+    let wrapper = build_guest_wrapper_for_vm(&vm.vm_name, &req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
     // Inbound vsock RPC audit. Mirrors run_in_guest's emit; was lost when
@@ -1743,7 +1350,7 @@ pub fn dispatch_in_session(
 /// propagated, since the reaper calls this from a background thread
 /// where there's nobody to receive an error.
 pub fn tear_down_session_vm(vm: SessionVm) {
-    let backend = AnyBackend::auto_select();
+    let backend = AnyBackend::auto_select_workload();
     if let Err(e) = backend.stop(&VmId(vm.vm_name.clone())) {
         tracing::warn!(vm = %vm.vm_name, err = %e, "session VM teardown failed");
     }
@@ -1806,68 +1413,6 @@ mod tests {
         );
         assert_eq!(hc.interval_secs, 10);
         assert_eq!(build_healthcheck(None, 30, 5, 3, 0), None);
-    }
-
-    #[test]
-    fn validate_backend_for_egress_refuses_unavailable_hvf_before_boot_work() {
-        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-            mvm_core::network_policy::HostPort::new("example.com", 443),
-        ]);
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", "/no/such/mvm-hvf-supervisor");
-        }
-        let err = validate_backend_for_egress(
-            "hvf",
-            true,
-            &policy,
-            "OCI --image runs with outbound egress enabled",
-        )
-        .expect_err("unavailable hvf must fail closed before OCI work");
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-        }
-        let msg = err.to_string();
-        assert!(msg.contains("NIC-less host-vsock-proxy backend"));
-        assert!(msg.contains("backend hvf lacks ["));
-        assert!(msg.contains("host_vsock_proxy"));
-        assert!(msg.contains("no_routable_guest_nic"));
-    }
-
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-    #[test]
-    fn select_backend_name_for_egress_picks_hvf_when_proxy_support_is_available() {
-        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().expect("tempdir");
-        let supervisor = dir.path().join("mvm-hvf-supervisor");
-        std::fs::write(&supervisor, b"stub").expect("stub supervisor");
-        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-            mvm_core::network_policy::HostPort::new("example.com", 443),
-        ]);
-
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::set_var("MVM_HVF_SUPERVISOR_PATH", &supervisor);
-        }
-        let selected = select_backend_name_for_egress(
-            None,
-            true,
-            &policy,
-            "OCI --image runs with outbound egress enabled",
-        )
-        .expect("hvf should satisfy the proxy backend requirement");
-        // SAFETY: test-only env mutation.
-        unsafe {
-            std::env::remove_var("MVM_HVF_SUPERVISOR_PATH");
-        }
-
-        assert_eq!(selected, "hvf");
     }
 
     #[test]
@@ -2074,93 +1619,6 @@ mod tests {
             "expected unqualified mount line, got: {script}"
         );
         assert!(!script.contains("-o ro"), "RW mount must not include -o ro");
-    }
-
-    #[test]
-    fn pty_console_request_passes_inline_argv_directly() {
-        let req = ExecRequest {
-            name: None,
-            warm_pool_size: 0,
-            image: ImageSource::Template("t".into()),
-            cpus: 1,
-            memory_mib: 256,
-            mem_initial_mib: None,
-            add_dirs: Vec::new(),
-            env: vec![("TERM".into(), "xterm-256color".into())],
-            target: ExecTarget::Inline {
-                argv: vec!["/bin/sh".into()],
-            },
-            timeout_secs: None,
-            pty: true,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            stdin: Vec::new(),
-            healthcheck: None,
-        };
-
-        let pty = pty_console_request(&req, &[], "set -e\nexec '/bin/sh'\n".to_string());
-
-        assert_eq!(pty.argv, vec!["/bin/sh"]);
-        assert_eq!(pty.env, vec![("TERM".into(), "xterm-256color".into())]);
-    }
-
-    #[test]
-    fn pty_console_request_uses_wrapper_when_mount_setup_is_required() {
-        let req = ExecRequest {
-            name: None,
-            warm_pool_size: 0,
-            image: ImageSource::Template("t".into()),
-            cpus: 1,
-            memory_mib: 256,
-            mem_initial_mib: None,
-            add_dirs: vec![AddDir {
-                host_path: "/h".into(),
-                guest_path: "/g".into(),
-                read_only: true,
-            }],
-            env: vec![("FOO".into(), "bar".into())],
-            target: ExecTarget::Inline {
-                argv: vec!["/bin/sh".into()],
-            },
-            timeout_secs: None,
-            pty: true,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            stdin: Vec::new(),
-            healthcheck: None,
-        };
-        let wrapper = build_guest_wrapper(&req, &["mvm-extra-0".to_string()]);
-
-        let pty = pty_console_request(&req, &["mvm-extra-0".to_string()], wrapper.clone());
-
-        assert_eq!(pty.argv, vec!["/bin/sh", "-lc", wrapper.as_str()]);
-        assert!(pty.env.is_empty());
-    }
-
-    #[test]
-    fn pty_console_request_keeps_relative_commands_on_shell_path_lookup() {
-        let req = ExecRequest {
-            name: None,
-            warm_pool_size: 0,
-            image: ImageSource::Template("t".into()),
-            cpus: 1,
-            memory_mib: 256,
-            mem_initial_mib: None,
-            add_dirs: Vec::new(),
-            env: Vec::new(),
-            target: ExecTarget::Inline {
-                argv: vec!["htop".into()],
-            },
-            timeout_secs: None,
-            pty: true,
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            stdin: Vec::new(),
-            healthcheck: None,
-        };
-        let wrapper = build_guest_wrapper(&req, &[]);
-
-        let pty = pty_console_request(&req, &[], wrapper.clone());
-
-        assert_eq!(pty.argv, vec!["/bin/sh", "-lc", wrapper.as_str()]);
-        assert!(pty.env.is_empty());
     }
 
     #[test]
@@ -2467,6 +1925,50 @@ mod tests {
         assert!(script.contains("exec 'true'"));
     }
 
+    #[test]
+    fn build_guest_wrapper_for_vm_prepends_egress_ca_env_when_present() {
+        let scratch = tempfile::tempdir().expect("create tempdir");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", scratch.path());
+
+        let vm_state = mvm_core::config::vm_state_dir("vm-ca");
+        std::fs::create_dir_all(&vm_state).expect("create vm state dir");
+        std::fs::write(vm_state.join("egress-intermediate.json"), "{}")
+            .expect("write egress intermediate marker");
+
+        let req = ExecRequest {
+            name: None,
+            warm_pool_size: 0,
+            image: ImageSource::Template("t".into()),
+            cpus: 1,
+            memory_mib: 256,
+            mem_initial_mib: None,
+            add_dirs: Vec::new(),
+            env: vec![("HTTPS_PROXY".to_string(), "http://guest".to_string())],
+            target: ExecTarget::Inline {
+                argv: vec!["true".into()],
+            },
+            timeout_secs: Some(30),
+            pty: false,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+            stdin: Vec::new(),
+            healthcheck: None,
+        };
+        let script = build_guest_wrapper_for_vm("vm-ca", &req, &[]);
+        assert!(script.contains("export SSL_CERT_FILE='/run/mvm/ca-bundle.crt'"));
+        assert!(script.contains("export CURL_CA_BUNDLE='/run/mvm/ca-bundle.crt'"));
+        assert!(script.contains("export REQUESTS_CA_BUNDLE='/run/mvm/ca-bundle.crt'"));
+        assert!(script.contains("export NODE_EXTRA_CA_CERTS='/run/mvm/egress-ca.crt'"));
+        assert!(script.contains("export HTTPS_PROXY='http://guest'"));
+        let ca_pos = script
+            .find("export SSL_CERT_FILE='/run/mvm/ca-bundle.crt'")
+            .expect("CA env exported");
+        let proxy_pos = script
+            .find("export HTTPS_PROXY='http://guest'")
+            .expect("proxy env exported");
+        assert!(ca_pos < proxy_pos, "CA vars must precede existing env");
+    }
+
     // -- snapshot_eligible --
 
     fn template(name: &str) -> ImageSource {
@@ -2556,154 +2058,31 @@ mod tests {
         assert!(!snapshot_eligible(&prebuilt(), &[], true, true));
     }
 
-    #[test]
-    fn transient_oci_required_overlay_prefers_sibling_initrd() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "download");
-        let image = ImageSource::Prebuilt {
-            kernel_path: "/k".into(),
-            rootfs_path: rootfs.display().to_string(),
-            initrd_path: None,
-            label: "oci".into(),
-            virtiofs_oci_root: Some(VirtiofsOciRoot {
-                tree_dir: "/tree".into(),
-                prod: false,
-            }),
-        };
-
-        let resolved = effective_transient_initrd(
-            &image,
-            None,
-            &rootfs.display().to_string(),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            mvm_build::run_image::RootStrategy::BlockExt4,
-        )
-        .unwrap();
-
-        assert_eq!(
-            resolved.as_deref(),
-            Some(initrd.to_str().expect("utf-8 initrd path"))
-        );
-    }
-
-    #[test]
-    fn transient_oci_required_overlay_falls_back_to_cached_verity_initrd() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        let image = ImageSource::Prebuilt {
-            kernel_path: "/k".into(),
-            rootfs_path: rootfs.display().to_string(),
-            initrd_path: None,
-            label: "oci".into(),
-            virtiofs_oci_root: Some(VirtiofsOciRoot {
-                tree_dir: "/tree".into(),
-                prod: false,
-            }),
-        };
-
-        let cache = tempfile::tempdir().unwrap();
-        let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "download");
-        let initrd_dir = cache
-            .path()
-            .join("verity-initrd")
-            .join(env!("CARGO_PKG_VERSION"))
-            .join(if cfg!(target_arch = "aarch64") {
-                "aarch64"
-            } else {
-                "x86_64"
-            });
-        std::fs::create_dir_all(&initrd_dir).unwrap();
-        std::fs::write(initrd_dir.join("rootfs.initrd"), b"initrd").unwrap();
-
-        let resolved = effective_transient_initrd(
-            &image,
-            None,
-            &rootfs.display().to_string(),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            mvm_build::run_image::RootStrategy::BlockExt4,
-        )
-        .unwrap();
-
-        assert_eq!(
-            resolved.as_deref(),
-            Some(
-                initrd_dir
-                    .join("rootfs.initrd")
-                    .to_str()
-                    .expect("utf-8 cached initrd path")
-            )
-        );
-    }
-
-    #[test]
-    fn transient_non_oci_prebuilt_does_not_infer_initrd() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-
-        let resolved = effective_transient_initrd(
-            &prebuilt(),
-            None,
-            &rootfs.display().to_string(),
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-            mvm_build::run_image::RootStrategy::BlockExt4,
-        )
-        .unwrap();
-
-        assert!(resolved.is_none());
-    }
-
     // --- transient_run_dev_console ---
 
     #[test]
     fn interactive_transient_run_sets_dev_console_when_not_sealed() {
         // PTY-mode run against a non-sealed image must pre-open console sockets
         // so the hvf backend can host-dial the guest's data port.
-        assert!(transient_run_dev_console(true, false));
+        assert!(transient_run_dev_console(true, None));
     }
 
     #[test]
     fn non_interactive_transient_run_leaves_dev_console_unset() {
         // A non-PTY run never needs the interactive console data sockets.
-        assert!(!transient_run_dev_console(false, false));
+        assert!(!transient_run_dev_console(false, None));
     }
 
     #[test]
     fn interactive_sealed_run_leaves_dev_console_unset() {
-        // A sealed image has no dev-shell agent; pre-opening sockets is
-        // wasteful. enforce_accessible_gate refuses the attach separately.
-        assert!(!transient_run_dev_console(true, true));
+        // A verity-sealed image has no dev-shell agent; pre-opening sockets
+        // is wasteful. enforce_accessible_gate refuses the attach separately.
+        assert!(!transient_run_dev_console(true, Some("/rootfs.verity")));
     }
 
     #[test]
     fn non_interactive_sealed_run_leaves_dev_console_unset() {
-        assert!(!transient_run_dev_console(false, true));
-    }
-
-    #[test]
-    fn interactive_verity_backed_oci_run_still_arms_dev_console() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"x").unwrap();
-        std::fs::write(dir.path().join("rootfs.verity"), b"verity").unwrap();
-        std::fs::write(dir.path().join("rootfs.roothash"), b"roothash").unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", false, true)
-            .write_to_dir(dir.path())
-            .unwrap();
-
-        let image_sealed = crate::commands::vm::image_is_sealed(&rootfs);
-        assert!(
-            transient_run_dev_console(true, image_sealed),
-            "verity-backed accessible OCI images must keep the interactive console armed"
-        );
+        assert!(!transient_run_dev_console(false, Some("/rootfs.verity")));
     }
 
     #[test]
@@ -2756,19 +2135,5 @@ mod tests {
             "cleanup command must remove the staging directory: {}",
             scripts[0]
         );
-    }
-
-    #[test]
-    fn normalize_backend_override_trims_lowercases_and_drops_blank() {
-        assert_eq!(
-            normalize_backend_override("  LibKrun \n"),
-            Some("libkrun".to_string())
-        );
-        assert_eq!(
-            normalize_backend_override("firecracker"),
-            Some("firecracker".to_string())
-        );
-        assert_eq!(normalize_backend_override("   "), None);
-        assert_eq!(normalize_backend_override(""), None);
     }
 }

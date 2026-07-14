@@ -5,6 +5,7 @@ pub mod bootstrap;
 pub mod commands;
 pub mod config_watcher;
 pub mod doctor;
+mod egress_ca_env;
 pub mod exec;
 pub mod host_binaries;
 pub mod http;

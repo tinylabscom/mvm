@@ -12,7 +12,7 @@
 //! caller hands to the guest (env/file injection) so the workload sends the
 //! opaque token where its credential would go — it never sees the value.
 
-use mvm_core::plan::{SecretBinding, SecretSource};
+use mvm_core::plan::{SecretBinding, SecretGuestMount, SecretSource};
 use mvm_sdk::ir::{SecretMount, SecretRef};
 
 use super::binding::BindingStore;
@@ -70,14 +70,16 @@ pub fn assemble_registry(
             .ok_or_else(|| AssembleError::NoBinding {
                 name: address.clone(),
             })?;
-        // `mount` is irrelevant to substitution (which keys on name/auth/hosts);
-        // record the guest-facing name so the placeholder reaches the right env
-        // slot when handed to the guest.
-        let secret_ref = SecretRef {
-            name: address.clone(),
-            mount: SecretMount::Env {
+        let mount = match b.guest_mount.as_ref() {
+            Some(SecretGuestMount::Env { var }) => SecretMount::Env { var: var.clone() },
+            Some(SecretGuestMount::File { path }) => SecretMount::File { path: path.clone() },
+            None => SecretMount::Env {
                 var: b.name.clone(),
             },
+        };
+        let secret_ref = SecretRef {
+            name: address.clone(),
+            mount,
             auth_type: meta.auth_type,
             allowed_hosts: meta.allowed_hosts,
             // Non-secret SigV4 scope from the operator-set binding; the
@@ -104,6 +106,10 @@ mod tests {
             source: SecretSource::Keystore {
                 address: address.into(),
             },
+            guest_mount: Some(SecretGuestMount::Env {
+                var: guest_name.into(),
+            }),
+            allowed_hosts: vec![],
         }
     }
 
@@ -190,6 +196,42 @@ mod tests {
     }
 
     #[test]
+    fn reconstructs_file_mount_when_admitted_plan_carries_one() {
+        let dir = tempdir().unwrap();
+        let store = FileBindingStore::with_dir(dir.path());
+        store
+            .put(
+                "local",
+                "openai",
+                &SecretBindingMeta {
+                    auth_type: AuthType::Bearer,
+                    allowed_hosts: vec!["api.openai.com".into()],
+                    sigv4: None,
+                },
+            )
+            .unwrap();
+
+        let plan = [SecretBinding {
+            name: "/run/mvm-secrets/openai".into(),
+            source: SecretSource::Keystore {
+                address: "openai".into(),
+            },
+            guest_mount: Some(SecretGuestMount::File {
+                path: "/run/mvm-secrets/openai".into(),
+            }),
+            allowed_hosts: vec![],
+        }];
+        let (registry, handed) = assemble_registry(&plan, "local", &store).unwrap();
+        let secret_ref = registry.resolve(handed[0].1.as_str()).unwrap();
+        assert_eq!(
+            secret_ref.mount,
+            SecretMount::File {
+                path: "/run/mvm-secrets/openai".into()
+            }
+        );
+    }
+
+    #[test]
     fn skips_static_and_external_sources() {
         let dir = tempdir().unwrap();
         let store = FileBindingStore::with_dir(dir.path());
@@ -197,6 +239,8 @@ mod tests {
             SecretBinding {
                 name: "T".into(),
                 source: SecretSource::Static { value: "x".into() },
+                guest_mount: None,
+                allowed_hosts: vec![],
             },
             SecretBinding {
                 name: "E".into(),
@@ -204,6 +248,8 @@ mod tests {
                     provider: "vault".into(),
                     path: "kv/x".into(),
                 },
+                guest_mount: None,
+                allowed_hosts: vec![],
             },
         ];
         let (registry, handed) = assemble_registry(&plan, "local", &store).unwrap();

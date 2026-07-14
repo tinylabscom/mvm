@@ -14,11 +14,7 @@
 //! transient runner, while `exec` / `shell` / `stop` stay thin wrappers over
 //! the existing running-VM surfaces.
 
-mod lifecycle;
 mod portable;
-mod receipt;
-mod runtime;
-mod spec_ops;
 
 use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine as _;
@@ -54,18 +50,6 @@ use super::vm::{console, down};
 use crate::commands::ssh_agent_proxy::{
     SSH_AGENT_GUEST_SOCKET, SshAgentProxyListen, reap_proxy, spawn_proxy, ssh_auth_sock_from_env,
 };
-use crate::ui;
-use lifecycle::{exec_machine, run_restart, run_start, shell_machine, stop_machine};
-#[cfg(test)]
-use receipt::verify_machine_start_receipt;
-use receipt::{
-    MachineStartJsonSummary, MachineStartReceiptInput, MachineStartReceiptOutcome,
-    machine_start_plan_auth_policy, machine_start_preflight_summary, machine_start_receipt_input,
-    machine_start_volume_summary, print_machine_start_preflight_human, write_machine_start_receipt,
-};
-pub(in crate::commands) use runtime::boot_persistent_by_name;
-use runtime::run_dispatch;
-use spec_ops::{create_machine, inspect_machine, list_machines, remove_machine, run_reconfigure};
 
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct Args {
@@ -114,14 +98,11 @@ pub(in crate::commands) enum MachineAction {
     /// Run a command inside an already-started named machine
     #[command(display_order = 10)]
     Exec(MachineExecArgs),
-    /// Update the runtime idle timeout for a running machine
-    #[command(name = "set-timeout", display_order = 11)]
-    SetTimeout(MachineSetTimeoutArgs),
     /// Show console logs from a running VM
-    #[command(display_order = 12)]
+    #[command(display_order = 11)]
     Logs(super::vm::logs::Args),
     /// Interactive PTY console to a running VM (dev images only; claim-15 gated)
-    #[command(display_order = 13)]
+    #[command(display_order = 12)]
     Console(super::vm::console::Args),
     /// Verify a portable `.mvm` artifact and preview how `machine run` would
     /// admit it (arch, profile, seccomp, egress, volumes). Read-only: no
@@ -153,7 +134,6 @@ impl MachineAction {
             | MachineAction::Inspect(_)
             | MachineAction::Shell(_)
             | MachineAction::Exec(_)
-            | MachineAction::SetTimeout(_)
             | MachineAction::Logs(_)
             | MachineAction::Console(_)
             | MachineAction::CheckArtifact(_) => "machine",
@@ -167,24 +147,18 @@ impl MachineAction {
 pub(in crate::commands) struct MachineRunArgs {
     /// OCI image reference to boot (pulled or reused from the local cache).
     /// Required for a fresh boot; optional when reconnecting to an existing
-    /// persistent machine by `--name`. Mutually exclusive with `--manifest`,
-    /// `--flake`, and `--runtime-pack`.
-    #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake", "runtime_pack"])]
+    /// persistent machine by `--name`. Mutually exclusive with `--manifest`
+    /// and `--flake`.
+    #[arg(long, value_name = "REF", conflicts_with_all = ["manifest", "flake"])]
     pub image: Option<String>,
     /// Pre-built manifest slot (path to `mvm.toml`, its directory, or a slot
-    /// name). Mutually exclusive with `--image`, `--flake`, and
-    /// `--runtime-pack`.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake", "runtime_pack"])]
+    /// name). Mutually exclusive with `--image` and `--flake`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "flake"])]
     pub manifest: Option<String>,
     /// Nix flake reference — build in the builder VM, then boot the result.
-    /// Mutually exclusive with `--image`, `--manifest`, and `--runtime-pack`.
-    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest", "runtime_pack"])]
+    /// Mutually exclusive with `--image` and `--manifest`.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "manifest"])]
     pub flake: Option<String>,
-    /// Boot from a verified attested runtime pack in the local cache instead
-    /// of building/pulling an image. Its own image source: mutually
-    /// exclusive with `--image`, `--manifest`, and `--flake`.
-    #[arg(long, conflicts_with_all = ["image", "manifest", "flake"])]
-    pub runtime_pack: bool,
     /// Flake package variant (with `--flake`). Omit to use flake default.
     #[arg(long, value_name = "PROFILE", requires = "flake")]
     pub flake_profile: Option<String>,
@@ -209,10 +183,11 @@ pub(in crate::commands) struct MachineRunArgs {
     /// the computed sealed-prod default. Values must be production-safe verbs.
     #[arg(long = "agent-verb", value_name = "VERB")]
     pub agent_verb: Vec<String>,
-    /// Mount a host directory into the guest: `HOST_PATH:/GUEST_PATH[:MODE]`.
+    /// Share a host directory into the guest: `HOST_PATH:/GUEST_PATH[:MODE]`.
     /// MODE defaults to `ro`; `rw` needs `--profile dev` or `permissive`.
-    /// `--volume` remains as a compatibility alias; `-v` is global verbosity.
-    #[arg(long = "mount", visible_alias = "volume")]
+    /// (No short flag: `-v` is the global verbosity counter and `-d` is
+    /// `--detach`.)
+    #[arg(long = "volume")]
     pub volume: Vec<String>,
     /// Explicit environment variable to inject (KEY=VALUE). Repeatable.
     #[arg(short, long)]
@@ -283,7 +258,7 @@ pub(in crate::commands) struct MachineRunArgs {
     #[arg(long)]
     pub force: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -351,7 +326,6 @@ impl MachineRunArgs {
             pty: false,
             vm_name: self.name,
             image: self.image,
-            runtime_pack: self.runtime_pack,
             net: self.net,
             allow_host: self.allow_host,
             cpus: self.cpus,
@@ -429,16 +403,12 @@ impl MachineRunArgs {
     }
 
     /// Fresh-boot modes (transient, interactive-transient) have no spec to fall
-    /// back on, so an image, manifest, flake, or runtime pack is mandatory.
+    /// back on, so an image, manifest, or flake is mandatory.
     fn require_image_for_fresh_boot(&self) -> Result<()> {
-        if self.image.is_none()
-            && self.manifest.is_none()
-            && self.flake.is_none()
-            && !self.runtime_pack
-        {
+        if self.image.is_none() && self.manifest.is_none() && self.flake.is_none() {
             bail!(
-                "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, or \
-                 `--runtime-pack` to boot a new machine"
+                "machine run needs `--image <ref>`, `--manifest <path>`, or `--flake <path>` \
+                 to boot a new machine"
             );
         }
         Ok(())
@@ -501,7 +471,7 @@ fn profile_allows_writable_volume(profile: &str) -> bool {
     matches!(profile, "dev" | "permissive")
 }
 
-/// Validate `--mount`/`--volume` specs and normalise them for storage in a managed
+/// Validate `--volume` specs and normalise them for storage in a managed
 /// `MachineSpec`. Each spec is run through the shared
 /// `vm_volume_from_spec_validated` choke point (protected-dir deny-list +
 /// guest-mount validation, claim 1) and its host path is canonicalised to an
@@ -566,17 +536,13 @@ fn machine_run_spec(
     } else if let Some(img) = &args.image {
         // Image-backed: store the OCI ref.
         (Some(img.clone()), None)
-    } else if args.runtime_pack {
-        // The verified runtime pack is its own source; recorded via
-        // `runtime_pack: true` below, not `image`/`manifest`.
-        (None, None)
     } else if std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1") {
         // Test escape: kernel + rootfs from env vars; no persistent source.
         (None, None)
     } else {
         bail!(
-            "machine run needs `--image <ref>`, `--manifest <path>`, `--flake <path>`, or \
-             `--runtime-pack` to create machine {name:?}"
+            "machine run needs `--image <ref>`, `--manifest <path>`, or `--flake <path>` \
+             to create machine {name:?}"
         );
     };
     super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
@@ -588,7 +554,6 @@ fn machine_run_spec(
         image,
         manifest,
         resolved_digest: None,
-        runtime_pack: args.runtime_pack,
         net: args.net,
         allow_host: args.allow_host.clone(),
         cpus: args.cpus,
@@ -711,7 +676,7 @@ pub(in crate::commands) struct MachineStartArgs {
     #[arg(skip)]
     pub quiet: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -752,7 +717,7 @@ pub(in crate::commands) struct MachineStartCmd {
     #[arg(long)]
     pub dry_run: bool,
     /// Workload VMM backend. Defaults to the host's best supported backend
-    /// (Linux+KVM → firecracker; macOS 26+ → hvf; macOS 13-25 → libkrun). On a
+    /// (Linux+KVM → firecracker; macOS 26+ → vz; macOS 13-25 → libkrun). On a
     /// Linux+KVM host, `--hypervisor libkrun` opts into the libkrun runtime instead
     /// of the firecracker default — both require `/dev/kvm` and enforce claim-10
     /// egress (qemu is a no-`/dev/kvm` dev/test fallback only). `MVM_HYPERVISOR` is
@@ -787,6 +752,66 @@ impl MachineStartCmd {
     }
 }
 
+/// `machine start <name>...`: boot each named machine. A single name returns
+/// its error directly; a batch continues past a failed start so one bad name
+/// doesn't strand the rest, then fails if any failed.
+fn run_start(cmd: MachineStartCmd) -> Result<()> {
+    if cmd.names.len() > 1 && (cmd.receipt.is_some() || cmd.json || cmd.dry_run) {
+        bail!(
+            "--receipt/--json/--dry-run report on a single machine; \
+             start machines individually to use them"
+        );
+    }
+    if cmd.names.len() == 1 {
+        return start_machine(cmd.start_args_for(&cmd.names[0]));
+    }
+    let mut had_err = false;
+    for name in &cmd.names {
+        if let Err(err) = start_machine(cmd.start_args_for(name)) {
+            eprintln!("failed to start {name}: {err:#}");
+            had_err = true;
+        }
+    }
+    if had_err {
+        bail!("one or more machines failed to start");
+    }
+    Ok(())
+}
+
+/// `machine restart <name>...`: stop each running machine, then start it — the
+/// same stop→start sequence the config-change recreate path uses. Like
+/// `run_start`, `--receipt`/`--json`/`--dry-run` are single-machine; a batch
+/// continues past a failed restart. Dry-run only previews the start plan (it
+/// never stops a running machine).
+fn run_restart(cmd: MachineStartCmd) -> Result<()> {
+    if cmd.names.len() > 1 && (cmd.receipt.is_some() || cmd.json || cmd.dry_run) {
+        bail!(
+            "--receipt/--json/--dry-run report on a single machine; \
+             restart machines individually to use them"
+        );
+    }
+    let restart_one = |name: &str| -> Result<()> {
+        if !cmd.dry_run && machine_is_running(name) {
+            stop_running_machine(name);
+        }
+        start_machine(cmd.start_args_for(name))
+    };
+    if cmd.names.len() == 1 {
+        return restart_one(&cmd.names[0]);
+    }
+    let mut had_err = false;
+    for name in &cmd.names {
+        if let Err(err) = restart_one(name) {
+            eprintln!("failed to restart {name}: {err:#}");
+            had_err = true;
+        }
+    }
+    if had_err {
+        bail!("one or more machines failed to restart");
+    }
+    Ok(())
+}
+
 #[derive(ClapArgs, Debug, Clone)]
 pub(in crate::commands) struct MachineExecArgs {
     /// Persistent machine name.
@@ -815,14 +840,6 @@ pub(in crate::commands) struct MachineShellArgs {
     /// Bypass the sealed-image accessibility check.
     #[arg(long)]
     pub force: bool,
-}
-
-#[derive(ClapArgs, Debug, Clone)]
-pub(in crate::commands) struct MachineSetTimeoutArgs {
-    /// Running VM name.
-    pub name: String,
-    /// New runtime idle timeout in seconds. Must be > 0.
-    pub seconds: u64,
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -887,6 +904,131 @@ struct MachineRemoveSummary {
 struct MachineManifestSource {
     workflow: ManifestMachineWorkflow,
     base_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartReceiptInput {
+    machine_name: String,
+    /// OCI image reference. Present for image-backed machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    image: Option<String>,
+    /// Pre-built manifest slot. Present for manifest- or flake-backed machines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    manifest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_digest: Option<String>,
+    cpus: u32,
+    memory: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mem_initial: Option<String>,
+    profile: String,
+    network_posture: String,
+    egress_enforcement: String,
+    transparent_tls_upstream_trust: String,
+    auth: MachineStartAuthPolicy,
+    volumes: Vec<MachineStartVolumePolicy>,
+    init: MachineStartInitPolicy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartAuthPolicy {
+    mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartVolumePolicy {
+    kind: String,
+    host_path_sha256: String,
+    guest_path: String,
+    read_only: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartInitPolicy {
+    command_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    script_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartJsonSummary {
+    schema_version: u32,
+    invocation: MachineStartReceiptInput,
+    transparent_tls_posture: String,
+    transparent_tls_upstream_trust: String,
+    outcome: MachineStartReceiptOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    receipt_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartPreflightSummary {
+    schema_version: u32,
+    dry_run: bool,
+    will_execute: bool,
+    machine: MachineStartPreflightMachine,
+    invocation: MachineStartReceiptInput,
+    transparent_tls_posture: String,
+    transparent_tls_upstream_trust: String,
+    resources: MachineStartPreflightResources,
+    receipt: MachineStartPreflightReceipt,
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartPreflightMachine {
+    name: String,
+    image_reference_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    resolved_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartPreflightResources {
+    cpus: u32,
+    memory: String,
+    memory_mib: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mem_initial: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mem_initial_mib: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartPreflightReceipt {
+    requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    path_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartReceiptPayload {
+    schema_version: u32,
+    receipt_id: String,
+    recorded_at: String,
+    invocation: MachineStartReceiptInput,
+    outcome: MachineStartReceiptOutcome,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartReceiptOutcome {
+    resolved_digest: String,
+    started_at: String,
+    init_commands_executed: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SignedMachineStartReceipt {
+    payload: MachineStartReceiptPayload,
+    signature: MachineStartReceiptSignature,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineStartReceiptSignature {
+    algorithm: String,
+    signer_id: String,
+    public_key_sha256: String,
+    signature_base64: String,
 }
 
 impl MachineCreateArgs {
@@ -967,7 +1109,6 @@ impl MachineCreateArgs {
             image: Some(image),
             manifest: None,
             resolved_digest: None,
-            runtime_pack: false,
             net,
             allow_host,
             cpus,
@@ -1070,7 +1211,340 @@ fn absolutize_manifest_volume_spec(spec: &str, base_dir: &Path) -> Result<String
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    hex::encode(hasher.finalize())
+    format!("{:x}", hasher.finalize())
+}
+
+fn machine_start_auth_policy(spec: &MachineSpec) -> MachineStartAuthPolicy {
+    let mode = machine_start_plan_auth_policy(spec).mode.as_str();
+    MachineStartAuthPolicy {
+        mode: mode.to_string(),
+    }
+}
+
+fn machine_start_plan_auth_policy(spec: &MachineSpec) -> mvm_core::plan::AuthPolicy {
+    if spec.ssh_agent {
+        mvm_core::plan::AuthPolicy::ssh_agent_socket()
+    } else {
+        mvm_core::plan::AuthPolicy::none()
+    }
+}
+
+fn machine_start_init_policy(spec: &MachineSpec) -> MachineStartInitPolicy {
+    let script_sha256 =
+        (!spec.init.is_empty()).then(|| sha256_hex(spec.init.join("\n").as_bytes()));
+    MachineStartInitPolicy {
+        command_count: spec.init.len(),
+        script_sha256,
+    }
+}
+
+fn machine_start_volume_policy(spec: &MachineSpec) -> Result<Vec<MachineStartVolumePolicy>> {
+    let mut volumes = Vec::with_capacity(spec.volumes.len());
+    for volume in &spec.volumes {
+        let parsed = super::shared::parse_volume_spec(volume)?;
+        let (kind, host_path, guest_path, read_only) = match parsed {
+            super::shared::VolumeSpec::DirShare {
+                host_dir,
+                guest_mount,
+                read_only,
+            } => ("dir_share", host_dir, guest_mount, read_only),
+            super::shared::VolumeSpec::Disk {
+                host,
+                guest,
+                read_only,
+                ..
+            } => ("disk", host, guest, read_only),
+        };
+        volumes.push(MachineStartVolumePolicy {
+            kind: kind.to_string(),
+            host_path_sha256: sha256_hex(host_path.as_bytes()),
+            guest_path,
+            read_only,
+        });
+    }
+    Ok(volumes)
+}
+
+fn machine_start_receipt_input(
+    spec: &MachineSpec,
+    backend: &str,
+) -> Result<MachineStartReceiptInput> {
+    enforce_ssh_agent_profile(&spec.profile, spec.ssh_agent)?;
+    let network_policy = super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    let _ = validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
+    let volumes = machine_start_volume_policy(spec)?;
+    Ok(MachineStartReceiptInput {
+        machine_name: spec.name.clone(),
+        image: spec.image.clone(),
+        manifest: spec.manifest.clone(),
+        resolved_digest: spec.resolved_digest.clone(),
+        cpus: spec.cpus,
+        memory: spec.memory.clone(),
+        mem_initial: spec.mem_initial.clone(),
+        profile: spec.profile.clone(),
+        network_posture: network_policy.posture_label(),
+        egress_enforcement: super::shared::egress_enforcement_label(backend, &network_policy),
+        transparent_tls_upstream_trust: super::shared::transparent_tls_upstream_trust_label(
+            &network_policy,
+        ),
+        auth: machine_start_auth_policy(spec),
+        volumes,
+        init: machine_start_init_policy(spec),
+    })
+}
+
+fn machine_start_volume_summary(volumes: &[MachineStartVolumePolicy]) -> &'static str {
+    if volumes.is_empty() {
+        "none"
+    } else if volumes.iter().all(|volume| volume.read_only) {
+        "ro-only"
+    } else {
+        "contains-rw"
+    }
+}
+
+fn machine_start_preflight_summary(
+    spec: &MachineSpec,
+    receipt: Option<&Path>,
+) -> Result<MachineStartPreflightSummary> {
+    let backend = super::shared::resolve_effective_hypervisor("firecracker");
+    let network_policy = super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    let invocation = machine_start_receipt_input(spec, &backend)?;
+    let (memory_mib, mem_initial_mib) =
+        validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
+    let mut notes = vec![
+        "preflight only; no image was resolved, pulled, booted, or executed".to_string(),
+        "raw host paths are intentionally omitted from policy output".to_string(),
+    ];
+    if receipt.is_some() {
+        notes.push("receipt path is hashed, but no receipt is written during dry-run".to_string());
+    }
+    Ok(MachineStartPreflightSummary {
+        schema_version: 1,
+        dry_run: true,
+        will_execute: false,
+        machine: MachineStartPreflightMachine {
+            name: spec.name.clone(),
+            image_reference_sha256: sha256_hex(
+                spec.image
+                    .as_deref()
+                    .or(spec.manifest.as_deref())
+                    .unwrap_or("")
+                    .as_bytes(),
+            ),
+            resolved_digest: spec.resolved_digest.clone(),
+        },
+        invocation,
+        transparent_tls_posture: network_policy.transparent_tls_posture_label(),
+        transparent_tls_upstream_trust: super::shared::transparent_tls_upstream_trust_label(
+            &network_policy,
+        ),
+        resources: MachineStartPreflightResources {
+            cpus: spec.cpus,
+            memory: spec.memory.clone(),
+            memory_mib,
+            mem_initial: spec.mem_initial.clone(),
+            mem_initial_mib,
+        },
+        receipt: MachineStartPreflightReceipt {
+            requested: receipt.is_some(),
+            path_sha256: receipt.map(|path| sha256_hex(path.to_string_lossy().as_bytes())),
+        },
+        notes,
+    })
+}
+
+fn print_machine_start_preflight_human(summary: &MachineStartPreflightSummary) {
+    println!("mvmctl machine start dry-run: no VM will be booted");
+    println!("machine: {}", summary.machine.name);
+    println!(
+        "image: OCI reference sha256={}{}",
+        summary.machine.image_reference_sha256,
+        summary
+            .machine
+            .resolved_digest
+            .as_deref()
+            .map(|digest| format!(" last_resolved_digest={digest}"))
+            .unwrap_or_default()
+    );
+    println!(
+        "resources: cpus={} memory={} ({} MiB)",
+        summary.resources.cpus, summary.resources.memory, summary.resources.memory_mib
+    );
+    if let Some(mem_initial) = summary.resources.mem_initial.as_deref() {
+        let mem_initial_mib = summary.resources.mem_initial_mib.unwrap_or_default();
+        println!("mem-initial: {mem_initial} ({mem_initial_mib} MiB)");
+    }
+    println!("profile: {}", summary.invocation.profile);
+    println!("network: {}", summary.invocation.network_posture);
+    println!("transparent tls: {}", summary.transparent_tls_posture);
+    println!(
+        "transparent tls trust: {}",
+        summary.transparent_tls_upstream_trust
+    );
+    println!("enforced: {}", summary.invocation.egress_enforcement);
+    println!("auth: {}", summary.invocation.auth.mode);
+    if summary.invocation.init.command_count == 0 {
+        println!("dev.init: none");
+    } else {
+        println!(
+            "dev.init: {} command(s) script_sha256={}",
+            summary.invocation.init.command_count,
+            summary
+                .invocation
+                .init
+                .script_sha256
+                .as_deref()
+                .unwrap_or("missing")
+        );
+    }
+    if summary.invocation.volumes.is_empty() {
+        println!("host shares: none");
+    } else {
+        println!("host shares:");
+        for volume in &summary.invocation.volumes {
+            println!(
+                "  kind={} host_sha256={} -> {} ({})",
+                volume.kind,
+                volume.host_path_sha256,
+                volume.guest_path,
+                if volume.read_only { "ro" } else { "rw" }
+            );
+        }
+    }
+    if summary.receipt.requested {
+        if let Some(path_sha256) = &summary.receipt.path_sha256 {
+            println!("receipt: requested path_sha256={path_sha256} (not written in dry-run)");
+        } else {
+            println!("receipt: requested (not written in dry-run)");
+        }
+    }
+}
+
+impl MachineStartJsonSummary {
+    fn from_parts(
+        invocation: MachineStartReceiptInput,
+        transparent_tls_posture: String,
+        transparent_tls_upstream_trust: String,
+        outcome: MachineStartReceiptOutcome,
+        receipt_path: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            schema_version: 1,
+            invocation,
+            transparent_tls_posture,
+            transparent_tls_upstream_trust,
+            outcome,
+            receipt_path,
+        }
+    }
+}
+
+fn write_machine_start_receipt(
+    path: &Path,
+    invocation: MachineStartReceiptInput,
+    outcome: MachineStartReceiptOutcome,
+) -> Result<()> {
+    let payload = MachineStartReceiptPayload {
+        schema_version: 1,
+        receipt_id: uuid::Uuid::new_v4().to_string(),
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        invocation,
+        outcome,
+    };
+    let payload_bytes =
+        serde_json::to_vec(&payload).context("serializing machine-start receipt payload")?;
+    let signer = load_or_init().context("loading host signer for machine-start receipt")?;
+    let signature = signer.signing.sign(&payload_bytes);
+    let public_key = signer.verifying.to_bytes();
+    let receipt = SignedMachineStartReceipt {
+        payload,
+        signature: MachineStartReceiptSignature {
+            algorithm: "ed25519".to_string(),
+            signer_id: host_signer_id(),
+            public_key_sha256: sha256_hex(&public_key),
+            signature_base64: base64::engine::general_purpose::STANDARD
+                .encode(signature.to_bytes()),
+        },
+    };
+
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating receipt directory {}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(&receipt).context("serializing machine-start receipt")?;
+    std::fs::write(path, bytes)
+        .with_context(|| format!("writing machine-start receipt {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(test)]
+fn verify_machine_start_receipt(
+    path: &Path,
+    pubkey_path: Option<&Path>,
+) -> Result<SignedMachineStartReceipt> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("reading machine-start receipt {}", path.display()))?;
+    let receipt: SignedMachineStartReceipt = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parsing machine-start receipt {}", path.display()))?;
+    if receipt.payload.schema_version != 1 {
+        bail!(
+            "unsupported machine-start receipt schema_version {}; this build supports 1",
+            receipt.payload.schema_version
+        );
+    }
+    if !receipt.signature.algorithm.eq_ignore_ascii_case("ed25519") {
+        bail!(
+            "unsupported machine-start receipt signature algorithm '{}'",
+            receipt.signature.algorithm
+        );
+    }
+    let verifying = load_machine_start_receipt_pubkey(pubkey_path)?;
+    let public_key = verifying.to_bytes();
+    let actual_key_hash = sha256_hex(&public_key);
+    if actual_key_hash != receipt.signature.public_key_sha256 {
+        bail!(
+            "machine-start receipt public key hash mismatch: receipt={}, supplied={actual_key_hash}",
+            receipt.signature.public_key_sha256
+        );
+    }
+    let payload_bytes = serde_json::to_vec(&receipt.payload)
+        .context("serializing machine-start receipt payload for verify")?;
+    let sig_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&receipt.signature.signature_base64)
+        .context("decoding machine-start receipt signature")?;
+    let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().map_err(|_| {
+        anyhow!(
+            "machine-start receipt signature is {} bytes; expected 64",
+            sig_bytes.len()
+        )
+    })?;
+    let signature = Signature::from_bytes(&sig_arr);
+    verifying
+        .verify(&payload_bytes, &signature)
+        .context("verifying machine-start receipt signature")?;
+    Ok(receipt)
+}
+
+#[cfg(test)]
+fn load_machine_start_receipt_pubkey(pubkey_path: Option<&Path>) -> Result<VerifyingKey> {
+    let path = match pubkey_path {
+        Some(path) => path.to_path_buf(),
+        None => super::vm::host_signer::default_keys_dir()?.join(PUBLIC_FILENAME),
+    };
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("reading machine-start receipt pubkey {}", path.display()))?;
+    let arr: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
+        anyhow!(
+            "receipt pubkey {} is {} bytes; expected 32",
+            path.display(),
+            bytes.len()
+        )
+    })?;
+    VerifyingKey::from_bytes(&arr).context("parsing machine-start receipt pubkey")
 }
 
 fn profile_allows_dev_init(profile: &str) -> bool {
@@ -1119,6 +1593,24 @@ fn remove_machine_spec(name: &str, yes: bool) -> Result<MachineRemoveSummary> {
     })
 }
 
+fn create_machine(args: MachineCreateArgs) -> Result<()> {
+    let json = args.json;
+    let force = args.force;
+    let spec = args.into_spec()?;
+    save_machine_spec(&spec, force)?;
+    mvm_core::audit_emit!(
+        ConfigChange,
+        vm: &spec.name,
+        "action=machine.create force={force}"
+    );
+    if json {
+        println!("{}", serde_json::to_string_pretty(&spec)?);
+    } else {
+        println!("created machine {}", spec.name);
+    }
+    Ok(())
+}
+
 /// `machine ls` row: the persisted spec plus its live run status. `status` is
 /// `running` when the backend reports the VM up, else `stopped`. SDK facades
 /// read this field so `MvmClient::list_machines` reports real status instead of
@@ -1128,11 +1620,13 @@ struct MachineListEntry<'a> {
     #[serde(flatten)]
     spec: &'a MachineSpec,
     status: &'static str,
+    health: &'static str,
+    network_summary: MachineInspectNetworkSummary,
 }
 
 /// Live status label for a persisted machine, resolved through the backend.
 fn machine_status_label(name: &str) -> &'static str {
-    if lifecycle::machine_is_running(name) {
+    if machine_is_running(name) {
         "running"
     } else {
         "stopped"
@@ -1145,7 +1639,24 @@ struct MachineLsRow {
     status: String,
     health: &'static str,
     source: String,
+    tls_443: String,
     age: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct MachineInspectNetworkSummary {
+    posture: String,
+    transparent_tls_posture: String,
+    transparent_tls_upstream_trust: String,
+    egress_enforcement: String,
+}
+
+#[derive(serde::Serialize)]
+struct MachineInspectJson<'a> {
+    #[serde(flatten)]
+    spec: &'a MachineSpec,
+    health: &'static str,
+    network_summary: MachineInspectNetworkSummary,
 }
 
 /// Health label for a machine's readiness, as shown in `machine ls`'s HEALTH
@@ -1160,6 +1671,17 @@ fn health_cell(readiness: Option<&mvm_core::domain::instance::InstanceReadiness>
         Some(InstanceReadiness::ServicesStarting { .. }) => "starting",
         _ => "-",
     }
+}
+
+fn machine_health_label(
+    registry: &mvm::vm::name_registry::VmNameRegistry,
+    name: &str,
+) -> &'static str {
+    health_cell(
+        registry
+            .lookup(name)
+            .and_then(|entry| entry.readiness.as_ref()),
+    )
 }
 
 /// Coarse, human-friendly age of a machine from its `created_at` timestamp,
@@ -1182,6 +1704,19 @@ fn humanize_age(created: Option<&str>, now: chrono::DateTime<chrono::Utc>) -> St
     }
 }
 
+fn machine_ls_tls_443_cell(spec: &MachineSpec) -> Result<String> {
+    let network_summary = machine_inspect_network_summary(spec)?;
+    let cell = match network_summary.transparent_tls_posture.as_str() {
+        "hostname-443-transform" => "transform".to_string(),
+        "ip-443-fail-closed" => "fail-closed".to_string(),
+        "mixed:hostname-443-transform,ip-443-fail-closed" => "mixed".to_string(),
+        "disabled:no-port-443" => "off".to_string(),
+        "disabled:unrestricted" => "unrestricted".to_string(),
+        other => other.to_string(),
+    };
+    Ok(cell)
+}
+
 /// Render the `machine ls` table: a header plus left-aligned, padded columns
 /// (docker-style). Pure so the alignment is unit-testable.
 fn format_machine_table(rows: &[MachineLsRow]) -> String {
@@ -1190,6 +1725,7 @@ fn format_machine_table(rows: &[MachineLsRow]) -> String {
         status: "STATUS".to_string(),
         health: "HEALTH",
         source: "SOURCE".to_string(),
+        tls_443: "TLS443".to_string(),
         age: "AGE".to_string(),
     };
     let all = std::iter::once(&header).chain(rows);
@@ -1197,17 +1733,139 @@ fn format_machine_table(rows: &[MachineLsRow]) -> String {
     let ws = all.clone().map(|r| r.status.len()).max().unwrap_or(0);
     let wh = all.clone().map(|r| r.health.len()).max().unwrap_or(0);
     let wsrc = all.clone().map(|r| r.source.len()).max().unwrap_or(0);
+    let wtls = all.clone().map(|r| r.tls_443.len()).max().unwrap_or(0);
     std::iter::once(&header)
         .chain(rows)
         .map(|r| {
             // AGE is the last column, so it needs no trailing pad.
             format!(
-                "{:<wn$}  {:<ws$}  {:<wh$}  {:<wsrc$}  {}",
-                r.name, r.status, r.health, r.source, r.age
+                "{:<wn$}  {:<ws$}  {:<wh$}  {:<wsrc$}  {:<wtls$}  {}",
+                r.name, r.status, r.health, r.source, r.tls_443, r.age
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn list_machines(args: MachineListArgs) -> Result<()> {
+    let specs = list_machine_specs()?;
+    if args.json {
+        let registry_path = mvm::vm::name_registry::registry_path();
+        let registry =
+            mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
+        let entries: Vec<MachineListEntry<'_>> = specs
+            .iter()
+            .map(|spec| {
+                Ok(MachineListEntry {
+                    spec,
+                    status: machine_status_label(&spec.name),
+                    health: machine_health_label(&registry, &spec.name),
+                    network_summary: machine_inspect_network_summary(spec)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("{}", serde_json::to_string_pretty(&entries)?);
+    } else if specs.is_empty() {
+        println!("no machines");
+    } else {
+        let now = chrono::Utc::now();
+        let registry_path = mvm::vm::name_registry::registry_path();
+        let registry =
+            mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
+        let rows: Vec<MachineLsRow> = specs
+            .iter()
+            .map(|spec| {
+                Ok(MachineLsRow {
+                    name: spec.name.clone(),
+                    status: machine_status_label(&spec.name).to_string(),
+                    health: machine_health_label(&registry, &spec.name),
+                    source: spec
+                        .image
+                        .as_deref()
+                        .or(spec.manifest.as_deref())
+                        .unwrap_or("<no source>")
+                        .to_string(),
+                    tls_443: machine_ls_tls_443_cell(spec)?,
+                    age: humanize_age(spec.created_at.as_deref(), now),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        println!("{}", format_machine_table(&rows));
+    }
+    Ok(())
+}
+
+fn machine_inspect_network_summary(spec: &MachineSpec) -> Result<MachineInspectNetworkSummary> {
+    let network_policy = super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    let backend = super::shared::resolve_effective_hypervisor("firecracker");
+    Ok(MachineInspectNetworkSummary {
+        posture: network_policy.posture_label(),
+        transparent_tls_posture: network_policy.transparent_tls_posture_label(),
+        transparent_tls_upstream_trust: super::shared::transparent_tls_upstream_trust_label(
+            &network_policy,
+        ),
+        egress_enforcement: super::shared::egress_enforcement_label(&backend, &network_policy),
+    })
+}
+
+fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
+    let spec = load_machine_spec(&args.name)?;
+    let registry_path = mvm::vm::name_registry::registry_path();
+    let registry = mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
+    let health = machine_health_label(&registry, &spec.name);
+    let network_summary = machine_inspect_network_summary(&spec)?;
+    if args.json {
+        let payload = MachineInspectJson {
+            spec: &spec,
+            health,
+            network_summary,
+        };
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("name: {}", spec.name);
+        if let Some(image) = spec.image.as_deref() {
+            println!("image: {}", image);
+        }
+        if let Some(manifest) = spec.manifest.as_deref() {
+            println!("manifest: {}", manifest);
+        }
+        if let Some(resolved_digest) = spec.resolved_digest.as_deref() {
+            println!("resolved-digest: {resolved_digest}");
+        }
+        println!("health: {health}");
+        println!("net: {}", spec.net);
+        println!("allow-host: {}", spec.allow_host.join(","));
+        println!("network-posture: {}", network_summary.posture);
+        println!(
+            "transparent-tls: {}",
+            network_summary.transparent_tls_posture
+        );
+        println!(
+            "transparent-tls-trust: {}",
+            network_summary.transparent_tls_upstream_trust
+        );
+        println!("enforced: {}", network_summary.egress_enforcement);
+        println!("cpus: {}", spec.cpus);
+        println!("memory: {}", spec.memory);
+        if let Some(mem_initial) = spec.mem_initial.as_deref() {
+            println!("mem-initial: {mem_initial}");
+        }
+        println!("profile: {}", spec.profile);
+        println!("ssh-agent: {}", spec.ssh_agent);
+        if !spec.volumes.is_empty() {
+            println!("volumes: {}", spec.volumes.join(","));
+        }
+        if !spec.init.is_empty() {
+            println!("init: {}", spec.init.join(" && "));
+        }
+        if let Some(created_at) = spec.created_at.as_deref() {
+            println!("created-at: {created_at}");
+        }
+        if let Some(last_started_at) = spec.last_started_at.as_deref() {
+            println!("last-started-at: {last_started_at}");
+        }
+    }
+    Ok(())
 }
 
 /// Resolve the concrete set of machine names a `rm` invocation targets. With
@@ -1244,6 +1902,78 @@ fn rm_running_refusal(running: &[String]) -> Option<String> {
     ))
 }
 
+fn remove_machine(args: MachineRemoveArgs) -> Result<()> {
+    let json = args.json;
+    let targets = resolve_remove_targets(args.all, &args.names)?;
+    if targets.is_empty() {
+        // Only reachable via `--all` against an empty machine store; the
+        // required arg-group rejects a bare `rm` before we get here.
+        if json {
+            println!("[]");
+        } else {
+            println!("no machines");
+        }
+        return Ok(());
+    }
+    if !args.yes {
+        use std::io::IsTerminal as _;
+        // Prompt for confirmation like `machine stop`. Only prompt on an
+        // interactive terminal; a non-interactive caller that didn't pass
+        // `--yes` declines (never block a script waiting on `/dev/tty`).
+        let prompt = if targets.len() == 1 {
+            format!("Remove machine {:?}?", targets[0])
+        } else {
+            format!(
+                "Remove {} machines ({})?",
+                targets.len(),
+                targets.join(", ")
+            )
+        };
+        let confirmed = std::io::stdin().is_terminal() && crate::ui::confirm(&prompt);
+        if !confirmed {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+    // Validate the whole set before deleting anything so a single typo doesn't
+    // leave a partially-removed batch behind (all-or-nothing on missing specs).
+    for name in &targets {
+        validate_machine_name(name)?;
+        if !config::machine_state_dir(name).exists() {
+            bail!("machine {name:?} does not exist. Run `mvmctl machine ls` to list machines.");
+        }
+    }
+    // Removing a running machine's spec would orphan its VM (unmanageable by
+    // name afterwards). Refuse up front unless `--force` was passed, in which
+    // case each running machine is stopped just before removal.
+    if !args.force {
+        let running: Vec<String> = targets
+            .iter()
+            .filter(|name| machine_is_running(name))
+            .cloned()
+            .collect();
+        if let Some(msg) = rm_running_refusal(&running) {
+            bail!(msg);
+        }
+    }
+    let mut summaries = Vec::with_capacity(targets.len());
+    for name in &targets {
+        if args.force && machine_is_running(name) {
+            stop_running_machine(name);
+        }
+        let summary = remove_machine_spec(name, true)?;
+        mvm_core::audit_emit!(ConfigChange, vm: &summary.name, "action=machine.rm");
+        if !json {
+            println!("removed machine {}", summary.name);
+        }
+        summaries.push(summary);
+    }
+    if json {
+        println!("{}", serde_json::to_string_pretty(&summaries)?);
+    }
+    Ok(())
+}
+
 fn ensure_machine_spec_exists(name: &str) -> Result<MachineSpec> {
     // `load_machine_spec` already emits an actionable "does not exist" message
     // for a missing spec, so no extra context wrapper is needed here.
@@ -1264,6 +1994,180 @@ fn already_running_notice(name: &str, json: bool) -> String {
     } else {
         format!("machine {name} is already running")
     }
+}
+
+fn start_machine(args: MachineStartArgs) -> Result<()> {
+    let mut spec = ensure_machine_spec_exists(&args.name)?;
+    if args.dry_run {
+        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        } else {
+            print_machine_start_preflight_human(&summary);
+        }
+        return Ok(());
+    }
+    // Starting an already-running machine is a no-op, not a second boot: say so
+    // and return, matching the persistent (`run -d`) path's behaviour.
+    if machine_is_running(&args.name) {
+        println!("{}", already_running_notice(&args.name, args.json));
+        return Ok(());
+    }
+    enforce_dev_init_profile(&spec.profile, &spec.init)?;
+    let effective_hypervisor = args
+        .hypervisor
+        .as_deref()
+        .map(String::from)
+        .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
+    let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
+    let ssh_auth_sock = if spec.ssh_agent {
+        Some(ssh_auth_sock_from_env()?)
+    } else {
+        None
+    };
+    let network_policy = super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
+    let (memory_mib, mem_initial_mib) =
+        validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
+    let volume_cfg = build_machine_volume_cfg(&spec.volumes)?;
+
+    // Direct-boot escape: kernel + rootfs supplied via env vars (test path only).
+    // Skips OCI image resolution and the default-microvm build entirely.
+    let (direct_boot_kernel, boot_label, boot_rootfs, boot_digest) = if std::env::var(
+        "MVM_DIRECT_BOOT",
+    )
+    .as_deref()
+        == Ok("1")
+    {
+        let kernel = std::env::var("MVM_KERNEL_PATH")
+            .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_KERNEL_PATH"))?;
+        let rootfs = std::env::var("MVM_ROOTFS_PATH")
+            .map_err(|_| anyhow::anyhow!("MVM_DIRECT_BOOT requires MVM_ROOTFS_PATH"))?;
+        (
+            Some(kernel),
+            "direct-boot".to_string(),
+            std::path::PathBuf::from(rootfs),
+            "direct-boot".to_string(),
+        )
+    } else {
+        // Boot source: OCI image or pre-built manifest slot.
+        let (label, rootfs, digest) = if let Some(slot_hash) = &spec.manifest {
+            let (_, _vmlinux, _initrd, rootfs, rev) =
+                mvm::vm::template::lifecycle::template_artifacts_for_slot(slot_hash).with_context(
+                    || format!("loading manifest slot {slot_hash:?} for machine start"),
+                )?;
+            (
+                format!("manifest:{slot_hash}"),
+                std::path::PathBuf::from(rootfs),
+                rev,
+            )
+        } else if let Some(image_ref) = &spec.image {
+            let cached = super::image::resolve_or_pull_run_image(
+                &super::image::oci_cache_root(),
+                image_ref,
+                false,
+            )?;
+            if cached.pulled {
+                let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
+                mvm_core::audit_emit!(
+                    ImageFetch,
+                    "source=machine_start reference={} digest={} prod=false layers={} trust_policy={} verification_status={} auth_source={}",
+                    cached.reference,
+                    cached.resolved_digest,
+                    cached.provenance.layer_digests.len(),
+                    cached.provenance.trust_policy,
+                    cached.provenance.verification_status,
+                    auth_source
+                );
+            }
+            (
+                cached.reference.clone(),
+                cached.rootfs_path.clone(),
+                cached.resolved_digest.clone(),
+            )
+        } else {
+            bail!(
+                "machine {name:?} spec has neither image nor manifest — use `machine rm` to remove and recreate it",
+                name = spec.name
+            );
+        };
+        (None, label, rootfs, digest)
+    };
+    // A `--kernel-pin` request overrides the image's own kernel with the
+    // locally-built workload kernel (the canonical boot path for `vm rekernel`).
+    // Direct-boot's explicit kernel always wins.
+    let kernel_path = match direct_boot_kernel {
+        Some(k) => Some(k),
+        None => super::vm::up::resolve_kernel_pin_path(args.kernel_pin.is_some())?,
+    };
+    super::vm::up::start_persistent_oci_machine(super::vm::up::PersistentImageStartParams {
+        name: &spec.name,
+        image_label: &boot_label,
+        resolved_digest: &boot_digest,
+        rootfs_path: &boot_rootfs,
+        profile: &spec.profile,
+        cpus: spec.cpus,
+        memory_mib,
+        mem_initial_mib,
+        volumes: &volume_cfg,
+        network_policy,
+        auth: machine_start_plan_auth_policy(&spec),
+        hypervisor_override: args.hypervisor.as_deref(),
+        no_supervisor: args.no_supervisor,
+        kernel_path,
+        agent_verb: spec.agent_verb.clone(),
+        has_ad_hoc_argv: args.has_ad_hoc_argv,
+    })?;
+    if let Some(host_sock) = ssh_auth_sock.as_deref()
+        && let Err(err) =
+            configure_machine_ssh_agent_forwarding(&spec.name, &effective_hypervisor, host_sock)
+    {
+        stop_failed_machine_start(&spec.name);
+        return Err(err);
+    }
+    if !spec.init.is_empty()
+        && let Err(err) = run_machine_init_commands(&spec.name, &spec.init, spec.ssh_agent)
+    {
+        stop_failed_machine_start(&spec.name);
+        return Err(err);
+    }
+    mark_machine_started(&mut spec, boot_digest);
+    let started_at = spec
+        .last_started_at
+        .clone()
+        .expect("mark_machine_started always stamps last_started_at");
+    if let Err(err) = overwrite_machine_spec(&spec) {
+        tracing::warn!(error = %err, machine = %spec.name, "updating machine start metadata failed (non-fatal)");
+    }
+    let outcome = MachineStartReceiptOutcome {
+        resolved_digest: spec
+            .resolved_digest
+            .clone()
+            .expect("mark_machine_started always stamps resolved_digest"),
+        started_at,
+        init_commands_executed: spec.init.len(),
+    };
+    if let Some(path) = args.receipt.as_deref() {
+        write_machine_start_receipt(path, receipt_input.clone(), outcome.clone())?;
+    }
+    mvm_core::audit_emit!(VmStart, vm: &spec.name, "{}", machine_start_audit_detail(&receipt_input));
+    if args.json {
+        let transparent_tls_posture =
+            super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?
+                .transparent_tls_posture_label();
+        let summary = MachineStartJsonSummary::from_parts(
+            receipt_input,
+            transparent_tls_posture,
+            super::shared::transparent_tls_upstream_trust_label(
+                &super::shared::resolve_run_network_policy(spec.net, &spec.allow_host)?,
+            ),
+            outcome,
+            args.receipt,
+        );
+        println!("{}", serde_json::to_string_pretty(&summary)?);
+    } else if !args.quiet {
+        println!("started machine {}", spec.name);
+    }
+    Ok(())
 }
 
 fn machine_start_audit_detail(input: &MachineStartReceiptInput) -> String {
@@ -1410,12 +2314,564 @@ fn run_machine_init_commands(name: &str, commands: &[String], ssh_agent: bool) -
     Ok(())
 }
 
-fn stop_failed_machine_start(name: &str, backend_name: &str) {
+fn stop_failed_machine_start(name: &str) {
     reap_proxy(name);
-    let backend = AnyBackend::from_hypervisor(backend_name);
+    let backend = AnyBackend::from_workload_hypervisor(
+        &super::shared::resolve_effective_hypervisor("firecracker"),
+    );
     if let Err(err) = backend.stop(&VmId(name.to_string())) {
         tracing::warn!(error = %err, machine = name, "stopping machine after failed init failed");
     }
+}
+
+fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()> {
+    let spec = ensure_machine_spec_exists(&args.name)?;
+    // No argv: `machine exec <name>` drops into an interactive shell, matching
+    // `machine shell <name>` (command: None launches the guest's default shell).
+    let command = if args.argv.is_empty() {
+        None
+    } else {
+        Some(machine_exec_command(&args.argv))
+    };
+    if args.tty || args.interactive {
+        use std::io::IsTerminal as _;
+        require_tty(std::io::stdin().is_terminal())?;
+        super::vm::console::enforce_accessible_gate(&args.name, args.force)?;
+        let env = machine_console_env(spec.ssh_agent);
+        return match command {
+            Some(cmd) => console::console_pty_command(&args.name, cmd, env),
+            None => console::console_interactive_with_env_and_argv(&args.name, env, Vec::new()),
+        };
+    }
+    console::run(
+        cli,
+        console::Args {
+            name: args.name,
+            command,
+            force: args.force,
+            env: machine_console_env(spec.ssh_agent),
+            pty_argv: Vec::new(),
+        },
+        cfg,
+    )
+}
+
+fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<()> {
+    let spec = ensure_machine_spec_exists(&args.name)?;
+    console::run(
+        cli,
+        console::Args {
+            name: args.name,
+            command: None,
+            force: args.force,
+            env: machine_console_env(spec.ssh_agent),
+            pty_argv: Vec::new(),
+        },
+        cfg,
+    )
+}
+
+fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) -> Result<()> {
+    if !args.yes {
+        use std::io::IsTerminal as _;
+        let prompt = if args.all {
+            "Stop all running machines?".to_string()
+        } else if args.names.len() == 1 {
+            format!("Stop machine {:?}?", args.names[0])
+        } else {
+            format!(
+                "Stop {} machines ({})?",
+                args.names.len(),
+                args.names.join(", ")
+            )
+        };
+        // Only prompt on an interactive terminal; a non-interactive caller that
+        // didn't pass `--yes` declines rather than blocking on `/dev/tty`.
+        let confirmed = std::io::stdin().is_terminal() && crate::ui::confirm(&prompt);
+        if !confirmed {
+            println!("aborted");
+            return Ok(());
+        }
+    }
+    // `--all` stops every running VM in one backend call.
+    if args.all {
+        return down::run(cli, down::Args { name: None }, cfg);
+    }
+    // Otherwise stop each named machine, continuing past a failure so one bad
+    // name doesn't strand the rest, then fail if any failed.
+    let mut had_err = false;
+    for name in &args.names {
+        reap_proxy(name);
+        if let Err(err) = down::run(
+            cli,
+            down::Args {
+                name: Some(name.clone()),
+            },
+            cfg,
+        ) {
+            eprintln!("failed to stop {name}: {err:#}");
+            had_err = true;
+        }
+    }
+    if had_err {
+        bail!("one or more machines failed to stop");
+    }
+    Ok(())
+}
+
+/// Resolve the spec a persistent run should boot, reconciling the desired
+/// config (when `--image`, `--manifest`, or a pre-built flake slot is given)
+/// against any on-disk spec. Does **no** IO beyond loading: persistence
+/// happens in the caller, keyed off the returned action. With no source flag
+/// this is a pure reconnect to an existing machine.
+///
+/// `resolved_manifest_slot` carries the slot hash for `--flake` runs where
+/// the flake was already built by the caller.
+fn resolve_persistent_spec(
+    args: &MachineRunArgs,
+    name: &str,
+    existing: Option<MachineSpec>,
+    resolved_manifest_slot: Option<&str>,
+) -> Result<(MachineSpec, SpecReconcile)> {
+    let direct_boot = std::env::var("MVM_DIRECT_BOOT").as_deref() == Ok("1");
+    let has_source = args.image.is_some()
+        || args.manifest.is_some()
+        || resolved_manifest_slot.is_some()
+        || direct_boot;
+    if !has_source {
+        return match existing {
+            Some(spec) => Ok((spec, SpecReconcile::Reuse)),
+            None => bail!(
+                "machine {name:?} does not exist; pass --image, --manifest, or --flake to create it"
+            ),
+        };
+    }
+    let desired = machine_run_spec(args, name.to_string(), resolved_manifest_slot)?;
+    let action = reconcile_machine_spec(existing.as_ref(), &desired, args.force)?;
+    let spec = match action {
+        SpecReconcile::Reuse => existing.expect("reuse implies an existing spec"),
+        SpecReconcile::Create | SpecReconcile::Recreate { .. } => desired,
+    };
+    Ok((spec, action))
+}
+
+/// `kill(pid,0)`-cheap liveness probe via the active backend.
+fn machine_is_running(name: &str) -> bool {
+    let backend = AnyBackend::from_workload_hypervisor(
+        &super::shared::resolve_effective_hypervisor("firecracker"),
+    );
+    matches!(
+        backend.status(&VmId(name.to_string())),
+        Ok(VmStatus::Running)
+    )
+}
+
+/// Stop a running machine before recreating it under a new config.
+fn stop_running_machine(name: &str) {
+    reap_proxy(name);
+    let backend = AnyBackend::from_workload_hypervisor(
+        &super::shared::resolve_effective_hypervisor("firecracker"),
+    );
+    if let Err(err) = backend.stop(&VmId(name.to_string())) {
+        tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
+    }
+}
+
+/// The persistent lifecycle: `machine run --name <N>` / `-d`. Composes the
+/// existing create + start (+ exec) verbs — no new lifecycle code — so the
+/// signed-`ExecutionPlan` admission and default-deny egress are identical to
+/// `machine create` + `machine start`.
+fn run_persistent(
+    cli: &Cli,
+    args: MachineRunArgs,
+    cfg: &MvmConfig,
+    resolved_flake_slot: Option<&str>,
+) -> Result<()> {
+    use std::io::IsTerminal as _;
+    if !std::io::stdin().is_terminal() {
+        eprintln!(
+            "warning: piped stdin is ignored for a persistent (-d/--name) machine; \
+             use a transient run or --entrypoint to deliver stdin"
+        );
+    }
+    let name = resolve_machine_run_name(&args)?;
+    let existing = load_machine_spec(&name).ok();
+    let (spec, action) = resolve_persistent_spec(&args, &name, existing, resolved_flake_slot)?;
+
+    // Dry-run: explain the effective start without persisting or booting.
+    if args.dry_run {
+        let summary = machine_start_preflight_summary(&spec, args.receipt.as_deref())?;
+        if args.json {
+            println!("{}", serde_json::to_string_pretty(&summary)?);
+        } else {
+            print_machine_start_preflight_human(&summary);
+        }
+        return Ok(());
+    }
+
+    let booted = persist_and_boot_machine(
+        &name,
+        &spec,
+        action,
+        MachineStartArgs {
+            name: name.clone(),
+            receipt: args.receipt.clone(),
+            json: args.json,
+            dry_run: false,
+            quiet: false,
+            hypervisor: args.hypervisor.clone(),
+            no_supervisor: args.no_supervisor,
+            kernel_pin: args.kernel_pin.clone(),
+            has_ad_hoc_argv: !args.argv.is_empty(),
+        },
+    )?;
+    if !booted && !args.json && !args.up_json {
+        println!("machine {name} already running");
+    }
+
+    // Apply TTL if requested (after a successful boot record exists).
+    if let Some(dur_str) = args.ttl.as_deref() {
+        apply_machine_ttl(&name, dur_str)?;
+    }
+
+    run_persistent_post_start(cli, cfg, &args, &name, &spec)
+}
+
+/// Persist the reconciled spec and boot the machine if it isn't already up.
+/// Shared by the persistent and interactive lifecycles. Returns whether a boot
+/// happened (`false` ⇒ the machine was already running).
+fn persist_and_boot_machine(
+    name: &str,
+    spec: &MachineSpec,
+    action: SpecReconcile,
+    start: MachineStartArgs,
+) -> Result<bool> {
+    match action {
+        SpecReconcile::Reuse => {}
+        SpecReconcile::Create => save_machine_spec(spec, false)?,
+        SpecReconcile::Recreate { changed } => {
+            // Loud, never silent: a config change converges by replacing the VM,
+            // so an unintended clobber (typo'd flag) is at least observable.
+            eprintln!(
+                "machine {name:?}: config changed ({changed}) — stopping the old instance and recreating it"
+            );
+            stop_running_machine(name);
+            overwrite_machine_spec(spec)?;
+        }
+    }
+    if machine_is_running(name) {
+        Ok(false)
+    } else {
+        start_machine(start)?;
+        Ok(true)
+    }
+}
+
+/// After the machine is up: run the command (streamed, machine left up), or —
+/// with no command — print the name (`-d`) or a reconnect hint.
+fn run_persistent_post_start(
+    cli: &Cli,
+    cfg: &MvmConfig,
+    args: &MachineRunArgs,
+    name: &str,
+    spec: &MachineSpec,
+) -> Result<()> {
+    if !args.argv.is_empty() {
+        if !super::shared::wait_for_guest_agent(name, 30) {
+            bail!("guest agent for {name:?} not reachable to run the command");
+        }
+        // `-d` with a command detaches: the guest agent spawns the argv as
+        // an independent workload (its own session, output to the captured
+        // console) and acks immediately, so we return instead of
+        // foreground-streaming a connection-scoped exec that the output cap
+        // would eventually kill.
+        if args.detach {
+            let env = machine_console_env(spec.ssh_agent);
+            let transport = mvm::vsock_transport::for_vm(name)?;
+            let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+            super::shared::emit_vsock_rpc_audit(
+                name,
+                &mvm_guest::vsock::GuestRequest::RunDetached {
+                    argv: args.argv.clone(),
+                    env: env.clone(),
+                },
+            );
+            let pid = mvm_guest::vsock::send_run_detached(&mut stream, args.argv.clone(), env)?;
+            if !args.json {
+                eprintln!("detached workload started (guest pid {pid})");
+                println!("{name}");
+            }
+            return Ok(());
+        }
+        return console::run(
+            cli,
+            console::Args {
+                name: name.to_string(),
+                command: Some(machine_exec_command(&args.argv)),
+                force: false,
+                env: machine_console_env(spec.ssh_agent),
+                pty_argv: Vec::new(),
+            },
+            cfg,
+        );
+    }
+    if args.up_json {
+        // Emit the SDK boot envelope as the sole stdout line.
+        let build_mode_str = resolve_build_mode_for_envelope(args, name);
+        let envelope = serde_json::json!({
+            "schema_version": 1,
+            "vm_id": name,
+            "build_mode": build_mode_str,
+        });
+        println!("{envelope}");
+        return Ok(());
+    }
+    if !args.json {
+        if args.detach {
+            // `-d`: the name is the handle. `start_machine` already printed it;
+            // echo it once more so it is the last line on stdout.
+            println!("{name}");
+        } else {
+            println!("machine {name} is up; attach with `machine shell {name}`");
+        }
+    }
+    Ok(())
+}
+
+/// Set a TTL on a persistent machine by writing `expires_at` to the name registry.
+/// Reuses the same registry helpers as `machine vm set-ttl`.
+fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
+    let dur = mvm_core::crypto::policy::parse_ttl(dur_str)
+        .with_context(|| format!("Invalid --ttl value {dur_str:?}"))?;
+    let expires_at = mvm_core::util::time::utc_plus_duration(dur);
+    let registry_path = mvm::vm::name_registry::registry_path();
+    let mut registry =
+        mvm::vm::name_registry::VmNameRegistry::load(&registry_path).with_context(|| {
+            format!(
+                "Failed to load VM name registry at {}",
+                registry_path.display()
+            )
+        })?;
+    registry
+        .set_expires_at(name, Some(expires_at))
+        .with_context(|| format!("Failed to set TTL for machine {name:?}"))?;
+    registry.save(&registry_path).with_context(|| {
+        format!(
+            "Failed to save VM name registry at {}",
+            registry_path.display()
+        )
+    })
+}
+
+/// Resolve the `build_mode` string for the `--up-json` envelope.
+///
+/// For manifest-backed boots, reads the template revision's `build_mode`
+/// field so the SDK knows whether `do_exec` is available (claim 4 / claim 15).
+/// For image-backed boots the runtime meta's `accessible` flag carries the
+/// same signal post-boot. Falls back to `"prod"` when no signal is available
+/// (fail-closed: the SDK will refuse exec against a prod image, which is
+/// correct).
+fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'static str {
+    // Manifest path: read the template revision's stored build_mode.
+    if let Some(manifest) = args.manifest.as_deref() {
+        let slot_name = manifest
+            .trim_end_matches('/')
+            .split('/')
+            .next_back()
+            .unwrap_or(manifest);
+        if let Ok(Some(revision)) =
+            mvm::vm::template::lifecycle::template_load_current_revision(slot_name)
+        {
+            return match revision.build_mode.as_deref() {
+                Some("dev") => "dev",
+                _ => "prod",
+            };
+        }
+    }
+    // Image / fallback path: consult the runtime meta written at boot time.
+    // Missing or unreadable meta defaults to "prod" (fail-closed).
+    match mvm::vm::runtime_meta::read(name) {
+        Ok(Some(meta)) if meta.accessible => "dev",
+        _ => "prod",
+    }
+}
+
+/// The entrypoint action: dispatch the image's baked `/etc/mvm/entrypoint` (the
+/// production-safe call surface) instead of argv. Reuses the shared
+/// `vm::invoke::run_entrypoint` runner — no boot/send logic is duplicated here.
+/// The source (`--manifest`, the built `--flake` slot, or the running machine
+/// name under `--attach`) and the lifecycle (`-d`/`--name` ⇒ warm session;
+/// default ⇒ transient boot + teardown) are mapped from the parsed flags.
+/// `--image` is rejected: OCI images carry their own process model and run via
+/// the default argv action, not a baked entrypoint.
+fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<String>) -> Result<()> {
+    if args.image.is_some() {
+        bail!(
+            "machine run --entrypoint dispatches a manifest/flake image's baked \
+             /etc/mvm/entrypoint; an OCI --image runs its own command via the \
+             default argv action — drop --entrypoint"
+        );
+    }
+    let source = if args.attach {
+        // `--attach` reinterprets the target as an already-running machine name.
+        resolve_machine_run_name(&args)?
+    } else if let Some(slot) = resolved_flake_slot {
+        slot
+    } else if let Some(manifest) = args.manifest.clone() {
+        manifest
+    } else {
+        bail!(
+            "machine run --entrypoint needs `--manifest <path>` or `--flake <path>` \
+             (or `--attach --name <NAME>` to dispatch into a running machine)"
+        );
+    };
+    let (memory_mib, _) = validate_machine_memory(&args.memory, None)?;
+    use std::io::IsTerminal as _;
+    let stdin = super::vm::invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+    super::vm::invoke::run_entrypoint(super::vm::invoke::EntrypointCall {
+        source,
+        stdin,
+        timeout: args.timeout.unwrap_or(30),
+        cpus: args.cpus,
+        memory_mib,
+        from_workload_ir: args.from_workload_ir.clone(),
+        reset: args.reset,
+        // Persistence axis (`-d`/`--name`) ⇒ keep the substrate VM warm after
+        // the call (the warm-session lifecycle). Default ⇒ transient teardown.
+        keep_alive: args.persistent(),
+        keep_alive_dev: false,
+        session: None,
+        r#fn: None,
+        attach: args.attach,
+    })
+}
+
+/// Dispatch `machine run` to one of the three flag-selected lifecycles. The
+/// transient default routes into the unchanged `run_secure`; persistence and
+/// interactivity compose the existing machine verbs.
+///
+/// For `--flake` runs the flake is built in the builder VM first (before mode
+/// dispatch) so all three lifecycles can reference the resulting slot hash
+/// uniformly. The build happens once regardless of mode.
+fn run_dispatch(cli: &Cli, mut args: MachineRunArgs, cfg: &MvmConfig) -> Result<()> {
+    // If a flake was given, build it into a slot before dispatching.
+    // The resolved slot hash replaces the `--flake` flag so all paths
+    // below treat it as a manifest-backed source.
+    let resolved_flake_slot = if let Some(flake_ref) = args.flake.take() {
+        let slot_hash = build::build_flake_to_slot(&flake_ref, args.flake_profile.as_deref())?;
+        args.manifest = Some(slot_hash.clone());
+        Some(slot_hash)
+    } else {
+        None
+    };
+
+    // Action axis: `--entrypoint` dispatches the image's baked entrypoint
+    // (production-safe call surface) instead of argv. It has its own lifecycle
+    // (transient / warm-session / attach-into-running) reused from the shared
+    // runner, so it short-circuits before the argv lifecycle dispatch below.
+    if args.entrypoint {
+        return run_entrypoint_action(args, resolved_flake_slot);
+    }
+
+    let mode = args.resolve_mode()?;
+    let warm_pool_size = mode.warm_pool_size(None, args.name.is_some());
+    // Resolve warm-pool eligibility per mode. Threaded into the
+    // claim path next; logged here so the dark-landed decision is observable
+    // (unnamed transient/interactive-transient take the residency size, named
+    // foreground and persistent → 0).
+    tracing::debug!(?mode, warm_pool_size, "machine run warm-pool eligibility");
+    match mode {
+        MachineRunMode::Transient => {
+            // For flake runs, pass the slot hash as the manifest.
+            if let Some(slot) = resolved_flake_slot {
+                args.manifest = Some(slot);
+            }
+            // Only unnamed throwaway transient runs are warm-claim eligible.
+            let mut run_args = args.into_run_args();
+            run_args.warm_pool_size = warm_pool_size;
+            use std::io::IsTerminal as _;
+            run_args.stdin = super::vm::invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+            run_secure(cli, run_args, cfg)
+        }
+        MachineRunMode::Persistent => {
+            run_persistent(cli, args, cfg, resolved_flake_slot.as_deref())
+        }
+        MachineRunMode::InteractiveTransient => {
+            use std::io::IsTerminal as _;
+            require_tty(std::io::stdin().is_terminal())?;
+            if let Some(slot) = resolved_flake_slot {
+                args.manifest = Some(slot);
+            }
+            let mut run_args = args.into_run_args();
+            run_args.pty = true;
+            run_args.warm_pool_size = warm_pool_size;
+            // Interactive mode has a TTY; read_auto_stdin returns empty for TTY.
+            run_args.stdin = super::vm::invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
+            run_secure(cli, run_args, cfg)
+        }
+    }
+}
+
+/// Boot (or reboot) a persistent machine by name through the canonical
+/// `machine run` persistent path. `vm rekernel` uses this to relaunch a
+/// stopped machine on a pinned/updated kernel without re-implementing any boot
+/// logic. With no `flake` source the existing on-disk spec is reused (config
+/// preserved) and only the kernel is swapped via `kernel_pin`; a `flake` source
+/// rebuilds and recreates. The caller stops the machine first when a fresh boot
+/// is required (the persistent path no-ops when the target is already running).
+pub(in crate::commands) fn boot_persistent_by_name(
+    cli: &Cli,
+    cfg: &MvmConfig,
+    name: String,
+    flake: Option<String>,
+    kernel_pin: Option<String>,
+    hypervisor: Option<String>,
+) -> Result<()> {
+    run_dispatch(
+        cli,
+        MachineRunArgs {
+            name: Some(name),
+            flake,
+            kernel_pin,
+            hypervisor,
+            detach: true,
+            // Everything else takes machine-run defaults; a no-source reconnect
+            // reuses the existing spec, so these only apply on a --flake recreate.
+            image: None,
+            manifest: None,
+            flake_profile: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            profile: RunProfile::Standard,
+            agent_verb: Vec::new(),
+            volume: Vec::new(),
+            env: Vec::new(),
+            timeout: None,
+            receipt: None,
+            json: false,
+            dry_run: false,
+            tty: false,
+            interactive: false,
+            force: false,
+            no_supervisor: false,
+            up_json: false,
+            ttl: None,
+            healthcheck: None,
+            health_interval: 30,
+            health_timeout: 5,
+            health_retries: 3,
+            health_start_period: 0,
+            entrypoint: false,
+            fresh: false,
+            reset: false,
+            from_workload_ir: None,
+            attach: false,
+            argv: Vec::new(),
+        },
+        cfg,
+    )
 }
 
 pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result<()> {
@@ -1430,7 +2886,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
         MachineAction::Restart(restart_cmd) => run_restart(restart_cmd),
         MachineAction::Exec(exec_args) => exec_machine(cli, exec_args, cfg),
         MachineAction::Shell(shell_args) => shell_machine(cli, shell_args, cfg),
-        MachineAction::SetTimeout(timeout_args) => set_machine_timeout(timeout_args),
         MachineAction::Stop(stop_args) => stop_machine(cli, stop_args, cfg),
         MachineAction::Reconfigure(args) => run_reconfigure(args),
         MachineAction::Logs(log_args) => super::vm::logs::run(cli, log_args, cfg),
@@ -1440,19 +2895,6 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
             super::vm::group::run(cli, super::vm::group::Args { action: cmd }, cfg)
         }
     }
-}
-
-fn set_machine_timeout(args: MachineSetTimeoutArgs) -> Result<()> {
-    if args.seconds == 0 {
-        bail!("seconds must be > 0");
-    }
-
-    let (previous_secs, applied_secs) =
-        super::vm::session::dispatch_update_idle_timeout(&args.name, args.seconds)?;
-    ui::info(&format!(
-        "substrate idle timeout: {previous_secs}s -> {applied_secs}s"
-    ));
-    Ok(())
 }
 
 /// Resolve CLI flags into a patch, validating memory eagerly so a bad
@@ -1486,5 +2928,2819 @@ fn patch_from_args(args: &MachineReconfigureArgs) -> Result<ReconfigurePatch> {
     })
 }
 
+/// `machine reconfigure <name>`: patch the persisted spec and relaunch.
+/// Patch semantics (only passed flags change), errors if the machine
+/// doesn't exist, and — when running — stops + restarts so a fresh
+/// signed ExecutionPlan reflects the change. When stopped, it persists
+/// only; the change applies on the next `machine start`.
+fn run_reconfigure(args: MachineReconfigureArgs) -> Result<()> {
+    let existing = load_machine_spec(&args.name)?;
+    let patch = patch_from_args(&args)?;
+    let desired = apply_patch(existing.clone(), &patch);
+
+    // Re-validate the final memory pair: patch_from_args only validates when
+    // --memory is passed, so a bare --mem-initial could slip through unchecked.
+    validate_machine_memory(&desired.memory, desired.mem_initial.as_deref())
+        .context("invalid machine memory after reconfigure")?;
+
+    let changed = machine_config_diff(&existing, &desired);
+    if changed.is_empty() {
+        println!("machine {:?}: no changes", args.name);
+        return Ok(());
+    }
+
+    let was_running = machine_is_running(&args.name);
+    overwrite_machine_spec(&desired)?;
+    mvm_core::audit_emit!(
+        ConfigChange,
+        vm: &args.name,
+        "action=machine.reconfigure changed={changed}"
+    );
+
+    if was_running {
+        eprintln!(
+            "reconfiguring {:?} ({changed}): stopping the old instance and restarting",
+            args.name
+        );
+        stop_running_machine(&args.name);
+        start_machine(MachineStartArgs {
+            name: args.name.clone(),
+            receipt: None,
+            json: false,
+            dry_run: false,
+            quiet: false,
+            hypervisor: args.hypervisor.clone(),
+            no_supervisor: false,
+            kernel_pin: None,
+            has_ad_hoc_argv: false,
+        })?;
+    } else {
+        println!(
+            "machine {:?} reconfigured ({changed}); change applies on next `machine start`",
+            args.name
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+    use crate::commands::{Cli, Commands};
+    use clap::{CommandFactory, Parser};
+    use mvm_core::atomic_io::atomic_write;
+    use mvm_core::util::test_env::TestEnv;
+
+    /// Minimal standalone parser so `MachineAction` can be exercised without
+    /// dragging the whole top-level CLI in for unit-level assertions.
+    #[derive(Parser, Debug)]
+    struct TestCli {
+        #[command(subcommand)]
+        action: MachineAction,
+    }
+
+    struct IsolatedMachineState {
+        _env: TestEnv,
+        _tmp: tempfile::TempDir,
+    }
+
+    impl IsolatedMachineState {
+        fn new() -> Self {
+            let mut env = TestEnv::new();
+            let tmp = tempfile::tempdir().expect("tempdir");
+            env.set("MVM_DATA_DIR", tmp.path());
+            Self {
+                _env: env,
+                _tmp: tmp,
+            }
+        }
+    }
+
+    fn parse(argv: &[&str]) -> Result<MachineAction, clap::Error> {
+        let mut full = vec!["machine"];
+        full.extend_from_slice(argv);
+        TestCli::try_parse_from(full).map(|cli| cli.action)
+    }
+
+    fn parse_owned(argv: &[String]) -> Result<MachineAction, clap::Error> {
+        let full = std::iter::once("machine".to_string())
+            .chain(argv.iter().cloned())
+            .collect::<Vec<_>>();
+        TestCli::try_parse_from(full).map(|cli| cli.action)
+    }
+
+    fn parse_run(argv: &[&str]) -> Result<MachineRunArgs, clap::Error> {
+        parse(argv).map(|action| match action {
+            MachineAction::Run(r) => r,
+            other => panic!("expected run action, got {other:?}"),
+        })
+    }
+
+    fn parse_owned_run(argv: &[String]) -> Result<MachineRunArgs, clap::Error> {
+        parse_owned(argv).map(|action| match action {
+            MachineAction::Run(r) => r,
+            other => panic!("expected run action, got {other:?}"),
+        })
+    }
+
+    fn sdk_machine_fixture(name: &str) -> Vec<String> {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../sdks/machine-fixtures")
+                .join(format!("{name}.argv")),
+        )
+        .expect("read shared SDK machine argv fixture")
+        .lines()
+        .map(std::string::ToString::to_string)
+        .collect()
+    }
+
+    /// The `machine` subcommand token a parsed action was built from — used to
+    /// assert a shared SDK fixture parses to the verb its first line names.
+    fn machine_subcommand(action: &MachineAction) -> &'static str {
+        match action {
+            MachineAction::Run(_) => "run",
+            MachineAction::Build(_) => "build",
+            MachineAction::Create(_) => "create",
+            MachineAction::Start(_) => "start",
+            MachineAction::Restart(_) => "restart",
+            MachineAction::Stop(_) => "stop",
+            MachineAction::Reconfigure(_) => "reconfigure",
+            MachineAction::Rm(_) => "rm",
+            MachineAction::Ls(_) => "ls",
+            MachineAction::Inspect(_) => "inspect",
+            MachineAction::Shell(_) => "shell",
+            MachineAction::Exec(_) => "exec",
+            MachineAction::Logs(_) => "logs",
+            MachineAction::Console(_) => "console",
+            MachineAction::CheckArtifact(_) => "check-artifact",
+            MachineAction::Vm(_) => "vm",
+        }
+    }
+
+    /// Source-of-truth anchor for the cross-language conformance harness: every
+    /// `sdks/machine-fixtures/*.argv` the SDKs assert against must be argv the
+    /// CLI parser actually accepts, and must map to the verb its first line
+    /// names. This is what catches an SDK emitting a flag the CLI rejects (e.g.
+    /// `stop --name X` when `stop` takes a positional name).
+    #[test]
+    fn every_shared_machine_fixture_parses_to_its_verb() {
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/machine-fixtures");
+        let mut seen = 0;
+        for entry in std::fs::read_dir(&dir).expect("read machine-fixtures dir") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("argv") {
+                continue;
+            }
+            let argv: Vec<String> = std::fs::read_to_string(&path)
+                .expect("read fixture")
+                .lines()
+                .map(std::string::ToString::to_string)
+                .collect();
+            let action = parse_owned(&argv).unwrap_or_else(|e| {
+                panic!(
+                    "fixture {} must parse as a machine subcommand: {e}",
+                    path.display()
+                )
+            });
+            let expected = argv.first().expect("non-empty fixture");
+            assert_eq!(
+                machine_subcommand(&action),
+                expected,
+                "fixture {} parsed to the wrong subcommand",
+                path.display()
+            );
+            seen += 1;
+        }
+        assert!(
+            seen >= 14,
+            "expected the full machine fixture set, found {seen}"
+        );
+    }
+
+    fn assert_sdk_run_admission_inputs(summary: super::super::vm::exec::RunSecuritySummary) {
+        assert!(summary.dry_run);
+        assert!(!summary.will_execute);
+        assert_eq!(summary.image_kind, "oci");
+        assert_eq!(summary.cpus, 4);
+        assert_eq!(summary.memory, "1G");
+        assert_eq!(summary.memory_mib, 1024);
+        assert_eq!(summary.profile, "dev");
+        assert!(summary.receipt_requested);
+        assert_eq!(
+            summary.preflight_network_posture,
+            "allow-list:api.example.com:443"
+        );
+        assert_eq!(
+            summary.receipt_network_posture,
+            summary.preflight_network_posture
+        );
+        assert_eq!(
+            summary.receipt_egress_enforcement,
+            "firecracker:l4-host-port"
+        );
+        assert_eq!(summary.preflight_command, summary.receipt_command);
+        assert!(summary.preflight_command.contains("argv_len=3"));
+        assert!(!summary.preflight_command.contains("echo ok"));
+        assert_eq!(summary.preflight_env_keys, ["MODE", "TOKEN"]);
+        assert_eq!(summary.receipt_env_keys, summary.preflight_env_keys);
+        assert_eq!(summary.preflight_add_dirs, summary.receipt_add_dirs);
+        assert_eq!(summary.preflight_add_dirs.len(), 1);
+        let add_dir = &summary.preflight_add_dirs[0];
+        assert_eq!(add_dir.guest_path, "/workspace");
+        assert!(add_dir.read_only);
+        assert!(!add_dir.host_path_sha256.contains("/tmp/mvm-sdk-src"));
+        assert_eq!(summary.preflight_timeout_secs, 30);
+        assert_eq!(summary.receipt_timeout_secs, 30);
+    }
+
+    fn assert_manifest_fixture_reaches_unknown_key_gate(mut sdk_args: Vec<String>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = dir.path().join("mvm.toml");
+        std::fs::write(
+            &manifest,
+            "image = \"alpine:latest\"\nnetwork_typo = true\n",
+        )
+        .expect("manifest");
+        let manifest_slot = sdk_args
+            .iter()
+            .position(|arg| arg == "mvm.toml")
+            .expect("fixture carries manifest path");
+        sdk_args[manifest_slot] = manifest.display().to_string();
+
+        let action = parse_owned(&sdk_args).expect("sdk args parse as CLI machine create");
+        let MachineAction::Create(args) = action else {
+            panic!("expected create action");
+        };
+        let err = args
+            .into_spec()
+            .expect_err("CLI manifest parser must reject unknown SDK-provided keys");
+        let chain = err
+            .chain()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            chain.contains("unknown field") || chain.contains("unknown key"),
+            "unexpected error chain: {chain}"
+        );
+    }
+
+    #[test]
+    fn run_parses_image_and_trailing_argv() {
+        let args = parse_run(&["run", "--image", "alpine", "--", "echo", "hello"]).expect("parse");
+        assert_eq!(args.image.as_deref(), Some("alpine"));
+        assert_eq!(args.argv, vec!["echo", "hello"]);
+    }
+
+    #[test]
+    fn run_parses_and_forwards_net_flags() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--net",
+            "--allow-host",
+            "a.com",
+            "--allow-host",
+            "b.com:8443",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        assert!(args.net);
+        assert_eq!(args.allow_host, vec!["a.com", "b.com:8443"]);
+        // The flags ride through into the canonical run args unchanged.
+        let run = args.into_run_args();
+        assert!(run.net);
+        assert_eq!(run.allow_host, vec!["a.com", "b.com:8443"]);
+    }
+
+    #[test]
+    fn run_net_flags_default_off() {
+        let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
+        assert!(!args.net);
+        assert!(args.allow_host.is_empty());
+    }
+
+    #[test]
+    fn fresh_boot_without_image_is_rejected_at_dispatch() {
+        // `--image` is no longer clap-required (a persistent run can reconnect
+        // by name), so a fresh transient boot with no image parses and is
+        // refused at mode resolution with a clear message.
+        let args = parse_run(&["run", "--", "echo", "hi"]).expect("parse");
+        let err = args.resolve_mode().expect_err("fresh boot needs an image");
+        assert!(err.to_string().contains("image"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn transient_run_without_argv_is_rejected_at_dispatch() {
+        // Argv is no longer clap-required (persistent/interactive modes boot
+        // without a command), so a bare transient run parses and is refused at
+        // mode resolution with a clear message — not a hang, not a silent exit.
+        let args = parse_run(&["run", "--image", "alpine"]).expect("parse");
+        let err = args
+            .resolve_mode()
+            .expect_err("transient run needs a command");
+        assert!(
+            err.to_string().contains("command"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn run_defaults_match_the_lower_level_runner() {
+        let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
+        assert_eq!(args.cpus, 2);
+        assert_eq!(args.memory, "512M");
+        assert_eq!(args.profile, RunProfile::Standard);
+        assert!(!args.json);
+        assert!(!args.dry_run);
+        assert!(args.volume.is_empty());
+        assert!(args.env.is_empty());
+        assert!(args.name.is_none());
+        assert!(!args.detach);
+        assert!(!args.tty);
+        assert!(!args.interactive);
+    }
+
+    #[test]
+    fn run_accepts_passthrough_flags() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--cpus",
+            "4",
+            "--memory",
+            "1G",
+            "--profile",
+            "dev",
+            "--volume",
+            "/host:/work:rw",
+            "-e",
+            "FOO=bar",
+            "--timeout",
+            "30",
+            "--json",
+            "--dry-run",
+            "--",
+            "uname",
+            "-a",
+        ])
+        .expect("parse");
+        assert_eq!(args.cpus, 4);
+        assert_eq!(args.memory, "1G");
+        assert_eq!(args.profile, RunProfile::Dev);
+        assert_eq!(args.volume, vec!["/host:/work:rw"]);
+        assert_eq!(args.env, vec!["FOO=bar"]);
+        assert_eq!(args.timeout, Some(30));
+        assert!(args.json);
+        assert!(args.dry_run);
+        assert_eq!(args.argv, vec!["uname", "-a"]);
+    }
+
+    #[test]
+    fn volume_flag_carries_dir_share_and_d_is_no_longer_a_share() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--volume",
+            "/host:/work:rw",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        assert_eq!(args.volume, vec!["/host:/work:rw"]);
+        // `-d` now means --detach, so it must NOT consume the following value as
+        // a dir share.
+        let detached = parse_run(&["run", "--image", "alpine", "-d"]).expect("parse");
+        assert!(detached.detach);
+        assert!(detached.volume.is_empty());
+    }
+
+    #[test]
+    fn detach_short_and_long_imply_persistence() {
+        for argv in [
+            &["run", "--image", "alpine", "-d"][..],
+            &["run", "--image", "alpine", "--detach"][..],
+        ] {
+            let args = parse_run(argv).expect("parse");
+            assert!(args.detach, "argv {argv:?}");
+            assert!(args.persistent(), "argv {argv:?}");
+            assert!(!args.interactive());
+        }
+    }
+
+    #[test]
+    fn name_is_identity_not_persistence() {
+        let args =
+            parse_run(&["run", "--image", "alpine", "--name", "web", "--", "true"]).expect("parse");
+        assert_eq!(args.name.as_deref(), Some("web"));
+        assert!(!args.persistent());
+        assert!(!args.detach);
+        assert!(!args.interactive());
+    }
+
+    #[test]
+    fn healthcheck_makes_run_persistent() {
+        let mut args = parse_run(&["run"]).expect("parse");
+        assert!(!args.persistent());
+        args.healthcheck = Some("true".into());
+        assert!(
+            args.persistent(),
+            "a healthcheck promotes the run to persistent"
+        );
+    }
+
+    #[test]
+    fn name_alone_stays_transient() {
+        let mut args = parse_run(&["run"]).expect("parse");
+        args.name = Some("web".into());
+        assert!(
+            !args.persistent(),
+            "--name is identity only, not persistence"
+        );
+    }
+
+    #[test]
+    fn healthcheck_run_routes_persistent_foreground() {
+        // A declared service without `-d`/`-it` boots and registers through the
+        // persistent lifecycle (streamed in the foreground by the argv arm of
+        // `run_persistent_post_start`), not the transient teardown path.
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "nginx",
+            "--healthcheck",
+            "true",
+            "--",
+            "nginx",
+            "-g",
+            "daemon off;",
+        ])
+        .expect("parse");
+        assert!(
+            args.persistent(),
+            "a healthcheck promotes the run to persistent"
+        );
+        assert!(!args.detach, "no -d");
+        assert!(!args.interactive(), "no -it");
+        assert_eq!(args.resolve_mode().unwrap(), MachineRunMode::Persistent);
+    }
+
+    #[test]
+    fn tty_long_short_alias_and_it_bundle_request_interactivity() {
+        for argv in [
+            &["run", "--image", "alpine", "--tty"][..],
+            &["run", "--image", "alpine", "-t"][..],
+            &["run", "--image", "alpine", "-i"][..],
+            &["run", "--image", "alpine", "-it"][..],
+        ] {
+            let args = parse_run(argv).expect("parse");
+            assert!(args.interactive(), "argv {argv:?}");
+            // Interactivity alone never implies persistence.
+            assert!(!args.persistent(), "argv {argv:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_mode_covers_the_behavior_matrix() {
+        let cases: &[(&[&str], MachineRunMode)] = &[
+            (
+                &["run", "--image", "X", "--", "cmd"],
+                MachineRunMode::Transient,
+            ),
+            (
+                &["run", "-it", "--image", "X", "--", "/bin/sh"],
+                MachineRunMode::InteractiveTransient,
+            ),
+            (
+                &["run", "--name", "web", "--image", "X", "--", "cmd"],
+                MachineRunMode::Transient,
+            ),
+            (&["run", "-d", "--image", "X"], MachineRunMode::Persistent),
+            (
+                &["run", "-d", "--name", "web", "--image", "X"],
+                MachineRunMode::Persistent,
+            ),
+            // `--up-json` implies Persistent (SDK boot-and-return path).
+            (
+                &["run", "--up-json", "--manifest", "tmpl"],
+                MachineRunMode::Persistent,
+            ),
+            (
+                &[
+                    "run", "-it", "--name", "web", "--image", "X", "--", "/bin/sh",
+                ],
+                MachineRunMode::InteractiveTransient,
+            ),
+        ];
+        for (argv, expected) in cases {
+            let args = parse_run(argv).expect("parse");
+            let mode = args.resolve_mode().expect("resolve");
+            assert_eq!(mode, *expected, "argv {argv:?}");
+        }
+    }
+
+    #[test]
+    fn resolve_mode_accepts_materialized_flake_slot_after_build() {
+        let mut args = parse_run(&["run", "--flake", ".", "--", "cmd"]).expect("parse");
+        let flake = args.flake.take().expect("flake source present");
+        assert_eq!(flake, ".");
+        args.manifest = Some("materialized-slot".to_string());
+
+        let mode = args.resolve_mode().expect("materialized flake is a source");
+
+        assert_eq!(mode, MachineRunMode::Transient);
+    }
+
+    #[test]
+    fn interactive_run_requires_foreground_argv() {
+        let args = parse_run(&["run", "-t", "--image", "X"]).expect("parse");
+        let err = args.resolve_mode().expect_err("interactive run needs argv");
+        assert!(err.to_string().contains("command after `--`"));
+    }
+
+    #[test]
+    fn warm_pool_size_is_claim_eligible_only_for_throwaway_runs() {
+        // Unnamed transient + interactive-transient are cattle → eligible:
+        // an explicit override is honoured verbatim (the residency-policy default
+        // for `None` is env-dependent, so the override path is the deterministic
+        // assertion).
+        assert_eq!(MachineRunMode::Transient.warm_pool_size(Some(3), false), 3);
+        assert_eq!(
+            MachineRunMode::InteractiveTransient.warm_pool_size(Some(2), false),
+            2
+        );
+        // A user-named foreground run has an observable identity, so it never
+        // reuses pool cattle.
+        assert_eq!(MachineRunMode::Transient.warm_pool_size(Some(3), true), 0);
+        assert_eq!(
+            MachineRunMode::InteractiveTransient.warm_pool_size(Some(2), true),
+            0
+        );
+        // A persistent machine is long-lived, never pooled — size 0 regardless
+        // of any override.
+        assert_eq!(MachineRunMode::Persistent.warm_pool_size(Some(5), false), 0);
+        assert_eq!(MachineRunMode::Persistent.warm_pool_size(None, true), 0);
+    }
+
+    #[test]
+    fn auto_generated_machine_name_is_a_valid_vm_name() {
+        let name = auto_machine_name();
+        mvm_core::naming::validate_vm_name(&name)
+            .unwrap_or_else(|e| panic!("auto name {name:?} invalid: {e}"));
+    }
+
+    #[test]
+    fn detach_resolves_to_an_auto_name_and_named_uses_the_given_name() {
+        let named = parse_run(&["run", "--image", "x", "--name", "web"]).expect("parse");
+        assert_eq!(resolve_machine_run_name(&named).expect("name"), "web");
+
+        let detached = parse_run(&["run", "--image", "x", "-d"]).expect("parse");
+        let auto = resolve_machine_run_name(&detached).expect("name");
+        mvm_core::naming::validate_vm_name(&auto).expect("auto name valid");
+        assert_ne!(auto, "web");
+    }
+
+    fn spec_fixture(name: &str) -> MachineSpec {
+        MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: name.to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec![],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: vec![],
+            init: vec![],
+            ssh_agent: false,
+            agent_verb: vec![],
+            created_at: None,
+            last_started_at: None,
+            health_check: None,
+        }
+    }
+
+    #[test]
+    fn run_spec_maps_run_args_into_a_machine_spec() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine:3.20",
+            "--name",
+            "web",
+            "--cpus",
+            "4",
+            "--memory",
+            "1G",
+            "--profile",
+            "dev",
+            "--net",
+            "--allow-host",
+            "api.example.com:443",
+        ])
+        .expect("parse");
+        let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
+        assert_eq!(spec.name, "web");
+        assert_eq!(spec.image.as_deref(), Some("alpine:3.20"));
+        assert_eq!(spec.cpus, 4);
+        assert_eq!(spec.memory, "1G");
+        assert_eq!(spec.profile, "dev");
+        assert!(spec.net);
+        assert_eq!(spec.allow_host, vec!["api.example.com:443"]);
+        // Disk volumes / init / ssh-agent are not part of the `run` surface.
+        assert!(spec.volumes.is_empty());
+        assert!(spec.init.is_empty());
+        assert!(!spec.ssh_agent);
+        // No --agent-verb: spec stores an empty list (computed default applies at start).
+        assert!(spec.agent_verb.is_empty());
+    }
+
+    #[test]
+    fn agent_verb_flag_persisted_in_spec_and_survives_roundtrip() {
+        let _state = IsolatedMachineState::new();
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine:3.20",
+            "--name",
+            "web",
+            "--agent-verb",
+            "run-entrypoint",
+            "--agent-verb",
+            "resolve-secret",
+        ])
+        .expect("parse");
+        let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
+        assert_eq!(
+            spec.agent_verb,
+            vec!["run-entrypoint".to_string(), "resolve-secret".to_string()]
+        );
+        // Round-trip: save → load preserves the verb list.
+        save_machine_spec(&spec, false).expect("save");
+        let loaded = load_machine_spec("web").expect("load");
+        assert_eq!(loaded.agent_verb, spec.agent_verb);
+        // When the field is absent from the JSON (old spec), deserializes as empty.
+        let path = config::machine_spec_path("other");
+        atomic_write(
+            &path,
+            br#"{
+              "schema_version": 1,
+              "name": "other",
+              "image": "alpine:latest",
+              "net": false,
+              "allow_host": [],
+              "cpus": 2,
+              "memory": "512M",
+              "profile": "standard"
+            }"#,
+        )
+        .expect("write");
+        let old = load_machine_spec("other").expect("load old spec without agent_verb");
+        assert!(
+            old.agent_verb.is_empty(),
+            "missing field must default to empty"
+        );
+    }
+
+    #[test]
+    fn run_volume_is_threaded_into_managed_spec_with_absolute_host() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let host = dir.path().to_string_lossy().into_owned();
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "x",
+            "--name",
+            "web",
+            "--volume",
+            &format!("{host}:/work:ro"),
+        ])
+        .expect("parse");
+        let spec = machine_run_spec(&args, "web".to_string(), None).expect("spec");
+        assert_eq!(spec.volumes.len(), 1);
+        let stored = &spec.volumes[0];
+        // Host pinned to an absolute (canonicalized) path so a reconnect from a
+        // different cwd still resolves; the guest+mode tail is preserved verbatim.
+        let host_part = stored.split(':').next().unwrap();
+        assert!(
+            std::path::Path::new(host_part).is_absolute(),
+            "host not absolute: {stored}"
+        );
+        assert!(stored.ends_with(":/work:ro"), "stored: {stored}");
+    }
+
+    #[test]
+    fn run_rw_volume_requires_dev_profile() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let host = dir.path().to_string_lossy().into_owned();
+        // Default profile is `standard` → :rw refused.
+        let std_args = parse_run(&[
+            "run",
+            "--image",
+            "x",
+            "--name",
+            "web",
+            "--volume",
+            &format!("{host}:/work:rw"),
+        ])
+        .expect("parse");
+        let err = machine_run_spec(&std_args, "web".to_string(), None)
+            .expect_err(":rw needs a dev-capable profile");
+        assert!(err.to_string().contains("profile dev"), "msg: {err}");
+
+        // With --profile dev the writable share is accepted.
+        let dev_args = parse_run(&[
+            "run",
+            "--image",
+            "x",
+            "--name",
+            "web",
+            "--profile",
+            "dev",
+            "--volume",
+            &format!("{host}:/work:rw"),
+        ])
+        .expect("parse");
+        let spec =
+            machine_run_spec(&dev_args, "web".to_string(), None).expect("dev profile allows :rw");
+        assert!(
+            spec.volumes[0].ends_with(":/work:rw"),
+            "stored: {}",
+            spec.volumes[0]
+        );
+    }
+
+    #[test]
+    fn persistent_spec_reconnects_without_image_and_errors_when_absent() {
+        // No `--image`: reconnect to the existing spec verbatim.
+        let reconnect = parse_run(&["run", "--name", "web"]).expect("parse");
+        let existing = spec_fixture("web");
+        let (spec, action) =
+            resolve_persistent_spec(&reconnect, "web", Some(existing.clone()), None)
+                .expect("reconnect");
+        assert_eq!(action, SpecReconcile::Reuse);
+        assert_eq!(spec, existing);
+
+        // No `--image` and no on-disk spec: a clear "does not exist" error.
+        let err = resolve_persistent_spec(&reconnect, "web", None, None)
+            .expect_err("reconnect to a missing machine errors");
+        assert!(err.to_string().contains("does not exist"), "msg: {err}");
+    }
+
+    #[test]
+    fn interactive_requires_a_host_tty() {
+        require_tty(true).expect("a host TTY is allowed");
+        let err = require_tty(false).expect_err("no TTY must be refused, not left to hang");
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("tty") || msg.contains("terminal") || msg.contains("interactive"),
+            "msg: {msg}"
+        );
+    }
+
+    #[test]
+    fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
+        let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut env = TestEnv::new();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        env.set("HOME", tmp.path());
+        env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+        let name = "sealed-machine";
+        mvm::vm::runtime_meta::write(
+            name,
+            &mvm::vm::runtime_meta::VmRuntimeMeta {
+                mode: mvm::vm::runtime_meta::StartModeKind::Detached,
+                accessible: false,
+                rootfs_path: None,
+            },
+        )
+        .expect("write sealed runtime meta");
+        // The interactive path reuses console's claim-15 gate before attaching.
+        let err = super::super::vm::console::enforce_accessible_gate(name, false)
+            .expect_err("a sealed machine must be refused");
+        assert!(err.to_string().contains("sealed image"), "msg: {err}");
+    }
+
+    #[test]
+    fn translation_is_an_image_backed_transient_run() {
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--json",
+            "--dry-run",
+            "--",
+            "echo",
+            "hi",
+        ])
+        .expect("parse");
+        let run = args.into_run_args();
+        // Image-backed: never a manifest, never a launch plan.
+        assert_eq!(run.image.as_deref(), Some("alpine"));
+        assert!(run.manifest.is_none());
+        assert!(run.launch_plan.is_none());
+        // OCI prod-pin stays off — `machine run` doesn't expose it.
+        assert!(!run.prod);
+        // User-facing flags flow through untouched.
+        assert!(run.json);
+        assert!(run.dry_run);
+        assert_eq!(run.argv, vec!["echo", "hi"]);
+    }
+
+    #[test]
+    fn agent_verb_forwarded_to_run_args_on_transient_path() {
+        // `--agent-verb` on a transient run (no --name/-d) must flow into
+        // RunArgs.agent_verb so the transient admit site uses it instead of
+        // falling back to the computed default.
+        let args = parse_run(&[
+            "run",
+            "--image",
+            "alpine",
+            "--agent-verb",
+            "run-entrypoint",
+            "--agent-verb",
+            "ping",
+            "--",
+            "true",
+        ])
+        .expect("parse");
+        let run = args.into_run_args();
+        assert_eq!(run.agent_verb, vec!["run-entrypoint", "ping"]);
+    }
+
+    #[test]
+    fn agent_verb_empty_on_transient_path_when_not_specified() {
+        let args = parse_run(&["run", "--image", "alpine", "--", "true"]).expect("parse");
+        let run = args.into_run_args();
+        assert!(run.agent_verb.is_empty());
+    }
+
+    #[test]
+    fn rust_sdk_machine_run_uses_cli_default_deny_preflight() {
+        let sdk_args = mvm_sdk::MachineRun::builder()
+            .image("alpine:latest")
+            .command(["true"])
+            .dry_run(true)
+            .json(true)
+            .machine_args()
+            .expect("sdk machine run args");
+
+        let run = parse_owned_run(&sdk_args)
+            .expect("sdk args parse as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI preflight accepts SDK args");
+
+        assert!(summary.dry_run);
+        assert!(!summary.will_execute);
+        assert_eq!(summary.image_kind, "oci");
+        assert_eq!(summary.preflight_network_posture, "deny-all");
+        assert_eq!(summary.preflight_egress_enforcement, "flow-drop");
+        assert_eq!(summary.receipt_network_posture, "deny-all");
+        assert_eq!(summary.receipt_egress_enforcement, "flow-drop");
+    }
+
+    #[test]
+    fn rust_sdk_machine_run_allow_host_matches_cli_receipt_posture() {
+        let sdk_args = mvm_sdk::MachineRun::builder()
+            .image("alpine:latest")
+            .allow_host("api.example.com")
+            .receipt("/tmp/mvm-sdk-machine.receipt.json")
+            .dry_run(true)
+            .json(true)
+            .command(["true"])
+            .machine_args()
+            .expect("sdk machine run args");
+
+        let run = parse_owned_run(&sdk_args)
+            .expect("sdk args parse as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI receipt input accepts SDK args");
+
+        assert_eq!(
+            summary.preflight_network_posture,
+            "allow-list:api.example.com:443"
+        );
+        assert!(summary.receipt_requested);
+        assert_eq!(
+            summary.receipt_network_posture,
+            summary.preflight_network_posture
+        );
+        assert_eq!(
+            summary.receipt_egress_enforcement,
+            "firecracker:l4-host-port"
+        );
+    }
+
+    #[test]
+    fn rust_sdk_machine_run_matches_cli_admission_and_receipt_inputs() {
+        let sdk_args = mvm_sdk::MachineRun::builder()
+            .image("alpine:latest")
+            .allow_host("api.example.com")
+            .cpus(4)
+            .memory("1G")
+            .profile("dev")
+            .volume("/tmp/mvm-sdk-src:/workspace:ro")
+            .env("TOKEN=secret")
+            .env("MODE=test")
+            .timeout(30)
+            .receipt("/tmp/mvm-sdk-machine.receipt.json")
+            .json(true)
+            .dry_run(true)
+            .command(["sh", "-lc", "echo ok"])
+            .machine_args()
+            .expect("sdk machine run args");
+        assert_eq!(sdk_args, sdk_machine_fixture("run-admission"));
+
+        let run = parse_owned_run(&sdk_args)
+            .expect("sdk args parse as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI receipt input accepts SDK args");
+
+        assert_sdk_run_admission_inputs(summary);
+    }
+
+    #[test]
+    fn python_typescript_machine_run_default_fixture_uses_cli_default_deny_preflight() {
+        let sdk_args = sdk_machine_fixture("run-default");
+        let run = parse_owned_run(&sdk_args)
+            .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI preflight accepts Python/TypeScript SDK fixture");
+
+        assert!(summary.dry_run);
+        assert!(!summary.will_execute);
+        assert_eq!(summary.image_kind, "oci");
+        assert_eq!(summary.preflight_network_posture, "deny-all");
+        assert_eq!(summary.preflight_egress_enforcement, "flow-drop");
+        assert_eq!(summary.receipt_network_posture, "deny-all");
+        assert_eq!(summary.receipt_egress_enforcement, "flow-drop");
+    }
+
+    #[test]
+    fn python_typescript_machine_run_allow_host_fixture_matches_cli_receipt_posture() {
+        let sdk_args = sdk_machine_fixture("run-allow-host-receipt");
+        let run = parse_owned_run(&sdk_args)
+            .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+
+        assert_eq!(
+            summary.preflight_network_posture,
+            "allow-list:api.example.com:443"
+        );
+        assert!(summary.receipt_requested);
+        assert_eq!(
+            summary.receipt_network_posture,
+            summary.preflight_network_posture
+        );
+        assert_eq!(
+            summary.receipt_egress_enforcement,
+            "firecracker:l4-host-port"
+        );
+    }
+
+    #[test]
+    fn python_typescript_machine_run_fixture_matches_cli_admission_and_receipt_inputs() {
+        let sdk_args = sdk_machine_fixture("run-admission");
+        let run = parse_owned_run(&sdk_args)
+            .expect("Python/TypeScript SDK fixture parses as CLI machine run")
+            .into_run_args();
+        let summary = super::super::vm::exec::test_run_security_summary(&run, "firecracker")
+            .expect("CLI receipt input accepts Python/TypeScript SDK fixture");
+
+        assert_sdk_run_admission_inputs(summary);
+    }
+
+    #[test]
+    fn rust_sdk_machine_create_manifest_reaches_cli_unknown_key_gate() {
+        let sdk_args = mvm_sdk::MachineCreate::builder("web")
+            .manifest("mvm.toml")
+            .profile("dev")
+            .force(true)
+            .json(true)
+            .machine_args()
+            .expect("sdk machine create args");
+        assert_eq!(sdk_args, sdk_machine_fixture("create-manifest"));
+
+        assert_manifest_fixture_reaches_unknown_key_gate(sdk_args);
+    }
+
+    #[test]
+    fn python_typescript_machine_create_manifest_fixture_reaches_cli_unknown_key_gate() {
+        assert_manifest_fixture_reaches_unknown_key_gate(sdk_machine_fixture("create-manifest"));
+    }
+
+    #[test]
+    fn create_parses_persistent_spec_flags() {
+        let action = parse(&[
+            "create",
+            "--name",
+            "web",
+            "--image",
+            "ghcr.io/acme/web:latest",
+            "--net",
+            "--allow-host",
+            "api.example.com:443",
+            "--cpus",
+            "4",
+            "--memory",
+            "1G",
+            "--profile",
+            "dev",
+            "--json",
+            "--force",
+        ])
+        .expect("parse");
+        match action {
+            MachineAction::Create(args) => {
+                assert_eq!(args.name.as_deref(), Some("web"));
+                assert_eq!(args.image.as_deref(), Some("ghcr.io/acme/web:latest"));
+                assert!(args.net);
+                assert_eq!(args.allow_host, vec!["api.example.com:443"]);
+                assert_eq!(args.cpus, Some(4));
+                assert_eq!(args.memory.as_deref(), Some("1G"));
+                assert_eq!(args.profile, Some(RunProfile::Dev));
+                assert!(args.json);
+                assert!(args.force);
+            }
+            other => panic!("expected create action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_inspect_and_remove_parse() {
+        match parse(&["ls", "--json"]).expect("parse") {
+            MachineAction::Ls(args) => assert!(args.json),
+            other => panic!("expected ls action, got {other:?}"),
+        }
+        // `ps` is a docker-style visible alias for `ls`.
+        match parse(&["ps", "--json"]).expect("parse ps alias") {
+            MachineAction::Ls(args) => assert!(args.json),
+            other => panic!("expected ls action from `ps`, got {other:?}"),
+        }
+        match parse(&[
+            "start",
+            "web",
+            "--receipt",
+            "/tmp/web.receipt.json",
+            "--json",
+            "--dry-run",
+        ])
+        .expect("parse")
+        {
+            MachineAction::Start(args) => {
+                assert_eq!(args.names, vec!["web"]);
+                assert_eq!(
+                    args.receipt.as_deref(),
+                    Some(Path::new("/tmp/web.receipt.json"))
+                );
+                assert!(args.json);
+                assert!(args.dry_run);
+            }
+            other => panic!("expected start action, got {other:?}"),
+        }
+        match parse(&["inspect", "web", "--json"]).expect("parse") {
+            MachineAction::Inspect(args) => {
+                assert_eq!(args.name, "web");
+                assert!(args.json);
+            }
+            other => panic!("expected inspect action, got {other:?}"),
+        }
+        match parse(&["rm", "web", "--yes", "--json"]).expect("parse") {
+            MachineAction::Rm(args) => {
+                assert_eq!(args.names, vec!["web"]);
+                assert!(!args.all);
+                assert!(args.yes);
+                assert!(args.json);
+            }
+            other => panic!("expected rm action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rm_parses_multiple_names_and_all() {
+        match parse(&["rm", "web", "db", "cache", "--yes"]).expect("parse") {
+            MachineAction::Rm(args) => {
+                assert_eq!(args.names, vec!["web", "db", "cache"]);
+                assert!(!args.all);
+                assert!(args.yes);
+            }
+            other => panic!("expected rm action, got {other:?}"),
+        }
+        match parse(&["rm", "--all", "--yes"]).expect("parse") {
+            MachineAction::Rm(args) => {
+                assert!(args.names.is_empty());
+                assert!(args.all);
+                assert!(args.yes);
+                assert!(!args.force, "force defaults off");
+            }
+            other => panic!("expected rm action, got {other:?}"),
+        }
+        match parse(&["rm", "web", "--yes", "--force"]).expect("parse") {
+            MachineAction::Rm(args) => {
+                assert_eq!(args.names, vec!["web"]);
+                assert!(args.force);
+            }
+            other => panic!("expected rm action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rm_requires_a_target_and_rejects_names_with_all() {
+        // Bare `rm` names no machine and doesn't pass --all.
+        let err = parse(&["rm", "--yes"]).expect_err("a target is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        // --all is mutually exclusive with explicit names.
+        let err = parse(&["rm", "web", "--all", "--yes"]).expect_err("names conflict with --all");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn start_quiet_is_internal_only_and_defaults_off() {
+        // `quiet` is an internal `MachineStartArgs` field, never a CLI flag —
+        // the standalone `machine start` path keeps printing the boot banner.
+        match parse(&["start", "web"]).expect("parse") {
+            MachineAction::Start(args) => assert_eq!(args.names, vec!["web"]),
+            other => panic!("expected start action, got {other:?}"),
+        }
+        assert!(
+            parse(&["start", "web", "--quiet"]).is_err(),
+            "--quiet must not be exposed as a CLI flag"
+        );
+    }
+
+    #[test]
+    fn start_parses_multiple_names_and_refuses_single_machine_flags_in_batch() {
+        match parse(&["start", "web", "db", "cache"]).expect("parse batch") {
+            MachineAction::Start(cmd) => assert_eq!(cmd.names, vec!["web", "db", "cache"]),
+            other => panic!("expected start action, got {other:?}"),
+        }
+        // `--receipt`/`--json`/`--dry-run` report on one machine; a batch is
+        // refused before any boot is attempted.
+        let MachineAction::Start(cmd) =
+            parse(&["start", "web", "db", "--receipt", "/tmp/r.json"]).expect("parse")
+        else {
+            panic!("expected start action");
+        };
+        let err = run_start(cmd).expect_err("receipt + batch is refused");
+        assert!(err.to_string().contains("single machine"), "msg: {err}");
+    }
+
+    #[test]
+    fn start_requires_at_least_one_name() {
+        let err = parse(&["start"]).expect_err("a machine name is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn restart_parses_names_and_flags() {
+        match parse(&["restart", "web", "db"]).expect("parse restart batch") {
+            MachineAction::Restart(cmd) => assert_eq!(cmd.names, vec!["web", "db"]),
+            other => panic!("expected restart action, got {other:?}"),
+        }
+        match parse(&["restart", "web", "--hypervisor", "mock"]).expect("parse restart") {
+            MachineAction::Restart(cmd) => {
+                assert_eq!(cmd.names, vec!["web"]);
+                assert_eq!(cmd.hypervisor.as_deref(), Some("mock"));
+            }
+            other => panic!("expected restart action, got {other:?}"),
+        }
+        let err = parse(&["restart"]).expect_err("a machine name is required");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn already_running_notice_wording() {
+        assert_eq!(
+            already_running_notice("web", false),
+            "machine web is already running"
+        );
+        let json: serde_json::Value =
+            serde_json::from_str(&already_running_notice("web", true)).expect("valid json");
+        assert_eq!(json["machine"], "web");
+        assert_eq!(json["already_running"], true);
+    }
+
+    #[test]
+    fn humanize_age_buckets() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-01-02T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let ago = |s: &str| humanize_age(Some(s), now);
+        assert_eq!(ago("2026-01-01T23:59:30Z"), "just now");
+        assert_eq!(ago("2026-01-01T23:30:00Z"), "30m");
+        assert_eq!(ago("2026-01-01T20:00:00Z"), "4h");
+        assert_eq!(ago("2025-12-30T00:00:00Z"), "3d");
+        assert_eq!(humanize_age(None, now), "-");
+        assert_eq!(humanize_age(Some("not-a-date"), now), "-");
+        // A future timestamp (clock skew) degrades to "-" rather than a negative.
+        assert_eq!(ago("2026-01-02T01:00:00Z"), "-");
+    }
+
+    #[test]
+    fn format_machine_table_aligns_columns_under_a_header() {
+        let rows = vec![
+            MachineLsRow {
+                name: "web".to_string(),
+                status: "running".to_string(),
+                health: "healthy",
+                source: "alpine".to_string(),
+                tls_443: "transform".to_string(),
+                age: "3d".to_string(),
+            },
+            MachineLsRow {
+                name: "database-1".to_string(),
+                status: "stopped".to_string(),
+                health: "-",
+                source: "ghcr.io/acme/db".to_string(),
+                tls_443: "off".to_string(),
+                age: "5m".to_string(),
+            },
+        ];
+        let table = format_machine_table(&rows);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines.len(), 3, "header + 2 rows");
+        assert!(lines[0].starts_with("NAME"), "header first: {}", lines[0]);
+        assert!(
+            lines[0].contains("STATUS")
+                && lines[0].contains("HEALTH")
+                && lines[0].contains("TLS443")
+                && lines[0].contains("AGE")
+        );
+        // The NAME column is padded to the widest name ("database-1" = 10),
+        // so every row's STATUS column starts at the same offset.
+        let status_col = lines[0].find("STATUS").expect("header has STATUS");
+        assert!(
+            lines[1][status_col..].starts_with("running"),
+            "row1: {}",
+            lines[1]
+        );
+        assert!(
+            lines[2][status_col..].starts_with("stopped"),
+            "row2: {}",
+            lines[2]
+        );
+    }
+
+    #[test]
+    fn machine_ls_tls_443_cell_compacts_resolved_posture_for_table_display() {
+        let transform = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec!["api.example.com".to_string()],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+        assert_eq!(
+            machine_ls_tls_443_cell(&transform).expect("transform cell"),
+            "transform"
+        );
+
+        let fail_closed = MachineSpec {
+            allow_host: vec!["93.184.216.34:443".to_string()],
+            ..transform.clone()
+        };
+        assert_eq!(
+            machine_ls_tls_443_cell(&fail_closed).expect("fail-closed cell"),
+            "fail-closed"
+        );
+
+        let unrestricted = MachineSpec {
+            net: true,
+            allow_host: Vec::new(),
+            ..transform
+        };
+        assert_eq!(
+            machine_ls_tls_443_cell(&unrestricted).expect("unrestricted cell"),
+            "transform"
+        );
+    }
+
+    #[test]
+    fn health_cell_maps_readiness() {
+        use mvm_core::domain::instance::InstanceReadiness::*;
+        assert_eq!(health_cell(Some(&ServicesReady)), "healthy");
+        assert_eq!(
+            health_cell(Some(&Degraded { unhealthy: vec![] })),
+            "unhealthy"
+        );
+        assert_eq!(
+            health_cell(Some(&ServicesStarting { pending: vec![] })),
+            "starting"
+        );
+        assert_eq!(health_cell(None), "-");
+    }
+
+    #[test]
+    fn exec_shell_and_stop_parse() {
+        match parse(&["exec", "web", "--", "echo", "hello world"]).expect("parse") {
+            MachineAction::Exec(args) => {
+                assert_eq!(args.name, "web");
+                assert_eq!(args.argv, vec!["echo", "hello world"]);
+                assert!(!args.force);
+                assert!(!args.tty);
+                assert!(!args.interactive);
+            }
+            other => panic!("expected exec action, got {other:?}"),
+        }
+        match parse(&["shell", "web", "--force"]).expect("parse") {
+            MachineAction::Shell(args) => {
+                assert_eq!(args.name, "web");
+                assert!(args.force);
+            }
+            other => panic!("expected shell action, got {other:?}"),
+        }
+        match parse(&["stop", "web"]).expect("parse") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.names, vec!["web"]);
+                assert!(!args.all);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_argv_is_optional_for_interactive_shell() {
+        // `machine exec <name>` with no argv parses and yields an empty argv,
+        // which the handler turns into an interactive shell (like `machine shell`).
+        match parse(&["exec", "web"]).expect("parse") {
+            MachineAction::Exec(args) => {
+                assert_eq!(args.name, "web");
+                assert!(args.argv.is_empty());
+            }
+            other => panic!("expected exec action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exec_accepts_it_for_pty_command() {
+        match parse(&["exec", "web", "-it", "--", "/bin/sh"]).expect("parse") {
+            MachineAction::Exec(args) => {
+                assert_eq!(args.name, "web");
+                assert!(args.tty);
+                assert!(args.interactive);
+                assert_eq!(args.argv, vec!["/bin/sh"]);
+            }
+            other => panic!("expected exec action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_exec_command_quotes_argv_for_guest_exec() {
+        let argv = vec![
+            "printf".to_string(),
+            "hello %s\n".to_string(),
+            "it's ok".to_string(),
+        ];
+        assert_eq!(
+            machine_exec_command(&argv),
+            "exec 'printf' 'hello %s\n' 'it'\\''s ok'"
+        );
+        assert_eq!(
+            machine_console_env(true),
+            vec![(
+                "SSH_AUTH_SOCK".to_string(),
+                "/run/mvm/ssh-agent.sock".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn mark_machine_started_sets_digest_and_timestamp() {
+        let mut spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+        mark_machine_started(&mut spec, "sha256:abc".to_string());
+        assert_eq!(spec.resolved_digest.as_deref(), Some("sha256:abc"));
+        assert!(spec.last_started_at.is_some());
+    }
+
+    #[test]
+    fn create_persists_machine_spec_under_data_dir() {
+        let _state = IsolatedMachineState::new();
+        let args = MachineCreateArgs {
+            name: Some("web".to_string()),
+            manifest: None,
+            image: Some("alpine:latest".to_string()),
+            net: true,
+            allow_host: vec!["api.example.com".to_string()],
+            cpus: Some(4),
+            memory: Some("1G".to_string()),
+            mem_initial: None,
+            profile: Some(RunProfile::Dev),
+            force: false,
+            json: false,
+        };
+        let spec = args.into_spec().expect("spec");
+        save_machine_spec(&spec, false).expect("save");
+
+        let path = config::machine_spec_path("web");
+        assert!(path.exists(), "spec path should exist: {}", path.display());
+        let loaded = load_machine_spec("web").expect("load");
+        assert_eq!(loaded, spec);
+        assert_eq!(loaded.schema_version, MACHINE_SPEC_SCHEMA_VERSION);
+        assert!(loaded.created_at.is_some());
+        assert!(loaded.last_started_at.is_none());
+    }
+
+    #[test]
+    fn create_auto_generates_a_name_when_omitted() {
+        let _state = IsolatedMachineState::new();
+        let spec = MachineCreateArgs {
+            name: None,
+            manifest: None,
+            image: Some("alpine:latest".to_string()),
+            net: false,
+            allow_host: Vec::new(),
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+            profile: None,
+            force: false,
+            json: false,
+        }
+        .into_spec()
+        .expect("auto-named spec");
+        // A generated name is present and passes the same validation as an
+        // explicit one, so a subsequent `start`/`ls`/`rm` can reference it.
+        assert!(!spec.name.is_empty());
+        validate_machine_name(&spec.name).expect("generated name is valid");
+    }
+
+    #[test]
+    fn create_sources_machine_defaults_from_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::create_dir_all(dir.path().join("src")).expect("src dir");
+        std::fs::write(
+            dir.path().join("mvm.toml"),
+            r#"
+image = "python:3.12-alpine"
+net = true
+cpus = 4
+mem = "2G"
+mem_initial = "512M"
+
+[network]
+allow_hosts = ["api.example.com"]
+
+[dev]
+init = ["pip install -r requirements.txt"]
+volumes = ["./src:/work:rw"]
+
+[auth]
+ssh_agent = true
+"#,
+        )
+        .expect("manifest");
+
+        let spec = MachineCreateArgs {
+            name: Some("web".to_string()),
+            manifest: Some(dir.path().join("mvm.toml").display().to_string()),
+            image: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+            profile: Some(RunProfile::Dev),
+            force: false,
+            json: false,
+        }
+        .into_spec()
+        .expect("manifest-backed spec");
+
+        assert_eq!(spec.image.as_deref(), Some("python:3.12-alpine"));
+        assert!(spec.net);
+        assert_eq!(spec.allow_host, vec!["api.example.com"]);
+        assert_eq!(spec.cpus, 4);
+        assert_eq!(spec.memory, "2G");
+        assert_eq!(spec.mem_initial.as_deref(), Some("512M"));
+        assert_eq!(spec.profile, "dev");
+        assert!(spec.ssh_agent);
+        assert_eq!(spec.init, vec!["pip install -r requirements.txt"]);
+        assert_eq!(
+            spec.volumes,
+            vec![format!("{}:/work:rw", dir.path().join("src").display())]
+        );
+    }
+
+    #[test]
+    fn create_rejects_flake_backed_manifest_for_machine_specs() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("mvm.toml"), "flake = \".\"\n").expect("manifest");
+        let err = MachineCreateArgs {
+            name: Some("web".to_string()),
+            manifest: Some(dir.path().join("mvm.toml").display().to_string()),
+            image: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+            profile: None,
+            force: false,
+            json: false,
+        }
+        .into_spec()
+        .expect_err("flake manifest rejected");
+        assert!(
+            err.to_string()
+                .contains("requires an image-backed manifest")
+        );
+    }
+
+    #[test]
+    fn create_requires_dev_profile_when_manifest_declares_dev_init() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("mvm.toml"),
+            "image = \"alpine:latest\"\n[dev]\ninit = [\"echo hi\"]\n",
+        )
+        .expect("manifest");
+        let err = MachineCreateArgs {
+            name: Some("web".to_string()),
+            manifest: Some(dir.path().join("mvm.toml").display().to_string()),
+            image: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+            profile: None,
+            force: false,
+            json: false,
+        }
+        .into_spec()
+        .expect_err("standard profile should refuse dev.init");
+        assert!(
+            err.to_string()
+                .contains("dev.init requires a dev-capable profile")
+        );
+    }
+
+    #[test]
+    fn create_requires_dev_profile_when_manifest_declares_ssh_agent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("mvm.toml"),
+            "image = \"alpine:latest\"\n[auth]\nssh_agent = true\n",
+        )
+        .expect("manifest");
+        let err = MachineCreateArgs {
+            name: Some("web".to_string()),
+            manifest: Some(dir.path().join("mvm.toml").display().to_string()),
+            image: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+            profile: None,
+            force: false,
+            json: false,
+        }
+        .into_spec()
+        .expect_err("standard profile should refuse ssh-agent");
+        assert!(
+            err.to_string()
+                .contains("ssh_agent requires a dev-capable profile")
+        );
+    }
+
+    #[test]
+    fn machine_start_preflight_redacts_host_paths_and_surfaces_policy() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: Some("sha256:abc".to_string()),
+            net: false,
+            allow_host: vec!["api.example.com".to_string()],
+            cpus: 4,
+            memory: "2G".to_string(),
+            mem_initial: Some("512M".to_string()),
+            profile: "dev".to_string(),
+            volumes: vec!["/Users/example/src:/work:rw".to_string()],
+            init: vec!["pip install -r requirements.txt".to_string()],
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+
+        let summary =
+            machine_start_preflight_summary(&spec, Some(Path::new("/tmp/web.receipt.json")))
+                .expect("preflight summary");
+        assert_eq!(
+            summary.invocation.network_posture,
+            "allow-list:api.example.com:443"
+        );
+        assert_eq!(summary.transparent_tls_posture, "hostname-443-transform");
+        assert_eq!(summary.invocation.auth.mode, "none");
+        assert_eq!(summary.invocation.volumes.len(), 1);
+        assert_eq!(summary.invocation.volumes[0].kind, "dir_share");
+        assert!(!summary.invocation.volumes[0].host_path_sha256.is_empty());
+        assert_eq!(summary.invocation.volumes[0].guest_path, "/work");
+        assert!(!summary.invocation.volumes[0].read_only);
+        assert_eq!(summary.invocation.init.command_count, 1);
+        let json = serde_json::to_string(&summary).expect("summary json");
+        assert!(!json.contains("/Users/example/src"));
+        assert!(json.contains("allow-list:api.example.com:443"));
+        assert!(json.contains("hostname-443-transform"));
+    }
+
+    #[test]
+    fn machine_start_preflight_surfaces_ssh_agent_auth_mode() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: Some("sha256:abc".to_string()),
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: true,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+
+        let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
+        assert_eq!(summary.invocation.auth.mode, "ssh-agent-socket");
+        let json = serde_json::to_string(&summary).expect("summary json");
+        assert!(json.contains("ssh-agent-socket"));
+    }
+
+    #[test]
+    fn machine_start_preflight_marks_ip_literal_443_as_transparent_tls_fail_closed() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: Some("sha256:abc".to_string()),
+            net: false,
+            allow_host: vec!["93.184.216.34:443".to_string()],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+
+        let summary = machine_start_preflight_summary(&spec, None).expect("preflight summary");
+        assert_eq!(
+            summary.invocation.network_posture,
+            "allow-list:93.184.216.34:443"
+        );
+        assert_eq!(summary.transparent_tls_posture, "ip-443-fail-closed");
+    }
+
+    #[test]
+    fn machine_start_json_summary_includes_transparent_tls_posture() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: Some("sha256:abc".to_string()),
+            net: false,
+            allow_host: vec!["api.example.com".to_string()],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+
+        let invocation = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
+        let outcome = MachineStartReceiptOutcome {
+            resolved_digest: "sha256:abc".to_string(),
+            started_at: "2026-06-18T00:00:01Z".to_string(),
+            init_commands_executed: 0,
+        };
+        let summary = MachineStartJsonSummary::from_parts(
+            invocation,
+            "hostname-443-transform".to_string(),
+            "native-roots".to_string(),
+            outcome,
+            Some(std::path::PathBuf::from("/tmp/receipt.json")),
+        );
+        let json = serde_json::to_string(&summary).expect("summary json");
+        assert!(json.contains("hostname-443-transform"));
+        assert!(json.contains("native-roots"));
+        assert!(json.contains("/tmp/receipt.json"));
+    }
+
+    #[test]
+    fn machine_start_receipt_is_signed_and_verifiable() {
+        let _state = IsolatedMachineState::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("machine-start.receipt.json");
+        let invocation = MachineStartReceiptInput {
+            machine_name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: Some("sha256:abc".to_string()),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            network_posture: "deny-all".to_string(),
+            egress_enforcement: "flow-drop".to_string(),
+            transparent_tls_upstream_trust: "not-applicable".to_string(),
+            auth: MachineStartAuthPolicy {
+                mode: "none".to_string(),
+            },
+            volumes: Vec::new(),
+            init: MachineStartInitPolicy {
+                command_count: 0,
+                script_sha256: None,
+            },
+        };
+        let outcome = MachineStartReceiptOutcome {
+            resolved_digest: "sha256:abc".to_string(),
+            started_at: "2026-06-18T00:00:00Z".to_string(),
+            init_commands_executed: 0,
+        };
+
+        write_machine_start_receipt(&path, invocation.clone(), outcome.clone()).expect("receipt");
+        let verified = verify_machine_start_receipt(&path, None).expect("verified receipt");
+        assert_eq!(
+            verified.payload.invocation.machine_name,
+            invocation.machine_name
+        );
+        assert_eq!(
+            verified.payload.outcome.resolved_digest,
+            outcome.resolved_digest
+        );
+        assert_eq!(verified.signature.signer_id, host_signer_id());
+    }
+
+    #[test]
+    fn machine_start_receipt_input_records_ssh_agent_socket_for_dev_profiles() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: true,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+        let input = machine_start_receipt_input(&spec, "firecracker").expect("receipt input");
+        assert_eq!(input.auth.mode, "ssh-agent-socket");
+        assert_eq!(
+            machine_start_plan_auth_policy(&spec),
+            mvm_core::plan::AuthPolicy::ssh_agent_socket()
+        );
+        assert!(machine_start_audit_detail(&input).contains("auth=ssh-agent-socket"));
+    }
+
+    #[test]
+    fn machine_inspect_network_summary_surfaces_hostname_443_transform() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec!["api.example.com".to_string()],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+
+        let summary = machine_inspect_network_summary(&spec).expect("network summary");
+        let network_policy =
+            crate::commands::shared::resolve_run_network_policy(spec.net, &spec.allow_host)
+                .expect("policy");
+        let backend = crate::commands::shared::resolve_effective_hypervisor("firecracker");
+        assert_eq!(summary.posture, "allow-list:api.example.com:443");
+        assert_eq!(summary.transparent_tls_posture, "hostname-443-transform");
+        assert_eq!(
+            summary.egress_enforcement,
+            crate::commands::shared::egress_enforcement_label(&backend, &network_policy)
+        );
+    }
+
+    #[test]
+    fn machine_inspect_network_summary_marks_ip_literal_443_fail_closed() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec!["93.184.216.34:443".to_string()],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+
+        let summary = machine_inspect_network_summary(&spec).expect("network summary");
+        assert_eq!(summary.posture, "allow-list:93.184.216.34:443");
+        assert_eq!(summary.transparent_tls_posture, "ip-443-fail-closed");
+    }
+
+    #[test]
+    fn machine_inspect_json_includes_derived_network_summary() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec!["api.example.com".to_string()],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+        let payload = MachineInspectJson {
+            spec: &spec,
+            health: "healthy",
+            network_summary: machine_inspect_network_summary(&spec).expect("network summary"),
+        };
+        let json = serde_json::to_value(&payload).expect("inspect json");
+        assert_eq!(json["name"], "web");
+        assert_eq!(json["health"], "healthy");
+        assert_eq!(
+            json["network_summary"]["posture"],
+            "allow-list:api.example.com:443"
+        );
+        assert_eq!(
+            json["network_summary"]["transparent_tls_posture"],
+            "hostname-443-transform"
+        );
+        assert_eq!(
+            json["network_summary"]["transparent_tls_upstream_trust"],
+            "native-roots"
+        );
+        let backend = crate::commands::shared::resolve_effective_hypervisor("firecracker");
+        assert_eq!(
+            json["network_summary"]["egress_enforcement"],
+            crate::commands::shared::egress_enforcement_label(
+                &backend,
+                &crate::commands::shared::resolve_run_network_policy(spec.net, &spec.allow_host)
+                    .expect("policy"),
+            )
+        );
+    }
+
+    #[test]
+    fn machine_ls_json_entry_includes_health_and_network_summary() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec!["93.184.216.34:443".to_string()],
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "dev".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+        let entry = MachineListEntry {
+            spec: &spec,
+            status: "running",
+            health: "starting",
+            network_summary: machine_inspect_network_summary(&spec).expect("network summary"),
+        };
+        let json = serde_json::to_value(&entry).expect("machine ls json");
+        assert_eq!(json["name"], "web");
+        assert_eq!(json["status"], "running");
+        assert_eq!(json["health"], "starting");
+        assert_eq!(
+            json["network_summary"]["posture"],
+            "allow-list:93.184.216.34:443"
+        );
+        assert_eq!(
+            json["network_summary"]["transparent_tls_posture"],
+            "ip-443-fail-closed"
+        );
+        assert_eq!(
+            json["network_summary"]["transparent_tls_upstream_trust"],
+            "not-applicable"
+        );
+    }
+
+    #[test]
+    fn ssh_agent_socket_forwarding_negotiates_capability_before_request() {
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
+
+        let guest_thread = std::thread::spawn(move || {
+            let hello: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
+            match hello {
+                mvm_guest::vsock::GuestRequest::ProtocolHello {
+                    requested_capabilities,
+                    ..
+                } => assert_eq!(
+                    requested_capabilities,
+                    vec![mvm_guest::vsock::GuestCapability::UnixSocketForward]
+                ),
+                other => panic!("expected ProtocolHello before forwarding request, got {other:?}"),
+            }
+            mvm_guest::vsock::write_frame(
+                &mut guest,
+                &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
+                    min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "test".to_string(),
+                    capabilities: vec![mvm_guest::vsock::GuestCapability::UnixSocketForward],
+                },
+            )
+            .expect("write hello ack");
+
+            let req: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read forward request");
+            match req {
+                mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
+                    guest_path,
+                    host_vsock_port,
+                    socket_mode,
+                } => {
+                    assert_eq!(guest_path, SSH_AGENT_GUEST_SOCKET);
+                    assert_eq!(host_vsock_port, mvm_guest::vsock::SSH_AGENT_PORT);
+                    assert_eq!(socket_mode, 0o600);
+                    mvm_guest::vsock::write_frame(
+                        &mut guest,
+                        &mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted {
+                            guest_path,
+                            host_vsock_port,
+                        },
+                    )
+                    .expect("write forward response");
+                }
+                other => panic!("expected StartUnixSocketForward, got {other:?}"),
+            }
+        });
+
+        start_guest_ssh_agent_socket_forwarding("devbox", &mut host)
+            .expect("ssh-agent forwarding request succeeds");
+        guest_thread.join().expect("guest thread");
+    }
+
+    #[test]
+    fn ssh_agent_socket_forwarding_refuses_guest_without_capability() {
+        let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
+
+        let guest_thread = std::thread::spawn(move || {
+            let hello: mvm_guest::vsock::GuestRequest =
+                mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
+            assert!(
+                matches!(hello, mvm_guest::vsock::GuestRequest::ProtocolHello { .. }),
+                "expected ProtocolHello, got {hello:?}"
+            );
+            mvm_guest::vsock::write_frame(
+                &mut guest,
+                &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
+                    agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
+                    min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+                    agent_version: "test".to_string(),
+                    capabilities: Vec::new(),
+                },
+            )
+            .expect("write hello ack");
+        });
+
+        let err = start_guest_ssh_agent_socket_forwarding("devbox", &mut host)
+            .expect_err("missing capability is refused");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("ssh-agent socket forwarding"),
+            "unexpected error: {msg}"
+        );
+        guest_thread.join().expect("guest thread");
+    }
+
+    #[test]
+    fn ssh_agent_proxy_uses_backend_socket_transport_for_firecracker_and_in_process_vmms() {
+        let cases = [
+            (
+                "firecracker",
+                mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            ),
+            (
+                "libkrun",
+                mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            ),
+            (
+                "vz",
+                mvm_core::config::vm_vz_vsock_port_socket(
+                    "devbox",
+                    mvm_guest::vsock::SSH_AGENT_PORT,
+                ),
+            ),
+        ];
+
+        for (backend, expected) in cases {
+            match ssh_agent_proxy_listen_for_backend("devbox", backend) {
+                SshAgentProxyListen::Uds(path) => assert_eq!(path, expected),
+                SshAgentProxyListen::Vsock(port) => {
+                    panic!("{backend} unexpectedly selected AF_VSOCK port {port}")
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_agent_proxy_keeps_qemu_on_raw_vsock_transport() {
+        match ssh_agent_proxy_listen_for_backend("devbox", "qemu") {
+            SshAgentProxyListen::Vsock(port) => {
+                assert_eq!(port, mvm_guest::vsock::SSH_AGENT_PORT);
+            }
+            SshAgentProxyListen::Uds(path) => {
+                panic!("qemu unexpectedly selected UDS {}", path.display())
+            }
+        }
+    }
+
+    #[test]
+    fn machine_start_receipt_input_refuses_ssh_agent_on_standard_profile() {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("ghcr.io/acme/web:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: true,
+            agent_verb: Vec::new(),
+            created_at: Some("2026-06-18T00:00:00Z".to_string()),
+            last_started_at: None,
+            health_check: None,
+        };
+        let err = machine_start_receipt_input(&spec, "firecracker")
+            .expect_err("standard profile must refuse ssh-agent");
+        assert!(err.to_string().contains("dev-capable profile"));
+    }
+
+    #[test]
+    fn ssh_agent_auth_is_dev_tier_only() {
+        assert!(!profile_allows_ssh_agent("restrictive"));
+        assert!(!profile_allows_ssh_agent("standard"));
+        assert!(profile_allows_ssh_agent("dev"));
+        assert!(profile_allows_ssh_agent("permissive"));
+    }
+
+    #[test]
+    fn create_rejects_unsafe_machine_name() {
+        let args = MachineCreateArgs {
+            name: Some("../web".to_string()),
+            manifest: None,
+            image: Some("alpine:latest".to_string()),
+            net: false,
+            allow_host: Vec::new(),
+            cpus: Some(2),
+            memory: Some("512M".to_string()),
+            mem_initial: None,
+            profile: Some(RunProfile::Standard),
+            force: false,
+            json: false,
+        };
+        let err = args.into_spec().expect_err("unsafe name rejected");
+        assert!(err.to_string().contains("machine name ID"));
+    }
+
+    #[test]
+    fn create_refuses_overwrite_without_force() {
+        let _state = IsolatedMachineState::new();
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some(mvm_core::time::utc_now()),
+            last_started_at: None,
+            health_check: None,
+        };
+        save_machine_spec(&spec, false).expect("first save");
+        let err = save_machine_spec(&spec, false).expect_err("overwrite rejected");
+        assert!(err.to_string().contains("already exists"));
+        save_machine_spec(&spec, true).expect("force overwrites");
+    }
+
+    #[test]
+    fn machine_list_entry_flattens_spec_and_adds_runtime_fields() {
+        let spec = spec_fixture("web");
+        let entry = MachineListEntry {
+            spec: &spec,
+            status: "running",
+            health: "healthy",
+            network_summary: MachineInspectNetworkSummary {
+                posture: "allow-list:api.example.com:443".to_string(),
+                transparent_tls_posture: "hostname-443-transform".to_string(),
+                transparent_tls_upstream_trust: "native-roots".to_string(),
+                egress_enforcement: "firecracker:l4-host-port".to_string(),
+            },
+        };
+        let v: serde_json::Value = serde_json::to_value(&entry).expect("serialize");
+        // Spec fields are flattened to the top level (not nested under `spec`),
+        // and the derived runtime/network fields ride alongside for SDKs/tools.
+        assert_eq!(v["name"], "web");
+        assert_eq!(v["status"], "running");
+        assert_eq!(v["health"], "healthy");
+        assert_eq!(
+            v["network_summary"]["transparent_tls_posture"],
+            "hostname-443-transform"
+        );
+        assert_eq!(
+            v["network_summary"]["transparent_tls_upstream_trust"],
+            "native-roots"
+        );
+        assert!(v.get("spec").is_none());
+    }
+
+    #[test]
+    fn remove_machine_spec_requires_confirmation_and_deletes_dir() {
+        let _state = IsolatedMachineState::new();
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".to_string(),
+            image: Some("alpine:latest".to_string()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some(mvm_core::time::utc_now()),
+            last_started_at: None,
+            health_check: None,
+        };
+        save_machine_spec(&spec, false).expect("save");
+        let err = remove_machine_spec("web", false).expect_err("confirmation required");
+        assert!(err.to_string().contains("without --yes"));
+
+        let summary = remove_machine_spec("web", true).expect("remove");
+        assert_eq!(summary.name, "web");
+        assert!(summary.removed);
+        assert!(!config::machine_state_dir("web").exists());
+    }
+
+    fn seed_machine_spec(name: &str) {
+        let spec = MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: name.to_string(),
+            image: Some(format!("example/{name}:latest")),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: Vec::new(),
+            cpus: 2,
+            memory: "512M".to_string(),
+            mem_initial: None,
+            profile: "standard".to_string(),
+            volumes: Vec::new(),
+            init: Vec::new(),
+            ssh_agent: false,
+            agent_verb: Vec::new(),
+            created_at: Some(mvm_core::time::utc_now()),
+            last_started_at: None,
+            health_check: None,
+        };
+        save_machine_spec(&spec, false).expect("save");
+    }
+
+    fn rm_args(names: &[&str], all: bool, yes: bool) -> MachineRemoveArgs {
+        MachineRemoveArgs {
+            names: names.iter().map(|n| n.to_string()).collect(),
+            all,
+            yes,
+            force: false,
+            json: false,
+        }
+    }
+
+    #[test]
+    fn rm_running_refusal_wording() {
+        assert!(rm_running_refusal(&[]).is_none());
+        let msg = rm_running_refusal(&["web".to_string(), "db".to_string()])
+            .expect("running machines refuse");
+        assert!(msg.contains("web, db"), "lists the running names: {msg}");
+        assert!(msg.contains("machine stop web db"), "hints stop: {msg}");
+        assert!(msg.contains("--force"), "mentions --force: {msg}");
+    }
+
+    #[test]
+    fn remove_machine_deletes_multiple_named_specs() {
+        let _state = IsolatedMachineState::new();
+        for name in ["web", "db", "cache"] {
+            seed_machine_spec(name);
+        }
+        remove_machine(rm_args(&["web", "cache"], false, true)).expect("remove batch");
+        assert!(!config::machine_state_dir("web").exists());
+        assert!(!config::machine_state_dir("cache").exists());
+        // Untargeted machine is untouched.
+        assert!(config::machine_state_dir("db").exists());
+    }
+
+    #[test]
+    fn remove_machine_all_deletes_every_spec() {
+        let _state = IsolatedMachineState::new();
+        for name in ["web", "db", "cache"] {
+            seed_machine_spec(name);
+        }
+        remove_machine(rm_args(&[], true, true)).expect("remove all");
+        assert!(list_machine_specs().expect("list").is_empty());
+    }
+
+    #[test]
+    fn remove_machine_all_on_empty_store_is_a_noop() {
+        let _state = IsolatedMachineState::new();
+        remove_machine(rm_args(&[], true, true)).expect("remove all on empty store");
+    }
+
+    #[test]
+    fn remove_machine_batch_declines_without_confirmation_and_keeps_all_specs() {
+        let _state = IsolatedMachineState::new();
+        for name in ["web", "db"] {
+            seed_machine_spec(name);
+        }
+        // No `--yes` on a non-interactive stdin: the prompt is declined, nothing
+        // is removed, and it is not an error (mirrors `machine stop`).
+        remove_machine(rm_args(&["web", "db"], false, false)).expect("declined without error");
+        assert!(config::machine_state_dir("web").exists());
+        assert!(config::machine_state_dir("db").exists());
+    }
+
+    #[test]
+    fn remove_machine_batch_is_all_or_nothing_on_a_missing_spec() {
+        let _state = IsolatedMachineState::new();
+        seed_machine_spec("web");
+        let err = remove_machine(rm_args(&["web", "ghost"], false, true))
+            .expect_err("missing spec aborts the batch");
+        assert!(err.to_string().contains("does not exist"));
+        // The valid target survives because validation precedes deletion.
+        assert!(config::machine_state_dir("web").exists());
+    }
+
+    #[test]
+    fn resolve_remove_targets_dedupes_named_and_enumerates_all() {
+        let _state = IsolatedMachineState::new();
+        for name in ["alpha", "zeta"] {
+            seed_machine_spec(name);
+        }
+        let named = resolve_remove_targets(
+            false,
+            &["web".to_string(), "db".to_string(), "web".to_string()],
+        )
+        .expect("resolve named");
+        assert_eq!(named, vec!["web", "db"]);
+        let all = resolve_remove_targets(true, &[]).expect("resolve all");
+        assert_eq!(all, vec!["alpha", "zeta"]);
+    }
+
+    #[test]
+    fn running_vm_wrappers_require_a_persisted_machine_spec() {
+        let _state = IsolatedMachineState::new();
+        let err = ensure_machine_spec_exists("web").expect_err("missing spec rejected");
+        let msg = format!("{err:#}");
+        // Actionable not-found: names the machine and points at the recovery verbs.
+        assert!(msg.contains("machine \"web\" does not exist"), "msg: {msg}");
+        assert!(msg.contains("machine ls"), "msg: {msg}");
+        assert!(msg.contains("machine create"), "msg: {msg}");
+    }
+
+    #[test]
+    fn top_level_cli_routes_machine_run() {
+        let cli = Cli::try_parse_from([
+            "mvmctl", "machine", "run", "--image", "alpine", "--", "echo", "hi",
+        ])
+        .expect("top-level parse");
+        match cli.command {
+            Commands::Machine(args) => match args.action {
+                MachineAction::Run(run) => {
+                    assert_eq!(run.image.as_deref(), Some("alpine"));
+                    assert_eq!(run.argv, vec!["echo", "hi"]);
+                }
+                other => panic!("expected run action, got {other:?}"),
+            },
+            other => panic!("expected Commands::Machine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_cli_routes_machine_create() {
+        let cli = Cli::try_parse_from([
+            "mvmctl", "machine", "create", "--name", "web", "--image", "alpine",
+        ])
+        .expect("top-level parse");
+        match cli.command {
+            Commands::Machine(args) => match args.action {
+                MachineAction::Create(create) => {
+                    assert_eq!(create.name.as_deref(), Some("web"));
+                    assert_eq!(create.image.as_deref(), Some("alpine"));
+                }
+                other => panic!("expected create action, got {other:?}"),
+            },
+            other => panic!("expected Commands::Machine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_cli_routes_machine_start() {
+        let cli = Cli::try_parse_from([
+            "mvmctl",
+            "machine",
+            "start",
+            "web",
+            "--receipt",
+            "/tmp/web.receipt.json",
+            "--json",
+            "--dry-run",
+        ])
+        .expect("top-level parse");
+        match cli.command {
+            Commands::Machine(args) => match args.action {
+                MachineAction::Start(start) => {
+                    assert_eq!(start.names, vec!["web"]);
+                    assert_eq!(
+                        start.receipt.as_deref(),
+                        Some(Path::new("/tmp/web.receipt.json"))
+                    );
+                    assert!(start.json);
+                    assert!(start.dry_run);
+                }
+                other => panic!("expected start action, got {other:?}"),
+            },
+            other => panic!("expected Commands::Machine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn top_level_cli_routes_machine_exec() {
+        let cli = Cli::try_parse_from(["mvmctl", "machine", "exec", "web", "--", "echo", "hi"])
+            .expect("top-level parse");
+        match cli.command {
+            Commands::Machine(args) => match args.action {
+                MachineAction::Exec(exec) => {
+                    assert_eq!(exec.name, "web");
+                    assert_eq!(exec.argv, vec!["echo", "hi"]);
+                }
+                other => panic!("expected exec action, got {other:?}"),
+            },
+            other => panic!("expected Commands::Machine, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_stop_named_and_all_parse() {
+        match parse(&["stop", "web"]).expect("parse named") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.names, vec!["web"]);
+                assert!(!args.all);
+                assert!(!args.yes, "confirmation is required by default");
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+        // Multiple names stop as a batch.
+        match parse(&["stop", "web", "db", "cache"]).expect("parse batch") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.names, vec!["web", "db", "cache"]);
+                assert!(!args.all);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+        match parse(&["stop", "--all"]).expect("parse --all") {
+            MachineAction::Stop(args) => {
+                assert!(args.names.is_empty());
+                assert!(args.all);
+                assert!(!args.yes);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_stop_yes_skips_confirmation() {
+        match parse(&["stop", "web", "--yes"]).expect("parse named --yes") {
+            MachineAction::Stop(args) => {
+                assert_eq!(args.names, vec!["web"]);
+                assert!(args.yes);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+        match parse(&["stop", "--all", "--yes"]).expect("parse --all --yes") {
+            MachineAction::Stop(args) => {
+                assert!(args.all);
+                assert!(args.yes);
+            }
+            other => panic!("expected stop action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn machine_stop_requires_target() {
+        let err = parse(&["stop"]).expect_err("no name and no --all must be rejected");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn machine_stop_name_and_all_conflict() {
+        let err = parse(&["stop", "web", "--all"]).expect_err("name + --all must be a parse error");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn machine_advanced_verbs_parse() {
+        use super::super::vm::group::VmCmd;
+
+        // pause
+        let r = parse(&["pause", "myvm", "--hypervisor", "mock"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Pause(_)))),
+            "pause: {r:?}"
+        );
+
+        // snapshot (subcommand with sub-subcommand)
+        let r = parse(&["snapshot", "ls"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Snapshot(_)))),
+            "snapshot ls: {r:?}"
+        );
+
+        // cp
+        let r = parse(&["cp", "myvm", "host.txt:/guest.txt"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Cp(_)))),
+            "cp: {r:?}"
+        );
+
+        // fs
+        let r = parse(&["fs", "ls", "myvm", "/"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Fs(_)))),
+            "fs: {r:?}"
+        );
+
+        // proc
+        let r = parse(&["proc", "ls", "myvm"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Proc(_)))),
+            "proc: {r:?}"
+        );
+
+        // session
+        let r = parse(&["session", "ls"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Session(_)))),
+            "session: {r:?}"
+        );
+
+        // volume
+        let r = parse(&["volume", "ls", "myvm"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Volume(_)))),
+            "volume: {r:?}"
+        );
+
+        // sandbox
+        let r = parse(&["sandbox", "gc"]);
+        assert!(
+            matches!(r, Ok(MachineAction::Vm(VmCmd::Sandbox(_)))),
+            "sandbox: {r:?}"
+        );
+    }
+
+    #[test]
+    fn machine_vm_op_uses_per_op_audit_verb() {
+        // Folded advanced ops keep their own `cmd.<verb>.*` audit verb (no
+        // regression from the vm→machine move); the dash-renamed `set-ttl`
+        // is the edge case that proves the clap name, not the enum variant.
+        let action = parse(&["pause", "myvm", "--hypervisor", "mock"]).unwrap();
+        assert_eq!(action.verb_name(), "pause");
+        let action = parse(&["snapshot", "ls"]).unwrap();
+        assert_eq!(action.verb_name(), "snapshot");
+        let action = parse(&["set-ttl", "myvm", "5m"]).unwrap();
+        assert_eq!(action.verb_name(), "set-ttl");
+    }
+
+    #[test]
+    fn machine_native_verb_audit_stays_machine() {
+        // Native lifecycle verbs report `machine`, as they always have.
+        assert_eq!(parse(&["stop", "web"]).unwrap().verb_name(), "machine");
+        assert_eq!(parse(&["ls"]).unwrap().verb_name(), "machine");
+    }
+
+    #[test]
+    fn machine_run_json_reserves_stdout() {
+        // `machine run --json` streams structured JSON, so the stdout guard
+        // must fire (preserved from the retired `run --json`); without it, off.
+        let on = Cli::try_parse_from(["mvmctl", "machine", "run", "--image", "alpine", "--json"])
+            .unwrap();
+        assert!(on.command.emits_machine_readable_stdout());
+        let off = Cli::try_parse_from(["mvmctl", "machine", "run", "--image", "alpine"]).unwrap();
+        assert!(!off.command.emits_machine_readable_stdout());
+    }
+
+    #[test]
+    fn vm_noun_removed() {
+        use clap::error::ErrorKind;
+        // After Task 7, `mvmctl vm <verb>` must not parse.
+        let err = Cli::try_parse_from(["mvmctl", "vm", "pause", "myvm"])
+            .expect_err("vm noun must be removed");
+        assert_eq!(
+            err.kind(),
+            ErrorKind::InvalidSubcommand,
+            "expected InvalidSubcommand, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn machine_help_hides_advanced() {
+        // `machine --help` must NOT list `snapshot`, but `machine snapshot <name>` must parse.
+        let help = {
+            let mut cmd = Cli::command();
+            let machine_sub = cmd.find_subcommand_mut("machine").unwrap();
+            format!("{}", machine_sub.render_help())
+        };
+        assert!(
+            !help.contains("snapshot"),
+            "`snapshot` must be hidden from `machine --help` output. Help text:\n{help}"
+        );
+        // But it still parses.
+        let r = parse(&["snapshot", "ls"]);
+        assert!(
+            r.is_ok(),
+            "`machine snapshot ls` must parse even when hidden from help: {r:?}"
+        );
+    }
+
+    fn reconfigure_spec_fixture() -> MachineSpec {
+        MachineSpec {
+            schema_version: MACHINE_SPEC_SCHEMA_VERSION,
+            name: "web".into(),
+            image: Some("img:1".into()),
+            manifest: None,
+            resolved_digest: None,
+            net: false,
+            allow_host: vec![],
+            cpus: 2,
+            memory: "512M".into(),
+            mem_initial: None,
+            profile: "standard".into(),
+            volumes: vec!["/data:/data:ro".into()],
+            init: vec![],
+            ssh_agent: false,
+            agent_verb: vec![],
+            created_at: None,
+            last_started_at: None,
+            health_check: None,
+        }
+    }
+
+    fn reconfigure_args_fixture(name: &str) -> MachineReconfigureArgs {
+        MachineReconfigureArgs {
+            name: name.into(),
+            net: false,
+            no_net: false,
+            allow_host: vec![],
+            clear_allow_host: false,
+            cpus: None,
+            memory: None,
+            mem_initial: None,
+            hypervisor: None,
+        }
+    }
+
+    #[test]
+    fn apply_patch_overrides_only_set_fields_and_preserves_rest() {
+        let mut args = reconfigure_args_fixture("web");
+        args.cpus = Some(8);
+        let patch = patch_from_args(&args).unwrap();
+        let out = apply_patch(reconfigure_spec_fixture(), &patch);
+        assert_eq!(out.cpus, 8);
+        // Everything else preserved.
+        assert_eq!(out.memory, "512M");
+        assert_eq!(out.volumes, vec!["/data:/data:ro".to_string()]);
+        assert!(!out.net);
+    }
+
+    #[test]
+    fn apply_patch_no_flags_is_noop() {
+        let patch = patch_from_args(&reconfigure_args_fixture("web")).unwrap();
+        assert_eq!(
+            apply_patch(reconfigure_spec_fixture(), &patch),
+            reconfigure_spec_fixture()
+        );
+    }
+
+    #[test]
+    fn patch_net_is_tri_state() {
+        let mut on = reconfigure_args_fixture("web");
+        on.net = true;
+        assert_eq!(patch_from_args(&on).unwrap().net, Some(true));
+        let mut off = reconfigure_args_fixture("web");
+        off.no_net = true;
+        assert_eq!(patch_from_args(&off).unwrap().net, Some(false));
+        assert_eq!(
+            patch_from_args(&reconfigure_args_fixture("web"))
+                .unwrap()
+                .net,
+            None
+        );
+    }
+
+    #[test]
+    fn patch_allow_host_replace_and_clear() {
+        let mut replace = reconfigure_args_fixture("web");
+        replace.allow_host = vec!["a:443".into()];
+        let out = apply_patch(
+            reconfigure_spec_fixture(),
+            &patch_from_args(&replace).unwrap(),
+        );
+        assert_eq!(out.allow_host, vec!["a:443".to_string()]);
+
+        let base = MachineSpec {
+            allow_host: vec!["old:443".into()],
+            ..reconfigure_spec_fixture()
+        };
+        let mut clear = reconfigure_args_fixture("web");
+        clear.clear_allow_host = true;
+        let out = apply_patch(base, &patch_from_args(&clear).unwrap());
+        assert!(out.allow_host.is_empty());
+    }
+
+    #[test]
+    fn patch_rejects_invalid_memory() {
+        let mut args = reconfigure_args_fixture("web");
+        args.memory = Some("notasize".into());
+        assert!(patch_from_args(&args).is_err());
+    }
+
+    #[test]
+    fn reconfigure_unknown_machine_errors_clearly() {
+        let _state = IsolatedMachineState::new();
+        let mut args = reconfigure_args_fixture("does-not-exist");
+        args.cpus = Some(4);
+        let err = run_reconfigure(args).unwrap_err();
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn reconfigure_mem_initial_inconsistency_rejected() {
+        // Validate that run_reconfigure rejects an inconsistent mem_initial
+        // even when only --mem-initial is passed (no --memory). This tests the
+        // post-apply re-validation added in Task 5 (Addition 2).
+        let _state = IsolatedMachineState::new();
+        // Persist a valid machine spec directly so the machine "exists".
+        let spec = reconfigure_spec_fixture();
+        save_machine_spec(&spec, false).expect("save fixture spec");
+        // Now try to reconfigure with a mem_initial that exceeds the existing
+        // memory (512M), which must be caught by the post-apply validator.
+        let mut args = reconfigure_args_fixture("web");
+        args.mem_initial = Some("1G".into()); // 1G > 512M → invalid
+        let err = run_reconfigure(args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid machine memory after reconfigure")
+                || msg.contains("mem_initial")
+                || msg.contains("must be strictly less than"),
+            "unexpected error: {err}"
+        );
+    }
+}

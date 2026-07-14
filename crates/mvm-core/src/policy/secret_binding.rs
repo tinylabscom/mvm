@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::error::Error;
 use std::fmt;
 use std::str::FromStr;
 
@@ -32,6 +33,107 @@ fn default_header() -> String {
 
 /// Placeholder value set in guest env vars so tools pass existence checks.
 pub const PLACEHOLDER_PREFIX: &str = "mvm-managed:";
+pub const MAX_TARGET_HOST_BYTES: usize = 255;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetHostValidationError {
+    detail: String,
+}
+
+impl TargetHostValidationError {
+    fn new(detail: impl Into<String>) -> Self {
+        Self {
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for TargetHostValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.detail)
+    }
+}
+
+impl Error for TargetHostValidationError {}
+
+pub fn validate_target_host_pattern(target_host: &str) -> Result<(), TargetHostValidationError> {
+    if target_host.is_empty() {
+        return Err(TargetHostValidationError::new(
+            "target host must not be empty",
+        ));
+    }
+    if target_host != target_host.trim() {
+        return Err(TargetHostValidationError::new(
+            "target host must not contain surrounding whitespace",
+        ));
+    }
+    if target_host.ends_with('.') {
+        return Err(TargetHostValidationError::new(
+            "target host must not end with a dot",
+        ));
+    }
+    let host = if let Some(suffix) = target_host.strip_prefix("*.") {
+        if suffix.is_empty() {
+            return Err(TargetHostValidationError::new(
+                "target host wildcard suffix must not be empty",
+            ));
+        }
+        if suffix.contains('*') {
+            return Err(TargetHostValidationError::new(
+                "target host wildcard must appear only as a leading *.",
+            ));
+        }
+        suffix
+    } else {
+        if target_host.contains('*') {
+            return Err(TargetHostValidationError::new(
+                "target host wildcard must appear only as a leading *.",
+            ));
+        }
+        target_host
+    };
+    if host.len() > MAX_TARGET_HOST_BYTES {
+        return Err(TargetHostValidationError::new(format!(
+            "target host is {} bytes; maximum is {MAX_TARGET_HOST_BYTES}",
+            host.len()
+        )));
+    }
+    for label in host.split('.') {
+        if label.is_empty() {
+            return Err(TargetHostValidationError::new(
+                "target host labels must not be empty",
+            ));
+        }
+        if label.len() > 63 {
+            return Err(TargetHostValidationError::new(
+                "target host labels must be 63 bytes or shorter",
+            ));
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(TargetHostValidationError::new(
+                "target host labels must not start or end with -",
+            ));
+        }
+        if !label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(TargetHostValidationError::new(
+                "target host labels must contain only ASCII letters, digits, or -",
+            ));
+        }
+    }
+    Ok(())
+}
+
+pub fn target_host_matches(pattern: &str, host: &str) -> bool {
+    let pattern = pattern.to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    match pattern.strip_prefix("*.") {
+        Some(suffix) => host.ends_with(&format!(".{suffix}")),
+        None => pattern == host,
+    }
+}
 
 impl SecretBinding {
     pub fn new(env_var: impl Into<String>, target_host: impl Into<String>) -> Self {
@@ -119,6 +221,8 @@ impl FromStr for SecretBinding {
         if target_host.is_empty() {
             anyhow::bail!("empty target host in {:?}", s);
         }
+        validate_target_host_pattern(&target_host)
+            .map_err(|err| anyhow::anyhow!("invalid target host in {:?}: {}", s, err))?;
 
         Ok(Self {
             env_var,
@@ -181,6 +285,41 @@ mod tests {
     #[test]
     fn parse_empty_host() {
         assert!("KEY:".parse::<SecretBinding>().is_err());
+    }
+
+    #[test]
+    fn parse_rejects_target_host_with_invalid_label_characters() {
+        let err = "KEY:api_exam!ple.com".parse::<SecretBinding>().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid target host in \"KEY:api_exam!ple.com\": target host labels must contain only ASCII letters, digits, or -"
+        );
+    }
+
+    #[test]
+    fn parse_rejects_target_host_with_edge_hyphen_label() {
+        let err = "KEY:-api.example.com".parse::<SecretBinding>().unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid target host in \"KEY:-api.example.com\": target host labels must not start or end with -"
+        );
+    }
+
+    #[test]
+    fn validate_target_host_pattern_accepts_exact_and_wildcard_hostname() {
+        assert!(validate_target_host_pattern("api.example.com").is_ok());
+        assert!(validate_target_host_pattern("*.example.com").is_ok());
+    }
+
+    #[test]
+    fn target_host_matches_handles_wildcards_and_lookalikes() {
+        assert!(target_host_matches("api.openai.com", "api.openai.com"));
+        assert!(!target_host_matches("api.openai.com", "evil.com"));
+        assert!(target_host_matches("*.example.com", "api.example.com"));
+        assert!(target_host_matches("*.example.com", "a.b.example.com"));
+        assert!(target_host_matches("API.Example.COM", "api.example.com"));
+        assert!(!target_host_matches("*.example.com", "example.com"));
+        assert!(!target_host_matches("*.example.com", "evilexample.com"));
     }
 
     #[test]

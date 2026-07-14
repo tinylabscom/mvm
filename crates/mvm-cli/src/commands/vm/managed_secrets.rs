@@ -1,4 +1,4 @@
-use mvm_core::plan::{SecretBinding, SecretReleasePolicy, SecretSource};
+use mvm_core::plan::{SecretBinding, SecretGuestMount, SecretReleasePolicy, SecretSource};
 use mvm_sdk::ir::{App, Entrypoint, EnvValue, SecretMount, Workload};
 
 // allow(secret-debug): `SecretBinding` is a reference type carrying
@@ -59,6 +59,11 @@ fn lower_env_map(env: &std::collections::BTreeMap<String, EnvValue>, out: &mut V
             source: SecretSource::Keystore {
                 address: reference.name.clone(),
             },
+            guest_mount: Some(match &reference.mount {
+                SecretMount::Env { var } => SecretGuestMount::Env { var: var.clone() },
+                SecretMount::File { path } => SecretGuestMount::File { path: path.clone() },
+            }),
+            allowed_hosts: reference.allowed_hosts.clone(),
         });
     }
 }
@@ -142,7 +147,23 @@ mod tests {
                 address: "app-key".into()
             }
         );
+        assert_eq!(
+            lowered.secrets[0].guest_mount,
+            Some(SecretGuestMount::Env {
+                var: "APP_KEY".into()
+            })
+        );
+        assert_eq!(
+            lowered.secrets[0].allowed_hosts,
+            vec!["api.example.com".to_string()]
+        );
         assert_eq!(lowered.secrets[1].name, "EP_KEY");
+        assert_eq!(
+            lowered.secrets[1].guest_mount,
+            Some(SecretGuestMount::Env {
+                var: "EP_KEY".into()
+            })
+        );
     }
 
     #[test]

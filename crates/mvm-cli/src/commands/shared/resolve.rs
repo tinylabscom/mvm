@@ -204,6 +204,32 @@ pub fn egress_enforcement_label(
     }
 }
 
+/// Which upstream trust source transformed hostname-bound `:443` flows would
+/// use on this host. This is derived from the effective operator config, not
+/// the requested guest policy alone.
+///
+/// Returns:
+/// - `native-roots` when transformed TLS is in play and no PEM bundle is
+///   configured;
+/// - `pem-bundle` when transformed TLS is in play and an effective PEM bundle
+///   path is configured;
+/// - `not-applicable` when the requested policy yields no hostname-bound
+///   transformed TLS path at all.
+pub fn transparent_tls_upstream_trust_label(
+    policy: &mvm_core::network_policy::NetworkPolicy,
+) -> String {
+    let posture = policy.transparent_tls_posture_label();
+    if !posture.contains("hostname-443-transform") {
+        return "not-applicable".to_string();
+    }
+    let cfg = mvm_core::user_config::load(None);
+    if cfg.effective_host_netd_upstream_roots_pem_file().is_some() {
+        "pem-bundle".to_string()
+    } else {
+        "native-roots".to_string()
+    }
+}
+
 /// Parse one `--allow-host` entry. `HOST:PORT` is parsed strictly;
 /// `HOST` with no port defaults to `443` (https). Fails closed on a
 /// malformed port or empty host before any VM work.
@@ -278,6 +304,7 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
 mod tests {
     use super::*;
     use mvm_core::network_policy::{HostPort, NetworkPolicy, NetworkPreset};
+    use mvm_core::util::test_env::TestEnv;
 
     #[test]
     fn run_net_default_is_deny_all() {
@@ -373,6 +400,51 @@ mod tests {
             egress_enforcement_label("libkrun", &p),
             "libkrun:l4-host-port"
         );
+    }
+
+    #[test]
+    fn transparent_tls_upstream_trust_is_not_applicable_without_hostname_transform() {
+        assert_eq!(
+            transparent_tls_upstream_trust_label(&NetworkPolicy::deny_all()),
+            "not-applicable"
+        );
+        assert_eq!(
+            transparent_tls_upstream_trust_label(&NetworkPolicy::allow_list(vec![HostPort::new(
+                "93.184.216.34",
+                443,
+            )])),
+            "not-applicable"
+        );
+    }
+
+    #[test]
+    fn transparent_tls_upstream_trust_defaults_to_native_roots() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_HOST_NETD_UPSTREAM_ROOTS_PEM_FILE");
+        let config_dir = tempfile::tempdir().expect("tempdir");
+        env.set("MVM_CONFIG_DIR", config_dir.path());
+
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
+        assert_eq!(
+            transparent_tls_upstream_trust_label(&policy),
+            "native-roots"
+        );
+    }
+
+    #[test]
+    fn transparent_tls_upstream_trust_uses_effective_pem_bundle_config() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_HOST_NETD_UPSTREAM_ROOTS_PEM_FILE");
+        let config_dir = tempfile::tempdir().unwrap();
+        env.set("MVM_CONFIG_DIR", config_dir.path());
+        let cfg = mvm_core::user_config::MvmConfig {
+            host_netd_upstream_roots_pem_file: Some("/etc/mvm/upstream-roots.pem".to_string()),
+            ..mvm_core::user_config::MvmConfig::default()
+        };
+        mvm_core::user_config::save(&cfg, Some(config_dir.path())).unwrap();
+
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)]);
+        assert_eq!(transparent_tls_upstream_trust_label(&policy), "pem-bundle");
     }
 
     /// An explicit `--hypervisor <x>` (anything but the `firecracker`

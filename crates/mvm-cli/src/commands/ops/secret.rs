@@ -911,6 +911,31 @@ mod tests {
     }
 
     #[test]
+    fn cmd_set_rejects_invalid_allowed_host_pattern() {
+        let tmp_store = tempfile::tempdir().unwrap();
+        let store = FileSecretStore::with_dir(tmp_store.path());
+        let (_bind_dir, bindings) = temp_bindings();
+        let (_audit_dir, audit) = temp_audit();
+
+        let err = set(
+            &store,
+            &bindings,
+            &audit,
+            "openai",
+            &["api_exam!ple.com"],
+            AuthType::Bearer,
+            "sk-live-zzz",
+        )
+        .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("invalid allowed_hosts entry \"api_exam!ple.com\""),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn cmd_set_sigv4_stores_params_in_binding_not_value_in_sidecar() {
         let tmp_store = tempfile::tempdir().unwrap();
         let store = FileSecretStore::with_dir(tmp_store.path());

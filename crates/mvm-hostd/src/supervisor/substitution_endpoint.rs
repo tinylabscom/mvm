@@ -343,6 +343,8 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                guest_mount: None,
+                allowed_hosts: vec![],
             }],
             std::path::Path::new("/tmp/x"),
         );
@@ -444,6 +446,8 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                guest_mount: None,
+                allowed_hosts: vec![],
             }],
             dir.path(),
         );
@@ -596,6 +600,8 @@ mod tests {
                 source: SecretSource::Keystore {
                     address: "openai".into(),
                 },
+                guest_mount: None,
+                allowed_hosts: vec![],
             }],
             dir.path(),
         );

@@ -10,6 +10,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
@@ -21,6 +22,39 @@ use mvm_sdk::ir::AuthType;
 use secrecy::SecretBox;
 
 const BIN: &str = env!("CARGO_BIN_EXE_mvm-substitution-endpoint");
+
+fn uds_tempdir() -> tempfile::TempDir {
+    let base = if cfg!(target_os = "macos") {
+        Path::new("/private/tmp")
+    } else {
+        Path::new("/tmp")
+    };
+    tempfile::Builder::new()
+        .prefix("mvm-hostd-subst-")
+        .tempdir_in(base)
+        .expect("create UDS tempdir")
+}
+
+fn uds_bind_supported(dir: &Path) -> bool {
+    let probe = dir.join("uds-bind-probe.sock");
+    match std::os::unix::net::UnixListener::bind(&probe) {
+        Ok(listener) => {
+            drop(listener);
+            let _ = std::fs::remove_file(&probe);
+            true
+        }
+        Err(err)
+            if err.kind() == std::io::ErrorKind::PermissionDenied
+                || err.raw_os_error() == Some(1) =>
+        {
+            false
+        }
+        Err(err) => panic!(
+            "unexpected UDS bind probe failure at {}: {err}",
+            probe.display()
+        ),
+    }
+}
 
 fn write_frame<W: Write>(w: &mut W, value: &impl serde::Serialize) {
     let body = serde_json::to_vec(value).unwrap();
@@ -47,9 +81,33 @@ impl Drop for Kill {
     }
 }
 
+fn read_handshake_or_child_stderr(
+    child: &mut Child,
+    stdout: &mut BufReader<std::process::ChildStdout>,
+) -> Vec<(String, String)> {
+    let mut line = String::new();
+    stdout.read_line(&mut line).expect("read handshake line");
+    if !line.trim().is_empty() {
+        return serde_json::from_str(line.trim()).expect("handshake json");
+    }
+
+    let status = child.wait().expect("wait for endpoint child");
+    let mut stderr = String::new();
+    child
+        .stderr
+        .take()
+        .expect("endpoint stderr pipe")
+        .read_to_string(&mut stderr)
+        .expect("read endpoint stderr");
+    panic!("empty handshake line; child status {status}; stderr: {stderr}");
+}
+
 #[test]
 fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = uds_tempdir();
+    if !uds_bind_supported(dir.path()) {
+        return;
+    }
     let sock = dir.path().join("substitution.sock");
 
     // Host stores: a Bearer secret bound to api.openai.com only.
@@ -79,6 +137,8 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            guest_mount: None,
+            allowed_hosts: vec![],
         }],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -95,19 +155,17 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
     let mut child = Command::new(BIN)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn endpoint bin");
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
     drop(stdin); // close stdin so the bin proceeds
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let guard = Kill(child);
+    let mut guard = Kill(child);
 
     // Handshake: one JSON line of (guest var, placeholder) pairs.
-    let mut line = String::new();
-    stdout.read_line(&mut line).expect("read handshake line");
-    let handed: Vec<(String, String)> = serde_json::from_str(line.trim()).expect("handshake json");
+    let handed = read_handshake_or_child_stderr(&mut guard.0, &mut stdout);
     assert_eq!(handed.len(), 1);
     assert_eq!(handed[0].0, "OPENAI_API_KEY");
     let placeholder = handed[0].1.clone();
@@ -146,7 +204,10 @@ fn endpoint_bin_serves_substitution_and_refuses_unbound_destination() {
 /// loop relays to the endpoint in relay mode, driven against the real bin.
 #[test]
 fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = uds_tempdir();
+    if !uds_bind_supported(dir.path()) {
+        return;
+    }
     let sock = dir.path().join("substitution.sock");
 
     // A Bearer secret bound to api.openai.com — the destination the request
@@ -178,6 +239,8 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            guest_mount: None,
+            allowed_hosts: vec![],
         }],
         transport: EndpointTransport::Uds { path: sock.clone() },
         redaction: mvm_core::policy::RedactionPolicy::default(),
@@ -195,18 +258,16 @@ fn endpoint_bin_claim10_gate_refuses_a_bound_but_unadmitted_destination() {
     let mut child = Command::new(BIN)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn endpoint bin");
     let mut stdin = child.stdin.take().unwrap();
     stdin.write_all(&serde_json::to_vec(&cfg).unwrap()).unwrap();
     drop(stdin);
     let mut stdout = BufReader::new(child.stdout.take().unwrap());
-    let guard = Kill(child);
+    let mut guard = Kill(child);
 
-    let mut line = String::new();
-    stdout.read_line(&mut line).expect("read handshake line");
-    let handed: Vec<(String, String)> = serde_json::from_str(line.trim()).expect("handshake json");
+    let handed = read_handshake_or_child_stderr(&mut guard.0, &mut stdout);
     let placeholder = handed[0].1.clone();
 
     let mut conn = UnixStream::connect(&sock).expect("connect to endpoint UDS");

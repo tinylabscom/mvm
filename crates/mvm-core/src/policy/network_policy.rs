@@ -306,15 +306,6 @@ impl NetworkPolicy {
         }
     }
 
-    /// Whether this policy grants any outbound egress at all.
-    ///
-    /// `unrestricted` obviously does; allow-lists and named presets do iff
-    /// they expand to at least one host:port rule. Both the explicit
-    /// deny-all preset and an empty allow-list return `false`.
-    pub fn allows_egress(&self) -> bool {
-        self.is_unrestricted() || self.resolve_rules().is_some_and(|rules| !rules.is_empty())
-    }
-
     /// Short, non-sensitive, human-readable summary of the effective
     /// egress posture for admission/audit/dry-run/receipt surfaces.
     ///
@@ -341,6 +332,37 @@ impl NetworkPolicy {
                 hosts.dedup();
                 format!("allow-list:{}", hosts.join(","))
             }
+        }
+    }
+
+    /// Short, non-sensitive summary of whether this policy can use the
+    /// transparent host-side TLS transform path on `:443`.
+    ///
+    /// The current transform path is available only for hostname-bound `:443`
+    /// destinations that can receive a per-VM name-constrained guest trust
+    /// root. Raw-IP `:443` entries stay fail-closed on that path, and
+    /// unrestricted egress cannot stage a bounded trust root.
+    pub fn transparent_tls_posture_label(&self) -> String {
+        let Some(rules) = self.resolve_rules() else {
+            return "disabled:unrestricted".to_string();
+        };
+        let mut hostname_443 = false;
+        let mut ip_literal_443 = false;
+        for rule in rules {
+            if rule.port != 443 {
+                continue;
+            }
+            if host_is_ip_literal(&rule.host) {
+                ip_literal_443 = true;
+            } else {
+                hostname_443 = true;
+            }
+        }
+        match (hostname_443, ip_literal_443) {
+            (false, false) => "disabled:no-port-443".to_string(),
+            (true, false) => "hostname-443-transform".to_string(),
+            (false, true) => "ip-443-fail-closed".to_string(),
+            (true, true) => "mixed:hostname-443-transform,ip-443-fail-closed".to_string(),
         }
     }
 
@@ -415,26 +437,14 @@ impl NetworkPolicy {
             ip = guest_ip,
         ))
     }
+}
 
-    /// The kernel-firewall policy to apply to a routable guest NIC (the
-    /// Firecracker TAP) given whether a userspace egress tunnel is carrying
-    /// this workload's traffic.
-    ///
-    /// A userspace L3 tunnel is the auditable egress seam: it terminates the
-    /// guest's outbound flows over vsock and enforces the allow-list there.
-    /// A routable NIC standing alongside the tunnel must not carry a second,
-    /// competing allow-list — a guest that brings that NIC up itself could
-    /// then egress straight to the allow-listed hosts and bypass the tunnel's
-    /// audit/substitution gate. So when a tunnel is present the NIC policy
-    /// collapses to deny-all (the tunnel owns egress); with no tunnel the NIC
-    /// keeps this policy verbatim (the direct-NIC / broad-egress case).
-    pub fn nic_policy_behind_tunnel(&self, has_tunnel: bool) -> NetworkPolicy {
-        if has_tunnel {
-            NetworkPolicy::deny_all()
-        } else {
-            self.clone()
-        }
-    }
+fn host_is_ip_literal(host: &str) -> bool {
+    let host = host.trim();
+    let host = host.strip_prefix('[').unwrap_or(host);
+    let host = host.strip_suffix(']').unwrap_or(host);
+    let host = host.split_once('%').map(|(addr, _)| addr).unwrap_or(host);
+    host.parse::<std::net::IpAddr>().is_ok()
 }
 
 impl Default for NetworkPolicy {
@@ -715,12 +725,42 @@ mod tests {
     }
 
     #[test]
-    fn allows_egress_covers_every_shape() {
-        assert!(!NetworkPolicy::deny_all().allows_egress());
-        assert!(!NetworkPolicy::allow_list(vec![]).allows_egress());
-        assert!(NetworkPolicy::unrestricted().allows_egress());
-        assert!(NetworkPolicy::preset(NetworkPreset::Dev).allows_egress());
-        assert!(NetworkPolicy::allow_list(vec![HostPort::new("a.com", 443)]).allows_egress());
+    fn transparent_tls_posture_label_covers_policy_shapes() {
+        assert_eq!(
+            NetworkPolicy::deny_all().transparent_tls_posture_label(),
+            "disabled:no-port-443"
+        );
+        assert_eq!(
+            NetworkPolicy::unrestricted().transparent_tls_posture_label(),
+            "disabled:unrestricted"
+        );
+        assert_eq!(
+            NetworkPolicy::preset(NetworkPreset::Dev).transparent_tls_posture_label(),
+            "hostname-443-transform"
+        );
+        assert_eq!(
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 443)])
+                .transparent_tls_posture_label(),
+            "hostname-443-transform"
+        );
+        assert_eq!(
+            NetworkPolicy::allow_list(vec![HostPort::new("93.184.216.34", 443)])
+                .transparent_tls_posture_label(),
+            "ip-443-fail-closed"
+        );
+        assert_eq!(
+            NetworkPolicy::allow_list(vec![
+                HostPort::new("api.example.com", 443),
+                HostPort::new("93.184.216.34", 443),
+            ])
+            .transparent_tls_posture_label(),
+            "mixed:hostname-443-transform,ip-443-fail-closed"
+        );
+        assert_eq!(
+            NetworkPolicy::allow_list(vec![HostPort::new("api.example.com", 8443)])
+                .transparent_tls_posture_label(),
+            "disabled:no-port-443"
+        );
     }
 
     #[test]
@@ -1020,43 +1060,6 @@ mod tests {
         assert!(script.contains("--dport 443"));
         assert!(script.contains("-s 172.16.0.3"));
         assert!(script.contains("-i br-mvm"));
-    }
-
-    #[test]
-    fn nic_policy_behind_tunnel_collapses_allow_list_to_deny_all() {
-        // A tunnel-carried workload must not leave a competing allow-list on
-        // its routable NIC: the NIC policy collapses to deny-all so the only
-        // egress seam is the audited tunnel.
-        let allow = NetworkPolicy::allow_list(vec![HostPort::new("1.1.1.1", 443)]);
-        let behind = allow.nic_policy_behind_tunnel(true);
-        assert_eq!(
-            behind,
-            NetworkPolicy::deny_all(),
-            "tunnel-present NIC policy is deny-all"
-        );
-        assert!(
-            !behind.allows_egress(),
-            "no direct egress may leak past the tunnel gate"
-        );
-        assert!(
-            behind
-                .iptables_script("br-mvm", "172.16.0.2")
-                .unwrap()
-                .contains("-j DROP"),
-            "the NIC firewall default-denies"
-        );
-        // The original allow-list is untouched — the tunnel worker still gets
-        // the real policy to enforce; only the NIC copy is denied.
-        assert!(allow.allows_egress());
-    }
-
-    #[test]
-    fn nic_policy_behind_tunnel_passes_policy_through_without_a_tunnel() {
-        // No tunnel → the NIC is the egress path and keeps the run's policy.
-        let allow = NetworkPolicy::allow_list(vec![HostPort::new("example.com", 443)]);
-        assert_eq!(allow.nic_policy_behind_tunnel(false), allow);
-        let deny = NetworkPolicy::deny_all();
-        assert_eq!(deny.nic_policy_behind_tunnel(false), deny);
     }
 
     #[test]

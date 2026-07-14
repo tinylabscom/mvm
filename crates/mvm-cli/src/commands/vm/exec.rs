@@ -12,13 +12,13 @@ use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
 
 use mvm_core::user_config::MvmConfig;
 use mvm_core::util::parse_human_size;
+use mvm_net::proto::{CURRENT_VERSION as MVM_NET_PROTOCOL_VERSION, PluginId};
+use mvm_net::stream_transform::{StreamTransformChain, StreamTransformConfig};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-use super::super::env::dev_vz::{
-    assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
-};
+use super::super::env::dev_vz::{ensure_default_microvm_image, ensure_workload_kernel};
 use super::Cli;
 use super::audit_chain::AuditEmitter;
 use super::host_signer::{PUBLIC_FILENAME, host_signer_id, load_or_init};
@@ -32,7 +32,7 @@ pub(in crate::commands) struct Args {
     /// legacy slot name). If omitted, the bundled
     /// `nix/images/default-tenant/` image is used (built via Nix on first use,
     /// cached at `~/.cache/mvm/default-microvm/`). Each invocation boots a
-    /// fresh transient microVM — never the long-running builder VM.
+    /// fresh transient microVM — never the long-running `mvmctl dev` VM.
     #[arg(short = 'm', long)]
     pub manifest: Option<String>,
     /// Internal (not a CLI flag): warm-pool size for this run, carried
@@ -124,11 +124,6 @@ pub(in crate::commands) struct RunArgs {
     /// Internal (not a CLI flag): optional foreground transient VM identity.
     #[arg(skip)]
     pub vm_name: Option<String>,
-    /// Internal (not a CLI flag): boot from a verified attested runtime pack
-    /// instead of `--manifest`/`--image`/the bundled default. Set by
-    /// `machine run --runtime-pack`.
-    #[arg(skip)]
-    pub runtime_pack: bool,
     /// Enable dev-tier outbound networking (broad egress + DNS). Off by
     /// default (deny-all). Narrow it with `--allow-host`.
     #[arg(long)]
@@ -344,7 +339,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
     // consumed by `into_exec_args()` below.
-    let admit_backend = crate::exec::select_exec_backend(args.image.is_some(), &network_policy)?
+    let admit_backend = mvm_backend::backend::AnyBackend::auto_select()
         .name()
         .to_string();
     // The closure below moves `admit_backend`; keep a copy for the receipt's
@@ -357,6 +352,8 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let admit_pty = args.pty;
     let admit_has_argv = !args.argv.is_empty();
     let admit_is_dev = matches!(args.profile, RunProfile::Dev);
+    let admit_build_provenance_seed =
+        transient_exec_build_provenance(args.manifest.as_deref(), args.image.as_deref())?;
     // The audit substrate carries no emitter, so stash the AdmissionContext here
     // as the closure runs (during boot) and emit launched/failed after `run`
     // returns — mirroring `up.rs`, so the claim-8 admitted/launched/failed
@@ -368,12 +365,23 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
                       vm_name: &str|
           -> Result<Option<crate::exec::SessionAuditSubstrate>> {
         let ledger = mvm_hostd::plan_admission::InMemoryNonceLedger::default();
+        let rootfs_sha256 = mvm_core::crypto::image_verify::sha256_file_cached(rootfs)
+            .with_context(|| {
+                format!(
+                    "hashing transient run rootfs at {} for build provenance",
+                    rootfs.display()
+                )
+            })?;
         let ctx = super::up::admit_plan_for_boot(super::up::AdmitPlanForBootParams {
             tenant: "local",
             vm_name,
             backend_name: &admit_backend,
             rootfs_path: rootfs,
-            precomputed_image_sha256: None,
+            build_provenance: Some(transient_build_provenance(
+                &admit_build_provenance_seed,
+                &rootfs_sha256,
+            )?),
+            precomputed_image_sha256: Some(rootfs_sha256),
             cpus: admit_cpus,
             mem_mib: admit_mem_mib,
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
@@ -406,14 +414,6 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             super::plan_persist::write_plan(vm_name, &c.admitted.plan)
                 .context("persisting admitted plan for the transient run")?;
         }
-        let guest_profile = super::up::guest_profile_for_boot(admit_is_dev, rootfs);
-        let mut start_config = mvm_core::vm_backend::VmStartConfig::default();
-        super::up::attach_guest_boot_config_for_plan(
-            &mut start_config,
-            &c.admitted.plan,
-            &c.host_signer_public_path,
-            guest_profile,
-        )?;
         let plan_json = serde_json::to_string(&c.admitted.signed)
             .context("serializing admitted plan for the transient run")?;
         let bundle_json = c
@@ -426,7 +426,6 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
             tenant_id: c.admitted.plan.tenant.0.clone(),
             plan_json,
             bundle_json,
-            config_files: start_config.config_files,
         };
         // Hand the admission context (with its emitter) to the command layer so
         // it can emit `plan.launched` / `plan.failed` once the boot resolves.
@@ -437,49 +436,56 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
     let receipt_path = args.receipt.clone();
     if args.json || receipt_path.is_some() {
         let receipt_input = ReceiptInput::from_run_args(&args, &receipt_backend)?;
+        let transparent_tls_policy =
+            super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
+        let transparent_tls_posture = transparent_tls_policy.transparent_tls_posture_label();
+        let transparent_tls_upstream_trust =
+            super::shared::transparent_tls_upstream_trust_label(&transparent_tls_policy);
         let json_requested = args.json;
-        let selection = ImageSelection {
-            image_ref: args.image.clone(),
-            prod: args.prod,
-            runtime_pack: args.runtime_pack,
-        };
+        let image = args.image.clone();
+        let prod = args.prod;
         let req = build_exec_request(
             args.into_exec_args(),
             "`mvmctl run`",
-            selection,
+            image,
+            prod,
             network_policy,
         )?;
         let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-        let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-        );
-        let output = match crate::exec::run_captured_with_posture(
-            req,
-            Some(&admit),
-            &posture,
-            &runtime_source_policy,
-        ) {
-            Ok(o) => {
-                let ctx = admit_ctx.borrow_mut().take();
-                super::up::emit_launched_if(&ctx, &receipt_backend);
-                super::up::emit_boot_posture_if(&ctx, posture.get(), runtime_source_policy.get());
-                o
-            }
-            Err(e) => {
-                let ctx = admit_ctx.borrow_mut().take();
-                super::up::emit_failed_if(&ctx, "launch", &e);
-                return Err(e);
-            }
-        };
+        let (output, ctx) =
+            match crate::exec::run_captured_with_posture(req, Some(&admit), &posture) {
+                Ok(o) => {
+                    let ctx = admit_ctx.borrow_mut().take();
+                    super::up::emit_launched_if(&ctx, &receipt_backend);
+                    super::up::emit_boot_posture_if(&ctx, posture.get());
+                    (o, ctx)
+                }
+                Err(e) => {
+                    let ctx = admit_ctx.borrow_mut().take();
+                    super::up::emit_failed_if(&ctx, "launch", &e);
+                    return Err(e);
+                }
+            };
         if !json_requested && !output.stdout.is_empty() {
             print!("{}", output.stdout);
         }
         if !json_requested && !output.stderr.is_empty() {
             eprint!("{}", output.stderr);
         }
-        let summary = RunJsonSummary::from_parts(receipt_input.clone(), &output, receipt_path);
+        let transparent_network_identity = ctx
+            .as_ref()
+            .map(|ctx| transparent_network_identity_from_admission(ctx, &transparent_tls_policy))
+            .transpose()?;
+        let summary = RunJsonSummary::from_parts(
+            receipt_input.clone(),
+            transparent_tls_posture,
+            transparent_tls_upstream_trust,
+            transparent_network_identity.clone(),
+            &output,
+            receipt_path,
+        );
         if let Some(path) = summary.receipt_path.as_deref() {
-            write_run_receipt(path, receipt_input, &output)?;
+            write_run_receipt(path, receipt_input, transparent_network_identity, &output)?;
         }
         if json_requested {
             println!(
@@ -492,16 +498,14 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
         }
         return Ok(());
     }
-    let selection = ImageSelection {
-        image_ref: args.image.clone(),
-        prod: args.prod,
-        runtime_pack: args.runtime_pack,
-    };
+    let image = args.image.clone();
+    let prod = args.prod;
     run_run_args(
         cli,
         args.into_exec_args(),
         cfg,
-        selection,
+        image,
+        prod,
         network_policy,
         RunAudit {
             admit: Some(&admit),
@@ -603,46 +607,32 @@ struct RunAudit<'a> {
     backend: &'a str,
 }
 
-/// The inputs that decide which `ImageSource` a run boots from: the OCI
-/// reference (`--image`), the prod/dev posture that gates it, and whether to
-/// boot from a verified attested runtime pack instead. Grouped so
-/// `build_exec_request` and its callers don't grow a loose bool/Option
-/// parameter apiece.
-struct ImageSelection {
-    image_ref: Option<String>,
-    prod: bool,
-    runtime_pack: bool,
-}
-
 fn run_run_args(
     _cli: &Cli,
     args: Args,
     _cfg: &MvmConfig,
-    selection: ImageSelection,
+    image: Option<String>,
+    prod: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
     audit: RunAudit<'_>,
 ) -> Result<()> {
-    let req = build_exec_request(args, "`mvmctl run`", selection, network_policy)?;
+    let req = build_exec_request(args, "`mvmctl run`", image, prod, network_policy)?;
     let posture = crate::exec::PostureSink::new(mvm_build::run_image::RootStrategy::BlockExt4);
-    let runtime_source_policy = crate::exec::RuntimeSourcePolicySink::new(
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
-    );
-    let exit_code =
-        match crate::exec::run_with_posture(req, audit.admit, &posture, &runtime_source_policy) {
-            Ok(code) => {
-                // The VM booted and the command ran (whatever its exit code), so the
-                // admission launched — emit `plan.launched` plus the resolved boot
-                // posture (virtiofs-root vs block-ext4) against the same plan.
-                let ctx = audit.ctx.borrow_mut().take();
-                super::up::emit_launched_if(&ctx, audit.backend);
-                super::up::emit_boot_posture_if(&ctx, posture.get(), runtime_source_policy.get());
-                code
-            }
-            Err(e) => {
-                super::up::emit_failed_if(&audit.ctx.borrow_mut().take(), "launch", &e);
-                return Err(e);
-            }
-        };
+    let exit_code = match crate::exec::run_with_posture(req, audit.admit, &posture) {
+        Ok(code) => {
+            // The VM booted and the command ran (whatever its exit code), so the
+            // admission launched — emit `plan.launched` plus the resolved boot
+            // posture (virtiofs-root vs block-ext4) against the same plan.
+            let ctx = audit.ctx.borrow_mut().take();
+            super::up::emit_launched_if(&ctx, audit.backend);
+            super::up::emit_boot_posture_if(&ctx, posture.get());
+            code
+        }
+        Err(e) => {
+            super::up::emit_failed_if(&audit.ctx.borrow_mut().take(), "launch", &e);
+            return Err(e);
+        }
+    };
     if exit_code != 0 {
         std::process::exit(exit_code);
     }
@@ -652,14 +642,10 @@ fn run_run_args(
 fn build_exec_request(
     args: Args,
     command_name: &str,
-    selection: ImageSelection,
+    image_ref: Option<String>,
+    prod: bool,
     network_policy: mvm_core::network_policy::NetworkPolicy,
 ) -> Result<crate::exec::ExecRequest> {
-    let ImageSelection {
-        image_ref,
-        prod,
-        runtime_pack,
-    } = selection;
     let target = match (args.launch_plan.as_ref(), args.argv.is_empty()) {
         (Some(_), false) => {
             anyhow::bail!("--launch-plan and a trailing argv are mutually exclusive");
@@ -684,123 +670,85 @@ fn build_exec_request(
     for kv in &args.env {
         env_pairs.push(parse_env_pair(kv)?);
     }
-    let selected_backend = crate::exec::select_exec_backend(image_ref.is_some(), &network_policy)?;
-    let mut effective_env =
-        oci_vsock_proxy_env_for_backend(&selected_backend, image_ref.is_some(), &network_policy);
-    effective_env.extend(env_pairs);
     // --manifest <PATH> accepts a manifest path / dir in addition to
     // legacy names. Resolve up front so the downstream
     // ImageSource::Template carries either a name (legacy) or a slot
     // hash (manifest), and the dispatched lifecycle helpers handle
     // both keys transparently.
-    //
-    // --runtime-pack is its own image source, mutually exclusive with
-    // --manifest/--image at the clap layer, so it short-circuits the match
-    // below entirely rather than adding a third leg to it.
-    let image = if runtime_pack {
-        super::runtime_pack::resolve_runtime_pack_image_source(prod)
-            .context("resolving --runtime-pack image source")?
-    } else {
-        match (args.manifest, image_ref) {
-            (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
-            (Some(arg), None) => {
-                let resolved = match super::shared::resolve_manifest_arg(&arg)? {
-                    super::shared::ManifestArgRef::Name(n) => n,
-                    super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
-                };
-                crate::exec::ImageSource::Template(resolved)
-            }
-            (None, Some(reference)) => {
-                let cached = super::super::image::resolve_or_pull_run_image(
-                    &super::super::image::oci_cache_root(),
-                    &reference,
+    let image = match (args.manifest, image_ref) {
+        (Some(_), Some(_)) => unreachable!("clap conflicts_with prevents --manifest + --image"),
+        (Some(arg), None) => {
+            let resolved = match super::shared::resolve_manifest_arg(&arg)? {
+                super::shared::ManifestArgRef::Name(n) => n,
+                super::shared::ManifestArgRef::Slot { slot_hash } => slot_hash,
+            };
+            crate::exec::ImageSource::Template(resolved)
+        }
+        (None, Some(reference)) => {
+            let cached = super::super::image::resolve_or_pull_run_image(
+                &super::super::image::oci_cache_root(),
+                &reference,
+                prod,
+            )?;
+            ui::info(&format!(
+                "Using OCI image {} ({})",
+                cached.reference, cached.resolved_digest
+            ));
+            emit_oci_run_admission(
+                &cached,
+                args.cpus,
+                u64::from(memory_mib),
+                args.timeout.unwrap_or(60),
+            )
+            .context("admitting OCI image provenance for mvmctl run --image")?;
+            if cached.pulled {
+                let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
+                mvm_core::audit_emit!(
+                    ImageFetch,
+                    "source=run_image reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
+                    cached.reference,
+                    cached.resolved_digest,
                     prod,
-                )?;
-                ui::info(&format!(
-                    "Using OCI image {} ({})",
-                    cached.reference, cached.resolved_digest
-                ));
-                emit_oci_run_admission(
-                    &cached,
-                    args.cpus,
-                    u64::from(memory_mib),
-                    args.timeout.unwrap_or(60),
-                )
-                .context("admitting OCI image provenance for mvmctl run --image")?;
-                if cached.pulled {
-                    let auth_source = cached.auth_source.as_deref().unwrap_or("unknown");
-                    mvm_core::audit_emit!(
-                        ImageFetch,
-                        "source=run_image reference={} digest={} prod={} layers={} trust_policy={} verification_status={} auth_source={}",
-                        cached.reference,
-                        cached.resolved_digest,
-                        prod,
-                        cached.provenance.layer_digests.len(),
-                        cached.provenance.trust_policy,
-                        cached.provenance.verification_status,
-                        auth_source
-                    );
-                }
-                // An `--image` run boots the materialized OCI rootfs (with its
-                // injected agent), so we need only a workload kernel — a cached
-                // workload/default-image kernel, a local build (source checkout),
-                // or the published download — rather than building/downloading a
-                // whole default image whose rootfs we'd discard. The rootfs boots
-                // verity-sealed, so the kernel must carry dm-verity; the builder
-                // kernel (which drops it) is never a stand-in.
-                let kernel_path = ensure_workload_kernel(prod)?;
-                // Enforce that invariant host-side: a kernel with no dm-verity
-                // support would panic the guest in early init opening
-                // /dev/mapper/control, with no host signal. Fail fast instead.
-                assert_workload_kernel_supports_verity(&kernel_path)?;
-                crate::exec::ImageSource::Prebuilt {
-                    kernel_path,
-                    rootfs_path: cached.rootfs_path.display().to_string(),
-                    initrd_path: None,
-                    label: format!("oci:{}", cached.resolved_digest),
-                    // Offer the unpacked+injected tree as a virtiofs-root candidate;
-                    // the run-path tier gate (backend cap × prod × sealed) decides.
-                    virtiofs_oci_root: cached.unpacked_root.as_ref().map(|tree| {
-                        crate::exec::VirtiofsOciRoot {
-                            tree_dir: tree.display().to_string(),
-                            prod,
-                        }
-                    }),
-                }
+                    cached.provenance.layer_digests.len(),
+                    cached.provenance.trust_policy,
+                    cached.provenance.verification_status,
+                    auth_source
+                );
             }
-            (None, None) => match super::runtime_pack::try_runtime_pack_image_source(prod) {
-                Some(src) => {
-                    let label = match &src {
-                        crate::exec::ImageSource::Prebuilt { label, .. } => label.clone(),
-                        crate::exec::ImageSource::Template(name) => name.clone(),
-                    };
-                    ui::info(&format!(
-                        "Instant boot from verified runtime pack ({label}); \
-                             skipping the build."
-                    ));
-                    src
-                }
-                None => {
-                    let reason = super::runtime_pack::runtime_pack_diagnosis()
-                        .ok()
-                        .and_then(|d| super::runtime_pack::not_instant_reason(&d))
-                        .unwrap_or_else(|| {
-                            "no verified runtime pack is cached for this host".to_string()
-                        });
-                    ui::info(&format!(
-                        "{reason}; building the bundled default microVM in the builder VM."
-                    ));
-                    let (kernel_path, rootfs_path) =
-                        ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
-                    crate::exec::ImageSource::Prebuilt {
-                        kernel_path,
-                        rootfs_path,
-                        initrd_path: None,
-                        label: "default-microvm".to_string(),
-                        virtiofs_oci_root: None,
+            // An `--image` run boots the materialized OCI rootfs (with its
+            // injected agent), so we need only a workload kernel. Resolve just
+            // the kernel — a cached workload/default-image kernel, the cold-cache
+            // published workload-kernel download, or (for non-prod) an existing
+            // builder kernel already on disk — rather than building/downloading a
+            // whole default image whose rootfs we'd discard. This runtime path
+            // never builds Stage 0 or compiles a workload kernel.
+            let kernel_path = ensure_workload_kernel(prod)?;
+            crate::exec::ImageSource::Prebuilt {
+                kernel_path,
+                rootfs_path: cached.rootfs_path.display().to_string(),
+                initrd_path: None,
+                label: format!("oci:{}", cached.resolved_digest),
+                // Offer the unpacked+injected tree as a virtiofs-root candidate;
+                // the run-path tier gate (backend cap × prod × sealed) decides.
+                virtiofs_oci_root: cached.unpacked_root.as_ref().map(|tree| {
+                    crate::exec::VirtiofsOciRoot {
+                        tree_dir: tree.display().to_string(),
+                        prod,
                     }
-                }
-            },
+                }),
+            }
+        }
+        (None, None) => {
+            ui::info("No --manifest specified; using bundled default microVM image.");
+            let (kernel_path, rootfs_path) =
+                ensure_default_microvm_image(mvm_build::pipeline::BuildMode::Dev)?;
+            crate::exec::ImageSource::Prebuilt {
+                kernel_path,
+                rootfs_path,
+                initrd_path: None,
+                label: "default-microvm".to_string(),
+                virtiofs_oci_root: None,
+            }
         }
     };
     Ok(crate::exec::ExecRequest {
@@ -813,7 +761,7 @@ fn build_exec_request(
         // mem_initial gets sourced for long-running workloads.
         mem_initial_mib: None,
         add_dirs,
-        env: effective_env,
+        env: env_pairs,
         target,
         timeout_secs: args.timeout,
         pty: args.pty,
@@ -865,9 +813,9 @@ fn emit_oci_run_admission(
         deps_volume: None,
         shares: Vec::new(),
         redaction: mvm_core::policy::RedactionPolicy::default(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         audit_labels: Default::default(),
         agent_verbs: None,
+        build_provenance: Some(oci_run_build_provenance(image, &image_sha256)?),
     };
     let ledger = InMemoryNonceLedger::new();
     let admitted = admit_for_run(&input, &SystemClock, &ledger, None, None)?;
@@ -891,6 +839,8 @@ struct RunReceiptPayload {
     receipt_id: String,
     recorded_at: String,
     invocation: ReceiptInput,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transparent_network_identity: Option<ReceiptTransparentNetworkIdentity>,
     outcome: ReceiptOutcome,
 }
 
@@ -910,6 +860,9 @@ struct ReceiptInput {
     /// now port-gated on every backend (Firecracker nftables; libkrun/Vz via the
     /// admission-time DNS pin → L4 scan). See `shared::egress_enforcement_label`.
     egress_enforcement: String,
+    /// Which upstream trust source transformed hostname-bound `:443` flows
+    /// would use on this host.
+    transparent_tls_upstream_trust: String,
     command: ReceiptCommand,
     env_keys: Vec<String>,
     add_dirs: Vec<ReceiptAddDir>,
@@ -957,9 +910,41 @@ struct RunReceiptSignature {
 struct RunJsonSummary {
     schema_version: u32,
     invocation: ReceiptInput,
+    transparent_tls_posture: String,
+    transparent_tls_upstream_trust: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transparent_network_identity: Option<ReceiptTransparentNetworkIdentity>,
     outcome: ReceiptOutcome,
     #[serde(skip_serializing_if = "Option::is_none")]
     receipt_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransientBuildProvenanceSeed {
+    input_kind: mvm_core::plan::InputKind,
+    input_ref: String,
+    lock_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReceiptTransparentNetworkIdentity {
+    protocol_version: String,
+    host_authority_binary_sha256: String,
+    guest_bridge_binary_sha256: String,
+    transform_routes: Vec<ReceiptTransformRouteIdentity>,
+    effective_network_policy_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReceiptTransformRouteIdentity {
+    target_host: String,
+    plugins: Vec<ReceiptTransformPluginIdentity>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReceiptTransformPluginIdentity {
+    plugin_id: String,
+    manifest_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -989,6 +974,12 @@ struct RunPreflightInvocation {
     /// Honest per-backend enforcement fidelity for that posture (see
     /// `ReceiptInput::egress_enforcement`).
     egress_enforcement: String,
+    /// Whether the requested policy yields hostname-bound transparent TLS on
+    /// `:443`, raw-IP `:443` fail-closed behavior, or no transparent TLS path.
+    transparent_tls_posture: String,
+    /// Which upstream trust source transformed hostname-bound `:443` flows
+    /// would use on this host.
+    transparent_tls_upstream_trust: String,
     command: ReceiptCommand,
     env_keys: Vec<String>,
     add_dirs: Vec<ReceiptAddDir>,
@@ -1009,18 +1000,23 @@ enum RunPreflightImage {
     DefaultMicrovm,
     Manifest { argument_sha256: String },
     Oci { reference_sha256: String },
-    RuntimePack,
 }
 
 impl RunJsonSummary {
     fn from_parts(
         invocation: ReceiptInput,
+        transparent_tls_posture: String,
+        transparent_tls_upstream_trust: String,
+        transparent_network_identity: Option<ReceiptTransparentNetworkIdentity>,
         output: &crate::exec::ExecOutput,
         receipt_path: Option<PathBuf>,
     ) -> Self {
         Self {
-            schema_version: 1,
+            schema_version: 2,
             invocation,
+            transparent_tls_posture,
+            transparent_tls_upstream_trust,
+            transparent_network_identity,
             outcome: ReceiptOutcome::from_exec_output(output),
             receipt_path,
         }
@@ -1029,13 +1025,6 @@ impl RunJsonSummary {
 
 impl RunPreflightSummary {
     fn from_args(args: &RunArgs) -> Result<Self> {
-        Self::from_args_with_backend_override(args, None)
-    }
-
-    fn from_args_with_backend_override(
-        args: &RunArgs,
-        backend_override: Option<&str>,
-    ) -> Result<Self> {
         let memory_mib = parse_human_size(&args.memory).context("Invalid --memory")?;
         for kv in &args.env {
             parse_env_pair(kv)?;
@@ -1047,7 +1036,6 @@ impl RunPreflightSummary {
             crate::exec::AddDir::parse(spec)?;
         }
         let image = match args.manifest.as_ref() {
-            _ if args.runtime_pack => RunPreflightImage::RuntimePack,
             Some(manifest) if args.image.is_none() => RunPreflightImage::Manifest {
                 argument_sha256: sha256_hex(manifest.as_bytes()),
             },
@@ -1074,13 +1062,10 @@ impl RunPreflightSummary {
 
         // Report the backend the real run would auto-select, so the dry-run's
         // enforcement tier matches what an actual boot would record.
+        let backend = mvm_backend::backend::AnyBackend::auto_select()
+            .name()
+            .to_string();
         let policy = super::shared::resolve_run_network_policy(args.net, &args.allow_host)?;
-        let backend = match backend_override {
-            Some(backend) => backend.to_string(),
-            None => crate::exec::select_exec_backend(args.image.is_some(), &policy)?
-                .name()
-                .to_string(),
-        };
         let receipt_input = ReceiptInput::from_run_args(args, &backend)?;
 
         Ok(Self {
@@ -1091,6 +1076,10 @@ impl RunPreflightSummary {
                 profile: receipt_input.profile,
                 network_posture: receipt_input.network_posture,
                 egress_enforcement: receipt_input.egress_enforcement,
+                transparent_tls_posture: policy.transparent_tls_posture_label(),
+                transparent_tls_upstream_trust: super::shared::transparent_tls_upstream_trust_label(
+                    &policy,
+                ),
                 command: receipt_input.command,
                 env_keys: receipt_input.env_keys,
                 add_dirs: receipt_input.add_dirs,
@@ -1127,9 +1116,6 @@ fn print_run_preflight_human(summary: &RunPreflightSummary) {
         RunPreflightImage::Oci { reference_sha256 } => {
             println!("image: OCI reference sha256={reference_sha256} (not resolved)");
         }
-        RunPreflightImage::RuntimePack => {
-            println!("image: verified attested runtime pack (not resolved)");
-        }
     }
     println!(
         "resources: cpus={} memory={} ({} MiB) timeout={}s",
@@ -1141,6 +1127,14 @@ fn print_run_preflight_human(summary: &RunPreflightSummary) {
     println!("profile: {}", summary.invocation.profile);
     println!("network: {}", summary.invocation.network_posture);
     println!("enforced: {}", summary.invocation.egress_enforcement);
+    println!(
+        "transparent tls: {}",
+        summary.invocation.transparent_tls_posture
+    );
+    println!(
+        "transparent tls trust: {}",
+        summary.invocation.transparent_tls_upstream_trust
+    );
     println!("command: {}", summary.invocation.command.describe());
     if summary.invocation.env_keys.is_empty() {
         println!("env: none");
@@ -1187,18 +1181,7 @@ impl ReceiptInput {
             }
         };
 
-        let selected_backend = mvm_backend::backend::AnyBackend::from_hypervisor(backend);
-        crate::exec::validate_image_egress_backend(
-            &selected_backend,
-            args.image.is_some(),
-            &policy,
-        )?;
-        let mut env_keys =
-            oci_vsock_proxy_env_for_backend(&selected_backend, args.image.is_some(), &policy)
-                .into_iter()
-                .map(|(key, _)| key)
-                .collect::<Vec<_>>();
-        env_keys.reserve(args.env.len());
+        let mut env_keys = Vec::with_capacity(args.env.len());
         for kv in &args.env {
             let (key, _) = kv
                 .split_once('=')
@@ -1206,7 +1189,6 @@ impl ReceiptInput {
             env_keys.push(key.to_string());
         }
         env_keys.sort();
-        env_keys.dedup();
 
         let mut add_dirs = Vec::with_capacity(args.add_dir.len());
         for spec in &args.add_dir {
@@ -1231,6 +1213,9 @@ impl ReceiptInput {
                 .to_string(),
             network_posture: policy.posture_label(),
             egress_enforcement: super::shared::egress_enforcement_label(backend, &policy),
+            transparent_tls_upstream_trust: super::shared::transparent_tls_upstream_trust_label(
+                &policy,
+            ),
             command,
             env_keys,
             add_dirs,
@@ -1266,6 +1251,263 @@ impl ReceiptOutcome {
     }
 }
 
+fn transparent_network_identity_from_admission(
+    ctx: &super::up::AdmissionContext,
+    policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Result<ReceiptTransparentNetworkIdentity> {
+    let host_authority_binary_sha256 = sha256_hex(
+        &std::fs::read(
+            mvm_backend::resolve_host_netd_path_for_runtime()
+                .context("resolving mvm-host-netd for run receipt identity")?,
+        )
+        .context("reading mvm-host-netd for run receipt identity")?,
+    );
+    let guest_bridge_binary_sha256 = guest_bridge_binary_sha256_for_receipt(&ctx.admitted.plan)?;
+    let transform_routes = configured_transform_route_identities(&ctx.admitted.plan, policy)?;
+    let effective_network_policy_sha256 =
+        effective_network_policy_sha256(policy, ctx.policy_bundle.as_ref())?;
+    Ok(ReceiptTransparentNetworkIdentity {
+        protocol_version: format!(
+            "{}.{}",
+            MVM_NET_PROTOCOL_VERSION.major, MVM_NET_PROTOCOL_VERSION.minor
+        ),
+        host_authority_binary_sha256,
+        guest_bridge_binary_sha256,
+        transform_routes,
+        effective_network_policy_sha256,
+    })
+}
+
+fn guest_bridge_binary_sha256_for_receipt(plan: &mvm_core::plan::ExecutionPlan) -> Result<String> {
+    if let Some(sha256) = plan
+        .build_provenance
+        .as_ref()
+        .and_then(|provenance| provenance.artifacts.mvm_netd.as_ref())
+    {
+        return Ok(sha256.clone());
+    }
+    embedded_guest_netd_sha256()
+        .context("locating embedded mvm-guest-netd for run receipt identity fallback")
+}
+
+fn embedded_guest_netd_sha256() -> Result<String> {
+    crate::host_binaries::embedded::EMBEDDED
+        .iter()
+        .find(|bin| bin.name == "mvm-guest-netd")
+        .map(|bin| bin.sha256_hex.to_string())
+        .ok_or_else(|| anyhow::anyhow!("embedded mvm-guest-netd binary not found"))
+}
+
+fn transient_exec_build_provenance(
+    manifest: Option<&str>,
+    image: Option<&str>,
+) -> Result<TransientBuildProvenanceSeed> {
+    if let Some(image_ref) = image {
+        let seed = match super::super::image::source::ImageSource::classify(image_ref)? {
+            super::super::image::source::ImageSource::Registry(reference) => {
+                TransientBuildProvenanceSeed {
+                    input_kind: mvm_core::plan::InputKind::Oci,
+                    input_ref: reference,
+                    lock_digest: None,
+                }
+            }
+            super::super::image::source::ImageSource::OciArchive(path) => {
+                TransientBuildProvenanceSeed {
+                    input_kind: mvm_core::plan::InputKind::Oci,
+                    input_ref: format!("oci-archive:{}", path.display()),
+                    lock_digest: None,
+                }
+            }
+            super::super::image::source::ImageSource::Stdin => TransientBuildProvenanceSeed {
+                input_kind: mvm_core::plan::InputKind::Oci,
+                input_ref: "oci-archive:-".to_string(),
+                lock_digest: None,
+            },
+            super::super::image::source::ImageSource::RootfsDir(path) => {
+                TransientBuildProvenanceSeed {
+                    input_kind: mvm_core::plan::InputKind::LocalProject,
+                    input_ref: format!("rootfs-dir:{}", path.display()),
+                    lock_digest: None,
+                }
+            }
+        };
+        return Ok(seed);
+    }
+    if let Some(manifest_ref) = manifest {
+        return Ok(TransientBuildProvenanceSeed {
+            input_kind: mvm_core::plan::InputKind::LocalProject,
+            input_ref: manifest_ref.to_string(),
+            lock_digest: None,
+        });
+    }
+    Ok(TransientBuildProvenanceSeed {
+        input_kind: mvm_core::plan::InputKind::NixTemplate,
+        input_ref: "default-microvm".to_string(),
+        lock_digest: None,
+    })
+}
+
+fn transient_build_provenance(
+    seed: &TransientBuildProvenanceSeed,
+    rootfs_sha256: &str,
+) -> Result<mvm_core::plan::BuildProvenance> {
+    Ok(mvm_core::plan::BuildProvenance {
+        input_kind: seed.input_kind,
+        input_ref: seed.input_ref.clone(),
+        lock_digest: seed.lock_digest.clone(),
+        builder_id: None,
+        artifacts: mvm_core::plan::ArtifactDigests {
+            rootfs: Some(rootfs_sha256.to_string()),
+            mvm_netd: Some(
+                embedded_guest_netd_sha256()
+                    .context("locating embedded mvm-guest-netd for transient build provenance")?,
+            ),
+            ..Default::default()
+        },
+    })
+}
+
+fn oci_run_build_provenance(
+    image: &super::super::image::ResolvedOciRunImage,
+    rootfs_sha256: &str,
+) -> Result<mvm_core::plan::BuildProvenance> {
+    transient_build_provenance(
+        &TransientBuildProvenanceSeed {
+            input_kind: mvm_core::plan::InputKind::Oci,
+            input_ref: image.provenance.supplied_reference.clone(),
+            lock_digest: Some(image.provenance.resolved_digest.clone()),
+        },
+        rootfs_sha256,
+    )
+}
+
+fn configured_transform_route_identities(
+    plan: &mvm_core::plan::ExecutionPlan,
+    policy: &mvm_core::network_policy::NetworkPolicy,
+) -> Result<Vec<ReceiptTransformRouteIdentity>> {
+    let target_hosts = transformed_tls_target_hosts(policy);
+    if target_hosts.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let plugin_ids = [
+        PluginId::new("audit").expect("built-in plugin id literal must be valid"),
+        PluginId::new("metadata-endpoint-deny").expect("built-in plugin id literal must be valid"),
+    ];
+    let config = stream_transform_config_for_plan(plan)?;
+    target_hosts
+        .into_iter()
+        .map(|target_host| {
+            let chain = StreamTransformChain::from_plugin_ids_with_config_for_target(
+                &plugin_ids,
+                &config,
+                Some(target_host.as_str()),
+            )
+            .with_context(|| {
+                format!(
+                    "building transformed-TLS plugin identity chain for target {}",
+                    target_host
+                )
+            })?;
+            Ok(ReceiptTransformRouteIdentity {
+                target_host,
+                plugins: chain
+                    .identity_digests()
+                    .into_iter()
+                    .map(
+                        |(plugin_id, manifest_sha256)| ReceiptTransformPluginIdentity {
+                            plugin_id: plugin_id.as_str().to_string(),
+                            manifest_sha256,
+                        },
+                    )
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+fn stream_transform_config_for_plan(
+    plan: &mvm_core::plan::ExecutionPlan,
+) -> Result<StreamTransformConfig> {
+    let secret_replacement_bindings = plan
+        .secrets
+        .iter()
+        .flat_map(|secret| {
+            let placeholder_name = match secret.guest_mount.as_ref() {
+                Some(mvm_core::plan::SecretGuestMount::Env { var }) => Some(var.clone()),
+                Some(mvm_core::plan::SecretGuestMount::File { path }) => Some(path.clone()),
+                None => Some(secret.name.clone()),
+            };
+            let Some(placeholder_name) = placeholder_name else {
+                return Vec::new();
+            };
+            secret
+                .allowed_hosts
+                .iter()
+                .map(|host| {
+                    let binding = mvm_core::policy::secret_binding::SecretBinding::new(
+                        &placeholder_name,
+                        host,
+                    );
+                    match &secret.source {
+                        mvm_core::plan::SecretSource::Static { value } => {
+                            binding.with_value(value.clone())
+                        }
+                        _ => binding,
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let response_leak_guard_secret_values = plan
+        .secrets
+        .iter()
+        .filter_map(|secret| match &secret.source {
+            mvm_core::plan::SecretSource::Static { value } if !secret.allowed_hosts.is_empty() => {
+                Some(value.clone())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    StreamTransformConfig::default()
+        .with_secret_replacement_bindings(secret_replacement_bindings)
+        .and_then(|config| {
+            config.with_response_leak_guard_secret_values(response_leak_guard_secret_values)
+        })
+        .map_err(Into::into)
+}
+
+fn effective_network_policy_sha256(
+    policy: &mvm_core::network_policy::NetworkPolicy,
+    policy_bundle: Option<&mvm_core::policy::PolicyBundle>,
+) -> Result<String> {
+    if let Some(bundle) = policy_bundle {
+        let bytes = serde_json::to_vec(bundle)
+            .context("serializing effective network policy bundle for run receipt")?;
+        return Ok(sha256_hex(&bytes));
+    }
+    let bytes = serde_json::to_vec(policy)
+        .context("serializing effective network policy for run receipt")?;
+    Ok(sha256_hex(&bytes))
+}
+
+fn transformed_tls_target_hosts(policy: &mvm_core::network_policy::NetworkPolicy) -> Vec<String> {
+    let Some(rules) = policy.resolve_rules() else {
+        return Vec::new();
+    };
+    let mut hosts = Vec::new();
+    for rule in rules {
+        if rule.port != 443 || rule.host.parse::<std::net::IpAddr>().is_ok() {
+            continue;
+        }
+        if !hosts.iter().any(|existing| existing == &rule.host) {
+            hosts.push(rule.host);
+        }
+    }
+    hosts
+}
+
 fn parse_env_pair(kv: &str) -> Result<(String, String)> {
     let (k, v) = kv
         .split_once('=')
@@ -1281,39 +1523,18 @@ fn parse_env_pair(kv: &str) -> Result<(String, String)> {
     Ok((k.to_string(), v.to_string()))
 }
 
-fn oci_vsock_proxy_env_for_capabilities(
-    caps: &mvm_core::vm_backend::VmCapabilities,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Vec<(String, String)> {
-    if !image_requested || !network_policy.allows_egress() {
-        return Vec::new();
-    }
-    if !(caps.vsock && caps.no_routable_guest_nic && caps.host_vsock_proxy) {
-        return Vec::new();
-    }
-    mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
-}
-
-fn oci_vsock_proxy_env_for_backend(
-    backend: &mvm_backend::backend::AnyBackend,
-    image_requested: bool,
-    network_policy: &mvm_core::network_policy::NetworkPolicy,
-) -> Vec<(String, String)> {
-    let caps = backend.capabilities();
-    oci_vsock_proxy_env_for_capabilities(&caps, image_requested, network_policy)
-}
-
 fn write_run_receipt(
     path: &Path,
     invocation: ReceiptInput,
+    transparent_network_identity: Option<ReceiptTransparentNetworkIdentity>,
     output: &crate::exec::ExecOutput,
 ) -> Result<()> {
     let payload = RunReceiptPayload {
-        schema_version: 1,
+        schema_version: 2,
         receipt_id: uuid::Uuid::new_v4().to_string(),
         recorded_at: chrono::Utc::now().to_rfc3339(),
         invocation,
+        transparent_network_identity,
         outcome: ReceiptOutcome::from_exec_output(output),
     };
     let payload_bytes = serde_json::to_vec(&payload).context("serializing run receipt payload")?;
@@ -1345,9 +1566,9 @@ fn verify_run_receipt(path: &Path, pubkey_path: Option<&Path>) -> Result<SignedR
         std::fs::read(path).with_context(|| format!("reading receipt {}", path.display()))?;
     let receipt: SignedRunReceipt = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing receipt {}", path.display()))?;
-    if receipt.payload.schema_version != 1 {
+    if !(1..=2).contains(&receipt.payload.schema_version) {
         anyhow::bail!(
-            "unsupported receipt schema_version {}; this build supports 1",
+            "unsupported receipt schema_version {}; this build supports 1 and 2",
             receipt.payload.schema_version
         );
     }
@@ -1397,7 +1618,7 @@ fn load_receipt_pubkey(path: Option<&Path>) -> Result<VerifyingKey> {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
-    hex::encode(digest)
+    format!("{digest:x}")
 }
 
 #[cfg(test)]
@@ -1413,6 +1634,7 @@ pub(in crate::commands) struct RunSecuritySummary {
     pub receipt_requested: bool,
     pub preflight_network_posture: String,
     pub preflight_egress_enforcement: String,
+    pub preflight_transparent_tls_posture: String,
     pub receipt_network_posture: String,
     pub receipt_egress_enforcement: String,
     pub preflight_command: String,
@@ -1451,31 +1673,10 @@ pub(in crate::commands) fn test_run_security_summary(
 ) -> Result<RunSecuritySummary> {
     let preflight = RunPreflightSummary::from_args(args)?;
     let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
-    test_run_security_summary_from_parts(preflight, receipt)
-}
-
-#[cfg(test)]
-pub(in crate::commands) fn test_run_security_summary_with_preflight_backend(
-    args: &RunArgs,
-    preflight_backend: &str,
-    receipt_backend: &str,
-) -> Result<RunSecuritySummary> {
-    let preflight =
-        RunPreflightSummary::from_args_with_backend_override(args, Some(preflight_backend))?;
-    let receipt = ReceiptInput::from_run_args(args, receipt_backend)?;
-    test_run_security_summary_from_parts(preflight, receipt)
-}
-
-#[cfg(test)]
-fn test_run_security_summary_from_parts(
-    preflight: RunPreflightSummary,
-    receipt: ReceiptInput,
-) -> Result<RunSecuritySummary> {
     let image_kind = match preflight.image {
         RunPreflightImage::DefaultMicrovm => "default-microvm",
         RunPreflightImage::Manifest { .. } => "manifest",
         RunPreflightImage::Oci { .. } => "oci",
-        RunPreflightImage::RuntimePack => "runtime-pack",
     };
     Ok(RunSecuritySummary {
         dry_run: preflight.dry_run,
@@ -1488,6 +1689,7 @@ fn test_run_security_summary_from_parts(
         receipt_requested: preflight.receipt.requested,
         preflight_network_posture: preflight.invocation.network_posture,
         preflight_egress_enforcement: preflight.invocation.egress_enforcement,
+        preflight_transparent_tls_posture: preflight.invocation.transparent_tls_posture,
         receipt_network_posture: receipt.network_posture,
         receipt_egress_enforcement: receipt.egress_enforcement,
         preflight_command: preflight.invocation.command.describe(),
@@ -1516,11 +1718,16 @@ mod tests {
         let mut args = run_args(RunProfile::Standard);
         let s = RunPreflightSummary::from_args(&args).expect("preflight");
         assert_eq!(s.invocation.network_posture, "deny-all");
+        assert_eq!(s.invocation.transparent_tls_posture, "disabled:no-port-443");
 
         // --net → dev preset.
         args.net = true;
         let s = RunPreflightSummary::from_args(&args).expect("preflight");
         assert_eq!(s.invocation.network_posture, "preset:dev");
+        assert_eq!(
+            s.invocation.transparent_tls_posture,
+            "hostname-443-transform"
+        );
 
         // --allow-host wins over --net and defaults the port.
         args.allow_host = vec!["a.com".into(), "b.com:8443".into()];
@@ -1529,6 +1736,18 @@ mod tests {
             s.invocation.network_posture,
             "allow-list:a.com:443,b.com:8443"
         );
+        assert_eq!(
+            s.invocation.transparent_tls_posture,
+            "hostname-443-transform"
+        );
+    }
+
+    #[test]
+    fn dry_run_transparent_tls_posture_marks_ip_literal_443_fail_closed() {
+        let mut args = run_args(RunProfile::Standard);
+        args.allow_host = vec!["93.184.216.34:443".into()];
+        let s = RunPreflightSummary::from_args(&args).expect("preflight");
+        assert_eq!(s.invocation.transparent_tls_posture, "ip-443-fail-closed");
     }
 
     #[test]
@@ -1559,109 +1778,6 @@ mod tests {
         assert_eq!(r.egress_enforcement, "flow-drop");
     }
 
-    #[test]
-    fn oci_vsock_proxy_env_requires_image_egress_and_vsock_proxy_backend() {
-        let hvf_proxy_caps = mvm_core::vm_backend::VmCapabilities {
-            vsock: true,
-            no_routable_guest_nic: true,
-            host_vsock_proxy: true,
-            ..mvm_core::vm_backend::VmCapabilities::default()
-        };
-        let deny_all = mvm_core::network_policy::NetworkPolicy::deny_all();
-        assert!(oci_vsock_proxy_env_for_capabilities(&hvf_proxy_caps, true, &deny_all).is_empty());
-
-        assert!(
-            oci_vsock_proxy_env_for_capabilities(
-                &hvf_proxy_caps,
-                false,
-                &mvm_core::network_policy::NetworkPolicy::preset(
-                    mvm_core::network_policy::NetworkPreset::Dev,
-                ),
-            )
-            .is_empty()
-        );
-        assert!(
-            oci_vsock_proxy_env_for_capabilities(
-                &mvm_core::vm_backend::VmCapabilities::default(),
-                true,
-                &mvm_core::network_policy::NetworkPolicy::preset(
-                    mvm_core::network_policy::NetworkPreset::Dev,
-                ),
-            )
-            .is_empty()
-        );
-
-        let vars = oci_vsock_proxy_env_for_capabilities(
-            &hvf_proxy_caps,
-            true,
-            &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-                mvm_core::network_policy::HostPort::new("example.com", 443),
-            ]),
-        );
-        assert!(
-            vars.iter()
-                .any(|(k, v)| k == "ALL_PROXY" && v == "http://127.0.0.1:1080")
-        );
-        assert!(
-            vars.iter()
-                .any(|(k, v)| k == "HTTP_PROXY" && v == "http://127.0.0.1:1080")
-        );
-        assert!(
-            vars.iter()
-                .any(|(k, v)| k == "NO_PROXY" && v == "localhost,127.0.0.1,::1")
-        );
-    }
-
-    #[test]
-    fn receipt_accepts_oci_egress_on_libkrun_and_records_uniform_l4_enforcement() {
-        let mut args = run_args(RunProfile::Standard);
-        args.image = Some("docker.io/library/alpine:latest".to_string());
-        args.allow_host = vec!["example.com".to_string()];
-
-        let receipt = ReceiptInput::from_run_args(&args, "libkrun")
-            .expect("libkrun OCI allow-host receipts should follow the active uniform L4 contract");
-        assert_eq!(receipt.network_posture, "allow-list:example.com:443");
-        assert_eq!(receipt.egress_enforcement, "libkrun:l4-host-port");
-    }
-
-    #[test]
-    fn receipt_env_keys_include_injected_oci_proxy_vars() {
-        let mut args = run_args(RunProfile::Standard);
-        args.image = Some("docker.io/library/alpine:latest".to_string());
-        args.allow_host = vec!["example.com".to_string()];
-        args.env.push("HTTP_PROXY=override".to_string());
-        args.env.push("APP_MODE=dev".to_string());
-
-        let receipt = ReceiptInput::from_run_args(&args, "libkrun").expect("receipt input");
-        let mut env_keys = std::collections::BTreeSet::from_iter(receipt.env_keys.clone());
-        env_keys.extend(
-            oci_vsock_proxy_env_for_capabilities(
-                &mvm_core::vm_backend::VmCapabilities {
-                    vsock: true,
-                    no_routable_guest_nic: true,
-                    host_vsock_proxy: true,
-                    ..mvm_core::vm_backend::VmCapabilities::default()
-                },
-                true,
-                &mvm_core::network_policy::NetworkPolicy::allow_list(vec![
-                    mvm_core::network_policy::HostPort::new("example.com", 443),
-                ]),
-            )
-            .into_iter()
-            .map(|(k, _)| k),
-        );
-        assert!(env_keys.contains("ALL_PROXY"));
-        assert!(env_keys.contains("HTTP_PROXY"));
-        assert!(env_keys.contains("APP_MODE"));
-        assert_eq!(
-            env_keys
-                .iter()
-                .filter(|k| k.as_str() == "HTTP_PROXY")
-                .count(),
-            1
-        );
-    }
-
     fn run_args(profile: RunProfile) -> RunArgs {
         RunArgs {
             warm_pool_size: 0,
@@ -1669,7 +1785,6 @@ mod tests {
             vm_name: None,
             manifest: None,
             image: None,
-            runtime_pack: false,
             net: false,
             allow_host: Vec::new(),
             cpus: 2,
@@ -1838,6 +1953,21 @@ mod tests {
         };
         let summary = RunJsonSummary::from_parts(
             ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
+            "hostname-443-transform".to_string(),
+            "native-roots".to_string(),
+            Some(ReceiptTransparentNetworkIdentity {
+                protocol_version: "1.0".to_string(),
+                host_authority_binary_sha256: "a".repeat(64),
+                guest_bridge_binary_sha256: "b".repeat(64),
+                transform_routes: vec![ReceiptTransformRouteIdentity {
+                    target_host: "api.example.com".to_string(),
+                    plugins: vec![ReceiptTransformPluginIdentity {
+                        plugin_id: "audit".to_string(),
+                        manifest_sha256: "c".repeat(64),
+                    }],
+                }],
+                effective_network_policy_sha256: "d".repeat(64),
+            }),
             &output,
             Some(PathBuf::from("/tmp/receipt.json")),
         );
@@ -1845,6 +1975,10 @@ mod tests {
         assert!(json.contains("stdout_sha256"));
         assert!(json.contains("stderr_sha256"));
         assert!(json.contains("/tmp/receipt.json"));
+        assert!(json.contains("hostname-443-transform"));
+        assert!(json.contains("native-roots"));
+        assert!(json.contains("\"transparent_network_identity\""));
+        assert!(json.contains("\"plugin_id\":\"audit\""));
         assert!(!json.contains("sensitive stdout"));
         assert!(!json.contains("sensitive stderr"));
     }
@@ -1892,19 +2026,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let receipt_path = dir.path().join("receipt.json");
         let pubkey_path = dir.path().join("host.pub");
-        let signing = {
-            let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
-            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
-        };
+        let signing = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         std::fs::write(&pubkey_path, signing.verifying_key().to_bytes()).expect("pubkey");
 
         let args = run_args(RunProfile::Standard);
         let payload = RunReceiptPayload {
-            schema_version: 1,
+            schema_version: 2,
             receipt_id: "receipt-1".to_string(),
             recorded_at: "2026-05-14T00:00:00Z".to_string(),
             invocation: ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
+            transparent_network_identity: None,
             outcome: ReceiptOutcome {
                 exit_code: 0,
                 success: true,
@@ -1940,19 +2071,16 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let receipt_path = dir.path().join("receipt.json");
         let pubkey_path = dir.path().join("host.pub");
-        let signing = {
-            let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
-            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
-        };
+        let signing = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         std::fs::write(&pubkey_path, signing.verifying_key().to_bytes()).expect("pubkey");
 
         let args = run_args(RunProfile::Standard);
         let mut payload = RunReceiptPayload {
-            schema_version: 1,
+            schema_version: 2,
             receipt_id: "receipt-1".to_string(),
             recorded_at: "2026-05-14T00:00:00Z".to_string(),
             invocation: ReceiptInput::from_run_args(&args, "firecracker").expect("receipt input"),
+            transparent_network_identity: None,
             outcome: ReceiptOutcome {
                 exit_code: 0,
                 success: true,
@@ -1984,6 +2112,150 @@ mod tests {
         let err = verify_run_receipt(&receipt_path, Some(&pubkey_path))
             .expect_err("tampered receipt rejected");
         assert!(err.to_string().contains("signature verification failed"));
+    }
+
+    #[test]
+    fn configured_transform_route_identities_follow_transparent_tls_chain() {
+        let plan = mvm_core::plan::synthesize_plan(&SynthesisInput {
+            vm_name: "vm-test",
+            tenant: Some("local"),
+            backend_name: "hvf",
+            image_name: "vm-test",
+            image_sha256: &"a".repeat(64),
+            image_cosign_bundle: None,
+            intent: None,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            network_policy_ref: None,
+            fs_policy_ref: None,
+            egress_policy_ref: None,
+            tool_policy_ref: None,
+            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            secrets: vec![mvm_core::plan::SecretBinding {
+                name: "API_TOKEN".to_string(),
+                source: mvm_core::plan::SecretSource::Static {
+                    value: "sk-live-12345".to_string(),
+                },
+                guest_mount: Some(mvm_core::plan::SecretGuestMount::Env {
+                    var: "API_TOKEN".to_string(),
+                }),
+                allowed_hosts: vec!["api.example.com".to_string()],
+            }],
+            auth: mvm_core::plan::AuthPolicy::none(),
+            audit_event_prefix: None,
+            cpus: 2,
+            mem_mib: 512,
+            disk_mib: 0,
+            boot_timeout_secs: 60,
+            exec_timeout_secs: 0,
+            destroy_on_exit: true,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            audit_labels: Default::default(),
+            agent_verbs: None,
+            build_provenance: None,
+        })
+        .expect("plan");
+        let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("api.example.com", 443),
+        ]);
+
+        let routes = configured_transform_route_identities(&plan, &policy)
+            .expect("route identities should build");
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].target_host, "api.example.com");
+        assert_eq!(routes[0].plugins.len(), 4);
+        assert_eq!(routes[0].plugins[0].plugin_id, "audit");
+        assert_eq!(routes[0].plugins[1].plugin_id, "secret-replacement");
+        assert_eq!(routes[0].plugins[2].plugin_id, "metadata-endpoint-deny");
+        assert_eq!(routes[0].plugins[3].plugin_id, "response-leak-guard");
+        assert!(
+            routes[0]
+                .plugins
+                .iter()
+                .all(|plugin| plugin.manifest_sha256.len() == 64)
+        );
+    }
+
+    #[test]
+    fn guest_bridge_binary_sha256_for_receipt_prefers_admitted_build_provenance() {
+        let expected = "1234abcd".repeat(8);
+        let plan = mvm_core::plan::synthesize_plan(&SynthesisInput {
+            vm_name: "vm-prov",
+            tenant: Some("local"),
+            backend_name: "hvf",
+            image_name: "vm-prov",
+            image_sha256: &"b".repeat(64),
+            image_cosign_bundle: None,
+            intent: None,
+            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
+            network_policy_ref: None,
+            fs_policy_ref: None,
+            egress_policy_ref: None,
+            tool_policy_ref: None,
+            secret_release: mvm_core::plan::SecretReleasePolicy::default(),
+            secrets: Vec::new(),
+            auth: mvm_core::plan::AuthPolicy::none(),
+            audit_event_prefix: None,
+            cpus: 2,
+            mem_mib: 512,
+            disk_mib: 0,
+            boot_timeout_secs: 60,
+            exec_timeout_secs: 0,
+            destroy_on_exit: true,
+            bundle_pin: None,
+            deps_volume: None,
+            shares: Vec::new(),
+            redaction: mvm_core::policy::RedactionPolicy::default(),
+            audit_labels: Default::default(),
+            agent_verbs: None,
+            build_provenance: Some(mvm_core::plan::BuildProvenance {
+                input_kind: mvm_core::plan::InputKind::Oci,
+                input_ref: "busybox:latest".to_string(),
+                lock_digest: None,
+                builder_id: None,
+                artifacts: mvm_core::plan::ArtifactDigests {
+                    mvm_netd: Some(expected.clone()),
+                    ..Default::default()
+                },
+            }),
+        })
+        .expect("plan");
+
+        let actual = guest_bridge_binary_sha256_for_receipt(&plan).expect("guest bridge sha");
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn transient_build_provenance_carries_rootfs_digest() {
+        let expected_rootfs = "9".repeat(64);
+        let provenance = transient_build_provenance(
+            &TransientBuildProvenanceSeed {
+                input_kind: mvm_core::plan::InputKind::NixTemplate,
+                input_ref: "default-microvm".to_string(),
+                lock_digest: None,
+            },
+            &expected_rootfs,
+        )
+        .expect("provenance");
+
+        assert_eq!(
+            provenance.artifacts.rootfs.as_deref(),
+            Some(expected_rootfs.as_str())
+        );
+        assert!(provenance.artifacts.mvm_netd.is_some());
+    }
+
+    #[test]
+    fn transient_exec_build_provenance_classifies_local_rootfs_dir_source() {
+        let seed =
+            transient_exec_build_provenance(None, Some("rootfs-dir:/tmp/rootfs")).expect("seed");
+
+        assert_eq!(seed.input_kind, mvm_core::plan::InputKind::LocalProject);
+        assert_eq!(seed.input_ref, "rootfs-dir:/tmp/rootfs");
+        assert_eq!(seed.lock_digest, None);
     }
 
     #[test]

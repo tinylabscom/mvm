@@ -4,11 +4,6 @@
 //! `persists_plan_before_start`, `resolve_workload_kernel`, `untrusted_transient_admit`,
 //! and `load_workload_ir`.
 
-use crate::commands::runtime_overlay::{
-    RuntimeOverlayAcquireMode, RuntimeOverlayAcquireParams, acquire_runtime_overlay,
-    runtime_overlay_acquire_mode, runtime_overlay_source_checkout_root,
-};
-use crate::ui;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
@@ -16,11 +11,10 @@ use mvm_backend::backend::AnyBackend;
 use mvm_backend::image;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::naming::validate_vm_name;
-use mvm_core::security::{AgentProfile, SecurityPolicy};
 
-use super::super::env::dev_vz::{ensure_workload_kernel, ensure_workload_verity_initrd};
+use super::super::env::dev_vz::ensure_workload_kernel;
 use super::audit_chain::{AuditEmitter, default_audit_dir};
-use super::host_signer::{PUBLIC_FILENAME, load_or_init_at};
+use super::host_signer::load_or_init_at;
 use super::policy_resolver::{
     LOCAL_DEFAULT, ResolveError, resolve_policy_bundle, resolve_policy_bundle_with_dir,
     resolve_supervisor_components, resolve_supervisor_components_with_dir,
@@ -63,8 +57,6 @@ impl mvm_core::plan::BundleResolver for InMemoryBundleResolver {
 
 use super::readiness::record_vm_readiness;
 
-pub(super) const SECURITY_POLICY_FILENAME: &str = "security-policy.json";
-
 /// Build a `PlanArtifact` pin from a verified bundle archive.
 /// Pulls the 64-byte signature out of the `manifest.sig` entry,
 /// hashes the archive for the bundle_sha256 field, and stamps the
@@ -103,6 +95,10 @@ pub(super) struct AdmitPlanForBootParams<'a> {
     pub vm_name: &'a str,
     pub backend_name: &'a str,
     pub rootfs_path: &'a std::path::Path,
+    /// Optional build provenance to thread into the synthesized signed plan for
+    /// this boot. `None` preserves the legacy "no build provenance recorded"
+    /// behavior for callers that do not yet have an authoritative source.
+    pub build_provenance: Option<mvm_core::plan::BuildProvenance>,
     /// Skip re-hashing `rootfs_path` and admit with this sha256 instead.
     /// Only sound when a fail-closed integrity check re-hashes the same
     /// bytes before boot (the checkpoint fork path: `verify_content`
@@ -346,7 +342,6 @@ pub(super) struct AdmissionContext {
     /// The resolved tenant `PolicyBundle` (Slice 3 (b)) the bridge enforces
     /// per-tenant L4 egress against; `None` for a local-default plan.
     pub(super) policy_bundle: Option<PolicyBundle>,
-    pub(super) host_signer_public_path: std::path::PathBuf,
 }
 
 // allow(secret-debug): hand-written Debug elides the AuditEmitter's
@@ -472,7 +467,6 @@ pub(super) fn admit_plan_for_boot(
         deps_volume: p.deps_volume.clone(),
         shares: p.shares.clone(),
         redaction: p.redaction.clone(),
-        reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
         audit_labels: Default::default(),
         agent_verbs: super::agent_verbs::parse_agent_verb_override(&p.agent_verb_override)?
             .or_else(|| {
@@ -481,6 +475,7 @@ pub(super) fn admit_plan_for_boot(
                     !p.shares.is_empty(),
                 )
             }),
+        build_provenance: p.build_provenance.clone(),
     };
     let admission_ctx = match (&bundle_resolver, &bundle_trust) {
         (Some(r), Some(t)) => Some(BundleAdmissionContext {
@@ -613,113 +608,7 @@ pub(super) fn admit_plan_for_boot(
         admitted,
         emitter,
         policy_bundle,
-        host_signer_public_path: signer.public_path,
     }))
-}
-
-pub(super) fn guest_profile_for_boot(
-    is_dev_mode: bool,
-    rootfs_path: &std::path::Path,
-) -> AgentProfile {
-    if is_dev_mode || !super::agent_verbs::image_is_sealed(rootfs_path) {
-        AgentProfile::Dev
-    } else {
-        AgentProfile::SealedProd
-    }
-}
-
-fn security_policy_for_profile(profile: AgentProfile) -> SecurityPolicy {
-    match profile {
-        AgentProfile::SealedProd => SecurityPolicy::default(),
-        AgentProfile::Dev => SecurityPolicy::dev_defaults(),
-        AgentProfile::Builder => SecurityPolicy {
-            profile: AgentProfile::Builder,
-            ..SecurityPolicy::default()
-        },
-    }
-}
-
-pub(super) fn attach_guest_security_policy_config(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    profile: AgentProfile,
-) -> Result<()> {
-    let content = serde_json::to_string(&security_policy_for_profile(profile))
-        .context("serializing guest security policy for config drive")?;
-    start_config
-        .config_files
-        .retain(|f| f.name != SECURITY_POLICY_FILENAME);
-    start_config
-        .config_files
-        .push(mvm_core::vm_backend::VmFile {
-            name: SECURITY_POLICY_FILENAME.to_string(),
-            content,
-            mode: 0o444,
-        });
-    Ok(())
-}
-
-pub(super) fn attach_guest_boot_config_for_plan(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    plan: &mvm_core::plan::ExecutionPlan,
-    host_signer_public_path: &std::path::Path,
-    profile: AgentProfile,
-) -> Result<()> {
-    attach_host_signer_pubkey_config_for_plan(start_config, plan, host_signer_public_path)?;
-    attach_guest_security_policy_config(start_config, profile)
-}
-
-pub(super) fn attach_guest_boot_config(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    admission: &AdmissionContext,
-    profile: AgentProfile,
-) -> Result<()> {
-    attach_guest_boot_config_for_plan(
-        start_config,
-        &admission.admitted.plan,
-        &admission.host_signer_public_path,
-        profile,
-    )
-}
-
-pub(super) fn attach_host_signer_pubkey_config_for_plan(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    plan: &mvm_core::plan::ExecutionPlan,
-    host_signer_public_path: &std::path::Path,
-) -> Result<()> {
-    if plan.agent_verbs.is_none() {
-        return Ok(());
-    }
-    let public_bytes = std::fs::read(host_signer_public_path).with_context(|| {
-        format!(
-            "reading host-signer public key for config drive at {}",
-            host_signer_public_path.display()
-        )
-    })?;
-    let public_array: [u8; 32] = public_bytes.as_slice().try_into().map_err(|_| {
-        anyhow::anyhow!(
-            "host-signer public key at {} must be 32 bytes, got {}",
-            host_signer_public_path.display(),
-            public_bytes.len()
-        )
-    })?;
-    ed25519_dalek::VerifyingKey::from_bytes(&public_array).with_context(|| {
-        format!(
-            "parsing host-signer public key at {}",
-            host_signer_public_path.display()
-        )
-    })?;
-    let content = format!("{}\n", hex::encode(public_bytes));
-    start_config
-        .config_files
-        .retain(|f| f.name != PUBLIC_FILENAME);
-    start_config
-        .config_files
-        .push(mvm_core::vm_backend::VmFile {
-            name: PUBLIC_FILENAME.to_string(),
-            content,
-            mode: 0o444,
-        });
-    Ok(())
 }
 
 /// Build the boot-time admission hook for an **untrusted transient run** —
@@ -735,7 +624,6 @@ pub(super) fn attach_host_signer_pubkey_config_for_plan(
 /// `SessionAuditSubstrate` (tenant + signed plan) the exec layer hands to the
 /// backend, persisting the bare plan first on the backends that read it from
 /// disk before `start()`.
-#[cfg(feature = "mcp")]
 pub(in crate::commands) fn untrusted_transient_admit(
     backend_name: String,
     cpus: u32,
@@ -747,7 +635,6 @@ pub(in crate::commands) fn untrusted_transient_admit(
 /// [`untrusted_transient_admit`] with explicit signer / audit directories so
 /// tests can admit against isolated `TempDir`s; production passes `None` (the
 /// default `~/.mvm` locations).
-#[cfg(any(feature = "mcp", test))]
 fn untrusted_transient_admit_in(
     backend_name: String,
     cpus: u32,
@@ -762,6 +649,7 @@ fn untrusted_transient_admit_in(
             vm_name,
             backend_name: &backend_name,
             rootfs_path: rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus,
             mem_mib,
@@ -798,7 +686,6 @@ fn untrusted_transient_admit_in(
             tenant_id: c.admitted.plan.tenant.0.clone(),
             plan_json,
             bundle_json: None,
-            config_files: vec![],
         }))
     }
 }
@@ -958,18 +845,13 @@ pub(super) fn emit_launched_if(ctx: &Option<AdmissionContext>, backend: &str) {
 pub(super) fn emit_boot_posture_if(
     ctx: &Option<AdmissionContext>,
     strategy: mvm_build::run_image::RootStrategy,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
 ) {
     let Some(ctx) = ctx else { return };
     let label = match strategy {
         mvm_build::run_image::RootStrategy::VirtiofsRoot => "virtiofs-root",
         mvm_build::run_image::RootStrategy::BlockExt4 => "block-ext4",
     };
-    if let Err(e) = ctx.emitter.emit_boot_posture(
-        &ctx.admitted.plan,
-        label,
-        runtime_source_policy.audit_label(),
-    ) {
+    if let Err(e) = ctx.emitter.emit_boot_posture(&ctx.admitted.plan, label) {
         tracing::warn!(error = %e, "audit emit_boot_posture failed (non-fatal)");
     }
 }
@@ -1013,7 +895,7 @@ pub(super) fn emit_failed_if(ctx: &Option<AdmissionContext>, class: &str, err: &
 ///
 /// QEMU is excluded: it reads the in-memory config and must not overwrite the
 /// persisted plan.
-pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
+pub(super) fn persists_plan_before_start(hypervisor: &str) -> bool {
     matches!(hypervisor, "firecracker" | "vz" | "libkrun" | "hvf")
 }
 
@@ -1216,7 +1098,7 @@ pub(in crate::commands) struct Args {
     #[arg(long = "up-json")]
     pub up_json: bool,
     /// Pin the workload kernel to the locally-built slim kernel in the mvm
-    /// cache (`mvmctl kernel build --which workload`). When set, the
+    /// cache (`mvmctl build kernel build --which workload`). When set, the
     /// boot path uses the cached workload kernel instead of whatever the
     /// image shipped; the image's own kernel file is ignored. If the cache
     /// entry is absent, the boot fails with a clear build hint.
@@ -1240,8 +1122,8 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     pub volumes: &'a [image::RuntimeVolume],
     pub network_policy: mvm_core::network_policy::NetworkPolicy,
     pub auth: mvm_core::plan::AuthPolicy,
-    /// Concrete backend selected by the caller.
-    pub backend_name: &'a str,
+    /// Override the backend (test escape; `None` = auto-detect).
+    pub hypervisor_override: Option<&'a str>,
     /// Skip plan-admission signing (test escape).
     pub no_supervisor: bool,
     /// Pre-built kernel path: skips `ensure_workload_kernel` when set.
@@ -1255,45 +1137,6 @@ pub(in crate::commands) struct PersistentImageStartParams<'a> {
     /// carry an attenuated ProdSafe-only grant. Baked-entrypoint boots (no
     /// trailing argv, non-dev profile) may still receive the grant.
     pub has_ad_hoc_argv: bool,
-}
-
-fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) -> bool {
-    let runtime_lean = rootfs_path
-        .parent()
-        .and_then(|dir| {
-            mvm_build::builder_vm::GuestSidecar::read_from_dir(dir)
-                .ok()
-                .flatten()
-        })
-        .map(|sidecar| sidecar.runtime_lean)
-        .unwrap_or(false);
-    let (verity_path, roothash) =
-        mvm_backend::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
-    runtime_lean && verity_path.is_some() && roothash.is_some()
-}
-
-pub(crate) fn persistent_oci_effective_initrd(
-    rootfs_path: &std::path::Path,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-) -> Result<Option<String>> {
-    if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        && runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
-        && super::super::env::dev_vz::find_builder_vm_flake_is_source_checkout()
-    {
-        return Ok(Some(ensure_workload_verity_initrd()?));
-    }
-    let sibling = rootfs_path
-        .parent()
-        .map(|dir| dir.join("rootfs.initrd"))
-        .filter(|path| path.is_file())
-        .map(|path| path.display().to_string());
-    if sibling.is_some() {
-        return Ok(sibling);
-    }
-    if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay {
-        return Ok(Some(ensure_workload_verity_initrd()?));
-    }
-    Ok(None)
 }
 
 fn register_vm_name(vm_name: &str, network_name: &str) {
@@ -1329,51 +1172,38 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         volumes,
         network_policy,
         auth,
-        backend_name,
+        hypervisor_override,
         no_supervisor,
         kernel_path,
         agent_verb,
         has_ad_hoc_argv,
     } = params;
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    register_vm_name(name, "default");
-    let image_sealed = super::agent_verbs::image_is_sealed(rootfs_path);
-    let overlay_required_oci = persistent_oci_rootfs_requires_overlay_policy(rootfs_path);
-    let (verity_path, roothash) =
-        mvm_backend::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
-    let runtime_source_policy = mvm_core::vm_backend::select_runtime_source_policy(
-        mvm_core::vm_backend::RuntimeSourcePolicySelection {
-            backend_name: Some(backend_name),
-            sealed: image_sealed || overlay_required_oci,
-            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-            launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-        },
-    );
+    let effective_hypervisor = hypervisor_override
+        .map(String::from)
+        .unwrap_or_else(|| super::shared::resolve_effective_hypervisor("firecracker"));
     let kernel_path = if let Some(k) = kernel_path {
         k
     } else {
-        // Required-overlay OCI boots must stay on the workload/prod kernel lane
-        // even if the machine profile is `dev`, otherwise a runtime-lean sealed
-        // root can silently boot with a dev-tier kernel cache fallback.
-        //
         // The rootfs is supplied (OCI image / manifest); we need only a kernel.
         // Resolve just the workload kernel — same as the transient OCI path
         // (`exec.rs`) — rather than building/downloading a whole default-microvm
-        // image whose rootfs we'd discard.
-        ensure_workload_kernel(persistent_oci_uses_prod_kernel(
-            profile,
-            runtime_source_policy,
-        ))?
+        // image whose 220 MB rootfs we'd discard. This runtime path never builds
+        // Stage 0 or compiles a workload kernel: dev may reuse an existing
+        // builder kernel, while sealed/prod uses a cached workload kernel or the
+        // published workload-kernel download.
+        ensure_workload_kernel(profile != "dev")?
     };
-    let initrd_path = persistent_oci_effective_initrd(rootfs_path, runtime_source_policy)?;
+    register_vm_name(name, "default");
 
-    let backend = AnyBackend::from_hypervisor(backend_name);
+    let backend = AnyBackend::from_workload_hypervisor(&effective_hypervisor);
     let admission_ledger = InMemoryNonceLedger::new();
     let admission = admit_plan_for_boot(AdmitPlanForBootParams {
         tenant: "local",
         vm_name: name,
-        backend_name,
+        backend_name: &effective_hypervisor,
         rootfs_path,
+        build_provenance: None,
         precomputed_image_sha256: None,
         cpus,
         mem_mib: u64::from(memory_mib),
@@ -1399,16 +1229,16 @@ pub(in crate::commands) fn start_persistent_oci_machine(
             false,
             has_ad_hoc_argv,
             profile == "dev",
-            image_sealed,
+            super::agent_verbs::image_is_sealed(rootfs_path),
         ),
     })?;
     let mut start_config = VmStartParams {
         name: name.to_string(),
         rootfs_path: rootfs_path.display().to_string(),
         vmlinux_path: kernel_path,
-        initrd_path,
-        verity_path,
-        roothash,
+        initrd_path: None,
+        verity_path: None,
+        roothash: None,
         revision_hash: resolved_digest.to_string(),
         flake_ref: format!("oci:{image_label}"),
         profile: Some(profile.to_string()),
@@ -1425,7 +1255,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         network_policy,
     }
     .into_start_config();
-    start_config.runtime_source_policy = runtime_source_policy;
     // A persistent named/detached machine is dev-accessible for its lifetime:
     // `machine run -t` boots through here, and `machine shell` / `machine
     // console` attach to it later. Pre-open the interactive-console data range
@@ -1434,14 +1263,11 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     // guest at the agent + `enforce_accessible_gate`, leaving the listeners
     // inert there.
     start_config.dev_console = true;
-    attach_runtime_overlay_if_cached(&mut start_config, backend_name)?;
-    emit_runtime_source_status(&start_config);
+    attach_runtime_overlay_if_cached(&mut start_config, &effective_hypervisor);
     if let Some(ctx) = admission.as_ref() {
         thread_tenant_id(&mut start_config, &ctx.admitted);
         populate_audit_substrate(&mut start_config, &ctx.admitted, ctx.policy_bundle.as_ref())?;
-        let guest_profile = guest_profile_for_boot(profile == "dev", rootfs_path);
-        attach_guest_boot_config(&mut start_config, ctx, guest_profile)?;
-        if persists_plan_before_start(backend_name) {
+        if persists_plan_before_start(&effective_hypervisor) {
             stash_plan_for_bridge(&start_config)?;
         }
     }
@@ -1454,117 +1280,37 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         emit_failed_if(&admission, "backend-start", &err);
         return Err(err);
     }
-    emit_launched_if(&admission, backend_name);
+    emit_launched_if(&admission, &effective_hypervisor);
     record_vm_readiness(name, InstanceReadiness::LaunchAccepted);
     mvm_core::audit_emit!(VmStart, vm: name);
     Ok(())
 }
 
-fn persistent_oci_uses_prod_kernel(
-    profile: &str,
-    runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
-) -> bool {
-    profile != "dev"
-        || runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeSourceStatus {
-    OverlayRequired,
-    OverlayPreferred,
-    OverlayPreferredFallbackUsed,
-    RootfsOnlyByPolicy,
-}
-
-impl RuntimeSourceStatus {
-    pub(crate) fn label(self) -> &'static str {
-        match self {
-            Self::OverlayRequired => "overlay-required",
-            Self::OverlayPreferred => "overlay-preferred",
-            Self::OverlayPreferredFallbackUsed => "overlay-preferred-fallback-used",
-            Self::RootfsOnlyByPolicy => "rootfs-only-by-policy",
-        }
-    }
-}
-
-pub(crate) fn resolve_runtime_source_status(
-    start_config: &mvm_core::vm_backend::VmStartConfig,
-) -> RuntimeSourceStatus {
-    match start_config.runtime_source_policy {
-        mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay => {
-            RuntimeSourceStatus::OverlayRequired
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay => {
-            if start_config.runtime_overlay_path.is_some()
-                && start_config.runtime_overlay_verity_path.is_some()
-                && start_config.runtime_overlay_roothash.is_some()
-            {
-                RuntimeSourceStatus::OverlayPreferred
-            } else {
-                RuntimeSourceStatus::OverlayPreferredFallbackUsed
-            }
-        }
-        mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly => {
-            RuntimeSourceStatus::RootfsOnlyByPolicy
-        }
-    }
-}
-
-pub(crate) fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::VmStartConfig) {
-    let status = resolve_runtime_source_status(start_config);
-    tracing::info!(
-        runtime_source_status = status.label(),
-        runtime_source_policy = start_config.runtime_source_policy.audit_label(),
-        overlay_attached = start_config.runtime_overlay_path.is_some(),
-        "resolved guest runtime source"
-    );
-    ui::info(&format!("Runtime source: {}", status.label()));
-}
-
-fn apply_runtime_overlay_artifact(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    artifact: mvm_build::runtime_overlay::RuntimeOverlayArtifact,
-) {
-    start_config.runtime_overlay_path = Some(artifact.overlay_ext4.display().to_string());
-    start_config.runtime_overlay_verity_path = Some(artifact.sidecar.display().to_string());
-    start_config.runtime_overlay_version = Some(artifact.version);
-    start_config.runtime_overlay_roothash = Some(artifact.roothash);
-}
-
 /// Attach the verity-sealed runtime overlay by
 /// populating `VmStartConfig`'s overlay fields from the resolver's cache
-/// probe. Backends that can consume the sealed overlay attach it as extra
-/// read-only block devices and thread the matching roothash through the
-/// guest cmdline; unsupported backends ignore the fields.
+/// probe. **Firecracker-only**: it's the sole backend that attaches the
+/// overlay (a second virtio-blk + `mvm.runtime_roothash=` on the cmdline);
+/// libkrun/Vz ignore the fields, so we skip them.
 /// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
 /// fields `None` and the VM boots legacy. `resolve()` is a pure cache read
 /// — no build, no download, no `nix` — so this is safe on every host.
-pub(crate) fn attach_runtime_overlay(
+fn attach_runtime_overlay(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
     resolver: &mvm_build::runtime_overlay::RuntimeOverlayResolver,
     arch: mvm_core::arch::GuestArch,
-) -> Result<()> {
-    if !matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun") {
-        return Ok(());
+) {
+    if hypervisor != "firecracker" {
+        return;
     }
     match resolver.resolve(arch) {
         Ok(a) => {
-            apply_runtime_overlay_artifact(start_config, a);
-            Ok(())
+            start_config.runtime_overlay_path = Some(a.overlay_ext4.display().to_string());
+            start_config.runtime_overlay_verity_path = Some(a.sidecar.display().to_string());
+            start_config.runtime_overlay_roothash = Some(a.roothash);
         }
-        Err(e) => {
-            if start_config.runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-            {
-                anyhow::bail!(
-                    "runtime overlay required for {hypervisor} boot but unavailable: {e}"
-                );
-            }
-            // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
-            tracing::debug!(backend = hypervisor, error = %e, "runtime overlay not attached");
-            Ok(())
-        }
+        // Cold cache / dev rootfs / version drift — boot legacy, don't fail.
+        Err(e) => tracing::debug!(error = %e, "runtime overlay not attached (firecracker)"),
     }
 }
 
@@ -1606,7 +1352,7 @@ pub(super) fn resolve_workload_kernel(
     anyhow::bail!(
         "image has no kernel ({vmlinux_path} missing) and the {hypervisor} backend \
          needs one; the builder-VM kernel fallback at {fallback} is also absent — \
-         run `mvmctl bootstrap` once to populate it"
+         run `mvmctl dev up` once to bootstrap it"
     )
 }
 
@@ -1622,55 +1368,21 @@ pub(super) fn resolve_pinned_kernel(
     arch: &str,
     source_checkout: bool,
 ) -> anyhow::Result<String> {
-    resolve_pinned_kernel_with(cache_dir, arch, source_checkout, download_published_kernel)
-}
-
-#[cfg(feature = "builder-vm")]
-fn download_published_kernel(
-    arch: &str,
-    variant: &str,
-    dest: &std::path::Path,
-) -> anyhow::Result<()> {
-    crate::update::download_kernel(arch, variant, dest)
-}
-
-#[cfg(not(feature = "builder-vm"))]
-fn download_published_kernel(
-    _arch: &str,
-    _variant: &str,
-    _dest: &std::path::Path,
-) -> anyhow::Result<()> {
-    anyhow::bail!(
-        "kernel-pin: downloading published workload kernels requires mvm-cli's builder-vm feature"
-    )
-}
-
-fn resolve_pinned_kernel_with<F>(
-    cache_dir: &std::path::Path,
-    arch: &str,
-    source_checkout: bool,
-    download_kernel: F,
-) -> anyhow::Result<String>
-where
-    F: Fn(&str, &str, &std::path::Path) -> anyhow::Result<()>,
-{
     use mvm_build::kernel_fetch::{KernelResolution, resolve_kernel};
     match resolve_kernel(cache_dir, arch, "workload", source_checkout) {
         KernelResolution::Cached(p) => Ok(p.display().to_string()),
         KernelResolution::NeedsBuild(p) => {
             anyhow::bail!(
                 "kernel-pin: workload kernel not built yet (expected at {}); \
-                 run `mvmctl kernel build --which workload` first",
+                 run `mvmctl build kernel build --which workload` first",
                 p.display()
             )
         }
-        KernelResolution::NeedsFetch(p) => {
-            download_kernel(arch, "workload", &p).map_err(|err| {
-                anyhow::anyhow!(
-                    "kernel-pin: downloading the published workload kernel for {arch} failed: {err:#}"
-                )
-            })?;
-            Ok(p.display().to_string())
+        KernelResolution::NeedsFetch(_) => {
+            anyhow::bail!(
+                "kernel-pin: fetching pre-built workload kernels is not yet supported on \
+                 installed binaries; build from source or omit --kernel-pin"
+            )
         }
     }
 }
@@ -1701,172 +1413,28 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
 /// Production wrapper: build the resolver from the mvm cache dir + the
 /// running mvmctl version, then attach for `hypervisor`. Called at each
 /// workload-boot `VmStartConfig` construction in [`run`].
-///
-/// Ordinary starts always re-resolve the overlay for the current host build.
-/// Callers that need same-version continuity across lifecycle state must use
-/// [`attach_runtime_overlay_if_cached_version`] with an explicit pin.
-pub(crate) fn attach_runtime_overlay_if_cached(
+fn attach_runtime_overlay_if_cached(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
-) -> Result<()> {
-    attach_runtime_overlay_if_cached_version(start_config, hypervisor, None)
-}
-
-pub(crate) fn attach_runtime_overlay_if_cached_version(
-    start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    hypervisor: &str,
-    expected_version: Option<&str>,
-) -> Result<()> {
-    let version = expected_version.unwrap_or(env!("CARGO_PKG_VERSION"));
-    let cache_root = std::path::PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let arch = mvm_core::arch::GuestArch::host();
-    if expected_version.is_none()
-        && start_config.runtime_source_policy
-            == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
-        && matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun")
-        && runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
-        && runtime_overlay_source_checkout_root().is_some()
-    {
-        let artifact = mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-            &cache_root,
-            version,
-            arch,
-        )?;
-        apply_runtime_overlay_artifact(start_config, artifact);
-        return Ok(());
-    }
+) {
     let resolver = mvm_build::runtime_overlay::RuntimeOverlayResolver::new(
-        cache_root.clone(),
-        version.to_string(),
+        std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()),
+        env!("CARGO_PKG_VERSION").to_string(),
     );
-    match attach_runtime_overlay(start_config, hypervisor, &resolver, arch) {
-        Ok(()) => Ok(()),
-        Err(_err)
-            if start_config.runtime_source_policy
-                == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay =>
-        {
-            if expected_version.is_some() {
-                return Err(anyhow::anyhow!(
-                    "runtime overlay version {version} is required for this boot and was not found in the local cache"
-                ));
-            }
-            let acquire_mode = runtime_overlay_acquire_mode();
-            let source_checkout_root = match acquire_mode {
-                RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-                    runtime_overlay_source_checkout_root()
-                }
-                RuntimeOverlayAcquireMode::DownloadPublishedArtifact => None,
-            };
-            match acquire_mode {
-                RuntimeOverlayAcquireMode::BuildFromSourceCheckout => {
-                    ui::info(
-                        "Runtime overlay missing from cache; building it from the source checkout...",
-                    );
-                }
-                RuntimeOverlayAcquireMode::DownloadPublishedArtifact => {
-                    ui::info(
-                        "Runtime overlay missing from cache; downloading the published artifact now...",
-                    );
-                }
-            }
-            let artifact = acquire_runtime_overlay(&RuntimeOverlayAcquireParams {
-                cache_root: &cache_root,
-                expected_version: version,
-                arch,
-                source_checkout_root: source_checkout_root.as_deref(),
-            })?;
-            apply_runtime_overlay_artifact(start_config, artifact);
-            tracing::info!(
-                runtime_overlay_version = version,
-                backend = hypervisor,
-                "runtime overlay cache populated for required-overlay boot"
-            );
-            Ok(())
-        }
-        Err(err) => Err(err),
-    }
+    attach_runtime_overlay(
+        start_config,
+        hypervisor,
+        &resolver,
+        mvm_core::arch::GuestArch::host(),
+    );
 }
 
 #[cfg(test)]
 mod runtime_overlay_attach_tests {
     use super::*;
-    use crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
     use mvm_build::runtime_overlay::RuntimeOverlayResolver;
     use mvm_core::arch::GuestArch;
-    use mvm_core::util::test_env::TestEnv;
-    use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
-    use mvm_ext4::Node;
-    use sha2::{Digest, Sha256};
-
-    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn valid_overlay_ext4_bytes(version: &str, include_egress_client: bool) -> Vec<u8> {
-        let mut nodes = vec![
-            Node::File {
-                path: "/agent".into(),
-                mode: 0o555,
-                data: b"agent".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/agent-dev-shell".into(),
-                mode: 0o555,
-                data: b"agent-dev".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/netinit".into(),
-                mode: 0o555,
-                data: b"netinit".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/netd".into(),
-                mode: 0o555,
-                data: b"netd".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/seccomp-apply".into(),
-                mode: 0o555,
-                data: b"seccomp".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/runner".into(),
-                mode: 0o555,
-                data: b"runner".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/addon-dns".into(),
-                mode: 0o555,
-                data: b"addon-dns".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/exit-report".into(),
-                mode: 0o555,
-                data: b"exit-report".to_vec(),
-                xattrs: Vec::new(),
-            },
-            Node::File {
-                path: "/VERSION".into(),
-                mode: 0o444,
-                data: format!("{version}\n").into_bytes(),
-                xattrs: Vec::new(),
-            },
-        ];
-        if include_egress_client {
-            nodes.push(Node::File {
-                path: "/egress-client".into(),
-                mode: 0o555,
-                data: b"egress".to_vec(),
-                xattrs: Vec::new(),
-            });
-        }
-        mvm_ext4::build_image(&nodes).expect("build valid overlay ext4 fixture")
-    }
+    use mvm_core::vm_backend::VmStartConfig;
 
     /// Stage a complete overlay cache entry (the four files the resolver
     /// validates) in the layout `resolve` expects.
@@ -1874,103 +1442,10 @@ mod runtime_overlay_attach_tests {
         let layout =
             RuntimeOverlayResolver::new(cache.to_path_buf(), version.to_string()).layout(arch);
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
-        let overlay_ext4 = valid_overlay_ext4_bytes(version, true);
-        let sidecar = b"verity-bytes";
-        let roothash = format!("{}\n", "a".repeat(64));
-        let version_text = format!("{version}\n");
-        std::fs::write(&layout.overlay_ext4, &overlay_ext4).unwrap();
-        std::fs::write(&layout.sidecar, sidecar).unwrap();
-        std::fs::write(&layout.roothash_file, &roothash).unwrap();
-        std::fs::write(&layout.version_file, &version_text).unwrap();
-        std::fs::write(
-            &layout.checksum_manifest_file,
-            format!(
-                "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
-                sha256_hex(&overlay_ext4),
-                sha256_hex(sidecar),
-                sha256_hex(roothash.as_bytes()),
-                sha256_hex(version_text.as_bytes()),
-            ),
-        )
-        .unwrap();
-        if let Some(workspace_root) =
-            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
-        {
-            let fingerprint =
-                mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
-                    &workspace_root,
-                )
-                .expect("compute runtime-overlay source fingerprint");
-            std::fs::write(
-                &layout.local_source_fingerprint_file,
-                format!("{fingerprint}\n"),
-            )
-            .unwrap();
-        }
-    }
-
-    fn sha256_hex(bytes: &[u8]) -> String {
-        let digest = Sha256::digest(bytes);
-        hex::encode(digest)
-    }
-
-    fn write_fixture(dir: &std::path::Path, name: &str, bytes: &[u8]) {
-        std::fs::write(dir.join(name), bytes).unwrap();
-    }
-
-    fn runtime_overlay_archive_bytes(
-        ext4_bytes: &[u8],
-        verity_bytes: &[u8],
-        roothash_bytes: &[u8],
-        version_bytes: &[u8],
-    ) -> Vec<u8> {
-        let checksums = format!(
-            "{}  overlay.ext4\n{}  overlay.verity\n{}  overlay.roothash\n{}  VERSION\n",
-            sha256_hex(ext4_bytes),
-            sha256_hex(verity_bytes),
-            sha256_hex(roothash_bytes),
-            sha256_hex(version_bytes),
-        );
-        let encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        let mut tar = tar::Builder::new(encoder);
-        append_archive_file(&mut tar, "overlay.ext4", ext4_bytes);
-        append_archive_file(&mut tar, "overlay.verity", verity_bytes);
-        append_archive_file(&mut tar, "overlay.roothash", roothash_bytes);
-        append_archive_file(&mut tar, "VERSION", version_bytes);
-        append_archive_file(&mut tar, "checksums-sha256.txt", checksums.as_bytes());
-        let encoder = tar.into_inner().unwrap();
-        encoder.finish().unwrap()
-    }
-
-    fn append_archive_file<W: std::io::Write>(tar: &mut tar::Builder<W>, path: &str, bytes: &[u8]) {
-        let mut header = tar::Header::new_gnu();
-        header.set_mode(0o644);
-        header.set_size(u64::try_from(bytes.len()).unwrap());
-        header.set_cksum();
-        tar.append_data(&mut header, path, bytes).unwrap();
-    }
-
-    fn seed_release_fixture(base: &std::path::Path, version: &str, arch: GuestArch) {
-        let names = mvm_build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch(arch);
-        let release_dir = base.join(format!("v{version}"));
-        std::fs::create_dir_all(&release_dir).unwrap();
-
-        let ext4_bytes = b"downloaded-ext4";
-        let verity_bytes = b"downloaded-verity";
-        let roothash_text = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n";
-        let version_text = format!("{version}\n");
-        let archive_bytes = runtime_overlay_archive_bytes(
-            ext4_bytes,
-            verity_bytes,
-            roothash_text,
-            version_text.as_bytes(),
-        );
-        write_fixture(&release_dir, &names.archive, &archive_bytes);
-        write_fixture(
-            &release_dir,
-            &names.archive_checksum,
-            format!("{}  {}\n", sha256_hex(&archive_bytes), names.archive).as_bytes(),
-        );
+        std::fs::write(&layout.overlay_ext4, b"ext4-bytes").unwrap();
+        std::fs::write(&layout.sidecar, b"verity-bytes").unwrap();
+        std::fs::write(&layout.roothash_file, format!("{}\n", "a".repeat(64))).unwrap();
+        std::fs::write(&layout.version_file, format!("{version}\n")).unwrap();
     }
 
     #[test]
@@ -1980,760 +1455,41 @@ mod runtime_overlay_attach_tests {
         let arch = GuestArch::host();
         seed_cache(dir.path(), ver, arch);
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap();
+        let mut sc = VmStartConfig::default();
+        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch);
         assert!(sc.runtime_overlay_path.is_some(), "ext4 path set");
         assert!(sc.runtime_overlay_verity_path.is_some(), "verity path set");
         assert_eq!(
             sc.runtime_overlay_roothash.as_deref(),
             Some("a".repeat(64).as_str())
         );
-        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
     }
 
     #[test]
-    fn hvf_with_cached_overlay_populates_all_three_fields() {
+    fn non_firecracker_backend_never_attaches() {
         let dir = tempfile::tempdir().unwrap();
         let ver = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
-        seed_cache(dir.path(), ver, arch);
+        seed_cache(dir.path(), ver, arch); // overlay IS cached…
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay(&mut sc, "hvf", &resolver, arch).unwrap();
-        assert!(sc.runtime_overlay_path.is_some());
-        assert!(sc.runtime_overlay_verity_path.is_some());
-        assert!(sc.runtime_overlay_roothash.is_some());
-        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
-    }
-
-    #[test]
-    fn libkrun_with_cached_overlay_populates_all_three_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let ver = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        seed_cache(dir.path(), ver, arch);
-        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap();
-        assert!(sc.runtime_overlay_path.is_some());
-        assert!(sc.runtime_overlay_verity_path.is_some());
-        assert!(sc.runtime_overlay_roothash.is_some());
-        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(ver));
-    }
-
-    #[test]
-    fn unsupported_backend_never_attaches() {
-        let dir = tempfile::tempdir().unwrap();
-        let ver = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        seed_cache(dir.path(), ver, arch);
-        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay(&mut sc, "mock", &resolver, arch).unwrap();
+        let mut sc = VmStartConfig::default();
+        attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch); // …but libkrun ignores it
         assert!(sc.runtime_overlay_path.is_none());
         assert!(sc.runtime_overlay_roothash.is_none());
     }
 
     #[test]
     fn firecracker_cold_cache_leaves_fields_unset_non_fatal() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap(); // empty cache
-        let home = tempfile::tempdir().unwrap();
-        env.set("HOME", home.path());
         let ver = env!("CARGO_PKG_VERSION");
         let arch = GuestArch::host();
         let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap();
+        let mut sc = VmStartConfig::default();
+        attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch);
         assert!(
             sc.runtime_overlay_path.is_none(),
             "cold cache must not attach (legacy boot)"
         );
-    }
-
-    #[test]
-    fn firecracker_cold_cache_errors_when_overlay_is_required() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap(); // empty cache
-        let home = tempfile::tempdir().unwrap();
-        env.set("HOME", home.path());
-        let ver = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        let err = attach_runtime_overlay(&mut sc, "firecracker", &resolver, arch).unwrap_err();
-        assert!(err.to_string().contains("runtime overlay required"));
-    }
-
-    #[test]
-    fn hvf_cold_cache_errors_when_overlay_is_required() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        env.set("HOME", home.path());
-        let ver = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        let err = attach_runtime_overlay(&mut sc, "hvf", &resolver, arch).unwrap_err();
-        assert!(err.to_string().contains("runtime overlay required"));
-        assert!(err.to_string().contains("hvf"));
-    }
-
-    #[test]
-    fn libkrun_cold_cache_errors_when_overlay_is_required() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        env.set("HOME", home.path());
-        let ver = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        let err = attach_runtime_overlay(&mut sc, "libkrun", &resolver, arch).unwrap_err();
-        assert!(err.to_string().contains("runtime overlay required"));
-        assert!(err.to_string().contains("libkrun"));
-    }
-
-    #[test]
-    fn qemu_with_cached_overlay_populates_all_three_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        let ver = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        seed_cache(dir.path(), ver, arch);
-        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay(&mut sc, "qemu", &resolver, arch).unwrap();
-        assert!(sc.runtime_overlay_path.is_some());
-        assert!(sc.runtime_overlay_verity_path.is_some());
-        assert!(sc.runtime_overlay_roothash.is_some());
-    }
-
-    #[test]
-    fn qemu_cold_cache_errors_when_overlay_is_required() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        env.set("HOME", home.path());
-        let ver = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        let resolver = RuntimeOverlayResolver::new(dir.path().to_path_buf(), ver.to_string());
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        let err = attach_runtime_overlay(&mut sc, "qemu", &resolver, arch).unwrap_err();
-        assert!(err.to_string().contains("runtime overlay required"));
-        assert!(err.to_string().contains("qemu"));
-    }
-
-    #[test]
-    fn required_overlay_cache_miss_downloads_overlay_and_attaches_it() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let cache = tempfile::tempdir().unwrap();
-        let home = tempfile::tempdir().unwrap();
-        env.set("HOME", home.path());
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
-
-        let release_root = tempfile::tempdir().unwrap();
-        let version = env!("CARGO_PKG_VERSION");
-        let arch = GuestArch::host();
-        seed_release_fixture(release_root.path(), version, arch);
-        env.set(
-            "MVM_OVERLAY_BASE_URL",
-            format!("file://{}", release_root.path().display()),
-        );
-
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", None).unwrap();
-
-        let layout = RuntimeOverlayResolver::new(cache.path().to_path_buf(), version.to_string())
-            .layout(arch);
-        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(version));
-        assert_eq!(
-            sc.runtime_overlay_path.as_deref(),
-            Some(layout.overlay_ext4.to_str().expect("utf-8 overlay path"))
-        );
-        assert_eq!(
-            sc.runtime_overlay_verity_path.as_deref(),
-            Some(layout.sidecar.to_str().expect("utf-8 verity path"))
-        );
-        assert_eq!(
-            sc.runtime_overlay_roothash.as_deref(),
-            Some("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-        );
-        assert!(layout.overlay_ext4.is_file());
-        assert!(layout.sidecar.is_file());
-        assert!(layout.roothash_file.is_file());
-        assert!(layout.version_file.is_file());
-    }
-
-    #[test]
-    fn runtime_overlay_acquire_mode_honors_explicit_download_override() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
-        assert_eq!(
-            runtime_overlay_acquire_mode(),
-            RuntimeOverlayAcquireMode::DownloadPublishedArtifact
-        );
-    }
-
-    #[test]
-    fn runtime_overlay_acquire_mode_honors_explicit_build_override() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "build");
-        assert_eq!(
-            runtime_overlay_acquire_mode(),
-            RuntimeOverlayAcquireMode::BuildFromSourceCheckout
-        );
-    }
-
-    #[test]
-    fn attach_runtime_overlay_if_cached_version_uses_requested_cached_version() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", dir.path());
-
-        let current = env!("CARGO_PKG_VERSION");
-        let pinned = if current == "0.17.0" {
-            "0.17.1"
-        } else {
-            "0.17.0"
-        };
-        let arch = GuestArch::host();
-        seed_cache(dir.path(), current, arch);
-        seed_cache(dir.path(), pinned, arch);
-
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(pinned)).unwrap();
-
-        let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), pinned.to_string()).layout(arch);
-        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(pinned));
-        assert_eq!(
-            sc.runtime_overlay_path.as_deref(),
-            Some(
-                expected_layout
-                    .overlay_ext4
-                    .to_str()
-                    .expect("utf-8 overlay path")
-            )
-        );
-        assert_eq!(
-            sc.runtime_overlay_verity_path.as_deref(),
-            Some(expected_layout.sidecar.to_str().expect("utf-8 verity path"))
-        );
-    }
-
-    #[test]
-    fn attach_runtime_overlay_if_cached_version_refuses_drift_to_other_cached_version() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", dir.path());
-
-        let current = env!("CARGO_PKG_VERSION");
-        let missing = if current == "0.17.0" {
-            "0.17.1"
-        } else {
-            "0.17.0"
-        };
-        let arch = GuestArch::host();
-        seed_cache(dir.path(), current, arch);
-
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        let err = attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(missing))
-            .unwrap_err();
-
-        let msg = err.to_string();
-        assert!(msg.contains("required for this boot"), "{msg}");
-        assert!(msg.contains(missing), "{msg}");
-        assert!(
-            sc.runtime_overlay_path.is_none(),
-            "missing pinned version must not attach"
-        );
-        assert!(
-            sc.runtime_overlay_version.is_none(),
-            "missing pinned version must not silently drift to a different cache entry"
-        );
-    }
-
-    #[test]
-    fn attach_runtime_overlay_if_cached_prefers_current_host_version_for_plain_boot() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", dir.path());
-        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
-
-        let current = env!("CARGO_PKG_VERSION");
-        let older = if current == "0.17.0" {
-            "0.16.9"
-        } else {
-            "0.17.0"
-        };
-        let arch = GuestArch::host();
-        seed_cache(dir.path(), current, arch);
-        seed_cache(dir.path(), older, arch);
-
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
-
-        let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), current.to_string()).layout(arch);
-        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(current));
-        assert_eq!(
-            sc.runtime_overlay_path.as_deref(),
-            Some(
-                expected_layout
-                    .overlay_ext4
-                    .to_str()
-                    .expect("utf-8 overlay path")
-            )
-        );
-    }
-
-    #[test]
-    fn attach_runtime_overlay_if_cached_ignores_stale_recorded_version_on_plain_boot() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let mut env = TestEnv::new();
-        let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", dir.path());
-        env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
-
-        let current = env!("CARGO_PKG_VERSION");
-        let stale = if current == "0.17.0" {
-            "0.16.9"
-        } else {
-            "0.17.0"
-        };
-        let arch = GuestArch::host();
-        seed_cache(dir.path(), current, arch);
-        seed_cache(dir.path(), stale, arch);
-
-        let mut sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
-            runtime_overlay_version: Some(stale.to_string()),
-            ..VmStartConfig::default()
-        };
-        attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
-
-        let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), current.to_string()).layout(arch);
-        assert_eq!(sc.runtime_overlay_version.as_deref(), Some(current));
-        assert_eq!(
-            sc.runtime_overlay_path.as_deref(),
-            Some(
-                expected_layout
-                    .overlay_ext4
-                    .to_str()
-                    .expect("utf-8 overlay path")
-            )
-        );
-    }
-
-    #[test]
-    fn prefer_overlay_reports_fallback_when_overlay_not_attached() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::OverlayPreferredFallbackUsed
-        );
-    }
-
-    #[test]
-    fn prefer_overlay_reports_overlay_when_all_artifacts_attached() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
-            runtime_overlay_path: Some("/overlay.ext4".into()),
-            runtime_overlay_verity_path: Some("/overlay.verity".into()),
-            runtime_overlay_roothash: Some("a".repeat(64)),
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::OverlayPreferred
-        );
-    }
-
-    #[test]
-    fn rootfs_only_reports_rootfs_only_by_policy() {
-        let sc = VmStartConfig {
-            runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
-            ..VmStartConfig::default()
-        };
-        assert_eq!(
-            resolve_runtime_source_status(&sc),
-            RuntimeSourceStatus::RootfsOnlyByPolicy
-        );
-    }
-}
-
-#[cfg(test)]
-mod runtime_source_policy_for_workload_boot_tests {
-    static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    use mvm_core::util::test_env::TestEnv;
-    use mvm_core::vm_backend::RuntimeSourcePolicy;
-
-    #[test]
-    fn firecracker_sealed_boot_requires_overlay() {
-        assert_eq!(
-            mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: Some("firecracker"),
-                    sealed: true,
-                    root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                }
-            ),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn firecracker_unsealed_block_boot_requires_overlay() {
-        // Unsealed block workloads now require the overlay too — the overlay is
-        // the single source of guest binaries, so a missing overlay fails closed
-        // instead of falling back to the baked rootfs copy.
-        assert_eq!(
-            mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: Some("firecracker"),
-                    sealed: false,
-                    root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                }
-            ),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn libkrun_sealed_boot_requires_overlay() {
-        assert_eq!(
-            mvm_core::vm_backend::select_runtime_source_policy(
-                mvm_core::vm_backend::RuntimeSourcePolicySelection {
-                    backend_name: Some("libkrun"),
-                    sealed: true,
-                    root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
-                    launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
-                }
-            ),
-            RuntimeSourcePolicy::RequiredOverlay
-        );
-    }
-
-    #[test]
-    fn persistent_oci_runtime_lean_verity_root_requires_overlay_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(dir.path().join("rootfs.verity"), b"verity").unwrap();
-        std::fs::write(
-            dir.path().join("rootfs.roothash"),
-            format!("{}\n", "a".repeat(64)),
-        )
-        .unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", true, true)
-            .write_to_dir(dir.path())
-            .unwrap();
-
-        assert!(super::persistent_oci_rootfs_requires_overlay_policy(
-            &rootfs
-        ));
-    }
-
-    #[test]
-    fn persistent_oci_rootfs_without_verity_stays_prefer_overlay() {
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", true, true)
-            .write_to_dir(dir.path())
-            .unwrap();
-
-        assert!(!super::persistent_oci_rootfs_requires_overlay_policy(
-            &rootfs
-        ));
-    }
-
-    #[test]
-    fn persistent_oci_required_overlay_prefers_sibling_initrd() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        let initrd = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&initrd, b"initrd").unwrap();
-        let mut env = TestEnv::new();
-        env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
-            "download",
-        );
-
-        let resolved =
-            super::persistent_oci_effective_initrd(&rootfs, RuntimeSourcePolicy::RequiredOverlay)
-                .unwrap();
-
-        assert_eq!(
-            resolved.as_deref(),
-            Some(initrd.to_str().expect("utf-8 initrd path"))
-        );
-    }
-
-    #[test]
-    fn persistent_oci_required_overlay_falls_back_to_cached_verity_initrd() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-
-        let cache = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
-            "download",
-        );
-
-        let initrd_dir = cache
-            .path()
-            .join("verity-initrd")
-            .join(env!("CARGO_PKG_VERSION"))
-            .join(if cfg!(target_arch = "aarch64") {
-                "aarch64"
-            } else {
-                "x86_64"
-            });
-        std::fs::create_dir_all(&initrd_dir).unwrap();
-        std::fs::write(initrd_dir.join("rootfs.initrd"), b"initrd").unwrap();
-
-        let resolved =
-            super::persistent_oci_effective_initrd(&rootfs, RuntimeSourcePolicy::RequiredOverlay)
-                .unwrap();
-
-        assert_eq!(
-            resolved.as_deref(),
-            Some(
-                initrd_dir
-                    .join("rootfs.initrd")
-                    .to_str()
-                    .expect("utf-8 cached initrd path")
-            )
-        );
-    }
-
-    #[test]
-    fn persistent_oci_required_overlay_source_checkout_ignores_stale_sibling_initrd() {
-        let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(workspace_root) =
-            crate::commands::runtime_overlay::runtime_overlay_source_checkout_root()
-        else {
-            return;
-        };
-
-        let dir = tempfile::tempdir().unwrap();
-        let rootfs = dir.path().join("rootfs.ext4");
-        let sibling = dir.path().join("rootfs.initrd");
-        std::fs::write(&rootfs, b"rootfs").unwrap();
-        std::fs::write(&sibling, b"stale-initrd").unwrap();
-
-        let cache = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set(
-            crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
-            "build",
-        );
-
-        let initrd_dir = cache
-            .path()
-            .join("verity-initrd")
-            .join(env!("CARGO_PKG_VERSION"))
-            .join(if cfg!(target_arch = "aarch64") {
-                "aarch64"
-            } else {
-                "x86_64"
-            });
-        std::fs::create_dir_all(&initrd_dir).unwrap();
-        std::fs::write(initrd_dir.join("rootfs.initrd"), b"fresh-initrd").unwrap();
-        let fingerprint =
-            mvm_build::guest_agent_build::runtime_overlay_source_checkout_fingerprint(
-                &workspace_root,
-            )
-            .unwrap();
-        std::fs::write(
-            initrd_dir.join("SOURCE_FINGERPRINT"),
-            format!("{fingerprint}\n"),
-        )
-        .unwrap();
-
-        let resolved =
-            super::persistent_oci_effective_initrd(&rootfs, RuntimeSourcePolicy::RequiredOverlay)
-                .unwrap();
-
-        assert_eq!(
-            resolved.as_deref(),
-            Some(
-                initrd_dir
-                    .join("rootfs.initrd")
-                    .to_str()
-                    .expect("utf-8 cached initrd path")
-            )
-        );
-    }
-
-    #[test]
-    fn persistent_oci_required_overlay_forces_prod_kernel_even_on_dev_profile() {
-        assert!(super::persistent_oci_uses_prod_kernel(
-            "dev",
-            RuntimeSourcePolicy::RequiredOverlay
-        ));
-    }
-
-    #[test]
-    fn persistent_oci_prefer_overlay_keeps_dev_kernel_lane_for_dev_profile() {
-        assert!(!super::persistent_oci_uses_prod_kernel(
-            "dev",
-            RuntimeSourcePolicy::PreferOverlay
-        ));
-    }
-
-    #[test]
-    fn persistent_oci_non_dev_profiles_keep_prod_kernel_lane() {
-        assert!(super::persistent_oci_uses_prod_kernel(
-            "prod",
-            RuntimeSourcePolicy::PreferOverlay
-        ));
-    }
-}
-
-#[cfg(test)]
-mod host_signer_pubkey_config_tests {
-    use super::*;
-    use mvm_core::plan::{VerbId, test_support::PlanFixture};
-    use mvm_core::vm_backend::VmStartConfig;
-
-    #[test]
-    fn attaches_pubkey_when_plan_has_agent_verbs() {
-        let dir = tempfile::tempdir().unwrap();
-        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let signer = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
-        let pubkey = signer.verifying_key().to_bytes();
-        std::fs::write(&pubkey_path, pubkey).unwrap();
-        let mut plan = PlanFixture::new().build();
-        plan.agent_verbs = Some(vec![VerbId::new("ping").unwrap()]);
-        let mut start_config = VmStartConfig::default();
-
-        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
-
-        assert_eq!(start_config.config_files.len(), 1);
-        let file = &start_config.config_files[0];
-        assert_eq!(file.name, PUBLIC_FILENAME);
-        assert_eq!(file.content, format!("{}\n", hex::encode(pubkey)));
-        assert_eq!(file.mode, 0o444);
-    }
-
-    #[test]
-    fn skips_pubkey_when_plan_has_no_agent_verbs() {
-        let dir = tempfile::tempdir().unwrap();
-        let pubkey_path = dir.path().join(PUBLIC_FILENAME);
-        let mut plan = PlanFixture::new().build();
-        plan.agent_verbs = None;
-        let mut start_config = VmStartConfig::default();
-
-        attach_host_signer_pubkey_config_for_plan(&mut start_config, &plan, &pubkey_path).unwrap();
-
-        assert!(start_config.config_files.is_empty());
-    }
-
-    #[test]
-    fn attaches_sealed_security_policy_for_prod_boots() {
-        let mut start_config = VmStartConfig::default();
-
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::SealedProd).unwrap();
-
-        let file = start_config
-            .config_files
-            .iter()
-            .find(|file| file.name == SECURITY_POLICY_FILENAME)
-            .expect("security policy file attached");
-        let policy: SecurityPolicy =
-            serde_json::from_str(&file.content).expect("parse security policy");
-        assert_eq!(policy.profile, AgentProfile::SealedProd);
-        assert!(policy.require_auth);
-        assert!(!policy.access.console);
-    }
-
-    #[test]
-    fn attaches_dev_security_policy_for_dev_boots() {
-        let mut start_config = VmStartConfig::default();
-
-        attach_guest_security_policy_config(&mut start_config, AgentProfile::Dev).unwrap();
-
-        let file = start_config
-            .config_files
-            .iter()
-            .find(|file| file.name == SECURITY_POLICY_FILENAME)
-            .expect("security policy file attached");
-        let policy: SecurityPolicy =
-            serde_json::from_str(&file.content).expect("parse security policy");
-        assert_eq!(policy.profile, AgentProfile::Dev);
-        assert!(!policy.require_auth);
-        assert!(policy.access.console);
     }
 }
 
@@ -2801,16 +1557,13 @@ mod resolve_workload_kernel_tests {
     }
 
     #[test]
-    fn vz_both_missing_returns_error_mentioning_bootstrap() {
+    fn vz_both_missing_returns_error_mentioning_dev_up() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
         env.set("MVM_CACHE_DIR", tmp.path());
         let err = resolve_workload_kernel("/nonexistent/vmlinux", "vz").unwrap_err();
         let msg = err.to_string();
-        assert!(
-            msg.contains("mvmctl bootstrap"),
-            "expected 'mvmctl bootstrap' in: {msg}"
-        );
+        assert!(msg.contains("dev up"), "expected 'dev up' in: {msg}");
         assert!(msg.contains("vz"), "expected hypervisor name in: {msg}");
     }
 }
@@ -2836,44 +1589,19 @@ mod resolve_pinned_kernel_tests {
         let err = resolve_pinned_kernel(tmp.path(), "aarch64", true).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("mvmctl kernel build"),
+            msg.contains("mvmctl build kernel build"),
             "expected build hint in: {msg}"
         );
     }
 
     #[test]
-    fn installed_binary_without_cache_fetches_the_published_kernel() {
+    fn installed_binary_without_cache_returns_err_about_fetch_not_supported() {
         let tmp = tempfile::tempdir().unwrap();
-        let result =
-            resolve_pinned_kernel_with(tmp.path(), "x86_64", false, |arch, variant, dest| {
-                assert_eq!(arch, "x86_64");
-                assert_eq!(variant, "workload");
-                std::fs::create_dir_all(dest.parent().expect("cache parent")).unwrap();
-                std::fs::write(dest, b"downloaded-vmlinux").unwrap();
-                Ok(())
-            })
-            .unwrap();
-        let expected =
-            mvm_build::kernel_fetch::cached_kernel_path(tmp.path(), "x86_64", "workload");
-        assert_eq!(result, expected.display().to_string());
-        assert_eq!(std::fs::read(expected).unwrap(), b"downloaded-vmlinux");
-    }
-
-    #[test]
-    fn installed_binary_without_cache_surfaces_download_failures() {
-        let tmp = tempfile::tempdir().unwrap();
-        let err = resolve_pinned_kernel_with(tmp.path(), "x86_64", false, |_, _, _| {
-            anyhow::bail!("simulated download failure")
-        })
-        .unwrap_err();
+        let err = resolve_pinned_kernel(tmp.path(), "x86_64", false).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("kernel-pin:"),
-            "expected kernel-pin context in: {msg}"
-        );
-        assert!(
-            msg.contains("simulated download failure"),
-            "expected download failure detail in: {msg}"
+            msg.contains("not yet supported"),
+            "expected fetch-unsupported note in: {msg}"
         );
     }
 }
@@ -2890,7 +1618,6 @@ mod resolve_pinned_kernel_tests {
 #[cfg(test)]
 mod admit_plan_tests {
     use super::*;
-    use mvm_core::util::test_env::TestEnv;
     use std::io::Write;
 
     fn write_rootfs(dir: &std::path::Path, bytes: &[u8]) -> std::path::PathBuf {
@@ -2954,11 +1681,7 @@ mod admit_plan_tests {
 
     #[test]
     fn bundle_pin_from_archive_recovers_signature_and_sha() {
-        let sk = {
-            let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
-            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
-        };
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let (archive, key_id) = make_bundle_for_pin(&sk);
         let pin = bundle_pin_from_archive(&archive, key_id.clone()).expect("recovers pin");
         assert_eq!(pin.bundle_sha256, mvm_core::plan::bundle_sha256(&archive));
@@ -2985,11 +1708,7 @@ mod admit_plan_tests {
             tar.finish().unwrap();
         }
         let archive = buf.into_inner();
-        let sk = {
-            let mut __ed_seed = [0u8; 32];
-            rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
-            ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
-        };
+        let sk = ed25519_dalek::SigningKey::generate(&mut rand::rngs::OsRng);
         let key_id = mvm_core::plan::KeyId::from_pubkey(&sk.verifying_key());
         let err = bundle_pin_from_archive(&archive, key_id).expect_err("must fail");
         let msg = format!("{err:#}");
@@ -3016,6 +1735,7 @@ mod admit_plan_tests {
             vm_name: "vm-skip",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 2,
             mem_mib: 512,
@@ -3052,6 +1772,7 @@ mod admit_plan_tests {
             vm_name: "vm-happy",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 2,
             mem_mib: 512,
@@ -3109,6 +1830,7 @@ mod admit_plan_tests {
             vm_name: "vm-auth",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 2,
             mem_mib: 512,
@@ -3159,9 +1881,6 @@ mod admit_plan_tests {
     // bridge backends (the bug: the MCP path passed `admit = None`).
     #[test]
     fn untrusted_transient_admit_yields_bridge_substrate() {
-        let mut env = TestEnv::new();
-        let data_dir = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", data_dir.path());
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();
@@ -3206,6 +1925,7 @@ mod admit_plan_tests {
             vm_name: "vm-missing",
             backend_name: "firecracker",
             rootfs_path: std::path::Path::new("/nonexistent/rootfs.ext4"),
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
@@ -3249,6 +1969,7 @@ mod admit_plan_tests {
             vm_name: "vm-1",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
@@ -3276,6 +1997,7 @@ mod admit_plan_tests {
             vm_name: "vm-2",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
@@ -3316,63 +2038,6 @@ mod admit_plan_tests {
         );
     }
 
-    #[test]
-    fn emit_boot_posture_audits_runtime_source_policy_label() {
-        let keys_dir = tempfile::tempdir().unwrap();
-        let audit_dir = tempfile::tempdir().unwrap();
-        let rootfs_dir = tempfile::tempdir().unwrap();
-        let rootfs = write_rootfs(rootfs_dir.path(), b"boot-posture-payload");
-        let ledger = InMemoryNonceLedger::new();
-        let ctx = admit_plan_for_boot(AdmitPlanForBootParams {
-            tenant: "local",
-            vm_name: "vm-boot-posture",
-            backend_name: "firecracker",
-            rootfs_path: &rootfs,
-            precomputed_image_sha256: None,
-            cpus: 1,
-            mem_mib: 128,
-            seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
-            secret_release: mvm_core::plan::SecretReleasePolicy::None,
-            secrets: Vec::new(),
-            auth: mvm_core::plan::AuthPolicy::none(),
-            no_supervisor: false,
-            ledger: &ledger,
-            keys_dir: Some(keys_dir.path()),
-            audit_dir: Some(audit_dir.path()),
-            policy_dir: None,
-            bundle_pin: None,
-            deps_volume: None,
-            shares: Vec::new(),
-            redaction: mvm_core::policy::RedactionPolicy::default(),
-            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
-            agent_verb_override: vec![],
-            restrict_agent_verbs: true,
-        })
-        .expect("admission")
-        .expect("Some when admission ran");
-
-        emit_boot_posture_if(
-            &Some(ctx),
-            mvm_build::run_image::RootStrategy::BlockExt4,
-            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
-        );
-
-        let audit_path = audit_dir.path().join("local.jsonl");
-        let content = std::fs::read_to_string(&audit_path).expect("audit file exists");
-        assert!(
-            content.contains("plan.boot_posture"),
-            "audit chain must include boot posture event: {content}"
-        );
-        assert!(
-            content.contains("\"root_strategy\":\"block-ext4\""),
-            "audit chain must carry selected root strategy: {content}"
-        );
-        assert!(
-            content.contains("\"runtime_source_policy\":\"required-overlay\""),
-            "audit chain must carry runtime_source_policy label from the enum: {content}"
-        );
-    }
-
     // ──────────────────────────────────────────────────────────────
     // Policy resolver wired into admission
     //
@@ -3402,6 +2067,7 @@ mod admit_plan_tests {
             vm_name: "vm-local-default",
             backend_name: "firecracker",
             rootfs_path: &rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
@@ -3454,6 +2120,7 @@ mod admit_plan_tests {
             vm_name: "vm-allow-list",
             backend_name: "libkrun",
             rootfs_path: &rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
@@ -3513,6 +2180,7 @@ mod admit_plan_tests {
             vm_name: "vm-unrestricted",
             backend_name: "vz",
             rootfs_path: &rootfs,
+            build_provenance: None,
             precomputed_image_sha256: None,
             cpus: 1,
             mem_mib: 128,
@@ -3612,9 +2280,9 @@ chain_signing = true
                 deps_volume: None,
                 shares: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
-                reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
                 audit_labels: Default::default(),
                 agent_verbs: None,
+                build_provenance: None,
             },
             &SystemClock,
             &ledger,
@@ -3716,9 +2384,9 @@ stream_destinations = ["file://{}"]
                 deps_volume: None,
                 shares: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
-                reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
                 audit_labels: Default::default(),
                 agent_verbs: None,
+                build_provenance: None,
             },
             &SystemClock,
             &ledger,
@@ -3819,9 +2487,9 @@ chain_signing = false
                 deps_volume: None,
                 shares: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
-                reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
                 audit_labels: Default::default(),
                 agent_verbs: None,
+                build_provenance: None,
             },
             &SystemClock,
             &ledger,
@@ -3897,9 +2565,9 @@ chain_signing = false
                 deps_volume: None,
                 shares: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
-                reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
                 audit_labels: Default::default(),
                 agent_verbs: None,
+                build_provenance: None,
             },
             &SystemClock,
             &ledger,
@@ -3995,9 +2663,9 @@ disabled_inspectors = ["ssrf_guarrd"]
                 deps_volume: None,
                 shares: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
-                reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
                 audit_labels: Default::default(),
                 agent_verbs: None,
+                build_provenance: None,
             },
             &SystemClock,
             &ledger,
@@ -4099,9 +2767,9 @@ port_hi  = 443
                 deps_volume: None,
                 shares: Vec::new(),
                 redaction: mvm_core::policy::RedactionPolicy::default(),
-                reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),
                 audit_labels: Default::default(),
                 agent_verbs: None,
+                build_provenance: None,
             },
             &SystemClock,
             &ledger,

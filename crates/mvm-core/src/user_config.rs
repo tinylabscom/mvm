@@ -34,6 +34,9 @@ pub struct MvmConfig {
     /// Default: 30 seconds. Override via the `MVM_SERVICES_HEALTH_TIMEOUT_SECS`
     /// environment variable when ad-hoc tuning beats a config edit.
     pub services_health_timeout_secs: u64,
+    /// Optional PEM bundle path for transformed-TLS upstream re-origination in
+    /// the host networking authority. `None` keeps the native host trust store.
+    pub host_netd_upstream_roots_pem_file: Option<String>,
 }
 
 impl MvmConfig {
@@ -49,6 +52,24 @@ impl MvmConfig {
         }
         self.services_health_timeout_secs
     }
+
+    /// Resolve the effective PEM bundle path for transformed-TLS upstream
+    /// re-origination. `MVM_HOST_NETD_UPSTREAM_ROOTS_PEM_FILE` overrides the
+    /// persisted config so one shell can stage an alternate trust bundle
+    /// without rewriting `config.toml`.
+    pub fn effective_host_netd_upstream_roots_pem_file(&self) -> Option<PathBuf> {
+        if let Ok(raw) = std::env::var("MVM_HOST_NETD_UPSTREAM_ROOTS_PEM_FILE") {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                return Some(PathBuf::from(trimmed));
+            }
+        }
+        self.host_netd_upstream_roots_pem_file
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    }
 }
 
 impl Default for MvmConfig {
@@ -62,6 +83,7 @@ impl Default for MvmConfig {
             metrics_port: None,
             catalog_url: None,
             services_health_timeout_secs: 30,
+            host_netd_upstream_roots_pem_file: None,
         }
     }
 }
@@ -192,10 +214,18 @@ pub fn set_key(cfg: &mut MvmConfig, key: &str, value: &str) -> Result<()> {
                 Some(value.to_string())
             };
         }
+        "host_netd_upstream_roots_pem_file" => {
+            cfg.host_netd_upstream_roots_pem_file = if value == "none" || value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            };
+        }
         other => {
             anyhow::bail!(
                 "Unknown config key {:?}. Valid keys: dev_vm_cpus, dev_vm_mem_gib, \
-                 default_cpus, default_memory_mib, log_format, metrics_port, catalog_url",
+                 default_cpus, default_memory_mib, log_format, metrics_port, catalog_url, \
+                 host_netd_upstream_roots_pem_file",
                 other
             );
         }
@@ -219,6 +249,7 @@ mod tests {
         assert!(cfg.metrics_port.is_none());
         // Default: 30 s services-health wait.
         assert_eq!(cfg.services_health_timeout_secs, 30);
+        assert!(cfg.host_netd_upstream_roots_pem_file.is_none());
     }
 
     #[test]
@@ -242,6 +273,32 @@ mod tests {
         env.set("MVM_SERVICES_HEALTH_TIMEOUT_SECS", "not-a-number");
         assert_eq!(cfg.effective_services_health_timeout_secs(), 7);
         // `env` restores the original value on drop.
+    }
+
+    #[test]
+    fn test_effective_host_netd_upstream_roots_pem_file_honors_env_override() {
+        let mut env = TestEnv::new();
+        env.remove("MVM_HOST_NETD_UPSTREAM_ROOTS_PEM_FILE");
+        let cfg = MvmConfig {
+            host_netd_upstream_roots_pem_file: Some("/config/roots.pem".to_string()),
+            ..MvmConfig::default()
+        };
+        assert_eq!(
+            cfg.effective_host_netd_upstream_roots_pem_file(),
+            Some(PathBuf::from("/config/roots.pem"))
+        );
+
+        env.set("MVM_HOST_NETD_UPSTREAM_ROOTS_PEM_FILE", "/env/roots.pem");
+        assert_eq!(
+            cfg.effective_host_netd_upstream_roots_pem_file(),
+            Some(PathBuf::from("/env/roots.pem"))
+        );
+
+        env.set("MVM_HOST_NETD_UPSTREAM_ROOTS_PEM_FILE", "   ");
+        assert_eq!(
+            cfg.effective_host_netd_upstream_roots_pem_file(),
+            Some(PathBuf::from("/config/roots.pem"))
+        );
     }
 
     #[test]
@@ -338,6 +395,31 @@ mod tests {
     fn test_catalog_url_default_none() {
         let cfg = MvmConfig::default();
         assert!(cfg.catalog_url.is_none());
+    }
+
+    #[test]
+    fn test_set_key_host_netd_upstream_roots_pem_file() {
+        let mut cfg = MvmConfig::default();
+        set_key(
+            &mut cfg,
+            "host_netd_upstream_roots_pem_file",
+            "/etc/mvm/upstream-roots.pem",
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.host_netd_upstream_roots_pem_file.as_deref(),
+            Some("/etc/mvm/upstream-roots.pem")
+        );
+    }
+
+    #[test]
+    fn test_set_key_host_netd_upstream_roots_pem_file_none() {
+        let mut cfg = MvmConfig {
+            host_netd_upstream_roots_pem_file: Some("/etc/mvm/upstream-roots.pem".to_string()),
+            ..MvmConfig::default()
+        };
+        set_key(&mut cfg, "host_netd_upstream_roots_pem_file", "none").unwrap();
+        assert!(cfg.host_netd_upstream_roots_pem_file.is_none());
     }
 
     #[test]
