@@ -101,7 +101,21 @@ loopback binds. That slice is validated so far with `cargo fmt --all --
 --check`, `cargo test -p mvm-cli top_level_cli_routes_machine_set_timeout
 --offline`, and `cargo test -p libkrun-sys
 free_loopback_port_is_in_range_and_bindable --lib -- --nocapture`; it improves
-the current mainline but does not change the honest remaining blocker list.
+the current mainline but does not change the honest remaining blocker list. The
+same refreshed branch now also carries the missing disabled-by-default macOS
+HVF verb-grant witness in `tests/oci_image_runner_smoke.rs` behind
+`MVM_AGENT_VERB_GRANT_SMOKE=1`: it compiles the checked-in
+`examples/python/hello-app`, boots a sealed `machine run --entrypoint -d`
+session with only `ping` + `run-entrypoint` granted, asserts the listed
+`RunEntrypoint` returns `"hello ari"`, checks `console.log` for
+`mvm-init: provisioned verb-grant` before `mvm-guest-agent: control plane ready`,
+expects `mvmctl machine set-timeout <vm>` to fail with
+`update-idle-timeout`, and verifies the resulting `verb_denied` workload audit
+chain plus `mvmctl trust audit verify --tenant local`. Targeted validation for
+the new harness is green with `cargo test --test oci_image_runner_smoke -- --nocapture`
+and `cargo clippy --test oci_image_runner_smoke -- -D warnings`; the honest
+remaining blocker is executing that witness on a host with the real runtime
+prerequisites and recording the evidence.
 
 ## Thesis
 
