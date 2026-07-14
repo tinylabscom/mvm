@@ -230,7 +230,6 @@ toml = "0.8"
 # CLI
 clap = { version = "4", default-features = false, features = ["derive", "help", "std", "usage"] }
 clap_mangen = "0.2"
-colored = "3"
 
 # HTTP client (for CLI upgrade)
 reqwest = { version = "0.13", features = ["blocking", "json", "rustls-no-provider"], default-features = false }
@@ -240,9 +239,6 @@ reqwest = { version = "0.13", features = ["blocking", "json", "rustls-no-provide
 # `ring` backend (matches reqwest's rustls-tls + rcgen), no aws-lc-rs/cmake.
 # Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-
-# Name generation
-names = { version = "0.14", default-features = false }
 
 # Signal handling
 libc = "0.2"
@@ -296,8 +292,7 @@ async-trait = "0.1"
 
 # Pure-Rust DNS resolver, used only by the opt-in custom-dns feature.
 hickory-resolver = "0.26"
-# DNS server/protocol stack for the in-guest addon DNS resolver.
-hickory-server = "0.26"
+# DNS protocol stack for the in-guest addon DNS resolver.
 hickory-proto = "0.26"
 
 # Utilities
@@ -371,15 +366,7 @@ mvm-mcp = { path = "crates/mvm-mcp", version = "0.18.0" }
 # stack. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
 libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.18.0" }
-# Plan 97 Phase B — type-safe interface to `mvm-vz-supervisor`. No FFI,
-# Linux-safe (compiles everywhere; `Platform::has_vz()` short-circuits
-# on non-macOS).
 mvm-backend = { path = "crates/mvm-backend", version = "0.18.0", default-features = false }
-
-# Plan 73 Followup B.2.x — builder-VM egress allowlist proxy.
-# mvm-host-vm-init spawns this as a subprocess before the
-# installer + tears it down after.
-mvm-egress-proxy = { path = "crates/mvm-egress-proxy", version = "0.18.0" }
 
 # Plan 113 / ADR-064 §Decision 5 — A2 confinement helper (seccompiler +
 # landlock). Consumed by the per-VM `mvm-bridge` sidecar.
