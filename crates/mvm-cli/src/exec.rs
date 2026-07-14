@@ -376,13 +376,35 @@ pub(crate) fn select_exec_backend(
     image_requested: bool,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> Result<AnyBackend> {
+    let backend_override = explicit_hypervisor_override();
     let backend_name = select_backend_name_for_egress(
-        None,
+        backend_override.as_deref(),
         image_requested,
         network_policy,
         "OCI --image runs with outbound egress enabled",
     )?;
     Ok(AnyBackend::from_hypervisor(&backend_name))
+}
+
+/// An explicit workload-backend override from the environment. The transient
+/// run path otherwise auto-detects the backend; this lets `MVM_HYPERVISOR`
+/// (or `MVM_BACKEND`) pin it — e.g. `libkrun`, whose vsock-tunnel egress path
+/// the auto-detected default would otherwise never select on this host. Every
+/// `select_exec_backend` call site reads the same value, so the admitted plan's
+/// backend and the boot backend agree.
+fn explicit_hypervisor_override() -> Option<String> {
+    ["MVM_HYPERVISOR", "MVM_BACKEND"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .find_map(|raw| normalize_backend_override(&raw.to_string_lossy()))
+}
+
+/// Normalize a backend-override string (trim + lowercase); a blank value yields
+/// `None` so an empty env var is treated as "unset" rather than an invalid
+/// backend name.
+fn normalize_backend_override(raw: &str) -> Option<String> {
+    let value = raw.trim().to_ascii_lowercase();
+    (!value.is_empty()).then_some(value)
 }
 
 pub(crate) fn select_backend_name_for_egress(
@@ -1057,10 +1079,29 @@ fn run_inner(
         secret_files: Vec::new(),
         runner_dir: None,
         network_policy: req.network_policy.clone(),
+        // Derive the userspace L3 egress tunnel from the resolved policy: an
+        // admitted allow-list gets a `mvm-network-tunnel-worker` (the smoltcp
+        // forwarder) whose gate enforces exactly those flows; deny-all /
+        // unrestricted return None (no forwarding tunnel). The identity is
+        // minted here so the guest cmdline token and the host worker's
+        // expected-session validate against identical values.
+        network_tunnel: mvm_backend::network_tunnel_for_launch(
+            &req.network_policy,
+            mvm_backend::TunnelLaunchIdentity {
+                tenant_id: "local".to_string(),
+                vm_id: vm_name.clone(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                session_nonce: uuid::Uuid::new_v4().to_string(),
+            },
+        ),
         warm_pool_size: req.warm_pool_size,
         runtime_source_policy,
         ..Default::default()
     };
+    // The tunnel worker spawns on the cold-boot path, not snapshot-restore.
+    if start_config.network_tunnel.is_some() {
+        use_snapshot = false;
+    }
 
     // Admit the transient run as a locally-signed workload. Setting
     // tenant_id + plan_json makes the libkrun/Vz supervisor spawn the gateway
@@ -2675,5 +2716,19 @@ mod tests {
             "cleanup command must remove the staging directory: {}",
             scripts[0]
         );
+    }
+
+    #[test]
+    fn normalize_backend_override_trims_lowercases_and_drops_blank() {
+        assert_eq!(
+            normalize_backend_override("  LibKrun \n"),
+            Some("libkrun".to_string())
+        );
+        assert_eq!(
+            normalize_backend_override("firecracker"),
+            Some("firecracker".to_string())
+        );
+        assert_eq!(normalize_backend_override("   "), None);
+        assert_eq!(normalize_backend_override(""), None);
     }
 }

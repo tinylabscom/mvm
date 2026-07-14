@@ -63,6 +63,10 @@ pkgs.rustPlatform.buildRustPackage {
     # for `MANDATORY_DENY_RANGES` at boot from `/init` (uid 0) before
     # the main agent forks under setpriv.
     "--bin" "mvm-guest-netinit"
+    # Userspace L3 egress pump: opens the guest TUN and relays packets to
+    # the host tunnel worker over vsock. netinit spawns it only when the
+    # `mvm.network_tunnel=` cmdline token is present; inert otherwise.
+    "--bin" "mvm-guest-netd"
   ] ++ lib.optionals withDevShell [
     "--features" "mvm-guest/dev-shell"
   ];
