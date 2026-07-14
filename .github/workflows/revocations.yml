@@ -49,7 +49,7 @@ jobs:
           not_after="$(date -u -d "+${VALID_DAYS} days" +%Y-%m-%dT%H:%M:%SZ)"
           jq --arg now "$now" --arg not_after "$not_after" \
             '. + {issued_at: $now, not_after: $not_after}' \
-            packaging/release/pack-revocations.source.json > pack-revocations.json
+            nix/packaging/release/pack-revocations.source.json > pack-revocations.json
           echo "built pack-revocations.json (issued_at=$now not_after=$not_after)"
 
       - name: Keyless-sign the revocation list

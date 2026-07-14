@@ -69,11 +69,11 @@ jobs:
         run: |
           sudo apt-get install -y shellcheck
           shellcheck -S warning install.sh
-          shellcheck packaging/release/verify-release-assets.sh \
-                     packaging/release/verify-release-assets.test.sh
+          shellcheck nix/packaging/release/verify-release-assets.sh \
+                     nix/packaging/release/verify-release-assets.test.sh
 
       - name: Release-asset verifier gate tests
-        run: bash packaging/release/verify-release-assets.test.sh
+        run: bash nix/packaging/release/verify-release-assets.test.sh
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings

@@ -42,7 +42,7 @@ cargo run -- dev        # auto-bootstrap + drop into the builder-VM shell
 Or run the bootstrap script on a fresh machine:
 
 ```bash
-./ops/bootstrap/dev-setup.sh
+./nix/ops/bootstrap/dev-setup.sh
 ```
 
 ## Building and Running
@@ -193,7 +193,7 @@ MVM_E2E_SMOKE=1 cargo test -p mvm-cli --test core_demo_e2e -- --nocapture
 
 The lane mirrored at `.github/workflows/ci.yml::core-demo-e2e` runs the same command on a self-hosted runner labelled `[self-hosted, macOS, ARM64, libkrun]`, gated on the `MACOS_LIBKRUN_AVAILABLE` repo variable. GitHub-hosted macOS runners cannot serve this lane (no nested HVF, no libkrun) — it stays opt-in until a self-hosted runner is wired.
 
-The same gated convention covers `sdks/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest sdks/python/tests/test_sandbox_exec.py`.
+The same gated convention covers `crates/mvm-sdk/python/tests/test_sandbox_exec.py`, which exercises `Sandbox.exec(*argv) -> ExecResult` against a real microVM. Default-skips on `pytest`; opt-in with `MVM_E2E_SMOKE=1 python -m pytest crates/mvm-sdk/python/tests/test_sandbox_exec.py`.
 
 ## Linting and Formatting
 

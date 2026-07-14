@@ -7,7 +7,7 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 The runtime SDK is the application-facing sandbox API. It is the surface you use when your product needs to create a microVM, run generated code, exchange files, inspect output, and clean up.
 
-> **Status:** Partially implemented. `sdks/python` and `sdks/typescript` already expose `Sandbox.create(...)`, command start, file write, record mode, live mode, and cleanup helpers. The remaining lifecycle methods below are the parity target; do not treat every method name on this page as a shipped package API.
+> **Status:** Partially implemented. `crates/mvm-sdk/python` and `crates/mvm-sdk/typescript` already expose `Sandbox.create(...)`, command start, file write, record mode, live mode, and cleanup helpers. The remaining lifecycle methods below are the parity target; do not treat every method name on this page as a shipped package API.
 
 For the execution-mode split between record, plan, live, and static declaration
 flows, see [Runtime modes](/sdk/runtime-modes/).

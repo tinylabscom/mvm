@@ -370,7 +370,7 @@
             # `import mvm; mvm.audit.emit(...)` resolves against the one
             # cdylib above. Pure Python, copied from the workspace source.
             mkdir -p "$staging/sdk-py"
-            cp -r ${workspace}/sdks/python/mvm "$staging/sdk-py/mvm"
+            cp -r ${workspace}/crates/mvm-sdk/python/mvm "$staging/sdk-py/mvm"
             find "$staging/sdk-py" -name '__pycache__' -type d -prune \
               -exec rm -rf {} +
 

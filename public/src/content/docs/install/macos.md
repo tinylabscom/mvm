@@ -100,7 +100,7 @@ mvmctl run
 
 ## Troubleshooting
 
-**"Hypervisor.framework: entitlement missing"** — re-codesign the binary with the entitlement: `codesign --entitlements resources/mvmctl.entitlements -f -s - ~/.local/bin/mvmctl`. The release binary ships pre-signed; this only matters if you've stripped entitlements or built from source without the build script's signing step.
+**"Hypervisor.framework: entitlement missing"** — re-codesign the binary with the entitlement: `codesign --entitlements assets/mvmctl.entitlements -f -s - ~/.local/bin/mvmctl`. The release binary ships pre-signed; this only matters if you've stripped entitlements or built from source without the build script's signing step.
 
 **`nix build` fails with "a 'x86_64-linux' with features … is required"** — that is a direct host-side Nix command failing because macOS cannot build Linux derivations by itself. Use `mvmctl build --flake .` so the Linux build runs inside the builder VM. If you intentionally want direct `nix build` on macOS, configure [`nix-darwin`'s `linux-builder`](https://nix.dev/manual/nix/stable/installation/installing-binary).
 

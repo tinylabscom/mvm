@@ -3,7 +3,7 @@
 //! Spawns a stand-alone Python script that mimics what the
 //! `mvm` SDK's atexit hook would do: writes a recording JSON to
 //! `$MVM_SDK_OUT_PATH`. This keeps the test self-contained (no
-//! `pip install -e sdks/python` required, no dependence on the
+//! `pip install -e crates/mvm-sdk/python` required, no dependence on the
 //! Python SDK being importable on the test runner). The wiring
 //! the test exercises is the *CLI* side of Phase 7e — `python3`
 //! discovery, env var plumbing, recording load, lowering — which
@@ -11,7 +11,7 @@
 //!
 //! When `python3` isn't on PATH the test prints a skip notice
 //! and returns Ok; the SDK's atexit hook is independently covered
-//! by `sdks/python/tests/test_sandbox.py`.
+//! by `crates/mvm-sdk/python/tests/test_sandbox.py`.
 
 use std::process::Command;
 

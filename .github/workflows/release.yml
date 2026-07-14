@@ -218,7 +218,7 @@ jobs:
             src="target/${TARGET}/release/${hostbin}"
             [ -f "$src" ] && cp "$src" "staging/${ARCHIVE_NAME}/" && echo "bundled ${hostbin}"
           done
-          cp -r resources "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
+          cp -r assets "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           cp README.md "staging/${ARCHIVE_NAME}/" 2>/dev/null || true
           # Include generated man pages
           if [ -d man ] && ls man/*.1 2>/dev/null; then
@@ -748,7 +748,7 @@ jobs:
             sbom.cdx.json
             sbom.cdx.json.bundle
           )
-          RELEASE_NOTES_PREFIX="$(cat packaging/release/runtime-overlay-operational-note.md)"
+          RELEASE_NOTES_PREFIX="$(cat nix/packaging/release/runtime-overlay-operational-note.md)"
           gh release create "${TAG_NAME}" \
             --title "${TAG_NAME}" \
             --generate-notes \
@@ -799,7 +799,7 @@ jobs:
           COSIGN_OIDC_ISSUER: "https://token.actions.githubusercontent.com"
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          bash packaging/release/verify-release-assets.sh \
+          bash nix/packaging/release/verify-release-assets.sh \
             --assets-dir release-assets \
             --cosign \
             --expect-version "${TAG_NAME#v}"

@@ -693,7 +693,6 @@ jobs:
             -not -path './.git/*' \
             -not -path './node_modules/*' \
             -not -path './*/resources/template_scaffold/*' \
-            -not -path './resources/template_scaffold/*' \
             -not -path './tests/fixtures/plan-89-baseline/*' \
             -not -path './examples/exit_code/*' \
             -not -path './examples/sleeper/*')

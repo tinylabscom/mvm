@@ -62,7 +62,7 @@ const SDK_RUN_EGRESS_ENFORCEMENT: &str = "libkrun:l4-host-port";
 fn sdk_machine_fixture(name: &str) -> Vec<String> {
     std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../sdks/machine-fixtures")
+            .join("../../tests/machine-fixtures")
             .join(format!("{name}.argv")),
     )
     .expect("read shared SDK machine argv fixture")
@@ -96,13 +96,13 @@ fn machine_subcommand(action: &MachineAction) -> &'static str {
 }
 
 /// Source-of-truth anchor for the cross-language conformance harness: every
-/// `sdks/machine-fixtures/*.argv` the SDKs assert against must be argv the
+/// `tests/machine-fixtures/*.argv` the SDKs assert against must be argv the
 /// CLI parser actually accepts, and must map to the verb its first line
 /// names. This is what catches an SDK emitting a flag the CLI rejects (e.g.
 /// `stop --name X` when `stop` takes a positional name).
 #[test]
 fn every_shared_machine_fixture_parses_to_its_verb() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/machine-fixtures");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/machine-fixtures");
     let mut seen = 0;
     for entry in std::fs::read_dir(&dir).expect("read machine-fixtures dir") {
         let path = entry.expect("dir entry").path();

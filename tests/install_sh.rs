@@ -27,8 +27,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
     d.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
-/// Build a gzipped tar containing `mvmctl-<target>/mvmctl` (+ a
-/// resources dir) where mvmctl is a shell stub printing a version.
+/// Build a gzipped tar containing `mvmctl-<target>/mvmctl` (+ an
+/// assets dir) where mvmctl is a shell stub printing a version.
 fn make_tarball(target: &str) -> Vec<u8> {
     use flate2::Compression;
     use flate2::write::GzEncoder;
@@ -52,7 +52,7 @@ fn make_tarball(target: &str) -> Vec<u8> {
     h2.set_cksum();
     tar.append_data(
         &mut h2,
-        format!("{dir}/resources/mvmctl.entitlements"),
+        format!("{dir}/assets/mvmctl.entitlements"),
         &ent[..],
     )
     .unwrap();

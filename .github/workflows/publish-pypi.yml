@@ -1,6 +1,6 @@
 name: Publish SDK to PyPI
 
-# Publishes the Python SDK (sdks/python, package `mvm`) to PyPI.
+# Publishes the Python SDK (crates/mvm-sdk/python, package `mvm`) to PyPI.
 #
 # Trigger:
 #   - automatically when a GitHub Release is published (same event that
@@ -54,18 +54,18 @@ jobs:
         if: github.event_name == 'release'
         run: |
           set -euo pipefail
-          sdk_ver=$(grep -E '^version' sdks/python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          sdk_ver=$(grep -E '^version' crates/mvm-sdk/python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
           tag="${GITHUB_REF_NAME#v}"
           echo "sdk=$sdk_ver tag=$tag"
           if [ "$sdk_ver" != "$tag" ]; then
-            echo "::error::sdks/python/pyproject.toml version ($sdk_ver) != release tag ($tag). Bump it in the release commit."
+            echo "::error::crates/mvm-sdk/python/pyproject.toml version ($sdk_ver) != release tag ($tag). Bump it in the release commit."
             exit 1
           fi
 
       - name: Build sdist + wheel
         run: |
           python -m pip install --upgrade build
-          python -m build sdks/python --outdir dist
+          python -m build crates/mvm-sdk/python --outdir dist
           ls -l dist
 
       - name: Publish to PyPI (Trusted Publishing)

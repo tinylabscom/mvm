@@ -1,6 +1,6 @@
 name: Publish SDK to npm
 
-# Publishes the TypeScript SDK (sdks/typescript, package `mvm-sdk`) to npm.
+# Publishes the TypeScript SDK (crates/mvm-sdk/typescript, package `mvm-sdk`) to npm.
 #
 # Trigger:
 #   - automatically when a GitHub Release is published (same event as
@@ -37,7 +37,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: sdks/typescript
+        working-directory: crates/mvm-sdk/typescript
     steps:
       - uses: actions/checkout@v4
 
@@ -68,7 +68,7 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           echo "sdk=$sdk_ver tag=$tag"
           if [ "$sdk_ver" != "$tag" ]; then
-            echo "::error::sdks/typescript/package.json version ($sdk_ver) != release tag ($tag). Bump it in the release commit."
+            echo "::error::crates/mvm-sdk/typescript/package.json version ($sdk_ver) != release tag ($tag). Bump it in the release commit."
             exit 1
           fi
 

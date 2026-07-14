@@ -1,6 +1,6 @@
 //! Cross-language machine-verb conformance for the Rust SDK.
 //!
-//! `sdks/machine-fixtures/*.argv` is the shared golden contract for the argv
+//! `tests/machine-fixtures/*.argv` is the shared golden contract for the argv
 //! every SDK hands to `mvmctl machine`. The CLI parser round-trips these
 //! fixtures (source of truth), and the Python (`_machine_*_argv`) and
 //! TypeScript (`machine*Argv`) builders already assert against them. This test
@@ -22,7 +22,7 @@ use mvm_sdk::{
 /// every language resolves the same file.
 fn fixture(name: &str) -> Vec<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../sdks/machine-fixtures")
+        .join("../../tests/machine-fixtures")
         .join(format!("{name}.argv"));
     std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("read shared machine fixture {}: {e}", path.display()))
@@ -220,7 +220,7 @@ fn rm_all_matches_shared_fixture() {
 /// yet — the current cross-language coverage gap.
 #[test]
 fn fixture_coverage_is_accounted_for() {
-    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../sdks/machine-fixtures");
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/machine-fixtures");
     let mut fixtures: Vec<String> = std::fs::read_dir(&dir)
         .expect("read machine-fixtures dir")
         .filter_map(|e| {

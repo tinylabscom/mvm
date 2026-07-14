@@ -147,16 +147,16 @@ for hostbin in mvm-bridge mvm-hvf-supervisor mvm-libkrun-supervisor mvm-substitu
   fi
 done
 
-if [ -d "$SRC/resources" ]; then
-  $SUDO rm -rf "$INSTALL_DIR/resources"
-  $SUDO cp -R "$SRC/resources" "$INSTALL_DIR/resources"
+if [ -d "$SRC/assets" ]; then
+  $SUDO rm -rf "$INSTALL_DIR/assets"
+  $SUDO cp -R "$SRC/assets" "$INSTALL_DIR/assets"
 fi
 
 # macOS: Hypervisor.framework needs the entitlement. Best-effort —
 # a re-sign failure warns but doesn't fail the install (the binary
 # still runs for non-hypervisor uses; `codesign` can be re-run).
 if [ "$(uname -s)" = "Darwin" ] && [ "${MVM_SKIP_CODESIGN:-}" != "1" ]; then
-  ent="$INSTALL_DIR/resources/mvmctl.entitlements"
+  ent="$INSTALL_DIR/assets/mvmctl.entitlements"
   if command -v codesign >/dev/null 2>&1 && [ -f "$ent" ]; then
     if $SUDO codesign --entitlements "$ent" -f -s - "$INSTALL_DIR/mvmctl" 2>/dev/null; then
       say "Codesigned with Hypervisor.framework entitlement."

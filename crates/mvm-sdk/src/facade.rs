@@ -33,7 +33,7 @@ fn machine_err(e: MachineError) -> MvmError {
 
 // The `machine` subcommand argv is built in exactly one place — the pure
 // `machine.rs` builders, which the cross-language conformance harness pins to
-// `sdks/machine-fixtures/*.argv`. The facade delegates to them rather than
+// `tests/machine-fixtures/*.argv`. The facade delegates to them rather than
 // hand-rolling a second copy, so it can never drift from the CLI contract.
 
 fn list_args() -> Result<Vec<String>> {
@@ -547,7 +547,7 @@ mod tests {
     fn fixture(name: &str) -> Vec<String> {
         std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../sdks/machine-fixtures")
+                .join("../../tests/machine-fixtures")
                 .join(format!("{name}.argv")),
         )
         .expect("read shared machine fixture")

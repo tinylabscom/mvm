@@ -42,7 +42,7 @@ git clone https://github.com/tinylabscom/mvm.git && cd mvm
 cargo build --release && cp target/release/mvmctl ~/.local/bin/
 
 # Language SDKs
-pip install mvm                 # Python  (or: pip install ./sdks/python)
+pip install mvm                 # Python  (or: pip install ./crates/mvm-sdk/python)
 npm install @runmvm/mvm         # TypeScript
 ```
 
@@ -499,8 +499,8 @@ attestation.
   [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
 - [CLI reference](public/src/content/docs/reference/cli-commands.md)
 - [SDK docs](public/src/content/docs/sdk/) ·
-  [Python SDK](sdks/python/README.md) ·
-  [TypeScript SDK](sdks/typescript/README.md)
+  [Python SDK](crates/mvm-sdk/python/README.md) ·
+  [TypeScript SDK](crates/mvm-sdk/typescript/README.md)
 - [Writing Nix flakes for guests (mkGuest)](public/src/content/docs/guides/nix-flakes.md)
 - [Secrets and credentials](public/src/content/docs/guides/secrets-and-credentials.mdx) ·
   [Network egress policy](public/src/content/docs/guides/network-egress-policy.mdx) ·
@@ -548,7 +548,7 @@ Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
 - **No task is done without tests.** Types get serde round-trips; wire/protocol
   code gets tampered-input rejection tests; security paths get positive *and*
   negative cases. SDK changes must keep the shared conformance fixtures
-  (`sdks/machine-fixtures/`) green — that is what keeps the wrappers thin.
+  (`tests/machine-fixtures/`) green — that is what keeps the wrappers thin.
 - **Reuse first.** Search the workspace before adding a helper — duplicated logic
   is this repo's most common bug source. All `~/.mvm` and `~/.cache/mvm` paths go
   through `mvm-core::config` helpers, never inline `$HOME` joins.
@@ -563,7 +563,7 @@ Keep PRs focused (one concern each) and write commit messages that explain
 *why*. PRs merge through the GitHub **merge queue** once CI is green. The full
 live suite (workspace clippy on x86_64-linux, seccomp probes, longer fuzz runs,
 live-KVM smokes) needs real `/dev/kvm`; cloud-init scaffolding for a throwaway
-KVM box lives in [`ops/hetzner/`](ops/hetzner/), and the
+KVM box lives in [`nix/ops/hetzner/`](nix/ops/hetzner/), and the
 [contributor guide](public/src/content/docs/contributing/development.md) has the
 details.
 
@@ -576,7 +576,7 @@ version: `mvm-core` (types / plans / policy / crypto — no runtime deps) →
 protocol + agent), `mvm-hostd` (host daemons: broker / signers / supervisor),
 `mvm-vm-host` (per-VM supervisor binaries), `mvm-sdk` (decorator parser + IR +
 runtime), `mvm-client*` (the local/remote client facade the SDKs and frontends
-share), and `xtask` (lint gates). Language SDKs live under `sdks/`.
+share), and `xtask` (lint gates). Language SDKs live under `crates/mvm-sdk/`.
 
 ## License
 

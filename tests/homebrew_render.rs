@@ -22,7 +22,7 @@ fn render_formula_fills_all_placeholders() {
     let out = tmp.path().join("mvmctl.rb");
 
     let status = Command::new("sh")
-        .arg(repo_root().join("packaging/homebrew/render-formula.sh"))
+        .arg(repo_root().join("nix/packaging/homebrew/render-formula.sh"))
         .arg("0.15.2")
         .arg(&checks)
         .arg(&out)

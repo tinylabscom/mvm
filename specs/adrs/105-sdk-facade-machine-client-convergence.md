@@ -107,8 +107,8 @@ Keep the two crates and their **distinct responsibilities** — `mvm-sdk` is *au
 
 # Runbook: publishing the mvm SDKs (PyPI + npm)
 
-Publishes the Python SDK (`sdks/python`, package **`mvm`**) and the
-TypeScript SDK (`sdks/typescript`, package **`mvm-sdk`**) to PyPI and
+Publishes the Python SDK (`crates/mvm-sdk/python`, package **`mvm`**) and the
+TypeScript SDK (`crates/mvm-sdk/typescript`, package **`mvm-sdk`**) to PyPI and
 npm. Driven by `.github/workflows/publish-pypi.yml` and
 `publish-npm.yml`, alongside the existing `publish-crates.yml`.
 
@@ -190,8 +190,8 @@ Publishing is tied to a GitHub Release so crates + PyPI + npm go out
 together at one version:
 
 1. Bump versions in the **same commit**:
-   - `sdks/python/pyproject.toml` `version`
-   - `sdks/typescript/package.json` `version`
+   - `crates/mvm-sdk/python/pyproject.toml` `version`
+   - `crates/mvm-sdk/typescript/package.json` `version`
    - the workspace/toolchain version (`Cargo.toml`) — keep all three equal.
 2. Tag + release:
    ```sh
