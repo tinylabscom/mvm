@@ -425,7 +425,6 @@ mod tests {
     use mvm_core::protocol::audit_signer::AuditSignerErrorCode;
     use mvm_core::protocol::broker::CorrelationId;
     use mvm_core::security::SIG_ALG_ED25519;
-    use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use tokio::sync::Mutex as TokioMutex;
@@ -497,7 +496,10 @@ mod tests {
 
     #[tokio::test]
     async fn emit_forwards_entry_with_workload_audit_category_and_ctx_ids() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         let captured = Arc::new(TokioMutex::new(Vec::new()));
         let mock = spawn_mock(path.clone(), captured.clone(), ok_response).await;
@@ -544,7 +546,10 @@ mod tests {
 
     #[tokio::test]
     async fn emit_rejects_record_above_4kib() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         let captured = Arc::new(TokioMutex::new(Vec::new()));
         let mock = spawn_mock(path.clone(), captured.clone(), ok_response).await;
@@ -567,7 +572,10 @@ mod tests {
 
     #[tokio::test]
     async fn emit_returns_rate_limit_when_bucket_drained() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         let captured = Arc::new(TokioMutex::new(Vec::new()));
         let mock = spawn_mock(path.clone(), captured.clone(), ok_response).await;
@@ -595,7 +603,10 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_verb_returns_not_implemented() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         // No mock spawned — the handler shouldn't reach the network.
         let handler = HostAuditV1Handler::new(AuditClient::new(&path));
@@ -608,7 +619,10 @@ mod tests {
 
     #[tokio::test]
     async fn emit_batch_succeeds_with_per_entry_status() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         let captured = Arc::new(TokioMutex::new(Vec::new()));
         let mock = spawn_mock(path.clone(), captured.clone(), ok_response).await;
@@ -638,7 +652,10 @@ mod tests {
 
     #[tokio::test]
     async fn emit_batch_stops_after_oversize_entry_marks_subsequent_skipped() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         let captured = Arc::new(TokioMutex::new(Vec::new()));
         let mock = spawn_mock(path.clone(), captured.clone(), ok_response).await;
@@ -677,7 +694,10 @@ mod tests {
 
     #[tokio::test]
     async fn emit_batch_rejects_more_than_max_entries() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         // No mock — the handler rejects at the count gate before any
         // network attempt.
@@ -700,7 +720,10 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_one_maps_audit_signer_typed_err_to_internal_error() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         let captured = Arc::new(TokioMutex::new(Vec::new()));
         let mock = spawn_mock(path.clone(), captured.clone(), |req| {
@@ -726,7 +749,10 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_returns_unavailable_when_audit_signer_socket_missing() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("nonexistent.sock");
         let handler = HostAuditV1Handler::new(AuditClient::new(&path));
         let payload = serde_json::json!({
@@ -749,7 +775,10 @@ mod tests {
 
     #[test]
     fn handler_id_is_host_audit_v1() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit.sock");
         let h = HostAuditV1Handler::new(AuditClient::new(&path));
         assert_eq!(h.id().as_str(), "host.audit.v1");

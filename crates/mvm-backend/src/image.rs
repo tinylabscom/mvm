@@ -882,13 +882,19 @@ mod tests {
     /// mount, not just this call.
     #[test]
     fn build_dir_image_ro_materializes_in_process_with_correct_label() {
-        let src = tempfile::tempdir().expect("tempdir");
+        let src = tempfile::Builder::new()
+            .prefix("image-src-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         std::fs::write(src.path().join("hello.txt"), b"hi\n").expect("write fixture file");
         std::fs::create_dir(src.path().join("sub")).expect("mkdir sub");
         std::fs::write(src.path().join("sub").join("nested.txt"), b"nested\n")
             .expect("write nested fixture file");
 
-        let out_dir = tempfile::tempdir().expect("tempdir");
+        let out_dir = tempfile::Builder::new()
+            .prefix("image-out-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let dest = out_dir.path().join("extra.ext4");
 
         let returned = build_dir_image_ro(
@@ -926,12 +932,18 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn build_dir_image_ro_rejects_a_socket_instead_of_silently_dropping_it() {
-        let src = tempfile::tempdir().expect("tempdir");
+        let src = tempfile::Builder::new()
+            .prefix("image-src-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let sock_path = src.path().join("weird.sock");
         let _listener =
             std::os::unix::net::UnixListener::bind(&sock_path).expect("bind a real test socket");
 
-        let out_dir = tempfile::tempdir().expect("tempdir");
+        let out_dir = tempfile::Builder::new()
+            .prefix("image-out-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let dest = out_dir.path().join("extra.ext4");
 
         let err = build_dir_image_ro(

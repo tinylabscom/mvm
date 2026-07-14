@@ -331,10 +331,18 @@ mod tests {
     use super::*;
     use mvm_backend::mock_guest_agent::MockGuestAgent;
     use mvm_guest::vsock::connect_to_port;
+    use tempfile::{Builder, TempDir};
+
+    fn short_socket_tempdir() -> TempDir {
+        Builder::new()
+            .prefix("mvm-exec-")
+            .tempdir_in("/tmp")
+            .expect("short tempdir under /tmp")
+    }
 
     /// Start a mock agent and return a connected, handshaken stream to it.
     fn agent_stream() -> Option<(tempfile::TempDir, MockGuestAgent, UnixStream)> {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_tempdir();
         let agent = match MockGuestAgent::start(dir.path()) {
             Ok(agent) => agent,
             Err(err)

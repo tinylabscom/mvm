@@ -18,6 +18,13 @@ use mvm_build::builder_protocol::{
 };
 use mvm_build::libkrun_builder::spawn_vsock_response_listener;
 
+fn short_socket_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("vrl-")
+        .tempdir_in("/tmp")
+        .expect("create short tempdir under /tmp")
+}
+
 fn bind_listener(path: &std::path::Path) -> Option<UnixListener> {
     match UnixListener::bind(path) {
         Ok(listener) => Some(listener),
@@ -44,7 +51,7 @@ fn spawn_vsock_response_listener_decodes_guest_response() {
     // a separate thread, accept the connection and write a framed
     // HostVmResponse. The listener helper's receiver should yield
     // Frame(...).
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket_path = socket_path_in(scratch.path());
     let Some(listener) = bind_listener(&socket_path) else {
         return;
@@ -101,7 +108,7 @@ fn spawn_vsock_response_listener_yields_empty_eof_when_no_send() {
     // guest that hit a fault before reaching the send code). Listener
     // helper must classify as EmptyEof so the caller falls back to the
     // file path silently.
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket_path = socket_path_in(scratch.path());
     let Some(listener) = bind_listener(&socket_path) else {
         return;

@@ -604,7 +604,10 @@ mod tests {
         // Full integration against the real daemon core: connect
         // handshakes via serve_connection, then a FlakeCheck (unimplemented
         // in the skeleton) comes back Failed/Unsupported.
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .prefix("builderd-client-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let sock = dir.path().join("vsock-21473.sock");
         let listener = match UnixListener::bind(&sock) {
             Ok(listener) => listener,

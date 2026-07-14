@@ -170,7 +170,6 @@ mod tests {
     use std::path::PathBuf;
 
     use mvm_core::protocol::broker::{CorrelationId, ServiceCall, ServiceErrorCode, ServiceId};
-    use tempfile::tempdir;
     use tokio::net::UnixStream as ClientStream;
 
     use super::*;
@@ -199,7 +198,10 @@ mod tests {
 
     #[tokio::test]
     async fn round_trips_a_call_and_returns_not_bound_with_empty_registry() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = uds_path(&dir);
         let listener = UnixListener::bind(&path).unwrap();
         let registry = Arc::new(Registry::new());
@@ -258,7 +260,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_frames_above_the_cap() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = uds_path(&dir);
         let listener = match UnixListener::bind(&path) {
             Ok(listener) => listener,

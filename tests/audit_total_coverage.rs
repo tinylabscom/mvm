@@ -234,6 +234,7 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("diff", AuditPosture::ReadOnly),
     ("wait", AuditPosture::ReadOnly),
     ("boot-report", AuditPosture::ReadOnly),
+    ("set-timeout", AuditPosture::Emits("VmTtlSet")),
     ("set-ttl", AuditPosture::Emits("VmTtlSet")),
     ("rekernel", AuditPosture::Emits("VmRekernel")),
     ("forward", AuditPosture::ReadOnly),

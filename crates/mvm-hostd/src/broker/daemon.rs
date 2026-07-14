@@ -682,7 +682,10 @@ mod tests {
 
     #[tokio::test]
     async fn register_binds_socket_then_deregister_unbinds() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let mut d = daemon("local");
         let reg = register(dir.path(), "vm-1", "local", None);
         let sock = reg.broker_listen_socket.clone();
@@ -702,7 +705,10 @@ mod tests {
 
     #[test]
     fn registration_journal_stores_sorted_snapshot_and_loads_it() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let journal = RegistrationJournal::new(dir.path().join("registrations.json"));
         let reg_b = register(dir.path(), "vm-b", "local", None);
         let reg_a = register(dir.path(), "vm-a", "local", None);
@@ -719,7 +725,10 @@ mod tests {
 
     #[tokio::test]
     async fn deregister_updates_registration_journal_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let journal_path = dir.path().join("registrations.json");
         let mut d = daemon("local").with_registration_journal(&journal_path);
 
@@ -752,7 +761,10 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_restart_restores_journaled_registration() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let journal_path = dir.path().join("registrations.json");
         let reg = register(dir.path(), "vm-1", "local", None);
         let sock = reg.broker_listen_socket.clone();
@@ -773,7 +785,10 @@ mod tests {
 
     #[tokio::test]
     async fn one_tenant_daemon_tracks_many_vm_registrations() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let mut d = daemon("local");
 
         for vm in ["vm-1", "vm-2", "vm-3"] {
@@ -804,7 +819,10 @@ mod tests {
 
     #[tokio::test]
     async fn register_refuses_other_tenant_and_unsafe_vm_id() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let mut d = daemon("local");
         assert!(
             d.apply(&ControlRequest::Register(register(
@@ -832,7 +850,10 @@ mod tests {
         // and comes back as a typed response with a server-reassigned
         // correlation id — i.e. bind + dispatch + server-derived identity work,
         // without depending on the audit-signer wire (covered elsewhere).
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let mut d = daemon("local");
         let reg = register(dir.path(), "vm-1", "local", None);
         let sock = reg.broker_listen_socket.clone();
@@ -865,7 +886,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn helper_backed_registered_vm_can_only_write_its_own_chain() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let helper_sock = dir.path().join("signer-helper.sock");
         let key_path = dir.path().join("tenant-key.ed25519");
         std::fs::write(&key_path, [12u8; 32]).unwrap();
@@ -909,7 +933,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn helper_restart_rebinds_live_registration_and_preserves_chain() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let helper_sock = dir.path().join("signer-helper.sock");
         let key_path = dir.path().join("tenant-key.ed25519");
         std::fs::write(&key_path, [12u8; 32]).unwrap();
@@ -958,7 +985,10 @@ mod tests {
         // With nothing registered, the snapshot carries no workload id for the
         // VM, so append no-ops before it ever connects to the helper (which
         // isn't running here).
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
         let d = HostAgentDaemon::new_with_signer_helper(
             "local",
@@ -973,7 +1003,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn health_audit_sink_appends_host_category_entry_to_the_chain() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let helper_sock = dir.path().join("signer-helper.sock");
         let key_path = dir.path().join("tenant-key.ed25519");
         std::fs::write(&key_path, [12u8; 32]).unwrap();

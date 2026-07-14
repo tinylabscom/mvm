@@ -248,7 +248,7 @@ pub(super) fn write_nonblocking(stream: &mut UnixStream, payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::error_chain_has_permission_denied;
+    use crate::test_support::{error_chain_has_permission_denied, short_tempdir};
     use std::time::Duration;
 
     /// Full host→guest relay: a host client connects, the bridge accepts and
@@ -256,7 +256,7 @@ mod tests {
     /// relays the client's request to the guest and the guest's reply back.
     #[test]
     fn host_connection_opens_stream_and_relays_both_directions() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("agent-bridge-");
         let sock = dir.path().join("agent.sock");
 
         let mut bridge = AgentBridge::new();
@@ -342,7 +342,7 @@ mod tests {
     /// leaking a half-open guest connection per dropped `for_vm` probe).
     #[test]
     fn host_close_is_surfaced_for_guest_reset() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("agent-bridge-");
         let sock = dir.path().join("agent.sock");
         let mut bridge = AgentBridge::new();
         bridge.set_activity(Arc::new(AtomicUsize::new(0)));
@@ -385,7 +385,7 @@ mod tests {
 
     #[test]
     fn poll_fds_include_listener_and_only_established_streams() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("agent-bridge-");
         let sock = dir.path().join("agent.sock");
         let mut bridge = AgentBridge::new();
         if let Err(err) = bridge.bind(&sock) {

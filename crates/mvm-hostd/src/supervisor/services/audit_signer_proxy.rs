@@ -145,7 +145,6 @@ mod tests {
     use std::sync::Arc;
 
     use mvm_core::security::SIG_ALG_ED25519;
-    use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use tokio::sync::Mutex;
@@ -190,7 +189,10 @@ mod tests {
 
     #[tokio::test]
     async fn probe_echoes_request_id() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit-signer.sock");
 
         let response = AppendEntryResponse::Pong {
@@ -211,7 +213,10 @@ mod tests {
 
     #[tokio::test]
     async fn append_entry_unwraps_ok_response() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit-signer.sock");
 
         let response = AppendEntryResponse::Ok {
@@ -246,7 +251,10 @@ mod tests {
 
     #[tokio::test]
     async fn append_entry_surfaces_chain_drift_error() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit-signer.sock");
 
         let response = AppendEntryResponse::Err {
@@ -274,7 +282,10 @@ mod tests {
 
     #[tokio::test]
     async fn probe_rejects_unexpected_response_variant() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit-signer.sock");
 
         // Misbehaving subprocess: returns Ok instead of Pong.

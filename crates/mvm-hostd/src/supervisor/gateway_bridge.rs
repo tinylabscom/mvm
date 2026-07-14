@@ -1923,7 +1923,10 @@ mod tests {
     async fn armed_capture_records_forwarded_frames_and_export_round_trips() {
         use std::os::unix::net::UnixStream as StdUs;
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let capture_roots = TranscriptCaptureRoots {
             transcripts_dir: tmp.path().join("audit").join("transcripts"),
             keys_dir: tmp.path().join("keys"),
@@ -2332,7 +2335,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn native_gateway_pipeline_forwards_modified_frame() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
@@ -2375,7 +2381,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn native_gateway_pipeline_drop_kills_flow_and_emits_fault() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
@@ -2487,7 +2496,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn l4_policy_denied_flow_is_dropped_through_the_live_bridge() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
@@ -2545,7 +2557,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn l4_policy_allowed_flow_is_forwarded_through_the_live_bridge() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -2587,7 +2602,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dns_sinkhole_drops_a_denied_lookup_through_the_live_bridge() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -2647,7 +2665,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn dns_sinkhole_forwards_an_allowed_lookup_through_the_live_bridge() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -2692,7 +2713,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plan_flow_policy_deny_all_drops_egress_flow_through_the_live_bridge() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -2753,7 +2777,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn plan_flow_policy_open_allows_egress_flow_through_the_live_bridge() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -2810,7 +2837,10 @@ mod tests {
             &mvm_core::network_policy::NetworkPolicy::deny_all(),
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
         );
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -2875,7 +2905,10 @@ mod tests {
             &mvm_core::network_policy::NetworkPolicy::unrestricted(),
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
         );
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
@@ -2922,7 +2955,10 @@ mod tests {
             &mvm_core::network_policy::NetworkPolicy::unrestricted(),
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
         );
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gateway_path = dir.path().join("native-gateway.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gateway = tokio::net::UnixDatagram::bind(&gateway_path).unwrap();
@@ -3000,7 +3036,10 @@ mod tests {
             &mvm_core::network_policy::NetworkPolicy::deny_all(),
             &mvm_core::policy::dns_pin::DnsPinRegistry::new(),
         );
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -3041,7 +3080,10 @@ mod tests {
             ]),
             &bare_pins("example.com", &["93.184.216.34"]),
         );
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -3079,7 +3121,10 @@ mod tests {
             ]),
             &bare_pins("example.com", &["93.184.216.34"]),
         );
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -3125,7 +3170,10 @@ mod tests {
             &bare_pins("example.com", &["93.184.216.34"]),
         );
         assert!(l4.is_some(), "bare allow-list now installs an L4 scan");
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -3165,7 +3213,10 @@ mod tests {
             ]),
             &bare_pins("example.com", &["93.184.216.34"]),
         );
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -3209,7 +3260,10 @@ mod tests {
             ]),
             &bare_pins("example.com", &["93.184.216.34"]),
         );
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gvproxy_path = dir.path().join("gvproxy.sock");
         let sup_listen = dir.path().join("sup.sock");
         let gvproxy = tokio::net::UnixDatagram::bind(&gvproxy_path).unwrap();
@@ -3328,7 +3382,10 @@ mod tests {
         }
         let gw_bin = std::env::var("MVM_GATEWAY_BIN")
             .unwrap_or_else(|_| "native gateway helper".to_string());
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gw_sock = tmp.path().join("gw.sock");
         let gw_log = tmp.path().join("gw.log");
         let stdio = std::fs::File::create(tmp.path().join("gw-stdio.log")).unwrap();
@@ -3519,7 +3576,10 @@ mod tests {
         dst: [u8; 4],
         poll_secs: u64,
     ) -> Option<NativeProbe> {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let gw_sock = tmp.path().join("gw.sock");
         let api_sock = tmp.path().join("api.sock");
         let flow_audit = tmp.path().join("flow-audit.jsonl");

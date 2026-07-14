@@ -58,7 +58,6 @@ mod tests {
     use std::time::Duration;
 
     use mvm_core::protocol::broker::ServiceErrorCode;
-    use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use tokio::sync::Mutex;
@@ -94,7 +93,10 @@ mod tests {
 
     #[tokio::test]
     async fn call_round_trips_through_mock_server() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("broker.sock");
 
         let correlation = CorrelationId::new("01HCORR0000000000000000");
@@ -128,7 +130,10 @@ mod tests {
 
     #[tokio::test]
     async fn call_round_trips_typed_err_responses() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("broker.sock");
 
         let correlation = CorrelationId::new("01HCORR_ERR");
@@ -161,7 +166,10 @@ mod tests {
 
     #[tokio::test]
     async fn connect_failure_surfaces_as_proxy_error() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("never-bound.sock");
         let proxy = BrokerProxy::new(&path);
         let err = proxy
@@ -178,7 +186,10 @@ mod tests {
 
     #[tokio::test]
     async fn oversized_response_surfaces_as_response_too_large() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("oversized.sock");
         let listener = UnixListener::bind(&path).unwrap();
 

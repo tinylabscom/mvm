@@ -205,7 +205,6 @@ mod tests {
     use mvm_core::protocol::audit_signer::{SignerHelperRequest, SignerHelperResponse};
     use mvm_core::protocol::host_signer::SignRequest;
     use mvm_core::security::SIG_ALG_ED25519;
-    use tempfile::tempdir;
     use tokio::net::UnixStream as ClientStream;
 
     use super::*;
@@ -255,7 +254,10 @@ mod tests {
 
     #[tokio::test]
     async fn sign_plan_round_trips_and_signature_verifies() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = uds_path(&dir);
         let listener = UnixListener::bind(&path).unwrap();
         let keystore = Arc::new(Keystore::generate());
@@ -304,7 +306,10 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_frames_above_the_cap() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = uds_path(&dir);
         let listener = match UnixListener::bind(&path) {
             Ok(listener) => listener,
@@ -342,7 +347,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn helper_proxy_forwards_sign_plan_to_signer_helper() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let signer_path = uds_path(&dir);
         let helper_path = dir.path().join("signer-helper.sock");
         let listener = UnixListener::bind(&signer_path).unwrap();

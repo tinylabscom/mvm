@@ -328,7 +328,9 @@ impl Drop for VirtioVsock {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
+    use crate::test_support::{
+        bind_unix_listener, error_chain_has_permission_denied, short_tempdir,
+    };
 
     fn dev() -> VsockShared {
         let ram = vec![0u8; 0x1000].leak();
@@ -403,7 +405,7 @@ mod tests {
     #[test]
     fn egress_port_relays_frame_to_endpoint_and_back() {
         use std::io::{Read, Write};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("vsock-");
         let sock = dir.path().join("subst.sock");
 
         let Some(listener) = bind_unix_listener(&sock) else {
@@ -486,7 +488,7 @@ mod tests {
     #[test]
     fn broker_port_relays_frame_to_endpoint_and_back() {
         use std::io::{Read, Write};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("vsock-");
         let sock = dir.path().join("hvf-broker.sock");
 
         let Some(listener) = bind_unix_listener(&sock) else {
@@ -642,7 +644,7 @@ mod tests {
     #[test]
     fn service_host_io_drains_egress_replies() {
         use std::io::{Read, Write};
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("vsock-");
         let sock = dir.path().join("subst.sock");
         let Some(listener) = bind_unix_listener(&sock) else {
             return;
@@ -689,7 +691,7 @@ mod tests {
 
     #[test]
     fn host_agent_connection_frames_op_request_and_routes_replies() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("vsock-");
         let sock = dir.path().join("agent.sock");
         let mut d = dev();
         if let Err(err) = d.set_agent_socket(&sock) {

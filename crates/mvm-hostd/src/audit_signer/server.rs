@@ -172,7 +172,6 @@ pub fn default_max_frame_bytes() -> usize {
 mod tests {
     use std::path::PathBuf;
 
-    use tempfile::tempdir;
     use tokio::net::UnixStream as ClientStream;
 
     use super::*;
@@ -230,7 +229,10 @@ mod tests {
 
     #[tokio::test]
     async fn probe_returns_pong_with_echoed_request_id() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let (path, _chain, task) = boot(&dir).await;
         let mut client = ClientStream::connect(&path).await.unwrap();
         let req = AppendEntryRequest::Probe {
@@ -247,7 +249,10 @@ mod tests {
 
     #[tokio::test]
     async fn append_advances_chain_head_and_persists() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let (path, chain, task) = boot(&dir).await;
         let mut client = ClientStream::connect(&path).await.unwrap();
         let req = sample_append("req-1");
@@ -279,7 +284,10 @@ mod tests {
         // fails the read_frame parse — the connection drops rather
         // than returning a typed error. We assert the connection
         // closes; the supervisor's proxy treats it as Unavailable.
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let (path, _chain, task) = boot(&dir).await;
         let mut client = ClientStream::connect(&path).await.unwrap();
         let bad_body = serde_json::to_vec(&serde_json::json!({

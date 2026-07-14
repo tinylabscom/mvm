@@ -406,7 +406,10 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::Builder::new()
+            .prefix("linux-env-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         env.set("HOME", tmp.path());
         env.remove("MVM_DATA_DIR");
 

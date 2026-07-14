@@ -981,7 +981,10 @@ mod tests {
     #[cfg(all(feature = "pure-mkfs", unix))]
     #[test]
     fn collect_nodes_skip_vs_reject_policy_for_unsupported_node_types() {
-        let src = tempfile::tempdir().unwrap();
+        let src = tempfile::Builder::new()
+            .prefix("rootfs-src-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let sock_path = src.path().join("weird.sock");
         let _listener =
             std::os::unix::net::UnixListener::bind(&sock_path).expect("bind a real test socket");

@@ -92,7 +92,6 @@ mod tests {
 
     use mvm_core::protocol::audit_signer::AuditSignerErrorCode;
     use mvm_core::protocol::host_signer::HostSignerErrorCode;
-    use tempfile::tempdir;
     use tokio::net::UnixListener;
     use tokio::sync::Mutex;
 
@@ -119,7 +118,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn sign_host_unwraps_nested_response() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("helper.sock");
         let captured = Arc::new(Mutex::new(None));
         let mock = spawn_mock(
@@ -157,7 +159,10 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unexpected_response_kind_is_an_error() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("helper.sock");
         let mock = spawn_mock(
             path.clone(),
@@ -187,7 +192,10 @@ mod tests {
 
     #[test]
     fn missing_helper_socket_errors() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let client = SignerHelperClient::new(dir.path().join("missing.sock"));
         let err = client
             .sign_host(SignRequest::SignPlan {

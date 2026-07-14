@@ -411,6 +411,14 @@ mod io_tests {
     use std::os::unix::net::UnixListener;
     use std::path::Path;
     use std::thread;
+    use tempfile::{Builder, TempDir};
+
+    fn short_socket_tempdir() -> TempDir {
+        Builder::new()
+            .prefix("builder-route-")
+            .tempdir_in("/tmp")
+            .expect("short tempdir under /tmp")
+    }
 
     fn bind_unix_listener(path: &Path) -> Option<UnixListener> {
         match UnixListener::bind(path) {
@@ -465,7 +473,7 @@ mod io_tests {
 
     #[test]
     fn typed_flake_check_clean_exit_is_valid() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let sock = tmp.path().join("vsock-21473.sock");
         let h = serve_one(sock.clone(), 0);
         let verdict = match run_flake_check(&sock, "/flake", Duration::from_secs(5)) {
@@ -479,7 +487,7 @@ mod io_tests {
 
     #[test]
     fn typed_flake_check_nonzero_exit_is_invalid_with_message() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let sock = tmp.path().join("vsock-21473.sock");
         let h = serve_one(sock.clone(), 1);
         match match run_flake_check(&sock, "/flake", Duration::from_secs(5)) {
@@ -495,7 +503,7 @@ mod io_tests {
 
     #[test]
     fn typed_build_clean_exit_with_out_path_is_built() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let sock = tmp.path().join("vsock-21473.sock");
         // The daemon's nix build prints the out-path on stdout.
         let h = serve_one_full(sock.clone(), 0, "/nix/store/aaaa-img\n".to_string());
@@ -526,7 +534,7 @@ mod io_tests {
 
     #[test]
     fn typed_build_nonzero_exit_is_failed_with_message() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let sock = tmp.path().join("vsock-21473.sock");
         let h = serve_one(sock.clone(), 1);
         match match run_build(&sock, "path:.", "x", None, Duration::from_secs(5)) {
@@ -542,7 +550,7 @@ mod io_tests {
 
     #[test]
     fn run_build_on_missing_socket_is_not_ready() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let sock = tmp.path().join("absent.sock");
         let err = run_build(&sock, "path:.", "x", None, Duration::from_secs(1)).unwrap_err();
         assert!(matches!(err, BuilderdClientError::NotReady { .. }));
@@ -550,7 +558,7 @@ mod io_tests {
 
     #[test]
     fn run_flake_check_on_missing_socket_is_not_ready() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let sock = tmp.path().join("absent.sock");
         let err = run_flake_check(&sock, "/flake", Duration::from_secs(1)).unwrap_err();
         assert!(matches!(err, BuilderdClientError::NotReady { .. }));
@@ -558,7 +566,7 @@ mod io_tests {
 
     #[test]
     fn resolve_socket_finds_a_present_control_socket() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let vms = tmp.path();
         // Short dir name keeps the bound socket path under macOS's SUN_LEN.
         let vmdir = vms.join("b");

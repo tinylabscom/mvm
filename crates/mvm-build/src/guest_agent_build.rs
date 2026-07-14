@@ -1158,7 +1158,10 @@ mod tests {
 
     #[test]
     fn source_workspace_from_none_for_non_checkout() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("non-checkout-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         assert_eq!(source_workspace_from(tmp.path()), None);
     }
 

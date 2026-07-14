@@ -316,6 +316,14 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
+    use tempfile::{Builder, TempDir};
+
+    fn short_socket_tempdir() -> TempDir {
+        Builder::new()
+            .prefix("mvm-vsock-")
+            .tempdir_in("/tmp")
+            .expect("short tempdir under /tmp")
+    }
 
     fn bind_unix_listener(path: &std::path::Path) -> Option<std::os::unix::net::UnixListener> {
         use std::os::unix::net::UnixListener;
@@ -369,7 +377,7 @@ mod tests {
     fn vz_transport_connects_to_socket_in_its_dir() {
         // Vz's supervisor listens on `<vsock_dir>/vsock-<port>.sock`; a host
         // client connects directly (no port handshake), same shape as libkrun.
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_tempdir();
         let sock = dir
             .path()
             .join(mvm_core::config::vsock_socket_filename(5252));
@@ -405,7 +413,7 @@ mod tests {
         let _lock = crate::vm::DATA_DIR_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_tempdir();
         let mut env = TestEnv::new();
         env.set("MVM_DATA_DIR", dir.path());
         let name = "vz-picker-probe";
@@ -432,7 +440,7 @@ mod tests {
         let _lock = crate::vm::DATA_DIR_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_tempdir();
         let mut env = TestEnv::new();
         env.set("MVM_DATA_DIR", dir.path());
         let name = "hvf-picker-probe";
@@ -515,7 +523,7 @@ mod tests {
     fn nesting_hop_writes_handshake_on_connect() {
         use std::io::Read;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_tempdir();
         let hop = dir.path().join("vsock-21472.sock");
         let Some(listener) = bind_unix_listener(&hop) else {
             return;
@@ -594,7 +602,7 @@ mod tests {
 
     #[test]
     fn dev_console_transport_connects_via_hvf_agent_sock() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_tempdir();
         let agent = dir.path().join("hvf-agent.sock");
         let Some(_listener) = bind_unix_listener(&agent) else {
             return;
@@ -606,7 +614,7 @@ mod tests {
 
     #[test]
     fn dev_console_transport_connects_via_console_data_sock() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_tempdir();
         let vsock_dir = dir.path().join("vsock");
         std::fs::create_dir_all(&vsock_dir).unwrap();
         let port = *mvm_guest::vsock::dev_console_data_ports()

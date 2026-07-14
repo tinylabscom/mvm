@@ -101,7 +101,6 @@ mod tests {
     use std::sync::Arc;
 
     use mvm_core::security::SIG_ALG_ED25519;
-    use tempfile::tempdir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::UnixListener;
     use tokio::sync::Mutex;
@@ -134,7 +133,10 @@ mod tests {
 
     #[tokio::test]
     async fn sign_plan_unwraps_ok_response() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("host-signer.sock");
 
         let response = SignResponse::Ok {
@@ -167,7 +169,10 @@ mod tests {
 
     #[tokio::test]
     async fn sign_plan_surfaces_typed_subprocess_err() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("host-signer.sock");
 
         let response = SignResponse::Err {
@@ -197,7 +202,10 @@ mod tests {
 
     #[tokio::test]
     async fn connect_failure_surfaces_as_proxy_error() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("missing.sock");
         let proxy = HostSignerProxy::new(&path);
         let err = proxy

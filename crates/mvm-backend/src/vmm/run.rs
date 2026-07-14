@@ -685,7 +685,7 @@ mod tests {
     #[test]
     fn vsock_io_thread_services_host_under_sustained_mmio() {
         use super::super::vsock::{IrqLine, VirtioVsock};
-        use crate::test_support::error_chain_has_permission_denied;
+        use crate::test_support::{error_chain_has_permission_denied, short_tempdir};
         use std::sync::Arc;
         use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -705,7 +705,7 @@ mod tests {
         let mut dev =
             unsafe { VirtioVsock::new(base, 49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) };
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("vsock-io-");
         let sock = dir.path().join("agent.sock");
         if let Err(err) = dev.set_agent_socket(&sock) {
             if error_chain_has_permission_denied(&err) {

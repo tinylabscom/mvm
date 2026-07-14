@@ -21,6 +21,13 @@ use mvm_build::persistent_builder::{
     WorkloadStartParams, dispatch_socket_path,
 };
 
+fn short_socket_tempdir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("pbs-")
+        .tempdir_in("/tmp")
+        .expect("create short tempdir under /tmp")
+}
+
 /// Spawn a fake guest dispatch loop on `socket_path`. The closure
 /// is invoked with each accepted connection and is responsible for
 /// reading any incoming `HostVmRequest`, writing responses, and
@@ -66,7 +73,7 @@ fn sample_boot_timings() -> BootTimingsWire {
 fn submit_round_trips_request_and_result_with_no_stderr_chunks() {
     // Happy path: supervisor sends Run, guest immediately sends
     // back Result with exit_code=0, no stderr stream.
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -114,7 +121,7 @@ fn submit_streams_stderr_chunks_then_collects_terminating_result() {
     // Realistic path: guest streams several StderrChunk frames
     // before the Result. Supervisor must accumulate them in
     // `outcome.stderr_chunks` in order.
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -179,7 +186,7 @@ fn submit_returns_premature_eof_when_guest_closes_without_result() {
     // without sending Result. Common crash signature; supervisor
     // surfaces PrematureEof so the caller can decide whether to
     // retry or fall back.
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -212,7 +219,7 @@ fn submit_detects_job_id_mismatch_in_result() {
     // Guest dispatch loop bug: response carries a different job_id
     // than the request. Hard failure — supervisor must not silently
     // accept the misattributed result.
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -249,7 +256,7 @@ fn shutdown_writes_shutdown_request_and_consumes_bye() {
     // Lifecycle path: caller invokes shutdown(); supervisor sends
     // HostVmRequest::Shutdown; guest replies with Bye; supervisor
     // returns cleanly.
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -321,7 +328,7 @@ impl BuilderAuditSink for RecordingAuditSink {
 
 #[test]
 fn submit_with_audit_sink_emits_dispatched_then_completed_on_success() {
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -381,7 +388,7 @@ fn submit_with_audit_sink_emits_dispatched_then_completed_on_success() {
 
 #[test]
 fn submit_with_audit_sink_emits_dispatched_then_failed_on_premature_eof() {
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     // Guest accepts and immediately closes — supervisor surfaces
@@ -426,7 +433,7 @@ fn submit_with_audit_sink_emits_dispatched_then_failed_on_premature_eof() {
 
 #[test]
 fn submit_without_audit_sink_emits_nothing() {
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -481,7 +488,7 @@ fn sample_workload_params() -> WorkloadStartParams {
 
 #[test]
 fn submit_workload_start_round_trips_started() {
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -518,7 +525,7 @@ fn submit_workload_start_round_trips_started() {
 
 #[test]
 fn submit_workload_start_surfaces_workload_failed() {
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -551,7 +558,7 @@ fn submit_workload_start_surfaces_workload_failed() {
 
 #[test]
 fn submit_workload_start_rejects_unexpected_response() {
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -578,7 +585,7 @@ fn submit_workload_start_rejects_unexpected_response() {
 
 #[test]
 fn submit_workload_start_premature_eof_when_guest_closes() {
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
@@ -600,7 +607,7 @@ fn submit_workload_start_premature_eof_when_guest_closes() {
 #[test]
 fn submit_workload_stop_and_status_round_trip() {
     // Stop → WorkloadStopped → Ok(())
-    let scratch = tempfile::tempdir().expect("tempdir");
+    let scratch = short_socket_tempdir();
     let socket = dispatch_socket_path(scratch.path());
     let wid = WorkloadId::new();
     let guest =
@@ -625,7 +632,7 @@ fn submit_workload_stop_and_status_round_trip() {
     stop_result.expect("stop ok");
 
     // Status → WorkloadStatusReport{status} → Ok(status)
-    let scratch2 = tempfile::tempdir().expect("tempdir");
+    let scratch2 = short_socket_tempdir();
     let socket2 = dispatch_socket_path(scratch2.path());
     let guest2 = spawn_fake_guest(&socket2, |mut conn| {
         let workload_id =

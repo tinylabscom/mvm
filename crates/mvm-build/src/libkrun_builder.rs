@@ -4875,7 +4875,11 @@ mod tests {
         //   pipeline rejects because the spec is missing required
         //   fields (`language`, …) — surfacing as `NixBuildFailed`.
         //
-        // Both outcomes prove the wiring proceeds past validation
+        // A host that reaches the lean-rootfs builder path can also
+        // fail closed earlier with `RuntimeOverlayUnavailable` when
+        // the required runtime overlay cannot be resolved or built.
+        //
+        // All three outcomes prove the wiring proceeds past validation
         // rather than short-circuiting on `NotYetImplemented`, which
         // is what this test exists to guarantee. The test must NOT
         // require a specific host environment.
@@ -4896,6 +4900,7 @@ mod tests {
                 BuilderVmError::LibkrunUnavailable(_)
                     | BuilderVmError::ExtractionFailed(_)
                     | BuilderVmError::NixBuildFailed(_)
+                    | BuilderVmError::RuntimeOverlayUnavailable(_)
                     | BuilderVmError::DegradedBuilderStore { .. }
                     | BuilderVmError::SupervisorExited { .. }
             ),
@@ -4969,13 +4974,18 @@ mod tests {
         //   - builder store degraded (dangling GC root in the nix
         //     store) on a host with a populated but corrupted cache →
         //     DegradedBuilderStore
+        //   - runtime overlay resolution/build fails on a host that
+        //     reaches the lean-rootfs builder path →
+        //     RuntimeOverlayUnavailable
         //   - a partially bootable cached image on a host where the
         //     supervisor starts but exits before the requested job runs →
         //     SupervisorExited
-        // All five are legitimate "environment gap" surfaces. The
-        // fourth is what `mvmctl bootstrap` reports to operators with
-        // a populated cache; the first three are what `mvmctl bootstrap`
-        // reports before the Stage 0 bootstrap completes.
+        // All six are legitimate "environment gap" surfaces. The
+        // Nix-build and runtime-overlay cases are what `mvmctl bootstrap`
+        // reports on a populated cache depending on how far the host
+        // gets through builder startup; the first three are what
+        // `mvmctl bootstrap` reports before the Stage 0 bootstrap
+        // completes.
         let scratch = TempDir::new().unwrap();
         let mounts = ok_mounts(&scratch);
         let err = LibkrunBuilderVm::default()
@@ -4987,6 +4997,7 @@ mod tests {
                 BuilderVmError::LibkrunUnavailable(_)
                     | BuilderVmError::ExtractionFailed(_)
                     | BuilderVmError::NixBuildFailed(_)
+                    | BuilderVmError::RuntimeOverlayUnavailable(_)
                     | BuilderVmError::DegradedBuilderStore { .. }
                     | BuilderVmError::SupervisorExited { .. }
             ),

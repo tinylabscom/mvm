@@ -1546,7 +1546,10 @@ mod tests {
         use std::os::unix::net::UnixListener;
         // Stand up the real serve loop behind a UnixListener and probe
         // it end-to-end over the typed handshake.
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .prefix("builderd-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let sock = dir.path().join("vsock-21473.sock");
         let listener = match UnixListener::bind(&sock) {
             Ok(listener) => listener,
@@ -1581,7 +1584,10 @@ mod tests {
         // A bound socket whose owner never accepts/serves: connect
         // succeeds (queued), but the handshake read times out. Models a
         // crashed daemon that left its socket behind.
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::Builder::new()
+            .prefix("builderd-")
+            .tempdir_in("/tmp")
+            .expect("tempdir");
         let sock = dir.path().join("vsock-21473.sock");
         let _listener = match UnixListener::bind(&sock) {
             Ok(listener) => listener,

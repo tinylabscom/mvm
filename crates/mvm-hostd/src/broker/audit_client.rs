@@ -282,7 +282,6 @@ mod tests {
 
     use mvm_core::protocol::audit_signer::AuditSignerErrorCode;
     use mvm_core::security::SIG_ALG_ED25519;
-    use tempfile::tempdir;
     use tokio::net::UnixListener;
     use tokio::sync::Mutex;
 
@@ -329,7 +328,10 @@ mod tests {
 
     #[tokio::test]
     async fn append_round_trips_an_ok_response() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit-signer.sock");
         let response = AppendEntryResponse::Ok {
             request_id: "req-1".into(),
@@ -352,7 +354,10 @@ mod tests {
 
     #[tokio::test]
     async fn surfaces_typed_subprocess_err_response() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("audit-signer.sock");
         let err_resp = AppendEntryResponse::Err {
             request_id: "req-1".into(),
@@ -371,7 +376,10 @@ mod tests {
 
     #[tokio::test]
     async fn returns_connect_error_when_socket_missing() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("does-not-exist.sock");
         let client = AuditClient::new(&path);
         let err = client.append(&sample_req()).await.unwrap_err();

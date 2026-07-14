@@ -169,7 +169,10 @@ mod tests {
     /// EADDRINUSE.
     #[tokio::test]
     async fn bind_pre_unlinks_stale_socket() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("gateway-vm.sock");
 
         // Stale file: write some bytes pretending a prior process
@@ -193,7 +196,10 @@ mod tests {
     /// fan-out shape `nc -U` consumers see.
     #[tokio::test]
     async fn accepts_many_subscribers_fans_out_jsonl() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("gateway-vm.sock");
         let sink = GatewayAuditSink::bind(&path).unwrap();
         let tx = sink.sender();
@@ -239,7 +245,10 @@ mod tests {
     /// and drop oldest, but the fast receiver's queue drains normally.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn slow_subscriber_does_not_block_fast_subscriber_or_sender() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let path = dir.path().join("gateway-vm.sock");
         let sink = GatewayAuditSink::bind(&path).unwrap();
         let tx = sink.sender();

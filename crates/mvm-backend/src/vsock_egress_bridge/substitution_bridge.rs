@@ -180,7 +180,7 @@ fn write_nonblocking(stream: &mut UnixStream, payload: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::bind_unix_listener;
+    use crate::test_support::{bind_unix_listener, short_tempdir};
     use std::time::Duration;
 
     /// No endpoint configured → every stream is refused, nothing opened.
@@ -199,7 +199,7 @@ mod tests {
     /// never parses or gates.
     #[test]
     fn relays_raw_frame_both_directions() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("subst-");
         let sock = dir.path().join("subst.sock");
         let Some(listener) = bind_unix_listener(&sock) else {
             return;
@@ -246,7 +246,7 @@ mod tests {
     /// connection is opened — and closing drops the endpoint connection.
     #[test]
     fn later_frames_relay_and_close_drops_connection() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("subst-");
         let sock = dir.path().join("subst.sock");
         let Some(listener) = bind_unix_listener(&sock) else {
             return;
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn poll_fds_include_open_endpoint_streams() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("subst-");
         let sock = dir.path().join("subst.sock");
         let Some(listener) = bind_unix_listener(&sock) else {
             return;

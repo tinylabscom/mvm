@@ -263,9 +263,17 @@ mod tests {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
+    use tempfile::{Builder, TempDir};
 
     fn write_handshake(stream: &mut UnixStream, id: &str, port: u32) {
         stream.write_all(&encode_handshake(id, port)).unwrap();
+    }
+
+    fn short_socket_tempdir() -> TempDir {
+        Builder::new()
+            .prefix("mwp-")
+            .tempdir_in("/tmp")
+            .expect("short tempdir under /tmp")
     }
 
     #[test]
@@ -365,7 +373,7 @@ mod tests {
 
     #[test]
     fn connect_firecracker_vsock_speaks_connect_and_accepts_ok() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let uds = tmp.path().join("v.sock");
         let (server, port_rx) = fake_vsock_server(uds.clone(), "OK 1024\n", false);
         let stream = match connect_firecracker_vsock(&uds, 5252) {
@@ -386,7 +394,7 @@ mod tests {
 
     #[test]
     fn connect_firecracker_vsock_rejects_non_ok() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let uds = tmp.path().join("v.sock");
         let (server, _rx) = fake_vsock_server(uds.clone(), "ERR no such port\n", false);
         let err = match connect_firecracker_vsock(&uds, 5252) {
@@ -402,7 +410,7 @@ mod tests {
 
     #[test]
     fn handle_forward_conn_splices_end_to_end() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let base = tmp.path();
         let id = "00000000-0000-0000-0000-00000000abcd";
         std::fs::create_dir_all(base.join(id)).unwrap();
@@ -443,7 +451,7 @@ mod tests {
 
     #[test]
     fn handle_forward_conn_rejects_path_traversal_id() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let (mut client, inbound) = UnixStream::pair().unwrap();
         let base = tmp.path().to_path_buf();
         let fwd = std::thread::spawn(move || handle_forward_conn(inbound, &base));
@@ -525,7 +533,7 @@ mod tests {
         use std::io::Read;
         use std::os::unix::net::UnixListener;
 
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_socket_tempdir();
         let base = tmp.path();
         let id = "00000000-0000-0000-0000-0000000000ff";
         std::fs::create_dir_all(base.join(id)).unwrap();

@@ -556,10 +556,10 @@ mod tests {
 
     #[test]
     fn vsock_connect_reaches_the_agent_socket_and_rejects_other_ports() {
-        use crate::test_support::bind_unix_listener;
+        use crate::test_support::{bind_unix_listener, short_tempdir};
         use std::io::{Read, Write};
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("hvf-");
         let sock = dir.path().join("agent.sock");
         // Stand-in for the supervisor's agent bridge: echo one byte back.
         let Some(listener) = bind_unix_listener(&sock) else {
@@ -622,10 +622,10 @@ mod tests {
 
     #[test]
     fn vsock_connect_console_port_resolves_to_vsock_subdir() {
-        use crate::test_support::bind_unix_listener;
+        use crate::test_support::{bind_unix_listener, short_tempdir};
         use std::io::{Read, Write};
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("hvf-");
         let vsock_dir = dir.path().join("vsock");
         std::fs::create_dir_all(&vsock_dir).unwrap();
         let sock = vsock_dir.join("vsock-20001.sock");

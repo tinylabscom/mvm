@@ -530,7 +530,6 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    use tempfile::tempdir;
     use tokio::net::UnixListener;
 
     use super::*;
@@ -583,7 +582,10 @@ mod tests {
 
     #[tokio::test]
     async fn restart_supervisor_succeeds_on_first_attempt() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let (spawner, attempts) = MockSpawner::new(vec![Ok(())]);
         let mut sup = RestartSupervisor::new(spawner)
             .with_backoff(vec![Duration::from_millis(1)])
@@ -596,7 +598,10 @@ mod tests {
 
     #[tokio::test]
     async fn restart_supervisor_retries_after_failure() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         // Outcomes are popped, so: first attempt fails, second succeeds.
         let outcomes = vec![
             Ok(()),
@@ -618,7 +623,10 @@ mod tests {
 
     #[tokio::test]
     async fn restart_supervisor_exhausts_budget_then_refuses() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let outcomes: Vec<Result<(), SpawnError>> = (0..6)
             .map(|i| {
                 Err(SpawnError::PrematureExit {
@@ -646,7 +654,10 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_probe_succeeds_when_uds_already_bound() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let uds_path = dir.path().join("already-bound.sock");
         let _listener = UnixListener::bind(&uds_path).unwrap();
 
@@ -671,7 +682,10 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_probe_times_out_when_uds_never_appears() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let mut child = match Command::new("sleep").arg("60").spawn() {
             Ok(c) => c,
             Err(_) => return,
@@ -693,7 +707,10 @@ mod tests {
 
     #[tokio::test]
     async fn readiness_probe_detects_premature_exit() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         // `true` exits immediately with 0.
         let mut child = match Command::new("true").spawn() {
             Ok(c) => c,
@@ -717,7 +734,10 @@ mod tests {
 
     #[tokio::test]
     async fn process_spawner_real_binary_propagates_spawn_error_on_missing_path() {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let spawner = ProcessSpawner::unchecked();
         let request = SpawnRequest::new(
             "/definitely/not/a/real/path/mvm-fake",
@@ -750,7 +770,10 @@ mod tests {
             BinarySignature, IntegrityError, ReleaseKeyBundle, SignedBinaryChecker,
         };
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let binary_path = dir.path().join("fake-bin");
         let original = b"#!/bin/sh\nsleep 5\n";
         std::fs::write(&binary_path, original).unwrap();

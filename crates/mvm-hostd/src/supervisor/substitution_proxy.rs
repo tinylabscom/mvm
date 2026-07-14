@@ -1492,10 +1492,12 @@ mod tests {
     use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::sync::Arc;
-    use tempfile::tempdir;
 
     fn resolver_with(name: &str, value: &str) -> (tempfile::TempDir, LocalResolver) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let store = FileSecretStore::with_dir(dir.path());
         store
             .put("local", name, &SecretBox::new(Box::new(value.to_string())))
@@ -1910,7 +1912,6 @@ mod server_tests {
     use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::sync::Mutex;
-    use tempfile::tempdir;
 
     /// Records the request it was handed so a test can prove the destination
     /// (not the guest) received the real credential — without a network call.
@@ -1981,7 +1982,10 @@ mod server_tests {
         Arc<MockForwarder>,
         tempfile::TempDir,
     ) {
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let store = FileSecretStore::with_dir(dir.path());
         store
             .put(
@@ -2257,7 +2261,10 @@ mod server_tests {
             }
         }
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let store = FileSecretStore::with_dir(dir.path());
         store
             .put(
@@ -2368,7 +2375,10 @@ mod server_tests {
             }
         }
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let store = FileSecretStore::with_dir(dir.path());
         store
             .put(
@@ -2551,7 +2561,10 @@ mod server_tests {
         use crate::keyholder::{FileBindingStore, SecretBindingMeta};
         use mvm_core::plan::{SecretBinding, SecretSource};
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         // Binding metadata (`secret set`) + the value store.
         let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
         bindings
@@ -2604,7 +2617,10 @@ mod server_tests {
         use mvm_core::plan::{SecretBinding, SecretSource};
         use mvm_core::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let bindings = FileBindingStore::with_dir(dir.path().join("bindings"));
         bindings
             .put(
@@ -2752,7 +2768,10 @@ mod server_tests {
         use mvm_core::plan::TenantId;
         use mvm_core::policy::{EntropyMode, RedactionAction, RedactionPolicy, RedactionProfile};
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
             .put(
@@ -2845,7 +2864,10 @@ mod server_tests {
         use ed25519_dalek::SigningKey;
         use mvm_core::plan::TenantId;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
             .put(
@@ -2908,7 +2930,10 @@ mod server_tests {
         use ed25519_dalek::SigningKey;
         use mvm_core::plan::TenantId;
 
-        let dir = tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix("mvm-hostd-")
+            .tempdir_in("/tmp")
+            .unwrap();
         let store = FileSecretStore::with_dir(dir.path().join("secrets"));
         store
             .put(

@@ -4,6 +4,8 @@ use std::error::Error;
 use std::os::unix::net::UnixListener;
 #[cfg(test)]
 use std::path::Path;
+#[cfg(test)]
+use tempfile::{Builder, TempDir};
 
 #[cfg(test)]
 use crate::mock_guest_agent::MockGuestAgent;
@@ -77,4 +79,12 @@ pub(crate) fn start_mock_guest_agent(vm_dir: &Path) -> Option<MockGuestAgent> {
             vm_dir.display()
         ),
     }
+}
+
+#[cfg(test)]
+pub(crate) fn short_tempdir(prefix: &str) -> TempDir {
+    Builder::new()
+        .prefix(prefix)
+        .tempdir_in("/tmp")
+        .expect("short tempdir under /tmp")
 }

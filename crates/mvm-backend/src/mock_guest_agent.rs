@@ -406,7 +406,7 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::start_mock_guest_agent;
+    use crate::test_support::{short_tempdir, start_mock_guest_agent};
     use mvm_guest::vsock::{
         connect_to, query_fs_diff_on, send_fs_request, send_proc_request, send_proc_request_on,
         send_proc_wait_on, vsock_uds_path,
@@ -422,7 +422,7 @@ mod tests {
     }
 
     fn make_vm_dir() -> TempDir {
-        tempfile::tempdir().expect("tempdir")
+        short_tempdir("mock-agent-")
     }
 
     #[test]

@@ -420,7 +420,9 @@ fn read_framed<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
+    use crate::test_support::{
+        bind_unix_listener, error_chain_has_permission_denied, short_tempdir,
+    };
 
     fn key() -> [u8; 32] {
         [11u8; 32]
@@ -494,7 +496,7 @@ mod tests {
 
     #[test]
     fn register_vm_signs_and_sends_and_accepts_ok() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("host-agent-");
         let socket = dir.path().join("control.sock");
         let handle = stub_endpoint(socket.clone(), ControlResponse::Ok);
         // Give the stub a beat to bind.
@@ -525,7 +527,7 @@ mod tests {
 
     #[test]
     fn control_err_response_is_surfaced() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("host-agent-");
         let socket = dir.path().join("control.sock");
         let handle = stub_endpoint(
             socket.clone(),
@@ -552,7 +554,7 @@ mod tests {
 
     #[test]
     fn register_vm_retries_across_control_socket_restart() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_tempdir("host-agent-");
         let socket = dir.path().join("control.sock");
         let worker = std::thread::spawn({
             let socket = socket.clone();

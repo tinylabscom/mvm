@@ -3649,6 +3649,13 @@ pub fn mount_volume_on(
 mod tests {
     use super::*;
 
+    fn short_socket_tempdir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("mvm-guest-vsock-")
+            .tempdir_in("/tmp")
+            .expect("create short tempdir under /tmp")
+    }
+
     #[test]
     fn dev_console_data_ports_cover_the_expected_range() {
         let ports: Vec<u32> = dev_console_data_ports().collect();
@@ -5405,7 +5412,7 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::os::unix::net::UnixListener;
 
-        let dir = tempfile::tempdir().unwrap();
+        let dir = short_socket_tempdir();
         let socket = dir.path().join("v.sock");
         let socket_path = socket.to_string_lossy().into_owned();
         let port = 4242;
