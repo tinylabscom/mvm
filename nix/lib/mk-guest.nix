@@ -768,11 +768,13 @@ let
     # `mvm-verity-init` bind-mounts it at /mvm/runtime before
     # switch_root, and on a non-verity boot the overlay is mounted
     # there directly, so /mvm/runtime/agent is the canonical binary
-    # location. mkGuest no longer bakes a /usr/local/bin fallback, so a
-    # required-overlay boot fails closed when the overlay agent is
-    # absent (a half-attached overlay never boots agent-less silently).
-    # The rootfs_only / prefer-overlay branches keep the legacy
-    # /usr/local/bin lookup for images that predate overlay-only.
+    # location. mkGuest no longer bakes a /usr/local/bin fallback, so ANY
+    # boot fails closed when no agent can be resolved (the guard after the
+    # ladder) — a half-attached overlay never boots agent-less silently,
+    # regardless of policy. The rootfs_only / prefer-overlay
+    # /usr/local/bin lookups below are inert for current mkGuest output
+    # (nothing is baked); they matter only if a future non-lean image
+    # reintroduces a baked agent.
     MVM_VARIANT=$(/bin/busybox cat /etc/mvm/variant 2>/dev/null || echo prod)
     MVM_AGENT_BIN=
     if [ "$MVM_RUNTIME_SOURCE_POLICY" = rootfs_only ]; then
@@ -789,16 +791,23 @@ let
     elif [ -x /usr/local/bin/mvm-guest-agent ]; then
       MVM_AGENT_BIN=/usr/local/bin/mvm-guest-agent
     fi
-    if [ -n "$MVM_AGENT_BIN" ]; then
-      # util-linux setpriv — busybox setpriv lacks --reuid /
-      # --regid / --clear-groups; see `setprivWrap` above for
-      # the full reasoning. Without this fix the agent never
-      # forks and vsock port 5252 stays unbound.
-      /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
-        --reuid=${toString agentUid} --regid=${toString agentUid} \
-        --clear-groups --no-new-privs \
-        -- "$MVM_AGENT_BIN" &
+    if [ -z "$MVM_AGENT_BIN" ]; then
+      # Fail closed regardless of policy. Every mkGuest /init boot needs the
+      # agent, so an empty resolution means the overlay is missing or
+      # half-attached (or a future non-lean shape lost its baked agent).
+      # Booting on would leave vsock 5252 unbound and the control plane
+      # silently dead — refuse instead.
+      echo "mvm-init: no guest agent resolved from /mvm/runtime and no baked fallback"
+      exit 1
     fi
+    # util-linux setpriv — busybox setpriv lacks --reuid /
+    # --regid / --clear-groups; see `setprivWrap` above for
+    # the full reasoning. Without this fix the agent never
+    # forks and vsock port 5252 stays unbound.
+    /bin/busybox setsid ${pkgs.util-linux}/bin/setpriv \
+      --reuid=${toString agentUid} --regid=${toString agentUid} \
+      --clear-groups --no-new-privs \
+      -- "$MVM_AGENT_BIN" &
 
     # Stage 3 — hostname + console. /dev/console is what the
     # hypervisor wires our virtio-console to; in dev mode we keep
