@@ -69,6 +69,8 @@ Logging is **`mvm-core::log`** (a module, not a crate): structured `tracing` for
 - **Two carved exemptions** (the process *is* the workload, not a helper we spawn for our own logic): (1) launching the **Firecracker** VMM process; (2) the **builder VM** invoking `nix` — the builder VM is a nix-execution engine and that is its sole purpose. Both are allow-listed explicitly in the lint.
 - **Secrets isolation (Option A):** keys/secrets live in a dedicated module — `mlock`ed, `zeroize`-on-drop, constant-time compare (`subtle`), never logged; the whole daemon runs under seccomp + landlock; the vsock parsers stay fuzzed. This trades the previous address-space process-moat for in-process isolation + memory hygiene; the primary guarantee (*secrets never enter the guest*) is untouched.
 - **Multi-role dispatch** is by subcommand/argv0 within the single binary (no fork). PID-1 variants (verity-init, oci-init) are selected by the overlay's init symlink.
+- The **builder VM runs the same single guest binary** (`mvm-agentd` in a "builder" role: drive the nix build, report status/outcome, emit the artifact location) — one guest binary across workload *and* builder VMs, not a separate builder-VM binary set.
+- **Host daemon state store = append-only, signed `jsonl`** (the tamper-evident shape the audit chain already uses), never an embedded SQL / `libSQL` database — fewer deps, smaller attack surface, and it doubles as an audit artifact.
 
 ### 2.3 Feature model — exactly two
 
@@ -137,11 +139,12 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 
 ### Phase 0 — Repo & spec hygiene (low-risk, unblocks a clean base)
 
-**WS0.1 — specs/ sweep**
-- [ ] Delete `specs/{plans,notes,backlog,research,perf,prompts}`, `scratch.md`, `gap-analysis-vs-libkrun.md`, `REFACTOR-STATUS.md` (history preserved in git).
-- [ ] Fold `specs/claims/*` and `specs/compliance/*` and `specs/threat-models/*` into the consolidated ADRs; keep the machine-checked `claims/catalog.md` witness table.
+**WS0.1 — specs/ sweep** (gate-sensitive: 6 xtask checks + 4 CI workflows read `specs/`)
+- [ ] Delete `specs/{plans,notes,backlog,research,perf,prompts}`, `scratch.md`, `gap-analysis-vs-libkrun.md`, `REFACTOR-STATUS.md`, `DEPLOYMENT.md` (all preserved in git).
+- [ ] Fold `specs/claims/*` (per-claim docs) + `specs/compliance/*` + `specs/threat-models/*` into the consolidated ADRs; keep `claims/catalog.md` as the machine-checked witness ledger.
+- [ ] **Update the xtask gates that read the deleted trees in the same change:** `check_spec_numbers` (reads `plans/` → retire or repoint), and repoint `check_claim_catalog` / `check_adr_coverage` / `check_trust_gradient` / `check_no_overclaim` / `check_doc_claims` at the consolidated ADRs + `catalog.md`. Update the 4 CI workflows (`security.yml`, `ci-full.yml`, `publish-npm.yml`, `publish-pypi.yml`) that reference `specs/`.
 - [ ] Keep `specs/adrs/` (consolidated per WS0.2), `01-project.md`, `02-roadmap.md`, `runbooks/`, `contracts/`.
-- Gate: `specs/` contains only ADRs + the small kept set; `xtask check-spec-numbers` / `check-claim-catalog` green.
+- Gate: `specs/` is ADRs + the small kept set; every xtask check green; the 4 CI workflows green.
 
 **WS0.2 — ADR consolidation (~91 → ~15)**
 - [ ] Merge the 13 clusters into ~15 canonical ADRs, deleting the merged files (no decision lost — knowledge folded in). Fix dup titles (008/010) and the 012 internal-number mismatch. See Appendix A.
@@ -173,11 +176,11 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 **WS1 — crate restructure** (the spine; each sub-step keeps tests green)
 - [ ] 1a `mvm-protocol`: extract `mvm-sdk::ir` + wire + policy + `mvm-verify`; make it `#![no_std]` + `alloc`; add a `wasm32-unknown-unknown` CI build; `unsafe_code = "forbid"`.
 - [ ] 1b `mvm-core`: rebuild on `mvm-protocol`; own single-dir config, crypto, keystore, attestation, catalog, `log`.
-- [ ] 1c `mvm-fs`: fold `mvm-ext4` + `mvm-oci` + rootfs/overlay/unpack; one ext4 writer + one reader; "image → rootfs + vmlinux" is its public surface.
+- [ ] 1c `mvm-fs`: fold `mvm-ext4` + `mvm-oci` + rootfs/overlay/unpack; one ext4 writer + one reader; "image → rootfs + vmlinux" is its public surface. Prefer **virtiofs-root for OCI** (boot directly off the unpacked OCI dir, skipping ext4 materialize) where the backend supports it; keep materialize as the fallback.
 - [ ] 1d `mvm-net`: fold `mvm-network` + host tunnel/gateway/dns + guest net; vsock/UDS transport + egress seam.
 - [ ] 1e `mvm-runtime`: fold `mvm` + `mvm-backend`; `VmBackend` trait + libkrun/hvf/firecracker; delete `qemu.rs`.
 - [ ] 1f `mvm-build`: slim the builder pipeline.
-- [ ] 1g `mvm-sdk`: authoring + tree-sitter→nix-template; IR now imported from `mvm-protocol`.
+- [ ] 1g `mvm-sdk`: authoring + the tree-sitter → Workload IR → **nix-template** pipeline (IR imported from `mvm-protocol`); support a user-specified **base OCI image** as the generated template's base layer.
 - [ ] 1h `mvm-client`: facade covering every runtime operation the CLI needs.
 - [ ] 1i `mvm-cli`: delete direct reaches into runtime internals; route through `mvm-client`.
 - Gate: `cargo build --workspace` for both `user` and `host` surfaces; full suite green; dependency graph acyclic and matches §2.1.
@@ -199,8 +202,8 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 ### Phase 2 — Binaries, egress invariant, lifecycle
 
 **WS2 — single host + single guest binary, no forks**
-- [ ] `mvm-agentd`: merge `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi`; one binary, subcommand/argv0 dispatch; ship via runtime-overlay volume.
-- [ ] `mvm-hostd`: fold `mvm-vm-host` + host-side builder bins; single-process resident daemon; roles as tasks.
+- [ ] `mvm-agentd`: merge `mvm-guest` + `mvm-guest-helpers` + `mvm-host-services-ffi` **and the builder-VM guest bins** (`mvm-host-vm-init`/`mvm-builderd`/`stage0-init`/`mvm-rootfs-patcher` → a "builder" role); one binary, subcommand/argv0 dispatch; ship via the runtime-overlay volume.
+- [ ] `mvm-hostd`: fold `mvm-vm-host` + host-side builder bins; single-process resident daemon; roles as tasks; state in append-only signed `jsonl` (§2.2).
 - [ ] Remove every `Command` shell-out (host/runtime/agent); native Rust replacements; the two carved exemptions (FC launch, builder-VM nix) allow-listed.
 - [ ] Secrets module: `mlock` + `zeroize` + `subtle`; daemon-wide seccomp + landlock.
 - [ ] CI lints: "exactly two shipped binaries + CLI", "no `Command` outside the allow-list".
@@ -213,12 +216,13 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [ ] Bidirectional secret-substitution + PII-redaction at the seam, enforced on all workload backends; add the data-governance CI witness.
 - [ ] Delete the dead rvproxy / native-gateway subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`.
 - [ ] Enforce the mount no-shadow rule; add `/mvm` to deny prefixes.
-- Gate: `check_vsock_only_egress` passes for all workload backends; live egress smoke on Mac (HVF) + Linux (libkrun + FC); no NIC bypass.
+- Gate: `check_vsock_only_egress` passes for all workload backends; `machine run --image busybox --allow-host google.com` resolves DNS + connects over the seam (the current `ping: bad address` failure fixed); live egress smoke on Mac (HVF) + Linux (libkrun + FC); no NIC bypass.
 
 **WS9 — lifecycle correctness**
 - [ ] Confirm transient teardown (entrypoint exit + no healthcheck → VM stops) — already centralized; add tests.
+- [ ] **Capture workload stdout/stderr + exit code over vsock** (reuse the `BuilderStatus`/`BuilderOutcome` pattern the builder VM already uses) so all workload output crosses the auditable seam and the transient exit code is sourced from it.
 - [ ] Implement the missing **host-side healthcheck reaper** for persistent machines (probe the stored `health_check`; restart/mark-unhealthy on failure). Today it's persisted but never executed.
-- Gate: transient exits propagate exit code + tear down; persistent machine with a healthcheck is actively probed.
+- Gate: transient exits propagate the vsock-sourced exit code + tear down; workload stdout/stderr captured over vsock; a persistent machine with a healthcheck is actively probed.
 
 ### Phase 3 — Quality: size, dead code, CLI, kernel/memory
 
@@ -236,15 +240,25 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [ ] Replace the 31-arm dispatch `match` with a `Command` trait (`fn run(&self, ctx: &Cli) -> Result<()>`); one module per command; every command calls `mvm-client`.
 - [ ] `mvmctl serve` exposes the agent-facing server behind an `AgentProtocol` trait (MCP impl now; ACP added as a second impl when a consumer exists — no new crate), all backed by `mvm-client`.
 - [ ] Remove hidden/duplicate/dead verbs.
-- Gate: `mvmctl --help` lists the real surface; `tests/cli.rs` covers it; no command reaches past `mvm-client`.
+- [ ] Slim the **Justfile** — collapse the recipe sprawl to a small set (`build`, `test`, `lint`, `ci`, `bdd`, `run`, `clean`).
+- Gate: `mvmctl --help` lists the real surface; `tests/cli.rs` covers it; no command reaches past `mvm-client`; `just --list` is short.
 
-**WS10 — tiny kernel + low memory**
+**WS10 — tiny kernel + low memory + density**
 - [ ] Kernel: minimal defconfig; stop boot-probing IPVS/btrfs/RAID-autodetect (#1283); bump the kernel pin (#1264).
 - [ ] Guest agent ≈ **8 MB**: de-`tokio` the guest (mio / raw epoll+kqueue), strip deps, measure RSS.
 - [ ] Host daemon ≈ **64 MB**: minimal runtime, evaluate `mimalloc`, strip deps.
+- [ ] **Density levers:** right-size the default `--memory` (64–96 MB, not 512); **demand-fault guest RAM** (MAP_ANON demand-zero instead of eager-dirty — the architectural fix for high VM density); share one **read-only kernel mmap** across VMs.
 - [ ] Release profile: `lto = "thin"`, `codegen-units = 1`, `strip = true`, `panic = "abort"` for bins.
-- [ ] Dep cut: dedupe ext4 (writer+reader), TLS (`reqwest`/`rustls`/`rcgen`), compression (`flate2`/`lzma-rs`/`tar`), net (`smoltcp`/`etherparse`/`rtnetlink`/`mio`), syscall (`nix`/`rustix`/`libc`).
-- Gate: measured guest RSS ≤ ~8 MB, host RSS ≤ ~64 MB idle; lockfile materially smaller.
+- [ ] Dep cut: dedupe ext4 (writer+reader), TLS (`reqwest`/`rustls`/`rcgen`), compression (`flate2`/`lzma-rs`/`tar`), net (`smoltcp`/`etherparse`/`rtnetlink`/`mio`), syscall (`nix`/`rustix`/`libc`); **reimplement trivially-used deps** where it removes an attack surface for little code.
+- [ ] **Nix build speed:** local parallel/incremental build (nix-fast-build-style), no external cache providers (hermetic).
+- Gate: guest RSS ≤ ~8 MB, host RSS ≤ ~64 MB idle; an idle guest configured at 512 MB resident-costs ~its working set (demand-fault proven); lockfile materially smaller.
+
+**WS-DX — developer experience & performance** (the story #1637 promises)
+- [ ] **Sub-second launch**, verified: a timed `mvmctl up` → PTY shell → `mvmctl down` e2e on Mac (HVF) and Linux (libkrun + FC), asserting sub-second boot + clean teardown.
+- [ ] **Warm start / warm pool** (pre-warmed standby VMs), **snapshots** (bake + fast restore), **streaming exec**, **`expose_tcp`** (host↔guest port forward), **live host-directory mount** — the supermachine-shaped capabilities, exposed through `mvm-client` + the SDK.
+- [ ] A clean **external API** (`Image` / `Vm` / `Pool` / `ExecBuilder`-style) on `mvm-client`, so library and CLI share one surface.
+- [ ] **Simple, fast install:** a one-line installer + `mvmctl upgrade`.
+- Gate: the timed e2e proves sub-second launch on both hosts; warm-start + snapshot restore measured; the external API is documented and BDD-covered.
 
 ### Phase 4 — Docs, close-out, stretch
 
@@ -284,7 +298,8 @@ WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net`
 
 - Both surfaces build; `cargo nextest run --workspace` + `cargo test --workspace --doc` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all --check` green.
 - ~11 crates, 2 features, 1 host + 1 guest + 1 CLI binary, 1 base dir, 0 non-test files > 1500 lines, no `Command` outside the allow-list, no hardcoded IPs/ports, vsock-only egress on every workload backend with the data-governance witness passing.
-- All security claims still witnessed; live egress + boot smoke on Mac (HVF) and Linux (libkrun + FC).
+- All security claims still witnessed; live egress + boot smoke on Mac (HVF) and Linux (libkrun + FC); **sub-second launch** proven by the timed e2e; guest RAM demand-faulted for density.
+- Workload stdout/stderr + exit code flow over vsock; the builder VM runs the same single guest binary.
 - `just bdd` green; every security claim and top-level CLI verb has a passing Gherkin scenario; `just ci` runs the BDD suite.
 - Root is ~8 dirs (§2.8); SDKs live under `crates/`.
 - SDK usage (decorator + runtime) unchanged; ADRs consolidated but intact; website docs current; only #1637 open.
