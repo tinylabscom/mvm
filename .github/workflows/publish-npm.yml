@@ -11,7 +11,8 @@ name: Publish SDK to npm
 #
 # Auth: NPM_TOKEN repo secret (a granular automation token with publish
 # rights on `mvm-sdk`). Provenance is attested via OIDC. See
-# specs/runbooks/publish-sdks.md.
+# specs/adrs/105-sdk-facade-machine-client-convergence.md ("Runbook:
+# publishing the mvm SDKs").
 
 on:
   release:

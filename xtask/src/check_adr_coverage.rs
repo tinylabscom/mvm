@@ -259,8 +259,8 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     ),
     (
         36,
-        "AI-agent threat model — flagged TBD in specs/compliance/soc2-controls.md; ADR pending the \
-         agent threat model write-up",
+        "AI-agent threat model — flagged TBD in the SOC 2 controls mapping under ADR-002 \
+         §\"Compliance mapping\"; ADR pending the agent threat model write-up",
     ),
     (
         999,

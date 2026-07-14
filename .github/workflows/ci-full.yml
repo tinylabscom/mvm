@@ -136,7 +136,7 @@ jobs:
       - name: Gated doc claims (plan 74 W0)
         run: cargo run -p xtask -- check-doc-claims
 
-      - name: No overclaiming (gated phrases from specs/claims/)
+      - name: No overclaiming (gated phrases from claim frontmatter in specs/adrs/)
         run: cargo run -p xtask -- check-no-overclaim
 
       # Plan 115 / ADR-065 — Rust manifest ⇔ Nix attrset parity.

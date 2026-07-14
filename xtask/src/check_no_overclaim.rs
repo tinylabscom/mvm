@@ -1,14 +1,19 @@
 //! `xtask check-no-overclaim`
 //!
 //! Refuses any user-facing repo text that uses phrases declared
-//! "gated" by a claim file in `specs/claims/` whose status is not
-//! `Shipped`.
+//! "gated" by a claim whose status is not `Shipped`.
 //!
-//! The lint reads every `specs/claims/*.md` (excluding `README.md`),
-//! parses its YAML frontmatter, and builds a `phrase → (claim, status,
-//! exempt_paths)` index. It then walks the workspace, scans `.md` and
-//! `.rs` files, and reports any path that contains a gated phrase and
-//! is not in the claim's `exempt_paths`.
+//! Claim frontmatter blocks live embedded inside ADR bodies under
+//! `specs/adrs/**/*.md` (each consolidated claim doc keeps its
+//! original YAML frontmatter, wrapped in a "consolidated from the
+//! former per-claim doc" section). The lint scans every ADR file
+//! for `---`-delimited blocks, skips blocks that don't declare a
+//! `claim:` key (an ADR's own title/status/date frontmatter, or an
+//! example inside a fenced code block), parses the rest as claim
+//! frontmatter, and builds a `phrase → (claim, status, exempt_paths)`
+//! index. It then walks the workspace, scans `.md` and `.rs` files,
+//! and reports any path that contains a gated phrase and is not in
+//! the claim's `exempt_paths`.
 //!
 //! A claim with status `Shipped` admits its phrases everywhere — the
 //! gate disengages. A claim with status `Planned` or `Preview` keeps
@@ -25,15 +30,15 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 pub fn run(workspace: &Path) -> Result<()> {
-    let claims_dir = workspace.join("specs").join("claims");
-    if !claims_dir.is_dir() {
+    let adrs_dir = workspace.join("specs").join("adrs");
+    if !adrs_dir.is_dir() {
         bail!(
-            "expected claims dir at {}; got nothing. Did plan 75 W0 land?",
-            claims_dir.display()
+            "expected ADR dir at {}; got nothing. Did the specs/adrs consolidation land?",
+            adrs_dir.display()
         );
     }
 
-    let claims = load_claims(&claims_dir)?;
+    let claims = load_claims(&adrs_dir)?;
     let active: Vec<&Claim> = claims
         .iter()
         .filter(|c| c.status != Status::Shipped)
@@ -142,60 +147,114 @@ struct Finding {
     status: Status,
 }
 
-fn load_claims(claims_dir: &Path) -> Result<Vec<Claim>> {
+/// Recursively scan `dir` for `.md` files and pull every embedded claim
+/// frontmatter block out of each one.
+fn load_claims(dir: &Path) -> Result<Vec<Claim>> {
     let mut out = Vec::new();
-    for entry in std::fs::read_dir(claims_dir)
-        .with_context(|| format!("reading claims dir {}", claims_dir.display()))?
+    collect_claims(dir, &mut out)?;
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
+fn collect_claims(dir: &Path, out: &mut Vec<Claim>) -> Result<()> {
+    for entry in
+        std::fs::read_dir(dir).with_context(|| format!("reading ADR dir {}", dir.display()))?
     {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
+            collect_claims(&path, out)?;
             continue;
         }
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        if !name.ends_with(".md") || name == "README.md" {
+        if !name.ends_with(".md") {
             continue;
         }
         let source = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading claim file {}", path.display()))?;
-        let claim = parse_claim_frontmatter(&path, &source)?;
-        out.push(claim);
+            .with_context(|| format!("reading {}", path.display()))?;
+        for block in extract_frontmatter_blocks(&source) {
+            if let Some(claim) = claim_from_frontmatter(&path, &block)? {
+                out.push(claim);
+            }
+        }
     }
-    out.sort_by(|a, b| a.id.cmp(&b.id));
-    Ok(out)
+    Ok(())
 }
 
-/// Minimal frontmatter parser. The format is fixed (we control the
-/// authors and the file format), so handwritten parsing avoids the
-/// serde_yaml dep.
-fn parse_claim_frontmatter(path: &Path, source: &str) -> Result<Claim> {
-    let mut lines = source.lines();
-    if lines.next().map(str::trim) != Some("---") {
-        bail!(
-            "{}: expected frontmatter delimiter `---` on line 1",
-            path.display()
-        );
+/// Scan `source` for every `---`-delimited block (a line that is
+/// exactly `---`, up to the next such line) and return each block's
+/// inner lines. Blocks inside fenced code (```` ``` ```` or `~~~`)
+/// are skipped — an ADR's "## File format" section can legitimately
+/// show an example frontmatter template inside a fence, and that
+/// template (`status: Planned | Preview | ...`) is not a real claim.
+fn extract_frontmatter_blocks(source: &str) -> Vec<Vec<String>> {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut blocks = Vec::new();
+    let mut in_fence = false;
+    let mut i = 0;
+    while i < lines.len() {
+        if is_fence_delimiter(lines[i]) {
+            in_fence = !in_fence;
+            i += 1;
+            continue;
+        }
+        if in_fence || lines[i].trim() != "---" {
+            i += 1;
+            continue;
+        }
+        // Found an opening delimiter outside a fence; scan forward
+        // for the matching close, tracking fences within the search
+        // so a fenced example between the two `---` lines can't
+        // supply a spurious close.
+        let mut j = i + 1;
+        let mut inner_fence = false;
+        let mut close = None;
+        while j < lines.len() {
+            if is_fence_delimiter(lines[j]) {
+                inner_fence = !inner_fence;
+            } else if !inner_fence && lines[j].trim() == "---" {
+                close = Some(j);
+                break;
+            }
+            j += 1;
+        }
+        match close {
+            Some(close) => {
+                blocks.push(lines[i + 1..close].iter().map(|s| s.to_string()).collect());
+                i = close + 1;
+            }
+            // Unterminated opening delimiter (e.g. a lone `---`
+            // markdown thematic break later in the file) — stop
+            // looking for frontmatter blocks in this file.
+            None => break,
+        }
     }
+    blocks
+}
+
+fn is_fence_delimiter(line: &str) -> bool {
+    let t = line.trim_start();
+    t.starts_with("```") || t.starts_with("~~~")
+}
+
+/// Parse one frontmatter block's lines into scalar and list fields.
+/// The format is fixed (we control the authors and the file format),
+/// so handwritten parsing avoids the serde_yaml dep.
+fn parse_frontmatter_fields(
+    lines: &[String],
+) -> (BTreeMap<String, String>, BTreeMap<String, Vec<String>>) {
     let mut scalars: BTreeMap<String, String> = BTreeMap::new();
     let mut lists: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut current_list: Option<String> = None;
-    for raw in &mut lines {
+    for raw in lines {
         let line = raw.trim_end();
-        if line.trim() == "---" {
-            break;
-        }
         if let Some(item) = strip_list_item(line) {
-            let key = current_list.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{}: list item {:?} without a preceding `key:` line",
-                    path.display(),
-                    item
-                )
-            })?;
-            lists.entry(key.to_string()).or_default().push(item);
+            if let Some(key) = current_list.as_deref() {
+                lists.entry(key.to_string()).or_default().push(item);
+            }
             continue;
         }
         if let Some((key, value)) = split_kv(line) {
@@ -209,17 +268,26 @@ fn parse_claim_frontmatter(path: &Path, source: &str) -> Result<Claim> {
             }
         }
     }
+    (scalars, lists)
+}
 
-    let id = scalars
-        .get("claim")
-        .cloned()
-        .ok_or_else(|| anyhow::anyhow!("{}: missing `claim:` field", path.display()))?;
-    let status_str = scalars
-        .get("status")
-        .ok_or_else(|| anyhow::anyhow!("{}: missing `status:` field", path.display()))?;
+/// Parse a frontmatter block into a `Claim`, or `Ok(None)` when the
+/// block has no `claim:` key — i.e. it isn't a claim doc at all (an
+/// ADR's own title/status/date header is the common case).
+fn claim_from_frontmatter(path: &Path, lines: &[String]) -> Result<Option<Claim>> {
+    let (mut scalars, mut lists) = parse_frontmatter_fields(lines);
+    let Some(id) = scalars.remove("claim") else {
+        return Ok(None);
+    };
+    let status_str = scalars.get("status").ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}: claim `{id}` frontmatter block missing `status:` field",
+            path.display()
+        )
+    })?;
     let status = Status::parse(status_str).ok_or_else(|| {
         anyhow::anyhow!(
-            "{}: unknown status {:?}. Expected Planned, Preview, Shipped, or Not-claimed.",
+            "{}: claim `{id}` has unknown status {:?}. Expected Planned, Preview, Shipped, or Not-claimed.",
             path.display(),
             status_str
         )
@@ -227,12 +295,12 @@ fn parse_claim_frontmatter(path: &Path, source: &str) -> Result<Claim> {
     let gated_phrases = lists.remove("gated_phrases").unwrap_or_default();
     let exempt_paths = lists.remove("exempt_paths").unwrap_or_default();
 
-    Ok(Claim {
+    Ok(Some(Claim {
         id,
         status,
         gated_phrases,
         exempt_paths,
-    })
+    }))
 }
 
 /// Parse a `- "value"` or `- value` list item.
@@ -368,6 +436,18 @@ fn visit_inner(
 mod tests {
     use super::*;
 
+    /// Parse the single frontmatter block in `src` (test-only sugar
+    /// over `extract_frontmatter_blocks` + `claim_from_frontmatter`,
+    /// mirroring the old standalone-file parse path).
+    fn parse_one_claim(path: &Path, src: &str) -> Result<Claim> {
+        let blocks = extract_frontmatter_blocks(src);
+        let block = blocks
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("no frontmatter block found"))?;
+        claim_from_frontmatter(path, block)?
+            .ok_or_else(|| anyhow::anyhow!("block has no `claim:` field"))
+    }
+
     #[test]
     fn parses_claim_frontmatter() {
         let src = "\
@@ -383,7 +463,7 @@ exempt_paths:
 
 # body
 ";
-        let claim = parse_claim_frontmatter(Path::new("test.md"), src).unwrap();
+        let claim = parse_one_claim(Path::new("test.md"), src).unwrap();
         assert_eq!(claim.id, "10-test");
         assert_eq!(claim.status, Status::Planned);
         assert_eq!(claim.gated_phrases, vec!["foo bar", "baz"]);
@@ -403,7 +483,7 @@ exempt_paths: []
 
 body
 ";
-        let claim = parse_claim_frontmatter(Path::new("test.md"), src).unwrap();
+        let claim = parse_one_claim(Path::new("test.md"), src).unwrap();
         assert_eq!(claim.status, Status::Shipped);
     }
 
@@ -415,13 +495,132 @@ claim: 1
 status: Cheese
 ---
 ";
-        let err = parse_claim_frontmatter(Path::new("test.md"), src).unwrap_err();
+        let err = parse_one_claim(Path::new("test.md"), src).unwrap_err();
         assert!(err.to_string().contains("unknown status"));
     }
 
     #[test]
+    fn non_claim_frontmatter_block_is_skipped() {
+        // An ADR's own title/status/date header carries no `claim:`
+        // key — it must not be mistaken for a claim doc.
+        let src = "\
+---
+title: \"ADR-002: something\"
+status: Accepted
+date: 2026-04-30
+---
+
+## Body
+";
+        let blocks = extract_frontmatter_blocks(src);
+        assert_eq!(blocks.len(), 1);
+        assert!(
+            claim_from_frontmatter(Path::new("adr.md"), &blocks[0])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fenced_example_frontmatter_is_not_extracted() {
+        // The claims README's "## File format" section shows an
+        // example template inside a ```markdown fence. That example's
+        // `status:` value is a human-readable placeholder, not a real
+        // status — it must never be parsed as a claim.
+        let src = "\
+## File format
+
+```markdown
+---
+claim: <kebab-case-id>
+status: Planned | Preview | Shipped | Not-claimed
+---
+
+# Claim <N>
+```
+
+more prose
+";
+        assert!(extract_frontmatter_blocks(src).is_empty());
+    }
+
+    #[test]
+    fn multiple_blocks_in_one_file_are_all_found() {
+        let src = "\
+---
+title: \"ADR-050\"
+status: Proposed
+---
+
+## Claim 10 (consolidated)
+
+---
+claim: 10-oci-image-provenance
+status: Shipped
+gated_phrases:
+  - \"any OCI image\"
+exempt_paths: []
+---
+
+more prose
+";
+        let blocks = extract_frontmatter_blocks(src);
+        assert_eq!(blocks.len(), 2);
+        assert!(
+            claim_from_frontmatter(Path::new("adr.md"), &blocks[0])
+                .unwrap()
+                .is_none()
+        );
+        let claim = claim_from_frontmatter(Path::new("adr.md"), &blocks[1])
+            .unwrap()
+            .unwrap();
+        assert_eq!(claim.id, "10-oci-image-provenance");
+        assert_eq!(claim.gated_phrases, vec!["any OCI image"]);
+    }
+
+    #[test]
+    fn unterminated_delimiter_yields_no_block() {
+        let src = "prose\n\n---\nlone thematic break below, no closing pair\n\nmore prose\n";
+        assert!(extract_frontmatter_blocks(src).is_empty());
+    }
+
+    #[test]
+    fn load_claims_walks_adrs_dir_recursively() {
+        let tmp = tempfile::tempdir().unwrap();
+        let adrs = tmp.path().join("specs").join("adrs");
+        std::fs::create_dir_all(&adrs).unwrap();
+        // The gated phrase deliberately isn't a real one — this whole
+        // file is `.rs` text that the workspace-wide scan in `run()`
+        // would itself pick up if it ever matched a live claim's gate.
+        std::fs::write(
+            adrs.join("002-example.md"),
+            "\
+---
+title: \"ADR-002\"
+status: Accepted
+---
+
+---
+claim: fixture-example-claim
+status: Preview
+gated_phrases:
+  - \"totally-fictional-gated-phrase-for-testing\"
+exempt_paths:
+  - \"specs/**\"
+---
+",
+        )
+        .unwrap();
+
+        let claims = load_claims(&adrs).unwrap();
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].id, "fixture-example-claim");
+        assert_eq!(claims[0].status, Status::Preview);
+    }
+
+    #[test]
     fn glob_matches_prefix_and_doublestar() {
-        assert!(glob_match("specs/**", "specs/claims/75.md"));
+        assert!(glob_match("specs/**", "specs/plans/75.md"));
         assert!(glob_match("specs/**", "specs/adrs/049.md"));
         assert!(!glob_match("specs/**", "public/docs/index.md"));
         assert!(glob_match("CHANGELOG.md", "CHANGELOG.md"));

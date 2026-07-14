@@ -10,7 +10,9 @@ name: Publish SDK to PyPI
 #     no upload — use this to rehearse before the first real publish).
 #
 # Auth: PyPI Trusted Publishing (OIDC) — no long-lived token. Configure a
-# trusted publisher on PyPI first (see specs/runbooks/publish-sdks.md):
+# trusted publisher on PyPI first (see
+# specs/adrs/105-sdk-facade-machine-client-convergence.md, "Runbook:
+# publishing the mvm SDKs"):
 #   project `mvm` → Publishing → add GitHub publisher
 #   (owner tinylabscom, repo mvm, workflow publish-pypi.yml, environment pypi).
 # New projects use a "pending publisher" so the first publish creates the

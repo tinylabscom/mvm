@@ -588,3 +588,880 @@ Listed here for the audit-cleanly reader.
 | What is shared between this code and the host? | KVM `/dev/kvm` ioctls (Linux); Hypervisor.framework calls (macOS Vz / libkrun); vsock for control plane + brokered host services (binding-gated per claim 12); one explicit virtio-fs share per declared mount. Host filesystem is never ambient. |
 | What can the code touch? | Whatever the signed `ExecutionPlan` admits: declared shares, declared egress allowlist (claim 10), declared volumes, declared `host.*` brokered services (claim 12 binding). No raw devices. No host process namespace. No host network namespace. |
 | What survives between runs? | Volumes the plan declares persistent (sealed deps volumes are RO and hash-locked per claim 11). Everything else is ephemeral by default. Snapshot/restore on workload microVMs not yet exposed — see Plan 111 Workstream B. SDK workload hooks (`before_build` / `before_start` / `after_start` / `before_stop` in `crates/mvm-sdk/src/compile/hooks.rs`) shape what runs at launch, not what survives across launches. |
+
+## Claims ledger (claim → witness)
+
+<!-- claims-catalog:begin -->
+---
+claim: catalog
+status: Shipped
+gated_phrases: []
+exempt_paths: []
+---
+
+# Conformance claim catalog
+
+The machine-checked map from each numbered security claim (the narrative
+lives in `CLAUDE.md` §"Security model" and `specs/adrs/002-microvm-security-posture.md`)
+to the witnesses that ratify it. `xtask check-claim-catalog` parses the
+table below on every PR and fails when a named witness no longer exists,
+so the claim list cannot silently drift from the tree.
+
+Witness tokens are typed:
+
+- `fn:NAME` — a `fn NAME(` must exist under `crates/` (a test, or the impl
+  symbol the claim exercises).
+- `ci:NAME` — `NAME` must appear in some `.github/workflows/*` file (a job
+  key or lane name).
+
+The witnesses here are a representative anchor per claim, not the full
+test list — enough that a rename or deletion trips the gate. Grounding
+each witness in an *external* authority (vs. a self-referential check) is
+tracked separately as a follow-up audit (see "deferred follow-ups").
+
+| #  | Claim | Witnesses | Authority | Status |
+|----|-------|-----------|-----------|--------|
+| 1  | No host-fs access from a guest beyond explicit shares | fn:seccomp_allows_listed_denies_unlisted, ci:seccomp-functional, fn:validated_conversion_enforces_mount_allow_list, fn:dir_share_two_part_defaults_ro, fn:libkrun_refuses_read_only_virtiofs_share, fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched | seccomp + setpriv (ADR-002 §W2) + user-volume allow-list / ro-default / admission-enforced shares (mvm-cli + mvm-backend) | Shipped |
+| 2  | No guest binary can elevate to uid 0 | fn:set_no_new_privs, fn:virtiofs_mount_flags_keep_workspace_read_only | setpriv --no-new-privs + RO config binds (ADR-002 §W2.2) | Shipped |
+| 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts | dm-verity + roothash on **block+ext4** backends — Firecracker + Option B (ADR-002 §W3, ADR-106); virtiofs-root is a dev-tier path with a weaker contract that does **not** witness this claim (ADR-107) | Shipped |
+| 4  | The guest agent has no do_exec in production builds | ci:prod-agent-runentry-contract | ELF symbol contract (ADR-002 §W4.3) | Shipped |
+| 5  | Vsock framing + supervisor-config JSON are fuzzed | ci:fuzz | cargo-fuzz (ADR-002 §W4.1/W4.2) | Shipped |
+| 6  | The pre-built dev image is hash-verified | ci:hash-verify-tests, fn:download_runtime_overlay_rejects_checksum_mismatch | SHA-256 manifest (ADR-002 §W5.1) | Shipped |
+| 7  | Cargo deps are audited on every PR | ci:cargo-deny, ci:cargo-audit, ci:reproducibility | RUSTSEC + deny.toml (ADR-002 §W5.2/W5.3) | Shipped |
+| 8  | Every workload runs from a signed, audited ExecutionPlan | fn:synthesize_plan, fn:admit_for_run, fn:verify_audit_chain | Ed25519 + chain-signed audit log (ADR-041) | Shipped |
+| 9  | Every published bundle is content-addressed and re-verified | fn:read_and_verify_bundle, fn:verify_plan_bundle | SHA-256 content-addressing (Sprint 52 W2) | Shipped |
+| 10 | No untrusted workload reaches the network unless policy-admitted | fn:policy_default_is_deny_all, fn:run_net_default_is_deny_all | default-deny network policy (Sprint 52 W3) | Shipped |
+| 11 | Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated | ci:app-deps-audit, fn:verify_sealed_volume, fn:apply_install_gate | CycloneDX + pip-audit (ADR-047) | Shipped |
+| 12 | Every host-side service binding is plan-gated and audited | fn:unbound_service_returns_not_bound, fn:service_call_rejects_unknown_envelope_fields | ExecutionPlan.services binding (ADR-059) | Shipped |
+| 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-049) | Shipped |
+| 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md) | Shipped |
+| 15 | No interactive access to a sealed production microVM | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + dev-shell-gated agent (Plan 165 WS-C, ADR-002 §W4.3 extension) | Shipped |
+| 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-067, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
+
+Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
+it is registered here for witness machine-checking and tracked by its own doc
+(`claim-egress-no-secret-to-guest.md`) at status `Preview`; promotion to a
+numbered claim in ADR-002's source-of-truth table is a separate maintainer
+decision. It does not restate or replace the broker rows 12/13 — those are the
+shipped broker delivery; row 16 backs the same two invariants on the egress
+substitution path.
+
+**Claim 3 backend scoping (ADR-107).** Claim 3's witness, dm-verity, is
+block-device-specific: it ratifies the claim on the **block+ext4** backends
+— Firecracker and the in-process Option B materialize path (ADR-106). A
+**virtiofs root** (Plan 221 Option A) serves a host directory, not a block
+device, so it cannot be dm-verity-sealed. Per ADR-107, virtiofs-root is a
+dev/local-tier boot mechanism carrying an explicitly weaker contract
+(unpack-time per-layer sha256 + read-only serving from the trusted host, no
+guest-enforced plan-bound re-verification); it does **not** witness claim 3.
+Prod / sealed / `--prod` workloads — and Firecracker on every tier — stay on
+Option B, where claim 3 holds unchanged. No numbered claim is weakened; this
+note only scopes which backends the existing witness covers.
+
+## Maintaining this catalog
+
+- Adding a claim: append a row with the next number (the gate enforces a
+  contiguous `1..=N`) and at least one resolvable witness.
+- Renaming a witnessed test/fn or CI lane: update the row in the same PR,
+  or the gate goes red.
+- The `Status` column accepts `Shipped` / `Preview` / `Planned` /
+  `Not-claimed`, matching `check-no-overclaim`'s status vocabulary.
+
+## Deferred follow-ups
+
+- [ ] Audit each witness for *external-authority* grounding (assert against
+  a reference implementation / oracle rather than the code's own output);
+  record gaps in the Authority column. Becomes its own
+  `specs/plans/<N>-claim-witness-authority-audit.md`.
+- [ ] For any witness found to be self-referential, file a follow-up to add
+  a reference oracle.
+<!-- claims-catalog:end -->
+
+## Claims (narrative)
+
+# `specs/claims/` — public claim gating files
+
+Each file under this directory records the lifecycle status of one
+public security or capability claim. Files are consumed by
+`xtask check-no-overclaim`, which scans repo text (README, public
+docs, code comments, CLI help) for "guarded phrases" associated
+with a claim and refuses to admit those phrases when the claim's
+status is anything other than `Shipped`.
+
+The intent is to prevent the docs/website/README from saying "we do
+X" before the CI gates that prove X actually pass. Plan 74 W0 and
+plan 75 W0 introduce this pattern; both plans use it to gate the
+OCI ingest, network policy, and other surface that's not yet
+production.
+
+## File format
+
+```markdown
+---
+claim: <kebab-case-id>
+status: Planned | Preview | Shipped | Not-claimed
+gated_phrases:
+  - "phrase to refuse outside this file"
+  - "another phrase"
+exempt_paths:
+  - "specs/**"
+  - "CHANGELOG.md"
+---
+
+# Claim <N> — <human title>
+
+<description of the claim, what it asserts, what CI gate ratifies it>
+```
+
+Fields:
+
+- `claim` — stable identifier. Used in error messages.
+- `status` — see below.
+- `gated_phrases` — list of substrings to refuse outside this
+  claim file (and any path in `exempt_paths`). Case-sensitive.
+- `exempt_paths` — glob list of paths where the phrases are
+  always allowed (this file, history, etc.). `specs/**` is the
+  default exemption for design docs.
+
+## Status semantics
+
+- `Planned` — claim is on the roadmap; phrases blocked everywhere except `exempt_paths`.
+- `Preview` — claim partially shipped; phrases blocked in user-facing surface (README, public docs, landing page, CLI help) but admitted in design docs and changelog entries.
+- `Shipped` — claim has CI proof; phrases admitted everywhere.
+- `Not-claimed` — claim is explicitly out of scope; phrases blocked everywhere.
+
+Bumping status is a deliberate PR; it's how a claim transitions from "we plan to do this" to "we say in public that we do this."
+
+## Compliance mapping
+
+_Consolidated from `specs/compliance/`._
+
+# GDPR — Mapping
+
+**Status:** STUB. Filled out in Phase 9 of `specs/plans/60-mvm-libkrun-migration.md`.
+**Last verified:** N/A (stub created 2026-05-07).
+**Owner:** mvm + mvmd platform team.
+**Scope:** the open-source `mvm` library + the hosted mvmd cloud (when offered to EU customers).
+
+## Default posture: data-minimization-by-default
+
+GDPR is largely operational (privacy notices, lawful basis, controller/processor agreements). The technical aspects mvm must support are limited to data minimization, right-to-erasure, and breach detection.
+
+## Articles mapped to mvm capabilities (Phase 9 to fill)
+
+### Article 5 — Principles of processing
+
+- [ ] (TBD) Data minimization: PII redactor (ADR-020) reduces what's logged.
+- [ ] (TBD) Storage limitation: snapshot retention policies (plan 60 §"Snapshots — first-class feature") + audit log rotation.
+- [ ] (TBD) Integrity and confidentiality: encryption layers (ADR-027).
+
+### Article 17 — Right to erasure ("right to be forgotten")
+
+- [ ] (TBD) mvmd tenant deprovisioning uses mvm overlay erasure certificates signed by the host identity key (ADR-028).
+- [ ] (TBD) LUKS keyslot revocation + zero-fill on volumes.
+- [ ] (TBD) Snapshot DEK destruction (cryptographic erasure).
+- [ ] (TBD) Per-tenant audit log entries retained as redacted-only or destroyed (configurable; legal-hold default keeps redacted forms).
+
+### Article 20 — Right to data portability
+
+- [ ] (TBD) `mvmctl snapshot export` produces a portable, signed bundle of the VM state.
+- [ ] (TBD) `mvmctl audit export --tenant <id>` produces a portable, signed audit bundle.
+
+### Article 25 — Data protection by design and by default
+
+- [ ] (TBD) Default-deny network egress (ADR-017).
+- [ ] (TBD) Encryption-everywhere (plan 60).
+- [ ] (TBD) Opt-in telemetry only.
+
+### Article 30 — Records of processing activities
+
+- [ ] (TBD) Audit chain (ADR-019) provides authoritative records.
+- [ ] (TBD) Per-tenant query: `mvmctl audit export`.
+
+### Article 32 — Security of processing
+
+- [ ] (TBD) Encryption (in transit + at rest) per ADR-027.
+- [ ] (TBD) Pseudonymization where applicable (PII redactor's tokenization scheme).
+- [ ] (TBD) Resilience (snapshot pool + supervisor restart).
+- [ ] (TBD) Process for regularly testing (continuous fuzzing, reproducibility).
+
+### Article 33 — Notification of personal data breach (to supervisory authority within 72 hours)
+
+- [ ] (TBD) Operational; mvmd hosted cloud handles. mvm contribution: audit events (ADR-019) capture every flow and tool call, enabling reconstruction.
+
+### Article 34 — Communication of breach to data subject
+
+- [ ] (TBD) Operational; mvmd handles.
+
+### Article 35 — Data Protection Impact Assessment
+
+- [ ] (TBD) Operational artifact; templated alongside ADR-018, ADR-029.
+
+## Cross-border transfer
+
+- [ ] (TBD) Operational; mvmd's choice of relay servers (iroh) and storage regions impacts this. Out of mvm's scope.
+
+## Data subject access requests (Articles 15-22)
+
+- [ ] (TBD) `mvmctl audit export --tenant <id>` and `mvmctl snapshot export <id>` provide the technical primitives. mvmd hosted cloud wraps them in a self-service UX (post-launch).
+
+# HIPAA Security Rule — Mapping
+
+**Status:** STUB. Filled out in Phase 9 of `specs/plans/60-mvm-libkrun-migration.md`.
+**Last verified:** N/A (stub created 2026-05-07).
+**Owner:** mvm + mvmd platform team.
+**Scope:** the open-source `mvm` library + the hosted mvmd cloud (when launched and only after a Business Associate Agreement is signed).
+
+## Default posture: BAA-required
+
+The hosted mvmd cloud will require a Business Associate Agreement before customers can store Protected Health Information. The mvm library itself is the substrate; HIPAA compliance is an operational property of a deployment, not the library.
+
+This document maps each technical safeguard from 45 CFR §164.312 (the HIPAA Security Rule's Technical Safeguards) to the implementing artifact in the mvm codebase.
+
+## §164.312(a) — Access Control
+
+### (a)(1) — Unique user identification (Required)
+- [ ] (TBD) Per-VM Ed25519 identity key (ADR-018)
+- [ ] (TBD) Per-tenant signing key (mvm-plan)
+
+### (a)(2)(i) — Emergency access procedure (Required)
+- [ ] (TBD) mvmd tenant deprovisioning backed by mvm overlay erasure certificates (ADR-028)
+- [ ] (TBD) Recovery key escrow (opt-in) — documented in plan 60
+
+### (a)(2)(ii) — Automatic logoff (Addressable)
+- [ ] (TBD) Session idle timeout (`mvmctl session timeout`) — Phase 7
+
+### (a)(2)(iii) — Encryption and decryption (Addressable)
+- [ ] (TBD) Volume LUKS encryption (Phase 2)
+- [ ] (TBD) Snapshot AEAD encryption (Phase 2)
+
+## §164.312(b) — Audit Controls
+
+- [ ] (TBD) Chain-signed HMAC audit log (ADR-019)
+- [ ] (TBD) Audit total-coverage test (`tests/audit_total_coverage.rs`)
+- [ ] (TBD) Audit categories: cmd, lifecycle, secret, flow, plan, policy, key, host, audit
+- [ ] (TBD) Audit shipping to remote sink (`audit-remote-sink` feature)
+
+## §164.312(c) — Integrity
+
+### (c)(1) — Mechanism to authenticate ePHI
+- [ ] (TBD) dm-verity rootfs integrity (Firecracker tier)
+- [ ] (TBD) AEAD authentication on snapshots
+- [ ] (TBD) HMAC chain on audit log
+
+## §164.312(d) — Person or Entity Authentication
+
+- [ ] (TBD) Attestation chain (ADR-018)
+- [ ] (TBD) mTLS at mvmd-agent ↔ mvm-hostd hop (ADR-027)
+- [ ] (TBD) Ed25519 identity keys per VM
+
+## §164.312(e) — Transmission Security
+
+### (e)(1) — Integrity controls
+- [ ] (TBD) AuthenticatedFrame on vsock (ADR-026)
+- [ ] (TBD) Replay protection (nonce + monotonic timestamp)
+
+### (e)(2)(i) — Encryption (Addressable)
+- [ ] (TBD) iroh QUIC TLS 1.3 (ADR-027)
+- [ ] (TBD) mTLS at hostd hop
+- [ ] (TBD) X25519 ephemeral session keys for vsock (forward secrecy)
+
+## Operational requirements (out of mvm's scope, in mvmd's)
+
+The HIPAA Security Rule has Administrative and Physical safeguards (§164.308 and §164.310) that are operational by nature: workforce training, contingency plans, facility access controls, etc. These belong to the deployer (mvmd hosted cloud or self-hoster), not the mvm library.
+
+The Privacy Rule (45 CFR §164.500-534) is similarly operational and out of scope here.
+
+## Breach notification
+
+§164.404 requires breach notification within 60 days. Implementation is mvmd's: the hosted cloud will integrate the audit log + flow events into its incident-response system. mvm's contribution is making sure the events are *recordable* (not making them, that's the operator's job).
+
+# PCI DSS — Scope Statement
+
+**Status:** STUB. Filled out in Phase 9 of `specs/plans/60-mvm-libkrun-migration.md`.
+**Last verified:** N/A (stub created 2026-05-07).
+**Owner:** mvm + mvmd platform team.
+**Scope:** the open-source `mvm` library + the hosted mvmd cloud (when launched).
+
+## Default posture: out of scope
+
+**mvm and mvmd do not handle cardholder data.** The default posture is PCI **scope reduction**:
+
+- Customers who run mvm/mvmd are expected to delegate payment processing to an external PCI-compliant processor (Stripe, Adyen, Braintree, etc.) at their application layer.
+- The microVMs run customer code, but cardholder data should never enter them. Customers who attempt to do so are subject to their own PCI compliance burden — mvm/mvmd does not assist or certify.
+- This stance is publicly documented; customers cannot claim our compliance posture on their behalf.
+
+## Opt-in `profile = "pci"` template (Phase 7b — not on default path)
+
+For the rare customer who insists on processing PCI inside mvm, an opt-in template is available with stricter defaults:
+
+- [ ] (TBD) Mandatory LUKS volume encryption
+- [ ] (TBD) No shared infrastructure across tenants
+- [ ] (TBD) Mandatory L7 egress proxy with cardholder-data DLP rules
+- [ ] (TBD) Audit log retention ≥ 1 year
+- [ ] (TBD) Mandatory quarterly ASV scans (operational; documented in `specs/runbooks/pci-asv.md`)
+- [ ] (TBD) Mandatory annual penetration test (operational)
+
+**We do not certify the PCI profile.** The template provides the substrate; the customer retains end-to-end PCI responsibility.
+
+## Why we don't pursue PCI certification ourselves
+
+- mvm is a microVM library; the PCI scope of certifying it would extend to the entire deployment, which we don't control in self-hosted scenarios.
+- The hosted mvmd cloud may pursue certification at the platform layer (post-launch decision).
+- PCI certification is operational, not technical: most controls are about audit, vendor management, and incident response — implementable but not what mvm is trying to be.
+
+## PCI DSS 4.0 requirements vs. mvm capability (Phase 9 to fill)
+
+### Requirement 1 — Network Security Controls
+- [ ] (TBD) Default-deny egress (ADR-017)
+- [ ] (TBD) L4/L7 proxy mediation (ADR-017)
+- [ ] (TBD) Per-tenant network isolation
+
+### Requirement 2 — Secure Configurations
+- [ ] (TBD) Hardened defaults (W1-W6 from sprint 42)
+- [ ] (TBD) `safe-openclaw` template defaults
+
+### Requirement 3 — Protect Stored Account Data
+- [ ] (TBD) AES-256 LUKS volume encryption
+- [ ] (TBD) AEAD snapshot encryption
+- [ ] (TBD) PII redactor configurable for cardholder-data patterns (ADR-020)
+
+### Requirement 4 — Protect Cardholder Data with Strong Cryptography
+- [ ] (TBD) TLS 1.3 mandatory; rustls + iroh (ADR-027)
+
+### Requirement 5 — Anti-Malware
+- [ ] (TBD) Out of scope at the library level; deployment concern.
+
+### Requirement 6 — Secure Software Development
+- [ ] (TBD) ADR coverage; reproducibility; SBOM; cosign signatures
+
+### Requirement 7 — Restrict Access (need-to-know)
+- [ ] (TBD) Per-tenant policy bundles (mvm-policy crate)
+
+### Requirement 8 — Identify Users and Authenticate Access
+- [ ] (TBD) Attestation + identity keys (ADR-018)
+
+### Requirement 9 — Restrict Physical Access
+- [ ] (TBD) Out of scope at the library level.
+
+### Requirement 10 — Log and Monitor
+- [ ] (TBD) Audit chain (ADR-019)
+- [ ] (TBD) Metrics catalog
+- [ ] (TBD) Audit retention via `audit-remote-sink`
+
+### Requirement 11 — Test Security
+- [ ] (TBD) Continuous fuzzing
+- [ ] (TBD) Reproducibility check
+
+### Requirement 12 — Security Policy
+- [ ] (TBD) `SECURITY.md` + disclosure policy
+
+# SOC 2 Type II — Controls Mapping
+
+**Status:** STUB. Filled out in Phase 9 of `specs/plans/60-mvm-libkrun-migration.md`.
+**Last verified:** N/A (stub created 2026-05-07).
+**Owner:** mvm + mvmd platform team.
+**Scope:** the open-source `mvm` library + the hosted mvmd cloud (when launched).
+
+This document maps each SOC 2 Trust Services Criterion to the implementing artifact in the mvm codebase: a code path, a test, an ADR, or a CI gate. Auditors get a living traceability matrix; developers get a single source of truth for "what control does this PR affect."
+
+## Trust Services Criteria mapping (to be filled in Phase 9)
+
+### CC1 — Control Environment
+- [ ] (TBD) Documented governance model
+- [ ] (TBD) Code-quality controls (ADR-033)
+- [ ] (TBD) Two-person review for security paths (CODEOWNERS)
+
+### CC2 — Communication and Information
+- [ ] (TBD) Audit log structure + chain-signed envelope
+- [ ] (TBD) Customer-facing posture statement
+
+### CC3 — Risk Assessment
+- [ ] (TBD) Threat models per ADR (STRIDE tables)
+- [ ] (TBD) AI-agent threat model (ADR-036)
+
+### CC4 — Monitoring Activities
+- [ ] (TBD) Metrics catalog coverage (plan 60 §"Comprehensive metrics catalog")
+- [ ] (TBD) Audit total-coverage test (`tests/audit_total_coverage.rs`)
+
+### CC5 — Control Activities
+- [ ] (TBD) Encryption layers (ADR-027)
+- [ ] (TBD) Access controls (mvm-policy)
+- [ ] (TBD) Default-deny network egress (ADR-017)
+
+### CC6 — Logical and Physical Access Controls
+- [ ] (TBD) mTLS at hostd hop
+- [ ] (TBD) Attestation chain (ADR-018)
+- [ ] (TBD) Tenant isolation (cgroup, bridge, signing key per tenant)
+
+### CC7 — System Operations
+- [ ] (TBD) SLO commitments (plan 60 §"Reliability and SLOs")
+- [ ] (TBD) Incident response runbooks (`specs/runbooks/`)
+
+### CC8 — Change Management
+- [ ] (TBD) ADR coverage gate (`xtask check-adr-coverage`)
+- [ ] (TBD) Reproducibility double-build (Phase 9)
+- [ ] (TBD) Cosign-signed releases (Phase 9)
+
+### CC9 — Risk Mitigation
+- [ ] (TBD) PII redaction (ADR-020)
+- [ ] (TBD) Continuous fuzzing (Phase 9)
+- [ ] (TBD) Vulnerability disclosure (`SECURITY.md`)
+
+### Availability (A)
+- [ ] (TBD) Per-VM crash rate target < 0.1%
+- [ ] (TBD) Builder warm-pool 99.9%
+- [ ] (TBD) Pause/resume correctness test
+
+### Processing Integrity (PI)
+- [ ] (TBD) Reproducibility check
+- [ ] (TBD) Signed Plan protocol (ADR-018, mvm-plan crate)
+- [ ] (TBD) Audit chain integrity
+
+### Confidentiality (C)
+- [ ] (TBD) Encryption at rest (LUKS, AEAD snapshots)
+- [ ] (TBD) Encryption in transit (ADR-027)
+- [ ] (TBD) Tenant destruction certificates (ADR-028)
+
+### Privacy (P)
+- [ ] (TBD) PII redaction (ADR-020)
+- [ ] (TBD) Opt-in telemetry only
+- [ ] (TBD) GDPR right-to-erasure via mvmd tenant deprovisioning and mvm overlay erasure certificates
+
+## Threat model — host services broker (consolidated from specs/threat-models/)
+
+# Threat model 02 — Host services broker over vsock
+
+- **Status:** Proposed
+- **Date:** 2026-05-27
+- **Owner:** MVM Project
+- **Related:** [ADR-002 microvm security posture](../adrs/002-microvm-security-posture.md), [ADR-059 host services broker (original two-process design)](../adrs/059-host-services-broker.md), [ADR-061 host services broker — four-subprocess hardening (supersession)](../adrs/061-host-services-broker-hardening.md), [Plan 104 host services broker](../plans/104-host-services-broker.md), [ADR-049 secret substitution mechanism](../adrs/049-secret-substitution-mechanism.md), [SECURITY.md (CVE response runbook)](../../SECURITY.md), [mvmd ADR-0023](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md), [threat model 01 — runtime baseline](01-runtime-baseline.md) (TBD)
+
+This document is the STRIDE walk for the host services broker introduced by ADR-059 / Plan 104 and refined by [ADR-061's four-subprocess hardening](../adrs/061-host-services-broker-hardening.md). The ADRs are the decision records (architecture, choices); this document is the structured-threat enumeration with mitigation cross-references into Plan 104's §Hardening posture (Layers 1–11).
+
+## Scope
+
+**In scope:**
+
+- The four broker subprocesses (`mvm-broker`, `mvm-secrets-dispatcher`, `mvm-host-signer`, `mvm-audit-signer`) and their per-VM lifecycle.
+- The vsock channel (ports 5300 + 5301) between the guest microVM and the host subprocesses.
+- The per-VM UDS channels between the supervisor and each subprocess.
+- The cross-VM path from the supervisor to mvmd-agent over iroh ALPN, with respect to the four services Plan 104 ships.
+- The `ExecutionPlan.services` admission ceremony and audit chain entries it generates.
+
+**Out of scope** (per ADR-002, ADR-059, and ADR-061):
+
+- Physical attacks on the host (cold-boot DRAM, DMA via Thunderbolt/PCIe, chip-off, side-channel power analysis, unauthorized firmware flashing).
+- Multi-tenant guests (one guest = one workload).
+- Hardware-backed key attestation by the workload itself.
+- Vulnerabilities in the hypervisor's vsock implementation (KVM `vhost-vsock`, Firecracker, libkrun, cloud-hypervisor, Apple `vz`) — these are dependency-CVE-managed per [ADR-061 §"Dependency CVE surface"](../adrs/061-host-services-broker-hardening.md#dependency-cve-surface).
+
+## Adversary model
+
+Three adversary classes, in order of decreasing access:
+
+| Class | Description | Capabilities |
+| --- | --- | --- |
+| **G — Hostile guest** | A workload running inside a microVM (the primary adversary). Has full control over guest userspace; cannot break out of the VM. | Sends arbitrary bytes to vsock 5300 + 5301; receives responses; observes timing |
+| **N — Hostile network peer** | A network attacker on the path between the supervisor and mvmd-agent. | Observes + tampers with iroh ALPN traffic (mitigated by mvmd identity pinning + TLS 1.3) |
+| **I — Software insider** | An unauthorized human with shell access to the host as some Unix user. **Newly in scope** per [ADR-061's §Threat model](../adrs/061-host-services-broker-hardening.md#threat-model) narrowing of ADR-002's "malicious host" clause (which remains true for *physical* attacks). | Executes arbitrary code on the host; cannot escalate to root if not already root; cannot perform physical attacks |
+
+For each service below, the STRIDE table notes which adversary class the threat applies to in the **Adv.** column.
+
+## Cross-cutting threats (apply to all services)
+
+| ID | STRIDE | Adv. | Threat | Mitigation |
+| --- | --- | --- | --- | --- |
+| X-S1 | S | G | Guest spoofs another workload's session by forging session id | `AuthenticatedFrame` Ed25519/P-256 verify under per-workload session key (minted at admission, discarded at workload stop); session id rotated per H-L4.3 |
+| X-S2 | S | I | Insider runs a fake `mvm-secrets-dispatcher` binary | Cosign-verify at spawn (H-L3.1); TOCTOU-resistant verify-then-`fexecve` (H-L3.2); subprocess config signed under the same release key (H-L3.6) |
+| X-S3 | S | N | mvmd-agent identity spoofed during initial bootstrap | mvmd public key pinned in `~/.mvm/keys/mvmd-pubkey`; admission refuses without pin (H-L6.4) |
+| X-T1 | T | G | Guest tampers with response bytes before guest userspace consumes them | Out of scope at the broker boundary — guest controls its own userspace |
+| X-T2 | T | I | Insider tampers with the audit chain JSONL on disk | `O_APPEND`-only FD held by `mvm-audit-signer` (H-L5.1); dir-immutable (`chattr +a` / `UF_APPEND`); `chain_head` persisted to a second location and verified by `mvmctl audit verify` (H-L5.2); per-tenant AEAD encryption at rest (H-L5.4) means insider sees only ciphertext |
+| X-T3 | T | I | Insider tampers with the host signer key on disk | On enclave-equipped hosts (H-L2.1) the key never leaves the enclave; on non-enclave hosts (TOFU) the key file is mode 0600 + `chattr +i` once written + monotonic-counter (H-L2.2) detects rollback |
+| X-T4 | T | I | Insider modifies a subprocess binary between cosign-verify and exec | TOCTOU-resistant mmap-then-`fexecve` (H-L3.2) narrows the window to a kernel syscall; subprocess refuses to start if its config signature doesn't verify (H-L3.6) |
+| X-R1 | R | G | Guest denies having made a call later | Every dispatch — allowed or denied — emits a chain-signed audit entry with `(service, verb, outcome, correlation_id)` (Plan 104 §Audit chain); audit chain is JCS-canonical and chain-signed (H-L5.1+H-L5.2) |
+| X-R2 | R | I | Insider operator denies having taken a privileged action | Operator actions (`mvmctl services revoke`, `mvmctl host-key rotate`, `mvmctl up --insecure-host`) emit chain-signed entries via `mvm-audit-signer` (H-L6.1) |
+| X-I1 | I | G | Guest reads bytes from another workload's UDS path | Per-VM UDS paths under `~/.mvm/vms/<vm>/services/` with mode 0600; supervisor-owned (uid 0) — guest in the microVM never has host-side FS access regardless |
+| X-I2 | I | G | Guest infers state from response timing | Rate limit applies to read-only services; `host.secrets.v1` pads to latency floor `BROKER_SECRETS_LATENCY_FLOOR_MS=5` (S26); per-workload total-call/minute budget escalates to `ServiceCallAbuse` audit |
+| X-I3 | I | I | Insider reads audit log contents | Per-tenant ChaCha20-Poly1305 at rest, key derived from TPM/SE-bound master (H-L5.4) |
+| X-I4 | I | I | Insider reads in-memory secrets from a running subprocess | Per-workload cgroup + PID/mount namespace (H-L1.4); `mlock` on secret-bearing pages (H-L3.9); `PR_SET_DUMPABLE=0` / `PT_DENY_ATTACH` + anti-debug startup check (H-L3.9, H-L3.11); seccomp denies `process_vm_readv` (H-L3.3) |
+| X-I5 | I | I | Insider extracts host signer key from process memory | On enclave-equipped hosts: key never in process memory (H-L2.1). On non-enclave hosts: key in `mvm-host-signer` process only (H-L1.1), confined by the cgroup + namespace + seccomp + mlock stack |
+| X-D1 | D | G | Guest floods broker with calls to exhaust CPU/memory | Per-`(workload_id, service_id)` token-bucket; in-flight cap; lifetime quota (S12); per-workload broker-CPU budget (`BROKER_CPU_BUDGET_MS_PER_MIN=50`); memory cap (`BROKER_INFLIGHT_MEM_CAP_BYTES=1048576`); bounded vsock receive queue (`BROKER_QUEUE_DEPTH=16`) (S6, S21) |
+| X-D2 | D | G | Guest forces subprocess restart loop | 3-restart cap per workload lifetime; beyond → audit `<subprocess>.crashed_repeatedly` and workload pause (Plan 82 harness) |
+| X-D3 | D | N | mvmd unavailable blocks cross-tenant cost queries | Circuit breaker per handler (S13); `host.cost.v1::tenant` returns `Err(Unavailable)` rather than stale data (R2 in mvmd Plan 52) |
+| X-D4 | D | G | Guest exploits amplification attack (small request → large response) | Per-handler `response_size_cap()` default 64 KiB; `Err(ResponseTooLarge)` + audited (S11) |
+| X-E1 | E | G | Guest exploits a parser bug in the schema gate to elevate within the subprocess | Frame size cap (64 KiB) enforced before parse; recursion cap 8; 50ms parse timeout; `serde_json` is the fuzzed parser (W6 `fuzz_service_call.rs`); subprocess address space is fully isolated from the supervisor's |
+| X-E2 | E | G | Guest exploits a logic bug in the binding-gate to call an unbound service | Binding-gate refuses; `service_call_denied_when_unbound` regression test in W2 |
+| X-E3 | E | I | Insider replaces a subprocess binary and waits for the next workload | Cosign-verify at spawn (H-L3.1) refuses tampered binary; Sigstore/Rekor transparency log (H-L8.1) exposes any secretly-signed builds |
+| X-E4 | E | G | Guest triggers a use-after-free in the general broker that pivots into the secrets dispatcher | Out of scope of the pivot — the four subprocesses share zero address space (Layer 1). A UAF in `mvm-broker`'s parser cannot reach `mvm-secrets-dispatcher`'s grant table |
+
+## Per-service threat walk
+
+### `host.time.v1` (returns wall + monotonic time)
+
+| ID | STRIDE | Adv. | Threat | Mitigation |
+| --- | --- | --- | --- | --- |
+| TIME-I1 | I | G | Wall clock leaks host's NTP-synced time, useful for cross-workload correlation | Considered low-impact; tenant-private fleets already correlate via mvmd. `host.time.v1` returns canonical UTC. |
+| TIME-T1 | T | I | Insider moves host clock backward, making `mvm-audit-signer` log backdated entries | `audit.clock.jump_detected` audit emitted on negative jump (H-L5.5); audit timestamps anchored to TPM monotonic counter or kernel boottime |
+| TIME-D1 | D | G | Guest spams `time/now` calls to consume broker CPU | Token-bucket per workload (X-D1) |
+
+### `host.cost.v1` (workload + tenant verbs)
+
+| ID | STRIDE | Adv. | Threat | Mitigation |
+| --- | --- | --- | --- | --- |
+| COST-S1 | S | G | Workload spoofs workload-id to read another workload's cost | `correlation_id` is supervisor-assigned (H-L4.6); supervisor passes workload-id from its own state, not from workload-supplied data |
+| COST-S2 | S | N | mvmd response forged by network attacker | mvmd identity pinned (H-L6.4); TLS 1.3 + ChaCha20-Poly1305 + X25519 (H-L4.4); mvmd responses parsed with `deny_unknown_fields`; mvmd-signed catalog response (S23) |
+| COST-I1 | I | G | `tenant` verb leaks cross-tenant data | mvmd-side tenant-scoped-authz (ADR-0008); supervisor refuses mvmd response if tenant_id ≠ workload.tenant_id |
+| COST-I2 | I | G | Cost numeric values quantize-leak workload behavior to a multi-step attacker | Considered low-impact for v1; future plan may quantize values to coarse units |
+| COST-D1 | D | N | mvmd slow → blocks broker thread | Per-handler call timeout (`host.cost.v1::tenant=150ms`); circuit breaker after 5 failures (S13) |
+
+### `host.audit.v1` (workload-emitted audit entries — new in ADR-062)
+
+> **Note.** This section replaces the previous `host.secrets.v1` table. `host.secrets.v1` and the entire `SECRET-*` threat set are dropped by [ADR-062](../adrs/062-host-services-broker-rescope-drop-secrets.md). `host.audit.v1` becomes the load-bearing workload-callable service in its place.
+
+| ID | STRIDE | Adv. | Threat | Mitigation |
+| --- | --- | --- | --- | --- |
+| AUDIT-S1 | S | G | Guest emits an entry claiming a workload id it doesn't own (impersonation) | Handler refuses with `ServiceErrorCode::BadRequest` when entry's `workload_id` ≠ `ctx.workload_id`; supervisor-assigned `workload_id` (H-L4.6) is the authoritative source |
+| AUDIT-S2 | S | G | Guest forges a `workload_audit` entry that looks like a `Admission` (system-asserted) entry | New `EventCategory::WorkloadAudit` variant is *distinct* from `Admission` and `ServiceCall`; `mvm-audit-signer`'s category allow-list pins the variant to the handler that produced it; `mvmctl audit verify` displays category alongside entry |
+| AUDIT-T1 | T | G | Guest tampers with an emitted entry after signing | **Architectural impossibility:** chain entries are signed by `mvm-audit-signer` before append; tamper fails `mvmctl audit verify` per chain integrity (X-T2) |
+| AUDIT-R1 | R | G | Guest denies having emitted a particular entry | Every `host.audit.v1` call emits a chain-signed entry with `(workload_id, correlation_id, ts, fields)`; the chain ties the workload id to the entry cryptographically |
+| AUDIT-I1 | I | G | Entry leaks sensitive workload-internal state through `fields` | The chain entry's `fields` are workload-controlled — they can include whatever the workload chooses. Plan 104 §H-L5.6 (PII invariant) applies to *system-asserted* `correlation_id`s; workload-emitted `fields` are workload's responsibility. **Operator-facing tooling should display a privacy warning** when filtering by `WorkloadAudit` category. |
+| AUDIT-D1 | D | G | Guest fills the chain with garbage entries to obscure forensics or exhaust audit storage | Per-handler rate limit (`BROKER_AUDIT_TOKENS_PER_SEC=20`); per-record cap (4 KiB); per-batch cap (100 entries / 256 KiB); per-workload lifetime quota (§S12); tenant-level cap (§H-L6.3); audit-log rotation policy (§H-L6.2) keeps chain bounded |
+| AUDIT-D2 | D | G | Guest's `emit_batch` triggers `mvm-audit-signer` crash via malformed bytes | Per-record JSON schema validation in handler before batch forward; batch is rejected with `ServiceErrorCode::BadRequest` if any record fails. Audit-signer's own envelope parse (X-E1 equivalent) is the second line of defense |
+| AUDIT-E1 | E | G | Guest exploits handler parser bug to inject a non-`WorkloadAudit` category entry | Handler signature pins `category = WorkloadAudit` literal at call-time; the category field is *not* forwarded from workload input. CI lint asserts the handler doesn't accept a workload-supplied `category`. Tested by `host_audit_v1_workload_cannot_set_category` |
+
+### `broker.v1` (introspection: `list_services`)
+
+| ID | STRIDE | Adv. | Threat | Mitigation |
+| --- | --- | --- | --- | --- |
+| BROKER-I1 | I | G | Guest enumerates services to discover unbound services and probe for them | Bindings are workload-supplied at admission; `list_services` returns only the workload's bound set. An unbound service is invisible. |
+| BROKER-D1 | D | G | Guest spams `list_services` for amplification | Response size cap 64 KiB (S11); per-handler call timeout |
+
+## Threats by adversary class — summary
+
+**Hostile guest (G):** Capped by the five-rule capability gating (Plan 104 §"Capability gating") + per-handler `parse_payload` + token-bucket quotas + circuit breaker + latency floor + audit chain. The most credible escape path is a parser bug in `serde_json` exploited via the schema gate; W6 fuzz (`fuzz_service_call.rs`) closes this. A pivot from `mvm-broker` to `mvm-secrets-dispatcher` is architecturally impossible (Layer 1).
+
+**Hostile network peer (N):** Limited to the mvmd path. Mitigated by TLS 1.3 + ChaCha20-Poly1305 + X25519 + mvmd identity pinning + signed catalog responses. The supervisor-to-subprocess UDS paths are not network-reachable.
+
+**Software insider (I):** Newly in scope per ADR-061 (supersedes ADR-059's two-process design's threat-model boundary). The L1+L2+L5 hardening (key isolation + HW enclave + at-rest encryption + cgroup/namespace) means shell access yields neither the host signer key, nor the audit chain-signing key, nor the audit log plaintext, nor in-flight secrets. The remaining insider capability is "modify a subprocess binary on disk and wait for the next spawn," which is defeated by cosign-verify + Sigstore/Rekor transparency.
+
+## Open issues / explicitly accepted residual risk
+
+- **Non-enclave hosts retain TOFU posture for the host signer.** Plan 104 §H-L11.5 and ADR-059 §"Threat model" both acknowledge this. `mvmctl doctor` surfaces it as a downgrade row. Mitigation deferred to W8 hardware-enclave integration; software fallback retained for hosts without TPM/SE.
+- **Single-tenant `mvm-audit-signer` per host.** All workloads on a host share the audit-signer subprocess (per-VM still, but one subprocess per VM). A `mvm-audit-signer` UAF affects all entries for that workload — mitigated by the audit-signer subprocess being minimal-code and security-reviewed.
+- **`mvm-host-signer` is a single point of admission availability.** If down, no plans can be signed and no workloads can admit. Restart-with-backoff is the v1 mitigation; m-of-n quorum deferred. Documented operational behavior.
+- **No alerting in v1 (G10).** Audit logs are forensics. Detection-time discovery of a compromise depends on downstream log-shipping which is out of scope.
+- **No disaster recovery for lost keys (G11).** Lost host signer key = broken workloads with no recovery path. Future plan once W11 FIDO ceremony exists.
+
+## See also
+
+- ADR-059 (decision record) for architecture + claims.
+- Plan 104 (implementation specifics) for build sequence + verification.
+- ADR-002 (microvm security posture) for the broader trust model this narrows.
+- ADR-049 (secret substitution mechanism) for the `host.secrets.v1` design.
+
+## Runbook: W3 verified-boot verification (consolidated from specs/runbooks/w3-verified-boot.md)
+
+# W3 verified-boot verification runbook
+
+> Created: 2026-04-30
+> Last updated: 2026-04-30 (full pass after initramfs fix)
+> Parent plan: `specs/plans/27-w3-verified-boot.md`
+> ADR: `specs/adrs/002-microvm-security-posture.md`
+>
+> **Status: ✅ all 5 steps PASS as of 2026-04-30.** The original
+> Step 3 failure (Firecracker's aarch64 boot path auto-appends
+> `root=/dev/vda ro` and last-wins clobbers `/dev/dm-0`) is fixed
+> by an early-userspace verity initramfs that owns the boot pivot
+> in userspace via `mvm-verity-init` + `switch_root`. The kernel-
+> level `root=` setting is now irrelevant. Tamper test confirms
+> the kernel panics with `data block N is corrupted`.
+
+This runbook is the manual end-to-end verification for ADR-002 §W3
+(verified boot via dm-verity). The `security.yml::verified-boot-artifacts`
+CI gate covers the static-shape check; this runbook covers the live-
+boot side that needs `/dev/kvm`, `firecracker`, and `veritysetup` —
+all of which are present in the project's Lima dev VM (`mvmctl dev up`)
+but not on a macOS host directly.
+
+The whole runbook is mechanical: copy each block into
+`limactl shell mvm-builder`, observe the expected signal, move on. Each step
+is independently runnable so a partial failure is debuggable in
+isolation.
+
+## Prerequisites
+
+Inside `limactl shell mvm-builder` (or any Linux/KVM host with the project
+checkout at `$REPO`), confirm tooling:
+
+```bash
+ls -la /dev/kvm                    # crw-rw---- 1 root kvm 10, 232 …
+which firecracker veritysetup nix  # all three on PATH
+nix --version                      # ≥ 2.18 with flakes enabled
+```
+
+## Step 1 — Build, inspect artifacts, sanity-check the kernel
+
+```bash
+cd "$REPO"
+out=$(nix build "./nix/default-microvm#packages.aarch64-linux.default" \
+        --no-link --print-out-paths)
+
+ls -la "$out"
+# Expected: image.tar.gz, rootfs.ext4, rootfs.verity, rootfs.roothash, vmlinux
+
+cat "$out/rootfs.roothash"
+# Expected: a 64-char lowercase-hex string + newline
+
+strings "$out/vmlinux" | grep -iE 'verity|dm-mod|device-mapper' | head
+# Expected: matches for 'dm-verity', 'device-mapper', 'verity_algorithm',
+# 'verity_mode', 'verity_version' — proves CONFIG_DM_VERITY=y took effect.
+```
+
+**Verified 2026-04-30**: store path
+`/nix/store/rg208ijvys4vwfby3qmz7xs85bj347rs-mvm-default-microvm`
+contained all four artifacts plus a 16 MiB Linux 6.1.169 aarch64
+vmlinux with the expected verity strings.
+
+## Step 2 — `veritysetup verify` round-trip
+
+```bash
+veritysetup verify \
+    "$out/rootfs.ext4" \
+    "$out/rootfs.verity" \
+    "$(cat "$out/rootfs.roothash")"
+echo "exit=$?"
+# Expected: exit=0
+```
+
+**Verified 2026-04-30**: exit 0. The Nix-built sidecar matches the
+ext4 it was built against, and the roothash produced by mkGuest is the
+same one veritysetup recovers from the tree.
+
+## Step 3 — Live Firecracker boot via the verity initramfs
+
+The verity boot path uses the `rootfs.initrd` baked by mkGuest. The
+kernel mounts the initramfs first, runs `mvm-verity-init` as PID 1,
+which constructs `/dev/mapper/root` via DM ioctls, mounts it at
+`/sysroot`, then `switch_root`s to the real init. The kernel-level
+`root=` setting is irrelevant because the initramfs picks the real
+root explicitly.
+
+```bash
+work=/tmp/w3-smoke
+rm -rf "$work" && mkdir -p "$work"
+cp "$out/vmlinux"        "$work/vmlinux"
+cp "$out/rootfs.ext4"    "$work/rootfs.ext4"
+cp "$out/rootfs.verity"  "$work/rootfs.verity"
+cp "$out/rootfs.initrd"  "$work/rootfs.initrd"
+chmod u+w "$work"/*
+
+hash=$(cat "$out/rootfs.roothash")
+python3 - <<EOF > "$work/config.json"
+import json
+boot_args = (
+    "console=ttyS0 reboot=k panic=1 init=/init "
+    f"mvm.roothash=${hash} mvm.data=/dev/vda mvm.hash=/dev/vdb"
+)
+print(json.dumps({
+    "boot-source": {
+        "kernel_image_path": "$work/vmlinux",
+        "boot_args": boot_args,
+        "initrd_path": "$work/rootfs.initrd",
+    },
+    "drives": [
+        {"drive_id": "rootfs", "path_on_host": "$work/rootfs.ext4",
+         "is_root_device": True, "is_read_only": True},
+        {"drive_id": "verity", "path_on_host": "$work/rootfs.verity",
+         "is_root_device": False, "is_read_only": True},
+    ],
+    "machine-config": {"vcpu_count": 1, "mem_size_mib": 256, "smt": False},
+}, indent=2))
+EOF
+
+sudo timeout 30 firecracker --no-api --config-file "$work/config.json" \
+    > "$work/fc.stdout" 2> "$work/fc.stderr"
+
+grep -E 'mvm-verity-init|device-mapper:|switching to|/sysroot' "$work/fc.stdout"
+```
+
+**Expected** (verified 2026-04-30):
+
+```
+mvm-verity-init: starting
+mvm-verity-init: data=/dev/vda hash=/dev/vdb roothash=…
+mvm-verity-init: verity table = 419840 sectors, 209920 data blocks
+mvm-verity-init: dm-ioctl kernel version 4.47.0
+mvm-verity-init: DM_DEV_CREATE ok
+[..] device-mapper: verity: sha256 using implementation "sha256-generic"
+mvm-verity-init: DM_TABLE_LOAD ok
+mvm-verity-init: dm-verity device active
+mvm-verity-init: /sysroot mounted (verity-protected)
+mvm-verity-init: switching to /init
+[init] /etc/{passwd,group,nsswitch.conf} are read-only bind-mounts
+```
+
+The trailing `[init]` line confirms the real `minimal-init` script
+reached userspace from the verity-protected `/dev/dm-0`. (Subsequent
+warnings about missing config drives or `setpriv` flag conflicts are
+unrelated to W3 — they're side effects of using the production rootfs
+without the per-VM config/secrets drives.)
+
+## Step 4 — Tamper-panic regression
+
+Tampering inside the ext4 superblock guarantees verity sees the
+corruption at first read (the kernel reads the superblock during the
+initial mount). Picking a "deeper" offset gambles on that block
+actually being read — verity is lazy, so a tampered byte that the
+boot path never touches goes undetected. That's not a verity bug; it
+just means the regression test has to point at a block ext4 is sure
+to read.
+
+```bash
+# Restore from the unmodified store path before tampering.
+cp "$out/rootfs.ext4" "$work/rootfs.ext4"
+chmod u+w "$work/rootfs.ext4"
+
+# Clobber 128 bytes inside the ext4 superblock at offset 1024.
+dd if=/dev/urandom of="$work/rootfs.ext4" bs=1 count=128 \
+   seek=1024 conv=notrunc
+
+sudo timeout 15 firecracker --no-api --config-file "$work/config.json" \
+    > "$work/fc-tamper.stdout" 2>&1
+grep -E 'data block .* is corrupted|Kernel panic' "$work/fc-tamper.stdout"
+```
+
+**Verified 2026-04-30** — output:
+
+```
+[..] device-mapper: verity: 254:0: data block 1 is corrupted
+mvm-verity-init: FATAL: mount(/dev/dm-0 → /sysroot, ext4): I/O error (os error 5)
+[..] Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100
+```
+
+Verity returns `-EIO` for the corrupted read, the mount fails, PID 1
+exits, and the kernel panics. The VM does NOT reach userspace.
+
+## Step 5 — Dev-image exemption
+
+```bash
+out_dev=$(nix build "./nix/dev-image#packages.aarch64-linux.default" \
+            --no-link --print-out-paths)
+ls "$out_dev"
+[ ! -f "$out_dev/rootfs.verity"   ] && echo "OK: no rootfs.verity"
+[ ! -f "$out_dev/rootfs.roothash" ] && echo "OK: no rootfs.roothash"
+```
+
+**Verified 2026-04-30**: dev-image output contains
+`image.tar.gz rootfs.ext4 vmlinux` only. The
+`verifiedBoot = false` override in `nix/dev-image/flake.nix` is
+correctly suppressing the verity sidecar.
+
+## Findings
+
+### Finding #1 (RESOLVED 2026-04-30) — Firecracker auto-appends `root=/dev/vda ro` on aarch64
+
+**Resolution**: implemented option (2) below. mkGuest now bakes a
+~250 KB cpio.gz initramfs at `rootfs.initrd` whose `/init` is
+`mvm-verity-init` (a static-musl Rust binary). The initramfs runs
+*before* the kernel commits to a root device, so Firecracker's
+trailing `root=/dev/vda ro` becomes irrelevant — `mvm-verity-init`
+constructs `/dev/mapper/root` via DM ioctls, mounts it, and
+`switch_root`s explicitly. Live boot + tamper test both green.
+
+**What**
+
+Firecracker v1.14.1 on aarch64 unconditionally appends
+`pci=off root=/dev/vda ro earlycon=uart,mmio,<addr>` to the kernel
+cmdline regardless of what the API caller put in `boot_args`. With
+verity in play, the cmdline ends up looking like:
+
+```
+root=/dev/dm-0 ro … dm-mod.create="…" pci=off root=/dev/vda ro earlycon=…
+```
+
+The kernel uses last-wins semantics for `root=`, so the user's
+`root=/dev/dm-0` is silently overridden, and the kernel tries to
+mount `/dev/vda` directly. dm-verity is constructed correctly but
+never on the read path that matters.
+
+**Why this matters**
+
+The W3 implementation (`crates/mvm/src/vm/microvm.rs::configure_flake_microvm_with_drives_dir`)
+sets `boot_args = "root=/dev/dm-0 ro rootwait init=/init {dm_create} {base_args}"`
+when verity is on. The Apple Container path (`crates/mvm-apple-container/src/macos.rs`)
+does the analogous thing. Both share the same defect: Firecracker's
+auto-append (and presumably whatever the VZ code path does on macOS)
+is not accounted for, so a verity-enabled production microVM still
+boots off raw `/dev/vda`. Verity is initialized but doesn't gate
+reads against the rootfs the running guest is actually using.
+
+**Status**: ADR-002 §W3 claim (#3 — "a tampered rootfs ext4 fails to
+boot") **does not yet hold in practice**. Static structure passes
+(Steps 1, 2, 5 all green), the kernel constructs the verity device
+correctly, but the cmdline plumbing means the kernel ignores the
+verity-protected device and mounts the raw block device instead.
+
+**Possible fixes** (in rough preference order)
+
+1. **Drop our user-supplied `root=` and use a fixed dm name that the
+   FDT default points at.** The dm-mod.create syntax accepts a
+   `<name>` field; if we name the device so it ends up at
+   `/dev/vda`, Firecracker's `root=/dev/vda` becomes the dm-verity
+   target. Doesn't actually work — dm devices live under
+   `/dev/dm-N` and `/dev/mapper/<name>`, not `/dev/vd*`.
+
+2. **Use a tiny initramfs that does verity setup in early
+   userspace, then `switch_root` to `/dev/mapper/rootfs`.** The
+   initramfs runs `veritysetup open /dev/vda root <hash> /dev/vdb`
+   and `exec switch_root /mnt /init`. This bypasses the
+   cmdline-`root=` issue entirely because the kernel mounts
+   the initramfs first and we choose the eventual root manually.
+   Cost: an extra ~1MB artifact in the rootfs build, plus an
+   initramfs builder in mkGuest. This is the typical real-world
+   verity setup.
+
+3. **Check if Firecracker has a knob to suppress the
+   arch-specific cmdline append.** A quick look at v1.14.1
+   source in `vmm/src/arch/aarch64/fdt.rs` shows the append is
+   unconditional. A Firecracker feature request or patch is
+   plausible but slow.
+
+4. **Pre-process the boot_args so our `root=` is the LAST one.**
+   Doesn't work — Firecracker appends after user input, not
+   before.
+
+5. **Use `root=253:0` (dm-0's major:minor) instead of
+   `root=/dev/dm-0`.** Same problem: Firecracker still appends
+   `root=/dev/vda ro` after, and last `root=` still wins.
+
+The pragmatic path is **(2) initramfs**. It's well-understood, the
+build cost is small, and it gives us full control over the boot
+sequence without depending on Firecracker behavior.
+
+**Action**: file as a follow-up under §W3 in plan 27 and gate the
+ADR-002 claim #3 on it. Mark §W3 status as "host-side wired,
+not enforcing — initramfs work outstanding" until this is closed.
+
+### Finding #2 — `pkgs.cryptsetup` build is heavy on first build
+
+`nix build .#default-microvm` on the Lima VM took ~30 minutes the
+first time (it pulled and built `elfutils-0.194-dev` + a few other
+non-cached deps). Cached build is fast. Document this in the
+runbook so a first-time runner doesn't think the build is hung.
+
+## Operator checklist
+
+Before claiming the W3 boot regression passes, run all five steps
+and check off:
+
+- [x] Step 1: artifacts present + kernel has DM_VERITY strings.
+- [x] Step 2: `veritysetup verify` exits 0.
+- [x] Step 3: live boot mounts `/dev/dm-0` as root via verity initramfs.
+- [x] Step 4: tampered ext4 panics in early boot (`data block N is corrupted`).
+- [x] Step 5: dev-image build emits no verity sidecar.
+
+All five green as of 2026-04-30. The runbook + the
+`security.yml::verified-boot-artifacts` CI gate together provide the
+technical receipt for ADR-002 claim #3 ("a tampered rootfs ext4
+fails to boot").

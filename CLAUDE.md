@@ -213,11 +213,12 @@ the source gap analysis is at
    entry (W2.2).
 3. **A tampered rootfs ext4 fails to boot.** dm-verity sidecar +
    kernel-cmdline roothash + `mvm-verity-init` initramfs (W3 —
-   shipped 2026-04-30; see plan 27 + runbook
-   `specs/runbooks/w3-verified-boot.md`). CI lane
-   `verified-boot-artifacts` in `security.yml` asserts the artifacts
-   are emitted; live-KVM tamper regression confirms the kernel
-   panics before userspace on a flipped data block.
+   shipped 2026-04-30; see plan 27 + the runbook in
+   `specs/adrs/002-microvm-security-posture.md` §"Runbook: W3
+   verified-boot verification"). CI lane `verified-boot-artifacts`
+   in `security.yml` asserts the artifacts are emitted; live-KVM
+   tamper regression confirms the kernel panics before userspace
+   on a flipped data block.
 4. **The guest agent does not contain `do_exec` in production
    builds.** `prod-agent-no-exec` job in `.github/workflows/ci.yml`
    builds the agent without `dev-shell` and asserts the

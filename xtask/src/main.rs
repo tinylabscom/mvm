@@ -232,13 +232,13 @@ fn main() -> Result<()> {
                 "  check-runtime-overlay-version           Plan 124 C: assert the runtime-overlay flake's overlayVersion matches the workspace version"
             );
             eprintln!(
-                "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from specs/claims/ outside exempt paths"
+                "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from claim frontmatter embedded in specs/adrs/ outside exempt paths"
             );
             eprintln!(
                 "  check-no-spec-refs-in-comments         Reject plan/PR/ADR/sprint/workstream citations in source comments"
             );
             eprintln!(
-                "  check-claim-catalog                    Verify specs/claims/catalog.md witnesses still exist in the tree"
+                "  check-claim-catalog                    Verify the claims ledger embedded in specs/adrs/002-microvm-security-posture.md — witnesses still exist in the tree"
             );
             eprintln!(
                 "  check-trust-gradient                   Verify trust-gradient ledger: monotonic tiers, workload forbidden authorities, witnesses"
