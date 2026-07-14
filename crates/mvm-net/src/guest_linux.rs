@@ -150,7 +150,12 @@ where
 }
 
 pub fn resolver_contents(nameserver: Ipv4Addr) -> String {
-    format!("nameserver {nameserver}\n")
+    let nameserver = nameserver.to_string();
+    let mut contents = String::with_capacity("nameserver \n".len() + nameserver.len());
+    contents.push_str("nameserver ");
+    contents.push_str(&nameserver);
+    contents.push('\n');
+    contents
 }
 
 #[derive(Debug)]
@@ -206,6 +211,7 @@ where
 
 #[cfg(feature = "wire-json")]
 pub const DEFAULT_GUEST_RUNNER_POLL_TIMEOUT_MILLIS: i32 = 1_000;
+pub const MAX_GUEST_RUNNER_POLL_TIMEOUT_MILLIS: i32 = DEFAULT_GUEST_RUNNER_POLL_TIMEOUT_MILLIS;
 
 #[cfg(feature = "wire-json")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -301,9 +307,19 @@ impl LinuxGuestBridgeRunnerConfigBuilder {
                 "idle_poll_timeout_millis must be positive",
             ));
         }
+        if self.idle_poll_timeout_millis > MAX_GUEST_RUNNER_POLL_TIMEOUT_MILLIS {
+            return Err(LinuxGuestBridgeRunError::InvalidConfig(
+                "idle_poll_timeout_millis exceeds the hard maximum",
+            ));
+        }
         if self.write_poll_timeout_millis <= 0 {
             return Err(LinuxGuestBridgeRunError::InvalidConfig(
                 "write_poll_timeout_millis must be positive",
+            ));
+        }
+        if self.write_poll_timeout_millis > MAX_GUEST_RUNNER_POLL_TIMEOUT_MILLIS {
+            return Err(LinuxGuestBridgeRunError::InvalidConfig(
+                "write_poll_timeout_millis exceeds the hard maximum",
             ));
         }
         Ok(LinuxGuestBridgeRunnerConfig {
@@ -419,6 +435,8 @@ where
         Capability::Tcp,
         Capability::Udp,
         Capability::IcmpEcho,
+        Capability::TlsTransform,
+        Capability::StreamTransforms,
     ];
     authority
         .send_message(NetMessage::Hello(Hello::new(
@@ -722,11 +740,11 @@ mod linux {
         link: Ipv4Cidr,
     ) -> Result<(), GuestBridgeExecError> {
         with_inet_socket("assign_address", |sock| {
-            set_ifaddr(sock, name, libc::SIOCSIFADDR, address, "SIOCSIFADDR")?;
+            set_ifaddr(sock, name, libc::SIOCSIFADDR as u64, address, "SIOCSIFADDR")?;
             set_ifaddr(
                 sock,
                 name,
-                libc::SIOCSIFNETMASK,
+                libc::SIOCSIFNETMASK as u64,
                 prefix_to_netmask(link.prefix()),
                 "SIOCSIFNETMASK",
             )
@@ -865,7 +883,7 @@ mod linux {
     fn set_ifaddr(
         sock: RawFd,
         name: &InterfaceName,
-        request: libc::Ioctl,
+        request: u64,
         address: Ipv4Addr,
         operation: &'static str,
     ) -> Result<(), GuestBridgeExecError> {
@@ -876,8 +894,9 @@ mod linux {
             set_sockaddr_in(&mut ifr.ifr_ifru.ifru_addr, address);
         }
         // SAFETY: `ifr` is initialized for the requested interface and address;
-        // `sock` is an AF_INET control socket.
-        let rc = unsafe { libc::ioctl(sock, request, &ifr) };
+        // `sock` is an AF_INET control socket. `libc::Ioctl` differs between
+        // libc targets, so cast the numeric request only at the syscall boundary.
+        let rc = unsafe { libc::ioctl(sock, request as libc::Ioctl, &ifr) };
         if rc < 0 {
             return Err(last_os(operation));
         }
@@ -1231,6 +1250,27 @@ mod tests {
                 .write_poll_timeout_millis(0)
                 .build(),
             Err(LinuxGuestBridgeRunError::InvalidConfig(_))
+        ));
+    }
+
+    #[cfg(feature = "wire-json")]
+    #[test]
+    fn runner_config_rejects_oversized_poll_timeouts() {
+        assert!(matches!(
+            LinuxGuestBridgeRunnerConfig::builder()
+                .idle_poll_timeout_millis(MAX_GUEST_RUNNER_POLL_TIMEOUT_MILLIS + 1)
+                .build(),
+            Err(LinuxGuestBridgeRunError::InvalidConfig(
+                "idle_poll_timeout_millis exceeds the hard maximum"
+            ))
+        ));
+        assert!(matches!(
+            LinuxGuestBridgeRunnerConfig::builder()
+                .write_poll_timeout_millis(MAX_GUEST_RUNNER_POLL_TIMEOUT_MILLIS + 1)
+                .build(),
+            Err(LinuxGuestBridgeRunError::InvalidConfig(
+                "write_poll_timeout_millis exceeds the hard maximum"
+            ))
         ));
     }
 

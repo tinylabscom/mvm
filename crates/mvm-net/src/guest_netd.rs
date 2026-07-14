@@ -500,6 +500,22 @@ mod tests {
     }
 
     #[test]
+    fn oversized_poll_timeout_values_fail_at_runner_config_admission() {
+        let oversized = (crate::guest_linux::MAX_GUEST_RUNNER_POLL_TIMEOUT_MILLIS + 1).to_string();
+        let err = config(&["--idle-poll-timeout-ms", oversized.as_str()], &[]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid runner config: invalid guest bridge runner config: idle_poll_timeout_millis exceeds the hard maximum"
+        );
+
+        let err = config(&["--write-poll-timeout-ms", oversized.as_str()], &[]).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "invalid runner config: invalid guest bridge runner config: write_poll_timeout_millis exceeds the hard maximum"
+        );
+    }
+
+    #[test]
     fn args_override_environment_values() {
         let config = config(
             &["--tun-name", "arg0", "--vsock-port=7000"],
@@ -547,6 +563,26 @@ mod tests {
         assert!(matches!(
             config(&["--max-wire-frame-bytes", "0"], &[]),
             Err(GuestNetdError::WireConfig(_))
+        ));
+        assert!(matches!(
+            config(
+                &[&format!(
+                    "--max-wire-frame-bytes={}",
+                    crate::wire_json::MAX_JSON_WIRE_FRAME_BYTES + 1
+                )],
+                &[]
+            ),
+            Err(GuestNetdError::WireConfig(_))
+        ));
+        assert!(matches!(
+            config(
+                &[&format!(
+                    "--max-authority-messages-per-tick={}",
+                    crate::guest_pump::MAX_AUTHORITY_MESSAGES_PER_TICK + 1
+                )],
+                &[]
+            ),
+            Err(GuestNetdError::PumpConfig(_))
         ));
         assert!(matches!(
             config(&["--idle-poll-timeout-ms", "0"], &[]),
