@@ -106,7 +106,7 @@ impl HvfBuilderVm {
         })?;
 
         let name = format!("mvm-hvf-builder-shell-{job_id}");
-        let runtime_overlay = cached_runtime_overlay_ext4();
+        let runtime_overlay = require_runtime_overlay_ext4()?;
         let outcome = BuilderRunner::new(HvfDriver::new())
             .build(&BuilderBuild {
                 name: &name,
@@ -116,7 +116,7 @@ impl HvfBuilderVm {
                 job_dir: &job_dir,
                 work_src: &job.work_dir,
                 host_bin_dir: &host_bin_dir,
-                runtime_overlay: runtime_overlay.as_deref(),
+                runtime_overlay: Some(runtime_overlay.as_path()),
                 closure_nar: None,
                 output_size: u64::from(self.output_mib) << 20,
                 vcpus: self.vcpus,
@@ -169,27 +169,18 @@ fn map_runner_failure(detail: String) -> BuilderVmError {
     BuilderVmError::HvfVmmFailed { detail }
 }
 
-fn cached_runtime_overlay_ext4() -> Option<PathBuf> {
-    let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
-    let version = env!("CARGO_PKG_VERSION");
-    let arch = mvm_core::arch::GuestArch::host();
-    match mvm_build::runtime_overlay::resolve_or_build_local_runtime_overlay(
-        &cache_root,
-        version,
-        arch,
-    ) {
-        Ok(artifact) => Some(artifact.overlay_ext4),
-        Err(error) => {
-            tracing::warn!(
-                cache_root = %cache_root.display(),
-                version,
-                arch = %arch,
-                error = %error,
-                "runtime overlay unavailable for HVF builder"
-            );
-            None
-        }
-    }
+/// Resolve (or build) the runtime overlay the lean HVF builder rootfs sources
+/// its guest binaries from, failing closed when it is unavailable.
+///
+/// The HVF builder is always a lean `Rootfs` builder (kernel + rootfs whose
+/// baked image bakes no guest binaries), so a missing overlay silently strands
+/// the guest agent — it must be fatal. Reuses the shared resolver so the cache
+/// layout and source-checkout rebuild policy stay single-sourced. Mapped to
+/// [`BuilderVmError::RuntimeOverlayUnavailable`] (not a VMM-level failure), so
+/// it surfaces unchanged with no auto-fallback to another builder backend.
+fn require_runtime_overlay_ext4() -> Result<PathBuf, BuilderVmError> {
+    mvm_build::libkrun_builder::require_runtime_overlay_ext4()
+        .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}")))
 }
 
 fn validate_shell_job(
@@ -254,7 +245,7 @@ impl BuilderVm for HvfBuilderVm {
         // Boot the builder VM over the hvf VMM + disk transport; the guest
         // runs cmd.sh and tars its artifacts back onto the output disk.
         let name = format!("mvm-hvf-builder-{job_id}");
-        let runtime_overlay = cached_runtime_overlay_ext4();
+        let runtime_overlay = require_runtime_overlay_ext4()?;
         let outcome = BuilderRunner::new(HvfDriver::new())
             .build(&BuilderBuild {
                 name: &name,
@@ -264,7 +255,7 @@ impl BuilderVm for HvfBuilderVm {
                 job_dir: &job_dir,
                 work_src: &mounts.flake_src,
                 host_bin_dir: &mounts.host_bin_dir,
-                runtime_overlay: runtime_overlay.as_deref(),
+                runtime_overlay: Some(runtime_overlay.as_path()),
                 closure_nar: self.closure_nar.as_deref(),
                 output_size: u64::from(self.output_mib) << 20,
                 vcpus: self.vcpus,

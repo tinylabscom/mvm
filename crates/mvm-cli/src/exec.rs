@@ -215,7 +215,10 @@ mod runtime_source_policy_tests {
     use super::*;
 
     #[test]
-    fn templates_declare_prefer_overlay() {
+    fn templates_require_overlay_on_block_boots() {
+        // A block-rooted flake/template workload sources its guest binaries from
+        // the overlay, so it fails closed when the overlay is unavailable rather
+        // than silently falling back to the baked rootfs copy.
         assert_eq!(
             runtime_source_policy_for(
                 &ImageSource::Template("t".into()),
@@ -223,7 +226,7 @@ mod runtime_source_policy_tests {
                 false,
                 mvm_build::run_image::RootStrategy::BlockExt4,
             ),
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
         );
     }
 
@@ -1591,6 +1594,20 @@ pub fn boot_session_vm(
         ..Default::default()
     };
 
+    // Session VMs are always block-rooted template boots; resolve the overlay
+    // policy the same way the transient runner does so the runtime overlay is
+    // the single source of the guest agent + helpers here too (a missing
+    // required overlay is built/acquired by attach_runtime_overlay_if_cached,
+    // never silently replaced by a baked rootfs copy).
+    start_config.runtime_source_policy = mvm_core::vm_backend::select_runtime_source_policy(
+        mvm_core::vm_backend::RuntimeSourcePolicySelection {
+            backend_name: Some(backend.name()),
+            sealed: start_config.verity_path.is_some(),
+            root_strategy: Some(mvm_core::vm_backend::RuntimeSourceRootStrategy::BlockExt4),
+            launch_kind: mvm_core::vm_backend::RuntimeSourceLaunchKind::WorkloadImage,
+        },
+    );
+
     // Admit the workload's lowered secrets (the closure runs
     // synthesize→sign→verify with the now-known rootfs + vm_name) and thread the
     // signed plan into the config so `backend.start` spawns the substitution
@@ -1610,6 +1627,8 @@ pub fn boot_session_vm(
                 .context("persisting admitted session plan before backend start")?;
         }
     }
+
+    crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
 
     // The tunnel worker spawns on the cold-boot path, not snapshot-restore, so an
     // egress-admitted session must cold-boot even when a snapshot exists.

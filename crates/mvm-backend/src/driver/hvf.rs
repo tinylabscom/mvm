@@ -164,6 +164,8 @@ fn relay_supervisor_config(spec: &VmmSpec, paths: &SupervisorPaths) -> Result<Hv
         egress_relay_socket,
         // Builder/dev VMs run no admitted workload, so no host-services broker.
         broker_socket: None,
+        // Builder/dev VMs carry no admitted egress tunnel.
+        network_tunnel_socket: None,
         console_data_sockets,
     })
 }

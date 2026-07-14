@@ -506,6 +506,14 @@ pub enum BuilderVmError {
         /// full pre- and post-panic kernel output is preserved.
         console_log_path: String,
     },
+
+    /// A lean (`runtimeLean`) builder VM requires the runtime overlay for its
+    /// guest binaries — it bakes none — but the overlay could not be resolved
+    /// or built. Booting without it silently strands the guest agent, so this
+    /// fails closed. Distinct from a VMM-level failure: it is not
+    /// backend-specific, so it surfaces unchanged with no auto-fallback.
+    #[error("builder VM runtime overlay unavailable: {0}")]
+    RuntimeOverlayUnavailable(String),
 }
 
 /// `~/.cache/mvm/builder-vm/` (honors `MVM_CACHE_DIR`) — the directory to clear

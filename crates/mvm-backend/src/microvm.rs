@@ -2296,6 +2296,30 @@ pub fn build_runtime_overlay_cmdline_args(
     }
 }
 
+/// The runtime-overlay ext4 to attach as a plain read-only virtio-blk device
+/// on a NON-verity workload boot, or `None` to attach nothing.
+///
+/// A sealed (verity) boot instead attaches the dm-verity overlay pair that the
+/// verity initramfs sets up, so this is only consulted on the non-verity
+/// branch of each backend. The gate mirrors the firecracker path: attach only
+/// when the resolved overlay triple is present and the boot is not rootfs-only
+/// (the virtiofs-root shape carries no block overlay). Returned to the
+/// backends that assign the overlay the next free `/dev/vdN` after the rootfs
+/// — always `/dev/vdb` on the non-verity branch, matching
+/// [`build_runtime_overlay_cmdline_args`]`(None, true)`.
+pub fn non_verity_overlay_ext4(config: &mvm_core::vm_backend::VmStartConfig) -> Option<&str> {
+    if config.runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly {
+        return None;
+    }
+    // The three overlay fields are populated together; require the full triple
+    // so a half-populated config can't attach a device the guest can't
+    // corroborate against the cmdline token.
+    if config.runtime_overlay_verity_path.is_none() || config.runtime_overlay_roothash.is_none() {
+        return None;
+    }
+    config.runtime_overlay_path.as_deref()
+}
+
 /// Resolve whether the runtime-overlay drives should be attached
 /// alongside the rootfs verity sidecar. Returns the
 /// `(overlay_ext4_path, overlay_verity_sidecar_path,
@@ -3718,6 +3742,47 @@ mod tests {
             build_runtime_overlay_cmdline_args(None, true).as_deref(),
             Some("mvm.runtime_data=/dev/vdb")
         );
+    }
+
+    #[test]
+    fn non_verity_overlay_ext4_requires_full_triple_and_non_rootfs_only() {
+        use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
+
+        // Bare rootfs, no overlay resolved → nothing to attach.
+        let bare = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        assert_eq!(non_verity_overlay_ext4(&bare), None);
+
+        // Full triple + a non-rootfs-only policy → attach the ext4.
+        let resolved = VmStartConfig {
+            runtime_overlay_path: Some("/cache/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/cache/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        assert_eq!(
+            non_verity_overlay_ext4(&resolved),
+            Some("/cache/runtime.ext4")
+        );
+
+        // A half-populated triple must not attach a device the guest can't
+        // corroborate against the cmdline token.
+        let partial = VmStartConfig {
+            runtime_overlay_path: Some("/cache/runtime.ext4".into()),
+            runtime_source_policy: RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        assert_eq!(non_verity_overlay_ext4(&partial), None);
+
+        // Rootfs-only (the virtiofs-root shape) never attaches a block overlay.
+        let rootfs_only = VmStartConfig {
+            runtime_source_policy: RuntimeSourcePolicy::RootfsOnly,
+            ..resolved.clone()
+        };
+        assert_eq!(non_verity_overlay_ext4(&rootfs_only), None);
     }
 
     #[test]

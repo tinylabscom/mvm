@@ -195,23 +195,55 @@ pub fn resolve_networking_mode() -> NetworkingPreference {
     default_networking_mode()
 }
 
-pub(crate) fn cached_runtime_overlay_ext4() -> Option<PathBuf> {
+/// Resolve (or locally build) the runtime overlay ext4 the builder VM sources
+/// its guest binaries from, failing closed when it cannot be produced.
+///
+/// A lean builder image bakes no guest binaries — every one is sourced from
+/// this overlay mounted at `/mvm/runtime` — so booting without it silently
+/// strands the guest agent. Callers that boot a lean `Rootfs` builder MUST
+/// treat a resolution failure as fatal; see [`builder_runtime_overlay_or_bail`]
+/// for the image-gated wrapper the boot paths use.
+pub fn require_runtime_overlay_ext4() -> anyhow::Result<PathBuf> {
+    use anyhow::Context as _;
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     let version = env!("CARGO_PKG_VERSION");
     let arch = mvm_core::arch::GuestArch::host();
-    match crate::runtime_overlay::resolve_or_build_local_runtime_overlay(&cache_root, version, arch)
-    {
-        Ok(artifact) => Some(artifact.overlay_ext4),
-        Err(error) => {
-            tracing::warn!(
-                cache_root = %cache_root.display(),
-                version,
-                arch = %arch,
-                error = %error,
-                "runtime overlay unavailable for builder VM"
-            );
-            None
-        }
+    let artifact =
+        crate::runtime_overlay::resolve_or_build_local_runtime_overlay(&cache_root, version, arch)
+            .with_context(|| {
+                format!(
+                    "builder VM requires the runtime overlay but it could not be resolved or \
+                     built (cache_root={}, version={version}, arch={arch})",
+                    cache_root.display()
+                )
+            })?;
+    Ok(artifact.overlay_ext4)
+}
+
+/// Resolve the runtime overlay for a builder boot, gating on the image shape.
+///
+/// A lean [`BuilderVmImage::Rootfs`] builder requires the overlay and fails
+/// closed when it is unavailable. A [`BuilderVmImage::RootDir`] (Stage 0
+/// bootstrap) image boots from libkrun's bundled kernel and sources no guest
+/// binaries from the overlay, so it legitimately returns `None`.
+pub(crate) fn builder_runtime_overlay_or_bail(
+    image: &BuilderVmImage,
+) -> Result<Option<PathBuf>, BuilderVmError> {
+    builder_runtime_overlay_or_bail_with(image, require_runtime_overlay_ext4)
+}
+
+/// Injectable core of [`builder_runtime_overlay_or_bail`] — takes the resolver
+/// as a closure so the image-gating and fail-closed mapping are unit-testable
+/// without touching the on-disk cache or triggering a source-checkout rebuild.
+fn builder_runtime_overlay_or_bail_with(
+    image: &BuilderVmImage,
+    resolve: impl FnOnce() -> anyhow::Result<PathBuf>,
+) -> Result<Option<PathBuf>, BuilderVmError> {
+    match image {
+        BuilderVmImage::Rootfs { .. } => resolve()
+            .map(Some)
+            .map_err(|e| BuilderVmError::RuntimeOverlayUnavailable(format!("{e:#}"))),
+        BuilderVmImage::RootDir { .. } => Ok(None),
     }
 }
 
@@ -1012,7 +1044,7 @@ impl LibkrunBuilderVm {
             ))
         })?;
         let console_log = vm_state_dir.join("console.log");
-        let runtime_overlay = cached_runtime_overlay_ext4();
+        let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
         // `job.work_dir` can be the repo root on a source checkout; stage a
@@ -1077,15 +1109,10 @@ impl LibkrunBuilderVm {
         // supervisor rejects anything else. Matches the Stage 0 path.
         krun = apply_networking_mode(krun);
 
-        if builder_uses_vsock_egress(&image)
-            && runtime_overlay.is_none()
-            && let BuilderVmImage::Rootfs { cmdline, .. } = &image
-        {
-            krun = krun
-                .with_cmdline(builder_disk_transport_cmdline(cmdline))
-                .with_vsock_direct();
-        }
-
+        // A lean Rootfs builder always carries the runtime overlay here
+        // (resolution failed closed above), so the disk-transport cmdline is
+        // set by `builder_runtime_overlay_attachment` — there is no
+        // overlay-absent degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
@@ -1510,7 +1537,7 @@ impl BuilderVm for LibkrunBuilderVm {
         // hvc0 output silently and "supervisor running, then exits 1"
         // is the only observable signal.
         let console_log = vm_state_dir.join("console.log");
-        let runtime_overlay = cached_runtime_overlay_ext4();
+        let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
         // `mounts.flake_src` is the repo root itself on a source checkout
@@ -1572,15 +1599,10 @@ impl BuilderVm for LibkrunBuilderVm {
         // supervisor rejects anything else. Matches the Stage 0 path.
         krun = apply_networking_mode(krun);
 
-        if builder_uses_vsock_egress(&image)
-            && runtime_overlay.is_none()
-            && let BuilderVmImage::Rootfs { cmdline, .. } = &image
-        {
-            krun = krun
-                .with_cmdline(builder_disk_transport_cmdline(cmdline))
-                .with_vsock_direct();
-        }
-
+        // A lean Rootfs builder always carries the runtime overlay here
+        // (resolution failed closed above), so the disk-transport cmdline is
+        // set by `builder_runtime_overlay_attachment` — there is no
+        // overlay-absent degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
@@ -4197,7 +4219,7 @@ impl LibkrunPersistentHostVm {
             ))
         })?;
         let console_log = vm_state_dir.join("console.log");
-        let runtime_overlay = cached_runtime_overlay_ext4();
+        let runtime_overlay = builder_runtime_overlay_or_bail(&image)?;
         let guest_agent_vsock =
             builder_runtime_overlay_guest_agent_enabled(&image, runtime_overlay.as_deref());
 
@@ -4243,18 +4265,10 @@ impl LibkrunPersistentHostVm {
             );
         }
 
-        if builder_uses_vsock_egress(&image)
-            && !matches!(
-                (&image, runtime_overlay.as_deref()),
-                (BuilderVmImage::Rootfs { .. }, Some(_))
-            )
-            && let BuilderVmImage::Rootfs { cmdline, .. } = &image
-        {
-            krun = krun
-                .with_cmdline(builder_vsock_egress_cmdline(cmdline))
-                .with_vsock_direct();
-        }
-
+        // A lean Rootfs builder always carries the runtime overlay here
+        // (resolution failed closed above), so its cmdline is set by
+        // `builder_runtime_overlay_attachment` — there is no overlay-absent
+        // degraded boot.
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
@@ -6514,6 +6528,50 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn builder_runtime_overlay_or_bail_fails_closed_for_lean_rootfs_when_unavailable() {
+        let image = BuilderVmImage::new(
+            PathBuf::from("/img/Image"),
+            PathBuf::from("/img/rootfs.ext4"),
+            "console=hvc0 root=/dev/vda".to_string(),
+        );
+        let err = builder_runtime_overlay_or_bail_with(&image, || {
+            Err(anyhow::anyhow!("cache miss and no source checkout"))
+        })
+        .expect_err("a lean Rootfs builder must fail closed when the overlay is unavailable");
+        match err {
+            BuilderVmError::RuntimeOverlayUnavailable(msg) => {
+                assert!(msg.contains("cache miss and no source checkout"), "{msg}");
+            }
+            other => panic!("expected RuntimeOverlayUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builder_runtime_overlay_or_bail_threads_resolved_overlay_for_rootfs() {
+        let image = BuilderVmImage::new(
+            PathBuf::from("/img/Image"),
+            PathBuf::from("/img/rootfs.ext4"),
+            "console=hvc0 root=/dev/vda".to_string(),
+        );
+        let resolved = PathBuf::from("/cache/runtime-overlay.ext4");
+        let out = builder_runtime_overlay_or_bail_with(&image, || Ok(resolved.clone()))
+            .expect("resolved overlay threads through");
+        assert_eq!(out.as_deref(), Some(resolved.as_path()));
+    }
+
+    #[test]
+    fn builder_runtime_overlay_or_bail_skips_resolver_for_rootdir_stage0() {
+        // Stage 0 (RootDir) boots libkrun's bundled kernel and bakes its own
+        // entrypoint, so it must never even attempt overlay resolution.
+        let image = BuilderVmImage::new_root_dir(PathBuf::from("/rootdir"), "/init");
+        let out = builder_runtime_overlay_or_bail_with(&image, || {
+            panic!("RootDir images must not resolve the runtime overlay")
+        })
+        .expect("RootDir images resolve to no overlay");
+        assert!(out.is_none());
     }
 
     #[test]

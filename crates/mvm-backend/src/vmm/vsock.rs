@@ -81,6 +81,14 @@ impl VsockShared {
         self.handlers.set_broker_activity(counter);
     }
 
+    pub fn set_network_tunnel_endpoint(&mut self, path: &std::path::Path) {
+        self.handlers.set_network_tunnel_endpoint(path);
+    }
+
+    pub fn set_network_tunnel_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.handlers.set_network_tunnel_activity(counter);
+    }
+
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.lifecycle.exit_stop = Some(self.handlers.capture_workload_exit(stop));
     }
@@ -222,6 +230,16 @@ impl VirtioVsock {
 
     pub fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_broker_activity(counter);
+        self.notify_io();
+    }
+
+    pub fn set_network_tunnel_endpoint(&mut self, path: &std::path::Path) {
+        self.lock().set_network_tunnel_endpoint(path);
+        self.notify_io();
+    }
+
+    pub fn set_network_tunnel_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
+        self.lock().set_network_tunnel_activity(counter);
         self.notify_io();
     }
 
