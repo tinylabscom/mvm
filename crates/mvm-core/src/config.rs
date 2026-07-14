@@ -1,5 +1,3 @@
-use sha2::Digest as _;
-
 /// Default Firecracker version, overridable at build time via `MVM_FC_VERSION` env var.
 pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
     Some(v) => v,
@@ -9,7 +7,7 @@ pub const FC_VERSION_DEFAULT: &str = match option_env!("MVM_FC_VERSION") {
 /// Host CPU architecture for arch-tagged downloads (the Firecracker release
 /// binary, firecracker-ci kernel/rootfs). `std::env::consts::ARCH` is the arch
 /// mvmctl was compiled for == the arch it runs on, so the downloaded binaries
-/// match the host. (Was hardcoded `"aarch64"` — wrong on x86_64: a build
+/// match the host. (Was hardcoded `"aarch64"` — wrong on x86_64: `dev up`
 /// fetched the aarch64 firecracker on an x86_64 host → "Exec format error".)
 pub const ARCH: &str = std::env::consts::ARCH;
 
@@ -102,7 +100,7 @@ pub fn mvm_data_dir_strict() -> std::io::Result<std::path::PathBuf> {
 /// mode `0700` and return its path. Idempotent: if the dir already
 /// exists with looser perms, chmod it to `0700` so a host that was
 /// created before this lockdown still gets locked down on the next
-/// run.
+/// `dev up`.
 ///
 /// `~/.mvm` holds the dev VM's GC root, the host-backed Nix store
 /// disk image, the per-VM `vsock.sock` proxy listener path, build
@@ -153,21 +151,6 @@ fn home_dir() -> String {
     std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
 }
 
-/// Default cache directory for build artifacts, images, and VM runtime state,
-/// ignoring `MVM_CACHE_DIR` overrides.
-///
-/// Resolution order:
-///   1. `$XDG_CACHE_HOME/mvm`
-///   2. `$HOME/.cache/mvm`
-pub fn default_mvm_cache_dir() -> String {
-    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
-        && !xdg.is_empty()
-    {
-        return format!("{xdg}/mvm");
-    }
-    format!("{}/.cache/mvm", home_dir())
-}
-
 /// Cache directory for build artifacts, images, VM runtime state.
 ///
 /// Resolution order:
@@ -180,7 +163,12 @@ pub fn mvm_cache_dir() -> String {
     {
         return d;
     }
-    default_mvm_cache_dir()
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return format!("{xdg}/mvm");
+    }
+    format!("{}/.cache/mvm", home_dir())
 }
 
 /// Config directory for user configuration files.
@@ -460,84 +448,14 @@ pub fn vsock_socket_filename(port: u32) -> String {
     format!("vsock-{port}.sock")
 }
 
-/// Conservative per-path byte budget for Unix-domain sockets. macOS caps
-/// `sockaddr_un.sun_path` at roughly 104 bytes including the trailing NUL, so
-/// keep generated paths at or below 103 bytes and fall back to a short `/tmp`
-/// namespace when a worktree-local `MVM_DATA_DIR` would overflow it.
-const UNIX_SOCKET_PATH_MAX_BYTES: usize = 103;
-const SHORT_VM_SOCKET_ROOT: &str = "/tmp/mvm-sock";
-
-fn unix_socket_path_len(path: &std::path::Path) -> usize {
-    #[cfg(unix)]
-    {
-        use std::os::unix::ffi::OsStrExt as _;
-        path.as_os_str().as_bytes().len()
-    }
-    #[cfg(not(unix))]
-    {
-        path.to_string_lossy().len()
-    }
-}
-
-fn fits_unix_socket_path(path: &std::path::Path) -> bool {
-    unix_socket_path_len(path) <= UNIX_SOCKET_PATH_MAX_BYTES
-}
-
-fn short_vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
-    #[cfg(unix)]
-    use std::os::unix::ffi::OsStrExt as _;
-
-    let digest = {
-        #[cfg(unix)]
-        {
-            sha2::Sha256::digest(state_dir.as_os_str().as_bytes())
-        }
-        #[cfg(not(unix))]
-        {
-            let path = state_dir.to_string_lossy();
-            sha2::Sha256::digest(path.as_bytes())
-        }
-    };
-    std::path::PathBuf::from(SHORT_VM_SOCKET_ROOT).join(hex::encode(&digest[..8]))
-}
-
-/// Per-VM Unix-socket directory. Uses the normal `vm_state_dir` when its known
-/// socket shapes fit within the Unix-domain path budget; otherwise falls back to
-/// a hashed short namespace under `/tmp/mvm-sock/` so interactive HVF runs from
-/// deep worktrees still bind on macOS.
-pub fn vm_socket_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
-    let max_root_socket = state_dir.join("substitution-endpoint.sock");
-    let max_vsock_socket = state_dir
-        .join("vsock")
-        .join(vsock_socket_filename(u16::MAX.into()));
-    if fits_unix_socket_path(&max_root_socket) && fits_unix_socket_path(&max_vsock_socket) {
-        state_dir.to_path_buf()
-    } else {
-        short_vm_socket_dir_at(state_dir)
-    }
-}
-
-/// Per-VM Unix-socket directory for a named VM.
-pub fn vm_socket_dir(name: &str) -> std::path::PathBuf {
-    vm_socket_dir_at(&vm_state_dir(name))
-}
-
-/// libkrun's per-port vsock listener socket: `<socket-dir>/vsock-<port>.sock`.
-/// `socket-dir` is normally the per-VM state dir, but falls back to a short
-/// hashed `/tmp` namespace when a deep worktree path would overflow macOS's
-/// Unix-socket limit. libkrun's supervisor binds one socket per forwarded
-/// port, so a client connects directly with no port handshake. This +
-/// [`vsock_socket_filename`] are the single source of truth for the convention
-/// — every host-side resolver (the console transport, the dev-VM connect path)
-/// must use them so they cannot drift.
+/// libkrun's per-port vsock listener socket: `<vm_state_dir>/vsock-<port>.sock`.
+/// libkrun's supervisor binds one socket per forwarded port, so a client
+/// connects directly with no port handshake. This + [`vsock_socket_filename`]
+/// are the single source of truth for the convention — every host-side
+/// resolver (the console transport, the dev-VM connect path) must use them
+/// so they cannot drift.
 pub fn vm_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
-    vm_vsock_port_socket_at(&vm_state_dir(name), port)
-}
-
-/// Same as [`vm_vsock_port_socket`] when the caller already has the per-VM
-/// state dir and only needs the port-specific socket path.
-pub fn vm_vsock_port_socket_at(state_dir: &std::path::Path, port: u32) -> std::path::PathBuf {
-    vm_socket_dir_at(state_dir).join(vsock_socket_filename(port))
+    vm_state_dir(name).join(vsock_socket_filename(port))
 }
 
 /// The Apple-Container cross-process vsock proxy socket:
@@ -569,44 +487,31 @@ pub fn inhouse_agent_socket_filename() -> &'static str {
 /// honored on the backend side only, so the override path must set the same
 /// value both sides use.
 pub fn vm_inhouse_agent_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
-    vm_socket_dir_at(state_dir).join(inhouse_agent_socket_filename())
+    state_dir.join(inhouse_agent_socket_filename())
 }
 
 /// The in-house runner's guest-agent RPC bridge for a VM by name:
-/// `<socket-dir>/agent.sock`. See [`vm_inhouse_agent_socket_at`].
+/// `<vm_state_dir>/agent.sock`. See [`vm_inhouse_agent_socket_at`].
 pub fn vm_inhouse_agent_socket(name: &str) -> std::path::PathBuf {
     vm_inhouse_agent_socket_at(&vm_state_dir(name))
 }
 
 /// The directory the Vz supervisor nests its per-port vsock listener
-/// sockets under: `<socket-dir>/vsock`. Unlike libkrun (which binds
+/// sockets under: `<vm_state_dir>/vsock`. Unlike libkrun (which binds
 /// `<vm_state_dir>/vsock-<port>.sock` directly), the Vz `VsockProxy`
-/// listens inside this subdir. `socket-dir` is normally the per-VM state dir,
-/// but falls back to a short hashed `/tmp` namespace when a deep worktree path
-/// would overflow macOS's Unix-socket limit. Single source of truth so
-/// `mvm-backend`'s supervisor config and the host-side `VzTransport` can't
-/// drift.
-pub fn vm_vz_vsock_dir_at(state_dir: &std::path::Path) -> std::path::PathBuf {
-    vm_socket_dir_at(state_dir).join("vsock")
-}
-
-/// The directory the Vz supervisor nests its per-port vsock listener
-/// sockets under for a named VM.
+/// listens inside this subdir. Single source of truth for the subdir so
+/// `mvm-backend`'s supervisor config and the host-side `VzTransport`
+/// can't drift.
 pub fn vm_vz_vsock_dir(name: &str) -> std::path::PathBuf {
-    vm_vz_vsock_dir_at(&vm_state_dir(name))
+    vm_state_dir(name).join("vsock")
 }
 
 /// Vz's per-port vsock listener socket: `<vm_state_dir>/vsock/vsock-<port>.sock`.
 /// The Vz supervisor listens here and forwards to the guest's vsock port, so a
 /// host client connects directly with no port handshake (same shape as libkrun,
 /// one subdir deeper). Pairs with [`vm_vz_vsock_dir`] + [`vsock_socket_filename`].
-pub fn vm_vz_vsock_port_socket_at(state_dir: &std::path::Path, port: u32) -> std::path::PathBuf {
-    vm_vz_vsock_dir_at(state_dir).join(vsock_socket_filename(port))
-}
-
-/// Vz's per-port vsock listener socket for a named VM.
 pub fn vm_vz_vsock_port_socket(name: &str, port: u32) -> std::path::PathBuf {
-    vm_vz_vsock_port_socket_at(&vm_state_dir(name), port)
+    vm_vz_vsock_dir(name).join(vsock_socket_filename(port))
 }
 
 /// libkrun supervisor pid file: `<vm_state_dir>/libkrun.pid`.
@@ -627,48 +532,42 @@ pub fn vm_substitution_env_path(name: &str) -> std::path::PathBuf {
     vm_state_dir(name).join("substitution-env.json")
 }
 
-/// Per-VM marker that the guest booted with the loopback SOCKS5 vsock egress
-/// client enabled. Invoke-time env synthesis reads it to route plain workload
-/// egress through the vsock proxy rather than any guest NIC path.
-pub fn vm_vsock_egress_marker_path(name: &str) -> std::path::PathBuf {
-    vm_state_dir(name).join("vsock-egress-enabled")
-}
-
 /// Per-VM Unix socket the `mvm-substitution-endpoint` binds and the hvf VMM's
-/// substitution bridge connects to: `<socket-dir>/substitution-endpoint.sock`.
-/// Unlike the Vz path (where the Swift supervisor proxies the guest
+/// substitution bridge connects to: `<vm_state_dir>/substitution-endpoint.sock`
+///. Unlike the Vz path (where the Swift supervisor proxies the guest
 /// vsock dial to a `vsock/`-nested socket), the hvf VMM's device bridges
-/// `EGRESS_PORT` straight to this socket, so it lives at the socket-dir root.
-/// `socket-dir` is normally the per-VM state dir, but falls back to a short
-/// hashed `/tmp` namespace when a deep worktree path would overflow macOS's
-/// Unix-socket limit. Single source of truth: the backend spawn (which binds
-/// it) and the supervisor config (which hands it to the device) both resolve it
-/// here.
+/// `EGRESS_PORT` straight to this socket, so it lives at the state-dir root. Single
+/// source of truth: the backend spawn (which binds it) and the supervisor config
+/// (which hands it to the device) both resolve it here.
 pub fn vm_substitution_endpoint_socket(name: &str) -> std::path::PathBuf {
-    vm_socket_dir(name).join("substitution-endpoint.sock")
+    vm_state_dir(name).join("substitution-endpoint.sock")
 }
 
 /// The hvf (HVF / `WorkloadRunner`) VMM's host→guest agent-RPC socket:
-/// `<socket-dir>/hvf-agent.sock`. The device's `AgentBridge` binds it and
+/// `<vm_state_dir>/hvf-agent.sock`. The device's `AgentBridge` binds it and
 /// bridges every host connection to the guest agent on `GUEST_AGENT_PORT`.
 /// Single source of truth so the backend (which binds it) and the host-side
 /// agent-RPC transport (which connects to it) cannot drift — the drift that
 /// silently broke non-interactive `machine run` on the hvf VMM.
+pub fn vm_hvf_agent_socket_at(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join("hvf-agent.sock")
+}
+
+/// The hvf (HVF / detached supervisor) VMM's host→guest agent-RPC socket for a
+/// VM by name: `<vm_state_dir>/hvf-agent.sock`.
 pub fn vm_hvf_agent_socket(name: &str) -> std::path::PathBuf {
-    vm_socket_dir(name).join("hvf-agent.sock")
+    vm_hvf_agent_socket_at(&vm_state_dir(name))
 }
 
 /// The hvf VMM's per-VM `BROKER_PORT` listener socket the host-agent daemon
 /// (or, on the fork path, the per-VM broker) binds on behalf of this VM:
-/// `<socket-dir>/hvf-broker.sock`. Sits at the socket-dir root like the
+/// `<vm_state_dir>/hvf-broker.sock`. Sits at the state-dir root like the
 /// substitution-endpoint socket (the hvf device model has no `vsock/` subdir
-/// the way vz does). `socket-dir` is normally the per-VM state dir, but falls
-/// back to a short hashed `/tmp` namespace when a deep worktree path would
-/// overflow macOS's Unix-socket limit. Single source of truth so the backend
-/// (which passes it to registration) and whatever eventually bridges the
-/// guest's `BROKER_PORT` dial to it cannot drift.
+/// the way vz does). Single source of truth so the backend (which passes it
+/// to registration) and whatever eventually bridges the guest's `BROKER_PORT`
+/// dial to it cannot drift.
 pub fn vm_hvf_broker_socket(name: &str) -> std::path::PathBuf {
-    vm_socket_dir(name).join("hvf-broker.sock")
+    vm_state_dir(name).join("hvf-broker.sock")
 }
 
 // ============================================================================
@@ -705,6 +604,9 @@ pub fn mvm_transcripts_dir() -> std::path::PathBuf {
 /// Filename suffix for a per-VM workload audit chain.
 pub const WORKLOAD_AUDIT_SUFFIX: &str = ".workload.jsonl";
 
+/// Filename suffix for a per-VM transparent-network audit chain.
+pub const TRANSPARENT_NET_AUDIT_SUFFIX: &str = ".transparent-net.jsonl";
+
 /// Per-VM workload audit-chain file:
 /// `<mvm_data_dir>/audit/<tenant>.<vm>.workload.jsonl`.
 ///
@@ -718,6 +620,15 @@ pub const WORKLOAD_AUDIT_SUFFIX: &str = ".workload.jsonl";
 /// can't drift between them.
 pub fn workload_audit_path(tenant: &str, vm_name: &str) -> std::path::PathBuf {
     mvm_audit_dir().join(format!("{tenant}.{vm_name}{WORKLOAD_AUDIT_SUFFIX}"))
+}
+
+/// Per-VM transparent-network audit-chain file:
+/// `<mvm_data_dir>/audit/<tenant>.<vm>.transparent-net.jsonl`.
+///
+/// Distinct from the workload chain because the transparent-network authority is
+/// a separate per-VM process and must not co-write the workload audit file.
+pub fn transparent_net_audit_path(tenant: &str, vm_name: &str) -> std::path::PathBuf {
+    mvm_audit_dir().join(format!("{tenant}.{vm_name}{TRANSPARENT_NET_AUDIT_SUFFIX}"))
 }
 
 /// If `file_name` is a workload audit chain for `tenant`
@@ -943,14 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_mvm_cache_dir_ignores_override() {
-        let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", "/custom/cache");
-        env.set("XDG_CACHE_HOME", "/xdg/cache");
-        assert_eq!(default_mvm_cache_dir(), "/xdg/cache/mvm");
-    }
-
-    #[test]
     fn test_mvm_cache_dir_default() {
         let mut env = TestEnv::new();
         env.remove("MVM_CACHE_DIR");
@@ -1131,18 +1034,14 @@ mod tests {
             std::path::PathBuf::from("/custom/data/vms/foo/vsock/vsock-5252.sock")
         );
         assert_eq!(
-            vm_vz_vsock_port_socket_at(&vm_state_dir("foo"), 5252),
+            vm_vz_vsock_dir("foo").join(vsock_socket_filename(5252)),
             vm_vz_vsock_port_socket("foo", 5252)
         );
         // The dev-VM connect resolver (mvm-backend) and the console transport
-        // (mvm) both build the libkrun socket from the shared socket-dir +
-        // filename helper, so they cannot drift again.
+        // (mvm) both build the libkrun socket as state-dir + shared filename,
+        // so they cannot drift again.
         assert_eq!(
-            vm_socket_dir("foo").join(vsock_socket_filename(5252)),
-            vm_vsock_port_socket("foo", 5252)
-        );
-        assert_eq!(
-            vm_vsock_port_socket_at(&vm_state_dir("foo"), 5252),
+            vm_state_dir("foo").join(vsock_socket_filename(5252)),
             vm_vsock_port_socket("foo", 5252)
         );
         // The hvf VMM's substitution-endpoint socket sits at the state-dir
@@ -1156,49 +1055,6 @@ mod tests {
             vm_hvf_broker_socket("foo"),
             std::path::PathBuf::from("/custom/data/vms/foo/hvf-broker.sock")
         );
-
-        env.remove("MVM_DATA_DIR");
-    }
-
-    #[test]
-    fn long_vm_socket_paths_fall_back_to_short_tmp_namespace() {
-        let mut env = TestEnv::new();
-        env.set(
-            "MVM_DATA_DIR",
-            "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test",
-        );
-
-        let state_dir = vm_state_dir("sunny-badger-e546");
-        let socket_dir = vm_socket_dir("sunny-badger-e546");
-        assert_ne!(socket_dir, state_dir, "long worktree paths must shorten");
-        assert!(
-            socket_dir.starts_with(SHORT_VM_SOCKET_ROOT),
-            "short socket dir should live under {SHORT_VM_SOCKET_ROOT}: {}",
-            socket_dir.display()
-        );
-
-        let substitution = vm_substitution_endpoint_socket("sunny-badger-e546");
-        let agent = vm_inhouse_agent_socket_at(&state_dir);
-        let hvf_agent = vm_hvf_agent_socket("sunny-badger-e546");
-        let broker = vm_hvf_broker_socket("sunny-badger-e546");
-        let libkrun = vm_vsock_port_socket_at(&state_dir, 5252);
-        let console = vm_vz_vsock_port_socket_at(&state_dir, 20001);
-
-        for path in [
-            &substitution,
-            &agent,
-            &hvf_agent,
-            &broker,
-            &libkrun,
-            &console,
-        ] {
-            assert!(
-                fits_unix_socket_path(path),
-                "socket path must fit AF_UNIX budget ({} bytes): {}",
-                unix_socket_path_len(path),
-                path.display()
-            );
-        }
 
         env.remove("MVM_DATA_DIR");
     }

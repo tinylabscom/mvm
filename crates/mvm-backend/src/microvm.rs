@@ -3126,11 +3126,9 @@ fn network_tunnel_cmdline_token(config: &FlakeRunConfig) -> Option<String> {
 /// sidecar yields `None` rather than blocking boot — the worst case is the guest
 /// can't trust host-terminated TLS, and the claim-12 host allow-list still holds.
 fn egress_ca_cmdline_token(vm_name: &str) -> Option<String> {
-    let path = mvm_core::config::vm_state_dir(vm_name).join("egress-intermediate.json");
-    let bytes = std::fs::read(&path).ok()?;
-    let v: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
-    let cert = v["cert_pem"].as_str()?;
-    mvm_core::vm_backend::encode_egress_ca_cmdline(cert)
+    crate::substitution_spawn::egress_ca_cmdline_token_from_state_dir(
+        &mvm_core::config::vm_state_dir(vm_name),
+    )
 }
 
 /// The `mvm.secret_env=<hex>` cmdline token for `vm_name`, or `None`

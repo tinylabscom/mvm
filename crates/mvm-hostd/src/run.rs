@@ -111,6 +111,7 @@ pub fn admit_and_boot_local(
         reversible_replacement: Default::default(),
         audit_labels: Default::default(),
         agent_verbs: None,
+        build_provenance: None,
     };
 
     let path_string = |p: &Path| p.to_string_lossy().into_owned();

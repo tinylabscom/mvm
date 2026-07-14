@@ -6,6 +6,7 @@ use crate::ir::workload::{
     Concurrency, Entrypoint, EnvValue, InProcessMode, JsonSchemaShape, NetworkMode, Resources,
     Source, WarmProcessConfig, Workload,
 };
+use mvm_core::policy::secret_binding::validate_target_host_pattern;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -679,6 +680,20 @@ fn validate_env(env: &BTreeMap<String, EnvValue>, base: &str, errors: &mut Vec<V
                     reference.name
                 ),
             });
+        }
+        if let EnvValue::SecretRef { reference } = value {
+            for (index, host) in reference.allowed_hosts.iter().enumerate() {
+                if let Err(err) = validate_target_host_pattern(host) {
+                    errors.push(ValidationError {
+                        code: ErrorCode::SecretInvalidAllowedHost,
+                        path: format!("{base}.{key}.ref.allowed_hosts[{index}]"),
+                        detail: format!(
+                            "secret {:?} declares invalid allowed_hosts entry {:?}: {}. Use a hostname such as \"api.example.com\" or a leading-* wildcard such as \"*.example.com\".",
+                            reference.name, host, err
+                        ),
+                    });
+                }
+            }
         }
     }
 }

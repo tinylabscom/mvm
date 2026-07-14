@@ -39,6 +39,7 @@ mvm-oci = { workspace = true }
 # gzip layer decode at this crate's boundary (mvm-oci stays decompressor-free by
 # design; the CLI decodes at its boundary the same way).
 flate2 = { workspace = true }
+zstd = { workspace = true }
 # `Vec<u8>` implements tokio's `AsyncWrite`, the sink for `fetch_layer`.
 tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
@@ -47,3 +48,4 @@ async-trait = { workspace = true }
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }
+tar = { workspace = true }

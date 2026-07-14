@@ -115,6 +115,44 @@ pub(crate) fn read_egress_intermediate(state_dir: &Path) -> Result<Option<(Strin
     }
 }
 
+/// Persist the per-VM egress intermediate sidecar under
+/// `<state_dir>/egress-intermediate.json` so host-side helpers can reconstruct
+/// the terminator minter and guest boot paths can encode the cert-only cmdline
+/// token from one shared source of truth.
+pub fn write_egress_intermediate(state_dir: &Path, cert_pem: &str, key_pem: &str) -> Result<()> {
+    std::fs::create_dir_all(state_dir)
+        .map_err(|e| anyhow!("create {}: {e}", state_dir.display()))?;
+    let path = state_dir.join("egress-intermediate.json");
+    let json = serde_json::json!({
+        "cert_pem": cert_pem,
+        "key_pem": key_pem,
+    });
+    std::fs::write(&path, json.to_string()).map_err(|e| anyhow!("write {}: {e}", path.display()))
+}
+
+/// Remove any staged per-VM egress intermediate sidecar. Best-effort: missing
+/// file is treated as already clean.
+pub fn clear_egress_intermediate(state_dir: &Path) {
+    let path = state_dir.join("egress-intermediate.json");
+    match std::fs::remove_file(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {}
+    }
+}
+
+/// The `mvm.egress_ca=<hex>` cmdline token derived from the staged per-VM
+/// intermediate cert in `state_dir`, or `None` when the sidecar is absent or
+/// malformed. The private key never reaches the guest — only the cert half is
+/// encoded.
+pub fn egress_ca_cmdline_token_from_state_dir(state_dir: &Path) -> Option<String> {
+    let path = state_dir.join("egress-intermediate.json");
+    let bytes = std::fs::read(&path).ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let cert = value["cert_pem"].as_str()?;
+    mvm_core::vm_backend::encode_egress_ca_cmdline(cert)
+}
+
 /// PID of the per-VM `mvm-substitution-endpoint` moat, and the JSON
 /// file holding the `(guest var, placeholder)` env pairs it minted (the invoke
 /// path reads this to inject `HTTP_PROXY` + placeholder vars). Spawned only when

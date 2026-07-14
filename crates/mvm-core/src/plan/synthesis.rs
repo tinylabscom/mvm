@@ -43,10 +43,10 @@
 
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, AuthPolicy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec,
-    Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef,
-    SCHEMA_VERSION, SecretBinding, SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec,
-    WorkloadId, WorkloadIntent,
+    AuditTaxonomy, AuthPolicy, BuildProvenance, DepsVolumeBinding, ExecutionPlan, FsPolicyRef,
+    KeyRotationSpec, Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources,
+    RuntimeProfileRef, SCHEMA_VERSION, SecretBinding, SecretReleasePolicy, SignedImageRef,
+    TenantId, TimeoutSpec, WorkloadId, WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -169,6 +169,11 @@ pub struct SynthesisInput<'a> {
     /// Per-workload agent verb allow-list threaded verbatim into the plan.
     /// `None` preserves the current class/profile-gate-only behavior.
     pub agent_verbs: Option<Vec<crate::plan::VerbId>>,
+    /// Optional build provenance to carry into the signed plan when the caller
+    /// can attest the source/build identity and artifact digests at admission
+    /// time. `None` preserves legacy synthesis for callers that do not yet
+    /// record provenance.
+    pub build_provenance: Option<BuildProvenance>,
 }
 
 /// Build an unsigned `ExecutionPlan` from CLI-shaped input.
@@ -245,7 +250,7 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
     };
 
     Ok(ExecutionPlan {
-        build_provenance: Default::default(),
+        build_provenance: input.build_provenance.clone(),
         snapshot_at: Default::default(),
         network_mode: Default::default(),
         schema_version: SCHEMA_VERSION,
@@ -392,6 +397,7 @@ mod tests {
             destroy_on_exit: false,
             bundle_pin: None,
             deps_volume: None,
+            build_provenance: None,
             shares: Vec::new(),
             redaction: crate::policy::RedactionPolicy::default(),
             reversible_replacement: crate::policy::ReversibleReplacementPolicy::default(),
@@ -412,6 +418,24 @@ mod tests {
         assert_eq!(plan.resources.mem_mib, 2048);
         assert_eq!(plan.resources.timeouts.boot_secs, 120);
         assert_eq!(plan.resources.timeouts.exec_secs, 600);
+    }
+
+    #[test]
+    fn carries_build_provenance_into_synthesized_plan() {
+        let mut inp = input("vm-prov");
+        inp.build_provenance = Some(BuildProvenance {
+            input_kind: crate::plan::InputKind::Oci,
+            input_ref: "busybox:latest".to_string(),
+            lock_digest: None,
+            builder_id: Some("builder-01".to_string()),
+            artifacts: crate::plan::ArtifactDigests {
+                mvm_netd: Some("abcd".repeat(16)),
+                ..Default::default()
+            },
+        });
+
+        let plan = synthesize_plan(&inp).expect("plan");
+        assert_eq!(plan.build_provenance, inp.build_provenance);
     }
 
     #[test]
@@ -600,6 +624,8 @@ mod tests {
             source: crate::plan::SecretSource::Keystore {
                 address: "api-key".into(),
             },
+            guest_mount: None,
+            allowed_hosts: vec![],
         }];
         let plan = synthesize_plan(&inp).unwrap();
         assert_eq!(plan.secrets, inp.secrets);

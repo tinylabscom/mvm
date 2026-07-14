@@ -144,6 +144,7 @@ pub use broker_services_spawn::{
     BrokerServicesSpawnParams, BrokerSpawnParams, reap_audit_signer, reap_broker,
     reap_broker_services, spawn_audit_signer, spawn_broker, spawn_broker_services_if_admitted,
 };
+pub use mvm_net_spawn::resolve_host_netd_path_for_runtime;
 
 /// Per-tenant host-agent daemon seam: register/deregister VMs with one
 /// resident daemon instead of forking a per-VM broker. Exposed so the backend

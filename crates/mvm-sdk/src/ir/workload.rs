@@ -1,5 +1,6 @@
 use crate::ir::addon::{AddonUse, ThreatTier};
 use crate::ir::hooks::Hooks;
+use mvm_core::policy::secret_binding::target_host_matches;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -515,12 +516,7 @@ pub enum AuthType {
 /// NOT the apex `suffix` itself — the leading dot stops a registrable lookalike
 /// (`*.example.com` rejects `evilexample.com`). Case-insensitive.
 pub fn host_matches(pattern: &str, host: &str) -> bool {
-    let pattern = pattern.to_ascii_lowercase();
-    let host = host.to_ascii_lowercase();
-    match pattern.strip_prefix("*.") {
-        Some(suffix) => host.ends_with(&format!(".{suffix}")),
-        None => pattern == host,
-    }
+    target_host_matches(pattern, host)
 }
 
 // allow(secret-debug): metadata-only — variants carry the env-var name

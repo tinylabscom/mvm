@@ -27,6 +27,7 @@ use mvm_oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
     OciManifestFetcher, UnpackOptions, unpack_layer,
 };
+use zstd::stream::read::Decoder as ZstdDecoder;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
@@ -143,13 +144,8 @@ fn materialize_from_dir(dir: &Path, name: &str) -> Result<PathBuf> {
     let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
     // `None`: this library carries no embedded guest binaries (only the mvmctl
     // binary does), so it resolves them from the cache or a source checkout.
-    mvm_build::run_image::inject_and_materialize(
-        mvm_build::run_image::InjectAndMaterializeRequest::builder(&cache_root, dir, &output, name)
-            .profile(mvm_build::oci_runtime_inject::RuntimeInjectionProfile::RuntimeLean)
-            .sealed(false)
-            .build(),
-    )
-    .map_err(|e| backend_err(format!("{e:#}")))?;
+    mvm_build::run_image::inject_and_materialize(&cache_root, dir, &output, name, None)
+        .map_err(backend_err)?;
     Ok(output)
 }
 
@@ -184,15 +180,19 @@ async fn pull_image_to_dir(reference: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Unpack one layer's bytes into `dest`, decompressing gzip layers first.
+/// Unpack one layer's bytes into `dest`, decompressing gzip/zstd layers first.
 fn unpack_one_layer(layer: &LayerDescriptor, bytes: &[u8], dest: &Path) -> Result<()> {
     let mt = &layer.media_type;
-    let report = if mt.ends_with("+gzip") || mt.ends_with(".gzip") || mt.contains("tar.gzip") {
+    let report = if is_gzip_layer(mt) {
         unpack_layer(
             GzDecoder::new(Cursor::new(bytes)),
             dest,
             &UnpackOptions::default(),
         )
+    } else if is_zstd_layer(mt) {
+        let decoder = ZstdDecoder::new(Cursor::new(bytes))
+            .map_err(|e| backend_err(format!("decode zstd layer {}: {e}", layer.digest)))?;
+        unpack_layer(decoder, dest, &UnpackOptions::default())
     } else {
         unpack_layer(Cursor::new(bytes), dest, &UnpackOptions::default())
     }
@@ -204,6 +204,19 @@ fn unpack_one_layer(layer: &LayerDescriptor, bytes: &[u8], dest: &Path) -> Resul
         )));
     }
     Ok(())
+}
+
+fn is_gzip_layer(media_type: &str) -> bool {
+    media_type.ends_with("+gzip")
+        || media_type.ends_with(".gzip")
+        || media_type.contains("tar.gzip")
+}
+
+fn is_zstd_layer(media_type: &str) -> bool {
+    media_type.ends_with("+zstd")
+        || media_type.ends_with(".zstd")
+        || media_type.contains("tar+zstd")
+        || media_type.contains("tar.zstd")
 }
 
 /// Probe the dm-verity sidecars the pure materializer writes beside the image
@@ -250,30 +263,12 @@ impl MvmClient for LocalBackend {
         let rootfs = resolve_local_rootfs(&spec.image, &spec.name).await?;
         let (verity_path, roothash) = host_verity_sidecars(&rootfs);
 
-        // libkrun/Vz/mock carry their own kernel; HVF boots an explicit
-        // arm64 kernel Image. Resolve it from the per-arch workload-kernel
-        // cache the CLI's run path populates — the facade stays
-        // cache-hit-or-error; the heavier build/fetch flows are CLI concerns.
-        let kernel_path = if self.backend.name() == "hvf" {
-            let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
-            let arch = mvm_core::arch::GuestArch::host().to_string();
-            let path = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");
-            if !path.exists() {
-                return Err(backend_err(format!(
-                    "hvf needs a workload kernel at {} — run a `mvmctl machine run` once \
-                     (or `mvmctl build kernel build`) to populate the cache",
-                    path.display()
-                )));
-            }
-            Some(path)
-        } else {
-            None
-        };
-
         let req = LocalRunRequest {
             name: spec.name.clone(),
             rootfs_path: rootfs,
-            kernel_path,
+            // libkrun/Vz/mock carry their own kernel; a Firecracker local run
+            // that needs an explicit kernel path is a later slice.
+            kernel_path: None,
             verity_path: verity_path.map(PathBuf::from),
             roothash,
             cpus: spec.cpus,
@@ -287,8 +282,6 @@ impl MvmClient for LocalBackend {
         // `~/.mvm/keys/`.
         let ledger = InMemoryNonceLedger::new();
         let clock = SystemClock;
-        // `{:#}` keeps the anyhow context chain — "backend start after
-        // signed-plan admission" alone hides the actionable root cause.
         let started = admit_and_boot_local(
             &self.backend,
             &req,
@@ -298,7 +291,7 @@ impl MvmClient for LocalBackend {
                 host_signer_keys_dir: None,
             },
         )
-        .map_err(|e| backend_err(format!("{e:#}")))?;
+        .map_err(backend_err)?;
 
         Ok(MachineState {
             id: MachineId(started.vm_id.0),
@@ -454,35 +447,7 @@ impl MvmClient for LocalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::util::test_env::TestEnv;
-
-    static DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    struct IsolatedDataDir {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        _env: TestEnv,
-        dir: tempfile::TempDir,
-    }
-
-    impl IsolatedDataDir {
-        fn new() -> Self {
-            let lock = DATA_DIR_TEST_LOCK
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let dir = tempfile::tempdir().unwrap();
-            let mut env = TestEnv::new();
-            env.set("MVM_DATA_DIR", dir.path());
-            Self {
-                _lock: lock,
-                _env: env,
-                dir,
-            }
-        }
-
-        fn path(&self) -> &std::path::Path {
-            self.dir.path()
-        }
-    }
+    use tar::{Builder, EntryType, Header};
 
     #[test]
     fn status_maps_all_variants() {
@@ -545,9 +510,46 @@ mod tests {
         assert!(s.contains("my_app_1_2"));
     }
 
+    fn single_file_tar(path: &str, body: &[u8]) -> Vec<u8> {
+        let mut builder = Builder::new(Vec::new());
+        let mut header = Header::new_gnu();
+        header.set_size(body.len() as u64);
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, path, body)
+            .expect("append tar entry");
+        builder.into_inner().expect("finish tar")
+    }
+
+    #[test]
+    fn unpack_one_layer_accepts_zstd_layers() {
+        let tar = single_file_tar("bin/hello", b"hello from zstd\n");
+        let compressed = zstd::stream::encode_all(Cursor::new(tar), 0).expect("zstd encode");
+        let layer = LayerDescriptor {
+            digest: "sha256:test-zstd".into(),
+            size: compressed.len() as u64,
+            media_type: "application/vnd.oci.image.layer.v1.tar+zstd".into(),
+        };
+        let tmp = tempfile::tempdir().expect("tempdir");
+
+        unpack_one_layer(&layer, &compressed, tmp.path()).expect("unpack zstd layer");
+
+        assert_eq!(
+            std::fs::read(tmp.path().join("bin/hello")).expect("read unpacked file"),
+            b"hello from zstd\n"
+        );
+    }
+
     #[tokio::test]
     async fn run_boots_admitted_plan_from_materialized_rootfs() {
-        let data = IsolatedDataDir::new();
+        // Isolate the host signer + mock VM dirs under a tempdir.
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test; no other thread reads these vars.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
         let rootfs = data.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
 
@@ -576,7 +578,13 @@ mod tests {
 
     #[tokio::test]
     async fn remove_drops_the_machine_from_list_and_is_idempotent() {
-        let data = IsolatedDataDir::new();
+        // Isolate the host signer + mock VM dirs under a tempdir (nextest runs
+        // each test in its own process, so the env var can't race a sibling).
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test; no other thread reads these vars.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
         let rootfs = data.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
 
@@ -652,7 +660,6 @@ mod tests {
             name: name.to_string(),
             image: Some("alpine:latest".to_string()),
             manifest: None,
-            runtime_pack: false,
             resolved_digest: None,
             net: false,
             allow_host: vec![],
@@ -673,7 +680,11 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_refuses_network_changes_on_local_backend() {
-        let _data = IsolatedDataDir::new();
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process (nextest runs each test in its own process).
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
         persist_test_spec("web");
         let be = LocalBackend::with_hypervisor("mock");
         let err = be
@@ -695,7 +706,11 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_refuses_allow_host_changes_on_local_backend() {
-        let _data = IsolatedDataDir::new();
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
         persist_test_spec("web2");
         let be = LocalBackend::with_hypervisor("mock");
         let err = be
@@ -717,7 +732,11 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_unknown_machine_is_error() {
-        let _data = IsolatedDataDir::new();
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
         let be = LocalBackend::with_hypervisor("mock");
         let err = be
             .reconfigure_machine(
@@ -738,7 +757,11 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_stopped_machine_updates_spec_and_returns_stopped() {
-        let _data = IsolatedDataDir::new();
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
         persist_test_spec("myapp");
         let be = LocalBackend::with_hypervisor("mock");
         // Machine is not running in the mock backend — just patching the spec.
@@ -763,7 +786,11 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_rejects_zero_cpus() {
-        let _data = IsolatedDataDir::new();
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
         persist_test_spec("zero-cpu-machine");
         let be = LocalBackend::with_hypervisor("mock");
         let err = be
@@ -790,7 +817,11 @@ mod tests {
 
     #[tokio::test]
     async fn reconfigure_noop_returns_stopped_without_overwriting_spec() {
-        let _data = IsolatedDataDir::new();
+        let data = tempfile::tempdir().unwrap();
+        // SAFETY: single-threaded test process.
+        unsafe {
+            std::env::set_var("MVM_DATA_DIR", data.path());
+        }
         persist_test_spec("noop-machine");
         let be = LocalBackend::with_hypervisor("mock");
         // No fields changed → should short-circuit, not error.

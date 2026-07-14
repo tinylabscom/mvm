@@ -116,11 +116,11 @@ impl VsockTransport for LibkrunTransport {
     }
 }
 
-/// Connects through a per-VM supervisor's per-port vsock listener.
+/// Connects through the Vz supervisor's per-port vsock listener.
 ///
-/// The supervisor listens under `<vm_state_dir>/vsock/` and forwards each
-/// connection to the guest's vsock port, so a host client connects directly
-/// with no
+/// `VzBackend` starts the Swift supervisor with a `VsockProxy` that
+/// listens under `<vm_state_dir>/vsock/` and forwards each connection to
+/// the guest's vsock port, so a host client connects directly with no
 /// port handshake — the libkrun shape, one subdir deeper. The path is the
 /// single-source-of-truth [`mvm_core::config::vm_vz_vsock_port_socket`].
 pub struct VzTransport {
@@ -152,14 +152,14 @@ impl VsockTransport for VzTransport {
     }
 }
 
-/// Connects to an hvf (`WorkloadRunner` / HVF) VM's vsock channels.
+/// Connects to an in-house workload runner or detached HVF VM's vsock channels.
 ///
 /// The hvf runner binds two distinct socket layouts under the per-VM
-/// socket dir:
-/// - Agent RPC (`GUEST_AGENT_PORT`): `<socket-dir>/hvf-agent.sock` — the
-///   standing agent bridge the device binds at boot (see
-///   [`mvm_core::config::vm_hvf_agent_socket`]).
-/// - Console data (ports in `dev_console_data_ports()`): `<socket-dir>/vsock/vsock-<port>.sock`
+/// state dir:
+/// - Agent RPC (`GUEST_AGENT_PORT`): prefer `<state_dir>/agent.sock` for the
+///   in-process workload runner, then fall back to `<state_dir>/hvf-agent.sock`
+///   for the detached HVF backend.
+/// - Console data (ports in `dev_console_data_ports()`): `<state_dir>/vsock/vsock-<port>.sock`
 ///   — same `vsock/` subdir convention the Vz supervisor uses, populated
 ///   only when `VmStartConfig.dev_console` is true.
 ///
@@ -170,41 +170,44 @@ impl VsockTransport for VzTransport {
 /// (non-sealed) workload, so a sealed production runner cannot receive an
 /// interactive attach over this path.
 pub struct DevConsoleTransport {
-    agent_socket: PathBuf,
+    state_dir: PathBuf,
     vsock_dir: PathBuf,
 }
 
 impl DevConsoleTransport {
     pub fn new(state_dir: impl Into<PathBuf>) -> Self {
         let state_dir = state_dir.into();
-        let socket_dir = mvm_core::config::vm_socket_dir_at(&state_dir);
-        let agent_socket = socket_dir.join("hvf-agent.sock");
-        let vsock_dir = mvm_core::config::vm_vz_vsock_dir_at(&state_dir);
+        let vsock_dir = state_dir.join("vsock");
         Self {
-            agent_socket,
+            state_dir,
             vsock_dir,
         }
     }
 
     pub fn for_vm(vm_name: &str) -> Self {
-        let agent_socket = mvm_core::config::vm_hvf_agent_socket(vm_name);
+        let state_dir = mvm_core::config::vm_state_dir(vm_name);
         let vsock_dir = mvm_core::config::vm_vz_vsock_dir(vm_name);
         Self {
-            agent_socket,
+            state_dir,
             vsock_dir,
         }
     }
 
     /// Resolve the host UDS for a port.
     ///
-    /// - `GUEST_AGENT_PORT` → `<socket-dir>/hvf-agent.sock` (the standing agent
-    ///   bridge the hvf device binds — see
-    ///   [`mvm_core::config::vm_hvf_agent_socket`]).
-    /// - Any other port → `<socket-dir>/vsock/vsock-<port>.sock` (the
+    /// - `GUEST_AGENT_PORT` → prefer `<state_dir>/agent.sock` (the in-process
+    ///   workload runner bridge); if absent, fall back to
+    ///   `<state_dir>/hvf-agent.sock` (the detached hvf bridge).
+    /// - Any other port → `<state_dir>/vsock/vsock-<port>.sock` (the
     ///   pre-opened console data socket, same convention as Vz).
     pub(crate) fn socket_path(&self, port: u32) -> PathBuf {
         if port == mvm_guest::vsock::GUEST_AGENT_PORT {
-            self.agent_socket.clone()
+            let inhouse = mvm_core::config::vm_inhouse_agent_socket_at(&self.state_dir);
+            if inhouse.exists() {
+                inhouse
+            } else {
+                mvm_core::config::vm_hvf_agent_socket_at(&self.state_dir)
+            }
         } else {
             self.vsock_dir
                 .join(mvm_core::config::vsock_socket_filename(port))
@@ -315,27 +318,6 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_core::util::test_env::TestEnv;
-
-    fn bind_unix_listener(path: &std::path::Path) -> Option<std::os::unix::net::UnixListener> {
-        use std::os::unix::net::UnixListener;
-
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
-        }
-        let _ = std::fs::remove_file(path);
-        match UnixListener::bind(path) {
-            Ok(listener) => Some(listener),
-            Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-                eprintln!(
-                    "test skipped: sandbox refused unix socket bind at {}: {err}",
-                    path.display()
-                );
-                None
-            }
-            Err(err) => panic!("bind unix listener at {}: {err}", path.display()),
-        }
-    }
 
     #[test]
     fn firecracker_transport_constructs_with_instance_dir() {
@@ -367,15 +349,14 @@ mod tests {
 
     #[test]
     fn vz_transport_connects_to_socket_in_its_dir() {
+        use std::os::unix::net::UnixListener;
         // Vz's supervisor listens on `<vsock_dir>/vsock-<port>.sock`; a host
         // client connects directly (no port handshake), same shape as libkrun.
         let dir = tempfile::tempdir().unwrap();
         let sock = dir
             .path()
             .join(mvm_core::config::vsock_socket_filename(5252));
-        let Some(_listener) = bind_unix_listener(&sock) else {
-            return;
-        };
+        let _listener = UnixListener::bind(&sock).unwrap();
         let t = VzTransport::new(dir.path());
         t.connect(5252).expect("vz transport should connect");
     }
@@ -398,6 +379,7 @@ mod tests {
 
     #[test]
     fn for_vm_selects_vz_when_only_vz_socket_present() {
+        use std::os::unix::net::UnixListener;
         // With a Vz workload's socket present (and no libkrun/firecracker
         // surface), the picker must select the Vz transport rather
         // than falling through to the firecracker error. Regression for the
@@ -406,26 +388,46 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
         let name = "vz-picker-probe";
         let sock =
             mvm_core::config::vm_vz_vsock_port_socket(name, mvm_guest::vsock::GUEST_AGENT_PORT);
-        let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_DATA_DIR") };
-            return;
-        };
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let _listener = UnixListener::bind(&sock).unwrap();
 
         let t = for_vm(name).expect("picker should find the vz transport");
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the vz socket");
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
+    }
+
+    #[test]
+    fn for_vm_selects_inhouse_runner_when_agent_socket_present() {
+        use std::os::unix::net::UnixListener;
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
+        let name = "inhouse-picker-probe";
+        let sock = mvm_core::config::vm_inhouse_agent_socket(name);
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let _listener = UnixListener::bind(&sock).unwrap();
+
+        let t = for_vm(name).expect("picker should find the in-house runner transport");
+        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect("selected transport should connect to agent.sock");
+
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]
     fn for_vm_selects_hvf_when_hvf_agent_socket_present() {
-        // The hvf (HVF / WorkloadRunner) agent bridge binds
-        // `<state_dir>/hvf-agent.sock`. With only that socket present the picker
-        // must select the hvf transport — the regression for the
+        use std::os::unix::net::UnixListener;
+        // The detached hvf backend binds `<state_dir>/hvf-agent.sock`. With
+        // only that socket present the picker must still select the hvf
+        // transport — the regression for the
         // non-interactive `machine run` reachability gap (the picker previously
         // knew only libkrun/vz/firecracker, so it fell through to the
         // firecracker error and the agent-RPC path timed out after 30s).
@@ -433,40 +435,17 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
-        let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        unsafe { std::env::set_var("MVM_DATA_DIR", dir.path()) };
         let name = "hvf-picker-probe";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
-        let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_DATA_DIR") };
-            return;
-        };
+        std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+        let _listener = UnixListener::bind(&sock).unwrap();
 
         let t = for_vm(name).expect("picker should find the hvf transport");
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the hvf-agent socket");
-    }
 
-    #[test]
-    fn for_vm_selects_hvf_when_agent_socket_uses_short_socket_dir_fallback() {
-        let _lock = crate::vm::DATA_DIR_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mut env = TestEnv::new();
-        env.set(
-            "MVM_DATA_DIR",
-            "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test",
-        );
-        let name = "hvf-picker-long-path";
-        let sock = mvm_core::config::vm_hvf_agent_socket(name);
-        let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_DATA_DIR") };
-            return;
-        };
-
-        let t = for_vm(name).expect("picker should find the hvf transport");
-        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            .expect("selected transport should connect to the short hvf-agent socket");
+        unsafe { std::env::remove_var("MVM_DATA_DIR") };
     }
 
     #[test]
@@ -514,12 +493,11 @@ mod tests {
     #[test]
     fn nesting_hop_writes_handshake_on_connect() {
         use std::io::Read;
+        use std::os::unix::net::UnixListener;
 
         let dir = tempfile::tempdir().unwrap();
         let hop = dir.path().join("vsock-21472.sock");
-        let Some(listener) = bind_unix_listener(&hop) else {
-            return;
-        };
+        let listener = UnixListener::bind(&hop).unwrap();
         let server = std::thread::spawn(move || {
             let (mut conn, _) = listener.accept().unwrap();
             let mut len = [0u8; 4];
@@ -548,17 +526,26 @@ mod tests {
     // --- DevConsoleTransport ---
 
     #[test]
-    fn dev_console_transport_agent_port_resolves_to_hvf_agent_sock() {
-        // GUEST_AGENT_PORT → `<state_dir>/hvf-agent.sock` (what the hvf
-        // device's AgentBridge actually binds), not the vsock/ subdir. The old
-        // `agent.sock` name never matched the backend, so the host agent-RPC
-        // path could not reach an hvf guest.
+    fn dev_console_transport_agent_port_prefers_inhouse_agent_sock() {
+        let dir = tempfile::tempdir().unwrap();
+        let inhouse = mvm_core::config::vm_inhouse_agent_socket_at(dir.path());
+        let _listener = std::os::unix::net::UnixListener::bind(&inhouse).unwrap();
+        let t = DevConsoleTransport::new(dir.path());
+        let path = t.socket_path(mvm_guest::vsock::GUEST_AGENT_PORT);
+        assert_eq!(
+            path, inhouse,
+            "agent port must prefer agent.sock when the in-house runner bound it"
+        );
+    }
+
+    #[test]
+    fn dev_console_transport_agent_port_falls_back_to_hvf_agent_sock() {
         let t = DevConsoleTransport::new("/tmp/no-such-hvf-vm");
         let path = t.socket_path(mvm_guest::vsock::GUEST_AGENT_PORT);
         assert_eq!(
             path,
             PathBuf::from("/tmp/no-such-hvf-vm/hvf-agent.sock"),
-            "agent port must resolve to hvf-agent.sock at state-dir root"
+            "agent port must fall back to hvf-agent.sock when agent.sock is absent"
         );
     }
 
@@ -593,12 +580,22 @@ mod tests {
     }
 
     #[test]
-    fn dev_console_transport_connects_via_hvf_agent_sock() {
+    fn dev_console_transport_connects_via_inhouse_agent_sock_when_present() {
+        use std::os::unix::net::UnixListener;
+        let dir = tempfile::tempdir().unwrap();
+        let agent = dir.path().join("agent.sock");
+        let _listener = UnixListener::bind(&agent).unwrap();
+        let t = DevConsoleTransport::new(dir.path());
+        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect("should connect to agent.sock");
+    }
+
+    #[test]
+    fn dev_console_transport_connects_via_hvf_agent_sock_fallback() {
+        use std::os::unix::net::UnixListener;
         let dir = tempfile::tempdir().unwrap();
         let agent = dir.path().join("hvf-agent.sock");
-        let Some(_listener) = bind_unix_listener(&agent) else {
-            return;
-        };
+        let _listener = UnixListener::bind(&agent).unwrap();
         let t = DevConsoleTransport::new(dir.path());
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("should connect to hvf-agent.sock");
@@ -606,6 +603,7 @@ mod tests {
 
     #[test]
     fn dev_console_transport_connects_via_console_data_sock() {
+        use std::os::unix::net::UnixListener;
         let dir = tempfile::tempdir().unwrap();
         let vsock_dir = dir.path().join("vsock");
         std::fs::create_dir_all(&vsock_dir).unwrap();
@@ -614,9 +612,7 @@ mod tests {
             .first()
             .expect("at least one console data port");
         let sock = vsock_dir.join(mvm_core::config::vsock_socket_filename(port));
-        let Some(_listener) = bind_unix_listener(&sock) else {
-            return;
-        };
+        let _listener = UnixListener::bind(&sock).unwrap();
         let t = DevConsoleTransport::new(dir.path());
         t.connect(port)
             .expect("should connect to console data sock");

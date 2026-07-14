@@ -206,6 +206,42 @@ fn rejects_unbound_secret_ref() {
 }
 
 #[test]
+fn rejects_secret_ref_with_invalid_allowed_host_pattern() {
+    let mut w = base_workload();
+    let env = match &mut w.apps[0].entrypoints[0] {
+        Entrypoint::Command { env, .. } => env,
+        Entrypoint::Function { env, .. } => env,
+    };
+    env.insert(
+        "KEY".to_string(),
+        EnvValue::SecretRef {
+            reference: SecretRef {
+                name: "k".to_string(),
+                mount: SecretMount::File {
+                    path: "/run/k".to_string(),
+                },
+                auth_type: AuthType::Bearer,
+                allowed_hosts: vec!["api_exam!ple.com".to_string()],
+                sigv4: None,
+            },
+        },
+    );
+    let errs = validate(&w).unwrap_err();
+    assert_eq!(errs[0].code, ErrorCode::SecretInvalidAllowedHost);
+    assert_eq!(
+        errs[0].path,
+        ".apps[0].entrypoint.env.KEY.ref.allowed_hosts[0]"
+    );
+    assert!(
+        errs[0]
+            .detail
+            .contains("target host labels must contain only ASCII letters, digits, or -"),
+        "got detail: {}",
+        errs[0].detail
+    );
+}
+
+#[test]
 fn rejects_persist_volume() {
     let mut w = base_workload();
     w.volumes.push(Volume {

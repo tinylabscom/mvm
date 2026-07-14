@@ -27,4 +27,5 @@ pub use console_smoke::{ConsoleProof, console_smoke};
 pub use hv_impl::{HvfHandle, HvfVcpu, HvfVm};
 pub use kernel_boot::{
     HostChannels, KernelBootResult, KernelBootUntilParams, boot_kernel, boot_kernel_until,
+    default_workload_bootargs,
 };

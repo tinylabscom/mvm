@@ -38,6 +38,10 @@
       "description": "A SecretRef declares no allowed_hosts. An unbound secret could be substituted toward any destination the egress endpoint reaches, so it is refused (claim 12). Add hosts, e.g. [\"api.example.com\"] or [\"*.example.com\"].",
       "applicable_fields": ["apps[*].env.*", "apps[*].entrypoint.env.*"]
     },
+    "E_SECRET_INVALID_ALLOWED_HOST": {
+      "description": "A SecretRef declares an invalid allowed_hosts hostname pattern. Entries must be hostname-only exact matches such as \"api.example.com\" or leading-* subdomain wildcards such as \"*.example.com\"; malformed labels, surrounding whitespace, trailing dots, and non-hostname characters are refused.",
+      "applicable_fields": ["apps[*].env.*.ref.allowed_hosts[*]", "apps[*].entrypoint.env.*.ref.allowed_hosts[*]"]
+    },
     "E_PERSIST_DEFERRED": {
       "description": "Volume.persist = true is not supported in v0.",
       "applicable_fields": ["volumes[*].persist"]

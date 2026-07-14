@@ -285,6 +285,7 @@ mod tests {
             entries.iter().map(|e| e.code.as_str()).collect();
         let ir_codes = [
             ErrorCode::FunctionNotFound,
+            ErrorCode::SecretInvalidAllowedHost,
             ErrorCode::SecretWithoutBinding,
             ErrorCode::AddonLockfileMissing,
             ErrorCode::UnsupportedLanguage,

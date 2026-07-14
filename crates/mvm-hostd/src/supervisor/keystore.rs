@@ -137,6 +137,8 @@ mod tests {
             source: mvm_core::plan::SecretSource::Keystore {
                 address: "acme/api-token".to_string(),
             },
+            guest_mount: None,
+            allowed_hosts: vec![],
         }
     }
 

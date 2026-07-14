@@ -570,6 +570,7 @@ mod tests {
             destroy_on_exit: true,
             bundle_pin: None,
             deps_volume: None,
+            build_provenance: None,
             shares: Vec::new(),
             redaction: mvm_core::policy::RedactionPolicy::default(),
             reversible_replacement: mvm_core::policy::ReversibleReplacementPolicy::default(),

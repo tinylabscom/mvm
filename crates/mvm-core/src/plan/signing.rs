@@ -315,6 +315,8 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "openai".into(),
             },
+            guest_mount: None,
+            allowed_hosts: vec![],
         }];
         let (sk, _vk) = fresh_key();
         let signed = sign_plan(&plan, &sk, "test-signer");
@@ -336,6 +338,8 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "echo-key".into(),
             },
+            guest_mount: None,
+            allowed_hosts: vec![],
         }];
         let json = serde_json::to_string(&plan).unwrap();
         let decoded = plan_from_admitted_json(&json).unwrap();
@@ -350,6 +354,8 @@ mod tests {
             source: SecretSource::Keystore {
                 address: "echo-key".into(),
             },
+            guest_mount: None,
+            allowed_hosts: vec![],
         }];
         let (sk, _vk) = fresh_key();
         let signed = sign_plan(&plan, &sk, "test-signer");

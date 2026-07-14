@@ -539,6 +539,18 @@ impl AnyBackend {
             .unwrap_or_else(Self::default_backend)
     }
 
+    /// Select a backend for an untrusted workload path. This preserves the
+    /// user-facing `"hvf"` selector while routing that workload traffic through
+    /// the runner-role backend that owns the transparent-network authority.
+    pub fn from_workload_hypervisor(name: &str) -> Self {
+        match Self::from_hypervisor(name) {
+            Self::Hvf(_) => {
+                Self::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner))
+            }
+            other => other,
+        }
+    }
+
     /// Select the best backend for the current platform.
     ///
     /// Firecracker is the production target — it always wins when KVM
@@ -580,6 +592,18 @@ impl AnyBackend {
         // then fails with the production-path error message rather than
         // silently picking a backend the caller didn't ask for.
         Self::Firecracker(FirecrackerBackend)
+    }
+
+    /// Auto-select the backend for an untrusted workload path. On the macOS-26
+    /// HVF tier this upgrades the raw hvf backend to the runner-role variant so
+    /// workload egress goes through the transparent-network authority path.
+    pub fn auto_select_workload() -> Self {
+        match Self::auto_select() {
+            Self::Hvf(_) => {
+                Self::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner))
+            }
+            other => other,
+        }
     }
 
     /// Resolve the backend that owns an already-started VM by its per-VM
@@ -1091,6 +1115,18 @@ mod tests {
     }
 
     #[test]
+    fn from_workload_hypervisor_upgrades_hvf_to_runner() {
+        for sel in ["hvf", "hypervisor", "hvf-runner"] {
+            let backend = AnyBackend::from_workload_hypervisor(sel);
+            assert!(
+                matches!(backend, AnyBackend::HvfRunner(_)),
+                "selector {sel}"
+            );
+            assert_eq!(backend.as_vm_backend().name(), "hvf");
+        }
+    }
+
+    #[test]
     fn test_any_backend_from_hypervisor_unknown_defaults() {
         let backend = AnyBackend::from_hypervisor("unknown");
         assert_eq!(backend.name(), "firecracker");
@@ -1150,6 +1186,22 @@ mod tests {
             matches!(name, "firecracker" | "hvf" | "libkrun"),
             "auto_select returned unexpected backend: {name}"
         );
+    }
+
+    #[test]
+    fn auto_select_workload_returns_valid_backend() {
+        let backend = AnyBackend::auto_select_workload();
+        let name = backend.name();
+        assert!(
+            matches!(name, "firecracker" | "hvf" | "libkrun"),
+            "auto_select_workload returned unexpected backend: {name}"
+        );
+        if matches!(AnyBackend::auto_select(), AnyBackend::Hvf(_)) {
+            assert!(
+                matches!(backend, AnyBackend::HvfRunner(_)),
+                "workload auto-select must upgrade hvf to the runner backend"
+            );
+        }
     }
 
     #[test]

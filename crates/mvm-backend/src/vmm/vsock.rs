@@ -8,17 +8,10 @@
 //! in the guest's `QueueNotify` MMIO exit and completed by the backend raising
 //! the device's SPI line.
 
+use std::os::fd::RawFd;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use super::vsock_handlers::{VsockHandlerContext, VsockHandlerRegistry, VsockLifecycleState};
-#[cfg(test)]
-use super::vsock_transport::{
-    GUEST_CID, HOST_BUF_ALLOC, HOST_CID, TYPE_STREAM, VIRTIO_ID_VSOCK, VIRTIO_MAGIC, VIRTIO_VERSION,
-};
-use super::vsock_transport::{
-    OP_CREDIT_UPDATE, OP_REQUEST, OP_RESPONSE, OP_RST, OP_RW, RegisterWrite, VsockHdr,
-    VsockTransportCore,
-};
+use super::guest_mem::GuestMem;
 
 /// A guest interrupt line the host-I/O thread can assert on its own — the seam
 /// that lets host→guest vsock delivery raise the device's IRQ **off** the vCPU
@@ -31,146 +24,921 @@ pub trait IrqLine: Send + Sync {
     fn signal(&self, spi: u32);
 }
 
-const R_CONFIG: u64 = 0x100; // guest_cid (u64) at +0
-const MMIO_LEN: u64 = 0x200;
+const VIRTIO_MAGIC: u32 = 0x7472_6976;
+const VIRTIO_VERSION: u32 = 2;
+const VIRTIO_ID_VSOCK: u32 = 19;
+const VIRTIO_VENDOR: u32 = 0x4d56_4d76;
 
-/// The lockable inner state of the virtio-vsock device. Shared (behind `Mutex`)
-/// between the vCPU thread (MMIO dispatch) and the host-I/O thread
-/// ([`super::vsock_io`]); every field is touched only while the lock is held, so
-/// guest RAM and the virtqueues are never accessed concurrently.
+const R_MAGIC: u64 = 0x000;
+const R_VERSION: u64 = 0x004;
+const R_DEVICE_ID: u64 = 0x008;
+const R_VENDOR_ID: u64 = 0x00c;
+const R_DEVICE_FEATURES: u64 = 0x010;
+const R_DEVICE_FEATURES_SEL: u64 = 0x014;
+const R_DRIVER_FEATURES: u64 = 0x020;
+const R_DRIVER_FEATURES_SEL: u64 = 0x024;
+const R_QUEUE_SEL: u64 = 0x030;
+const R_QUEUE_NUM_MAX: u64 = 0x034;
+const R_QUEUE_NUM: u64 = 0x038;
+const R_QUEUE_READY: u64 = 0x044;
+const R_QUEUE_NOTIFY: u64 = 0x050;
+const R_INTERRUPT_STATUS: u64 = 0x060;
+const R_INTERRUPT_ACK: u64 = 0x064;
+const R_STATUS: u64 = 0x070;
+const R_QUEUE_DESC_LO: u64 = 0x080;
+const R_QUEUE_DESC_HI: u64 = 0x084;
+const R_QUEUE_DRIVER_LO: u64 = 0x090;
+const R_QUEUE_DRIVER_HI: u64 = 0x094;
+const R_QUEUE_DEVICE_LO: u64 = 0x0a0;
+const R_QUEUE_DEVICE_HI: u64 = 0x0a4;
+const R_CONFIG: u64 = 0x100; // guest_cid (u64) at +0
+
+const MMIO_LEN: u64 = 0x200;
+const QUEUE_SIZE_MAX: u32 = 256;
+const NUM_QUEUES: usize = 3;
+const RX: usize = 0;
+const TX: usize = 1;
+
+const VIRTQ_DESC_F_NEXT: u16 = 1;
+
+const HDR_LEN: usize = 44;
+const HOST_CID: u64 = 2;
+const GUEST_CID: u64 = 3;
+const HOST_BUF_ALLOC: u32 = 256 * 1024;
+
+// vsock packet ops.
+const OP_REQUEST: u16 = 1;
+const OP_RESPONSE: u16 = 2;
+const OP_RST: u16 = 3;
+const OP_SHUTDOWN: u16 = 4;
+const OP_RW: u16 = 5;
+const OP_CREDIT_UPDATE: u16 = 6;
+const OP_CREDIT_REQUEST: u16 = 7;
+const TYPE_STREAM: u16 = 1;
+
+/// A split virtqueue's driver-programmed layout + our consume cursor.
+#[derive(Default, Clone, Copy)]
+struct Queue {
+    num: u32,
+    ready: u32,
+    desc: u64,
+    avail: u64,
+    used: u64,
+    last_avail: u16,
+}
+
+/// The vsock packet header (little-endian, 44 bytes).
+#[derive(Default, Clone, Copy)]
+struct Hdr {
+    src_cid: u64,
+    dst_cid: u64,
+    src_port: u32,
+    dst_port: u32,
+    len: u32,
+    typ: u16,
+    op: u16,
+    flags: u32,
+    buf_alloc: u32,
+    fwd_cnt: u32,
+}
+
+impl Hdr {
+    fn to_bytes(self) -> [u8; HDR_LEN] {
+        let mut b = [0u8; HDR_LEN];
+        b[0..8].copy_from_slice(&self.src_cid.to_le_bytes());
+        b[8..16].copy_from_slice(&self.dst_cid.to_le_bytes());
+        b[16..20].copy_from_slice(&self.src_port.to_le_bytes());
+        b[20..24].copy_from_slice(&self.dst_port.to_le_bytes());
+        b[24..28].copy_from_slice(&self.len.to_le_bytes());
+        b[28..30].copy_from_slice(&self.typ.to_le_bytes());
+        b[30..32].copy_from_slice(&self.op.to_le_bytes());
+        b[32..36].copy_from_slice(&self.flags.to_le_bytes());
+        b[36..40].copy_from_slice(&self.buf_alloc.to_le_bytes());
+        b[40..44].copy_from_slice(&self.fwd_cnt.to_le_bytes());
+        b
+    }
+    fn from_bytes(b: &[u8]) -> Hdr {
+        let u64a = |o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+        let u32a = |o: usize| u32::from_le_bytes(b[o..o + 4].try_into().unwrap());
+        let u16a = |o: usize| u16::from_le_bytes(b[o..o + 2].try_into().unwrap());
+        Hdr {
+            src_cid: u64a(0),
+            dst_cid: u64a(8),
+            src_port: u32a(16),
+            dst_port: u32a(20),
+            len: u32a(24),
+            typ: u16a(28),
+            op: u16a(30),
+            flags: u32a(32),
+            buf_alloc: u32a(36),
+            fwd_cnt: u32a(40),
+        }
+    }
+}
+
+/// The lockable inner state of the virtio-vsock device: host-side listener that
+/// accepts any connection and records the stream bytes the guest sends. Shared
+/// (behind `Mutex`) between the vCPU thread (MMIO dispatch) and the host-I/O
+/// thread ([`super::vsock_io`]); every field is touched only while the lock is
+/// held, so guest RAM and the virtqueues are never accessed concurrently.
 pub(super) struct VsockShared {
-    transport: VsockTransportCore,
-    lifecycle: VsockLifecycleState,
-    handlers: VsockHandlerRegistry,
+    irq: u32,
+    mem: GuestMem,
+    device_features_sel: u32,
+    status: u32,
+    queue_sel: u32,
+    queues: [Queue; NUM_QUEUES],
+    interrupt_status: u32,
+    /// Bytes received from the guest over an accepted stream (for the host).
+    pub received: Vec<u8>,
+    /// Per-connection receive credit: bytes the host has consumed from the guest,
+    /// keyed by `(host_port, guest_port)`. Advertised back to the guest as a
+    /// packet's `fwd_cnt` so its tx-credit accounting stays valid. Must be
+    /// per-connection — a global counter mixes one stream's bytes into another's
+    /// credit and breaks the handshake (the guest resets or can't reply).
+    recv_cnt: std::collections::HashMap<(u32, u32), u32>,
+    /// Pending packets to deliver to the guest on its rx queue.
+    pending_rx: Vec<(Hdr, Vec<u8>)>,
+    /// Workload exit code captured from a guest write to
+    /// [`WORKLOAD_EXIT_PORT`](mvm_guest::vsock::WORKLOAD_EXIT_PORT) (4-byte LE
+    /// i32) — the transient run-to-exit signal. `Some` once the guest reports.
+    pub workload_exit_code: Option<i32>,
+    /// Set when the workload-exit code arrives, so the run loop's watchdog ends a
+    /// transient VM (the same flag the SIGTERM/stop path uses).
+    exit_stop: Option<&'static std::sync::atomic::AtomicBool>,
+    /// Host→guest agent stream bridge. Host RPC clients connect to its Unix socket
+    /// and reach the guest agent on
+    /// [`GUEST_AGENT_PORT`](mvm_guest::vsock::GUEST_AGENT_PORT); the device frames
+    /// its `OP_REQUEST`/`OP_RW` onto the rx queue and routes the guest's replies
+    /// back to the host socket.
+    agent: super::agent_bridge::AgentBridge,
+    /// Per-VM egress relay. `EGRESS_PORT` streams are relayed byte-for-byte to the
+    /// per-VM `mvm-substitution-endpoint`, which owns the whole egress decision
+    /// (claim-10 default-deny + claims-12/13 secret substitution). The device
+    /// parses nothing and gates nothing — it only frames the relay both ways.
+    substitution: super::substitution_bridge::SubstitutionBridge,
+    /// Inbound vsock header per substitution stream (keyed by guest `src_port`), so
+    /// an endpoint reply can be framed back on the right stream.
+    substitution_hdrs: std::collections::HashMap<u32, Hdr>,
+    /// Transparent network relay. Guest bridge streams on port 5254 are relayed
+    /// byte-for-byte to the per-VM `mvm-host-netd` authority. The authority owns
+    /// real sockets, DNS, policy, audit, and future transform stages.
+    transparent_net: super::substitution_bridge::SubstitutionBridge,
+    /// Inbound vsock header per transparent-network stream (keyed by guest
+    /// `src_port`), so authority replies frame back on the right stream.
+    transparent_net_hdrs: std::collections::HashMap<u32, Hdr>,
+    /// Per-VM host-services broker relay. `BROKER_PORT` streams are relayed
+    /// byte-for-byte to the per-VM broker UDS the host-agent daemon bound, so a
+    /// guest `host.audit.v1` call reaches the broker exactly as on the other
+    /// backends. Reuses the same generic guest-stream↔UDS relay the egress path
+    /// uses: it opens the UDS on the first frame and relays verbatim in both
+    /// directions, failing closed when no broker socket is wired.
+    broker: super::substitution_bridge::SubstitutionBridge,
+    /// Inbound vsock header per broker stream (keyed by guest `src_port`), so a
+    /// broker reply can be framed back on the right stream.
+    broker_hdrs: std::collections::HashMap<u32, Hdr>,
+    /// Host→guest console bridge (dev-only). Host console clients connect to a
+    /// per-port Unix socket the supervisor bound and reach the guest console
+    /// listener on that data port. Empty (binds nothing) for a sealed prod config —
+    /// claim 15.
+    console: super::console_bridge::ConsoleBridge,
 }
 
 impl VsockShared {
     /// # Safety
     /// `ram` must point to `ram_size` bytes mapped as guest RAM at `ram_base`.
     unsafe fn new(irq: u32, ram: *mut u8, ram_base: u64, ram_size: usize) -> Self {
-        let _ = irq;
         Self {
+            irq,
             // SAFETY: forwarded from this fn's contract.
-            transport: unsafe { VsockTransportCore::new(ram, ram_base, ram_size) },
-            lifecycle: VsockLifecycleState::new(),
-            handlers: VsockHandlerRegistry::new(),
+            mem: unsafe { GuestMem::new(ram, ram_base, ram_size) },
+            device_features_sel: 0,
+            status: 0,
+            queue_sel: 0,
+            queues: [Queue::default(); NUM_QUEUES],
+            interrupt_status: 0,
+            received: Vec::new(),
+            recv_cnt: std::collections::HashMap::new(),
+            pending_rx: Vec::new(),
+            workload_exit_code: None,
+            exit_stop: None,
+            agent: super::agent_bridge::AgentBridge::new(),
+            substitution: super::substitution_bridge::SubstitutionBridge::new(),
+            substitution_hdrs: std::collections::HashMap::new(),
+            transparent_net: super::substitution_bridge::SubstitutionBridge::new(),
+            transparent_net_hdrs: std::collections::HashMap::new(),
+            broker: super::substitution_bridge::SubstitutionBridge::new(),
+            broker_hdrs: std::collections::HashMap::new(),
+            console: super::console_bridge::ConsoleBridge::new(),
         }
     }
 
+    /// Expose the host-side agent listener at `path` (host→guest). Host RPC
+    /// clients connect here; the bridge opens a vsock stream to the guest agent on
+    /// [`GUEST_AGENT_PORT`](mvm_guest::vsock::GUEST_AGENT_PORT).
     pub fn set_agent_socket(&mut self, path: &std::path::Path) -> std::io::Result<()> {
-        self.handlers.set_agent_socket(path)
+        self.agent.bind(path)
     }
 
-    pub fn set_agent_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.handlers.set_agent_activity(counter);
+    /// Share the heartbeat activity counter with the agent bridge so an open agent
+    /// stream keeps the run loop waking an idle guest (the same counter the
+    /// substitution relay uses).
+    pub fn set_agent_activity(&mut self, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        self.agent.set_activity(counter);
     }
 
+    /// Point the egress relay at this VM's `mvm-substitution-endpoint` Unix socket.
+    /// Once set, a guest connect to `EGRESS_PORT` is relayed byte-for-byte to the
+    /// endpoint, which owns the whole egress decision (claim-10 + claims-12/13
+    /// substitution). Without it, `EGRESS_PORT` streams fail closed.
     pub fn set_substitution_endpoint(&mut self, path: &std::path::Path) {
-        self.handlers.set_substitution_endpoint(path);
+        self.substitution.set_endpoint(path);
     }
 
-    pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.handlers.set_substitution_activity(counter);
+    /// Share the heartbeat activity counter with the egress relay so an open
+    /// stream awaiting an endpoint reply keeps the run loop waking an idle guest
+    /// (the same counter the agent bridge uses).
+    pub fn set_substitution_activity(
+        &mut self,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        self.substitution.set_activity(counter);
     }
 
+    /// Point the transparent-network relay at this VM's `mvm-host-netd` authority
+    /// Unix socket. Once set, guest bridge streams on port 5254 are relayed
+    /// byte-for-byte to the authority. Without it, port 5254 streams fail closed.
     pub fn set_transparent_net_endpoint(&mut self, path: &std::path::Path) {
-        self.handlers.set_transparent_net_endpoint(path);
+        self.transparent_net.set_endpoint(path);
     }
 
+    /// Share the heartbeat activity counter with the transparent-network relay so
+    /// an open authority stream keeps the run loop waking an idle guest.
     pub fn set_transparent_net_activity(
         &mut self,
-        counter: Arc<std::sync::atomic::AtomicUsize>,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     ) {
-        self.handlers.set_transparent_net_activity(counter);
+        self.transparent_net.set_activity(counter);
     }
 
+    /// Point the broker relay at this VM's host-services broker Unix socket (the
+    /// per-VM UDS the host-agent daemon bound). Once set, a guest connect to
+    /// `BROKER_PORT` is relayed byte-for-byte to the broker, so a guest
+    /// `host.audit.v1` call reaches it. Without it, `BROKER_PORT` streams fail
+    /// closed.
     pub fn set_broker_endpoint(&mut self, path: &std::path::Path) {
-        self.handlers.set_broker_endpoint(path);
+        self.broker.set_endpoint(path);
     }
 
-    pub fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.handlers.set_broker_activity(counter);
+    /// Share the heartbeat activity counter with the broker relay so an open
+    /// stream awaiting a broker reply keeps the run loop waking an idle guest
+    /// (the same counter the egress relay and agent bridge use).
+    pub fn set_broker_activity(&mut self, counter: std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        self.broker.set_activity(counter);
     }
 
-    pub fn set_network_tunnel_endpoint(&mut self, path: &std::path::Path) {
-        self.handlers.set_network_tunnel_endpoint(path);
-    }
-
-    pub fn set_network_tunnel_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.handlers.set_network_tunnel_activity(counter);
-    }
-
+    /// Capture the transient workload-exit code: a guest write of a 4-byte LE i32
+    /// to [`WORKLOAD_EXIT_PORT`](mvm_guest::vsock::WORKLOAD_EXIT_PORT) records the
+    /// code and sets `stop` so the run loop ends (VM life = workload life).
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
-        self.lifecycle.exit_stop = Some(self.handlers.capture_workload_exit(stop));
+        self.exit_stop = Some(stop);
     }
 
+    /// Bind the dev-only host console listeners: one Unix socket per guest console
+    /// data port. Populated only for a `dev_console` machine; a sealed prod config
+    /// passes an empty list and nothing is bound (claim 15).
     pub fn set_console_sockets<'a>(
         &mut self,
         ports: impl IntoIterator<Item = (u32, &'a std::path::Path)>,
     ) -> std::io::Result<()> {
-        self.handlers.set_console_sockets(ports)
+        self.console.bind_ports(ports)
     }
 
-    pub fn set_console_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.handlers.set_console_activity(counter);
+    /// Share the heartbeat activity counter with the console bridge so an open
+    /// interactive console stream keeps the run loop waking an idle guest.
+    pub fn set_console_activity(
+        &mut self,
+        counter: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        self.console.set_activity(counter);
     }
 
     pub fn read(&self, offset: u64) -> u64 {
-        self.transport.read(offset, R_CONFIG)
+        u64::from(match offset {
+            R_MAGIC => VIRTIO_MAGIC,
+            R_VERSION => VIRTIO_VERSION,
+            R_DEVICE_ID => VIRTIO_ID_VSOCK,
+            R_VENDOR_ID => VIRTIO_VENDOR,
+            R_DEVICE_FEATURES if self.device_features_sel == 1 => 1, // VIRTIO_F_VERSION_1
+            R_DEVICE_FEATURES => 0,
+            R_QUEUE_NUM_MAX => QUEUE_SIZE_MAX,
+            R_QUEUE_READY => self.cur().ready,
+            R_INTERRUPT_STATUS => self.interrupt_status,
+            R_STATUS => self.status,
+            R_CONFIG => GUEST_CID as u32, // guest_cid low
+            o if o == R_CONFIG + 4 => (GUEST_CID >> 32) as u32, // guest_cid high
+            _ => 0,
+        })
     }
 
+    fn cur(&self) -> &Queue {
+        &self.queues[(self.queue_sel as usize).min(NUM_QUEUES - 1)]
+    }
+    fn cur_mut(&mut self) -> &mut Queue {
+        let i = (self.queue_sel as usize).min(NUM_QUEUES - 1);
+        &mut self.queues[i]
+    }
+
+    /// Handle an MMIO write. Returns `true` if the guest needs an interrupt.
     pub fn write(&mut self, offset: u64, value: u64) -> bool {
-        match self.transport.write_register(offset, value) {
-            RegisterWrite::None => false,
-            RegisterWrite::Notify(queue) => self.on_notify(queue),
+        let v = value as u32;
+        match offset {
+            R_DEVICE_FEATURES_SEL => self.device_features_sel = v,
+            R_DRIVER_FEATURES_SEL | R_DRIVER_FEATURES => {}
+            R_QUEUE_SEL => self.queue_sel = v,
+            R_QUEUE_NUM => self.cur_mut().num = v,
+            R_QUEUE_READY => self.cur_mut().ready = v,
+            R_STATUS => self.status = v,
+            R_INTERRUPT_ACK => self.interrupt_status &= !v,
+            R_QUEUE_DESC_LO => set_lo(&mut self.cur_mut().desc, v),
+            R_QUEUE_DESC_HI => set_hi(&mut self.cur_mut().desc, v),
+            R_QUEUE_DRIVER_LO => set_lo(&mut self.cur_mut().avail, v),
+            R_QUEUE_DRIVER_HI => set_hi(&mut self.cur_mut().avail, v),
+            R_QUEUE_DEVICE_LO => set_lo(&mut self.cur_mut().used, v),
+            R_QUEUE_DEVICE_HI => set_hi(&mut self.cur_mut().used, v),
+            R_QUEUE_NOTIFY => return self.on_notify(v),
+            _ => {}
         }
+        false
     }
 
     fn on_notify(&mut self, queue: u32) -> bool {
-        if queue == 1 {
-            let packets = self.transport.take_tx_packets();
-            for (hdr, payload) in packets {
-                self.handle_packet(hdr, &payload);
-            }
+        // The guest notifies tx (new packets) or rx (new buffers posted). Either
+        // way, drain tx then try to flush queued rx packets to the guest.
+        if queue as usize == TX {
+            self.drain_tx();
         }
-        let flushed = self.transport.flush_rx();
-        let drained = self.transport.interrupt_status & 1 != 0;
+        let flushed = self.flush_rx();
+        let drained = self.interrupt_status & 1 != 0;
         drained || flushed
     }
 
-    fn handle_packet(&mut self, hdr: VsockHdr, payload: &[u8]) {
-        let mut ctx = VsockHandlerContext::new(&mut self.transport, &mut self.lifecycle);
-        if self.handlers.dispatch_packet(&mut ctx, hdr, payload) {
+    /// Process guest→host packets on the tx queue.
+    fn drain_tx(&mut self) {
+        let q = self.queues[TX];
+        if q.ready == 0 || q.num == 0 {
             return;
         }
+        let qsz = q.num as u16;
+        let avail_idx = self.mem.rd_u16(q.avail + 2);
+        let mut last = q.last_avail;
+        while last != avail_idx {
+            let slot = last % qsz;
+            let head = self.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
+            let buf = self.read_chain(q.desc, head, qsz);
+            if buf.len() >= HDR_LEN {
+                let hdr = Hdr::from_bytes(&buf[..HDR_LEN]);
+                self.handle_packet(hdr, &buf[HDR_LEN..]);
+            }
+            self.complete(TX, head, 0);
+            last = last.wrapping_add(1);
+        }
+        self.queues[TX].last_avail = last;
+    }
 
+    /// Read a (readable) descriptor chain into one contiguous buffer.
+    fn read_chain(&self, desc: u64, head: u16, qsz: u16) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut idx = head;
+        let mut guard = 0u32;
+        loop {
+            let da = desc + u64::from(idx) * 16;
+            let addr = self.mem.rd_u64(da);
+            let len = self.mem.rd_u32(da + 8) as usize;
+            let flags = self.mem.rd_u16(da + 12);
+            out.extend_from_slice(&self.mem.read_bytes(addr, len));
+            guard += 1;
+            if flags & VIRTQ_DESC_F_NEXT == 0 || guard > u32::from(qsz) {
+                break;
+            }
+            idx = self.mem.rd_u16(da + 14);
+        }
+        out
+    }
+
+    fn handle_packet(&mut self, hdr: Hdr, payload: &[u8]) {
+        // Guest→host packet on a host-initiated agent stream: the host opened it,
+        // so the guest agent's reply is addressed to our host-assigned src_port
+        // (dst_port here). Route to the agent bridge, not the listener paths.
+        if self.agent.is_agent_stream(hdr.dst_port) {
+            agent_dbg(&format!(
+                "guest op={} ({} bytes) for agent stream {}",
+                hdr.op,
+                payload.len(),
+                hdr.dst_port
+            ));
+            match hdr.op {
+                OP_RESPONSE => self.agent.on_established(hdr.dst_port),
+                OP_RW => {
+                    let n = (hdr.len as usize).min(payload.len());
+                    self.agent.write_to_host(hdr.dst_port, &payload[..n]);
+                    self.add_recv(&hdr, n as u32);
+                    self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                }
+                OP_SHUTDOWN | OP_RST => {
+                    self.agent.close(hdr.dst_port);
+                    self.recv_cnt.remove(&(hdr.dst_port, hdr.src_port));
+                    self.queue_reply(&hdr, OP_RST, &[]);
+                }
+                _ => {}
+            }
+            return;
+        }
+        // Guest→host packet on a host-initiated console stream (dev-only): routed by
+        // the opaque host-assigned conn id (`dst_port` here), never by the agent's
+        // `is_agent_stream`. Same handshake/relay shape as the agent branch: the
+        // host dialed the guest's console data port, so the guest's PTY output is
+        // addressed back to our conn id.
+        if self.console.is_console_stream(hdr.dst_port) {
+            match hdr.op {
+                OP_RESPONSE => self.console.on_established(hdr.dst_port),
+                OP_RW => {
+                    let n = (hdr.len as usize).min(payload.len());
+                    self.console.write_to_host(hdr.dst_port, &payload[..n]);
+                    self.add_recv(&hdr, n as u32);
+                    self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                }
+                OP_SHUTDOWN | OP_RST => {
+                    self.console.close(hdr.dst_port);
+                    self.recv_cnt.remove(&(hdr.dst_port, hdr.src_port));
+                    self.queue_reply(&hdr, OP_RST, &[]);
+                }
+                _ => {}
+            }
+            return;
+        }
         match hdr.op {
-            OP_REQUEST => ctx.queue_reply(&hdr, OP_RESPONSE, &[]),
+            OP_REQUEST => {
+                // Accept the connection: reply RESPONSE with our credit.
+                self.queue_reply(&hdr, OP_RESPONSE, &[]);
+            }
             OP_RW => {
                 let n = (hdr.len as usize).min(payload.len());
-                ctx.record_received(&payload[..n]);
-                ctx.add_recv(&hdr, n as u32);
-                ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
+                if hdr.dst_port == mvm_guest::vsock::WORKLOAD_EXIT_PORT {
+                    // Transient workload-exit signal: a 4-byte LE i32 exit code.
+                    // Record it and request stop (VM life = workload life).
+                    if n >= 4 {
+                        self.workload_exit_code =
+                            Some(i32::from_le_bytes(payload[..4].try_into().unwrap()));
+                    } else {
+                        self.workload_exit_code = Some(0);
+                    }
+                    if let Some(stop) = self.exit_stop {
+                        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                } else if hdr.dst_port == mvm_guest::vsock::EGRESS_PORT {
+                    // The egress port is a pure relay to the per-VM endpoint, which
+                    // owns the whole egress decision (claim-10 default-deny + secret
+                    // substitution). The device parses nothing and gates nothing —
+                    // it only relays the stream both ways. With no endpoint wired
+                    // the bridge fails closed (resets the stream).
+                    self.handle_substitution_request(&hdr, &payload[..n]);
+                    self.add_recv(&hdr, n as u32);
+                    return;
+                } else if hdr.dst_port == crate::mvm_net_spawn::TRANSPARENT_NET_VSOCK_PORT {
+                    // The transparent-network port is a pure relay to the per-VM
+                    // host authority. The device parses nothing and gates nothing.
+                    self.handle_transparent_net_request(&hdr, &payload[..n]);
+                    self.add_recv(&hdr, n as u32);
+                    return;
+                } else if hdr.dst_port == mvm_guest::vsock::BROKER_PORT {
+                    // The broker port is a pure relay to the per-VM host-services
+                    // broker UDS the host-agent daemon bound — the same generic relay
+                    // the egress path uses. The device parses nothing and gates
+                    // nothing; it only relays the stream both ways. With no broker
+                    // socket wired the bridge fails closed (resets the stream).
+                    self.handle_broker_request(&hdr, &payload[..n]);
+                    self.add_recv(&hdr, n as u32);
+                    return;
+                } else {
+                    self.received.extend_from_slice(&payload[..n]);
+                }
+                self.add_recv(&hdr, n as u32);
+                // Acknowledge consumed bytes so the guest's credit recovers.
+                self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]);
             }
-            super::vsock_transport::OP_CREDIT_REQUEST => {
-                ctx.queue_reply(&hdr, OP_CREDIT_UPDATE, &[])
-            }
-            super::vsock_transport::OP_SHUTDOWN => {
-                ctx.remove_recv(hdr.dst_port, hdr.src_port);
-                ctx.queue_reply(&hdr, OP_RST, &[]);
+            OP_CREDIT_REQUEST => self.queue_reply(&hdr, OP_CREDIT_UPDATE, &[]),
+            OP_SHUTDOWN => {
+                // A substitution stream the guest is done with: tear down its
+                // endpoint connection so the endpoint sees EOF on the request.
+                if self.substitution_hdrs.remove(&hdr.src_port).is_some() {
+                    self.substitution.close(hdr.src_port);
+                }
+                // Likewise for a transparent-network stream.
+                if self.transparent_net_hdrs.remove(&hdr.src_port).is_some() {
+                    self.transparent_net.close(hdr.src_port);
+                }
+                // Likewise for a broker stream the guest is done with: drop its
+                // endpoint connection so the broker sees EOF on the request.
+                if self.broker_hdrs.remove(&hdr.src_port).is_some() {
+                    self.broker.close(hdr.src_port);
+                }
+                self.recv_cnt.remove(&(hdr.dst_port, hdr.src_port));
+                self.queue_reply(&hdr, OP_RST, &[]);
             }
             _ => {}
         }
     }
 
-    pub(super) fn service_host_io(&mut self) -> bool {
-        let mut ctx = VsockHandlerContext::new(&mut self.transport, &mut self.lifecycle);
-        self.handlers.service_host_io(&mut ctx)
+    /// Frame an inbound egress request to the [`SubstitutionBridge`] and map its
+    /// action to a vsock control reply. The bridge relays the stream to the per-VM
+    /// endpoint, which owns the whole egress decision (claim-10 + claims 12/13);
+    /// the device owns only the rx framing and the per-stream header.
+    fn handle_substitution_request(&mut self, hdr: &Hdr, payload: &[u8]) {
+        use super::substitution_bridge::SubstitutionAction;
+        match self.substitution.handle_frame(hdr.src_port, payload) {
+            // Relayed: ack the bytes so the guest's credit recovers, and keep the
+            // stream's header for framing replies / a later reset.
+            SubstitutionAction::Relayed => {
+                self.substitution_hdrs.insert(hdr.src_port, *hdr);
+                self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
+            }
+            // Fail-closed: no endpoint or a connect failure → reset the stream.
+            SubstitutionAction::Refused => {
+                self.substitution_hdrs.remove(&hdr.src_port);
+                self.queue_reply(hdr, OP_RST, &[]);
+            }
+        }
     }
 
-    pub(super) fn poll_fds(&self) -> Vec<std::os::fd::RawFd> {
-        self.handlers.poll_fds()
+    /// Frame an inbound transparent-network request to the host authority and map
+    /// its action to a vsock control reply. The authority owns all real networking,
+    /// policy, audit, and transforms; the device only preserves stream framing.
+    fn handle_transparent_net_request(&mut self, hdr: &Hdr, payload: &[u8]) {
+        use super::substitution_bridge::SubstitutionAction;
+        match self.transparent_net.handle_frame(hdr.src_port, payload) {
+            SubstitutionAction::Relayed => {
+                self.transparent_net_hdrs.insert(hdr.src_port, *hdr);
+                self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
+            }
+            SubstitutionAction::Refused => {
+                self.transparent_net_hdrs.remove(&hdr.src_port);
+                self.queue_reply(hdr, OP_RST, &[]);
+            }
+        }
     }
+
+    /// Frame an inbound broker request to the broker [`SubstitutionBridge`] and map
+    /// its action to a vsock control reply. Reuses the same generic guest-stream↔UDS
+    /// relay the egress path uses: it relays the stream to the per-VM broker UDS the
+    /// host-agent daemon bound; the device owns only the rx framing and the
+    /// per-stream header.
+    fn handle_broker_request(&mut self, hdr: &Hdr, payload: &[u8]) {
+        use super::substitution_bridge::SubstitutionAction;
+        match self.broker.handle_frame(hdr.src_port, payload) {
+            // Relayed: ack the bytes so the guest's credit recovers, and keep the
+            // stream's header for framing replies / a later reset.
+            SubstitutionAction::Relayed => {
+                self.broker_hdrs.insert(hdr.src_port, *hdr);
+                self.queue_reply(hdr, OP_CREDIT_UPDATE, &[]);
+            }
+            // Fail-closed: no broker socket or a connect failure → reset the stream.
+            SubstitutionAction::Refused => {
+                self.broker_hdrs.remove(&hdr.src_port);
+                self.queue_reply(hdr, OP_RST, &[]);
+            }
+        }
+    }
+
+    /// Drain endpoint replies into the guest's rx queue — the host→guest half of
+    /// the substitution relay, called on every timer tick (via [`RunDevice::poll`])
+    /// so a `WireResponse` reaches a guest blocked in `recv`. Returns `Some(irq)`
+    /// if a reply was delivered into a posted rx buffer.
+    pub fn drain_substitution(&mut self) -> Option<u32> {
+        if !self.substitution.has_active() {
+            return None;
+        }
+        let drained = self.substitution.drain();
+        for (conn_id, bytes) in drained.ready {
+            if let Some(h) = self.substitution_hdrs.get(&conn_id).copied() {
+                self.queue_reply(&h, OP_RW, &bytes);
+            }
+        }
+        for conn_id in drained.closed {
+            self.substitution_hdrs.remove(&conn_id);
+        }
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+
+    /// Drain transparent-network authority replies into the guest's rx queue.
+    /// Returns `Some(irq)` if a reply was delivered into a posted rx buffer.
+    pub fn drain_transparent_net(&mut self) -> Option<u32> {
+        if !self.transparent_net.has_active() {
+            return None;
+        }
+        let drained = self.transparent_net.drain();
+        for (conn_id, bytes) in drained.ready {
+            if let Some(h) = self.transparent_net_hdrs.get(&conn_id).copied() {
+                self.queue_reply(&h, OP_RW, &bytes);
+            }
+        }
+        for conn_id in drained.closed {
+            self.transparent_net_hdrs.remove(&conn_id);
+        }
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+
+    /// Drain broker replies into the guest's rx queue — the host→guest half of the
+    /// broker relay, mirroring [`drain_substitution`](Self::drain_substitution). A
+    /// `host.audit.v1` response from the broker reaches a guest blocked in `recv`
+    /// via this pump. Returns `Some(irq)` if a reply was delivered into a posted rx
+    /// buffer.
+    pub fn drain_broker(&mut self) -> Option<u32> {
+        if !self.broker.has_active() {
+            return None;
+        }
+        let drained = self.broker.drain();
+        for (conn_id, bytes) in drained.ready {
+            if let Some(h) = self.broker_hdrs.get(&conn_id).copied() {
+                self.queue_reply(&h, OP_RW, &bytes);
+            }
+        }
+        for conn_id in drained.closed {
+            self.broker_hdrs.remove(&conn_id);
+        }
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+
+    /// Drive the host→guest agent bridge each tick: open a vsock stream for each new
+    /// host connection (`OP_REQUEST` to the guest agent on
+    /// [`GUEST_AGENT_PORT`](mvm_guest::vsock::GUEST_AGENT_PORT)) and relay host→guest
+    /// request bytes (`OP_RW`). The guest's replies are routed back to the host
+    /// socket in [`handle_packet`](Self::handle_packet). Returns `Some(irq)` when a
+    /// packet was delivered into a posted rx buffer.
+    pub fn drain_agent(&mut self) -> Option<u32> {
+        let opened = self.agent.accept_new();
+        if !opened.is_empty() {
+            agent_dbg(&format!(
+                "accepted {} host conn(s) → OP_REQUEST to:{}",
+                opened.len(),
+                mvm_guest::vsock::GUEST_AGENT_PORT
+            ));
+        }
+        for conn_id in opened {
+            self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
+        }
+        for (conn_id, bytes) in self.agent.drain_host() {
+            agent_dbg(&format!(
+                "host→guest {} bytes on stream {conn_id}",
+                bytes.len()
+            ));
+            self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RW, &bytes);
+        }
+        // The host closed its side of these streams — tell the guest with an
+        // OP_RST so it frees its half instead of leaking a half-open connection
+        // (drain_host recorded them; the `for_vm` reachability poll drops a probe
+        // stream every iteration, so without this the guest accrues dead conns).
+        for conn_id in self.agent.take_host_closed() {
+            agent_dbg(&format!("host closed stream {conn_id} → OP_RST to guest"));
+            self.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RST, &[]);
+        }
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+
+    /// Drive the host→guest console bridge each tick (dev-only): open a vsock stream
+    /// for each new host console connection (`OP_REQUEST` to the guest console
+    /// listener on that connection's data port — the *real* console port, not the
+    /// hardwired agent port) and relay host→guest PTY bytes (`OP_RW`). The guest's
+    /// replies route back to the host socket by conn id in
+    /// [`handle_packet`](Self::handle_packet). Returns `Some(irq)` when a packet was
+    /// delivered into a posted rx buffer. A no-op when no console ports are bound
+    /// (sealed prod).
+    pub fn drain_console(&mut self) -> Option<u32> {
+        for (conn_id, guest_port) in self.console.accept_new() {
+            self.queue_host_packet(conn_id, guest_port, OP_REQUEST, &[]);
+        }
+        for (conn_id, guest_port, bytes) in self.console.drain_host() {
+            self.queue_host_packet(conn_id, guest_port, OP_RW, &bytes);
+        }
+        if self.flush_rx() {
+            Some(self.irq)
+        } else {
+            None
+        }
+    }
+
+    /// Count `n` bytes consumed from the guest on the connection an inbound
+    /// (guest→host) packet belongs to. The connection is keyed `(host_port,
+    /// guest_port)` = `(inbound.dst_port, inbound.src_port)`.
+    fn add_recv(&mut self, inbound: &Hdr, n: u32) {
+        let e = self
+            .recv_cnt
+            .entry((inbound.dst_port, inbound.src_port))
+            .or_default();
+        *e = e.wrapping_add(n);
+    }
+
+    /// The `fwd_cnt` to advertise on a host→guest packet for the stream
+    /// `(host_port, guest_port)` — bytes the host has consumed from the guest on
+    /// that stream (0 for a stream with no guest data yet).
+    fn fwd_cnt_for(&self, host_port: u32, guest_port: u32) -> u32 {
+        self.recv_cnt
+            .get(&(host_port, guest_port))
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Frame a host-*initiated* host→guest packet for an agent stream. Unlike
+    /// [`queue_reply`](Self::queue_reply) (which swaps an inbound header), this
+    /// builds a fresh header for a stream the host opened: `src_port` is the
+    /// host-assigned conn id, `dst_port` the guest's listener.
+    fn queue_host_packet(&mut self, src_port: u32, dst_port: u32, op: u16, payload: &[u8]) {
+        let hdr = Hdr {
+            src_cid: HOST_CID,
+            dst_cid: GUEST_CID,
+            src_port,
+            dst_port,
+            len: payload.len() as u32,
+            typ: TYPE_STREAM,
+            op,
+            flags: 0,
+            buf_alloc: HOST_BUF_ALLOC,
+            // Per-connection credit: bytes the host has consumed from the guest on
+            // THIS stream (host is `src_port`, guest is `dst_port`). A global
+            // counter here would advertise `peer_fwd_cnt > tx_cnt` to the guest,
+            // underflowing its tx-credit accounting so it can't reply (or resets
+            // the stream).
+            fwd_cnt: self.fwd_cnt_for(src_port, dst_port),
+        };
+        self.pending_rx.push((hdr, payload.to_vec()));
+    }
+
+    /// Queue a host→guest reply (src/dst swapped from the inbound header).
+    fn queue_reply(&mut self, inbound: &Hdr, op: u16, payload: &[u8]) {
+        let reply = Hdr {
+            src_cid: HOST_CID,
+            dst_cid: GUEST_CID,
+            src_port: inbound.dst_port,
+            dst_port: inbound.src_port,
+            len: payload.len() as u32,
+            typ: TYPE_STREAM,
+            op,
+            flags: 0,
+            buf_alloc: HOST_BUF_ALLOC,
+            // Inbound is guest→host, so the host side of this stream is
+            // `inbound.dst_port` and the guest side is `inbound.src_port` — the same
+            // key the receive path counts under.
+            fwd_cnt: self.fwd_cnt_for(inbound.dst_port, inbound.src_port),
+        };
+        self.pending_rx.push((reply, payload.to_vec()));
+    }
+
+    /// Deliver queued packets into guest-posted rx buffers. Returns whether any
+    /// were delivered (the guest then needs an interrupt).
+    fn flush_rx(&mut self) -> bool {
+        let q = self.queues[RX];
+        if q.ready == 0 || q.num == 0 || self.pending_rx.is_empty() {
+            return false;
+        }
+        let qsz = q.num as u16;
+        let mut last = q.last_avail;
+        let mut delivered = false;
+        while !self.pending_rx.is_empty() {
+            let avail_idx = self.mem.rd_u16(q.avail + 2);
+            if last == avail_idx {
+                break; // no rx buffer available
+            }
+            let (hdr, payload) = self.pending_rx.remove(0);
+            let slot = last % qsz;
+            let head = self.mem.rd_u16(q.avail + 4 + u64::from(slot) * 2);
+            // rx buffer: first writable descriptor (vsock posts single buffers).
+            let da = q.desc + u64::from(head) * 16;
+            let addr = self.mem.rd_u64(da);
+            let cap = self.mem.rd_u32(da + 8) as usize;
+            let split = match split_rx_packet(hdr, payload, cap) {
+                Ok(split) => split,
+                Err(pending) => {
+                    self.pending_rx.insert(0, pending);
+                    break;
+                }
+            };
+            let n = split.frame.len();
+            self.mem.write_bytes(addr, &split.frame);
+            self.complete(RX, head, n as u32);
+            if let Some(remainder) = split.remainder {
+                self.pending_rx.insert(0, remainder);
+            }
+            last = last.wrapping_add(1);
+            delivered = true;
+        }
+        self.queues[RX].last_avail = last;
+        delivered
+    }
+
+    /// Push a completed buffer onto a queue's used ring.
+    fn complete(&mut self, q: usize, head: u16, written: u32) {
+        let used = self.queues[q].used;
+        let qsz = self.queues[q].num as u16;
+        let used_idx = self.mem.rd_u16(used + 2);
+        let slot = u64::from(used_idx % qsz);
+        self.mem.wr_u16(used + 4 + slot * 8, head);
+        self.mem.wr_u16(used + 6 + slot * 8, 0);
+        self.mem.wr_u16(used + 8 + slot * 8, written as u16);
+        self.mem
+            .wr_u16(used + 10 + slot * 8, (written >> 16) as u16);
+        self.mem.wr_u16(used + 2, used_idx.wrapping_add(1));
+        self.interrupt_status |= 1;
+    }
+
+    /// Do one non-blocking pass of host→guest servicing: accept new agent
+    /// connections + frame their `OP_REQUEST`/`OP_RW`, and drain egress-endpoint
+    /// replies. Returns `true` if anything was delivered into the guest's rx queue
+    /// (so the caller raises the device IRQ). This is the body both the run loop's
+    /// [`RunDevice::poll`](super::run::RunDevice::poll) and the dedicated host-I/O
+    /// thread ([`super::vsock_io`]) run — the I/O thread is what makes it happen
+    /// reliably, independent of vCPU exits.
+    pub(super) fn service_host_io(&mut self) -> bool {
+        let agent = self.drain_agent();
+        let subst = self.drain_substitution();
+        let net = self.drain_transparent_net();
+        let broker = self.drain_broker();
+        let console = self.drain_console();
+        agent.is_some() || subst.is_some() || net.is_some() || broker.is_some() || console.is_some()
+    }
+
+    /// Raw fd of the bound host agent listener, for the I/O thread to register
+    /// with its `mio::Poll` (readiness-driven accept). `None` until an agent
+    /// socket is bound. The listener lives inside the lock for the whole run, so
+    /// the fd stays valid while registered (the I/O thread is joined before the
+    /// device drops).
+    pub(super) fn agent_listener_fd(&self) -> Option<RawFd> {
+        self.agent.listener_fd()
+    }
+}
+
+struct SplitRxPacket {
+    frame: Vec<u8>,
+    remainder: Option<(Hdr, Vec<u8>)>,
+}
+
+fn split_rx_packet(
+    hdr: Hdr,
+    payload: Vec<u8>,
+    cap: usize,
+) -> Result<SplitRxPacket, (Hdr, Vec<u8>)> {
+    if cap < HDR_LEN {
+        return Err((hdr, payload));
+    }
+
+    let Some(total_len) = HDR_LEN.checked_add(payload.len()) else {
+        return Err((hdr, payload));
+    };
+    if total_len <= cap {
+        let mut frame = hdr.to_bytes().to_vec();
+        frame.extend_from_slice(&payload);
+        return Ok(SplitRxPacket {
+            frame,
+            remainder: None,
+        });
+    }
+
+    if hdr.op != OP_RW {
+        return Err((hdr, payload));
+    }
+
+    let max_payload = cap - HDR_LEN;
+    if max_payload == 0 {
+        return Err((hdr, payload));
+    }
+
+    let (head, tail) = payload.split_at(max_payload);
+    let mut frame_hdr = hdr;
+    frame_hdr.len = head.len() as u32;
+    let mut frame = frame_hdr.to_bytes().to_vec();
+    frame.extend_from_slice(head);
+
+    let mut remainder_hdr = hdr;
+    remainder_hdr.len = tail.len() as u32;
+    Ok(SplitRxPacket {
+        frame,
+        remainder: Some((remainder_hdr, tail.to_vec())),
+    })
 }
 
 /// The virtio-vsock device the run loop drives (a [`RunDevice`](super::run::RunDevice)).
@@ -203,89 +971,79 @@ impl VirtioVsock {
         }
     }
 
+    /// Lock the shared state, recovering the guard if a peer thread panicked while
+    /// holding it (a poisoned lock is not itself a reason to abort teardown).
     fn lock(&self) -> MutexGuard<'_, VsockShared> {
         self.shared.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn notify_io(&self) {
-        if let Some(io) = &self.io {
-            io.wake();
-        }
-    }
-
+    /// Expose the host-side agent listener at `path` (host→guest). Host RPC
+    /// clients connect here; the bridge opens a vsock stream to the guest agent on
+    /// [`GUEST_AGENT_PORT`](mvm_guest::vsock::GUEST_AGENT_PORT).
     pub fn set_agent_socket(&mut self, path: &std::path::Path) -> std::io::Result<()> {
-        let result = self.lock().set_agent_socket(path);
-        self.notify_io();
-        result
+        self.lock().set_agent_socket(path)
     }
 
+    /// Share the heartbeat activity counter with the agent bridge.
     pub fn set_agent_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_agent_activity(counter);
-        self.notify_io();
     }
 
+    /// Point the egress relay at this VM's `mvm-substitution-endpoint` Unix socket.
     pub fn set_substitution_endpoint(&mut self, path: &std::path::Path) {
         self.lock().set_substitution_endpoint(path);
-        self.notify_io();
     }
 
+    /// Share the heartbeat activity counter with the egress relay.
     pub fn set_substitution_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_substitution_activity(counter);
-        self.notify_io();
     }
 
+    /// Point the transparent-network relay at this VM's `mvm-host-netd` authority.
     pub fn set_transparent_net_endpoint(&mut self, path: &std::path::Path) {
         self.lock().set_transparent_net_endpoint(path);
-        self.notify_io();
     }
 
-    pub fn set_transparent_net_activity(
-        &mut self,
-        counter: Arc<std::sync::atomic::AtomicUsize>,
-    ) {
+    /// Share the heartbeat activity counter with the transparent-network relay.
+    pub fn set_transparent_net_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_transparent_net_activity(counter);
-        self.notify_io();
     }
 
+    /// Point the broker relay at this VM's host-services broker Unix socket.
     pub fn set_broker_endpoint(&mut self, path: &std::path::Path) {
         self.lock().set_broker_endpoint(path);
-        self.notify_io();
     }
 
+    /// Share the heartbeat activity counter with the broker relay.
     pub fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_broker_activity(counter);
-        self.notify_io();
     }
 
-    pub fn set_network_tunnel_endpoint(&mut self, path: &std::path::Path) {
-        self.lock().set_network_tunnel_endpoint(path);
-        self.notify_io();
-    }
-
-    pub fn set_network_tunnel_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.lock().set_network_tunnel_activity(counter);
-        self.notify_io();
-    }
-
+    /// Capture the transient workload-exit code (guest write to the exit port).
     pub fn capture_workload_exit(&mut self, stop: &'static std::sync::atomic::AtomicBool) {
         self.lock().capture_workload_exit(stop);
-        self.notify_io();
     }
 
+    /// Bind the dev-only host console listeners (one per guest console data port).
+    /// Empty for a sealed prod config ⇒ nothing bound (claim 15).
     pub fn set_console_sockets<'a>(
         &mut self,
         ports: impl IntoIterator<Item = (u32, &'a std::path::Path)>,
     ) -> std::io::Result<()> {
-        let result = self.lock().set_console_sockets(ports);
-        self.notify_io();
-        result
+        self.lock().set_console_sockets(ports)
     }
 
+    /// Share the heartbeat activity counter with the console bridge.
     pub fn set_console_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
         self.lock().set_console_activity(counter);
-        self.notify_io();
     }
 
+    /// Spawn the dedicated host-I/O thread: it owns a `mio::Poll` over the agent
+    /// listener (readiness-driven accept) with a short backstop tick, runs
+    /// [`VsockShared::service_host_io`] on each wake, and raises `irq_line` when it
+    /// delivers — so host→guest reachability no longer depends on vCPU exits.
+    /// Idempotent-ish: a second call replaces the handle (the old thread is
+    /// joined). Call after the agent/egress sockets are wired.
     pub fn start_io(&mut self, irq_line: Arc<dyn IrqLine>) {
         self.shutdown();
         self.io = Some(super::vsock_io::spawn(
@@ -295,23 +1053,32 @@ impl VirtioVsock {
         ));
     }
 
+    /// Stop and join the host-I/O thread (if running). Must run before the guest
+    /// RAM the device points into is unmapped/freed — the join guarantees the I/O
+    /// thread has stopped touching guest memory.
     pub fn shutdown(&mut self) {
         if let Some(io) = self.io.take() {
             io.stop();
         }
     }
 
+    /// Bytes the guest sent to the host over the capture path. Read after the run
+    /// ends (post-[`Self::shutdown`]).
     pub fn received(&self) -> Vec<u8> {
-        self.lock().lifecycle.received.clone()
+        self.lock().received.clone()
     }
 
+    /// Workload exit code, if the guest reported one over the workload-exit port.
     pub fn workload_exit_code(&self) -> Option<i32> {
-        self.lock().lifecycle.workload_exit_code
+        self.lock().workload_exit_code
     }
 
+    /// Count of host→guest packets queued but not yet delivered into the guest rx
+    /// queue — used by tests to observe that the I/O thread serviced a host
+    /// connection (framed an `OP_REQUEST`) without any rx buffers posted.
     #[cfg(test)]
     pub(crate) fn queued_host_packets(&self) -> usize {
-        self.lock().transport.pending_rx.len()
+        self.lock().pending_rx.len()
     }
 
     pub fn base(&self) -> u64 {
@@ -324,16 +1091,20 @@ impl VirtioVsock {
         self.irq
     }
 
+    /// Service a guest MMIO load (vCPU thread).
     pub fn read(&self, offset: u64) -> u64 {
         self.lock().read(offset)
     }
 
+    /// Service a guest MMIO store (vCPU thread); `true` ⇒ the guest needs an IRQ.
     pub fn write(&self, offset: u64, value: u64) -> bool {
-        let result = self.lock().write(offset, value);
-        self.notify_io();
-        result
+        self.lock().write(offset, value)
     }
 
+    /// Run loop fallback host→guest servicing (used by backends without the I/O
+    /// thread, e.g. KVM). Returns `Some(irq)` if a packet was delivered. On HVF the
+    /// I/O thread does this reliably; this path is harmless there (both run under
+    /// the lock).
     pub fn poll(&self) -> Option<u32> {
         if self.lock().service_host_io() {
             Some(self.irq)
@@ -345,17 +1116,41 @@ impl VirtioVsock {
 
 impl Drop for VirtioVsock {
     fn drop(&mut self) {
+        // Safety net: guarantee the I/O thread is joined before the shared state
+        // (and the guest-RAM pointer it holds) is torn down. `kernel_boot` also
+        // calls `shutdown()` explicitly before freeing RAM.
         self.shutdown();
     }
+}
+
+/// Debug trace for the host↔guest agent relay, gated on `MVM_HVF_AGENT_DEBUG` so
+/// it is silent in normal operation. Goes to stderr (the supervisor inherits it).
+fn agent_dbg(msg: &str) {
+    if let Some(path) = std::env::var_os("MVM_HVF_AGENT_DEBUG") {
+        use std::io::Write as _;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "[agent-bridge] {msg}");
+        }
+    }
+}
+
+fn set_lo(v: &mut u64, lo: u32) {
+    *v = (*v & !0xffff_ffff) | u64::from(lo);
+}
+fn set_hi(v: &mut u64, hi: u32) {
+    *v = (*v & 0xffff_ffff) | (u64::from(hi) << 32);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
 
     fn dev() -> VsockShared {
-        let ram = vec![0u8; 0x1000].leak();
+        let mut ram = vec![0u8; 0x1000];
         // SAFETY: leaked for the test.
         unsafe { VsockShared::new(49, ram.as_mut_ptr(), 0x4000_0000, ram.len()) }
     }
@@ -363,15 +1158,14 @@ mod tests {
     #[test]
     fn identity_and_config() {
         let d = dev();
-        assert_eq!(d.read(0x000) as u32, VIRTIO_MAGIC);
-        assert_eq!(d.read(0x008) as u32, VIRTIO_ID_VSOCK);
+        assert_eq!(d.read(R_MAGIC) as u32, VIRTIO_MAGIC);
+        assert_eq!(d.read(R_DEVICE_ID) as u32, VIRTIO_ID_VSOCK);
         assert_eq!(d.read(R_CONFIG) as u32, GUEST_CID as u32);
-        assert_eq!(d.read(0x004) as u32, VIRTIO_VERSION);
     }
 
     #[test]
     fn hdr_round_trips() {
-        let h = VsockHdr {
+        let h = Hdr {
             src_cid: 3,
             dst_cid: 2,
             src_port: 1234,
@@ -384,7 +1178,7 @@ mod tests {
             fwd_cnt: 7,
         };
         let b = h.to_bytes();
-        let h2 = VsockHdr::from_bytes(&b);
+        let h2 = Hdr::from_bytes(&b);
         assert_eq!(h2.src_port, 1234);
         assert_eq!(h2.dst_port, 5678);
         assert_eq!(h2.op, OP_RW);
@@ -393,9 +1187,51 @@ mod tests {
     }
 
     #[test]
+    fn split_rx_packet_preserves_full_rw_payload_across_remainder() {
+        let hdr = Hdr {
+            src_cid: HOST_CID,
+            dst_cid: GUEST_CID,
+            src_port: 5254,
+            dst_port: 2400,
+            len: 10,
+            op: OP_RW,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+
+        let split = match split_rx_packet(hdr, b"abcdefghij".to_vec(), HDR_LEN + 4) {
+            Ok(split) => split,
+            Err(_) => panic!("rw payload should split across the posted rx cap"),
+        };
+        let first_hdr = Hdr::from_bytes(&split.frame[..HDR_LEN]);
+        assert_eq!(first_hdr.len, 4);
+        assert_eq!(&split.frame[HDR_LEN..], b"abcd");
+
+        let (remainder_hdr, remainder_payload) = split.remainder.unwrap();
+        assert_eq!(remainder_hdr.len, 6);
+        assert_eq!(remainder_payload, b"efghij");
+    }
+
+    #[test]
+    fn split_rx_packet_refuses_to_truncate_non_rw_packet() {
+        let hdr = Hdr {
+            src_cid: HOST_CID,
+            dst_cid: GUEST_CID,
+            src_port: 5254,
+            dst_port: 2400,
+            len: 1,
+            op: OP_RESPONSE,
+            typ: TYPE_STREAM,
+            ..Default::default()
+        };
+
+        assert!(split_rx_packet(hdr, b"x".to_vec(), HDR_LEN).is_err());
+    }
+
+    #[test]
     fn request_queues_a_response_and_rw_is_captured() {
         let mut d = dev();
-        let req = VsockHdr {
+        let req = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1000,
@@ -405,12 +1241,12 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(req, &[]);
-        assert_eq!(d.transport.pending_rx.len(), 1);
-        assert_eq!(d.transport.pending_rx[0].0.op, OP_RESPONSE);
-        assert_eq!(d.transport.pending_rx[0].0.src_port, 2000);
-        assert_eq!(d.transport.pending_rx[0].0.dst_port, 1000);
+        assert_eq!(d.pending_rx.len(), 1);
+        assert_eq!(d.pending_rx[0].0.op, OP_RESPONSE);
+        assert_eq!(d.pending_rx[0].0.src_port, 2000); // swapped
+        assert_eq!(d.pending_rx[0].0.dst_port, 1000);
 
-        let rw = VsockHdr {
+        let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1000,
@@ -421,18 +1257,20 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(rw, b"hello");
-        assert_eq!(d.lifecycle.received, b"hello");
+        assert_eq!(d.received, b"hello");
     }
 
+    /// With an egress endpoint wired, a guest OP_RW to `EGRESS_PORT` is relayed
+    /// byte-for-byte to the endpoint (not captured as raw bytes, not parsed), and
+    /// the endpoint's reply frames back to the guest as OP_RW on the same stream.
+    /// The endpoint owns the whole egress decision, so the device gates nothing.
     #[test]
     fn egress_port_relays_frame_to_endpoint_and_back() {
         use std::io::{Read, Write};
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("subst.sock");
 
-        let Some(listener) = bind_unix_listener(&sock) else {
-            return;
-        };
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let server = std::thread::spawn(move || {
             let (mut c, _) = listener.accept().unwrap();
             let mut buf = [0u8; 64];
@@ -447,7 +1285,7 @@ mod tests {
         d.set_substitution_endpoint(&sock);
 
         let raw = b"1.2.3.4:80\n".to_vec();
-        let rw = VsockHdr {
+        let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1500,
@@ -459,22 +1297,17 @@ mod tests {
         };
         d.handle_packet(rw, &raw);
 
-        assert!(d.lifecycle.received.is_empty());
-        assert!(
-            d.transport
-                .pending_rx
-                .iter()
-                .any(|(h, _)| h.op == OP_CREDIT_UPDATE)
-        );
+        // Relayed (not captured), stream acked.
+        assert!(d.received.is_empty());
+        assert!(d.pending_rx.iter().any(|(h, _)| h.op == OP_CREDIT_UPDATE));
 
         let got_by_endpoint = server.join().unwrap();
-        assert_eq!(got_by_endpoint, raw);
+        assert_eq!(got_by_endpoint, raw, "endpoint got the raw bytes verbatim");
 
         let mut reply = None;
         for _ in 0..200 {
-            let _ = d.service_host_io();
+            let _ = d.drain_substitution();
             if let Some((h, payload)) = d
-                .transport
                 .pending_rx
                 .iter()
                 .find(|(h, _)| h.op == OP_RW && h.dst_port == 1500)
@@ -485,14 +1318,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let (h, payload) = reply.expect("endpoint reply framed back to the guest");
-        assert_eq!(h.src_port, mvm_guest::vsock::EGRESS_PORT);
+        assert_eq!(h.src_port, mvm_guest::vsock::EGRESS_PORT); // swapped from inbound
         assert!(payload.starts_with(b"OK:"));
     }
 
+    /// Fail-closed: with no egress endpoint wired, a guest OP_RW to `EGRESS_PORT`
+    /// is reset (OP_RST), never captured as raw bytes — the guest's egress carries
+    /// a relay socket or it goes nowhere.
     #[test]
     fn egress_port_resets_without_endpoint() {
         let mut d = dev();
-        let rw = VsockHdr {
+        let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 2000,
@@ -503,14 +1339,19 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(rw, b"93.184.216.34:80");
-        assert!(d.lifecycle.received.is_empty());
-        assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+        assert!(d.received.is_empty());
+        assert!(
+            d.pending_rx.iter().any(|(h, _)| h.op == OP_RST),
+            "egress with no endpoint must fail closed (reset)"
+        );
     }
 
+    /// With a transparent network authority wired, a guest OP_RW to port 5254 is
+    /// relayed byte-for-byte to `mvm-host-netd`, and the authority's reply frames
+    /// back to the guest as OP_RW on the same stream.
     #[test]
     fn transparent_net_port_relays_frame_to_endpoint_and_back() {
         use std::io::{Read, Write};
-
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("mvm-net-authority.sock");
 
@@ -529,7 +1370,7 @@ mod tests {
         d.set_transparent_net_endpoint(&sock);
 
         let raw = b"authority-frame".to_vec();
-        let rw = VsockHdr {
+        let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 2400,
@@ -541,17 +1382,19 @@ mod tests {
         };
         d.handle_packet(rw, &raw);
 
-        assert!(d.lifecycle.received.is_empty());
-        assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_CREDIT_UPDATE));
+        assert!(d.received.is_empty());
+        assert!(d.pending_rx.iter().any(|(h, _)| h.op == OP_CREDIT_UPDATE));
 
         let got_by_authority = server.join().unwrap();
-        assert_eq!(got_by_authority, raw);
+        assert_eq!(
+            got_by_authority, raw,
+            "authority got the raw bytes verbatim"
+        );
 
         let mut reply = None;
         for _ in 0..200 {
-            let _ = d.service_host_io();
+            let _ = d.drain_transparent_net();
             if let Some((h, payload)) = d
-                .transport
                 .pending_rx
                 .iter()
                 .find(|(h, _)| h.op == OP_RW && h.dst_port == 2400)
@@ -566,10 +1409,12 @@ mod tests {
         assert!(payload.starts_with(b"NET:"));
     }
 
+    /// Fail-closed: with no transparent network authority wired, a guest OP_RW to
+    /// port 5254 is reset and never captured as raw bytes.
     #[test]
     fn transparent_net_port_resets_without_endpoint() {
         let mut d = dev();
-        let rw = VsockHdr {
+        let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 2500,
@@ -580,19 +1425,24 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(rw, b"authority-frame");
-        assert!(d.lifecycle.received.is_empty());
-        assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+        assert!(d.received.is_empty());
+        assert!(
+            d.pending_rx.iter().any(|(h, _)| h.op == OP_RST),
+            "transparent network with no authority must fail closed (reset)"
+        );
     }
 
+    /// With a broker socket wired, a guest OP_RW to `BROKER_PORT` is relayed
+    /// byte-for-byte to the per-VM broker UDS (not captured, not parsed), and the
+    /// broker's reply frames back to the guest as OP_RW on the same stream — the
+    /// same relay the egress path uses, so `host.audit.v1` reaches the broker.
     #[test]
     fn broker_port_relays_frame_to_endpoint_and_back() {
         use std::io::{Read, Write};
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("hvf-broker.sock");
 
-        let Some(listener) = bind_unix_listener(&sock) else {
-            return;
-        };
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let server = std::thread::spawn(move || {
             let (mut c, _) = listener.accept().unwrap();
             let mut buf = [0u8; 64];
@@ -607,7 +1457,7 @@ mod tests {
         d.set_broker_endpoint(&sock);
 
         let raw = b"host.audit.v1 request\n".to_vec();
-        let rw = VsockHdr {
+        let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1600,
@@ -619,22 +1469,17 @@ mod tests {
         };
         d.handle_packet(rw, &raw);
 
-        assert!(d.lifecycle.received.is_empty());
-        assert!(
-            d.transport
-                .pending_rx
-                .iter()
-                .any(|(h, _)| h.op == OP_CREDIT_UPDATE)
-        );
+        // Relayed (not captured), stream acked.
+        assert!(d.received.is_empty());
+        assert!(d.pending_rx.iter().any(|(h, _)| h.op == OP_CREDIT_UPDATE));
 
         let got_by_broker = server.join().unwrap();
-        assert_eq!(got_by_broker, raw);
+        assert_eq!(got_by_broker, raw, "broker got the raw bytes verbatim");
 
         let mut reply = None;
         for _ in 0..200 {
-            let _ = d.service_host_io();
+            let _ = d.drain_broker();
             if let Some((h, payload)) = d
-                .transport
                 .pending_rx
                 .iter()
                 .find(|(h, _)| h.op == OP_RW && h.dst_port == 1600)
@@ -645,14 +1490,16 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let (h, payload) = reply.expect("broker reply framed back to the guest");
-        assert_eq!(h.src_port, mvm_guest::vsock::BROKER_PORT);
+        assert_eq!(h.src_port, mvm_guest::vsock::BROKER_PORT); // swapped from inbound
         assert!(payload.starts_with(b"OK:"));
     }
 
+    /// Fail-closed: with no broker socket wired, a guest OP_RW to `BROKER_PORT` is
+    /// reset (OP_RST), never captured as raw bytes — mirrors the egress path.
     #[test]
     fn broker_port_resets_without_endpoint() {
         let mut d = dev();
-        let rw = VsockHdr {
+        let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 2100,
@@ -663,14 +1510,24 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(rw, b"audit v1");
-        assert!(d.lifecycle.received.is_empty());
-        assert!(d.transport.pending_rx.iter().any(|(h, _)| h.op == OP_RST));
+        assert!(d.received.is_empty());
+        assert!(
+            d.pending_rx.iter().any(|(h, _)| h.op == OP_RST),
+            "broker with no socket must fail closed (reset)"
+        );
     }
 
+    /// A host-initiated agent `OP_REQUEST` to port 5252 must carry valid credit —
+    /// a non-zero `buf_alloc` and, crucially, `fwd_cnt == 0` for a fresh stream.
+    /// Advertising another stream's cumulative `fwd_cnt` (the global-counter bug)
+    /// makes the guest's tx-credit accounting underflow, so it resets the stream or
+    /// never replies. This is the device side of the reachability handshake.
     #[test]
     fn host_agent_request_advertises_zero_credit_so_guest_does_not_reset() {
         let mut d = dev();
-        let cap = VsockHdr {
+        // Pollute a *different* stream's receive credit first: a guest→host capture
+        // stream that sends 5 bytes bumps that connection's consumed count.
+        let cap = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 7000,
@@ -682,27 +1539,37 @@ mod tests {
         };
         d.handle_packet(cap, b"hello");
         let credit = d
-            .transport
             .pending_rx
             .iter()
             .find(|(h, _)| h.op == OP_CREDIT_UPDATE && h.dst_port == 7000)
             .expect("capture stream acked");
-        assert_eq!(credit.0.fwd_cnt, 5);
-        d.transport.pending_rx.clear();
+        assert_eq!(credit.0.fwd_cnt, 5, "the capture stream's own credit is 5");
+        d.pending_rx.clear();
 
-        d.transport
-            .queue_host_packet(1 << 20, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
-        let req = &d.transport.pending_rx[0].0;
+        // A host-initiated agent stream (host src_port, guest listener 5252) must
+        // advertise fwd_cnt=0 — NOT the 5 bytes from the unrelated capture stream.
+        d.queue_host_packet(1 << 20, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
+        let req = &d.pending_rx[0].0;
         assert_eq!(req.op, OP_REQUEST);
         assert_eq!(req.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
-        assert_eq!(req.fwd_cnt, 0);
-        assert_eq!(req.buf_alloc, HOST_BUF_ALLOC);
+        assert_eq!(
+            req.fwd_cnt, 0,
+            "a fresh stream must advertise fwd_cnt=0, not another stream's credit"
+        );
+        assert_eq!(
+            req.buf_alloc, HOST_BUF_ALLOC,
+            "non-zero rx credit advertised"
+        );
     }
 
+    /// Per-connection credit tracks each stream independently: two streams that
+    /// send different amounts each get their own `fwd_cnt` in their credit updates —
+    /// one stream's bytes never leak into another's accounting.
     #[test]
     fn receive_credit_is_tracked_per_connection() {
         let mut d = dev();
-        let a = VsockHdr {
+        // Stream A: guest sends 3 bytes.
+        let a = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 7000,
@@ -713,7 +1580,8 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(a, b"abc");
-        let b = VsockHdr {
+        // Stream B: guest sends 10 bytes on a different ephemeral port.
+        let b = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 8000,
@@ -724,30 +1592,33 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(b, b"0123456789");
+        // Each stream's CREDIT_UPDATE reflects only its own consumed bytes.
         let ca = d
-            .transport
             .pending_rx
             .iter()
             .find(|(h, _)| h.op == OP_CREDIT_UPDATE && h.dst_port == 7000)
             .expect("stream A credit");
         let cb = d
-            .transport
             .pending_rx
             .iter()
             .find(|(h, _)| h.op == OP_CREDIT_UPDATE && h.dst_port == 8000)
             .expect("stream B credit");
-        assert_eq!(ca.0.fwd_cnt, 3);
-        assert_eq!(cb.0.fwd_cnt, 10);
+        assert_eq!(ca.0.fwd_cnt, 3, "stream A consumed 3 bytes");
+        assert_eq!(
+            cb.0.fwd_cnt, 10,
+            "stream B consumed 10 bytes, independent of A"
+        );
     }
 
+    /// The egress/substitution host→guest reply path is driven by the same
+    /// `service_host_io` the I/O thread runs — so a `WireResponse` from the endpoint
+    /// reaches the guest via that path, not only the vCPU `poll()`.
     #[test]
     fn service_host_io_drains_egress_replies() {
         use std::io::{Read, Write};
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("subst.sock");
-        let Some(listener) = bind_unix_listener(&sock) else {
-            return;
-        };
+        let listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
         let server = std::thread::spawn(move || {
             let (mut c, _) = listener.accept().unwrap();
             let mut buf = [0u8; 64];
@@ -758,7 +1629,7 @@ mod tests {
 
         let mut d = dev();
         d.set_substitution_endpoint(&sock);
-        let rw = VsockHdr {
+        let rw = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1500,
@@ -770,13 +1641,14 @@ mod tests {
         };
         d.handle_packet(rw, b"1.2.3");
         server.join().unwrap();
-        d.transport.pending_rx.clear();
+        d.pending_rx.clear();
 
+        // `service_host_io` (the I/O-thread body) must drain the endpoint reply and
+        // frame it back to the guest as OP_RW on the same stream.
         let mut framed = false;
         for _ in 0..200 {
             let _ = d.service_host_io();
-            if d.transport
-                .pending_rx
+            if d.pending_rx
                 .iter()
                 .any(|(h, _)| h.op == OP_RW && h.dst_port == 1500)
             {
@@ -785,7 +1657,10 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(framed);
+        assert!(
+            framed,
+            "service_host_io must relay the endpoint reply to the guest"
+        );
     }
 
     #[test]
@@ -793,23 +1668,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("agent.sock");
         let mut d = dev();
-        if let Err(err) = d.set_agent_socket(&sock) {
-            if error_chain_has_permission_denied(&err) {
-                eprintln!(
-                    "skipping test: sandbox denied agent socket setup at {}: {err}",
-                    sock.display()
-                );
-                return;
-            }
-            panic!("agent socket setup failed at {}: {err}", sock.display());
-        }
+        d.set_agent_socket(&sock).unwrap();
 
+        // A host RPC client connects to the agent socket.
         let _client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
 
+        // drain_agent accepts it and frames an OP_REQUEST to the guest agent port.
         let mut hdr = None;
         for _ in 0..200 {
-            let _ = d.service_host_io();
-            if let Some((h, _)) = d.transport.pending_rx.first() {
+            let _ = d.drain_agent();
+            if let Some((h, _)) = d.pending_rx.first() {
                 hdr = Some(*h);
                 break;
             }
@@ -820,10 +1688,12 @@ mod tests {
         assert_eq!(hdr.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
         assert_eq!(hdr.src_cid, HOST_CID);
         assert_eq!(hdr.dst_cid, GUEST_CID);
+        // The host-assigned src_port is now an agent stream, so a guest reply
+        // addressed to it routes to the bridge rather than the capture path.
         let conn_id = hdr.src_port;
-        assert!(d.handlers.is_agent_stream(conn_id));
+        assert!(d.agent.is_agent_stream(conn_id));
 
-        let reply = VsockHdr {
+        let reply = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: mvm_guest::vsock::GUEST_AGENT_PORT,
@@ -834,9 +1704,18 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(reply, b"world");
-        assert!(d.lifecycle.received.is_empty());
+        // Routed to the bridge (host socket), NOT appended to the guest-capture buf.
+        assert!(
+            d.received.is_empty(),
+            "agent-stream bytes must not hit the capture path"
+        );
     }
 
+    /// A host connect on a *console* data port opens a guest listener on that same
+    /// port (not the hardwired agent port) and relays bytes both ways: the device
+    /// frames `OP_REQUEST`→console port, routes the guest's reply back to the host
+    /// socket by conn id (not `is_agent_stream`), and does not touch the capture
+    /// path. This is the device-level Task 5 contract.
     #[test]
     fn host_console_connection_frames_op_request_on_the_console_port() {
         use std::io::{Read, Write};
@@ -844,32 +1723,18 @@ mod tests {
         let port = 20005u32;
         let sock = dir.path().join("vsock-20005.sock");
         let mut d = dev();
-        if let Err(err) = d.set_console_sockets([(port, sock.as_path())]) {
-            if error_chain_has_permission_denied(&err) {
-                eprintln!(
-                    "skipping test: sandbox denied console socket setup at {}: {err}",
-                    sock.display()
-                );
-                return;
-            }
-            panic!("console socket setup failed at {}: {err}", sock.display());
-        }
-        if !sock.exists() {
-            eprintln!(
-                "skipping test: console socket was not created at {}",
-                sock.display()
-            );
-            return;
-        }
+        d.set_console_sockets([(port, sock.as_path())]).unwrap();
 
+        // A host console client connects and immediately writes a keystroke.
         let mut client = std::os::unix::net::UnixStream::connect(&sock).unwrap();
         client.write_all(b"ls\n").unwrap();
         client.set_nonblocking(true).unwrap();
 
+        // drain_console accepts it and frames an OP_REQUEST to the CONSOLE port.
         let mut hdr = None;
         for _ in 0..200 {
-            let _ = d.service_host_io();
-            if let Some((h, _)) = d.transport.pending_rx.first() {
+            let _ = d.drain_console();
+            if let Some((h, _)) = d.pending_rx.first() {
                 hdr = Some(*h);
                 break;
             }
@@ -877,15 +1742,20 @@ mod tests {
         }
         let hdr = hdr.expect("OP_REQUEST framed for the host console connection");
         assert_eq!(hdr.op, OP_REQUEST);
-        assert_eq!(hdr.dst_port, port);
+        assert_eq!(
+            hdr.dst_port, port,
+            "console stream dials the real console port, not the agent port"
+        );
         assert_ne!(hdr.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
         assert_eq!(hdr.src_cid, HOST_CID);
         assert_eq!(hdr.dst_cid, GUEST_CID);
         let conn_id = hdr.src_port;
-        assert!(d.handlers.is_console_stream(conn_id));
-        assert!(!d.handlers.is_agent_stream(conn_id));
+        // Routed by conn id in the console bridge — NOT via the agent's keyspace.
+        assert!(d.console.is_console_stream(conn_id));
+        assert!(!d.agent.is_agent_stream(conn_id));
 
-        let accept = VsockHdr {
+        // Guest accepts (OP_RESPONSE) → now host→guest keystrokes relay.
+        let accept = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: port,
@@ -895,12 +1765,11 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(accept, &[]);
-        d.transport.pending_rx.clear();
+        d.pending_rx.clear();
         let mut relayed = false;
         for _ in 0..200 {
-            let _ = d.service_host_io();
-            if d.transport
-                .pending_rx
+            let _ = d.drain_console();
+            if d.pending_rx
                 .iter()
                 .any(|(h, p)| h.op == OP_RW && h.dst_port == port && p == b"ls\n")
             {
@@ -909,9 +1778,11 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        assert!(relayed);
+        assert!(relayed, "host keystrokes relay to the guest console port");
 
-        let out = VsockHdr {
+        // Guest → host PTY output: routed to the host socket by conn id, never the
+        // capture path.
+        let out = Hdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: port,
@@ -922,7 +1793,10 @@ mod tests {
             ..Default::default()
         };
         d.handle_packet(out, b"# ");
-        assert!(d.lifecycle.received.is_empty());
+        assert!(
+            d.received.is_empty(),
+            "console-stream bytes must not hit the capture path"
+        );
         let mut buf = [0u8; 16];
         let mut n = 0;
         for _ in 0..200 {
@@ -934,14 +1808,16 @@ mod tests {
                 _ => std::thread::sleep(std::time::Duration::from_millis(5)),
             }
         }
-        assert_eq!(&buf[..n], b"# ");
+        assert_eq!(&buf[..n], b"# ", "guest PTY output reaches the host socket");
     }
 
+    /// Sealed prod: an empty console-socket list binds no listeners, so
+    /// `drain_console` frames nothing — the console path is inert (claim 15).
     #[test]
     fn empty_console_sockets_bind_nothing() {
         let mut d = dev();
         d.set_console_sockets([]).unwrap();
-        assert!(!d.service_host_io());
-        assert!(d.transport.pending_rx.is_empty());
+        assert!(d.drain_console().is_none());
+        assert!(d.pending_rx.is_empty());
     }
 }

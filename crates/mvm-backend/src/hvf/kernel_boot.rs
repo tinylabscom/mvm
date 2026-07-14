@@ -29,7 +29,6 @@ use super::guest_ram::{GuestRam, page_rounded_len};
 use super::hv_impl::{HvfHandle, HvfVcpu};
 use super::sys::*;
 use super::vcpu::esr_ec;
-use crate::hvf_bootargs::{default_bootargs, default_virtiofs_bootargs};
 use crate::vmm::device::Pl011;
 use crate::vmm::hv::{CoreReg, HypervisorVcpu, SysReg, VcpuHandle};
 use crate::vmm::run::{self, RunControl, RunDevice, RunOutcome};
@@ -68,17 +67,15 @@ const VIRTIO_MMIO_BASE: u64 = 0x0a00_0000;
 const VIRTIO_IRQ: u32 = 48;
 const VSOCK_MMIO_BASE: u64 = 0x0a00_0200;
 const VSOCK_IRQ: u32 = 49;
-/// virtio-fs **root** window + SPI, above the disk band (MAX_DISKS=5 → up to
-/// base+5*stride) and vsock, so it never collides. Used only on a virtiofs-root
+/// virtio-fs **root** window + SPI, above the disk band (MAX_DISKS=4 → up to
+/// base+4*stride) and vsock, so it never collides. Used only on a virtiofs-root
 /// dev boot (there are no virtio-blk disks then).
 const FS_MMIO_BASE: u64 = VIRTIO_MMIO_BASE + 6 * MMIO_STRIDE;
 const FS_IRQ: u32 = 54;
 /// virtio-mmio window stride; each device occupies one 0x200 slot.
 const MMIO_STRIDE: u64 = 0x200;
-/// Max virtio-blk devices (`/dev/vda`..). The builder-with-runtime-overlay path
-/// needs five: rootfs, nix-store, input, output, and the read-only runtime
-/// overlay.
-const MAX_DISKS: usize = 5;
+/// Max virtio-blk devices (`/dev/vda`..). Bounds the reserved window band.
+const MAX_DISKS: usize = 4;
 
 /// MMIO base + SPI for virtio-blk device `i` (`/dev/vda` = 0). Disk 0 keeps the
 /// original single-disk window; disks 1+ sit *above* the vsock slot, so vsock's
@@ -142,6 +139,40 @@ pub struct KernelBootResult {
     pub workload_exit_code: Option<i32>,
 }
 
+/// Kernel cmdline used when `MVM_HVF_BOOTARGS` is unset. Always wires the PL011
+/// console (earlycon + `ttyAMA0`). When a virtio-blk disk is attached it is a
+/// real mkGuest workload rootfs, so mount it and run the baked init —
+/// `root=/dev/vda rw init=/init`, the same contract other block-rootfs backends
+/// boot mkGuest images with. Disk-less boots (initramfs / freestanding payloads)
+/// keep the bare console args.
+pub fn default_workload_bootargs(has_disk: bool) -> String {
+    let mut args =
+        format!("earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8");
+    if has_disk {
+        args.push_str(" root=/dev/vda rw init=/init");
+    }
+    args
+}
+
+/// Cmdline for a virtiofs-root dev boot: mount the virtio-fs device tagged
+/// `mvmroot` as root and run the baked init. No block rootfs is attached.
+fn default_virtiofs_bootargs() -> String {
+    format!(
+        "earlycon=pl011,0x{UART_BASE:x} console=ttyAMA0 panic=-1 nokaslr loglevel=8 \
+         rootfstype=virtiofs root=mvmroot rw init=/init"
+    )
+}
+
+fn append_cmdline_token(cmdline: &mut String, token: &str) {
+    if cmdline.split_whitespace().any(|existing| existing == token) {
+        return;
+    }
+    if !cmdline.trim().is_empty() {
+        cmdline.push(' ');
+    }
+    cmdline.push_str(token);
+}
+
 /// Host-supplied boot inputs the supervisor threads into a guest: the vsock
 /// channels (per-VM host→guest agent RPC socket, substitution-endpoint socket,
 /// egress relay UDS, transparent network authority UDS) plus the kernel
@@ -165,11 +196,6 @@ pub struct HostChannels {
     /// socket the host-agent daemon bound for this VM — so a guest `host.audit.v1`
     /// call reaches the broker. `None` ⇒ `BROKER_PORT` fails closed at the bridge.
     pub broker_socket: Option<PathBuf>,
-    /// Per-VM userspace L3 egress tunnel UDS. When set, the guest's dial of
-    /// `NETWORK_TUNNEL_GUEST_PORT` relays here — the socket the per-VM tunnel worker
-    /// bound — so guest packets reach the host forwarder and admitted flows egress.
-    /// `None` ⇒ the tunnel port fails closed at the bridge (no forwarder reachable).
-    pub network_tunnel_socket: Option<PathBuf>,
     /// Dev-only host console listeners: one `(guest_port, host_socket)` per console
     /// data port the interactive PTY may reach. Populated only for a `dev_console`
     /// machine; empty for a sealed prod config, so nothing is bound (claim 15).
@@ -184,9 +210,9 @@ pub struct HostChannels {
     /// several GiB so `nix build` doesn't OOM.
     pub mem_mib: u32,
     /// When set, serve this host directory (the unpacked+injected OCI tree) to
-    /// the guest as a read-only **virtiofs root** instead of a block rootfs — the
-    /// Plan-223 dev-tier boot. No virtio-blk disk is attached; the default
-    /// cmdline becomes `rootfstype=virtiofs root=mvmroot`.
+    /// the guest as a read-only **virtiofs root** instead of a block rootfs. No
+    /// virtio-blk disk is attached; the default cmdline becomes
+    /// `rootfstype=virtiofs root=mvmroot`.
     pub virtiofs_root: Option<PathBuf>,
 }
 
@@ -311,16 +337,6 @@ pub fn boot_kernel(
             .vsock(vsock)
             .build(),
     )
-}
-
-fn append_cmdline_token(cmdline: &mut String, token: &str) {
-    if cmdline.split_whitespace().any(|existing| existing == token) {
-        return;
-    }
-    if !cmdline.trim().is_empty() {
-        cmdline.push(' ');
-    }
-    cmdline.push_str(token);
 }
 
 /// Like [`boot_kernel`], but stops as soon as `stop` is set — a
@@ -455,7 +471,7 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
             if channels.virtiofs_root.is_some() {
                 default_virtiofs_bootargs()
             } else {
-                default_bootargs(!disks.is_empty())
+                default_workload_bootargs(!disks.is_empty())
             }
         });
     if let Ok(extra) = std::env::var("MVM_HVF_BOOTARGS_EXTRA") {
@@ -527,7 +543,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
                 egress_relay: channels.egress_relay,
                 transparent_net_socket: channels.transparent_net_socket,
                 broker_socket: channels.broker_socket,
-                network_tunnel_socket: channels.network_tunnel_socket,
                 console_data_sockets: channels.console_data_sockets,
                 virtiofs_root: channels.virtiofs_root,
             },
@@ -564,9 +579,6 @@ struct RunInputs {
     /// Per-VM host-services broker UDS. When set, `BROKER_PORT` relays here — the
     /// socket the host-agent daemon bound for this VM.
     broker_socket: Option<PathBuf>,
-    /// Per-VM userspace L3 egress tunnel UDS. When set, `NETWORK_TUNNEL_GUEST_PORT`
-    /// relays here — the socket the per-VM tunnel worker bound.
-    network_tunnel_socket: Option<PathBuf>,
     /// Dev-only host console listeners (one `(guest_port, host_socket)` per console
     /// data port). Empty for a sealed prod config — nothing bound (claim 15).
     console_data_sockets: Vec<(u32, PathBuf)>,
@@ -592,7 +604,6 @@ unsafe fn run(
         egress_relay,
         transparent_net_socket,
         broker_socket,
-        network_tunnel_socket,
         console_data_sockets,
         virtiofs_root,
     } = inputs;
@@ -758,8 +769,7 @@ unsafe fn run(
             // back to the dev/live `MVM_HVF_SUBSTITUTION_SOCKET` hook. Shares the
             // heartbeat counter so an in-flight request awaiting its reply keeps the
             // loop polling. With no relay wired, EGRESS_PORT fails closed at the
-            // bridge — the admitted-runtime case for a deny-all workload carrying
-            // no bound secrets, which spawns no endpoint and has no egress path.
+            // bridge (an hvf VM must always carry a relay socket).
             if let Some(relay) = egress_relay.as_ref().or(substitution_socket.as_ref()) {
                 v.set_substitution_activity(egress_active.clone());
                 v.set_substitution_endpoint(relay);
@@ -778,16 +788,6 @@ unsafe fn run(
             if let Some(broker) = broker_socket.as_ref() {
                 v.set_broker_activity(egress_active.clone());
                 v.set_broker_endpoint(broker);
-            }
-            // Userspace L3 egress tunnel (NETWORK_TUNNEL_GUEST_PORT): a pure relay to
-            // the per-VM tunnel worker UDS, which owns the packet-forwarding decision
-            // (default-deny gate + admitted-flow forward). Shares the heartbeat
-            // counter so in-flight forwarded traffic keeps the loop polling. With no
-            // tunnel socket wired, the port fails closed at the bridge — the
-            // deny-all / no-tunnel case.
-            if let Some(tunnel) = network_tunnel_socket.as_ref() {
-                v.set_network_tunnel_activity(egress_active.clone());
-                v.set_network_tunnel_endpoint(tunnel);
             }
             // Dev-only interactive console (`machine run -it`): bind one host
             // listener per guest console data port so the console driver can reach
@@ -929,7 +929,7 @@ mod tests {
         // A virtio-blk disk is a real mkGuest workload rootfs: mount it and run
         // the baked init, matching the `root=/dev/vda rw init=/init` contract
         // the other backends boot mkGuest images with.
-        let with = default_bootargs(true);
+        let with = default_workload_bootargs(true);
         assert!(
             with.contains("root=/dev/vda rw"),
             "real workload must mount the virtio-blk rootfs: {with}"
@@ -941,7 +941,7 @@ mod tests {
         assert!(with.contains("console=ttyAMA0"), "console wired: {with}");
 
         // Disk-less boots (initramfs / freestanding demos) keep the demo args.
-        let without = default_bootargs(false);
+        let without = default_workload_bootargs(false);
         assert!(
             !without.contains("root="),
             "disk-less boot must not mount a root: {without}"
@@ -1008,21 +1008,6 @@ mod tests {
         let meta = KernelImageSource::File(&kernel).metadata().unwrap();
         assert_eq!(meta.file_len, 128);
         assert_eq!(meta.reserved_len, HVF_PAGE_SIZE);
-    }
-
-    #[test]
-    fn fifth_disk_slot_stays_below_virtiofs_window() {
-        let (last_mmio, _) = disk_mmio(MAX_DISKS - 1);
-        assert!(
-            last_mmio + MMIO_STRIDE <= FS_MMIO_BASE,
-            "fifth disk must fit below the virtiofs MMIO window"
-        );
-
-        let (next_mmio, _) = disk_mmio(MAX_DISKS);
-        assert_eq!(
-            next_mmio, FS_MMIO_BASE,
-            "a sixth disk would collide with the virtiofs root window"
-        );
     }
 
     #[test]

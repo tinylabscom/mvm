@@ -19,22 +19,11 @@ use mvm_core::vm_backend::{
 
 use crate::driver::{RunningVm, VmmDriver};
 use crate::egress_shared::decode_plan_secrets_from_state;
-<<<<<<< HEAD
-use crate::network_tunnel_spawn::{
-    NetworkTunnelListener, NetworkTunnelWorkerSpawnParams, reap_network_tunnel_worker,
-    spawn_network_tunnel_worker_if_configured,
-};
-use crate::substitution_spawn::{
-    EndpointTransport, SubstitutionSpawnParams, reap_substitution_endpoint,
-    spawn_substitution_endpoint,
-};
-=======
 use crate::mvm_net_spawn::{MvmNetSpawnParams, reap_mvm_net_authority, spawn_mvm_net_authority};
-use crate::substitution_spawn::reap_substitution_endpoint;
->>>>>>> 411a20937 (Wire host netd backend spawn seam)
+use crate::substitution_spawn::egress_ca_cmdline_token_from_state_dir;
 use crate::workload_backend::{EgressSubstitutionTransport, WorkloadBackend};
 use crate::workload_runner::spec_map::{
-    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, network_tunnel_socket, workload_spec,
+    WorkloadSockets, WorkloadSpecInputs, console_data_sockets, workload_spec,
 };
 
 /// What the workload runner needs to stand up the per-VM gating endpoint.
@@ -45,9 +34,6 @@ pub struct EndpointSpawnRequest<'a> {
     pub secrets: &'a [SecretBinding],
     pub redaction: &'a RedactionPolicy,
     pub network_policy: &'a NetworkPolicy,
-    /// Legacy raw/Wire protocol hint retained until secret substitution moves into
-    /// the transparent network transform path.
-    pub raw_egress: bool,
 }
 
 /// Stand up the per-VM network authority; return the host UDS the guest's
@@ -65,6 +51,8 @@ impl EndpointSpawner for RealEndpointSpawner {
         spawn_mvm_net_authority(MvmNetSpawnParams {
             vm_name: req.vm_name,
             state_dir: req.state_dir,
+            tenant: req.tenant,
+            secrets: req.secrets,
             network_policy: req.network_policy,
         })
     }
@@ -88,22 +76,20 @@ pub struct WorkloadLaunchInputs<'a> {
 struct StandingSockets {
     agent: PathBuf,
     exit: PathBuf,
-    network_tunnel: Option<(u32, PathBuf)>,
     console_log: PathBuf,
     /// Per-port UDS for the interactive console data range. Non-empty only when
     /// `VmStartConfig.dev_console` is true; empty for all sealed prod boots.
     console_data: Vec<(u32, PathBuf)>,
 }
 
-fn standing_sockets(state_dir: &Path, config: &VmStartConfig) -> StandingSockets {
+fn standing_sockets(state_dir: &Path, dev_console: bool) -> StandingSockets {
     StandingSockets {
         // Single source of truth shared with the host-side resolver so the
         // guest agent bridge can't drift out of the host's reach.
         agent: mvm_core::config::vm_inhouse_agent_socket_at(state_dir),
         exit: state_dir.join("workload.exit"),
-        network_tunnel: network_tunnel_socket(state_dir, config),
         console_log: state_dir.join("console.log"),
-        console_data: console_data_sockets(state_dir, config.dev_console),
+        console_data: console_data_sockets(state_dir, dev_console),
     }
 }
 
@@ -119,29 +105,12 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
         Self { driver, spawner }
     }
 
-    /// Spawn the gating endpoint, compose the spec, and boot. The endpoint is
-    /// ALWAYS spawned — it is the sole egress gate now, even for the no-secret
-    /// raw path.
+    /// Spawn the network authority, compose the spec, and boot. The authority is
+    /// ALWAYS spawned — it is the sole egress gate now for workload networking.
     pub fn start_workload(&self, inputs: &WorkloadLaunchInputs<'_>) -> Result<Box<dyn RunningVm>> {
         let state_dir = vm_state_dir(&inputs.config.name);
         std::fs::create_dir_all(&state_dir)
             .with_context(|| format!("create state dir {}", state_dir.display()))?;
-
-        // A secret-free workload speaks raw TCP; a secret-bearing one speaks the
-        // WireRequest substitution protocol so the real secret never enters the guest.
-        let raw_egress = inputs.secrets.is_empty();
-        let mut tunnel_guard =
-            spawn_network_tunnel_worker_if_configured(NetworkTunnelWorkerSpawnParams {
-                state_dir: &state_dir,
-                runtime_config: inputs.config.network_tunnel.as_ref(),
-                listener: inputs.config.network_tunnel.as_ref().map(|tunnel| {
-                    NetworkTunnelListener::Uds(mvm_core::config::vm_vsock_port_socket_at(
-                        &state_dir,
-                        tunnel.guest_port,
-                    ))
-                }),
-                network_policy: Some(&inputs.config.network_policy),
-            })?;
 
         let authority_uds = self.spawner.spawn(&EndpointSpawnRequest {
             vm_name: &inputs.config.name,
@@ -150,38 +119,47 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
             secrets: inputs.secrets,
             redaction: inputs.redaction,
             network_policy: inputs.network_policy,
-            raw_egress,
         })?;
 
-        let socks = standing_sockets(&state_dir, inputs.config);
+        let socks = standing_sockets(&state_dir, inputs.config.dev_console);
+        let cmdline = cmdline_with_egress_ca(inputs.cmdline.clone(), &state_dir, inputs.config);
         let spec = workload_spec(&WorkloadSpecInputs {
             config: inputs.config,
             sockets: WorkloadSockets {
                 agent: &socks.agent,
                 transparent_network: &authority_uds,
                 exit: &socks.exit,
-                network_tunnel: socks.network_tunnel,
                 console_data: socks.console_data,
             },
-            cmdline: inputs.cmdline.clone(),
+            cmdline,
             console_log: socks.console_log,
         });
 
-<<<<<<< HEAD
-        let vm = self.driver.boot(&spec)?;
-        tunnel_guard.defuse();
-        Ok(vm)
-=======
         match self.driver.boot(&spec) {
             Ok(vm) => Ok(vm),
             Err(err) => {
                 reap_mvm_net_authority(&state_dir);
-                reap_substitution_endpoint(&state_dir, &inputs.config.name);
                 Err(err)
             }
         }
->>>>>>> 411a20937 (Wire host netd backend spawn seam)
     }
+}
+
+fn cmdline_with_egress_ca(mut cmdline: String, state_dir: &Path, config: &VmStartConfig) -> String {
+    let Some(token) = egress_ca_cmdline_token_from_state_dir(state_dir) else {
+        return cmdline;
+    };
+    if cmdline.trim().is_empty() {
+        cmdline = crate::hvf::default_workload_bootargs(!config.rootfs_path.is_empty());
+    }
+    if cmdline.split_whitespace().any(|existing| existing == token) {
+        return cmdline;
+    }
+    if !cmdline.trim().is_empty() {
+        cmdline.push(' ');
+    }
+    cmdline.push_str(&token);
+    cmdline
 }
 
 /// The runner IS the workload backend: the lifecycle runs through the `VmmDriver`
@@ -239,12 +217,8 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
     }
 
     fn stop(&self, id: &VmId) -> Result<()> {
-        // Reap the per-VM secrets endpoint first, so a crashed VM's
-        // network authority process can't outlive the guest. Idempotent + a no-op
-        // when the VM spawned none; the legacy endpoint reap stays for older state.
+        // Reap the per-VM network authority first so it cannot outlive the guest.
         reap_mvm_net_authority(&vm_state_dir(&id.0));
-        reap_substitution_endpoint(&vm_state_dir(&id.0), &id.0);
-        reap_network_tunnel_worker(&vm_state_dir(&id.0));
         self.driver.attach(id)?.kill()
     }
 
@@ -343,7 +317,6 @@ mod tests {
     }
 
     struct Recorded {
-        raw_egress: bool,
         tenant: String,
         secrets_len: usize,
         policy: NetworkPolicy,
@@ -361,7 +334,6 @@ mod tests {
     impl EndpointSpawner for RecordingSpawner {
         fn spawn(&self, req: &EndpointSpawnRequest<'_>) -> Result<PathBuf> {
             *self.seen.lock().unwrap() = Some(Recorded {
-                raw_egress: req.raw_egress,
                 tenant: req.tenant.to_string(),
                 secrets_len: req.secrets.len(),
                 policy: req.network_policy.clone(),
@@ -384,7 +356,19 @@ mod tests {
             source: SecretSource::Static {
                 value: "s3cr3t".into(),
             },
+            guest_mount: None,
+            allowed_hosts: vec![],
         }
+    }
+
+    fn with_test_data_dir<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+        f()
     }
 
     fn transparent_net_host_uds(spec: &crate::driver::VmmSpec) -> &Path {
@@ -397,133 +381,139 @@ mod tests {
 
     #[test]
     fn start_workload_threads_authority_uds_into_transparent_net_port() {
-        let policy = NetworkPolicy::deny_all();
-        let redaction = RedactionPolicy::default();
-        let runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        with_test_data_dir(|| {
+            let policy = NetworkPolicy::deny_all();
+            let redaction = RedactionPolicy::default();
+            let runner =
+                WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
 
-        let cfg = config("w-egress");
-        let vm = runner
-            .start_workload(&WorkloadLaunchInputs {
-                config: &cfg,
-                tenant: "tenant-x",
-                secrets: &[],
-                redaction: &redaction,
-                network_policy: &policy,
-                cmdline: "root=/dev/vda".into(),
-            })
-            .expect("start_workload succeeds against the mock driver");
+            let cfg = config("w-egress");
+            let vm = runner
+                .start_workload(&WorkloadLaunchInputs {
+                    config: &cfg,
+                    tenant: "tenant-x",
+                    secrets: &[],
+                    redaction: &redaction,
+                    network_policy: &policy,
+                    cmdline: "root=/dev/vda".into(),
+                })
+                .expect("start_workload succeeds against the mock driver");
 
-        assert_eq!(vm.id().0, "w-egress");
+            assert_eq!(vm.id().0, "w-egress");
 
-        let specs = runner.driver.booted_specs();
-        assert_eq!(specs.len(), 1);
-        let spec = &specs[0];
+            let specs = runner.driver.booted_specs();
+            assert_eq!(specs.len(), 1);
+            let spec = &specs[0];
 
-        // The authority UDS the spawner returned is wired to the network port.
-        assert_eq!(transparent_net_host_uds(spec), Path::new("/run/ep.sock"));
-        // The sealed rootfs lands at /dev/vda.
-        assert_eq!(spec.blocks[0].device_node(), "/dev/vda");
-        assert_eq!(spec.blocks[0].source, PathBuf::from("/img/rootfs.ext4"));
-        // The write-only console capture path is set under the state dir.
-        assert!(spec.console.log_path.ends_with("console.log"));
+            // The authority UDS the spawner returned is wired to the network port.
+            assert_eq!(transparent_net_host_uds(spec), Path::new("/run/ep.sock"));
+            // The sealed rootfs lands at /dev/vda.
+            assert_eq!(spec.blocks[0].device_node(), "/dev/vda");
+            assert_eq!(spec.blocks[0].source, PathBuf::from("/img/rootfs.ext4"));
+            // The write-only console capture path is set under the state dir.
+            assert!(spec.console.log_path.ends_with("console.log"));
+        });
     }
 
     #[test]
-    fn start_workload_uses_raw_egress_when_no_secrets_and_wire_when_secrets() {
-        let policy = NetworkPolicy::deny_all();
-        let redaction = RedactionPolicy::default();
+    fn start_workload_passes_secret_count_to_the_spawner() {
+        with_test_data_dir(|| {
+            let policy = NetworkPolicy::deny_all();
+            let redaction = RedactionPolicy::default();
 
-        // No secrets ⇒ raw TCP egress.
-        let raw_runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
-        let cfg = config("w-raw");
-        raw_runner
-            .start_workload(&WorkloadLaunchInputs {
-                config: &cfg,
-                tenant: "tenant-x",
-                secrets: &[],
-                redaction: &redaction,
-                network_policy: &policy,
-                cmdline: String::new(),
-            })
-            .unwrap();
-        assert!(
-            raw_runner
-                .spawner
-                .seen
-                .lock()
-                .unwrap()
-                .as_ref()
-                .unwrap()
-                .raw_egress
-        );
+            let no_secret_runner =
+                WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+            let cfg = config("w-raw");
+            no_secret_runner
+                .start_workload(&WorkloadLaunchInputs {
+                    config: &cfg,
+                    tenant: "tenant-x",
+                    secrets: &[],
+                    redaction: &redaction,
+                    network_policy: &policy,
+                    cmdline: String::new(),
+                })
+                .unwrap();
+            assert!(
+                no_secret_runner
+                    .spawner
+                    .seen
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .secrets_len
+                    == 0
+            );
 
-        // One secret ⇒ WireRequest substitution (raw_egress false).
-        let wire_runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
-        let cfg = config("w-wire");
-        let secrets = [static_secret()];
-        wire_runner
-            .start_workload(&WorkloadLaunchInputs {
-                config: &cfg,
-                tenant: "tenant-x",
-                secrets: &secrets,
-                redaction: &redaction,
-                network_policy: &policy,
-                cmdline: String::new(),
-            })
-            .unwrap();
-        let recorded = wire_runner.spawner.seen.lock().unwrap();
-        let recorded = recorded.as_ref().unwrap();
-        assert!(!recorded.raw_egress);
-        assert_eq!(recorded.secrets_len, 1);
+            let secret_runner =
+                WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+            let cfg = config("w-wire");
+            let secrets = [static_secret()];
+            secret_runner
+                .start_workload(&WorkloadLaunchInputs {
+                    config: &cfg,
+                    tenant: "tenant-x",
+                    secrets: &secrets,
+                    redaction: &redaction,
+                    network_policy: &policy,
+                    cmdline: String::new(),
+                })
+                .unwrap();
+            let recorded = secret_runner.spawner.seen.lock().unwrap();
+            let recorded = recorded.as_ref().unwrap();
+            assert_eq!(recorded.secrets_len, 1);
+        });
     }
 
     #[test]
     fn start_workload_passes_the_network_policy_and_tenant_to_the_spawner() {
-        let policy = NetworkPolicy::deny_all();
-        let redaction = RedactionPolicy::default();
-        let runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        with_test_data_dir(|| {
+            let policy = NetworkPolicy::deny_all();
+            let redaction = RedactionPolicy::default();
+            let runner =
+                WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
 
-        let cfg = config("w-policy");
-        runner
-            .start_workload(&WorkloadLaunchInputs {
-                config: &cfg,
-                tenant: "acme",
-                secrets: &[],
-                redaction: &redaction,
-                network_policy: &policy,
-                cmdline: String::new(),
-            })
-            .unwrap();
+            let cfg = config("w-policy");
+            runner
+                .start_workload(&WorkloadLaunchInputs {
+                    config: &cfg,
+                    tenant: "acme",
+                    secrets: &[],
+                    redaction: &redaction,
+                    network_policy: &policy,
+                    cmdline: String::new(),
+                })
+                .unwrap();
 
-        let recorded = runner.spawner.seen.lock().unwrap();
-        let recorded = recorded.as_ref().unwrap();
-        assert_eq!(recorded.tenant, "acme");
-        assert_eq!(recorded.policy, NetworkPolicy::deny_all());
+            let recorded = runner.spawner.seen.lock().unwrap();
+            let recorded = recorded.as_ref().unwrap();
+            assert_eq!(recorded.tenant, "acme");
+            assert_eq!(recorded.policy, NetworkPolicy::deny_all());
+        });
     }
 
     #[test]
     fn vmbackend_start_then_status_wait_stop_via_the_driver() {
-        let exit = VmExitStatus {
-            code: Some(0),
-            success: true,
-        };
-        let runner = WorkloadRunner::new(
-            MockDriver::with_exit(exit),
-            RecordingSpawner::new("/run/ep.sock"),
-        );
+        with_test_data_dir(|| {
+            let exit = VmExitStatus {
+                code: Some(0),
+                success: true,
+            };
+            let runner = WorkloadRunner::new(
+                MockDriver::with_exit(exit),
+                RecordingSpawner::new("/run/ep.sock"),
+            );
 
-        let id = runner.start(&config("w")).expect("start succeeds");
-        assert_eq!(id.0, "w");
+            let id = runner.start(&config("w")).expect("start succeeds");
+            assert_eq!(id.0, "w");
 
-        // attach hands back a MockRunningVm, so the lifecycle works with no real VM.
-        assert_eq!(runner.status(&id).unwrap(), VmStatus::Running);
-        assert_eq!(runner.wait(&id).unwrap(), exit);
-        // stop reaps a nonexistent endpoint (no-op) then kills the attached handle.
-        assert!(runner.stop(&VmId("w".into())).is_ok());
+            // attach hands back a MockRunningVm, so the lifecycle works with no real VM.
+            assert_eq!(runner.status(&id).unwrap(), VmStatus::Running);
+            assert_eq!(runner.wait(&id).unwrap(), exit);
+            // stop reaps a nonexistent endpoint (no-op) then kills the attached handle.
+            assert!(runner.stop(&VmId("w".into())).is_ok());
+        });
     }
 
     #[test]
@@ -540,84 +530,185 @@ mod tests {
 
     #[test]
     fn start_workload_with_dev_console_threads_128_console_ports_into_spec() {
-        use mvm_guest::vsock::CONSOLE_PORT_BASE;
-        let policy = NetworkPolicy::deny_all();
-        let redaction = RedactionPolicy::default();
-        let runner =
-            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+        with_test_data_dir(|| {
+            use mvm_guest::vsock::CONSOLE_PORT_BASE;
+            let policy = NetworkPolicy::deny_all();
+            let redaction = RedactionPolicy::default();
+            let runner =
+                WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
 
-        let cfg = VmStartConfig {
-            dev_console: true,
-            ..config("w-dev-console")
-        };
-        runner
-            .start_workload(&WorkloadLaunchInputs {
-                config: &cfg,
-                tenant: "t",
-                secrets: &[],
-                redaction: &redaction,
-                network_policy: &policy,
-                cmdline: String::new(),
-            })
-            .expect("start_workload with dev_console succeeds");
+            let cfg = VmStartConfig {
+                dev_console: true,
+                ..config("w-dev-console")
+            };
+            runner
+                .start_workload(&WorkloadLaunchInputs {
+                    config: &cfg,
+                    tenant: "t",
+                    secrets: &[],
+                    redaction: &redaction,
+                    network_policy: &policy,
+                    cmdline: String::new(),
+                })
+                .expect("start_workload with dev_console succeeds");
 
-        let specs = runner.driver.booted_specs();
-        let spec = &specs[0];
+            let specs = runner.driver.booted_specs();
+            let spec = &specs[0];
 
-        // 3 standing + 128 console data = 131 vsock entries.
-        assert_eq!(spec.vsock.len(), 131);
+            // 3 standing + 128 console data = 131 vsock entries.
+            assert_eq!(spec.vsock.len(), 131);
 
-        // Every console port is in range and routed as HostDials.
-        let console: Vec<_> = spec
-            .vsock
-            .iter()
-            .filter(|p| p.guest_port > CONSOLE_PORT_BASE)
-            .collect();
-        assert_eq!(console.len(), 128);
-        assert!(
-            console
+            // Every console port is in range and routed as HostDials.
+            let console: Vec<_> = spec
+                .vsock
                 .iter()
-                .all(|p| p.direction == crate::driver::VsockDirection::HostDials),
-            "console ports must be HostDials"
-        );
+                .filter(|p| p.guest_port > CONSOLE_PORT_BASE)
+                .collect();
+            assert_eq!(console.len(), 128);
+            assert!(
+                console
+                    .iter()
+                    .all(|p| p.direction == crate::driver::VsockDirection::HostDials),
+                "console ports must be HostDials"
+            );
 
-        // Paths live under <state_dir>/vsock/ — same shape as the Vz convention.
-        let first = &console[0];
-        assert!(
-            first.host_uds.to_string_lossy().contains("/vsock/vsock-"),
-            "path must be under vsock/ subdir: {}",
-            first.host_uds.display()
-        );
+            // Paths live under <state_dir>/vsock/ — same shape as the Vz convention.
+            let first = &console[0];
+            assert!(
+                first.host_uds.to_string_lossy().contains("/vsock/vsock-"),
+                "path must be under vsock/ subdir: {}",
+                first.host_uds.display()
+            );
+        });
     }
 
     #[test]
     fn start_workload_without_dev_console_carries_only_three_vsock_entries() {
-        let policy = NetworkPolicy::deny_all();
+        with_test_data_dir(|| {
+            let policy = NetworkPolicy::deny_all();
+            let redaction = RedactionPolicy::default();
+            let runner =
+                WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+
+            let cfg = VmStartConfig {
+                dev_console: false,
+                ..config("w-sealed")
+            };
+            runner
+                .start_workload(&WorkloadLaunchInputs {
+                    config: &cfg,
+                    tenant: "t",
+                    secrets: &[],
+                    redaction: &redaction,
+                    network_policy: &policy,
+                    cmdline: String::new(),
+                })
+                .expect("start_workload without dev_console succeeds");
+
+            let specs = runner.driver.booted_specs();
+            let spec = &specs[0];
+            assert_eq!(
+                spec.vsock.len(),
+                3,
+                "sealed prod boot must carry no console listeners"
+            );
+        });
+    }
+
+    #[test]
+    fn start_workload_appends_staged_egress_ca_cmdline_token() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let policy =
+            NetworkPolicy::allow_list(vec![mvm_core::policy::network_policy::HostPort::new(
+                "api.example.com",
+                443,
+            )]);
         let redaction = RedactionPolicy::default();
         let runner =
             WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
 
-        let cfg = VmStartConfig {
-            dev_console: false,
-            ..config("w-sealed")
-        };
+        let cfg = config("w-egress-ca");
+        let state_dir = vm_state_dir(&cfg.name);
+        let delivery = crate::substitution_spawn::build_egress_tls_delivery(
+            &["api.example.com"],
+            &mvm_core::config::egress_ca_dir(),
+        )
+        .unwrap();
+        crate::substitution_spawn::write_egress_intermediate(
+            &state_dir,
+            &delivery.endpoint_cert_pem,
+            &delivery.endpoint_key_pem,
+        )
+        .unwrap();
         runner
             .start_workload(&WorkloadLaunchInputs {
                 config: &cfg,
-                tenant: "t",
+                tenant: "tenant-x",
+                secrets: &[],
+                redaction: &redaction,
+                network_policy: &policy,
+                cmdline: "console=ttyAMA0".into(),
+            })
+            .unwrap();
+
+        let specs = runner.driver.booted_specs();
+        let spec = &specs[0];
+        assert!(spec.cmdline.contains("console=ttyAMA0"));
+        assert!(spec.cmdline.contains("mvm.egress_ca="));
+    }
+
+    #[test]
+    fn start_workload_with_empty_cmdline_preserves_hvf_default_when_staging_egress_ca() {
+        let _guard = crate::base::runtime_meta::HOME_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_DATA_DIR", dir.path());
+
+        let policy =
+            NetworkPolicy::allow_list(vec![mvm_core::policy::network_policy::HostPort::new(
+                "api.example.com",
+                443,
+            )]);
+        let redaction = RedactionPolicy::default();
+        let runner =
+            WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
+
+        let cfg = config("w-egress-ca-default-cmdline");
+        let state_dir = vm_state_dir(&cfg.name);
+        let delivery = crate::substitution_spawn::build_egress_tls_delivery(
+            &["api.example.com"],
+            &mvm_core::config::egress_ca_dir(),
+        )
+        .unwrap();
+        crate::substitution_spawn::write_egress_intermediate(
+            &state_dir,
+            &delivery.endpoint_cert_pem,
+            &delivery.endpoint_key_pem,
+        )
+        .unwrap();
+        runner
+            .start_workload(&WorkloadLaunchInputs {
+                config: &cfg,
+                tenant: "tenant-x",
                 secrets: &[],
                 redaction: &redaction,
                 network_policy: &policy,
                 cmdline: String::new(),
             })
-            .expect("start_workload without dev_console succeeds");
+            .unwrap();
 
         let specs = runner.driver.booted_specs();
         let spec = &specs[0];
-        assert_eq!(
-            spec.vsock.len(),
-            3,
-            "sealed prod boot must carry no console listeners"
-        );
+        assert!(spec.cmdline.contains("root=/dev/vda"));
+        assert!(spec.cmdline.contains("init=/init"));
+        assert!(spec.cmdline.contains("mvm.egress_ca="));
     }
 }
