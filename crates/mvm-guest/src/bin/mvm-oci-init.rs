@@ -33,7 +33,20 @@ mod linux {
             bring_loopback_up();
             spawn_one(Path::new(EGRESS_CLIENT), "egress-client");
         }
-        spawn_one_optional(resolve_guest_agent(), "guest-agent");
+        // The guest agent is the mvm vsock control plane — the whole reason this
+        // init exists (scratch/distroless/Alpine all get it from the overlay).
+        // Fail closed if it can't be resolved: idling on agent-less would leave
+        // the host waiting out its agent-readiness timeout on a silently dead VM.
+        // PID 1 exiting panics the kernel (panic=-1 -> reboot), so the boot fails
+        // loudly instead.
+        let Some(agent) = resolve_guest_agent() else {
+            eprintln!(
+                "mvm-oci-init: no guest agent resolved from /mvm/runtime and no baked \
+                 fallback — refusing to boot without the mvm control plane"
+            );
+            std::process::exit(1);
+        };
+        spawn_one(&agent, "guest-agent");
         idle_forever();
     }
 
@@ -341,14 +354,6 @@ mod linux {
         }
     }
 
-    fn spawn_one_optional(path: Option<PathBuf>, label: &str) {
-        let Some(path) = path else {
-            eprintln!("mvm-oci-init: no executable {label} found");
-            return;
-        };
-        spawn_one(&path, label);
-    }
-
     fn cmdline() -> String {
         fs::read_to_string("/proc/cmdline").unwrap_or_default()
     }
@@ -537,6 +542,18 @@ mod linux {
                 |path| path == Path::new(AGENT_FALLBACK),
             );
             assert_eq!(got, Some(PathBuf::from(AGENT_FALLBACK)));
+        }
+
+        #[test]
+        fn resolve_guest_agent_for_required_overlay_returns_none_when_overlay_missing() {
+            // No executable candidate -> None, which main() treats as fatal
+            // (fail closed) rather than booting agent-less.
+            let got = resolve_guest_agent_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                mvm_core::security::AgentProfile::SealedProd,
+                |_path| false,
+            );
+            assert_eq!(got, None);
         }
     }
 }
