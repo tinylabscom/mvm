@@ -43,6 +43,23 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D
       warnings`, `cargo test --workspace`, and the live TTY witness
       `MVM_DATA_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test /private/tmp/mvm-interactive-oci-dev-console-target/debug/mvmctl machine run --image alpine -it --allow-host google.com -- /bin/sh`, which reached `~ #`, ran `echo READY_FROM_ALPINE` plus `uname -a`, and exited cleanly.
+- [x] 2026-07-13 Plan 219 / Plan 236 macOS verb-grant witness harness: the
+      refreshed current-main branch now carries the missing disabled-by-default
+      HVF live-smoke harness for the last honest Plan 219 blocker. The new
+      `prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit`
+      target in `tests/oci_image_runner_smoke.rs` compiles the checked-in
+      `examples/python/hello-app`, boots a sealed `machine run --entrypoint -d`
+      session with only `ping` + `run-entrypoint` granted, asserts listed
+      `RunEntrypoint` success (`"hello ari"`), checks `console.log` for
+      `mvm-init: provisioned verb-grant` before
+      `mvm-guest-agent: control plane ready`, expects
+      `mvmctl machine set-timeout <vm> 349` to fail with
+      `update-idle-timeout`, and verifies the per-VM `verb_denied` workload
+      chain plus `mvmctl trust audit verify --tenant local`. Focused
+      validation is green with `cargo test --test oci_image_runner_smoke -- --nocapture`
+      and `cargo clippy --test oci_image_runner_smoke -- -D warnings`. The
+      production blocker is now the real host run/evidence, not the absence of
+      a reusable witness harness.
 - [x] 2026-07-11 Plan 236 OCI `--prod` live witness closeout: the
       source-checkout prod harness now forces `--kernel-source compile` so the
       local witness does not depend on a release-published workload-kernel

@@ -30,13 +30,21 @@
 #![cfg(unix)]
 
 use mvm_backend::backend::AnyBackend;
+#[cfg(target_os = "macos")]
+use std::io::Write;
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
 use std::process::Command;
+#[cfg(target_os = "macos")]
+use std::process::Stdio;
+#[cfg(target_os = "macos")]
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use serde::Deserialize;
+#[cfg(target_os = "macos")]
+use tempfile::TempDir;
 
 const ENABLE_VAR: &str = "MVM_OCI_IMAGE_RUNNER_SMOKE";
 const REQUIRED_OVERLAY_ENABLE_VAR: &str = "MVM_OCI_REQUIRED_OVERLAY_SMOKE";
@@ -55,6 +63,21 @@ const PROD_DEFAULT_POLICY_IDENTITY: &str =
     "https://github.com/chainguard-images/images/.github/workflows/release.yaml@refs/heads/main";
 #[cfg(target_os = "macos")]
 const PROD_DEFAULT_POLICY_ISSUER: &str = "https://token.actions.githubusercontent.com";
+#[cfg(target_os = "macos")]
+const VERB_GRANT_ENABLE_VAR: &str = "MVM_AGENT_VERB_GRANT_SMOKE";
+#[cfg(target_os = "macos")]
+const HELLO_APP_ARGV: &str = "[[\"ari\"], {}]";
+#[cfg(target_os = "macos")]
+const VERB_GRANT_STAGED_MARKER: &str = "mvm-init: provisioned verb-grant";
+#[cfg(target_os = "macos")]
+const AGENT_READY_MARKER: &str = "mvm-guest-agent: control plane ready";
+#[cfg(target_os = "macos")]
+const DENIED_VERB: &str = "update-idle-timeout";
+#[cfg(target_os = "macos")]
+const HELLO_APP_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/examples/python/hello-app/app.py"
+);
 
 #[cfg(target_os = "macos")]
 #[derive(Debug, Deserialize)]
@@ -69,6 +92,49 @@ struct CachedOciImage {
     resolved_digest: String,
     #[serde(default)]
     rootfs_path: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Deserialize)]
+struct SessionInfo {
+    vm_name: String,
+}
+
+#[cfg(target_os = "macos")]
+struct SessionCleanup {
+    data_dir: PathBuf,
+    session_id: Option<String>,
+}
+
+#[cfg(target_os = "macos")]
+impl SessionCleanup {
+    fn new(data_dir: &Path) -> Self {
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            session_id: None,
+        }
+    }
+
+    fn arm(&mut self, session_id: String) {
+        self.session_id = Some(session_id);
+    }
+
+    fn disarm(&mut self) {
+        self.session_id = None;
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for SessionCleanup {
+    fn drop(&mut self) {
+        let Some(session_id) = self.session_id.as_deref() else {
+            return;
+        };
+        let _ = mvmctl_with_target_path()
+            .env("MVM_DATA_DIR", &self.data_dir)
+            .args(["session", "kill", session_id])
+            .output();
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -99,6 +165,70 @@ fn mvmctl_with_target_path() -> Command {
     let mut cmd = Command::new(mvmctl);
     cmd.env("PATH", path);
     cmd
+}
+
+#[cfg(target_os = "macos")]
+fn smoke_data_dir(sandbox: &TempDir) -> PathBuf {
+    sandbox.path().join("mvm-state")
+}
+
+#[cfg(target_os = "macos")]
+fn workload_audit_path(data_dir: &Path, vm_name: &str) -> PathBuf {
+    data_dir
+        .join("audit")
+        .join(format!("local.{vm_name}.workload.jsonl"))
+}
+
+#[cfg(target_os = "macos")]
+fn console_log_path(data_dir: &Path, vm_name: &str) -> PathBuf {
+    data_dir.join("vms").join(vm_name).join("console.log")
+}
+
+#[cfg(target_os = "macos")]
+fn kept_alive_session_id(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("Session kept alive: ")
+            .map(str::trim)
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_file_contains(path: &Path, needle: &str, timeout: Duration) -> String {
+    let start = Instant::now();
+    loop {
+        if let Ok(contents) = std::fs::read_to_string(path)
+            && contents.contains(needle)
+        {
+            return contents;
+        }
+        assert!(
+            start.elapsed() < timeout,
+            "timed out waiting for {needle:?} in {}\nlast contents:\n{}",
+            path.display(),
+            std::fs::read_to_string(path).unwrap_or_else(|_| "<unreadable>".to_string())
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn run_with_stdin(cmd: &mut Command, stdin: &[u8], context: &str) -> std::process::Output {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|e| panic!("{context}: spawn failed: {e}"));
+    child
+        .stdin
+        .take()
+        .expect("child stdin piped")
+        .write_all(stdin)
+        .unwrap_or_else(|e| panic!("{context}: write stdin failed: {e}"));
+    child
+        .wait_with_output()
+        .unwrap_or_else(|e| panic!("{context}: wait_with_output failed: {e}"))
 }
 
 #[cfg(target_os = "macos")]
@@ -480,4 +610,170 @@ fn run_image_uses_vsock_only_egress_contract_on_selected_backend() {
         combined.contains("ALL_PROXY=socks5h://127.0.0.1:1080"),
         "guest env must receive the OCI SOCKS proxy contract for the vsock egress helper.\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
+    if std::env::var(VERB_GRANT_ENABLE_VAR).as_deref() != Ok("1") {
+        eprintln!(
+            "[agent_verb_grant_smoke] skipped - set {VERB_GRANT_ENABLE_VAR}=1 on macOS with a working hvf workload path, builder VM access, and network/build prerequisites to capture the sealed grant-delivery witness"
+        );
+        return;
+    }
+
+    let sandbox = tempfile::tempdir().expect("create smoke sandbox");
+    let data_dir = smoke_data_dir(&sandbox);
+    std::fs::create_dir_all(&data_dir).expect("create smoke data dir");
+    let mut cleanup = SessionCleanup::new(&data_dir);
+    let compile_out = sandbox.path().join("hello-app");
+    let app_path = Path::new(HELLO_APP_PATH);
+    assert!(
+        app_path.is_file(),
+        "hello-app fixture missing at {}",
+        app_path.display()
+    );
+
+    let compile = mvmctl_with_target_path()
+        .env("MVM_DATA_DIR", &data_dir)
+        .args([
+            "build",
+            "compile",
+            app_path.to_str().expect("hello-app path utf-8"),
+            "--out",
+            compile_out.to_str().expect("compile out utf-8"),
+        ])
+        .output()
+        .expect("spawn mvmctl build compile hello-app");
+    let compile_stdout = String::from_utf8_lossy(&compile.stdout);
+    let compile_stderr = String::from_utf8_lossy(&compile.stderr);
+    assert!(
+        compile.status.success(),
+        "mvmctl build compile failed with {:?}\nstdout:\n{compile_stdout}\nstderr:\n{compile_stderr}",
+        compile.status.code()
+    );
+
+    let run = run_with_stdin(
+        mvmctl_with_target_path()
+            .env("MVM_DATA_DIR", &data_dir)
+            .env("MVM_HYPERVISOR", "hvf")
+            .args([
+                "machine",
+                "run",
+                "--flake",
+                compile_out.to_str().expect("compile out utf-8"),
+                "--entrypoint",
+                "-d",
+                "--agent-verb",
+                "ping",
+                "--agent-verb",
+                "run-entrypoint",
+            ]),
+        HELLO_APP_ARGV.as_bytes(),
+        "spawn mvmctl machine run --entrypoint",
+    );
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    let run_stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        run.status.success(),
+        "machine run --entrypoint failed with {:?}\nstdout:\n{run_stdout}\nstderr:\n{run_stderr}",
+        run.status.code()
+    );
+    let run_combined = format!("{run_stdout}\n{run_stderr}");
+    assert!(
+        run_combined.contains("\"hello ari\""),
+        "listed RunEntrypoint witness missing hello-app output.\nstdout:\n{run_stdout}\nstderr:\n{run_stderr}"
+    );
+    let session_id = kept_alive_session_id(&run_combined)
+        .expect("machine run --entrypoint -d must print the kept-alive session id")
+        .to_string();
+    cleanup.arm(session_id.clone());
+
+    let info = mvmctl_with_target_path()
+        .env("MVM_DATA_DIR", &data_dir)
+        .args(["session", "info", &session_id])
+        .output()
+        .expect("spawn mvmctl session info");
+    let info_stdout = String::from_utf8_lossy(&info.stdout);
+    let info_stderr = String::from_utf8_lossy(&info.stderr);
+    assert!(
+        info.status.success(),
+        "session info failed with {:?}\nstdout:\n{info_stdout}\nstderr:\n{info_stderr}",
+        info.status.code()
+    );
+    let info_json: SessionInfo =
+        serde_json::from_slice(&info.stdout).expect("parse session info json");
+    let vm_name = info_json.vm_name;
+
+    let console_log = console_log_path(&data_dir, &vm_name);
+    let console = wait_for_file_contains(&console_log, AGENT_READY_MARKER, Duration::from_secs(30));
+    let staged_index = console.find(VERB_GRANT_STAGED_MARKER).unwrap_or_else(|| {
+        panic!(
+            "console log missing grant staged marker {VERB_GRANT_STAGED_MARKER:?}\n{}",
+            console
+        )
+    });
+    let ready_index = console.find(AGENT_READY_MARKER).unwrap_or_else(|| {
+        panic!(
+            "console log missing agent ready marker {AGENT_READY_MARKER:?}\n{}",
+            console
+        )
+    });
+    assert!(
+        staged_index < ready_index,
+        "grant must stage before the agent reports ready.\n{}",
+        console
+    );
+
+    let denied = mvmctl_with_target_path()
+        .env("MVM_DATA_DIR", &data_dir)
+        .env("MVM_HYPERVISOR", "hvf")
+        .args(["machine", "set-timeout", &vm_name, "349"])
+        .output()
+        .expect("spawn mvmctl machine set-timeout");
+    let denied_stdout = String::from_utf8_lossy(&denied.stdout);
+    let denied_stderr = String::from_utf8_lossy(&denied.stderr);
+    assert!(
+        !denied.status.success(),
+        "unlisted ProdSafe verb should be denied.\nstdout:\n{denied_stdout}\nstderr:\n{denied_stderr}"
+    );
+    let denied_combined = format!("{denied_stdout}\n{denied_stderr}");
+    assert!(
+        denied_combined.contains(DENIED_VERB),
+        "denial output must name the refused verb {DENIED_VERB:?}.\nstdout:\n{denied_stdout}\nstderr:\n{denied_stderr}"
+    );
+
+    let verify = mvmctl_with_target_path()
+        .env("MVM_DATA_DIR", &data_dir)
+        .args(["trust", "audit", "verify", "--tenant", "local"])
+        .output()
+        .expect("spawn mvmctl trust audit verify");
+    let verify_stdout = String::from_utf8_lossy(&verify.stdout);
+    let verify_stderr = String::from_utf8_lossy(&verify.stderr);
+    assert!(
+        verify.status.success(),
+        "trust audit verify failed with {:?}\nstdout:\n{verify_stdout}\nstderr:\n{verify_stderr}",
+        verify.status.code()
+    );
+
+    let workload_audit = workload_audit_path(&data_dir, &vm_name);
+    let audit_contents =
+        wait_for_file_contains(&workload_audit, "verb_denied", Duration::from_secs(15));
+    assert!(
+        audit_contents.contains(DENIED_VERB),
+        "workload audit chain must carry the denied verb name.\n{audit_contents}"
+    );
+
+    let kill = mvmctl_with_target_path()
+        .env("MVM_DATA_DIR", &data_dir)
+        .args(["session", "kill", &session_id])
+        .output()
+        .expect("spawn mvmctl session kill");
+    assert!(
+        kill.status.success(),
+        "session kill cleanup failed: stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&kill.stdout),
+        String::from_utf8_lossy(&kill.stderr)
+    );
+    cleanup.disarm();
 }
