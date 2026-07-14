@@ -272,7 +272,7 @@ impl VmBackend for FirecrackerBackend {
                 "Firecracker requires /dev/kvm, which is not available on this host. \
                  Firecracker is the production runtime; for local dev/test on a no-KVM \
                  host run with `--hypervisor qemu` (Tier-3 TCG software emulation, \
-                 ADR-072). To run Firecracker, use a host with KVM enabled."
+                 ADR-014). To run Firecracker, use a host with KVM enabled."
             );
         }
         let fc_config = FirecrackerConfig::from_start_config(config)?;

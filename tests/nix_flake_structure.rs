@@ -967,7 +967,7 @@ fn flake_lock_pins_microvm_input_by_hash() {
     );
 }
 
-/// Plan 199 WS-B — the no-release-binary contract (ADR-046) must hold for
+/// Plan 199 WS-B — the no-release-binary contract (ADR-014) must hold for
 /// *every* host package under `nix/packages/`, not just `mvmctl.nix`. A new
 /// sidecar package that pulled a project release tarball or carried
 /// `binaryNativeCode` provenance would silently bypass the source-build
@@ -1006,7 +1006,7 @@ fn no_host_package_uses_release_binary_provenance() {
                 !content.contains(needle),
                 "host package nix/packages/{name} must not use {needle:?} — host \
                  packages are source-built, never mvm-published release binaries \
-                 (ADR-046 / Plan 199 WS-B)"
+                 (ADR-014 / Plan 199 WS-B)"
             );
         }
         scanned += 1;

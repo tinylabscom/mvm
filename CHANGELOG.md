@@ -67,7 +67,7 @@ All notable changes to mvm are documented in this file.
 - **secrets**: SecretRef gains auth_type + allowed_hosts; lift the not-implemented gate (plan 129 Phase A)
 - **plan-166**: QEMU run_build — steady-state builds (Task 1.5)
 - **plan-166**: Route mvmctl build through the selected builder backend
-- **plan-166**: Skip egress lockdown on the dev-tier QEMU builder (ADR-072)
+- **plan-166**: Skip egress lockdown on the dev-tier QEMU builder (ADR-014)
 - **plan-124 C1/2a**: Wire runtime-overlay resolver into the up/run boot path
 - **mvm-backend**: Public sign_binaries/entitlements_present API
 - **mvm-backend**: Collect_sign_targets aggregator
@@ -309,7 +309,7 @@ All notable changes to mvm are documented in this file.
 - **plan-204**: Default guest-image builds to the typed mvm-builderd route + raw-shell debug gate (WS-D)
 - **machine**: --volume host shares + auto-recreate for managed `machine run`
 - **cli**: Fold `up`/`run` into `machine run` — source axis (Plan 208 Task 4, pt 1)
-- **vm-host**: ADR-094 + Plan 209 Tasks 1–2 — unified mvm-bridge sidecar contract + binary
+- **vm-host**: ADR-014 + Plan 209 Tasks 1–2 — unified mvm-bridge sidecar contract + binary
 - **vm-host**: Plan 209 Task 4 — fold FC+vz sidecars into mvm-bridge (libkrun merged); live-verified
 - Add attested pack manifest verifier core
 - **backend**: Fail-closed capability model (Plan 214 slice 1)
@@ -429,14 +429,14 @@ All notable changes to mvm are documented in this file.
 - **plan-152**: Record minimal-VZ-launcher prior art; flip Plan 134 gate
 - **plan-166**: Promote cold-state guarantee to a witnessed non-persistence claim
 - **plan-167**: Renumber non-persistence plan 166->167 (collision with feat/plan-166-qemu-builder)
-- ADR-072 + Plan 165 — QEMU dev/builder backend (Firecracker stays prod)
+- ADR-014 + Plan 165 — QEMU dev/builder backend (Firecracker stays prod)
 - **adr-072,plan-165**: Scope QEMU to Linux; Vz is the macOS built-in equivalent
 - **claim15**: Catalog row + ADR-002 + CLAUDE.md — no interactive access to a sealed prod microVM (Plan 165 WS-C)
 - **plan-165**: Tick WS-B/WS-C; defer A4 invoke witness + note latent B4 gate
 - **sdk**: Clarify B1 comment — B4 enforces via the entrypoint_present wire field, not this predicate (Plan 165 review fix)
 - **plan-124 A4**: Record the −27-crate cut; defer A2 (serde_json unremovable)
 - **plan-157,adr-072**: Warm-snapshot prior-art adoption boundary
-- **adr**: Renumber ADR-072 → ADR-073 (072 taken by qemu-dev-builder-backend on main)
+- **adr**: Renumber ADR-014 (then numbered 072) → ADR-073 (072 taken by qemu-dev-builder-backend on main)
 - **adr-073**: Fix half-applied renumber (072→073 in headings + Plan 157 links)
 - **adr-073,plan-157**: Scope page-cache priming to the immutable rootfs
 - **plan-166**: Record QEMU run_build reachability gap found on box
@@ -609,7 +609,7 @@ All notable changes to mvm are documented in this file.
 - **machine**: Unified `machine run` lifecycle — ADR-091 + Plan 207
 - **adr-092**: `machine` as the sole workload CLI surface (consolidation)
 - **adr-093**: Linux builder auto-fallback over libkrun, default unchanged
-- **plan-210**: Kernel-pin security watcher (ADR-093 §6 follow-up)
+- **plan-210**: Kernel-pin security watcher (ADR-014 §6 follow-up)
 - **adr-096**: Stage 0 seed Nix 2.31.1 narHash regression — write-up + open decision
 - **agents**: Forbid spec/ADR/PR refs in code comments (matches CI lint gate)
 - **plan-204**: WS-D build-default flip + raw-shell gate merged
@@ -619,7 +619,7 @@ All notable changes to mvm are documented in this file.
 - Plan attested fast first boot packs
 - **plan-211**: Task 5 cleanup — repoint bridge fuzz labels + stale-ref sweep
 - **release**: Record why Linux intentionally doesn't ship mvm-libkrun-supervisor
-- Plan 214 clean-replacement architecture + ADR-098
+- Plan 214 clean-replacement architecture + ADR-014
 - ADR-103 + Plan 215 plan-bound agent verb capabilities
 - Plan 216 — mvm-client local/remote facade implementation plan
 - Mvm-client facade design + mvmd cloud-readiness assessment (research)

@@ -185,7 +185,7 @@ Rules:
 
 ## No Spec References in Code Comments
 
-**NEVER** cite a plan, ADR, PR, sprint, or workstream in a code comment. Process artifacts (`Plan 200`, `ADR-093`, `PR #1234`, `Sprint 52`, `W2.4`) belong in specs, commit messages, and PR descriptions — not in the source. The `check-no-spec-refs-in-comments` lint (`xtask/src/check_no_spec_refs_in_comments.rs`, a CI Lint-job gate) extracts comment text and fails the build on any such reference, so a citation that builds locally will still break the GitHub action.
+**NEVER** cite a plan, ADR, PR, sprint, or workstream in a code comment. Process artifacts (`Plan 200`, `ADR-014`, `PR #1234`, `Sprint 52`, `W2.4`) belong in specs, commit messages, and PR descriptions — not in the source. The `check-no-spec-refs-in-comments` lint (`xtask/src/check_no_spec_refs_in_comments.rs`, a CI Lint-job gate) extracts comment text and fails the build on any such reference, so a citation that builds locally will still break the GitHub action.
 
 Keep the *reasoning* in the comment, drop the *citation*. Write the invariant or the "why" the comment is explaining, not the spec number that motivated it:
 

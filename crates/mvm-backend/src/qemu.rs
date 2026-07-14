@@ -558,7 +558,7 @@ impl VmBackend for QemuBackend {
             layer_coverage: LayerCoverage::all_layers(),
             tier: "Tier 2",
             notes: &[
-                "QEMU workload runtime (Plan 166 / ADR-072); dev/test tier only.",
+                "QEMU workload runtime (Plan 166 / ADR-014); dev/test tier only.",
                 "KVM-accelerated where /dev/kvm is present; TCG software-emulation fallback otherwise (runtime Tier-3, banner-flagged).",
                 "Larger device model than Firecracker → higher L2 audit cost; outside ADR-002 claims. Never a production runtime.",
             ],
