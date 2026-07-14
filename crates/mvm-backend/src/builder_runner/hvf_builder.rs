@@ -21,8 +21,8 @@ use mvm_build::builder_vm::{
     BuilderArtifacts, BuilderJob, BuilderMounts, BuilderVm, BuilderVmError, builder_vm_cache_dir,
 };
 use mvm_build::builder_vm_runtime::{
-    acquire_nix_store_image_lock, finalize_flake_job, read_job_result_with_diagnostics,
-    shell_job_exit_error, stage_job_dir, stage_shell_job_dir,
+    acquire_nix_store_image_lock, copy_dir_filtered, finalize_flake_job,
+    read_job_result_with_diagnostics, shell_job_exit_error, stage_job_dir, stage_shell_job_dir,
 };
 
 use super::runner::{BuilderBuild, BuilderRunner};
@@ -96,6 +96,7 @@ impl HvfBuilderVm {
         let job_id = unique_job_id();
         let job_dir = cache.join("jobs").join(&job_id);
         stage_shell_job_dir(&job_dir, &job.script)?;
+        let work_staging = stage_filtered_work_input(&job.work_dir)?;
 
         let host_bin_dir = cache.join("shell-job-empty-mvm-bins");
         std::fs::create_dir_all(&host_bin_dir).map_err(|e| {
@@ -114,7 +115,7 @@ impl HvfBuilderVm {
                 rootfs: &self.rootfs,
                 nix_store: nix_store_lock.path(),
                 job_dir: &job_dir,
-                work_src: &job.work_dir,
+                work_src: work_staging.path(),
                 host_bin_dir: &host_bin_dir,
                 runtime_overlay: Some(runtime_overlay.as_path()),
                 closure_nar: None,
@@ -167,6 +168,20 @@ fn unique_job_id() -> String {
 /// backend rather than surfacing a false build error.
 fn map_runner_failure(detail: String) -> BuilderVmError {
     BuilderVmError::HvfVmmFailed { detail }
+}
+
+fn stage_filtered_work_input(src: &std::path::Path) -> Result<tempfile::TempDir, BuilderVmError> {
+    let staged = tempfile::TempDir::new().map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!("creating filtered HVF work dir: {e}"))
+    })?;
+    copy_dir_filtered(src, staged.path()).map_err(|e| {
+        BuilderVmError::ExtractionFailed(format!(
+            "staging filtered HVF work dir {} -> {}: {e}",
+            src.display(),
+            staged.path().display()
+        ))
+    })?;
+    Ok(staged)
 }
 
 /// Resolve (or build) the runtime overlay the lean HVF builder rootfs sources
@@ -241,6 +256,7 @@ impl BuilderVm for HvfBuilderVm {
                 .as_ref()
                 .map(|_| mounts.flake_src.as_path()),
         )?;
+        let work_staging = stage_filtered_work_input(&mounts.flake_src)?;
 
         // Boot the builder VM over the hvf VMM + disk transport; the guest
         // runs cmd.sh and tars its artifacts back onto the output disk.
@@ -253,7 +269,7 @@ impl BuilderVm for HvfBuilderVm {
                 rootfs: &self.rootfs,
                 nix_store: nix_store_lock.path(),
                 job_dir: &job_dir,
-                work_src: &mounts.flake_src,
+                work_src: work_staging.path(),
                 host_bin_dir: &mounts.host_bin_dir,
                 runtime_overlay: Some(runtime_overlay.as_path()),
                 closure_nar: self.closure_nar.as_deref(),
@@ -360,5 +376,27 @@ mod tests {
             validate_shell_job(&job),
             Err(BuilderVmError::NotYetImplemented)
         ));
+    }
+
+    #[test]
+    fn stage_filtered_work_input_prunes_mvm_test_dirs() {
+        let src = tempfile::tempdir().expect("src");
+        let keep = src.path().join("src/keep.txt");
+        std::fs::create_dir_all(keep.parent().expect("keep parent")).expect("create keep dir");
+        std::fs::write(&keep, b"keep").expect("write keep file");
+        let skip = src.path().join("pkg/.mvm-test/cache/blob");
+        std::fs::create_dir_all(skip.parent().expect("skip parent")).expect("create skip dir");
+        std::fs::write(&skip, b"skip").expect("write skip file");
+
+        let staged = stage_filtered_work_input(src.path()).expect("stage filtered work input");
+
+        assert_eq!(
+            std::fs::read_to_string(staged.path().join("src/keep.txt")).expect("read kept file"),
+            "keep"
+        );
+        assert!(
+            !staged.path().join("pkg/.mvm-test").exists(),
+            ".mvm-test dirs must be pruned from the HVF builder work snapshot"
+        );
     }
 }

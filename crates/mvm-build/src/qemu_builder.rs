@@ -116,7 +116,8 @@ const QEMU_STAGE0_OUT_ARTIFACT_NAMES: &[&str] = &[
 /// packing — the heavy build/VCS dirs the nix workspace filter ignores
 /// anyway. Shared with the libkrun Stage 0 path (`libkrun_builder`), which
 /// packs `/work` onto an ext4 disk the same way this QEMU path does.
-pub(crate) const WORK_TREE_EXCLUDE_DIRS: &[&str] = &["target", ".git", ".claude", "node_modules"];
+pub(crate) const WORK_TREE_EXCLUDE_DIRS: &[&str] =
+    &["target", ".git", ".claude", "node_modules", ".mvm-test"];
 
 /// Ext4 image sizes (sparse — `set_len` + `mkfs.ext4 -d` only touch real
 /// content). The seed disk holds the whole build closure nix downloads.
@@ -545,6 +546,36 @@ mod tests {
         assert_eq!(stats.file_count, 2);
         assert_eq!(stats.dir_count, 2);
         assert_eq!(stats.file_bytes, 10);
+    }
+
+    #[test]
+    fn copy_tree_filtered_skips_mvm_test_dirs_at_any_depth() {
+        let src = tempfile::tempdir().expect("src tempdir");
+        let dst = tempfile::tempdir().expect("dst tempdir");
+        let nested_skip = src.path().join("pkg/.mvm-test/cache/deep.txt");
+        fs::create_dir_all(
+            nested_skip
+                .parent()
+                .expect("nested skip path must have parent"),
+        )
+        .expect("create nested skip dir");
+        fs::write(&nested_skip, b"skip").expect("write skip file");
+        let keep = src.path().join("pkg/keep.txt");
+        fs::create_dir_all(keep.parent().expect("keep path must have parent"))
+            .expect("create keep dir");
+        fs::write(&keep, b"keep").expect("write keep file");
+
+        super::copy_tree_filtered(src.path(), dst.path(), super::WORK_TREE_EXCLUDE_DIRS)
+            .expect("filtered copy");
+
+        assert!(
+            !dst.path().join("pkg/.mvm-test").exists(),
+            ".mvm-test dirs must be pruned from the staged /work tree"
+        );
+        assert_eq!(
+            fs::read_to_string(dst.path().join("pkg/keep.txt")).expect("read kept file"),
+            "keep"
+        );
     }
 }
 

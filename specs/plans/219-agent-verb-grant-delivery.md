@@ -54,6 +54,25 @@ two `libkrun-sys` loopback-bind tests when the host sandbox denies even
 `cargo test -p mvm-cli top_level_cli_routes_machine_set_timeout --offline`, and
 `cargo test -p libkrun-sys free_loopback_port_is_in_range_and_bindable --lib -- --nocapture`.
 
+**Refresh 2026-07-14:** the current-main refresh branch now also closes two
+more real macOS source-checkout blockers on the last HVF witness lane. First,
+the disabled-by-default witness harness now forces both `MVM_DATA_DIR` and
+`MVM_CACHE_DIR` into a short `/tmp/mvm-oci-smoke-*` sandbox so Stage 0 and the
+overlay/bin caches no longer fail with `ENAMETOOLONG` under deep sibling
+worktree paths. Second, the HVF builder path now stages a filtered source tree
+before disk transport, matching the libkrun path, so source-checkout runs no
+longer tar the entire repo root (including per-worktree `.mvm-test` state)
+into the steady-state builder input. Focused validation is green with
+`cargo test -p mvm-build copy_tree_filtered_skips_mvm_test_dirs_at_any_depth -- --nocapture`,
+`cargo test -p mvm-backend stage_filtered_work_input_prunes_mvm_test_dirs -- --nocapture`,
+`cargo test --test oci_image_runner_smoke prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit -- --nocapture`,
+and `cargo clippy -p mvm-build -p mvm-backend --tests -- -D warnings`.
+The honest remaining macOS blocker is now external cold-cache builder fetch
+reliability on this host: the live witness reaches the in-guest flake build,
+but that build still failed on repeated truncated `cache.nixos.org` downloads
+(`HTTP 206` / `Truncated tar archive detected`) before the sealed workload
+could boot end to end.
+
 **Live Firecracker proof 2026-07-10:** on Linux/KVM host `88.99.197.234`, the
 rebuilt sealed artifact `w6xigclqfmqrwpzfll5rdw7z68mb3z1g` now carries
 `{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}`

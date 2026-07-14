@@ -43,6 +43,26 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D
       warnings`, `cargo test --workspace`, and the live TTY witness
       `MVM_DATA_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test /private/tmp/mvm-interactive-oci-dev-console-target/debug/mvmctl machine run --image alpine -it --allow-host google.com -- /bin/sh`, which reached `~ #`, ran `echo READY_FROM_ALPINE` plus `uname -a`, and exited cleanly.
+- [x] 2026-07-14 Plan 219 / Plan 236 macOS witness source-checkout hardening:
+      the refreshed branch cleared two more real blockers on the last HVF
+      verb-grant proof lane before the external runtime fetch issue surfaced.
+      `tests/oci_image_runner_smoke.rs` now forces both `MVM_DATA_DIR` and
+      `MVM_CACHE_DIR` into a short `/tmp/mvm-oci-smoke-*` sandbox so Stage 0
+      and overlay/bin caches no longer fail with `ENAMETOOLONG` under deep
+      sibling worktrees, and the HVF builder path now stages a filtered source
+      tree before disk transport so source-checkout runs do not tar the whole
+      repo root and `.mvm-test` state into the steady-state builder input.
+      Focused validation is green with `cargo test -p mvm-build
+      copy_tree_filtered_skips_mvm_test_dirs_at_any_depth -- --nocapture`,
+      `cargo test -p mvm-backend stage_filtered_work_input_prunes_mvm_test_dirs
+      -- --nocapture`, the default-skipped
+      `cargo test --test oci_image_runner_smoke
+      prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit -- --nocapture`,
+      and `cargo clippy -p mvm-build -p mvm-backend --tests -- -D warnings`.
+      The live `MVM_AGENT_VERB_GRANT_SMOKE=1` witness now gets as far as the
+      in-guest flake build, where it still fails on this host because repeated
+      `cache.nixos.org` NAR downloads arrive truncated (`HTTP 206` /
+      `Truncated tar archive detected`) before the sealed workload can boot.
 - [x] 2026-07-13 Plan 219 / Plan 236 macOS verb-grant witness harness: the
       refreshed current-main branch now carries the missing disabled-by-default
       HVF live-smoke harness for the last honest Plan 219 blocker. The new

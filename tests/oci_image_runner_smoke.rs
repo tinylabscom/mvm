@@ -173,6 +173,25 @@ fn smoke_data_dir(sandbox: &TempDir) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+fn smoke_cache_dir(sandbox: &TempDir) -> PathBuf {
+    sandbox.path().join("mvm-cache")
+}
+
+#[cfg(target_os = "macos")]
+fn short_smoke_sandbox() -> TempDir {
+    tempfile::Builder::new()
+        .prefix("mvm-oci-smoke-")
+        .tempdir_in("/tmp")
+        .expect("create short smoke sandbox under /tmp")
+}
+
+#[cfg(target_os = "macos")]
+fn smoke_env<'a>(cmd: &'a mut Command, data_dir: &Path, cache_dir: &Path) -> &'a mut Command {
+    cmd.env("MVM_DATA_DIR", data_dir)
+        .env("MVM_CACHE_DIR", cache_dir)
+}
+
+#[cfg(target_os = "macos")]
 fn workload_audit_path(data_dir: &Path, vm_name: &str) -> PathBuf {
     data_dir
         .join("audit")
@@ -622,9 +641,11 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
         return;
     }
 
-    let sandbox = tempfile::tempdir().expect("create smoke sandbox");
+    let sandbox = short_smoke_sandbox();
     let data_dir = smoke_data_dir(&sandbox);
+    let cache_dir = smoke_cache_dir(&sandbox);
     std::fs::create_dir_all(&data_dir).expect("create smoke data dir");
+    std::fs::create_dir_all(&cache_dir).expect("create smoke cache dir");
     let mut cleanup = SessionCleanup::new(&data_dir);
     let compile_out = sandbox.path().join("hello-app");
     let app_path = Path::new(HELLO_APP_PATH);
@@ -634,8 +655,8 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
         app_path.display()
     );
 
-    let compile = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+    let mut compile = mvmctl_with_target_path();
+    let compile = smoke_env(&mut compile, &data_dir, &cache_dir)
         .args([
             "build",
             "compile",
@@ -654,8 +675,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let run = run_with_stdin(
-        mvmctl_with_target_path()
-            .env("MVM_DATA_DIR", &data_dir)
+        smoke_env(&mut mvmctl_with_target_path(), &data_dir, &cache_dir)
             .env("MVM_HYPERVISOR", "hvf")
             .args([
                 "machine",
@@ -689,8 +709,8 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
         .to_string();
     cleanup.arm(session_id.clone());
 
-    let info = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+    let mut info = mvmctl_with_target_path();
+    let info = smoke_env(&mut info, &data_dir, &cache_dir)
         .args(["session", "info", &session_id])
         .output()
         .expect("spawn mvmctl session info");
@@ -725,8 +745,8 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
         console
     );
 
-    let denied = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+    let mut denied = mvmctl_with_target_path();
+    let denied = smoke_env(&mut denied, &data_dir, &cache_dir)
         .env("MVM_HYPERVISOR", "hvf")
         .args(["machine", "set-timeout", &vm_name, "349"])
         .output()
@@ -743,8 +763,8 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
         "denial output must name the refused verb {DENIED_VERB:?}.\nstdout:\n{denied_stdout}\nstderr:\n{denied_stderr}"
     );
 
-    let verify = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+    let mut verify = mvmctl_with_target_path();
+    let verify = smoke_env(&mut verify, &data_dir, &cache_dir)
         .args(["trust", "audit", "verify", "--tenant", "local"])
         .output()
         .expect("spawn mvmctl trust audit verify");
@@ -764,8 +784,8 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
         "workload audit chain must carry the denied verb name.\n{audit_contents}"
     );
 
-    let kill = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+    let mut kill = mvmctl_with_target_path();
+    let kill = smoke_env(&mut kill, &data_dir, &cache_dir)
         .args(["session", "kill", &session_id])
         .output()
         .expect("spawn mvmctl session kill");
