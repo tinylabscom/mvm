@@ -79,6 +79,11 @@ pub(in crate::commands) struct EntrypointCall {
     /// is the running VM's name. Its substitution endpoint + boot-minted
     /// placeholders are reused; the VM is left running (no teardown).
     pub attach: bool,
+    /// Resolved egress policy for the transient entrypoint boot (from `--net` /
+    /// `--allow-host`). Threaded onto the admitted plan and onto
+    /// `VmStartConfig.network_tunnel` so a baked entrypoint enforces egress
+    /// identically to the transient argv path. Defaults to `deny_all`.
+    pub network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 struct EntrypointAdmission {
@@ -95,6 +100,7 @@ struct EntrypointAdmissionParams<'a> {
     lowered_secrets: &'a super::managed_secrets::LoweredPlanSecrets,
     agent_verb_override: &'a [String],
     keep_alive_dev: bool,
+    network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 impl<'a> EntrypointAdmissionParams<'a> {
@@ -112,6 +118,7 @@ impl<'a> EntrypointAdmissionParams<'a> {
             lowered_secrets: None,
             agent_verb_override: &[],
             keep_alive_dev: false,
+            network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
         }
     }
 }
@@ -125,6 +132,7 @@ struct EntrypointAdmissionParamsBuilder<'a> {
     lowered_secrets: Option<&'a super::managed_secrets::LoweredPlanSecrets>,
     agent_verb_override: &'a [String],
     keep_alive_dev: bool,
+    network_policy: mvm_core::network_policy::NetworkPolicy,
 }
 
 impl<'a> EntrypointAdmissionParamsBuilder<'a> {
@@ -156,6 +164,11 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
         self
     }
 
+    fn network_policy(mut self, network_policy: mvm_core::network_policy::NetworkPolicy) -> Self {
+        self.network_policy = network_policy;
+        self
+    }
+
     fn build(self) -> EntrypointAdmissionParams<'a> {
         EntrypointAdmissionParams {
             rootfs: self.rootfs,
@@ -168,6 +181,7 @@ impl<'a> EntrypointAdmissionParamsBuilder<'a> {
                 .expect("entrypoint admission params require lowered secrets"),
             agent_verb_override: self.agent_verb_override,
             keep_alive_dev: self.keep_alive_dev,
+            network_policy: self.network_policy,
         }
     }
 }
@@ -197,7 +211,7 @@ fn admit_entrypoint_boot(
         deps_volume: None,
         shares: vec![],
         redaction: mvm_core::policy::RedactionPolicy::default(),
-        network_policy: mvm_core::network_policy::NetworkPolicy::deny_all(),
+        network_policy: params.network_policy.clone(),
         agent_verb_override: params.agent_verb_override.to_vec(),
         restrict_agent_verbs: !params.keep_alive_dev
             && super::agent_verbs::image_is_sealed(params.rootfs),
@@ -314,6 +328,8 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
     let mem = call.memory_mib as u64;
     let agent_verb_override = call.agent_verb_override.clone();
     let keep_alive_dev = call.keep_alive_dev;
+    let network_policy = call.network_policy.clone();
+    let admit_network_policy = network_policy.clone();
     let admit_ctx: std::rc::Rc<std::cell::RefCell<Option<super::up::AdmissionContext>>> =
         std::rc::Rc::new(std::cell::RefCell::new(None));
     let ctx_sink = std::rc::Rc::clone(&admit_ctx);
@@ -327,6 +343,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
                 .lowered_secrets(&lowered_secrets)
                 .agent_verb_override(&agent_verb_override)
                 .keep_alive_dev(keep_alive_dev)
+                .network_policy(admit_network_policy.clone())
                 .build(),
         )?;
         let Some(admitted) = admitted else {
@@ -341,6 +358,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         "invoke",
         call.cpus,
         call.memory_mib,
+        &network_policy,
         Some(&admit),
     ) {
         Ok(vm) => {
@@ -872,6 +890,63 @@ mod tests {
         let policy: mvm_core::security::SecurityPolicy =
             serde_json::from_str(&policy_file.content).expect("parse security policy");
         assert_eq!(policy.profile, mvm_core::security::AgentProfile::SealedProd);
+    }
+
+    #[test]
+    fn admit_entrypoint_boot_carries_resolved_allow_list_not_deny_all() {
+        use mvm_build::builder_vm::GuestSidecar;
+        use mvm_core::network_policy::{HostPort, NetworkPolicy};
+
+        let mut env = TestEnv::new();
+        let dir = tempfile::tempdir().expect("tempdir");
+        env.set("MVM_DATA_DIR", dir.path());
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
+        let sidecar = GuestSidecar::for_oci_run("egress-probe", true, true);
+        sidecar.write_to_dir(dir.path()).expect("write sidecar");
+
+        // A literal-IP allow-list skips DNS resolution in the generated signed
+        // policy, so this exercises the real threading without a live resolver.
+        let policy = NetworkPolicy::allow_list(vec![HostPort::new("127.0.0.1", 443)]);
+        let lowered_secrets = LoweredPlanSecrets::default();
+        let admitted = admit_entrypoint_boot(
+            EntrypointAdmissionParams::builder(&rootfs, "invoke-proof-allow", "firecracker")
+                .cpus(1)
+                .mem_mib(256)
+                .lowered_secrets(&lowered_secrets)
+                .agent_verb_override(&["run-entrypoint".into()])
+                .keep_alive_dev(false)
+                .network_policy(policy)
+                .build(),
+        )
+        .expect("admit entrypoint boot")
+        .expect("entrypoint boot admitted");
+
+        // deny_all resolves to `Some(empty)` rules → no generated bundle; the
+        // allow-list resolves to concrete L4 rules → a bundle that pins the host.
+        // Its presence proves the resolved policy survived rather than being
+        // hardcoded to deny_all.
+        let bundle = admitted
+            .context
+            .policy_bundle
+            .as_ref()
+            .expect("allow-list admission must generate a signed egress policy bundle");
+        assert!(
+            bundle
+                .egress
+                .allow_list
+                .iter()
+                .any(|(host, port)| host == "127.0.0.1" && *port == 443),
+            "generated egress bundle must carry the resolved allow-list host:port"
+        );
+        assert!(
+            bundle
+                .network
+                .l4
+                .iter()
+                .any(|r| r.dst_cidr == "127.0.0.1/32" && r.port_lo == 443 && r.port_hi == 443),
+            "generated network policy must carry the resolved L4 allow rule"
+        );
     }
 
     #[test]

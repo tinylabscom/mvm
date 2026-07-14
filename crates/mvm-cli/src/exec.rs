@@ -1535,6 +1535,7 @@ pub fn boot_session_vm(
     vm_name_prefix: &str,
     cpus: u32,
     memory_mib: u32,
+    network_policy: &mvm_core::network_policy::NetworkPolicy,
     admit: Option<&SessionAdmit<'_>>,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
@@ -1574,6 +1575,22 @@ pub fn boot_session_vm(
         config_files: vec![],
         secret_files: vec![],
         runner_dir: None,
+        network_policy: network_policy.clone(),
+        // Derive the userspace L3 egress tunnel from the resolved policy, exactly
+        // as the transient argv path does: an admitted allow-list gets the smoltcp
+        // forwarder whose gate enforces those flows; deny-all / unrestricted return
+        // None (no forwarding tunnel), so plain session/MCP boots are unaffected.
+        // The identity is minted here so the guest cmdline token and the host
+        // worker's expected-session validate against identical values.
+        network_tunnel: mvm_backend::network_tunnel_for_launch(
+            network_policy,
+            mvm_backend::TunnelLaunchIdentity {
+                tenant_id: "local".to_string(),
+                vm_id: vm_name.clone(),
+                boot_id: uuid::Uuid::new_v4().to_string(),
+                session_nonce: uuid::Uuid::new_v4().to_string(),
+            },
+        ),
         ..Default::default()
     };
 
@@ -1613,8 +1630,12 @@ pub fn boot_session_vm(
 
     crate::commands::vm::up::attach_runtime_overlay_if_cached(&mut start_config, backend.name())?;
 
-    let use_snapshot =
-        !admitted_workload && snap_info.is_some() && backend.capabilities().snapshots;
+    // The tunnel worker spawns on the cold-boot path, not snapshot-restore, so an
+    // egress-admitted session must cold-boot even when a snapshot exists.
+    let use_snapshot = !admitted_workload
+        && start_config.network_tunnel.is_none()
+        && snap_info.is_some()
+        && backend.capabilities().snapshots;
     let booted = if use_snapshot {
         let snap = snap_info.as_ref().expect("use_snapshot implies snap_info");
         match restore_via_snapshot(&vm_name, env, snap, &start_config) {
