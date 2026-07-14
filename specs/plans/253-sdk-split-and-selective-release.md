@@ -1,4 +1,4 @@
-# Plan 252 — SDK crate split and selective SDK release
+# Plan 253 — SDK crate split and selective SDK release
 
 **Status:** Complete (2026-07-13; single-CLI SDK split and release lane landed)
 

@@ -43,7 +43,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
       `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D
       warnings`, `cargo test --workspace`, and the live TTY witness
       `MVM_DATA_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test /private/tmp/mvm-interactive-oci-dev-console-target/debug/mvmctl machine run --image alpine -it --allow-host google.com -- /bin/sh`, which reached `~ #`, ran `echo READY_FROM_ALPINE` plus `uname -a`, and exited cleanly.
-- [x] 2026-07-13 Plan 252 complete: the worktree keeps the shared crate
+- [x] 2026-07-13 Plan 253 complete: the worktree keeps the shared crate
       separation and explicit `sdk-vX.Y.Z` release cadence while staying on a
       single `mvmctl` CLI. The repo now carries `sdks/release.toml`, a
       dedicated `.github/workflows/publish-sdk.yml` orchestrator with reusable
