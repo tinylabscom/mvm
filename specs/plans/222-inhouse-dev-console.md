@@ -2,6 +2,8 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: superpowers:subagent-driven-development. Steps use `- [ ]`.
 
+**Status: COMPLETE** (2026-07-13)
+
 **Goal:** Make `mvmctl machine run --image X -it -- /bin/sh` drop into an interactive shell over the **hvf** backend (`--hypervisor hvf` / the `WorkloadRunner`), as a DEV-ONLY affordance — the prerequisite for flipping the macOS-26 default off Vz (Plan 214 tail).
 
 **Architecture:** The hvf runner today exposes only `agent.sock` + write-only `console.log`, and `pick_console_transport` has no hvf case, so `-it` fails at console attach. This plan gives the runner a **dev-gated `dev_console` pre-open** (mirroring libkrun/vz) that binds the guest console data-port range as host UDS, plus a backend-neutral `DevConsoleTransport` + an hvf probe in `pick_console_transport`. The one new device mechanism is a `ConsoleBridge` in `vmm/vsock.rs` — a clone of the existing `AgentBridge` — that host-dials arbitrary console ports.
@@ -26,37 +28,47 @@
 
 ---
 
-## Task 1 — `dev_console` console-data sockets in the runner (collision-free)
+## Task 1 — `dev_console` console-data sockets in the runner (collision-free) `[x]`
 **Files:** `crates/mvm-backend/src/workload_runner/runner.rs` (StandingSockets 86-98, standing_sockets, start/start_workload 115-198); test in same file.
 Add console-data UDS paths (Vz shape `<state_dir>/vsock/vsock-<port>.sock` for each `dev_console_data_ports()`), populated into `StandingSockets` and pre-bound ONLY when `config.dev_console`. Thread the (port→path) list into the `VmmSpec`/supervisor request.
 **Test:** with `dev_console=true`, the spec/standing-sockets carry all 128 console-port paths under `vsock/`; with `dev_console=false`, none. (Unit-testable via `MockDriver`/`RecordingSpawner`, per existing `spec_map` tests.)
 
-## Task 2 — supervisor config carries the console sockets (collision-free)
+## Task 2 — supervisor config carries the console sockets (collision-free) `[x]`
 **Files:** `crates/mvm-build/src/hvf_supervisor.rs:79-92` (+ its parser/tests).
 Add `console_data_sockets: Vec<(u32, PathBuf)>` (default empty; `#[serde(default)]`). Serde roundtrip + `deny_unknown_fields` test.
 
-## Task 3 — thread console sockets through the driver + allow the port range (collision-free)
+## Task 3 — thread console sockets through the driver + allow the port range (collision-free) `[x]`
 **Files:** `crates/mvm-backend/src/driver/hvf.rs` (relay_supervisor_config 92-150; vsock_connect 311-330).
 Populate `console_data_sockets` in the relayed config; relax `vsock_connect` so a port in `dev_console_data_ports()` is dialable (return the console UDS) instead of bailing. Keep non-agent, non-console ports rejected.
 **Test:** `vsock_connect(GUEST_AGENT_PORT)` and a console port both resolve; an out-of-range port still bails.
 
-## Task 4 — `DevConsoleTransport` + hvf probe in the picker (collision-free)
+## Task 4 — `DevConsoleTransport` + hvf probe in the picker (collision-free) `[x]`
 **Files:** `crates/mvm/src/vsock_transport.rs` (new transport, mirror `VzTransport` 117-143); `crates/mvm-cli/src/commands/vm/console.rs:31-63` (pick_console_transport).
 Add `DevConsoleTransport::for_vm` dialing `<vm_vz_vsock_dir>/vsock-<port>.sock` (reuse `vm_vz_vsock_port_socket`). Add an hvf arm to `pick_console_transport` gated on `is_dev_mode()` + an hvf state marker, slotted where the vz probe sits. **Extend** the two existing boundary tests (`pick_console_transport_does_not_route_workload_to_dev_socket`, `..._selects_dev_socket_for_dev_vm`) — do not weaken them.
 
-## Task 5 — `ConsoleBridge` in the device (GATED on parallel merge)
+## Task 5 — `ConsoleBridge` in the device (GATED on parallel merge) `[x]`
 **Files:** `crates/mvm-backend/src/vmm/vsock.rs` (new `ConsoleBridge` mirroring `agent_bridge.rs`); `crates/mvm-backend/src/vmm/run.rs:228-235` (add `drain_console()` as a third poll drain); `crates/mvm-backend/src/hvf/kernel_boot.rs:481-505` (wire console sockets next to `set_agent_socket`).
 A per-console-port host→guest bridge: on a host connect to `<state_dir>/vsock/vsock-<port>.sock`, open the guest vsock listener on that port (reuse `queue_host_packet` with the real port, not the hardwired agent port; route replies by conn-id, not `is_agent_stream`). Add `drain_console()` to `poll()` as a NEW drain alongside `drain_agent`/`drain_substitution` — no changes to their bodies.
 **Test:** mock-scripted vCPU: a host connect on a console port opens the guest listener and streams bytes both ways; agent + substitution paths unchanged.
 **Do not start until the parallel poll-starvation fix has merged to main; rebase first.**
 
-## Task 6 — end-to-end wiring + fmt/clippy/nextest (partial: needs Task 5)
+## Task 6 — end-to-end wiring + fmt/clippy/nextest (partial: needs Task 5) `[x]`
 **Files:** touch points from Tasks 1–5.
 Confirm `machine run -it --hypervisor hvf` resolves `dev_console=true` and the picker selects `DevConsoleTransport`. Full gate green on `mvm-backend`, `mvm`, `mvm-cli`.
 
-## Task 7 — LIVE proof (manual, dev host)
+## Task 7 — LIVE proof (manual, dev host) `[x]`
 `cargo build -p mvmctl -p mvm-vm-host --bin mvmctl --bin mvm-hvf-supervisor`, then from a real TTY:
 `./target/debug/mvmctl machine run --image alpine -it --hypervisor hvf -- /bin/sh` → an interactive shell prompt; `uname -a` etc. returns; exit cleanly. Record the result and flip the design note's "-it hvf" line to PROVEN. Also verify claim 15: the same against a sealed image is REFUSED by `enforce_accessible_gate`.
+
+**Closeout (2026-07-13).** The interactive OCI path is now proven on the real
+`machine run --image` seam, not only on `--hypervisor hvf`. The host-side socket
+contract now falls back to a short hashed `/tmp/mvm-sock/...` namespace when
+deep worktree-local state dirs would overflow the Unix-socket limit, and the
+shared direct per-port helper uses the same fallback so the fix covers builder
+and libkrun-style sockets too. Validation in the worktree is green with `cargo
+check --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`, and
+`cargo test --workspace`, plus the live TTY witness
+`MVM_DATA_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test /private/tmp/mvm-interactive-oci-dev-console-target/debug/mvmctl machine run --image alpine -it --allow-host google.com -- /bin/sh`, which reached `~ #`, ran `echo READY_FROM_ALPINE` plus `uname -a`, and exited cleanly.
 
 ---
 

@@ -67,6 +67,7 @@ macOS-26 Apple Silicon host:
   on a flake entrypoint. A separate minor finding: clap does not reject
   `--stdin` given without `--entrypoint`; it silently ignores it (small CLI
   bug, tracked independently).
+- **Step-2 interactive `-it` shell: PROVEN (2026-07-13).** `MVM_DATA_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test /private/tmp/mvm-interactive-oci-dev-console-target/debug/mvmctl machine run --image alpine -it --allow-host google.com -- /bin/sh` reached a live `~ #` prompt on the default HVF path, accepted `echo READY_FROM_ALPINE` plus `uname -a`, and exited cleanly. The closeout fix was not another console-protocol change; it was eliminating long macOS Unix-socket-path overflows by moving the host-side HVF/direct-vsock UDS endpoints onto a short hashed `/tmp/mvm-sock/...` fallback when the worktree-local state dir is too deep.
 - **Builder reachability: deferred** (does not affect the plan's shape; part of
   the builder-flip proof).
 
@@ -213,7 +214,7 @@ separate `start()` copy so we do not ship two hvf code paths. `hvf`/
   (see companion section). Independent of the backend, ships DX value alone,
   and its acceptance test IS the channel-1 inbound proof
   (`echo … | machine run --hypervisor hvf -- /bin/cat`). Lands first.
-- **Step 2 — flip + wire.** Flip both defaults (workload `auto_select` +
+- **Step 2 — flip + wire. PROVEN (2026-07-13).** Flip both defaults (workload `auto_select` +
   builder `auto_detect`) to the hvf runner / builder. Keep Vz reachable
   via explicit `--hypervisor vz` / `MVM_BUILDER_BACKEND=vz` for this step. Wire
   the dev-only interactive PTY shell (the console design above). Collapse

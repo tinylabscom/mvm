@@ -16,6 +16,7 @@ mod linux {
 
     const AGENT_FALLBACK: &str = "/usr/local/bin/mvm-guest-agent";
     const AGENT_OVERLAY: &str = "/mvm/runtime/agent";
+    const AGENT_OVERLAY_DEV_SHELL: &str = "/mvm/runtime/agent-dev-shell";
     const NETINIT_FALLBACK: &str = "/usr/local/bin/mvm-guest-netinit";
     const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";
     const EGRESS_CLIENT: &str = "/usr/local/bin/mvm-egress-client";
@@ -32,11 +33,7 @@ mod linux {
             bring_loopback_up();
             spawn_one(Path::new(EGRESS_CLIENT), "egress-client");
         }
-        spawn_one(
-            &resolve_exec([AGENT_OVERLAY, AGENT_FALLBACK])
-                .unwrap_or_else(|| PathBuf::from(AGENT_FALLBACK)),
-            "guest-agent",
-        );
+        spawn_one_optional(resolve_guest_agent(), "guest-agent");
         idle_forever();
     }
 
@@ -241,6 +238,67 @@ mod linux {
             .find(|p| is_executable(p))
     }
 
+    fn runtime_source_policy() -> mvm_core::vm_backend::RuntimeSourcePolicy {
+        cmdline_value("mvm.runtime_source_policy")
+            .as_deref()
+            .and_then(mvm_core::vm_backend::RuntimeSourcePolicy::from_cmdline_value)
+            .unwrap_or(mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay)
+    }
+
+    fn guest_security_profile() -> mvm_core::security::AgentProfile {
+        mvm_guest::builder_agent::load_security_policy()
+            .ok()
+            .flatten()
+            .map(|policy| policy.profile)
+            .unwrap_or_else(|| mvm_core::security::SecurityPolicy::dev_defaults().profile)
+    }
+
+    fn resolve_guest_agent() -> Option<PathBuf> {
+        resolve_guest_agent_for(
+            runtime_source_policy(),
+            guest_security_profile(),
+            is_executable,
+        )
+    }
+
+    fn resolve_guest_agent_for(
+        runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy,
+        profile: mvm_core::security::AgentProfile,
+        is_exec: impl Fn(&Path) -> bool,
+    ) -> Option<PathBuf> {
+        let candidates: &[&str] = match (runtime_source_policy, profile) {
+            (
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                mvm_core::security::AgentProfile::Dev,
+            ) => &[AGENT_OVERLAY_DEV_SHELL],
+            (
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                mvm_core::security::AgentProfile::SealedProd
+                | mvm_core::security::AgentProfile::Builder,
+            ) => &[AGENT_OVERLAY],
+            (
+                mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+                mvm_core::security::AgentProfile::Dev,
+            ) => &[AGENT_OVERLAY_DEV_SHELL, AGENT_OVERLAY, AGENT_FALLBACK],
+            (
+                mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+                mvm_core::security::AgentProfile::SealedProd
+                | mvm_core::security::AgentProfile::Builder,
+            ) => &[AGENT_OVERLAY, AGENT_FALLBACK],
+            (
+                mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+                mvm_core::security::AgentProfile::Dev
+                | mvm_core::security::AgentProfile::SealedProd
+                | mvm_core::security::AgentProfile::Builder,
+            ) => &[AGENT_FALLBACK],
+        };
+        candidates
+            .iter()
+            .map(Path::new)
+            .find(|path| is_exec(path))
+            .map(Path::to_path_buf)
+    }
+
     fn is_executable(path: &Path) -> bool {
         path.is_file()
             && fs::metadata(path)
@@ -281,6 +339,14 @@ mod linux {
             Ok(child) => eprintln!("mvm-oci-init: spawned {label} pid={}", child.id()),
             Err(e) => eprintln!("mvm-oci-init: spawn {label} at {}: {e}", path.display()),
         }
+    }
+
+    fn spawn_one_optional(path: Option<PathBuf>, label: &str) {
+        let Some(path) = path else {
+            eprintln!("mvm-oci-init: no executable {label} found");
+            return;
+        };
+        spawn_one(&path, label);
     }
 
     fn cmdline() -> String {
@@ -441,6 +507,36 @@ mod linux {
                 !dir.path().join("run/mvm/host-signer.pub").exists(),
                 "no file written on malformed input"
             );
+        }
+
+        #[test]
+        fn resolve_guest_agent_for_dev_required_overlay_prefers_dev_shell_overlay() {
+            let got = resolve_guest_agent_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                mvm_core::security::AgentProfile::Dev,
+                |path| path == Path::new(AGENT_OVERLAY_DEV_SHELL),
+            );
+            assert_eq!(got, Some(PathBuf::from(AGENT_OVERLAY_DEV_SHELL)));
+        }
+
+        #[test]
+        fn resolve_guest_agent_for_prod_required_overlay_uses_plain_overlay_agent() {
+            let got = resolve_guest_agent_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+                mvm_core::security::AgentProfile::SealedProd,
+                |path| path == Path::new(AGENT_OVERLAY),
+            );
+            assert_eq!(got, Some(PathBuf::from(AGENT_OVERLAY)));
+        }
+
+        #[test]
+        fn resolve_guest_agent_for_rootfs_only_dev_falls_back_to_baked_agent() {
+            let got = resolve_guest_agent_for(
+                mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
+                mvm_core::security::AgentProfile::Dev,
+                |path| path == Path::new(AGENT_FALLBACK),
+            );
+            assert_eq!(got, Some(PathBuf::from(AGENT_FALLBACK)));
         }
     }
 }

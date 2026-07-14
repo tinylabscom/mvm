@@ -194,6 +194,10 @@ enum Bound {
 fn bind_transport(transport: &EndpointTransport) -> Result<Bound> {
     match transport {
         EndpointTransport::Uds { path } => {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .with_context(|| format!("create UDS parent {}", parent.display()))?;
+            }
             let listener = std::os::unix::net::UnixListener::bind(path)
                 .with_context(|| format!("UDS bind on {} failed", path.display()))?;
             listener.set_nonblocking(true)?;

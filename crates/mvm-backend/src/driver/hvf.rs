@@ -14,7 +14,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
-use mvm_core::config::{vm_state_dir, vsock_socket_filename};
+use mvm_core::config::{vm_state_dir, vm_vz_vsock_port_socket_at};
 use mvm_core::vm_backend::{
     SnapshotCapability, VmBackend, VmCapabilities, VmExitStatus, VmId, VmStatus,
 };
@@ -284,16 +284,11 @@ fn hvf_agent_socket(state_dir: &std::path::Path) -> PathBuf {
     mvm_core::config::vm_inhouse_agent_socket_at(state_dir)
 }
 
-/// Resolve the host UDS for a console data port under the per-VM state dir,
-/// following the `<state_dir>/vsock/vsock-<port>.sock` convention. Returns
-/// `None` when the port is outside `dev_console_data_ports()`.
+/// Resolve the host UDS for a console data port via the shared Vz-style socket
+/// helper. Returns `None` when the port is outside `dev_console_data_ports()`.
 fn console_socket_for_port(state_dir: &std::path::Path, guest_port: u32) -> Option<PathBuf> {
     if dev_console_data_ports().any(|p| p == guest_port) {
-        Some(
-            state_dir
-                .join("vsock")
-                .join(vsock_socket_filename(guest_port)),
-        )
+        Some(vm_vz_vsock_port_socket_at(state_dir, guest_port))
     } else {
         None
     }

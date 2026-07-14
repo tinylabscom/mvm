@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use mvm_build::builder_disk_transport::{
     InputTree, create_output_disk, pack_input_disk, read_output_disk,
 };
-use mvm_core::config::vm_state_dir;
+use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmStatus;
@@ -93,7 +93,7 @@ impl<D: VmmDriver + 'static> BuilderRunner<D> {
         let input_disk = state_dir.join("input.img");
         let output_disk = state_dir.join("output.img");
         let output_dir = state_dir.join("out");
-        let egress_socket = state_dir.join(mvm_core::config::vsock_socket_filename(EGRESS_PORT));
+        let egress_socket = vm_vsock_port_socket_at(&state_dir, EGRESS_PORT);
 
         // Pack {job, work, mvm-bins} onto the input disk; the guest extracts it.
         pack_input_disk(

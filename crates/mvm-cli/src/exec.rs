@@ -732,11 +732,11 @@ pub fn transient_vm_name() -> String {
 /// Whether a transient run should pre-open interactive console data sockets.
 ///
 /// `true` only when the caller requested a PTY (`pty`) AND the image is not
-/// verity-sealed (`verity_path.is_none()`). Sealed images carry no dev-shell
-/// agent, so pre-opening the sockets would be wasteful and misleading; the
-/// interactive attach is separately refused at `enforce_accessible_gate`.
-pub fn transient_run_dev_console(pty: bool, verity_path: Option<&str>) -> bool {
-    pty && verity_path.is_none()
+/// sealed (`image_sealed == false`). A verity-backed OCI/dev image may still be
+/// interactive, so sealing/accessibility must follow the image sidecar rather
+/// than the presence of verity sidecars alone.
+pub fn transient_run_dev_console(pty: bool, image_sealed: bool) -> bool {
+    pty && !image_sealed
 }
 
 /// Remove the transient `--add-dir` staging dir, but only when extras were
@@ -1015,9 +1015,10 @@ fn run_inner(
     let t_drives_ready = timing.then(std::time::Instant::now);
 
     // Pre-open console data sockets for interactive PTY runs against
-    // non-sealed images. Sealed images carry no dev-shell agent; the
-    // enforce_accessible_gate will refuse the attach separately.
-    let dev_console = transient_run_dev_console(req.pty, verity_path.as_deref());
+    // non-sealed images. OCI/dev images can carry verity sidecars and still be
+    // interactive, so the sidecar's sealed bit is the load-bearing signal here.
+    let image_sealed = crate::commands::vm::image_is_sealed(std::path::Path::new(&rootfs));
+    let dev_console = transient_run_dev_console(req.pty, image_sealed);
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
@@ -2585,25 +2586,43 @@ mod tests {
     fn interactive_transient_run_sets_dev_console_when_not_sealed() {
         // PTY-mode run against a non-sealed image must pre-open console sockets
         // so the hvf backend can host-dial the guest's data port.
-        assert!(transient_run_dev_console(true, None));
+        assert!(transient_run_dev_console(true, false));
     }
 
     #[test]
     fn non_interactive_transient_run_leaves_dev_console_unset() {
         // A non-PTY run never needs the interactive console data sockets.
-        assert!(!transient_run_dev_console(false, None));
+        assert!(!transient_run_dev_console(false, false));
     }
 
     #[test]
     fn interactive_sealed_run_leaves_dev_console_unset() {
-        // A verity-sealed image has no dev-shell agent; pre-opening sockets
-        // is wasteful. enforce_accessible_gate refuses the attach separately.
-        assert!(!transient_run_dev_console(true, Some("/rootfs.verity")));
+        // A sealed image has no dev-shell agent; pre-opening sockets is
+        // wasteful. enforce_accessible_gate refuses the attach separately.
+        assert!(!transient_run_dev_console(true, true));
     }
 
     #[test]
     fn non_interactive_sealed_run_leaves_dev_console_unset() {
-        assert!(!transient_run_dev_console(false, Some("/rootfs.verity")));
+        assert!(!transient_run_dev_console(false, true));
+    }
+
+    #[test]
+    fn interactive_verity_backed_oci_run_still_arms_dev_console() {
+        let dir = tempfile::tempdir().unwrap();
+        let rootfs = dir.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"x").unwrap();
+        std::fs::write(dir.path().join("rootfs.verity"), b"verity").unwrap();
+        std::fs::write(dir.path().join("rootfs.roothash"), b"roothash").unwrap();
+        mvm_build::builder_vm::GuestSidecar::for_oci_run("oci:test", false, true)
+            .write_to_dir(dir.path())
+            .unwrap();
+
+        let image_sealed = crate::commands::vm::image_is_sealed(&rootfs);
+        assert!(
+            transient_run_dev_console(true, image_sealed),
+            "verity-backed accessible OCI images must keep the interactive console armed"
+        );
     }
 
     #[test]

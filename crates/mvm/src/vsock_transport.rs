@@ -155,11 +155,11 @@ impl VsockTransport for VzTransport {
 /// Connects to an hvf (`WorkloadRunner` / HVF) VM's vsock channels.
 ///
 /// The hvf runner binds two distinct socket layouts under the per-VM
-/// state dir:
-/// - Agent RPC (`GUEST_AGENT_PORT`): `<state_dir>/hvf-agent.sock` — the
+/// socket dir:
+/// - Agent RPC (`GUEST_AGENT_PORT`): `<socket-dir>/hvf-agent.sock` — the
 ///   standing agent bridge the device binds at boot (see
 ///   [`mvm_core::config::vm_hvf_agent_socket`]).
-/// - Console data (ports in `dev_console_data_ports()`): `<state_dir>/vsock/vsock-<port>.sock`
+/// - Console data (ports in `dev_console_data_ports()`): `<socket-dir>/vsock/vsock-<port>.sock`
 ///   — same `vsock/` subdir convention the Vz supervisor uses, populated
 ///   only when `VmStartConfig.dev_console` is true.
 ///
@@ -170,39 +170,41 @@ impl VsockTransport for VzTransport {
 /// (non-sealed) workload, so a sealed production runner cannot receive an
 /// interactive attach over this path.
 pub struct DevConsoleTransport {
-    state_dir: PathBuf,
+    agent_socket: PathBuf,
     vsock_dir: PathBuf,
 }
 
 impl DevConsoleTransport {
     pub fn new(state_dir: impl Into<PathBuf>) -> Self {
         let state_dir = state_dir.into();
-        let vsock_dir = state_dir.join("vsock");
+        let socket_dir = mvm_core::config::vm_socket_dir_at(&state_dir);
+        let agent_socket = socket_dir.join("hvf-agent.sock");
+        let vsock_dir = mvm_core::config::vm_vz_vsock_dir_at(&state_dir);
         Self {
-            state_dir,
+            agent_socket,
             vsock_dir,
         }
     }
 
     pub fn for_vm(vm_name: &str) -> Self {
-        let state_dir = mvm_core::config::vm_state_dir(vm_name);
+        let agent_socket = mvm_core::config::vm_hvf_agent_socket(vm_name);
         let vsock_dir = mvm_core::config::vm_vz_vsock_dir(vm_name);
         Self {
-            state_dir,
+            agent_socket,
             vsock_dir,
         }
     }
 
     /// Resolve the host UDS for a port.
     ///
-    /// - `GUEST_AGENT_PORT` → `<state_dir>/hvf-agent.sock` (the standing agent
+    /// - `GUEST_AGENT_PORT` → `<socket-dir>/hvf-agent.sock` (the standing agent
     ///   bridge the hvf device binds — see
     ///   [`mvm_core::config::vm_hvf_agent_socket`]).
-    /// - Any other port → `<state_dir>/vsock/vsock-<port>.sock` (the
+    /// - Any other port → `<socket-dir>/vsock/vsock-<port>.sock` (the
     ///   pre-opened console data socket, same convention as Vz).
     pub(crate) fn socket_path(&self, port: u32) -> PathBuf {
         if port == mvm_guest::vsock::GUEST_AGENT_PORT {
-            self.state_dir.join("hvf-agent.sock")
+            self.agent_socket.clone()
         } else {
             self.vsock_dir
                 .join(mvm_core::config::vsock_socket_filename(port))
@@ -321,6 +323,7 @@ mod tests {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
+        let _ = std::fs::remove_file(path);
         match UnixListener::bind(path) {
             Ok(listener) => Some(listener),
             Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -442,6 +445,28 @@ mod tests {
         let t = for_vm(name).expect("picker should find the hvf transport");
         t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the hvf-agent socket");
+    }
+
+    #[test]
+    fn for_vm_selects_hvf_when_agent_socket_uses_short_socket_dir_fallback() {
+        let _lock = crate::vm::DATA_DIR_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut env = TestEnv::new();
+        env.set(
+            "MVM_DATA_DIR",
+            "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test",
+        );
+        let name = "hvf-picker-long-path";
+        let sock = mvm_core::config::vm_hvf_agent_socket(name);
+        let Some(_listener) = bind_unix_listener(&sock) else {
+            unsafe { std::env::remove_var("MVM_DATA_DIR") };
+            return;
+        };
+
+        let t = for_vm(name).expect("picker should find the hvf transport");
+        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .expect("selected transport should connect to the short hvf-agent socket");
     }
 
     #[test]

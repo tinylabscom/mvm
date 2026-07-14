@@ -32,6 +32,17 @@ plan 25 sequences the work into six independently-shippable workstreams.
 > given sprint's own section for its live status; the table below is the current
 > workspace snapshot, not Sprint 42's.
 
+- [x] 2026-07-13 Plan 222 HVF interactive OCI console closeout: the default
+      macOS HVF `machine run --image ... -it` path is live again and no longer
+      freezes on a deep worktree-local state dir. The closeout fixed the real
+      production seam rather than only the console protocol: host-side HVF and
+      direct per-port vsock UDS endpoints now fail over to a short hashed
+      `/tmp/mvm-sock/...` namespace when the normal VM state dir would exceed
+      the Unix-socket path budget, and the `mvm` transport tests now clean up
+      that shared fallback path before binding. Validation is green with
+      `cargo check --workspace`, `cargo clippy --workspace --all-targets -- -D
+      warnings`, `cargo test --workspace`, and the live TTY witness
+      `MVM_DATA_DIR=/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test /private/tmp/mvm-interactive-oci-dev-console-target/debug/mvmctl machine run --image alpine -it --allow-host google.com -- /bin/sh`, which reached `~ #`, ran `echo READY_FROM_ALPINE` plus `uname -a`, and exited cleanly.
 - [x] 2026-07-11 Plan 236 OCI `--prod` live witness closeout: the
       source-checkout prod harness now forces `--kernel-source compile` so the
       local witness does not depend on a release-published workload-kernel
