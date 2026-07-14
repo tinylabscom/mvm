@@ -131,22 +131,42 @@ spawns and reaps `mvm-host-netd`, writes its admitted policy/DNS-pin config, and
 captures its audit JSONL under the VM state directory. The supervisor receives a
 dedicated `transparent_net_socket` and relays guest vsock port `5254`
 byte-for-byte to that authority, failing closed when the authority is absent.
+The same backend wiring now also writes a signed transparent-network audit-chain
+config for each VM. When the host signer key is present, `mvm-host-netd`
+appends a per-VM chain-signed audit file at
+`<mvm_data_dir>/audit/<tenant>.<vm>.transparent-net.jsonl` while still mirroring
+the raw JSON event stream to stderr for local debugging. That signed-audit seam
+reuses the repo's existing naming invariants too: audit-chain `tenant` values
+must satisfy the same lowercase tenant-id rules as the rest of the system, and
+audit-chain `vm_name` values must satisfy the same VM-name validator, so
+invalid signed-audit label/file-name shapes are rejected before the daemon
+opens the chain file.
 OCI image injection includes `mvm-guest-netd` with the guest agent and netinit,
 and the injected PID 1 starts it only when the boot path adds `mvm.netd=1`
 because a transparent-network authority socket is present. If that token is
 present but netd is missing or exits during startup, PID 1 refuses to start the
 guest agent instead of silently running the workload without the requested
-network path. The first in-process acceptance harness now drives raw guest DNS
-and TCP packets through `GuestBridgePump`, a real `HostAuthority`, and a
-recording TCP connector. Host-side stop now reaps the recorded `mvm-host-netd`
-process with bounded SIGTERM-to-SIGKILL cleanup and removes the authority
-pid/socket state.
+network path. Admitted workload launch paths on macOS also resolve `hvf`
+through the runner-backed backend instead of the legacy raw HVF backend, so
+`machine run`, checkpoint child boots, and the related workload/session helpers
+use the transparent-network path when the authority socket is present.
 
-This is not end-to-end supported `mvmctl machine run` networking yet. A gated
-operator smoke exists as `just e2e-transparent-net`; it boots a live VM and
-probes ordinary DNS plus HTTP over `--allow-host example.com:80`. Until that
-live proof is green in the approved microVM environment, ordinary tools in the
-VM still must not rely on transparent networking on the default HVF path.
+There is also a gated live smoke at `just e2e-transparent-net`. It is skipped
+by default and is meant for an operator-approved host that can boot workload
+microVMs. The harness now defaults to `https://example.com:443`, uses the `dev`
+profile for the public `machine run` path, serializes its live cases, and adds
+negative probes for both denied HTTPS egress and denied ICMP echo in addition
+to the positive allow-list probes.
+
+For operator visibility, `mvmctl run --dry-run`,
+`mvmctl machine start --dry-run`, `mvmctl machine inspect`, and the human
+`mvmctl machine ls` table surface the transparent-TLS consequence in addition
+to the general network posture. `machine ls` adds a compact `TLS443` column
+(`transform`, `fail-closed`, `mixed`, `off`, `unrestricted`), while the JSON
+surfaces expose `transparent_tls_posture` and
+`transparent_tls_upstream_trust` so callers can see whether hostname-bound
+`:443` traffic is transformed and whether upstream trust resolves to native
+roots, an operator PEM bundle, or `not-applicable`.
 
 ## Security Profiles
 

@@ -160,7 +160,7 @@ guest-RPC surface, fleet-shaped workflows).
 |---------|-------------|
 | `mvmctl ops config show` | Print current config as TOML |
 | `mvmctl ops config edit` | Open the config file in $EDITOR (falls back to nano) |
-| `mvmctl ops config set <key> <value>` | Set a single config key (e.g. `mvmctl ops config set dev_vm_cpus 4`) |
+| `mvmctl ops config set <key> <value>` | Set a single config key (e.g. `mvmctl ops config set dev_vm_cpus 4` or `mvmctl ops config set host_netd_upstream_roots_pem_file /abs/path/to/roots.pem`) |
 
 ## Benchmarks
 
@@ -384,8 +384,11 @@ The resident host-agent daemon (default-on; opt out with
 every healthchecked persistent machine every `--health-interval` seconds, once
 `--health-start-period` seconds have elapsed since start (failures during the
 start period are grace-period noise and don't count). `machine ls` shows the
-result in a `HEALTH` column and `machine inspect` shows a `health:` line, one
-of:
+result in a `HEALTH` column and a `TLS443` column, and `machine inspect` shows
+a `health:` line plus resolved network / transparent-TLS posture lines. The
+`TLS443` column is a compact summary of the current `:443` transparent-TLS
+posture for that machine (`transform`, `fail-closed`, `mixed`, `off`,
+`unrestricted`). Health is one of:
 
 - `starting` — still inside the start period, or no probe result yet.
 - `healthy` — the most recent probe exited 0.
@@ -427,7 +430,7 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine run --image <ref> --profile dev --volume .:/work:rw -- <cmd>` | Same, with a writable host share under the dev profile |
 | `mvmctl machine run --image <ref> --cpus <n> --memory <size> -- <cmd>` | Resize the transient VM |
 | `mvmctl machine run --image <ref> --dry-run -- <cmd>` | Validate and explain the run plan without booting a VM |
-| `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary |
+| `mvmctl machine run --image <ref> --json -- <cmd>` | Print a redacted JSON execution summary, including derived `transparent_tls_posture` and `transparent_tls_upstream_trust` |
 | `mvmctl machine run --image <ref> --receipt <path> -- <cmd>` | Write a signed execution receipt |
 | `mvmctl machine run -d --image <ref>` | Boot a **persistent** machine, auto-name it (printed), return |
 | `mvmctl machine run -d --name <name> --image <ref>` | Boot a **persistent** named machine, return; reconnect via `machine shell <name>` |
@@ -444,13 +447,13 @@ or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
 | `mvmctl machine start <name>...` | Boot one or more persisted named machines through the admitted OCI-backed start path (`--receipt`/`--json`/`--dry-run` are single-machine) |
 | `mvmctl machine start <name> --dry-run` | Validate and explain the effective machine-start policy without booting a VM |
 | `mvmctl machine start <name> --dry-run --json` | Print the machine-start preflight summary as redacted JSON |
-| `mvmctl machine start <name> --json` | Print a redacted JSON start summary instead of plain text |
+| `mvmctl machine start <name> --json` | Print a redacted JSON start summary instead of plain text, including derived `transparent_tls_posture` and `transparent_tls_upstream_trust` |
 | `mvmctl machine start <name> --receipt <path>` | Write a signed machine-start receipt with effective policy plus the resolved digest and start timestamp |
 | `mvmctl machine restart <name>...` | Restart one or more named machines: stop if running, then start (same stop→start as a config-change recreate). This is also how a running machine picks up a newer version-matched runtime overlay. |
-| `mvmctl machine ls` (alias `ps`) | List persisted named machine specs |
-| `mvmctl machine ls --json` | Print persisted named machine specs as JSON |
-| `mvmctl machine inspect <name>` | Show one persisted named machine spec |
-| `mvmctl machine inspect <name> --json` | Print one persisted named machine spec as JSON |
+| `mvmctl machine ls` (alias `ps`) | List persisted named machine specs with live `STATUS`, `HEALTH`, and compact `TLS443` posture columns |
+| `mvmctl machine ls --json` | Print persisted named machine specs as JSON, including live `status`, `health`, and derived `network_summary { posture, transparent_tls_posture, transparent_tls_upstream_trust, egress_enforcement }` |
+| `mvmctl machine inspect <name>` | Show one persisted named machine spec plus resolved network / transparent-TLS posture details |
+| `mvmctl machine inspect <name> --json` | Print one persisted named machine spec as JSON, including live `health` and derived `network_summary { posture, transparent_tls_posture, transparent_tls_upstream_trust, egress_enforcement }` |
 | `mvmctl machine rm <name>... --yes` | Remove one or more persisted named machine specs (refuses a running machine; pass `--force` to stop then remove) |
 | `mvmctl machine rm --all --yes` | Remove every persisted named machine spec |
 | `mvmctl machine rm <name>... --yes --json` | Print a JSON array deletion summary |
@@ -838,6 +841,7 @@ All commands accept these global options:
 | `MVM_TEMPLATE_LOCAL_API_KEY` | Optional API key for the local AI endpoint | None |
 | `MVM_TEMPLATE_LOCAL_PROBE_TARGETS` | Comma-separated base URLs to probe for a local OpenAI-compatible endpoint in `auto` mode (overrides defaults `http://127.0.0.1:11434` and `http://127.0.0.1:8080`) | Defaults |
 | `MVM_TEMPLATE_NO_LOCAL_PROBE` | Set to `1` to skip the local-endpoint probe in `auto` mode (CI / sandboxed environments where loopback connects can hang) | Unset |
+| `MVM_HOST_NETD_UPSTREAM_ROOTS_PEM_FILE` | Absolute path override for the transformed-TLS upstream-roots PEM bundle; overrides `host_netd_upstream_roots_pem_file` from `config.toml` for the current shell/session | Unset |
 | `MVM_PRODUCTION` | Enable production mode checks | `false` |
 | `MVM_OCI_POLICY` | OCI production policy TOML used by `mvmctl image pull --prod` and `mvmctl run --image --prod` | `$MVM_DATA_DIR/oci-policy.toml` |
 | `MVM_OCI_BEARER_TOKEN_<HOST>` | Bearer token for one OCI registry host (`ghcr.io` -> `MVM_OCI_BEARER_TOKEN_GHCR_IO`) | Unset |
