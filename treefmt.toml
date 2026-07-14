@@ -37,4 +37,5 @@ excludes = [
   "target/**",
   "public/.astro/**",
   "specs/backlog/**",   # archived; preserve as-was
+  "specs/**",           # hand-authored plan + ADRs; prettier corrupts inline code (e.g. FLOW_ families) and reflows tables
 ]
