@@ -1661,7 +1661,9 @@ mod tests {
     }
 
     #[test]
-    fn unsealed_firecracker_forked_child_prefers_overlay() {
+    fn unsealed_firecracker_forked_child_requires_overlay() {
+        // A forked child is a block workload boot, so it requires the overlay
+        // whether or not its rootfs is sealed.
         let tmp = tempfile::tempdir().unwrap();
         let rootfs = tmp.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"fake").unwrap();
@@ -1681,7 +1683,7 @@ mod tests {
         sidecar.write_to_dir(tmp.path()).unwrap();
         assert_eq!(
             forked_child_runtime_source_policy("firecracker", &rootfs),
-            mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay
+            mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
         );
     }
 

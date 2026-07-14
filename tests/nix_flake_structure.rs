@@ -601,15 +601,10 @@ fn mk_guest_eval_assertions_all_pass_when_nix_available() {
 /// 3. The mvmMeta passthru carries `overlayAware = true`. Without
 ///    this, admission-time gates can't enforce overlay-aware
 ///    rootfs as a precondition.
-/// 4. The default sealed image shape marks `runtimeLean = isSealed`, while
-///    callers can override that for non-mkGuest-PID1 roots such as the
-///    builder VM.
-/// 5. The baked agent/netinit copies are conditional on that flag.
-///    Without this, required-overlay boots can silently keep a
-///    rootfs fallback around.
-/// 6. The builder-vm flake opts into the runtime-lean builder rootfs and
-///    disables the mkGuest-only exit reporter, so Stage 0 does not rebuild
-///    unused guest runtime binaries into the builder image closure.
+/// 4. The mvmMeta passthru carries `runtimeLean = true`. mkGuest bakes
+///    no guest-runtime binaries into any rootfs, so every image is
+///    runtime-lean; the required-overlay admission gate reads this to
+///    refuse a rootfs that could silently degrade to a baked fallback.
 #[test]
 fn mk_guest_carries_overlay_aware_contract() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
@@ -640,12 +635,6 @@ fn mk_guest_carries_overlay_aware_contract() {
     );
 
     assert!(
-        content.contains("if runtimeLeanOverride == null then isSealed else runtimeLeanOverride"),
-        "mk-guest.nix must default `runtimeLean` from the sealed-image posture \
-         while still allowing callers like the builder-vm flake to force a \
-         runtime-lean rootfs without pretending to be a sealed workload."
-    );
-    assert!(
         content.contains("mvm\\.chain_init=") && content.contains("exec \"$MVM_CHAIN_INIT\""),
         "mk-guest.nix /init must support the builder-only chained-init \
          handoff so the builder image can bootstrap through the generic \
@@ -660,11 +649,18 @@ fn mk_guest_carries_overlay_aware_contract() {
     );
 
     assert!(
-        content.contains("${if runtimeLean then \"\"")
-            && content.contains("runtimeLean = runtimeLean;"),
-        "mk-guest.nix must both conditionally skip the baked agent/netinit \
-         copy block for runtime-lean images and surface that fact through \
-         `passthru.mvm.runtimeLean`."
+        content.contains("runtimeLean = true;"),
+        "mk-guest.nix must surface `passthru.mvm.runtimeLean = true` for every \
+         image: mkGuest bakes no guest-runtime binaries, so the required-overlay \
+         admission gate can rely on the runtime-lean claim being universal."
+    );
+    assert!(
+        !content.contains("$out/usr/local/bin/mvm-guest-agent"),
+        "mk-guest.nix must not bake the guest-runtime binaries into the rootfs \
+         tree ($out/usr/local/bin); the agent (and netinit/addon-dns/exit-report/\
+         egress-client) are sourced from the runtime overlay at /mvm/runtime. The \
+         /init resolution ladders may still name the runtime `/usr/local/bin` path \
+         for rootfs-only / prefer-overlay boots, but nothing is cp'd there."
     );
 
     let builder_path = nix_dir()
@@ -673,13 +669,6 @@ fn mk_guest_carries_overlay_aware_contract() {
         .join("flake.nix");
     let builder = fs::read_to_string(&builder_path)
         .unwrap_or_else(|e| panic!("nix/images/builder-vm/flake.nix must be present: {e}"));
-    assert!(
-        builder.contains("runtimeLeanOverride = true;")
-            && builder.contains("bakeExitReport = false;"),
-        "builder-vm flake must force a runtime-lean rootfs and skip the \
-         mkGuest-only exit reporter so Stage 0 does not rebuild unused guest \
-         runtime binaries into the builder image closure."
-    );
     assert!(
         builder.contains(
             "builderCmdline = \"console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init\";"
@@ -691,14 +680,12 @@ fn mk_guest_carries_overlay_aware_contract() {
     );
 }
 
-/// Plan 74 W2 — `mkGuest` must bake `mvm-guest-netinit` into the
-/// rootfs AND invoke it from `/init` before forking the agent.
-/// Without this, the guest-side defense (kernel blackhole routes
-/// for `MANDATORY_DENY_RANGES`) never installs, leaving the
-/// macOS Apple Container path with no firewall at all. The
-/// source-grep here catches a regression that drops either the
-/// binary copy or the /init invocation before it reaches a live
-/// VM boot.
+/// `mkGuest`'s `/init` must resolve `mvm-guest-netinit` from the
+/// runtime overlay before forking the agent. Without this, the
+/// guest-side defense (kernel blackhole routes for
+/// `MANDATORY_DENY_RANGES`) never installs, leaving the guest with
+/// no firewall at all. The source-grep here catches a regression
+/// that drops the /init invocation before it reaches a live VM boot.
 #[test]
 fn mk_guest_installs_netinit_at_boot() {
     let path = nix_dir().join("lib").join("mk-guest.nix");
@@ -706,28 +693,20 @@ fn mk_guest_installs_netinit_at_boot() {
         .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
 
     assert!(
-        content.contains("mvmGuestNetinitBinary = \"${guestAgentPkg}/bin/mvm-guest-netinit\""),
-        "mk-guest.nix must reference the mvm-guest-netinit binary \
-         from the guest-agent derivation. Plan 74 W2 — guest-side \
-         network defense relies on this binary being baked into \
-         every mvm-built rootfs."
-    );
-
-    assert!(
-        content.contains("/usr/local/bin/mvm-guest-netinit"),
-        "mk-guest.nix /init must invoke the netinit binary at its \
-         canonical path. A drop here means the binary is built but \
-         never runs at boot, leaving the guest with no kernel-level \
-         defense against IMDS exfil."
-    );
-
-    assert!(
         content.contains("/mvm/runtime/netinit"),
-        "mk-guest.nix /init must prefer the runtime-overlay path \
-         (`/mvm/runtime/netinit`) over the baked-in copy when the \
-         W1.4b overlay is mounted. Mirrors the agent-bin resolution \
-         pattern; preserves the host-bake fallback for backends \
-         that don't attach the overlay yet."
+        "mk-guest.nix /init must resolve the netinit binary from the \
+         runtime-overlay path (`/mvm/runtime/netinit`). A drop here means \
+         guest-side network defense never runs at boot, leaving the guest \
+         with no kernel-level defense against IMDS exfil."
+    );
+
+    assert!(
+        content.contains(
+            "echo \"mvm-init: runtime overlay required but /mvm/runtime/netinit is missing\""
+        ),
+        "mk-guest.nix /init netinit ladder must fail closed under \
+         required_overlay when the overlay binary is absent, matching the \
+         agent/egress-client ladders — never silently boot without netinit."
     );
 
     assert!(
@@ -825,6 +804,32 @@ fn runtime_overlay_flake_stages_netinit_binary() {
     );
 }
 
+/// The userspace L3 egress pump `mvm-guest-netd` rides the runtime
+/// overlay at `/netd` (never baked into a per-image rootfs). `netinit`
+/// spawns it under the `mvm.network_tunnel=` cmdline token, resolving
+/// `/mvm/runtime/netd` first; the resolver's required-payload check
+/// (`REQUIRED_OVERLAY_GUEST_PATHS`) refuses an overlay missing it, so
+/// the published flake must stage it or every overlay-only boot fails
+/// closed.
+#[test]
+fn runtime_overlay_flake_stages_netd_binary() {
+    let path = nix_dir()
+        .join("images")
+        .join("runtime-overlay")
+        .join("flake.nix");
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nix/images/runtime-overlay/flake.nix must be present: {e}"));
+
+    assert!(
+        content.contains("cp ${guest}/bin/mvm-guest-netd       \"$staging/netd\""),
+        "runtime-overlay flake must stage `mvm-guest-netd` at \
+         `/netd` inside the overlay ext4. The tunnel egress pump is \
+         overlay-only (no per-image bake); the resolver rejects an \
+         overlay missing `/netd`, so dropping this line fails every \
+         overlay-only boot closed."
+    );
+}
+
 #[test]
 fn runtime_overlay_flake_stages_egress_client_binary() {
     let path = nix_dir()
@@ -840,21 +845,6 @@ fn runtime_overlay_flake_stages_egress_client_binary() {
          `/egress-client` inside the overlay ext4 so runtime-lean \
          sealed boots can source the egress shim from the mounted \
          runtime filesystem."
-    );
-}
-
-#[test]
-fn mk_guest_runtime_lean_skips_baked_egress_client_copy() {
-    let path = nix_dir().join("lib").join("mk-guest.nix");
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("nix/lib/mk-guest.nix must be present: {e}"));
-
-    assert!(
-        content.contains("runtimeLean then \"\"")
-            && content
-                .contains("cp ${mvmEgressClientBinary} \"$out/usr/local/bin/mvm-egress-client\""),
-        "mk-guest.nix must gate the baked egress-client copy on the same \
-         runtime-lean split as the other runtime binaries."
     );
 }
 

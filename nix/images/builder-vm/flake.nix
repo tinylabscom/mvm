@@ -295,22 +295,12 @@
         in
         (libFor { inherit system; }).mkGuest {
           name = "mvm-builder-vm";
-          # Skip the addon-dns bake. The builder VM chains from
-          # mkGuest's `/init` into `mvm-host-vm-init`, so
-          # mkGuest's initScript-side addon-dns activation block
-          # never runs and the binary would just sit unused at
-          # /usr/local/bin/mvm-addon-dns. The win is in Stage 0:
-          # not building `mvm-addon-dns` removes a parallel rustc
-          # run that competed with the kernel compile and pushed
-          # the tmpfs-bound build into OOM territory.
-          bakeAddonDns = false;
-          # The builder/dev VM chains into `mvm-host-vm-init` after the
-          # generic `/init` bootstrap, and the host always wires the runtime
-          # overlay into current builder images. Keep
-          # the rootfs lean: no baked guest agent / netinit / egress-client
-          # fallback, and no mkGuest-only exit reporter binary.
-          runtimeLeanOverride = true;
-          bakeExitReport = false;
+          # The builder VM chains from mkGuest's `/init` into
+          # `mvm-host-vm-init` and sources the guest agent + egress-client
+          # from the runtime overlay the host wires in. mkGuest bakes no
+          # guest-runtime binaries into any rootfs, so there is nothing to
+          # opt out of here — Stage 0 never compiles the unused
+          # addon-dns / exit-report fallbacks.
           # mkGuest requires an entrypoint declaration. At runtime
           # the kernel cmdline sets `init=/init` and
           # `mvm.chain_init=/sbin/mvm-host-vm-init`, so mkGuest's

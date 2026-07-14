@@ -370,12 +370,9 @@ fn build_flake(
             }
         };
         audit_build_ok("flake", &resolved, "", &result.revision_hash);
-        if let Err(e) = mvm_build::dev_build::ensure_guest_agent_if_needed(env, &result) {
-            ui::warn(&format!(
-                "Could not verify guest agent ({}). If built with mkGuest, the agent is already included.",
-                e
-            ));
-        }
+        // No post-build agent injection: every mkGuest image resolves its
+        // agent from the runtime overlay (or mkGuest's own bake) at boot,
+        // so there is nothing to verify or patch into the rootfs here.
 
         if json {
             #[derive(Serialize)]

@@ -136,10 +136,13 @@ pub struct RuntimeOverlayGuestBinaries {
     pub agent: PathBuf,
     pub agent_dev_shell: PathBuf,
     pub netinit: PathBuf,
+    pub netd: PathBuf,
     pub seccomp_apply: PathBuf,
     pub verity_init: PathBuf,
     pub runner: PathBuf,
     pub egress_client: PathBuf,
+    pub addon_dns: PathBuf,
+    pub exit_report: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -148,10 +151,13 @@ pub struct RuntimeOverlayGuestLayout {
     pub agent: PathBuf,
     pub agent_dev_shell: PathBuf,
     pub netinit: PathBuf,
+    pub netd: PathBuf,
     pub seccomp_apply: PathBuf,
     pub verity_init: PathBuf,
     pub runner: PathBuf,
     pub egress_client: PathBuf,
+    pub addon_dns: PathBuf,
+    pub exit_report: PathBuf,
 }
 
 impl RuntimeOverlayGuestLayout {
@@ -165,10 +171,13 @@ impl RuntimeOverlayGuestLayout {
             agent: dir.join("agent"),
             agent_dev_shell: dir.join("agent-dev-shell"),
             netinit: dir.join("netinit"),
+            netd: dir.join("netd"),
             seccomp_apply: dir.join("seccomp-apply"),
             verity_init: dir.join("verity-init"),
             runner: dir.join("runner"),
             egress_client: dir.join("egress-client"),
+            addon_dns: dir.join("addon-dns"),
+            exit_report: dir.join("exit-report"),
             dir,
         }
     }
@@ -177,10 +186,13 @@ impl RuntimeOverlayGuestLayout {
         self.agent.is_file()
             && self.agent_dev_shell.is_file()
             && self.netinit.is_file()
+            && self.netd.is_file()
             && self.seccomp_apply.is_file()
             && self.verity_init.is_file()
             && self.runner.is_file()
             && self.egress_client.is_file()
+            && self.addon_dns.is_file()
+            && self.exit_report.is_file()
     }
 
     fn binaries(&self) -> RuntimeOverlayGuestBinaries {
@@ -188,10 +200,13 @@ impl RuntimeOverlayGuestLayout {
             agent: self.agent.clone(),
             agent_dev_shell: self.agent_dev_shell.clone(),
             netinit: self.netinit.clone(),
+            netd: self.netd.clone(),
             seccomp_apply: self.seccomp_apply.clone(),
             verity_init: self.verity_init.clone(),
             runner: self.runner.clone(),
             egress_client: self.egress_client.clone(),
+            addon_dns: self.addon_dns.clone(),
+            exit_report: self.exit_report.clone(),
         }
     }
 }
@@ -558,6 +573,8 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--bin".to_string(),
         "mvm-guest-netinit".to_string(),
         "--bin".to_string(),
+        "mvm-guest-netd".to_string(),
+        "--bin".to_string(),
         "mvm-seccomp-apply".to_string(),
         "--bin".to_string(),
         "mvm-verity-init".to_string(),
@@ -567,15 +584,22 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "mvm-guest-helpers".to_string(),
         "--bin".to_string(),
         "mvm-egress-client".to_string(),
+        "--bin".to_string(),
+        "mvm-addon-dns".to_string(),
+        "--bin".to_string(),
+        "mvm-exit-report".to_string(),
     ];
     run_zigbuild(&spec, cargo.as_os_str(), &prod_args)?;
     let output_dir = spec.output_dir();
     install_one(&output_dir.join("mvm-guest-agent"), &layout.agent)?;
     install_one(&output_dir.join("mvm-guest-netinit"), &layout.netinit)?;
+    install_one(&output_dir.join("mvm-guest-netd"), &layout.netd)?;
     install_one(&output_dir.join("mvm-seccomp-apply"), &layout.seccomp_apply)?;
     install_one(&output_dir.join("mvm-verity-init"), &layout.verity_init)?;
     install_one(&output_dir.join("mvm-runner"), &layout.runner)?;
     install_one(&output_dir.join("mvm-egress-client"), &layout.egress_client)?;
+    install_one(&output_dir.join("mvm-addon-dns"), &layout.addon_dns)?;
+    install_one(&output_dir.join("mvm-exit-report"), &layout.exit_report)?;
 
     let dev_agent_args = vec![
         "zigbuild".to_string(),
@@ -1236,9 +1260,12 @@ mod tests {
         assert_eq!(layout.agent, layout.dir.join("agent"));
         assert_eq!(layout.agent_dev_shell, layout.dir.join("agent-dev-shell"));
         assert_eq!(layout.netinit, layout.dir.join("netinit"));
+        assert_eq!(layout.netd, layout.dir.join("netd"));
         assert_eq!(layout.seccomp_apply, layout.dir.join("seccomp-apply"));
         assert_eq!(layout.runner, layout.dir.join("runner"));
         assert_eq!(layout.egress_client, layout.dir.join("egress-client"));
+        assert_eq!(layout.addon_dns, layout.dir.join("addon-dns"));
+        assert_eq!(layout.exit_report, layout.dir.join("exit-report"));
     }
 
     #[test]

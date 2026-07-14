@@ -270,7 +270,7 @@ fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
         return disks;
     }
 
-    Some(config.rootfs_path.clone())
+    let mut disks = Some(config.rootfs_path.clone())
         .filter(|p| !p.is_empty())
         .map(|p| {
             vec![HvfDisk {
@@ -279,7 +279,22 @@ fn hvf_workload_disks(config: &VmStartConfig) -> Vec<HvfDisk> {
                 ephemeral: true,
             }]
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // A non-verity dev boot has no initramfs to mount the runtime overlay, so
+    // attach it as a plain read-only virtio-blk device immediately after the
+    // rootfs (=> /dev/vdb). The guest `/init` mounts it from the matching
+    // `mvm.runtime_data=` cmdline token. Only when the rootfs disk is present,
+    // so the overlay never slides down to /dev/vda.
+    if !disks.is_empty()
+        && let Some(overlay) = crate::microvm::non_verity_overlay_ext4(config)
+    {
+        disks.push(HvfDisk {
+            path: PathBuf::from(overlay),
+            read_only: true,
+            ephemeral: false,
+        });
+    }
+    disks
 }
 
 fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
@@ -289,14 +304,28 @@ fn ensure_hvf_runtime_source_supported(config: &VmStartConfig) -> Result<()> {
     if config.virtiofs_root.is_some() {
         bail!("required-overlay hvf boots do not support virtiofs-root");
     }
-    if !hvf_verity_enabled(config) {
+    // Two supported required-overlay shapes, keyed on whether the rootfs asks to
+    // be sealed. A sealed boot (verity metadata present) must be fully verity
+    // capable — a missing initrd fails closed rather than silently downgrading to
+    // an unverified root — and carries the dm-verity overlay triple its initramfs
+    // (mvm-verity-init) mounts. A non-verity dev boot instead mounts a plain
+    // read-only overlay from `/dev/vdb` in its guest `/init`.
+    let verity_intended = config.roothash.is_some() || config.verity_path.is_some();
+    if verity_intended {
+        if !hvf_verity_enabled(config) {
+            bail!(
+                "required-overlay hvf boot requires verity metadata plus an initrd \
+                 (`--initrd` or sibling rootfs.initrd)"
+            );
+        }
+        if hvf_runtime_overlay(config).is_none() {
+            bail!("required-overlay hvf boot requires the runtime overlay artifact triple");
+        }
+    } else if crate::microvm::non_verity_overlay_ext4(config).is_none() {
         bail!(
-            "required-overlay hvf boot requires verity metadata plus an initrd \
-             (`--initrd` or sibling rootfs.initrd)"
+            "required-overlay hvf boot requires the runtime overlay artifact triple \
+             (a non-verity boot mounts it as a plain read-only /dev/vdb)"
         );
-    }
-    if hvf_runtime_overlay(config).is_none() {
-        bail!("required-overlay hvf boot requires the runtime overlay artifact triple");
     }
     Ok(())
 }
@@ -329,6 +358,19 @@ fn hvf_workload_cmdline(config: &VmStartConfig, state_dir: &Path) -> Option<Stri
     ) {
         cmdline.push(' ');
         cmdline.push_str(&verity_args);
+    }
+    // Non-verity boots carry the runtime overlay as a plain read-only
+    // `/dev/vdb` (attached by `hvf_workload_disks`); emit the token its `/init`
+    // mounts from. Verity boots already emitted the dm-verity variant above.
+    if !verity_enabled
+        && has_disk
+        && let Some(overlay_args) = crate::microvm::build_runtime_overlay_cmdline_args(
+            None,
+            crate::microvm::non_verity_overlay_ext4(config).is_some(),
+        )
+    {
+        cmdline.push(' ');
+        cmdline.push_str(&overlay_args);
     }
     cmdline.push(' ');
     cmdline.push_str(&mvm_core::vm_backend::encode_runtime_source_policy_cmdline(
@@ -1064,6 +1106,47 @@ mod tests {
     }
 
     #[test]
+    fn hvf_non_verity_boot_attaches_runtime_overlay_as_vdb() {
+        // A plain dev rootfs (no verity) with a resolved overlay triple: the
+        // rootfs stays the ephemeral read-write /dev/vda, and the overlay is a
+        // read-only /dev/vdb the guest `/init` mounts from the cmdline token.
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        let disks = hvf_workload_disks(&config);
+        assert_eq!(disks.len(), 2);
+        assert_eq!(disks[0].path, PathBuf::from("/tmp/rootfs.ext4"));
+        assert!(!disks[0].read_only);
+        assert!(disks[0].ephemeral);
+        assert_eq!(disks[1].path, PathBuf::from("/tmp/runtime.ext4"));
+        assert!(disks[1].read_only);
+        assert!(!disks[1].ephemeral);
+
+        let dir = tempfile::tempdir().unwrap();
+        let cmdline = hvf_workload_cmdline(&config, dir.path()).expect("cmdline");
+        assert!(
+            cmdline.contains("mvm.runtime_data=/dev/vdb"),
+            "got: {cmdline}"
+        );
+        assert!(!cmdline.contains("mvm.runtime_hash="), "got: {cmdline}");
+    }
+
+    #[test]
+    fn hvf_non_verity_boot_without_overlay_attaches_only_rootfs() {
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
+            ..Default::default()
+        };
+        assert_eq!(hvf_workload_disks(&config).len(), 1);
+    }
+
+    #[test]
     fn required_overlay_hvf_support_rejects_missing_overlay_artifacts() {
         let dir = tempfile::tempdir().unwrap();
         let rootfs = dir.path().join("rootfs.ext4");
@@ -1104,6 +1187,32 @@ mod tests {
         };
         let err = ensure_hvf_runtime_source_supported(&config).unwrap_err();
         assert!(err.to_string().contains("rootfs.initrd"));
+    }
+
+    #[test]
+    fn required_overlay_hvf_support_accepts_non_verity_block_overlay() {
+        // A non-verity dev boot carrying the resolved overlay triple is served by
+        // the plain read-only /dev/vdb mount — no verity metadata or initrd.
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            runtime_overlay_path: Some("/tmp/runtime.ext4".into()),
+            runtime_overlay_verity_path: Some("/tmp/runtime.verity".into()),
+            runtime_overlay_roothash: Some("b".repeat(64)),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        assert!(ensure_hvf_runtime_source_supported(&config).is_ok());
+    }
+
+    #[test]
+    fn required_overlay_hvf_support_rejects_non_verity_without_overlay() {
+        let config = VmStartConfig {
+            rootfs_path: "/tmp/rootfs.ext4".into(),
+            runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
+            ..Default::default()
+        };
+        let err = ensure_hvf_runtime_source_supported(&config).unwrap_err();
+        assert!(err.to_string().contains("/dev/vdb"));
     }
 
     #[test]
