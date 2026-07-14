@@ -813,6 +813,20 @@ plan 25 sequences the work into six independently-shippable workstreams.
       egress allowlist had omitted `crates.io`, `index.crates.io`, and
       `static.crates.io`, which could force Cargo vendoring in the no-guest-NIC
       builder path through host-generated `403`s. Focused `mvm-build`
+      tests/clippy are green after admitting those hosts, and the synced
+      current-main refresh branch `codex/plan236-plan219-proof-refresh` has now
+      started the remaining operator-surface / validation closeout slice too:
+      it adds `mvmctl machine set-timeout <name> <seconds>` as a named-machine
+      wrapper over the existing idle-timeout RPC, broadens the caller-side
+      denial audit so local capability-gate refusals are chained the same way
+      as guest-returned `VerbNotAuthorized`, and makes the two
+      `libkrun-sys` loopback-bind tests skip cleanly on hosts where the sandbox
+      forbids binding even `127.0.0.1`. Focused refreshed-branch validation is
+      green with `cargo fmt --all -- --check`, `cargo test -p mvm-cli
+      top_level_cli_routes_machine_set_timeout --offline`, and `cargo test -p
+      libkrun-sys free_loopback_port_is_in_range_and_bindable --lib --
+      --nocapture`. These improvements do not change the honest remaining Plan
+      219 blockers: macOS HVF/libkrun live proof and ADR-103 acceptance.
       tests/clippy are green after admitting those hosts, and a fresh
       `/private/tmp/m236h2` rerun now stays alive in the real workload-build
       path instead of reproducing the old immediate failure. A further

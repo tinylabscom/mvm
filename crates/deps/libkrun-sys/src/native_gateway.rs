@@ -569,6 +569,20 @@ mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
 
+    fn require_loopback_bind_capability() -> bool {
+        match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(listener) => {
+                drop(listener);
+                true
+            }
+            Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                eprintln!("test skipped: loopback bind is not permitted on this host: {err}");
+                false
+            }
+            Err(err) => panic!("probe loopback bind capability: {err}"),
+        }
+    }
+
     #[test]
     fn install_hint_is_platform_specific() {
         let hint = install_hint();
@@ -606,6 +620,9 @@ mod tests {
     /// the reservation drops, which is exactly what the helper does.
     #[test]
     fn free_loopback_port_is_in_range_and_bindable() {
+        if !require_loopback_bind_capability() {
+            return;
+        }
         for _ in 0..20 {
             let port = match free_loopback_port() {
                 Ok(port) => port,
@@ -659,6 +676,9 @@ mod tests {
             eprintln!("test skipped: set MVM_TEST_RVPROXY_BIN to a vfkit gateway binary");
             return;
         };
+        if !require_loopback_bind_capability() {
+            return;
+        }
         let mut env = TestEnv::new();
         env.set("MVM_GATEWAY_BIN", &bin);
         let tmp = tempfile::tempdir().unwrap();

@@ -552,24 +552,34 @@ fn cmd_set_timeout(args: SetTimeoutArgs) -> Result<()> {
 /// active (cold-path-only build) — the host reaper remains the only
 /// enforcement. Errors propagate the underlying transport failure;
 /// the caller treats them as best-effort.
-fn dispatch_update_idle_timeout(vm_name: &str, secs: u64) -> Result<(u64, u64)> {
+pub(in crate::commands) fn dispatch_update_idle_timeout(
+    vm_name: &str,
+    secs: u64,
+) -> Result<(u64, u64)> {
     let transport = mvm::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on {vm_name:?}"))?;
     let mut stream = transport
         .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on {vm_name:?}"))?;
-    mvm_guest::vsock::require_capabilities(
+    if let Err(err) = mvm_guest::vsock::require_capabilities(
         &mut stream,
         &[mvm_guest::vsock::GuestCapability::UpdateIdleTimeout],
-    )?;
+    ) {
+        super::verb_audit::audit_verb_refusal(vm_name, &err);
+        return Err(err);
+    }
     let req = mvm_guest::vsock::GuestRequest::UpdateIdleTimeout { secs };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    let resp = mvm_guest::vsock::call_unary(&mut stream, &req).map_err(anyhow::Error::from);
-    if let Err(err) = &resp {
-        super::verb_audit::audit_verb_refusal(vm_name, err);
-    }
-    match classify_update_idle_response(resp?) {
+    let response = match mvm_guest::vsock::call_unary(&mut stream, &req) {
+        Ok(response) => response,
+        Err(err) => {
+            let err = anyhow::Error::from(err);
+            super::verb_audit::audit_verb_refusal(vm_name, &err);
+            return Err(err);
+        }
+    };
+    match classify_update_idle_response(response) {
         UpdateIdleOutcome::Applied {
             previous_secs,
             applied_secs,
