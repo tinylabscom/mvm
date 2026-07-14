@@ -131,6 +131,20 @@ scripts/   the few remaining dev/CI shell scripts
 ```
 Root files kept: `Cargo.*`, `Justfile`, `README`/`LICENSE`/`SECURITY`/`CHANGELOG`, `AGENTS.md`, `CLAUDE.md`, `deny.toml`, `rust-toolchain.toml`, `treefmt.toml`, `cliff.toml`, `install.sh`, `.github/`, `.githooks/`. Everything else is moved or deleted (WS0.3).
 
+### 2.9 Consolidated vsock networking (one standardized protocol)
+
+ALL guest ingress/egress rides vsock through a single authenticated, default-deny, auditable boundary — no NIC, no TAP, no bridge, ever. Data path:
+```
+guest app → guest Linux stack → guest TUN (mvm-net0) → mvm-agentd [net role]
+  → framed vsock protocol → per-VM host UDS (~/.mvm/run) → mvm-hostd [net worker]
+  → identity check + default-deny policy + DNS + audit → smoltcp userspace stack → approved endpoints
+```
+Two capabilities over that one seam:
+- **Generic transparent L3 tunnel** — carries no secrets; guest uses ordinary sockets (no proxy-awareness); all protocols (TCP/UDP/DNS/ICMP) as raw IP over vsock; host terminates in **userspace smoltcp** (no host TUN/NAT, no shell-out, cross-platform).
+- **Typed connectors** — secret-bearing requests; the host holds the credential and performs the request; secrets never enter the guest. Reuses the existing broker; replaces the global `HTTP_PROXY=:1080`.
+
+**Standardized protocol** (wire types in `mvm-protocol`, no_std/fuzzable): length-prefixed frames `magic|version|type|flags|flow_id|len|seq`; strict max size; `HELLO/HELLO_ACK/CONFIG/PACKET/CREDIT/HEARTBEAT/ERROR/SHUTDOWN` + ext (`FLOW_*`, `DNS_*`, `POLICY_UPDATE`, `STATS`, `AUDIT_EVENT`); credit backpressure; bounded queues; separate control + packet (+ audit) streams; session handshake `protocol_version/vm_id/boot_id/session_nonce/agent_version/features/max_frame` validated host-side, **fresh boot_id + nonce per boot and per snapshot-restore** (CID-reuse safe). Default-deny; block loopback/link-local/multicast/metadata/RFC1918/IPv6-local; DNS-rebinding protection; fail-closed everywhere. A `VmDuplexTransport` trait keeps protocol/policy/audit hypervisor-independent (Firecracker UDS · libkrun unixgram · HVF vsock · in-memory for tests). Host worker is one process (Option A) under cap-drop + seccomp + landlock. Identity is per-VM; mvmd layers tenant policy/quotas on the handshake fields.
+
 ---
 
 ## 3. Workstreams
@@ -139,17 +153,15 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 
 ### Phase 0 — Repo & spec hygiene (low-risk, unblocks a clean base)
 
-**WS0.1 — specs/ sweep** (gate-sensitive: 6 xtask checks + 4 CI workflows read `specs/`)
-- [ ] Delete `specs/{plans,notes,backlog,research,perf,prompts}`, `scratch.md`, `gap-analysis-vs-libkrun.md`, `REFACTOR-STATUS.md`, `DEPLOYMENT.md` (all preserved in git).
-- [ ] Fold `specs/claims/*` (per-claim docs) + `specs/compliance/*` + `specs/threat-models/*` into the consolidated ADRs; keep `claims/catalog.md` as the machine-checked witness ledger.
-- [ ] **Update the xtask gates that read the deleted trees in the same change:** `check_spec_numbers` (reads `plans/` → retire or repoint), and repoint `check_claim_catalog` / `check_adr_coverage` / `check_trust_gradient` / `check_no_overclaim` / `check_doc_claims` at the consolidated ADRs + `catalog.md`. Update the 4 CI workflows (`security.yml`, `ci-full.yml`, `publish-npm.yml`, `publish-pypi.yml`) that reference `specs/`.
-- [ ] Keep `specs/adrs/` (consolidated per WS0.2), `01-project.md`, `02-roadmap.md`, `runbooks/`, `contracts/`.
-- Gate: `specs/` is ADRs + the small kept set; every xtask check green; the 4 CI workflows green.
+**WS0.1 — specs/ sweep** ✅ done
+- [x] Delete `specs/{plans,notes,backlog,research,perf,prompts}` + loose history (`scratch`, `gap-analysis`, `REFACTOR-STATUS`, `DEPLOYMENT`, `README`, perf json) — `72a4214a7`.
+- [x] Retire `check_spec_numbers`; repoint `check_no_overclaim` + the 3 CI workflows + 2 scripts off the deleted trees — `72a4214a7`.
+- [x] `specs/` now = `adrs/` + `SPRINT.md` + `01-project.md`; every xtask check green.
 
-**WS0.2 — ADR consolidation (~91 → ~15)**
-- [ ] Merge the 13 clusters into ~15 canonical ADRs, deleting the merged files (no decision lost — knowledge folded in). Fix dup titles (008/010) and the 012 internal-number mismatch. See Appendix A.
-- [ ] Keep ADR-002 (security posture) as the distinct anchor/SoT; keep `claims/catalog.md` as a separate machine-checked ledger (folded knowledge, not folded prose) so the CI witness mapping survives. No mega-ADRs — each stays a coherent single-theme decision record.
-- Gate: ADR set ~15 files; `check-claim-catalog` still resolves every witness.
+**WS0.2 — ADR consolidation (~92 → ~15)**
+- [x] Consolidate claims/compliance/threat-models into existing ADRs (claim-10→ADR-050, egress-no-secret→ADR-067, trust-gradient→ADR-090; ledger table + compliance + threat model → ADR-002; gates repointed) — `985225f4e`; `check-claim-catalog` still verifies 16 claims / 38 witnesses from ADR-002.
+- [ ] Merge the 13 clusters into ~15 canonical ADRs (still ~92 files), deleting merged files (no decision lost). Fix dup titles (008/010) and the 012 internal-number mismatch. See Appendix A. Keep ADR-002 the SoT; no mega-ADRs.
+- Gate: ADR set ~15 files; `check-claim-catalog` + `check-adr-coverage` green.
 
 **WS0.3 — top-level directory compression** (target layout in §2.8)
 - [ ] Move `sdks/` into `crates/` — Rust SDK = `crates/mvm-sdk`; language bindings = `crates/mvm-sdk-<lang>` (Python surface stays `mvm`).
@@ -209,14 +221,21 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [ ] CI lints: "exactly two shipped binaries + CLI", "no `Command` outside the allow-list".
 - Gate: `ls` of the build outputs shows 1 host + 1 guest + `mvmctl`; lints green; secrets/seccomp tests pass.
 
-**WS3 — vsock-only egress unification + data governance**
-- [ ] Route Firecracker egress through the smoltcp vsock tunnel; retire the TAP+iptables NAT path (#1717, #1701).
-- [ ] HVF host-vsock-proxy for OCI allow-host egress (#1601).
-- [ ] Fail-closed on `--network-allow` for any backend that can't mediate egress host-side.
-- [ ] Bidirectional secret-substitution + PII-redaction at the seam, enforced on all workload backends; add the data-governance CI witness.
-- [ ] Delete the dead rvproxy / native-gateway subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`.
-- [ ] Enforce the mount no-shadow rule; add `/mvm` to deny prefixes.
-- Gate: `check_vsock_only_egress` passes for all workload backends; `machine run --image busybox --allow-host google.com` resolves DNS + connects over the seam (the current `ping: bad address` failure fixed); live egress smoke on Mac (HVF) + Linux (libkrun + FC); no NIC bypass.
+**WS-NET — consolidated vsock networking + standardized protocol** (absorbs the old WS3; see §2.9) — the core auditability seam
+First vertical slice (build in this order):
+- [ ] `mvm-protocol`: versioned frame codec (encode + incremental decoder) + handshake types; fuzz target for the decoder (never panic / OOM / OOB).
+- [ ] `VmDuplexTransport` trait + an in-memory / process-UDS test backend (so CI needs no VMM).
+- [ ] guest TUN pump (`mvm-agentd` net role): create `mvm-net0`, static IPv4, MTU, default route, DNS → controlled resolver; TUN↔frames.
+- [ ] host net worker (`mvm-hostd` role): accept per-VM UDS, validate the identity handshake, default-deny policy engine + one allow rule, smoltcp forward, structured allow/deny audit.
+- [ ] one control stream + one packet stream; hard frame/queue limits + credit backpressure.
+
+Then unify + retire the old paths:
+- [ ] Route Firecracker off TAP+iptables onto this tunnel (#1717, #1701); HVF host-vsock-proxy (#1601); fail-closed on `--network-allow` where the host can't mediate.
+- [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
+- [ ] Delete the dead rvproxy / native-gateway subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`. Enforce the mount no-shadow rule (`/mvm` in deny prefixes).
+- [ ] Snapshot/restore/warm-start: fresh boot_id + nonce + handshake; stale flows closed; no live-vsock-survives-restore assumption.
+- [ ] A networking ADR (networking cluster): why vsock-mandatory, guest-TUN, L3-over-smoltcp, typed-connectors-separate; threat/trust/privilege boundaries; snapshot behavior; transport abstraction.
+- Gate: protocol unit + fuzz green; process-level integration proves allow-passes / deny-drops / **stale-session-rejected**; `check_vsock_only_egress` passes on all workload backends; `machine run --image busybox --allow-host google.com` resolves DNS + connects (fixes `ping: bad address`); live smoke Mac (HVF) + Linux (libkrun + FC); no NIC bypass.
 
 **WS9 — lifecycle correctness**
 - [ ] Confirm transient teardown (entrypoint exit + no healthcheck → VM stops) — already centralized; add tests.
@@ -265,7 +284,8 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 **WS12 — ADRs alive + website docs**
 - [ ] Keep the consolidated ADRs authoritative; update `CLAUDE.md`/`AGENTS.md` to the new crate/binary/dir/feature/backend reality.
 - [ ] Update the website docs (`public/src/content/docs/**`) — CLI reference, architecture diagram, backend list (drop QEMU/Vz), single-dir, install/upgrade/clean.
-- Gate: docs match the shipped CLI + architecture; `#1637` (one-command microVM) becomes accurate.
+- [ ] Sweep stale `specs/{claims,compliance,threat-models,references,contracts,runbooks}` path references out of `SECURITY.md`, `README.md`, `ops/`, other ADRs, and `public/src/content/docs/**` (flagged by WS0.2a — they now live in ADR-002/050/067/090).
+- Gate: docs match the shipped CLI + architecture; no dangling `specs/` paths; `#1637` (one-command microVM) becomes accurate.
 
 **WS13 — issue/PR close-out** (all but #1637 — see Appendix B)
 - [ ] Fold each still-relevant intent into its WS; close the 8 issues + 4 PRs with a pointer to the superseding WS. Keep **#1637** open.
