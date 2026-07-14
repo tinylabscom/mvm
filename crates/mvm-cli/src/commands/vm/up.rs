@@ -1821,6 +1821,12 @@ mod runtime_overlay_attach_tests {
                 xattrs: Vec::new(),
             },
             Node::File {
+                path: "/netd".into(),
+                mode: 0o555,
+                data: b"netd".to_vec(),
+                xattrs: Vec::new(),
+            },
+            Node::File {
                 path: "/seccomp-apply".into(),
                 mode: 0o555,
                 data: b"seccomp".to_vec(),
