@@ -629,6 +629,20 @@ impl BuilderVm for StubBuilderVm {
 ///
 /// Resources (`vcpus`, `memory_mib`) are caller-supplied; the
 /// backend's resource-cap check enforces a host-side ceiling.
+/// The host's current wall clock as an `mvm.hostepoch=<unix_seconds>` cmdline
+/// token. The libkrun + hvf builder VMMs expose no RTC, so the guest boots with a
+/// ~1970 clock; PID 1 (`mvm-host-vm-init`) reads this token and seeds the wall
+/// clock from it, otherwise a cold Nix store's HTTPS fetch fails cert validation
+/// ("certificate is not yet valid"). Appended fresh at each launch so the clock
+/// tracks real time, not a stale image constant.
+pub fn builder_hostepoch_cmdline_token() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("mvm.hostepoch={secs}")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuilderVmRunConfig {
     /// Human-readable VM name. Surfaces in logs + the per-VM state

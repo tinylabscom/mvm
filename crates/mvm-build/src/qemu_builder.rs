@@ -199,8 +199,9 @@ fn run_stage0_qemu(
 
     // 2. Launch QEMU (the validated recipe), serial → console.log.
     let egress_port = allocate_qemu_builder_egress_port();
+    let hostepoch = crate::builder_vm::builder_hostepoch_cmdline_token();
     let append = format!(
-        "console=ttyS0 root=/dev/vda rw init={entry_path} mvm.backend=qemu {QEMU_BUILDER_VSOCK_EGRESS_TOKEN} {QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX}{egress_port} panic=-1"
+        "console=ttyS0 root=/dev/vda rw init={entry_path} mvm.backend=qemu {QEMU_BUILDER_VSOCK_EGRESS_TOKEN} {QEMU_BUILDER_VSOCK_EGRESS_PORT_TOKEN_PREFIX}{egress_port} {hostepoch} panic=-1"
     );
     let guest_cid = allocate_qemu_builder_guest_cid();
     #[cfg(feature = "builder-vm")]

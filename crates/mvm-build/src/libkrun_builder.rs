@@ -2521,6 +2521,14 @@ fn validate_builder_vm_image_cache(arch_dir: &Path) -> Result<String, BuilderVmE
         })?
         .trim()
         .to_string();
+    // Ride the host wall clock onto the base cmdline for every backend that boots
+    // this image (libkrun + hvf are RTC-less): PID 1 seeds the guest clock from it
+    // so a cold Nix store's HTTPS fetch doesn't fail cert validation. Fresh per
+    // run, and preserved through the later per-boot token appends.
+    let cmdline = append_cmdline_token(
+        &cmdline,
+        &crate::builder_vm::builder_hostepoch_cmdline_token(),
+    );
 
     let manifest = read_builder_vm_cache_manifest(&manifest_path, arch_dir)?;
     if manifest.cache_contract_version != BUILDER_VM_CACHE_CONTRACT_VERSION

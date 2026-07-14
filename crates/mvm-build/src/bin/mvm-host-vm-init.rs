@@ -412,6 +412,20 @@ fn vsock_egress_requested_from_cmdline(cmdline: &str) -> bool {
         .any(|tok| tok == "mvm.vsock_egress=1")
 }
 
+/// Parse `mvm.hostepoch=<unix_seconds>` — the host's wall-clock at launch. The
+/// builder VMMs expose no RTC, so PID 1 seeds the guest clock from this;
+/// otherwise a cold Nix store's HTTPS fetch fails cert validation ("certificate
+/// is not yet valid") against a clock stuck near the 1970 epoch. Rejects
+/// non-positive values so a malformed token can't wind the clock backwards.
+#[cfg(any(target_os = "linux", test))]
+fn hostepoch_from_cmdline(cmdline: &str) -> Option<i64> {
+    cmdline
+        .split_whitespace()
+        .find_map(|tok| tok.strip_prefix("mvm.hostepoch="))
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|secs| *secs > 0)
+}
+
 #[cfg(any(target_os = "linux", test))]
 fn vsock_egress_port_from_cmdline(cmdline: &str) -> Option<u32> {
     cmdline
@@ -733,6 +747,20 @@ mod tests {
         assert!(!vsock_egress_requested_from_cmdline(
             "console=hvc0 root=/dev/vda"
         ));
+    }
+
+    #[test]
+    fn hostepoch_from_cmdline_parses_positive_seconds_only() {
+        assert_eq!(
+            hostepoch_from_cmdline("console=hvc0 mvm.hostepoch=1783982554 root=/dev/vda"),
+            Some(1_783_982_554)
+        );
+        // Absent, non-numeric, zero, and negative all yield None (never winds the
+        // clock backwards).
+        assert_eq!(hostepoch_from_cmdline("console=hvc0 root=/dev/vda"), None);
+        assert_eq!(hostepoch_from_cmdline("mvm.hostepoch=notanumber"), None);
+        assert_eq!(hostepoch_from_cmdline("mvm.hostepoch=0"), None);
+        assert_eq!(hostepoch_from_cmdline("mvm.hostepoch=-5"), None);
     }
 
     #[test]
@@ -1398,6 +1426,30 @@ mod linux {
             .all(is_executable)
     }
 
+    /// Set the guest wall clock from the `mvm.hostepoch=` cmdline token. A no-op
+    /// when the token is absent or unparsable (the guest keeps whatever the
+    /// kernel set). Best-effort: a `settimeofday` failure is logged, not fatal.
+    fn set_clock_from_host_epoch(cmdline: &str) {
+        let Some(secs) = super::hostepoch_from_cmdline(cmdline) else {
+            return;
+        };
+        let tv = libc::timeval {
+            tv_sec: secs as libc::time_t,
+            tv_usec: 0,
+        };
+        // SAFETY: `tv` is a valid, fully-initialized timeval; the timezone arg is
+        // null, which Linux ignores.
+        let rc = unsafe { libc::settimeofday(&tv, std::ptr::null()) };
+        if rc != 0 {
+            eprintln!(
+                "mvm-host-vm-init: settimeofday failed: {}",
+                std::io::Error::last_os_error()
+            );
+        } else {
+            eprintln!("mvm-host-vm-init: wall clock set from host epoch {secs}");
+        }
+    }
+
     pub fn run() -> ExitCode {
         eprintln!("mvm-host-vm-init: pid 1 starting");
         append_init_breadcrumb("run_enter", "pid1");
@@ -1449,6 +1501,11 @@ mod linux {
         stamp(&timings, |t| {
             t.pseudofs_ready_ms = Some(BootTimings::ms_since(anchor))
         });
+
+        // Seed the wall clock from the host before any network fetch. The builder
+        // VMMs expose no RTC, so a cold Nix store's HTTPS fetch would otherwise
+        // fail cert validation against a ~1970 clock. No-op without the token.
+        set_clock_from_host_epoch(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
 
         // Three independent setup tracks fan out
         // after pseudofs. They share no state with each other
