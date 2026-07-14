@@ -13,7 +13,7 @@
 //! opaque token where its credential would go — it never sees the value.
 
 use mvm_core::plan::{SecretBinding, SecretSource};
-use mvm_sdk::ir::{SecretMount, SecretRef};
+use mvm_ir::{SecretMount, SecretRef};
 
 use super::binding::BindingStore;
 use super::substitution::{Placeholder, SubstitutionRegistry};
@@ -95,7 +95,7 @@ pub fn assemble_registry(
 mod tests {
     use super::*;
     use crate::keyholder::{FileBindingStore, SecretBindingMeta};
-    use mvm_sdk::ir::AuthType;
+    use mvm_ir::AuthType;
     use tempfile::tempdir;
 
     fn keystore_binding(guest_name: &str, address: &str) -> SecretBinding {
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn reconstructs_sigv4_params_onto_the_secret_ref() {
-        use mvm_sdk::ir::Sigv4Params;
+        use mvm_ir::Sigv4Params;
         let dir = tempdir().unwrap();
         let store = FileBindingStore::with_dir(dir.path());
         store

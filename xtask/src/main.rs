@@ -32,6 +32,7 @@ mod check_no_overclaim;
 mod check_no_spec_refs_in_comments;
 mod check_require_grant_token_allowlist;
 mod check_runtime_overlay_version;
+mod check_sdk_split;
 mod check_spec_numbers;
 mod check_trust_gradient;
 mod check_two_surfaces;
@@ -131,6 +132,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_spec_numbers::run(&workspace)
         }
+        Some("check-sdk-split") => {
+            let workspace = workspace_root();
+            check_sdk_split::run(&workspace)
+        }
         Some("check-no-spec-refs-in-comments") => {
             let workspace = workspace_root();
             check_no_spec_refs_in_comments::run(&workspace)
@@ -179,7 +184,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-spec-numbers, check-two-surfaces, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-sdk-split, check-spec-numbers, check-two-surfaces, check-no-spec-refs-in-comments, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -238,6 +243,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-no-overclaim                      Plan 75 W0 lint: refuse gated phrases from specs/claims/ outside exempt paths"
+            );
+            eprintln!(
+                "  check-sdk-split                        assert shared runtime/build crates stay off mvm-sdk while mvm-cli keeps the single-CLI SDK path"
             );
             eprintln!(
                 "  check-spec-numbers                     Reject duplicate numeric prefixes in specs/plans and specs/adrs"

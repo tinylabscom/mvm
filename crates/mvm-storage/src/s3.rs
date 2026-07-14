@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use mvm_core::volume::VolumeError;
-use mvm_sdk::ir::MountSource;
+use mvm_ir::MountSource;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjPath;
 

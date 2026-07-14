@@ -28,7 +28,7 @@ use mvm::vm::name_registry::record_readiness;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::health::{HealthAction, HealthPolicy, HealthState, HealthTracker, ProbeResult, fold};
 use mvm_guest::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
-use mvm_sdk::ir::HealthCheck;
+use mvm_ir::HealthCheck;
 
 /// Base of the exponential restart-backoff schedule, in seconds.
 const BACKOFF_BASE_SECS: u64 = 1;

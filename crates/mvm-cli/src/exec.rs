@@ -15,6 +15,7 @@ use anyhow::{Context, Result, anyhow};
 use mvm::vsock_transport;
 use mvm_backend::backend::AnyBackend;
 use mvm_core::vm_backend::{RequiredCapabilities, VmId, VmStartConfig, VmVolume};
+use mvm_ir::HealthCheck;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -372,7 +373,7 @@ pub struct ExecRequest {
     pub stdin: Vec<u8>,
     /// Recorded liveness declaration (phase A: presence only). Persisted with a
     /// persistent machine so it survives + is inspectable; not yet probed.
-    pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
+    pub healthcheck: Option<HealthCheck>,
 }
 
 pub(crate) fn select_exec_backend(
@@ -525,9 +526,9 @@ pub fn build_healthcheck(
     timeout_secs: u32,
     retries: u32,
     start_period_secs: u32,
-) -> Option<mvm_sdk::ir::HealthCheck> {
+) -> Option<HealthCheck> {
     let cmd = cmd?;
-    Some(mvm_sdk::ir::HealthCheck {
+    Some(HealthCheck {
         command: vec!["/bin/sh".into(), "-lc".into(), cmd.to_string()],
         interval_secs,
         timeout_secs,

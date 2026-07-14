@@ -13,7 +13,7 @@
 use std::sync::Arc;
 
 use mvm_core::crypto::secret_store::SecretStore;
-use mvm_sdk::ir::SecretRef;
+use mvm_ir::SecretRef;
 use secrecy::{ExposeSecret, SecretBox};
 
 /// Errors from resolving a [`SecretRef`] to its stored value.
@@ -86,7 +86,7 @@ impl SecretResolver for LocalResolver {
 mod tests {
     use super::*;
     use mvm_core::crypto::secret_store::FileSecretStore;
-    use mvm_sdk::ir::{AuthType, SecretMount};
+    use mvm_ir::{AuthType, SecretMount};
     use tempfile::tempdir;
 
     fn bearer_ref(name: &str, hosts: &[&str]) -> SecretRef {

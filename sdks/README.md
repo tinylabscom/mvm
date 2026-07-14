@@ -101,20 +101,118 @@ schema → datamodel-codegen (Python)           ← uvx, zero-install
 schema → json-schema-to-typescript (Node)     ← npx, zero-install
 ```
 
+## Local builds
+
+To build the SDKs without building the full Rust workspace:
+
+```bash
+just sdk-build
+```
+
+That delegates to:
+
+- `just sdk-build-python` — build the Python wheel + sdist into
+  `sdks/python/dist/`
+- `just sdk-build-typescript` — build the TypeScript SDK into
+  `sdks/typescript/dist/`
+
+On a fresh clone, install the TypeScript SDK dependencies first:
+
+```bash
+just sdk-install-typescript
+```
+
+## Local development
+
+When developing the SDKs in this repo, the usual loop is:
+
+1. Build the host CLI you want the SDKs to shell to:
+
+```bash
+cargo build -p mvm-cli
+export MVM_CLI_BIN="$PWD/target/debug/mvmctl"
+```
+
+2. Build the SDK you are changing:
+
+```bash
+just sdk-build-python
+just sdk-build-typescript
+```
+
+3. Exercise the SDK directly from the checkout:
+
+```bash
+# Python: use the checkout package directly.
+PYTHONPATH="$PWD/sdks/python" python3 your_app.py
+
+# TypeScript: build once, then point a consumer at the local package dir.
+npm install "$PWD/sdks/typescript"
+```
+
+For Python package work, an editable install is also fine:
+
+```bash
+uv venv
+. .venv/bin/activate
+uv pip install -e sdks/python
+```
+
+For TypeScript package work, a local-pack rehearsal matches publish behavior
+more closely than importing source files directly:
+
+```bash
+just sdk-build-typescript
+npm --prefix sdks/typescript pack
+```
+
+Then install the generated tarball into a scratch app or test fixture.
+
+Focused local test commands:
+
+```bash
+uv run --directory sdks/python pytest
+npm --prefix sdks/typescript run test
+```
+
+Release-path rehearsal without publishing:
+
+```bash
+just sdk-build
+# then run the GitHub Actions workflow `.github/workflows/publish-sdk.yml`
+# with `dry_run: true`
+```
+
+## Release contract
+
+Published SDK releases are driven by `sdks/release.toml`, not by the runtime
+toolchain tag stream. Runtime releases continue on `vX.Y.Z`; SDK publication
+only runs through `.github/workflows/publish-sdk.yml` for `sdk-vX.Y.Z`
+releases or an explicit workflow-dispatch dry-run. The same orchestrator is
+called from CI as the `SDK release dry-run` lane.
+
+The published SDK CLI resolution order is:
+
+- `MVM_CLI_BIN`
+- `mvmctl`
+
+Published SDKs use the ordinary `mvmctl` binary. A source checkout can still
+point `MVM_CLI_BIN` at a locally built `mvmctl`.
+
 ## Layout
 
 ```
 sdks/
 ├── README.md                       ← this file
 ├── python/
-│   ├── pyproject.toml              ← TBD — Slice D scaffolds this
+│   ├── pyproject.toml              ← Python package metadata
 │   └── mvm/
 │       ├── __init__.py
 │       └── _ir/
 │           ├── __init__.py
 │           └── workload.py         ← GENERATED — do not edit
 └── typescript/
-    ├── package.json                ← TBD — Slice E scaffolds this
+    ├── package.json                ← TypeScript package metadata
     └── src/
         └── ir/
             └── workload.ts         ← GENERATED — do not edit

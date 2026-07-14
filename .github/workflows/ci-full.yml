@@ -133,6 +133,9 @@ jobs:
       - name: No forbidden dependency families
         run: cargo run -p xtask -- check-forbidden-deps
 
+      - name: SDK crate split guard
+        run: cargo run -p xtask -- check-sdk-split
+
       - name: Gated doc claims (plan 74 W0)
         run: cargo run -p xtask -- check-doc-claims
 
@@ -256,6 +259,12 @@ jobs:
         # Keep this lane on end-to-end smoke targets that compile
         # without live microVM host state.
         run: cargo test --test smoke_run_json_receipt --test runtime_boot_bench
+
+  sdk-release-dry-run:
+    name: SDK release dry-run
+    uses: ./.github/workflows/publish-sdk.yml
+    with:
+      dry_run: true
 
   # Note: cargo-audit, cargo-deny, reproducibility, and prod-agent-no-exec
   # were duplicated here AND in security.yml. They now live only in

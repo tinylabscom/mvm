@@ -1,0 +1,11 @@
+# Languages mvmforge currently has shim renderers for. Per ADR-0010
+# the IR field is open (a string), but the host validator rejects
+# values not listed here with E_UNSUPPORTED_LANGUAGE.
+#
+# Adding a language is a one-PR change: append here, add a shim
+# renderer in `crates/mvmforge/src/shims/`, and add a corpus entry.
+# Lines starting with `#` and blank lines are ignored.
+
+python
+node
+wasm

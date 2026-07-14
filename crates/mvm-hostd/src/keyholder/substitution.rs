@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-use mvm_sdk::ir::{AuthType, SecretRef, host_matches};
+use mvm_ir::{AuthType, SecretRef, host_matches};
 use rand::RngCore;
 use zeroize::Zeroizing;
 
@@ -222,7 +222,7 @@ mod tests {
     use super::*;
     use crate::keyholder::LocalResolver;
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_sdk::ir::{AuthType, SecretMount};
+    use mvm_ir::{AuthType, SecretMount};
     use secrecy::SecretBox;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};

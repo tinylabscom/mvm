@@ -14,11 +14,18 @@ import mvm
 @pytest.fixture(autouse=True)
 def _isolate() -> None:
     """Each test starts with a clean recording + record mode."""
+    path = os.environ.get("PATH")
     mvm.reset_recording()
+    os.environ.pop("MVM_CLI_BIN", None)
     os.environ.pop("MVM_SDK_MODE", None)
     yield
     mvm.reset_recording()
+    os.environ.pop("MVM_CLI_BIN", None)
     os.environ.pop("MVM_SDK_MODE", None)
+    if path is None:
+        os.environ.pop("PATH", None)
+    else:
+        os.environ["PATH"] = path
 
 
 # ── basic recording shape ────────────────────────────────────────────
@@ -145,12 +152,13 @@ def test_context_manager_records_kill_on_exit() -> None:
 # ── modes ────────────────────────────────────────────────────────────
 
 
-def test_live_mode_requires_mvm_cli_bin() -> None:
-    """Plan 73 Followup H-live — MVM_SDK_MODE=live without
-    MVM_CLI_BIN must fail with an actionable hint."""
+def test_live_mode_requires_host_cli() -> None:
+    """MVM_SDK_MODE=live without the host CLI must fail with an
+    actionable hint."""
     os.environ["MVM_SDK_MODE"] = "live"
     os.environ.pop("MVM_CLI_BIN", None)
-    with pytest.raises(mvm.SandboxModeError, match="MVM_CLI_BIN"):
+    os.environ["PATH"] = ""
+    with pytest.raises(mvm.SandboxModeError, match="mvmctl"):
         mvm.Sandbox.create("python-3.12")
 
 

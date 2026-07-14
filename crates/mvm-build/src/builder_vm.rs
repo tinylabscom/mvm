@@ -170,7 +170,7 @@ pub enum BuilderArtifacts {
         /// Directory the builder VM sealed the application-deps
         /// volume into (content + SBOM + fetch log + CVE scan +
         /// attestations + meta). Caller hashes this with
-        /// `mvm_sdk::compile::deps_audit::verify_sealed_volume` to
+        /// `mvm_deps_audit::verify_sealed_volume` to
         /// derive the canonical `volume_hash`.
         volume_dir: PathBuf,
         /// JSON sidecar emitted by `mvm-host-vm-init` next to the

@@ -13,9 +13,8 @@ async-trait = "0.1"
 bytes = "1"
 chrono.workspace = true
 mvm-core.workspace = true
-# IR `MountSource` that MountProvider resolves. Acyclic: mvm-sdk does
-# not depend on mvm-storage, and its only mvm-* normal dep is mvm-core.
-mvm-sdk.workspace = true
+# IR `MountSource` that MountProvider resolves.
+mvm-ir.workspace = true
 # Content-addressed volume digests (B3).
 sha2.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt", "macros"] }

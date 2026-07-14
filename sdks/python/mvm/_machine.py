@@ -7,11 +7,10 @@ verification, and persistent spec handling stay in the CLI path.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Iterable
 
-from mvm._sandbox import MVM_CLI_BIN_ENV
+from mvm._cli import cli_resolution_hint, resolve_cli_bin
 from mvm._subprocess import (
     DEFAULT_INVOKE_TIMEOUT_SEC,
     DEFAULT_MAX_OUTPUT_BYTES,
@@ -53,7 +52,7 @@ class MachineError(RuntimeError):
 
 
 def _cli_bin() -> str:
-    return os.environ.get(MVM_CLI_BIN_ENV) or "mvmctl"
+    return resolve_cli_bin(purpose="Machine CLI commands")
 
 
 def _timeout() -> float:
@@ -85,7 +84,11 @@ def _append_repeated(argv: list[str], flag: str, values: Iterable[str] | None) -
 
 
 def _run_machine(argv: list[str]) -> MachineResult:
-    full = [_cli_bin(), "machine", *argv]
+    try:
+        cli_bin = _cli_bin()
+    except RuntimeError as exc:
+        raise MachineError(str(exc)) from exc
+    full = [cli_bin, "machine", *argv]
     try:
         result = run_capped(
             full,
@@ -94,7 +97,10 @@ def _run_machine(argv: list[str]) -> MachineResult:
             max_output_bytes=_max_output_bytes(),
         )
     except FileNotFoundError as exc:
-        raise MachineError(f"`{full[0]}` not found on disk; check MVM_CLI_BIN", argv=full) from exc
+        raise MachineError(
+            f"`{full[0]}` not found on disk; {cli_resolution_hint()}",
+            argv=full,
+        ) from exc
     except TransportTimeout as exc:
         raise MachineError(str(exc), argv=full) from exc
     except TransportOutputOverflow as exc:

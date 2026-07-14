@@ -48,7 +48,7 @@ use crate::proxy::{PROXY_URL, ProxyLifecycle};
 
 /// Subdir under `<job_dir>` that holds the installed payload. Same
 /// name as the canonical sealed-volume layout
-/// (`mvm_sdk::compile::deps_audit::FILE_CONTENT_DIR`) so the host
+/// (`mvm_deps_audit::FILE_CONTENT_DIR`) so the host
 /// can rename `<job_dir>` straight into a sealed volume without
 /// shuffling files. Mirrors that constant explicitly rather than
 /// re-exporting because `mvm-host-vm-init` doesn't depend on

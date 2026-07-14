@@ -8,7 +8,9 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+mvm-deps-audit.workspace = true
 mvm-core = { workspace = true }
+mvm-ir.workspace = true
 # The subprocess-backed MvmClient facade uses the trait + DTOs from
 # `mvm-core`'s `client` module (behind that crate's `client` feature). Kept off
 # by default so the mvmctl default closure gains no `async-trait`; the facade

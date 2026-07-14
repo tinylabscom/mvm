@@ -1,7 +1,7 @@
 //! `mvmctl deps` — user-facing CLI for the sealed deps-volume cache.
 //!
 //! Three verbs over the sealed-volume primitives in
-//! `mvm_sdk::compile::deps_audit` and the host orchestrator in
+//! `mvm_deps_audit` and the host orchestrator in
 //! `mvm_build::app_deps`:
 //!
 //! - **`mvmctl deps inspect <volume_hash>`** — pretty-print the four

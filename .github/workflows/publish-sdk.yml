@@ -1,0 +1,137 @@
+name: Publish SDKs
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build + smoke only; skip registry publication"
+        required: true
+        default: true
+        type: boolean
+  workflow_call:
+    inputs:
+      dry_run:
+        description: "Build + smoke only; skip registry publication"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-sdk
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    if: ${{ github.event_name != 'release' || startsWith(github.event.release.tag_name, 'sdk-v') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate manifest, tags, and registry state
+        env:
+          SDK_EVENT_NAME: ${{ github.event_name }}
+          SDK_RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SDK_DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          SDK_CHECK_REGISTRY: ${{ github.event_name == 'workflow_call' && 'false' || 'true' }}
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          import os
+          import pathlib
+          import tomllib
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+
+          root = pathlib.Path(".")
+          release = tomllib.loads((root / "sdks" / "release.toml").read_text())
+          pyproject = tomllib.loads((root / "sdks" / "python" / "pyproject.toml").read_text())
+          package = json.loads((root / "sdks" / "typescript" / "package.json").read_text())
+
+          event_name = os.environ["SDK_EVENT_NAME"]
+          dry_run = os.environ.get("SDK_DRY_RUN", "true").lower() == "true"
+          check_registry = os.environ.get("SDK_CHECK_REGISTRY", "true").lower() == "true"
+          version = release["version"]
+          expected_tag = f'{release["tag_prefix"]}{version}'
+
+          assert release["cli_binary_names"] == ["mvmctl"], (
+              f"sdks/release.toml cli_binary_names must be ['mvmctl'], got {release['cli_binary_names']}"
+          )
+          assert pyproject["project"]["version"] == version, "python package version mismatch"
+          assert package["version"] == version, "typescript package version mismatch"
+          assert pyproject["project"]["name"] == release["python"]["name"], "python package name mismatch"
+          assert package["name"] == release["typescript"]["name"], "typescript package name mismatch"
+
+          if event_name == "release":
+              actual_tag = os.environ["SDK_RELEASE_TAG"]
+              assert actual_tag == expected_tag, (
+                  f"release tag ({actual_tag}) != expected SDK tag ({expected_tag})"
+              )
+          elif not dry_run:
+              raise SystemExit("Non-release SDK workflow invocations must stay dry-run only.")
+
+          def fetch_json(url: str):
+              try:
+                  with urllib.request.urlopen(url) as response:
+                      return json.load(response)
+              except urllib.error.HTTPError as exc:
+                  if exc.code == 404:
+                      return None
+                  raise
+
+          if check_registry:
+              pypi = fetch_json(f"https://pypi.org/pypi/{release['python']['name']}/json")
+              if pypi is not None and version in pypi.get("releases", {}):
+                  raise SystemExit(
+                      f"PyPI already has {release['python']['name']} version {version}; bump sdks/release.toml before publishing."
+                  )
+
+              npm_name = urllib.parse.quote(release["typescript"]["name"], safe="")
+              npm = fetch_json(f"https://registry.npmjs.org/{npm_name}")
+              if npm is not None and version in npm.get("versions", {}):
+                  raise SystemExit(
+                      f"npm already has {release['typescript']['name']} version {version}; bump sdks/release.toml before publishing."
+                  )
+          PY
+
+  publish_pypi_release:
+    if: ${{ github.event_name == 'release' }}
+    needs: preflight
+    uses: ./.github/workflows/publish-pypi.yml
+    with:
+      dry_run: false
+    secrets: inherit
+
+  publish_pypi_dry_run:
+    if: ${{ github.event_name != 'release' }}
+    needs: preflight
+    uses: ./.github/workflows/publish-pypi.yml
+    with:
+      dry_run: true
+    secrets: inherit
+
+  publish_npm_release:
+    if: ${{ github.event_name == 'release' }}
+    needs: preflight
+    uses: ./.github/workflows/publish-npm.yml
+    with:
+      dry_run: false
+    secrets: inherit
+
+  publish_npm_dry_run:
+    if: ${{ github.event_name != 'release' }}
+    needs: preflight
+    uses: ./.github/workflows/publish-npm.yml
+    with:
+      dry_run: true
+    secrets: inherit

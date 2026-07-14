@@ -1,16 +1,15 @@
 # Runbook: publishing the mvm SDKs (PyPI + npm)
 
 Publishes the Python SDK (`sdks/python`, package **`mvm`**) and the
-TypeScript SDK (`sdks/typescript`, package **`mvm-sdk`**) to PyPI and
-npm. Driven by `.github/workflows/publish-pypi.yml` and
-`publish-npm.yml`, alongside the existing `publish-crates.yml`.
+TypeScript SDK (`sdks/typescript`, package **`@runmvm/mvm`**) to PyPI and
+npm. Driven by `.github/workflows/publish-sdk.yml`, which fans out to the
+reusable `.github/workflows/publish-pypi.yml` and `publish-npm.yml` jobs.
 
-**Why these ship coupled to the toolchain:** the SDK emits the Workload
-IR that the *same-version* `mvmctl` consumes (`launch.json`
-`toolchain_version` == mvmctl `CARGO_PKG_VERSION`). Both workflows refuse
-to publish unless the SDK version equals the release tag, so a published
-SDK can never drift from the toolchain. Bump the SDK versions in the same
-commit that bumps the toolchain.
+The SDK publish lane is explicit and separate from ordinary runtime releases:
+runtime tags stay on `vX.Y.Z`; SDK publication only runs for `sdk-vX.Y.Z`
+releases or an explicit workflow dispatch rehearsal. `sdks/release.toml` is the
+checked-in source of truth for the SDK release version, package metadata
+targets, and CLI resolution order.
 
 ## One-time setup (manual — outward-facing, do these first)
 
@@ -30,9 +29,7 @@ automated from the repo.
   Optionally retire the old name: `npm deprecate mvm-sdk "moved to
   @runmvm/mvm"`.
 
-Local is `0.15.0`, not on either registry, so the first publish is a
-clean bump (no duplicate-version rejection) that aligns the registries
-with the toolchain. Re-check anytime:
+The manifest currently carries `0.15.1`. Re-check the registries anytime:
 
 ```sh
 curl -s https://pypi.org/pypi/mvm/json | python3 -c 'import sys,json;print(json.load(sys.stdin)["info"]["version"])'
@@ -47,14 +44,17 @@ publisher** (GitHub):
 
 - Owner: `tinylabscom`
 - Repository: `mvm`
-- Workflow name: `publish-pypi.yml`
+- Workflow name: `publish-sdk.yml`
 - Environment: `pypi`
 
-(No API token is stored — the workflow authenticates via OIDC.) Also
-create a repo **Environment** named `pypi` (Settings → Environments) if
-you want required reviewers gating publishes. If you'd rather not use
-trusted publishing, drop a `PYPI_API_TOKEN` secret and swap the publish
-step to `with: { password: ${{ secrets.PYPI_API_TOKEN }} }`.
+(No API token is stored — the workflow authenticates via OIDC.) The PyPI
+publisher should bind to the orchestrator workflow (`publish-sdk.yml`), not
+the reusable leaf, because GitHub's standard OIDC claims describe the calling
+workflow and expose the called reusable workflow separately via
+`job_workflow_ref`. Also create a repo **Environment** named `pypi`
+(Settings → Environments) if you want required reviewers gating publishes. If
+you'd rather not use trusted publishing, drop a `PYPI_API_TOKEN` secret and
+swap the publish step to `with: { password: ${{ secrets.PYPI_API_TOKEN }} }`.
 
 ### 3. npm — org + automation token
 
@@ -70,42 +70,63 @@ step to `with: { password: ${{ secrets.PYPI_API_TOKEN }} }`.
 
 ## Rehearse (safe, no upload)
 
-Run each workflow via **Actions → Run workflow** with `dry_run: true`:
+Run **Publish SDKs** (`publish-sdk.yml`) via **Actions → Run workflow** with
+`dry_run: true`:
 
-- PyPI: builds sdist+wheel, runs the version guard, **skips upload**.
-- npm: `npm ci && npm run build && npm publish --dry-run` (no upload).
+- orchestrator preflight: validates `sdks/release.toml`, package metadata,
+  the single-CLI contract, and registry version availability;
+- PyPI leaf: builds sdist+wheel, runs `twine check`, installs the built wheel
+  in a clean venv, imports `mvm`, and **skips upload**;
+- npm leaf: runs `npm ci && npm run build`, `npm pack`, installs the packed
+  tarball in a clean temp project, imports `@runmvm/mvm`, and **skips upload**.
+
+The same dry-run path is exercised on every branch push by the CI lane
+`SDK release dry-run`.
 
 Fix anything that fails here before a real release.
 
 ## Publish (real)
 
-Publishing is tied to a GitHub Release so crates + PyPI + npm go out
-together at one version:
+Publishing is tied to a dedicated SDK GitHub Release:
 
-1. Bump versions in the **same commit**:
+1. Update the SDK release set in the **same commit**:
+   - `sdks/release.toml` `version`
    - `sdks/python/pyproject.toml` `version`
    - `sdks/typescript/package.json` `version`
-   - the workspace/toolchain version (`Cargo.toml`) — keep all three equal.
 2. Tag + release:
    ```sh
-   gh release create v0.15.0 --generate-notes
+   gh release create sdk-v0.15.1 --generate-notes
    ```
-   The `release: published` event fans out to `publish-crates.yml`,
-   `publish-pypi.yml`, and `publish-npm.yml`. Each asserts its package
-   version equals `0.15.0` and refuses otherwise.
+   The `release: published` event triggers `publish-sdk.yml`. Its preflight
+   job asserts the package metadata matches `sdks/release.toml`, that the
+   release tag equals `sdk-v0.15.1`, and that the version is not already
+   present on PyPI or npm before it calls the reusable PyPI/npm publish jobs.
 3. Verify:
    ```sh
-   pip index versions mvm        # or: pip install mvm==0.15.0
+   pip index versions mvm        # or: pip install mvm==0.15.1
    npm view @runmvm/mvm version
    ```
+
+## Rollback expectations
+
+- If preflight fails, fix the manifest/package metadata or bump the SDK version
+  and cut a new `sdk-vX.Y.Z` release; nothing has been published yet.
+- If one registry publish succeeds and the other fails, do not retry the same
+  version blindly. PyPI versions are immutable and npm provenance should stay
+  one-version-per-release. Cut a new SDK version after fixing the fault.
+- If npm succeeds but the release should no longer be advertised, deprecate the
+  published version on npm and cut a replacement SDK release.
 
 ## Notes
 
 - Both packages are pure (Python: zero runtime deps, hatchling; TS: tsc →
   `dist`), so there's nothing platform-specific to matrix.
+- Runtime `vX.Y.Z` releases do **not** attempt PyPI/npm publication anymore;
+  `publish-sdk.yml` refuses to fan out unless the release tag is `sdk-vX.Y.Z`.
 - The SDKs are **host authoring tools** — they are never installed into a
   workload guest (the `@mvm.app` decorator is stripped from the bundled
   source at compile, see `crates/mvm-sdk/src/compile/strip_framework.rs`).
 - For contributors working from a source checkout, prefer the editable
   install over the published package so the SDK always matches local
-  HEAD (see the development guide).
+  HEAD. Published SDKs use the ordinary `mvmctl`; source checkouts can
+  point `MVM_CLI_BIN` at a locally built `mvmctl`.

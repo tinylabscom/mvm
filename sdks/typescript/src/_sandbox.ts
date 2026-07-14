@@ -30,6 +30,8 @@
  */
 
 import type { EnvValue, Network, Resources } from "./ir/workload.js";
+import { cliResolutionHint, resolveCliBin } from "./_cli.js";
+export { MVM_CLI_BIN_ENV } from "./_cli.js";
 
 // ────────────────────────────────────────────────────────────────────
 // Wire types — mirror the Rust serde shape.
@@ -61,7 +63,7 @@ export interface RuntimeRecordingWire {
 // ────────────────────────────────────────────────────────────────────
 
 /** Raised when `MVM_SDK_MODE` is unsupported by this build, or
- *  `MVM_SDK_MODE=live` is requested without `MVM_CLI_BIN` set. */
+ *  `MVM_SDK_MODE=live` is requested without a resolvable SDK CLI. */
 export class SandboxModeError extends Error {
   constructor(message: string) {
     super(message);
@@ -136,13 +138,6 @@ export const MVM_SDK_MODE_ENV = "MVM_SDK_MODE";
  *  auto-exec path uses this to capture the recording without
  *  parsing stdout (which the user's own script may write to). */
 export const MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH";
-
-/** Plan 73 Followup H-live — when `MVM_SDK_MODE=live` is set, the
- *  SDK shells out to the `mvmctl` binary at this path. The host's
- *  `mvmctl run --mode live` verb sets it to its own
- *  `current_exe()` so a `cargo run -- run --mode live` flow finds
- *  the same binary it invoked through. */
-export const MVM_CLI_BIN_ENV = "MVM_CLI_BIN";
 
 let recording: RuntimeRecordingWire | null = null;
 
@@ -228,14 +223,10 @@ function resolveMode(): SandboxMode {
   const norm = raw.trim().toLowerCase();
   if (norm === "record") return "record";
   if (norm === "live") {
-    const bin =
-      typeof process !== "undefined" ? process.env[MVM_CLI_BIN_ENV] : undefined;
-    if (!bin) {
-      throw new SandboxModeError(
-        "MVM_SDK_MODE=live requires MVM_CLI_BIN to point at a `mvmctl` binary. " +
-          "The host's `mvmctl run --mode live` verb sets this automatically; if you're " +
-          "running the SDK directly, set MVM_CLI_BIN=/path/to/mvmctl before invoking your script.",
-      );
+    try {
+      resolveCliBin("MVM_SDK_MODE=live");
+    } catch (err) {
+      throw new SandboxModeError(String(err instanceof Error ? err.message : err));
     }
     return "live";
   }
@@ -401,12 +392,11 @@ export class LiveTransport {
     workloadId: string;
     ttlSeconds: number;
   }): LiveTransport {
-    const mvmCliBin =
-      typeof process !== "undefined" ? process.env[MVM_CLI_BIN_ENV] ?? "" : "";
-    if (!mvmCliBin) {
-      throw new SandboxModeError(
-        "MVM_SDK_MODE=live requires MVM_CLI_BIN to point at a `mvmctl` binary.",
-      );
+    let mvmCliBin: string;
+    try {
+      mvmCliBin = resolveCliBin("Sandbox live mode");
+    } catch (err) {
+      throw new SandboxModeError(String(err instanceof Error ? err.message : err));
     }
     // Generate a short, validatable VM id. `mvmctl machine run` rejects
     // names that don't match its validator; alphanumerics with a
@@ -439,7 +429,7 @@ export class LiveTransport {
       });
     } catch (err) {
       throw new SandboxLiveError(
-        `\`${mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        `\`${mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
         { argv: [mvmCliBin, ...argv] },
       );
     }
@@ -544,7 +534,7 @@ export class LiveTransport {
       });
     } catch (err) {
       throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
         { argv: startShell },
       );
     }
@@ -587,7 +577,7 @@ export class LiveTransport {
       });
     } catch (err) {
       throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
         { argv: waitShell },
       );
     }
@@ -615,7 +605,7 @@ export class LiveTransport {
       });
     } catch (err) {
       throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
         { argv: shell },
       );
     }
@@ -645,7 +635,7 @@ export class LiveTransport {
       result = child.spawnSync(shell[0], shell.slice(1));
     } catch (err) {
       throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
         { argv: shell },
       );
     }
@@ -678,7 +668,7 @@ export class LiveTransport {
       proc = child.spawn(shell[0], shell.slice(1), { stdio: "ignore" });
     } catch (err) {
       throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
         { argv: shell },
       );
     }
@@ -729,7 +719,7 @@ export class LiveTransport {
       result = child.spawnSync(shell[0], shell.slice(1), { encoding: "utf-8" });
     } catch (err) {
       throw new SandboxLiveError(
-        `\`${this.mvmCliBin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`,
+        `\`${this.mvmCliBin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`,
         { argv: shell },
       );
     }

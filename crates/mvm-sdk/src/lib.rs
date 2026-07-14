@@ -57,10 +57,9 @@ pub mod facade;
 pub mod machine;
 
 /// The canonical `Workload` IR — validate, canonicalize, hash, hooks,
-/// addon, version. The SDK is its only consumer alongside mvm-cli (mvmd
-/// does not consume the IR). Authoring + runtime SDKs lower to these
-/// types.
-pub mod ir;
+/// addon, version — now lives in `mvm-ir` and is re-exported here for
+/// source compatibility.
+pub use mvm_ir as ir;
 
 /// Author-side machinery for composable attested addons. Exposes
 /// `addon::{manifest, lockfile, validator, registry, archive, sbom,
