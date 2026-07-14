@@ -1,4 +1,4 @@
-# Plan 250: Reversible replacement on owned request/response paths
+# Plan 251: Reversible replacement on owned request/response paths
 
 **Status:** Implemented; workspace-wide validation closeout pending a clean host pass
 **Date:** 2026-07-13

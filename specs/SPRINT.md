@@ -48,7 +48,7 @@ plan 25 sequences the work into six independently-shippable workstreams.
       --workspace`, the focused `mvm-build` shell-context and Stage 0 tests,
       and the live signed-image witness under
       `MVM_OCI_IMAGE_RUNNER_PROD_SMOKE=1`.
-- [x] 2026-07-13 Plan 250 runtime-owned reversible replacement: `mvm-core`
+- [x] 2026-07-13 Plan 251 runtime-owned reversible replacement: `mvm-core`
       now carries a signed `ReversibleReplacementPolicy`, `mvm-hostd` resolves
       it per destination, and the host substitution proxy can detect secret/PII
       spans, replace them with request-scoped opaque tokens on owned outbound
