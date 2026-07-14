@@ -863,6 +863,24 @@ pub fn run_from_prestarted_build(
     run_configured_firecracker(config, abs_dir, abs_socket, false)
 }
 
+/// The egress policy for this run's Firecracker TAP.
+///
+/// Firecracker is the one workload backend that stands up a routable TAP NIC
+/// with a kernel firewall (libkrun/HVF carry egress solely over the vsock
+/// tunnel). When this run also configures a userspace egress tunnel, that
+/// tunnel is the auditable egress seam and must be the *only* one: applying
+/// the run's allow-list to the TAP as well would let a guest bring the NIC up
+/// itself and egress straight to the allow-listed hosts, bypassing the
+/// tunnel's audit/substitution gate. So a tunnel-present run pins the TAP to
+/// deny-all; the tunnel worker still receives the real policy to enforce.
+/// A no-tunnel run keeps the run's policy on the TAP (the direct-NIC path,
+/// including `--net` broad egress).
+fn firecracker_tap_policy(config: &FlakeRunConfig) -> mvm_core::network_policy::NetworkPolicy {
+    config
+        .network_policy
+        .nic_policy_behind_tunnel(config.network_tunnel.is_some())
+}
+
 fn run_configured_firecracker(
     config: &FlakeRunConfig,
     abs_dir: &str,
@@ -880,7 +898,7 @@ fn run_configured_firecracker(
         .provision(
             &mvm_core::protocol::vm_backend::VmId(slot.name.clone()),
             &NetworkSpec {
-                policy: config.network_policy.clone(),
+                policy: firecracker_tap_policy(config),
                 slot_index: slot.index,
             },
         )
@@ -1095,7 +1113,7 @@ pub fn restore_from_template_snapshot(
         .provision(
             &mvm_core::protocol::vm_backend::VmId(slot.name.clone()),
             &NetworkSpec {
-                policy: config.network_policy.clone(),
+                policy: firecracker_tap_policy(config),
                 slot_index: slot.index,
             },
         )
@@ -3603,6 +3621,51 @@ mod tests {
             .expect("cmdline token prefix");
         let decoded = mvm_core::vm_backend::decode_network_tunnel_cmdline(hex).unwrap();
         assert_eq!(decoded, config.network_tunnel.unwrap());
+    }
+
+    #[test]
+    fn firecracker_tap_policy_denies_tap_when_tunnel_present() {
+        // A tunnel-carried FC run must default-deny its TAP so egress can only
+        // leave through the audited vsock tunnel — the TAP allow-list would
+        // otherwise be a bypass. The tunnel worker keeps the real policy
+        // (`network_policy` on the config is untouched).
+        let mut config = baseline_run_config(None);
+        config.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("1.1.1.1", 443),
+        ]);
+        config.network_tunnel = Some(mvm_core::protocol::network_tunnel::TunnelRuntimeConfig {
+            guest_port: 5302,
+            session: mvm_core::protocol::network_tunnel::TunnelSessionConfig {
+                tenant_id: "t".to_string(),
+                vm_id: "vm-1".to_string(),
+                boot_id: "boot-1".to_string(),
+                session_nonce: "nonce-1".to_string(),
+                requested_features: mvm_core::protocol::network_tunnel::TunnelFeatures {
+                    ipv4: true,
+                    ..mvm_core::protocol::network_tunnel::TunnelFeatures::default()
+                },
+                maximum_frame_size: 4096,
+            },
+        });
+
+        assert_eq!(
+            firecracker_tap_policy(&config),
+            mvm_core::network_policy::NetworkPolicy::deny_all(),
+            "tunnel-present FC TAP must be deny-all"
+        );
+        // The run's policy is preserved for the tunnel worker to enforce.
+        assert!(config.network_policy.allows_egress());
+    }
+
+    #[test]
+    fn firecracker_tap_policy_passes_policy_through_without_tunnel() {
+        // No tunnel → the TAP is the egress path and keeps the run's policy.
+        let mut config = baseline_run_config(None);
+        config.network_policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
+            mvm_core::network_policy::HostPort::new("example.com", 443),
+        ]);
+        config.network_tunnel = None;
+        assert_eq!(firecracker_tap_policy(&config), config.network_policy);
     }
 
     fn baseline_run_config(mem_initial: Option<u32>) -> FlakeRunConfig {
