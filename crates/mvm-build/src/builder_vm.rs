@@ -514,6 +514,28 @@ pub enum BuilderVmError {
     /// backend-specific, so it surfaces unchanged with no auto-fallback.
     #[error("builder VM runtime overlay unavailable: {0}")]
     RuntimeOverlayUnavailable(String),
+
+    /// The guest shut down via a halt instead of a clean power-off. The
+    /// rootfs-backed builder kernel has no power-off method, so the guest's
+    /// end-of-job `reboot(RB_POWER_OFF)` falls back to a halt (the console
+    /// shows `Power off not available: System halted instead`). This is not a
+    /// build failure on its own — the single-shot build paths treat it like a
+    /// clean exit and defer to their fail-closed on-disk result. It surfaces as
+    /// an error only for callers that gate completion on a separate console
+    /// marker, where a halt without that marker does mean the build failed.
+    #[error(
+        "builder VM build failed — the guest halted ({halt_line}). Full console log: {console_log_path}"
+    )]
+    GuestHalted {
+        /// The console line that classified the shutdown as a halt (the
+        /// kernel's power-off-unavailable fallback banner). Captured verbatim
+        /// minus the trailing newline.
+        halt_line: String,
+        /// Host-side path to the supervisor's console log, where the full guest
+        /// output — including the build error above the halt banner — is
+        /// preserved.
+        console_log_path: String,
+    },
 }
 
 /// `~/.cache/mvm/builder-vm/` (honors `MVM_CACHE_DIR`) — the directory to clear
