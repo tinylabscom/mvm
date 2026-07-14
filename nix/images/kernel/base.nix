@@ -91,6 +91,13 @@ let
 
     # NLS (UTF-8 + ASCII only)
     "NLS" "NLS_UTF8" "NLS_ASCII"
+  ] ++ pkgs.lib.optionals (kernelArch == "x86_64") [
+    # KVM paravirt clock. libkrun's x86 device model exposes no PIT/HPET, so a
+    # guest that doesn't detect the hypervisor has no usable early clocksource
+    # and stalls in setup_arch before the console registers. HYPERVISOR_GUEST +
+    # KVM_GUEST make the kernel detect KVM and use kvm-clock; PARAVIRT is their
+    # prerequisite. arm64 boots under the architected timer and needs none of it.
+    "HYPERVISOR_GUEST" "PARAVIRT" "KVM_GUEST"
   ];
 
   # ── Base disables ──
