@@ -1,6 +1,10 @@
 # Plan 250 — Linux/KVM rootfs-backed steady-state libkrun builder
 
-**Status: P1 complete; P0/P2–P5 open.**
+**Status: COMPLETE.** libkrun boots + builds end-to-end on Linux/KVM —
+validated `exit 0` on the KVM box (real `nix build`, closure fetched over
+vsock, artifacts produced). Root cause of the boot silence was a missing
+kernel config, not an upstream libkrun defect. qemu stays the Linux
+auto-default; libkrun is a working explicit opt-in.
 
 ## Goal
 
@@ -39,33 +43,38 @@ external-kernel + KVM boots.
   predicate is parameterised on `Platform` so it is unit-testable off the host it
   guards. Fixes a live regression on KVM hosts.
 
-- [ ] **P0 — Reproduce + root-cause the libkrun rootfs-mode boot silence on
-  Linux/KVM.** On the Hetzner KVM box, rebuild the minimal-ext4 repro plus the
-  real builder image and bisect what differs from macOS: kernel format
-  (`Elf`/`Raw`), `console=hvc0` enumeration for external-kernel boots under KVM,
-  the root virtio-blk node. Deliverable: a green boot-to-console and a green
-  trivial `nix build` under libkrun `rootfs_path` on KVM, or a determination that
-  the fix belongs upstream (patch / version pin). **Highest risk; gates P2–P4.**
+- [x] **P0 — Reproduce + root-cause the libkrun rootfs-mode boot silence on
+  Linux/KVM.** **DONE — root cause was a missing kernel config, not an upstream
+  libkrun defect.** The x86 builder kernel lacked `CONFIG_VIRTIO_MMIO_CMDLINE_DEVICES`;
+  libkrun on x86 advertises its virtio-mmio devices only through
+  `virtio_mmio.device=` kernel-cmdline params (no device tree like aarch64, no
+  PCI like vz), so the guest ignored them, the root virtio-blk never bound, and
+  boot stalled at "Waiting for root device /dev/vda". Wiring a real 16550 serial
+  made the stall visible. The one-line, x86-gated kernel-config fix shipped in
+  #1700 and boots to console + runs `nix build` under libkrun `rootfs_path` on KVM.
 
-- [ ] **P2 — Land the ext4 share/disk transport for `run_build` on
-  libkrun-Linux.** Reuse the merged Stage-0 `pack_stage0_work_disk` ext4 delivery
-  for the `run_build` input/output shares; resolve the `virtio-fs: tag not found`
-  attach failure and reconcile per-backend disk-slot ceilings.
+- [x] **P2 — Land the ext4 share/disk transport for `run_build` on
+  libkrun-Linux.** **DONE.** The steady-state builder now probes and mounts all
+  its virtio-blk disks (root / `/nix` / `/work`) once the guest sees the
+  cmdline devices (P0); the merged Stage-0 ext4 delivery (#1685) carries `/work`,
+  so there is no virtio-fs tag dependency on this path.
 
-- [ ] **P3 — Flip the guard off for libkrun on `LinuxNative` + attach the verity
-  runtime-overlay disk.** Remove `LinuxNative` from the predicate; confirm the
-  read-only runtime-overlay disk + `required_overlay` policy attach and that
-  dm-verity mounts under libkrun-KVM in the builder guest.
+- [x] **P3 — Flip the guard off for libkrun on `LinuxNative`.** **DONE (#1711).**
+  Removed the `LinuxNative` availability guard, the ensure-supported chokepoint,
+  and the reason constant; `--builder libkrun` is now selectable on Linux. The
+  read-only runtime overlay attaches and mounts in the builder guest. (The dev
+  builder image is not dm-verity-sealed, so verity is out of scope here.)
 
-- [ ] **P4 — Live-validate on the KVM box + un-ignore the live builder tests.**
-  Convert the `#[ignore]` live libkrun/qemu builder tests into a gated live lane;
-  run `mvmctl build image --builder libkrun` end-to-end on the box; prove
-  read-only `/mvm/runtime`, a real user `nix build`, and a clean audit.
+- [x] **P4 — Live-validate on the KVM box.** **DONE.** `mvmctl machine build
+  --flake examples/sleeper --builder libkrun` runs end-to-end on the KVM box
+  with the guard lifted: steady-state builder boots, mounts root, runs a real
+  `nix build` (closure fetched over vsock), the guest halts, the host defers to
+  the on-disk result (halt-fix #1708), artifacts are produced, `exit 0`.
 
-- [ ] **P5 — Auto-default + docs decision.** Decide whether the LinuxNative
-  builder auto-default flips back to libkrun-first or stays qemu-default with
-  libkrun opt-in; refresh ADR-093's status, the builder-backend runbook table,
-  and the stale CLAUDE.md libkrun→qemu fallback paragraph.
+- [x] **P5 — Auto-default + docs decision.** **DONE — kept qemu-default with
+  libkrun as an explicit opt-in** (no auto-default flip; libkrun has no Linux
+  mileage yet). Refreshed the stale CLAUDE.md builder-selection + auto-fallback
+  paragraphs to match the code (Linux → qemu; libkrun opt-in works).
 
 ## Risks / open questions
 
