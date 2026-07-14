@@ -69,11 +69,11 @@ Selection priority (highest first):
 
 1. `--builder <libkrun|qemu|hvf>` global CLI flag.
 2. `MVM_BUILDER_BACKEND=libkrun|qemu|hvf` env var (case-insensitive, whitespace-trimmed; unrecognised values — including the removed `vz` — log a warning and fall through to auto-detect).
-3. Auto-detect: macOS 26+ Apple Silicon → hvf; everywhere else → libkrun.
+3. Auto-detect: macOS 26+ Apple Silicon → hvf; Linux → qemu; other macOS → libkrun.
 
 `mvmctl doctor` reports the resolved choice on the `builder backend` line with format `<backend> — <source> — <availability>` so the override path is observable.
 
-**Auto-fallback (ADR-093).** When the *auto-detected* builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error — mvm transparently retries the next backend: hvf → libkrun on macOS 26+, libkrun → the QEMU/microvm_nix builder (Plan 166) on Linux. One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point. A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. The Linux auto-detect default is unchanged (libkrun-first).
+**Auto-fallback (ADR-093).** When the *auto-detected* builder fails to **create its VM** — a VMM-level failure distinct from a `nix build` error — mvm transparently retries the next backend on macOS 26+ (hvf → libkrun). One policy (`builder_attempt_order` + `run_with_builder_fallback`) drives every builder entry point. A genuine build error surfaces unchanged with no retry, and an explicit `--builder` / `MVM_BUILDER_BACKEND` disables the fallback. On Linux the auto-detect default is **qemu**; the rootfs-backed libkrun builder now boots and builds on Linux/KVM (the guest kernel parses libkrun's virtio-mmio cmdline devices, and a poweroff-fallback halt defers to the on-disk build result) and is selectable as an explicit opt-in via `--builder libkrun`.
 
 The backends produce byte-identical `BuilderArtifacts` (kernel + rootfs from the same `nix/images/builder-vm/` flake), so switching backends mid-development is supported.
 
