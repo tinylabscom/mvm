@@ -262,6 +262,9 @@ jobs:
 
   sdk-release-dry-run:
     name: SDK release dry-run
+    permissions:
+      contents: read
+      id-token: write
     uses: ./.github/workflows/publish-sdk.yml
     with:
       dry_run: true
