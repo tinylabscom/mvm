@@ -144,8 +144,6 @@ const BUILDER_SUBST_PID_FILE: &str = "substitution.pid";
 const BUILDER_VM_BOOTSTRAP_BIN_ENV: &str = "MVM_BUILDER_VM_BOOTSTRAP_BIN";
 const BUILDER_VM_AUTO_BOOTSTRAP_SKIP_ENV: &str = "MVM_SKIP_BUILDER_VM_AUTO_BOOTSTRAP";
 const BUILDER_VM_CACHE_CONTRACT_VERSION: u32 = 3;
-pub const LINUX_ROOTFS_LIBKRUN_UNSUPPORTED_REASON: &str =
-    "the rootfs-backed libkrun builder is not supported on Linux/KVM yet; use the qemu builder";
 
 /// Caller-visible libkrun transport preference.
 ///
@@ -1012,7 +1010,7 @@ impl LibkrunBuilderVm {
         let supervisor_path = resolve_supervisor_path()?;
         let image = match &self.image_override {
             Some(image) => image.clone(),
-            None => ensure_builder_vm_image_for_libkrun()?,
+            None => ensure_builder_vm_image()?,
         };
         let nix_store_lock = acquire_nix_store_image_lock(
             &builder_vm_cache_dir(),
@@ -1493,7 +1491,7 @@ impl BuilderVm for LibkrunBuilderVm {
         //    image cache without first downloading it.
         let image = match &self.image_override {
             Some(image) => image.clone(),
-            None => ensure_builder_vm_image_for_libkrun()?,
+            None => ensure_builder_vm_image()?,
         };
 
         // 5. Allocate / locate the persistent `/nix-store`
@@ -1777,7 +1775,7 @@ impl LibkrunBuilderBackend {
     /// installed" at the call site rather than at first run.
     pub fn new() -> Result<Self, BuilderVmError> {
         let supervisor_path = resolve_supervisor_path()?;
-        let image = ensure_builder_vm_image_for_libkrun()?;
+        let image = ensure_builder_vm_image()?;
         Ok(Self {
             supervisor_path,
             image,
@@ -2237,42 +2235,6 @@ fn builder_vm_source_checkout_root() -> Option<PathBuf> {
 
 fn default_builder_vm_cache_dir() -> PathBuf {
     PathBuf::from(mvm_core::config::default_mvm_cache_dir()).join("builder-vm")
-}
-
-pub fn steady_state_rootfs_builder_unavailable_reason_for(
-    plat: mvm_core::platform::Platform,
-) -> Option<&'static str> {
-    if matches!(plat, mvm_core::platform::Platform::LinuxNative) {
-        Some(LINUX_ROOTFS_LIBKRUN_UNSUPPORTED_REASON)
-    } else {
-        None
-    }
-}
-
-/// Refuse to boot the steady-state rootfs-backed builder under libkrun on
-/// hosts where that image is known not to reach userspace (Linux/KVM). This
-/// restriction is libkrun-specific: the qemu and hvf builders load the same
-/// cached image without it, so the guard belongs on the libkrun boot path,
-/// not on the shared image loader. Parameterised on the platform so it is
-/// unit-testable off the host it guards.
-fn ensure_steady_state_libkrun_builder_supported_on(
-    plat: mvm_core::platform::Platform,
-) -> Result<(), BuilderVmError> {
-    match steady_state_rootfs_builder_unavailable_reason_for(plat) {
-        Some(reason) => Err(BuilderVmError::LibkrunUnavailable(reason.to_string())),
-        None => Ok(()),
-    }
-}
-
-/// Resolve the steady-state builder VM image for a libkrun boot, failing
-/// closed on hosts the libkrun builder does not support. The single libkrun
-/// chokepoint: `run_build`, `run_shell_script`, the persistent VM start, and
-/// the `VmBackendForBuilder` constructor all route steady-state image
-/// resolution through here. Stage 0 and other callers that supply an explicit
-/// image override never reach this path.
-fn ensure_builder_vm_image_for_libkrun() -> Result<BuilderVmImage, BuilderVmError> {
-    ensure_steady_state_libkrun_builder_supported_on(mvm_core::platform::current())?;
-    ensure_builder_vm_image()
 }
 
 fn seed_builder_vm_image_from_default_cache(arch_dir: &Path) -> Result<bool, BuilderVmError> {
@@ -4266,7 +4228,7 @@ impl LibkrunPersistentHostVm {
         let supervisor_path = resolve_supervisor_path()?;
         let image = match &self.image_override {
             Some(image) => image.clone(),
-            None => ensure_builder_vm_image_for_libkrun()?,
+            None => ensure_builder_vm_image()?,
         };
         // Acquire the cross-process flock on the nix-store image
         // for the persistent VM's lifetime. Concurrent
@@ -5462,28 +5424,6 @@ mod tests {
     }
 
     #[test]
-    fn linux_native_rootfs_builder_support_guard_matches_platforms() {
-        use mvm_core::platform::Platform;
-
-        assert_eq!(
-            steady_state_rootfs_builder_unavailable_reason_for(Platform::LinuxNative),
-            Some(LINUX_ROOTFS_LIBKRUN_UNSUPPORTED_REASON)
-        );
-        assert_eq!(
-            steady_state_rootfs_builder_unavailable_reason_for(Platform::MacOS),
-            None
-        );
-        assert_eq!(
-            steady_state_rootfs_builder_unavailable_reason_for(Platform::Wsl2),
-            None
-        );
-        assert_eq!(
-            steady_state_rootfs_builder_unavailable_reason_for(Platform::LinuxNoKvm),
-            None
-        );
-    }
-
-    #[test]
     #[cfg(not(target_os = "linux"))]
     fn ensure_builder_vm_image_accepts_current_manifest_capabilities() {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -5528,40 +5468,6 @@ mod tests {
                 );
             }
             BuilderVmImage::RootDir { .. } => panic!("expected rootfs builder image"),
-        }
-    }
-
-    #[test]
-    fn steady_state_libkrun_builder_guard_fails_closed_only_on_linux_native() {
-        use mvm_core::platform::Platform;
-
-        // Linux/KVM: the rootfs-backed libkrun builder image does not reach
-        // userspace, so the libkrun boot path must fail closed and point at qemu.
-        let err = ensure_steady_state_libkrun_builder_supported_on(Platform::LinuxNative)
-            .expect_err("libkrun steady-state builder must fail closed on Linux/KVM");
-        match err {
-            BuilderVmError::LibkrunUnavailable(message) => {
-                assert!(
-                    message.contains("rootfs-backed libkrun builder"),
-                    "got {message}"
-                );
-                assert!(message.contains("qemu builder"), "got {message}");
-            }
-            other => panic!("expected LibkrunUnavailable, got {other:?}"),
-        }
-
-        // Every other host permits the libkrun steady-state builder — the guard
-        // is scoped to the one platform whose boot is known to hang, not applied
-        // to the shared image loader that qemu and hvf also use.
-        for plat in [
-            Platform::MacOS,
-            Platform::LinuxNoKvm,
-            Platform::Wsl2,
-            Platform::Windows,
-        ] {
-            ensure_steady_state_libkrun_builder_supported_on(plat).unwrap_or_else(|e| {
-                panic!("{plat:?} should permit the libkrun builder, got {e:?}")
-            });
         }
     }
 

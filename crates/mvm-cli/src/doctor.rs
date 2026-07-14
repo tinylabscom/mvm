@@ -1441,11 +1441,7 @@ fn builder_backend_check(plat: Platform) -> Check {
 
     let availability = match resolved {
         BuilderBackendChoice::Libkrun => {
-            if let Some(reason) =
-                mvm_build::libkrun_builder::steady_state_rootfs_builder_unavailable_reason_for(plat)
-            {
-                format!("libkrun NOT available ({reason})")
-            } else if plat.has_libkrun() {
+            if plat.has_libkrun() {
                 "libkrun available".to_string()
             } else {
                 format!("libkrun NOT available ({})", libkrun_sys::install_hint())
@@ -3693,7 +3689,7 @@ mod tests {
 
     #[cfg(all(target_os = "linux", feature = "builder-vm"))]
     #[test]
-    fn builder_backend_check_linux_libkrun_override_surfaces_rootfs_builder_gap() {
+    fn builder_backend_check_linux_libkrun_override_no_longer_reports_a_rootfs_gap() {
         let prev = std::env::var_os("MVM_BUILDER_BACKEND");
         unsafe {
             std::env::set_var("MVM_BUILDER_BACKEND", "libkrun");
@@ -3708,7 +3704,6 @@ mod tests {
             }
         }
 
-        assert!(c.ok);
         assert!(
             c.info.starts_with("libkrun — "),
             "expected libkrun-resolved line under env override; got: {}",
@@ -3719,10 +3714,12 @@ mod tests {
             "expected `override via` source label; got: {}",
             c.info
         );
+        // The Linux/KVM steady-state guard is lifted, so doctor reports libkrun
+        // availability from host capability alone and no longer surfaces a
+        // rootfs-builder-unsupported gap for an explicit libkrun override.
         assert!(
-            c.info
-                .contains("rootfs-backed libkrun builder is not supported on Linux/KVM yet"),
-            "expected unsupported-rootfs reason; got: {}",
+            !c.info.contains("not supported on Linux/KVM"),
+            "guard is lifted; expected no unsupported-rootfs gap; got: {}",
             c.info
         );
     }
