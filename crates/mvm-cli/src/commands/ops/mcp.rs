@@ -492,6 +492,7 @@ impl ExecDispatcher {
             &prefix,
             DEFAULT_VM_CPUS,
             DEFAULT_VM_MEM_MIB,
+            &mvm_core::network_policy::NetworkPolicy::deny_all(),
             Some(&admit),
         )
         .with_context(|| format!("booting warm VM for session '{session_id}'"))?;

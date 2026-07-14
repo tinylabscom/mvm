@@ -222,6 +222,9 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         );
     };
     let (memory_mib, _) = validate_machine_memory(&args.memory, None)?;
+    // Resolve `--net` / `--allow-host` into the egress policy exactly as the
+    // transient argv path does, so a baked entrypoint enforces the same posture.
+    let network_policy = shared::resolve_run_network_policy(args.net, &args.allow_host)?;
     use std::io::IsTerminal as _;
     let stdin = invoke::read_auto_stdin(std::io::stdin().is_terminal())?;
     invoke::run_entrypoint(invoke::EntrypointCall {
@@ -238,6 +241,7 @@ fn run_entrypoint_action(args: MachineRunArgs, resolved_flake_slot: Option<Strin
         session: None,
         r#fn: None,
         attach: args.attach,
+        network_policy,
     })
 }
 
