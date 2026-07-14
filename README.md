@@ -9,7 +9,8 @@ Every machine boots its own Linux kernel under a real hypervisor. There is no
 Docker on the runtime path, no SSH in any guest, and (on the in-house macOS
 backend) no guest network device at all: guest I/O crosses **vsock**, where the
 host can audit flows, substitute secrets so the workload never sees raw
-credentials, and enforce default-deny egress from a signed execution plan.
+credentials, detect-and-replace secrets and structured PII on owned cleartext
+egress paths, and enforce default-deny egress from a signed execution plan.
 
 ```
 macOS 26+ (Apple Silicon)  →  in-house HVF VMM (Hypervisor.framework, zero extra deps)
@@ -468,6 +469,10 @@ claims), each backed by a named test or workflow gate. In summary:
     `ExecutionPlan.services` binding,** enforced before dispatch, audited.
 13. **No raw secret value crosses to the guest** — destination-bound,
     time-bound signed credentials only; real bytes never leave the supervisor.
+    For owned cleartext outbound flows, the host can also detect and replace
+    matched secrets and structured PII with request-scoped opaque tokens, then
+    restore the original bytes only when the exact token returns on an owned,
+    authorized cleartext path.
 14. **Every `run --image` admission records OCI image provenance** in the
     chain-signed audit log.
 15. **No interactive access to a sealed production microVM** — the console is
@@ -494,6 +499,9 @@ attestation.
   [Python SDK](sdks/python/README.md) ·
   [TypeScript SDK](sdks/typescript/README.md)
 - [Writing Nix flakes for guests (mkGuest)](public/src/content/docs/guides/nix-flakes.md)
+- [Secrets and credentials](public/src/content/docs/guides/secrets-and-credentials.mdx) ·
+  [Network egress policy](public/src/content/docs/guides/network-egress-policy.mdx) ·
+  [AI agent integration](public/src/content/docs/guides/ai-agent-integration.md)
 - [Security](public/src/content/docs/security/) ·
   [Troubleshooting](public/src/content/docs/guides/troubleshooting.md)
 - [Architecture & ADRs](specs/adrs/)

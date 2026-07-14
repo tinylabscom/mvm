@@ -21,6 +21,28 @@ Every tool result should include a sandbox identifier and audit/run identifier w
 
 - Keep egress deny-by-default.
 - Grant only the secrets needed for the current operation.
+- Treat structured PII the same way as secrets on runtime-owned cleartext paths:
+  detect it, replace it before egress, and only restore it on an owned return
+  path when policy allows that plaintext back to the caller.
 - Redact command output before returning it to a model if it may contain credentials or user data.
 - Use short TTLs for transient sandboxes.
 - Preserve cold state only when the workflow needs memory or filesystem continuity.
+
+## Request and response mediation
+
+When an agent calls an external model or API through a runtime-owned path, keep
+the contract narrow and auditable:
+
+- detect and replace secrets plus supported structured PII before the outbound
+  request leaves the runtime;
+- use opaque, flow-scoped tokens rather than stable pseudonyms;
+- restore original bytes only for exact token round trips on the owned response
+  path;
+- deny or redact when the response is transformed, delayed, replayed, or comes
+  back through an unowned path;
+- record the protection and reinjection decisions with the run or audit
+  identifier.
+
+This is exact-token restoration, not semantic reconstruction. If the upstream
+service rewrites the value in natural language, the safe behavior is to leave
+it redacted or tokenized.
