@@ -147,7 +147,10 @@ mvmctl machine run --image python:3.12 -- python -c "print(2 + 2)"
 
 Provenance (registry, repo, resolved digest, layer list, cosign verdict) is
 recorded in the chain-signed audit log; `--prod` refuses mutable tags before any
-network fetch.
+network fetch. In a source checkout, OCI boots also need a cached
+dm-verity-capable workload kernel; build it once with
+`mvmctl kernel build --which workload` (or `just kernel-workload`) before the
+first `machine run --image ...`.
 
 ### 2. From a Nix flake (`mkGuest`)
 

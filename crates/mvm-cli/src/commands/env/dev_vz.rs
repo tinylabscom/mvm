@@ -39,7 +39,7 @@ use default_microvm::DefaultMicrovmVariant;
 #[cfg(test)]
 use default_microvm::{
     WorkloadKernelBootstrap, default_microvm_assets, find_cached_workload_kernel,
-    kernel_carries_dm_verity, resolve_workload_kernel_bootstrap,
+    kernel_carries_dm_verity, missing_workload_kernel_message, resolve_workload_kernel_bootstrap,
 };
 pub(crate) use default_microvm::{
     assert_workload_kernel_supports_verity, ensure_default_microvm_image, ensure_workload_kernel,
