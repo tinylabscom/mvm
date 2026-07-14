@@ -114,6 +114,13 @@ pub struct HvfSupervisorConfig {
     /// other backends. `None` ⇒ `BROKER_PORT` fails closed (no broker reachable).
     #[serde(default)]
     pub broker_socket: Option<PathBuf>,
+    /// Per-VM userspace L3 egress tunnel UDS. When set, the supervisor relays the
+    /// guest's `NETWORK_TUNNEL_GUEST_PORT` dial to the socket the per-VM tunnel
+    /// worker bound, so guest packets reach the host forwarder and admitted flows
+    /// egress. `None` ⇒ the tunnel port fails closed (no forwarder). The backend
+    /// sets it only for an admitted allow-list run that carries a network tunnel.
+    #[serde(default)]
+    pub network_tunnel_socket: Option<PathBuf>,
     /// Dev-only console data sockets: one entry per guest vsock data port the
     /// console driver may connect to. Empty for sealed prod configs (claim 15).
     /// Populated by the driver when `VmStartConfig.dev_console` is true.
@@ -154,6 +161,7 @@ mod tests {
             substitution_socket: Some("/state/substitution-endpoint.sock".into()),
             egress_relay_socket: Some("/state/egress-bridge.sock".into()),
             broker_socket: Some("/state/hvf-broker.sock".into()),
+            network_tunnel_socket: Some("/state/vsock-5302.sock".into()),
             console_data_sockets: vec![],
         };
         let json = serde_json::to_string(&cfg).unwrap();
@@ -172,6 +180,7 @@ mod tests {
         assert_eq!(cfg.substitution_socket, None);
         assert_eq!(cfg.egress_relay_socket, None);
         assert_eq!(cfg.broker_socket, None);
+        assert_eq!(cfg.network_tunnel_socket, None);
     }
 
     #[test]
@@ -210,6 +219,7 @@ mod tests {
             substitution_socket: None,
             egress_relay_socket: None,
             broker_socket: None,
+            network_tunnel_socket: None,
             console_data_sockets: vec![
                 ConsoleDataSocket {
                     guest_port: 20001,

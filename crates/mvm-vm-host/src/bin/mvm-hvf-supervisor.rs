@@ -223,6 +223,7 @@ fn main() -> anyhow::Result<()> {
                 substitution_socket: cfg.substitution_socket.clone(),
                 egress_relay: cfg.egress_relay_socket.clone(),
                 broker_socket: cfg.broker_socket.clone(),
+                network_tunnel_socket: cfg.network_tunnel_socket.clone(),
                 console_data_sockets: cfg
                     .console_data_sockets
                     .iter()
