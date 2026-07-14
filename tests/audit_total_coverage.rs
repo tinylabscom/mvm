@@ -215,6 +215,7 @@ const MACHINE_SUB: &[(&str, AuditPosture)] = &[
     ("exec", AuditPosture::InteractiveOrControl),
     ("shell", AuditPosture::InteractiveOrControl),
     ("stop", AuditPosture::Emits("VmStop")),
+    ("set-timeout", AuditPosture::Emits("VmTtlSet")),
     // Plan 200 — verify a portable `.mvm` + preview its admission. Read-only:
     // no extraction, no boot, no audit-chain emission.
     ("check-artifact", AuditPosture::ReadOnly),
