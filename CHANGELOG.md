@@ -368,7 +368,7 @@ All notable changes to mvm are documented in this file.
 - **machine**: Actionable "machine does not exist" errors
 - **machine**: `machine rm` prompts for confirmation like `machine stop`
 - **machine**: `ps` as a visible alias for `machine ls`
-- **verb-grant**: Measured verb-trust policy + restore reconciliation (ADR-108, #1381 item 3)
+- **verb-grant**: Measured verb-trust policy + restore reconciliation (ADR-002, #1381 item 3)
 - **machine**: Auto-generate a name for `machine create` when omitted
 - **machine**: Batch `machine stop <name>...`
 - **machine**: Batch `machine start <name>...`
@@ -628,7 +628,7 @@ All notable changes to mvm are documented in this file.
 - **adr**: ADR-106 — Phase-A/Phase-B build boundary (Plan 221 B0)
 - **adr**: ADR-107 virtiofs-root integrity decision + Plan 223 impl plan
 - **claims**: Scope claim 3 to block+ext4 backends; note virtiofs-root posture (ADR-107)
-- **adr**: ADR-109 — attested launch anchor for real verb-grant key separation
+- **adr**: ADR-002 — attested launch anchor for real verb-grant key separation
 - **plan**: Plan 227 — instant-resume sandboxes over a vsock-only auditable data plane
 - **plan**: Plan 228 — release 0.17.0 (HVF default, working & documented)
 - **release**: Backfill CHANGELOG (0.15.2–0.16.1) + guard release flow + fix claim-3 scoping (Plan 228 WS-2/WS-4)

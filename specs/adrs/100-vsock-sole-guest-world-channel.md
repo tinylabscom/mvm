@@ -5,7 +5,7 @@
 egress), [ADR-049](049-vsock-substitution-service.md) (vsock substitution),
 [ADR-059](059-host-services-broker.md) (host-services broker over vsock),
 [ADR-082](082-rust-native-egress-gateway.md) (hvf egress gateway),
-[ADR-083](083-workload-backend-type-bar.md) (`WorkloadBackend`),
+[ADR-002](002-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
 [ADR-099](099-multi-backend-hypervisor-abstraction.md) (the backend seam),
 [Plan 214](../plans/214-clean-replacement-architecture.md).
 
@@ -25,7 +25,7 @@ A guest can reach the host/outside world over two planes:
   puts a NIC + IP stack inside the guest.
 
 An hvf vsock-mediated egress path already exists (the substitution service —
-ADR-049 — and the `WorkloadBackend` seam, ADR-083), but it is parity-gated, not
+ADR-049 — and the `WorkloadBackend` seam, ADR-002 consolidated from ADR-083), but it is parity-gated, not
 the universal default.
 
 The Plan 214 brief is explicit: **no guest NIC by default; host/vsock-mediated

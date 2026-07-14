@@ -40,7 +40,7 @@ noun**.
 
 A second object is in scope only to keep it *out* of scope: `dev` (the builder
 VM) is a genuinely different thing — host build substrate, not a workload — and
-stays its own command. ADR-088 already draws that boundary.
+stays its own command. ADR-002 (consolidated from ADR-088) already draws that boundary.
 
 ## Decision
 

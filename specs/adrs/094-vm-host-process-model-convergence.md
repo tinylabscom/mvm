@@ -1,7 +1,7 @@
 # ADR-094 — Fold the external-VMM bridge sidecars into one `mvm-bridge`; keep libkrun merged
 
 **Status:** Accepted
-**Amends:** [ADR-002](002-microvm-security-posture.md) (per-backend tier matrix — the external-VMM backends share one bridge-sidecar process) and [ADR-083](083-workload-backend-type-bar.md) (the shared egress/audit funnel gains a single, shared transport process for FC + vz instead of two near-identical ones).
+**Amends:** [ADR-002](002-microvm-security-posture.md) — its per-backend tier matrix (the external-VMM backends share one bridge-sidecar process) and its consolidated-in ADR-083 section (the shared egress/audit funnel gains a single, shared transport process for FC + vz instead of two near-identical ones).
 **Preserves:** every numbered claim — in particular claim 10 (default-deny egress), claim 12 (binding-gated host services), and claim 13 (no raw secret over the broker channel), all of which ride the gateway bridge. The `spawn_bridge_thread` enforcement core is unchanged; signed-plan admission ([ADR-041](041-signed-audited-execution-plans.md)) is untouched.
 **Relates:** does **not** drop Firecracker or pick a single VMM — it is the topology cleanup that should land *before* any future libkrun-only / backend-consolidation decision, and is independently valuable if that decision is never taken.
 

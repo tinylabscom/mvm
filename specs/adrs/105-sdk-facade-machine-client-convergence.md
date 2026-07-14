@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-07-01
 - Owner: MVM Project
-- Related: `specs/notes/mvm-client-facade-design.md` + Plan 216 (the `mvm-client` facade), ADR-104 (cloud control-plane trust boundary — the facade's remote path), ADR-041 (signed audited execution plans — claim 8, the admission the local `run` path must not skip). Sequenced by: Plan 218.
+- Related: `specs/notes/mvm-client-facade-design.md` + Plan 216 (the `mvm-client` facade), ADR-002 (cloud control-plane trust boundary — the facade's remote path, consolidated from ADR-104), ADR-041 (signed audited execution plans — claim 8, the admission the local `run` path must not skip). Sequenced by: Plan 218.
 
 ## Update (2026-07-06): the trait lives in `mvm-core`, one user-facing crate
 

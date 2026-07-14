@@ -106,7 +106,7 @@ The contract surfaces are:
 - The audit-emit invariant.
 - The cmdline contract.
 
-Any language change at the boundary MUST preserve these *byte-identically*. See ADR-063 (boundary-language-policy) for when non-Rust implementations are permitted at all.
+Any language change at the boundary MUST preserve these *byte-identically*. See ADR-002 (§"Consolidated from ADR-063 — Boundary Language Policy") for when non-Rust implementations are permitted at all.
 
 ## Consequences
 

@@ -6,7 +6,7 @@
 [ADR-046](046-builder-vm-via-libkrun.md),
 [ADR-057](057-symmetric-builder-vm.md),
 [ADR-084](084-host-services-daemon-not-per-vm-spawn.md),
-[ADR-088](088-dev-vm-promotion-boundary.md),
+[ADR-002](002-microvm-security-posture.md) (consolidated from ADR-088),
 [ADR-089](089-builder-vm-resident-control-plane.md),
 [Plan 118](../plans/118-supervisor-standby-pool-and-live-bench.md),
 [Plan 152](../plans/152-rust-native-vz-and-init-lifecycle-parity.md),
@@ -78,7 +78,7 @@ Concretely:
   into one global key-holding daemon is forbidden — it would regress claims 12/13.
 - The builder daemon is the resident service from ADR-089. It is the *only* daemon that
   may grow to host residency for performance, because building is its whole job and it
-  is dev-tier (ADR-088).
+  is dev-tier (ADR-002, consolidated from ADR-088).
 - The workload guest agent stays the runt by construction: prod builds strip `do_exec`
   (claim 4) and the console (claim 15), both `dev-shell`-gated. It must never acquire
   orchestration authority or hold secrets. Fattening it is the primary smell this ADR
@@ -115,7 +115,7 @@ split and Plan 159's snapshot/fork).
 
 ### 3. Residency introduces no claim regression
 
-- The builder VM is dev-tier (ADR-088), so snapshotting and resuming it requires no
+- The builder VM is dev-tier (ADR-002, consolidated from ADR-088), so snapshotting and resuming it requires no
   hardened kernel or verified boot and weakens no numbered claim.
 - The security-sensitive case — claim-11 application-dependency volumes — stays safe
   because the sealed volume is content-addressed and **re-verified host-side at admit

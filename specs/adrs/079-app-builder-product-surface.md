@@ -2,7 +2,7 @@
 
 **Status:** Accepted 2026-06-10. Implemented by
 [`specs/plans/181-app-builder-product-surface.md`](../plans/181-app-builder-product-surface.md).
-**Extends** [ADR-070](070-browser-reachable-verification-surface.md) (the
+**Extends** [ADR-002](002-microvm-security-posture.md) (consolidated from ADR-070) (the
 mvm-primitive ↔ mvmd-transport boundary), and builds on
 [ADR-078](078-rvproxy-gateway-ownership.md) / Plan 179 (the first-party gateway
 seam preview ingress publishes through) and the network-provider seam in
@@ -57,12 +57,12 @@ the sibling had to hand.
    they are not relitigated when the DX gap is felt again.
 
 2. **Split every capability into an mvm-side primitive and an mvmd-side product
-   leg, per ADR-070.** mvm ships the bridgeable primitives — a signed
+   leg, per ADR-002 (consolidated from ADR-070).** mvm ships the bridgeable primitives — a signed
    published-ports model, a per-port routing label at the gateway seam, a
    wake-on-access `VmBackend` hook, the task/files vsock protocol with an
    SSE-ready event shape, and the idle-TTL/keepalive contract. mvm does **not**
    grow a multi-tenant HTTP listener or tenant auth; that transport + auth +
-   wildcard-DNS/TLS surface is mvmd's (Plan 33 / ADR-070 §5). This is the same
+   wildcard-DNS/TLS surface is mvmd's (Plan 33 / ADR-002 §"Consolidated from ADR-070" §5). This is the same
    boundary Plan 170 drew for density.
 
 3. **One exception: a local, single-machine dev ingress lives in mvm.** So
@@ -108,7 +108,7 @@ the sibling had to hand.
 - [ ] Decide L4-only-now vs. a fuller local HTTP router (Plan 181 WS-A open
   decision); recommendation is L4 + loopback proxy first.
 - [ ] If/when a hosted (non-localhost) preview surface is wanted, it is an mvmd
-  effort (Plan 33), not mvm — same disposition as ADR-070 §5's hosted console.
+  effort (Plan 33), not mvm — same disposition as ADR-002 §"Consolidated from ADR-070"'s hosted console.
 
 ## Alternatives considered
 
@@ -116,7 +116,7 @@ the sibling had to hand.
   Rejected: it discards claims 1/2/10 and mvm's reason to exist. The DX does not
   require it.
 - **Build the full multi-tenant preview/ingress + auth in mvm.** Rejected:
-  violates the ADR-070 / Plan 33 boundary that reserves transport + tenant auth
+  violates the ADR-002 (consolidated from ADR-070) / Plan 33 boundary that reserves transport + tenant auth
   for mvmd. mvm ships primitives + a single-machine dev ingress only.
 - **Ambient (unsigned) port exposure for convenience.** Rejected: it would make
   egress reachability an unrecorded side effect, weakening claim 10. Published

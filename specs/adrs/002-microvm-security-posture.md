@@ -429,8 +429,8 @@ ever promoted to a workload-bearing tier, claim-10 would have to be plumbed
 through its start path first (`VmStartConfig` carries no egress-policy field
 today); that is a deliberate future decision, not a Phase A gap. This refines
 the "Network policy enforcement at hypervisor level" non-goal below, which
-predates Plan 123's host-side enforcement. As of [ADR-083](083-workload-backend-type-bar.md)
-this exclusion is **type-enforced**: QEMU does not implement the
+predates Plan 123's host-side enforcement. As of ADR-083 (see
+"Consolidated from ADR-083" below) this exclusion is **type-enforced**: QEMU does not implement the
 `WorkloadBackend` marker, so it cannot reach the admitted workload-launch
 path at all — the carve-out is a compile-time constraint, not only prose.
 (The mock backend implements the marker as the hermetic lifecycle test
@@ -1465,3 +1465,1198 @@ All five green as of 2026-04-30. The runbook + the
 `security.yml::verified-boot-artifacts` CI gate together provide the
 technical receipt for ADR-002 claim #3 ("a tampered rootfs ext4
 fails to boot").
+
+
+## Consolidated from ADR-032 — Hosted-cloud invariants — no lock-in, metering precision, compliance-ready
+
+## Status
+
+Proposed. Invariants are enforced from Phase 0 (no hosted-cloud-only paths in mvm) through Phase 9 (compliance docs).
+
+## Context
+
+A future hosted, monetized mvmd P2P cloud is on the roadmap. We don't want to wake up at month 12 of the migration and discover the open-source library and the hosted product have diverged — that's both a license-compliance hazard and a vendor-lock-in trap that conflicts with the project's stated values.
+
+Conversely, we don't want to under-invest in primitives the hosted cloud will depend on (precise metering, attestation, compliance docs) and pay a "hosted retrofit" tax later.
+
+The right move is a small set of invariants the hosted cloud can rely on, enforced in mvm from day one of the migration.
+
+## Decision
+
+Five invariants. Every PR is reviewed against them.
+
+### I1. No hosted-cloud-only code paths in `mvm` or `mvmctl`
+The open-source library remains fully self-hostable. Anything specific to the hosted offering (e.g., Stripe billing, customer-tier-specific limits, hosted-only auth flows) lives in `mvmd` or higher. CI lint: grep for `cfg(feature = "hosted-only")` in mvm; fail if present.
+
+### I2. Metering primitives are precise and tamper-evident
+The metrics catalog (plan 60 §"Comprehensive metrics catalog") covers:
+- Per-tenant CPU seconds, memory bytes, disk bytes, build seconds, egress bytes
+- Per-tenant tool RPC counts (web_search, web_fetch, code_eval, …)
+- Per-tenant snapshot bytes, snapshot count
+- Per-tenant audit event count
+
+Each metric is tied to a tenant_hash label (truncated SHA-256 of tenant_id; never raw tenant_id). Audit-logged on every read so dispute-resolution has an evidence trail.
+
+### I3. Attestation is the basis of trust in hosted mode
+In a self-hosted setup, attestation is good hygiene; in the hosted cloud, it's the basis of trust between customer and operator. Phase 6 implements attestation **at the strictness level the hosted cloud will require**, not a weaker dev-only version. mvmd may refuse unattested requests when running in hosted mode (a config flag, not a code fork).
+
+### I4. Compliance docs are first-class artifacts
+Phase 9 ships `specs/compliance/{soc2-controls,pci-scope,hipaa-mapping,gdpr-mapping}.md`. Stubs are created in Phase 0. Each compliance control maps to a test or ADR ID. CI checks doc staleness via timestamp on the "last verified" field.
+
+### I5. Customer-facing data destruction is provable
+`mvm` provides the overlay erasure primitive and destruction-certificate verifier; `mvmd` owns the customer-facing tenant lifecycle flow that invokes it. Certificates are signed by the host identity key so customers ending service get cryptographic proof their data was erased. This is a hosted-cloud requirement we choose to bake into the open-source substrate so self-hosters get it too.
+
+## Consequences
+
+**Positive**:
+- Open-source library and hosted product never diverge silently.
+- Compliance retrofitting later costs ~zero — the docs and primitives are already shipped.
+- Customers (current and future) get a clean migration story off the hosted cloud if they want.
+
+**Negative**:
+- Some hosted-cloud-friendly shortcuts (e.g., baking in a default Stripe billing flow) are explicitly forbidden. mvmd takes the cost.
+- Compliance docs are work overhead from day one; mitigated by template ADRs and table-of-contents-driven authoring.
+
+## Alternatives considered
+
+- **Build the hosted product first, retrofit the OSS later**: rejected. Retrofits never happen cleanly.
+- **Build the OSS without hosted-cloud awareness**: rejected. Means month-12 retrofit of attestation, metering, destruction certificates — far more painful.
+
+## Threat model impact
+
+- I3 makes attestation a load-bearing security property in hosted mode. Threat model documented in ADR-018 (attestation chain).
+- I5 is itself a security property: providing a proof-of-deletion has cryptographic guarantees attached. Documented in ADR-028 (tenant destruction).
+
+## Compliance impact
+
+- SOC 2: positive — I2, I4, I5 each map to specific Trust Services Criteria.
+- PCI: neutral — these invariants don't add PCI scope; ADR-029 covers PCI specifically.
+- HIPAA: positive — I3 (authentication via attestation), I5 (data deletion proof) align with §164.312.
+- GDPR: positive — I5 satisfies right-to-erasure (Art. 17).
+
+
+## Consolidated from ADR-063 — Boundary Language Policy
+
+**Status**: Proposed
+**Date**: 2026-05-28
+**Cross-refs**: ADR-002 (security posture), ADR-060 (pid0 portability boundary), Plan 109 (guest control-layer dep-reduction + encryption design), Sprint 42 §Track E (Zig evaluation gates)
+
+## Context
+
+mvm's guest-side control surface (pid0 — agent, init, netinit, addon binaries) is Rust today, with a heavy transitive dependency tree at the boundary: `tokio`, `serde_json`, `ed25519-dalek`, `rtnetlink`, `seccompiler`, and hundreds of indirect crates. Sprint 42's Dependency Reduction Roadmap added a **Track E** that gates any Zig adoption behind two rules:
+
+1. Do not introduce Zig for broad protocol-heavy replacements (`oci-client`, `pgp`) without a written tradeoff note covering native toolchain cost, cross-platform CI complexity, auditability, and risk reduction.
+2. If Zig is evaluated at all, constrain it to narrow ABI shims or parser islands where the native surface is small and stable.
+
+Track E names the gates but doesn't formalize them as a project-level policy. As Plan 109 runs the first concrete evaluation (a Zig vs lean-Rust-v2 A/B on `mvm-guest-netinit`), the team needs an ADR that the *next* contributor — or AI session — can consult without having to re-derive the discipline.
+
+This ADR codifies the policy. It is deliberately framed broadly as "boundary language policy" — not "Zig policy" — so that the doc has value even if Plan 109's measurements reject Zig and the project stays Rust-only. The point is the rule, not the language.
+
+## Decision
+
+mvm's default boundary language is **Rust**. Adoption of any other language at the boundary requires evidence and is gated as below.
+
+### 1. Default: Rust everywhere at the boundary
+
+Every binary that runs in the guest's blast radius (pid0 control surface per ADR-060: init, netinit, agent, in-boot addons) and every host-side binary that participates in the audit chain or signs material is **Rust by default**.
+
+The default is not negotiable case-by-case. Adopting a non-Rust binary requires the explicit process in §3.
+
+### 2. First path for dependency reduction: lean Rust v2
+
+Before considering a non-Rust language for any boundary binary, the team MUST evaluate whether the dep-reduction goal can be met within Rust. The "lean Rust v2" discipline:
+
+- Replace `tokio` with `polling` + a small hand-rolled executor for binaries where async/await ergonomics are not load-bearing.
+- Replace `serde_json` with hand-rolled per-variant parsers (or `nanoserde`) where the wire surface is small and stable.
+- Replace `rtnetlink` / `netlink-packet-route` with `linux-raw-sys` + manual netlink for one-shot or narrow netlink usage.
+- Replace heavy proc-macro derive chains with minimal-derive alternatives or inline implementations where reasonable.
+- Existing precedent: `mvm-egress-proxy` (libc only, no tokio) demonstrates the discipline already shipping in this repo.
+
+Plan 109's measurement framework (`specs/research/agent-evolution-tradeoff-note.md`) establishes the rubric for sizing this path. Subsequent dep-reduction proposals should use the same rubric so results are comparable.
+
+### 3. Where non-Rust may be considered
+
+Non-Rust languages MAY be proposed for boundary code only when **all** of the following hold:
+
+- The binary has a **narrow ABI surface** (a small, stable set of syscalls or wire variants). Examples that qualify: a netlink-route installer, a virtio-vsock diagnostics probe, an ObjC/Swift bridge to a closed-source host framework (Apple Vz). Examples that do not qualify: anything with broad protocol stacks (OCI, PGP, OpenAPI, async runtimes).
+- The binary is **not driving the audit chain**. Anything that emits to `~/.mvm/audit/<tenant>.jsonl` or computes/verifies signatures over `ExecutionPlan` material stays Rust. The audit chain is single-language by design (claim 8).
+- The native language materially reduces the **supply-chain attack surface or boundary footprint**, with measurement evidence per Plan 109's rubric — not opinion.
+
+Non-Rust languages MUST NOT be proposed for:
+
+- Broad protocol stacks (OCI, PGP, OpenAPI, sigstore, OAuth, etc.).
+- Async runtimes (`tokio` replacements). Building an event loop in another language is a workaround for "tokio is large" that re-creates the same async substrate without solving the underlying issue.
+- Anything that interacts with the audit chain.
+- Anything whose wire types are defined in `mvm-core` and shared across host/guest. The protocol stays Rust-canonical (Plan 109 §D2); any non-Rust implementation consumes a Rust-derived schema and round-trips byte-identically.
+
+### 4. Required deliverables per non-Rust adoption
+
+Any PR proposing a non-Rust boundary binary MUST include, before any prototype merge:
+
+1. **Tradeoff note** in `specs/research/<topic>-tradeoff-note.md`. Template: `specs/research/agent-evolution-tradeoff-note.md` (Plan 109 W1). Symmetric analysis of the non-Rust path AND a lean-Rust-v2 alternative. Cover: toolchain cost, CI complexity, auditability, supply-chain surface comparison, maintenance/contributor-pool impact.
+2. **Measurement comparison** with the lean-Rust v2 baseline against the rubric in Plan 109 W2/W2′. Primary metrics: dep-tree LoC reaching the boundary, transitive crate / module count + advisory exposure, stripped binary size, compile time, fuzz parity, reproducibility (claim 7), CI cost delta.
+3. **Fuzz harness** equivalent to the existing `cargo-fuzz` targets covering the binary's parser surface. The non-Rust fuzzer must run in CI on the same PR cadence.
+4. **Reproducible-build proof** — byte-identical rebuilds on `aarch64-linux` and `x86_64-linux` musl-static. Claim 7's invariant doesn't get a language carve-out.
+5. **Supply-chain attestation** equivalent to `cargo-deny` / `cargo-audit`: a documented inventory of every external dependency (stdlib modules, compiler version, transitive includes) and a CI gate that fails on yanked / advisory-flagged inputs.
+6. **Schema parity test** (per ADR-060 §8): the non-Rust binary consumes the Rust-canonical wire types and the build fails if the Rust types drift.
+
+Each deliverable is **a CI gate**, not a discretionary review item. Without all six, the PR is not mergeable regardless of measurement outcome.
+
+### 5. Reversibility
+
+Any non-Rust boundary binary MUST be kept side-by-side with the existing Rust implementation until the non-Rust path is proven across at least one full release cycle. The default kernel cmdline path selects the Rust binary; the non-Rust binary is opt-in via flake option. This is Plan 109's I4 invariant generalized.
+
+Adoption is then a separate PR that flips the default. Removal of the Rust binary is a *third* PR, no earlier than one release cycle after the default flip. The transition is irreversible only at that point.
+
+### 6. Apple VZ ObjC/Swift shim — explicit carve-out
+
+`mvm-vz-supervisor` (Plan 98 / ADR-056) uses Swift to bridge to Apple's closed-source Virtualization.framework. This is an existing exception that predates this ADR and is grandfathered. Any future Apple-framework integration MAY use Swift or ObjC under the same scoping discipline as §3 — narrow, framework-mandated, not part of the audit chain — but MUST still satisfy §4's deliverables.
+
+## Consequences
+
+**Positive:**
+
+- Future contributors and AI sessions have a single document explaining when Zig (or any non-Rust language) is acceptable at the boundary. No need to re-derive the discipline from Track E plus folklore.
+- The lean-Rust-v2 path becomes the explicit first move for any dep-reduction proposal, not a runner-up considered after a more exotic option.
+- The six-deliverable bar (§4) makes prototype-to-adoption a measurable process, not a tribal-knowledge decision.
+
+**Negative:**
+
+- The deliverable bar may slow legitimate experimentation. Mitigation: tradeoff notes and prototypes can be authored cheaply (Plan 109 demonstrates this); only *adoption* requires the full bar.
+- The schema-parity requirement (§3 "Rust-canonical types") forces hand-mirroring or codegen for any non-Rust implementation. Engineering cost is real and called out in Plan 109's analysis. Accepted.
+- Codifies a status-quo bias toward Rust. This is intentional — the team is Rust-first and the audit chain is Rust-anchored. Lowering the bar would re-introduce the toolchain-tax compounding that Plan 109 §"Systems-design recommendation" specifically identifies as the strongest argument against multi-language sprawl.
+
+**Neutral:**
+
+- Does not retroactively bless or revoke any existing non-Rust code. The Vz Swift shim is grandfathered (§6); there is no other non-Rust code at the boundary today.
+- Does not commit the team to evaluating any particular non-Rust language. Plan 109's Zig prototype is the first evaluation; nothing here commits to a second.
+
+## Alternatives considered
+
+**Alt 1: prohibit non-Rust at the boundary entirely.** Rejected because the Apple Vz Swift shim is load-bearing and the framework is closed-source. A blanket prohibition would either force re-implementation of Vz support in Rust (technically infeasible — Apple's framework requires Swift/ObjC) or block macOS Apple-Silicon support. A scoped policy is the workable middle.
+
+**Alt 2: allow non-Rust freely, gate only by code review.** Rejected because boundary code reaches every microVM and supply-chain hygiene compounds. Discretionary review provides no consistent floor; the six-deliverable bar gives one.
+
+**Alt 3: enumerate permitted languages (Rust, Zig, Swift) by name.** Rejected because it overcommits to today's set. The current text scopes by *constraints* (narrow ABI surface, not in audit chain, schema parity to mvm-core), which any future language candidate must satisfy. If a fourth language ever becomes a candidate, this ADR applies without amendment.
+
+## References
+
+- ADR-002 (microVM security posture, claims 1-10)
+- ADR-060 (pid0 portability boundary — what the boundary binaries must do regardless of language)
+- ADR-056 (Vz backend — grandfathered Swift shim, see §6)
+- Plan 98 (Vz builder VM — Swift supervisor wiring)
+- Plan 109 (guest control-layer dep-reduction + encryption design — this ADR is W4c)
+- `specs/research/agent-evolution-tradeoff-note.md` (Plan 109 W1 — template for §4.1)
+- `specs/SPRINT.md` Sprint 42 Track E (origin of the Zig evaluation gates this ADR codifies)
+- `deny.toml` (existing Rust supply-chain policy this ADR generalizes)
+
+
+## Consolidated from ADR-070 — Browser-reachable surface: verify, don't virtualize
+
+**Status**: Accepted
+**Date**: 2026-06-03
+**Cross-refs**: ADR-002 (security posture — the signed/audited artifacts this verifies), ADR-041 (signed, audited execution plans — claim 8), ADR-014 (VmBackend single trait — the seam a wasm backend would *not* fit), Plan 33 (hosted MCP transport — mvm owns protocol, mvmd owns transport). Input: a comparison against a sibling browser-VM project that boots Linux in the browser via a RISC-V→wasm emulator.
+
+## Context
+
+A sibling browser-VM project runs full environments **in the browser**: a RISC-V RV64GC interpreter compiled to `wasm32`, booting an unmodified kernel, with a WebSocket relay for egress. The natural question for mvm was "should we grow an analogous browser capability?"
+
+The answer turns on one distinction that is easy to miss. That project **emulates** a CPU; mvm **virtualizes** on real hardware (Firecracker/libkrun/Vz over KVM/HVF). You can ship a CPU emulator as wasm and run it in a tab. You **cannot** run KVM in a tab. So the headline browser-emulator capability — "boot the workload in the browser, serverless" — has no path into mvm's runtime model, and a `wasm`/emulator `VmBackend` is the wrong shape for the `VmBackend` trait (kernel path, ext4 rootfs, TAP, pause/resume, vsock — nearly all N/A; ADR-014). That dead end should be recorded so it is not relitigated.
+
+What *does* transfer is the part underneath the emulator: **content-addressed, self-verifying artifacts that any peer can check by re-derivation, with no server to trust** (its Law L5 — `verify_kappa()`). mvm already produces exactly such artifacts — signed `ExecutionPlan`s, content-addressed bundles, and a chain-signed audit log (claims 8/9/14). Those are verifiable from bytes alone. That is the idea that maps cleanly onto mvm's strengths.
+
+## Decision
+
+1. **mvm will not pursue "run microVMs in the browser."** It is incompatible with hardware virtualization. No wasm/emulator backend.
+
+2. **mvm grows a serverless, in-browser *verification* surface for its signed artifacts.** The first instantiation ships now: an audit-log verifier. `crates/mvm-verify` is a dependency-light, wasm-clean leaf crate that re-implements `mvm_supervisor::verify_audit_chain` against an in-memory `&str` + an Ed25519 public key; `web/audit-verify/` is a `#[wasm_bindgen]` shim + a static page. An operator drops a downloaded `<tenant>.jsonl` and the host signer's public key into a tab and gets a verdict — no host, no backend, nothing leaves the page.
+
+3. **Verification cores must be wasm-clean leaf crates.** The browser surface may depend only on crates that compile to `wasm32-unknown-unknown` — no tokio/libc/rustix, no `mvm-supervisor`/`mvm-core` in the graph. `mvm-verify` depends only on `ed25519-dalek`, `sha2`, `base64`, `serde`, `serde_json`. Byte-exact parity with the native verifier is **pinned by a cross-crate test** (`mvm-supervisor`'s `mvm_verify_matches_supervisor_chain`): if the audit entry's serde shape drifts, CI fails there, not silently in the browser.
+
+4. **The wasm artifact stays out of the main workspace.** `web/audit-verify/` is excluded from the Cargo workspace so `wasm-bindgen` and the `wasm32` target never enter `cargo build --workspace` or CI. Its logic is tested via the in-workspace `mvm-verify` crate; the page is built with `wasm-pack` (see `web/audit-verify/README.md`).
+
+5. **Remote console/control stays in mvmd, not mvm.** A browser-reachable *console* (driving a live microVM remotely) is realistic — mvm's PTY-over-vsock console is a raw byte stream and `mvm-mcp` is already transport-agnostic — but the HTTP/WebSocket transport + tenant auth is fleet-orchestration territory, reserved for mvmd by Plan 33. mvm's obligation is only to keep the console byte-stream and the `mvm-mcp` protocol cleanly bridgeable, which they already are. This ADR does not add any host-side remote surface to mvm.
+
+## Consequences
+
+- A new, small, fully-tested crate (`mvm-verify`) that is independently useful: any Rust caller (CLI, mvmd, a future `mvmctl audit verify --stdin`) can verify a chain from bytes without the supervisor's heavy dependency graph.
+- A serverless transparency tool: third parties can audit mvm's claim-8 log without running mvm or trusting a server — the strongest form of the "verify by re-derivation" property, applied to mvm's actual artifacts.
+- The browser tool's correctness is guarded by a test in the security-critical crate, so the duplication (a mirrored `AuditEntry`) is drift-proof rather than hope-based.
+
+### Follow-ups
+
+- [ ] `mvmctl audit pubkey` — print the host signer's Ed25519 public key as hex, so operators have a first-class way to feed the verifier (today they must derive it from the keypair).
+- [ ] Extend the verifier to **plan/bundle inspection** (`mvm_plan::verify_plan`, `read_and_verify_bundle` are already byte-oriented) — but only once `mvm-plan`'s graph is confirmed wasm-clean (it currently pulls `mvm-core`, which is not). May require lifting the pure verify path into a leaf crate, mirroring this ADR's pattern.
+- [ ] If a hosted browser **console** is ever wanted, it is an mvmd effort (Plan 33), not mvm.
+
+## Alternatives considered
+
+- **A wasm/emulator `VmBackend`.** Rejected: wrong shape for the trait, and it would mean shipping a CPU emulator — a different product, not a backend.
+- **Depend on `mvm-supervisor`/`mvm-plan` from the wasm crate.** Rejected: their graphs pull tokio/libc/rustix and do not compile to `wasm32`. Hence the leaf-crate rule (decision 3).
+- **Re-derive the signed bytes via `serde_json::Value`.** Rejected: `Value` re-serializes object keys sorted, but the audit entry is signed in struct-declaration order, so a round-trip through `Value` would reorder keys and break every signature. `mvm-verify` mirrors the struct's field order and `skip_serializing_if` attributes instead, reproducing the signed bytes exactly.
+
+
+## Consolidated from ADR-083 — Core security enforcement is a compile-time obligation on workload backends
+
+**Status:** Accepted
+**Amends:** [ADR-002](002-microvm-security-posture.md) (per-backend tier matrix — the workload / non-workload split becomes type-enforced rather than prose)
+**Preserves:** all numbered claims; [ADR-082](082-rust-native-egress-gateway.md) and Plan 129 egress secret substitution (now a tracked compile-time obligation on macOS, not an optional follow-up)
+
+## Context
+
+`mvm` runs untrusted workloads across several backends behind the
+`AnyBackend` enum. The cross-cutting security enforcement that backs the
+claims — signed-plan admission, default-deny egress + flow audit, app-deps
+seal, console lockdown, egress secret substitution — was applied in two
+different ways:
+
+- Some concerns run in a **shared funnel**: admission in the `up` launch
+  path, the egress bridge in the per-backend supervisor, app-deps seal in
+  the supervisor admission verifier. These apply to every workload backend
+  uniformly.
+- One concern, **egress secret substitution** (Plan 129), was hand-rolled
+  as a free function (`spawn_substitution_endpoint`) called *inside*
+  individual backends' `start()` methods — Firecracker and QEMU only.
+
+Because nothing forced a backend to acknowledge that free function, libkrun
+and vz silently never got it. The gap was invisible: a backend could be
+fully wired for boot, admission, and egress *filtering* while missing an
+entire security mechanism, and the type system was content. `BackendSecurityProfile`
+(its `claims: [ClaimStatus; 7]` array) did not help — it is advisory, and
+frozen at seven claims, so the substitution concern had no cell to be
+missing from.
+
+The lesson: a core security feature must not be expressible as *absent*
+without a deliberate, visible decision. A declaration matrix that lets a
+backend mark a core feature "unsupported" only *documents* the hole; it
+does not prevent it.
+
+## Decision
+
+Introduce a marker trait and type-bar the admitted workload-launch path.
+
+```rust
+pub trait WorkloadBackend: VmBackend {}
+```
+
+- `FirecrackerBackend`, `LibkrunBackend`, `VzBackend` implement it. `mock`
+  also implements it — it is the hermetic lifecycle test double (ADR-045)
+  that stands in for a workload backend on the admitted path in tests and
+  carries no real workload, so permitting it has no security cost. `qemu`
+  (a real Tier-2 dev/test VMM) does **not** — it is the meaningful carve-out.
+- `AnyBackend::as_workload_backend(&self) -> Option<&dyn WorkloadBackend>`
+  converts via an **exhaustive match** — a new `AnyBackend` variant cannot
+  compile without an explicit workload / non-workload decision.
+- `require_workload_backend(&AnyBackend) -> Result<&dyn WorkloadBackend>`
+  is the single boundary the admitted launch path runs; it refuses a
+  non-workload backend before any VM starts.
+
+The admitted launch arms in the `up` / `invoke` path call this guard before
+dispatching, so a non-workload backend is refused, not launched.
+
+This is the structural fix, not a capability matrix: a backend reaches the
+untrusted-workload path only by being a `WorkloadBackend`, and the shared
+funnel — not the backend — applies the cross-cutting enforcement. The lone
+genuinely per-backend concern (the egress substitution *transport*, which
+differs by backend mechanism) becomes a no-default `WorkloadBackend` method
+in a follow-on phase, so it cannot be omitted either.
+
+## Consequences
+
+- **A new backend cannot reach the workload path silently.** It must either
+  implement `WorkloadBackend` (and therefore the shared funnel applies) or
+  be deliberately excluded — a visible, reviewable decision.
+- **ADR-002's Tier-2 carve-out is now a type constraint.** QEMU's exclusion
+  from claim-10 egress enforcement was previously prose ("dev/test only, not
+  wired"); it is now enforced by types — `qemu` is not a `WorkloadBackend`,
+  so it cannot be passed to the admitted launch path. (`mock` is permitted —
+  the hermetic test double — but it never carries a real workload.)
+- **Egress secret substitution on macOS becomes a required build.** When the
+  substitution transport becomes a no-default `WorkloadBackend` method,
+  libkrun and vz will not compile without implementing it. This reclassifies
+  the macOS substitution port from an optional fast-follow to a compliance
+  requirement. (The transparent :80/:443 terminator half entangles with the
+  rvproxy migration — ADR-082 / Plan 193 — and is resolved by a design
+  spike before implementation.)
+- **`BackendSecurityProfile` stays advisory.** It continues to drive
+  `doctor` posture output; it is no longer mistaken for the enforcement
+  mechanism.
+
+## Alternatives considered
+
+- **Capability matrix + witness gate** (a `BackendCapabilityMatrix` with a
+  `Supported`/`DeliberatelyUnsupported` cell per concern, plus an xtask gate
+  asserting each `Supported` cell has a witness). Rejected: for a *core*
+  feature, a `DeliberatelyUnsupported` cell documents a hole rather than
+  preventing it, which is the opposite of the goal. The compiler forbids the
+  actual failure (a missing implementation) for free.
+- **Every backend enforces (close the Tier-2 carve-out).** Put the core
+  obligation on `VmBackend` so even `qemu` must enforce egress. Deferred: it
+  reopens ADR-002's settled Tier-2 decision and forces enforcement onto a
+  dev/test backend that carries no untrusted workload. Recorded as a future
+  option.
+- **Shared launch funnel with a per-backend transport seam only
+  (no-op-proofing).** Lift all enforcement into one pipeline so a backend
+  cannot even supply an inert implementation. Deferred: a larger launch-path
+  refactor; adopt only if inert seams prove to be a real problem (a witness
+  gate is the cheaper escalation).
+
+Implementation is sequenced in Plan 197.
+
+
+## Consolidated from ADR-088 — Dev VM mutation promotion boundary: mutable dev state never implicitly feeds prod, and SSH-agent stays dev-tier only
+
+**Status:** Accepted
+**Relates to:** [ADR-002](002-microvm-security-posture.md) (prod vs dev posture),
+[ADR-071](071-stage0-bootstrap-trust-model.md) (declared-input trust model),
+[ADR-079](079-app-builder-product-surface.md) (product ergonomics without
+weakening the engine), [Plan 200](../plans/200-machine-ux-dx-layer.md) (machine
+UX/DX), and [Plan 36](../plans/36-sealed-signed-builder-image.md) (dev vs prod
+image posture)
+
+## Context
+
+Plan 200 adds a persistent dev-machine workflow on top of existing runtime
+primitives: image-backed `machine create/start/exec/shell/stop`, `dev.init`,
+volumes, and a future `ssh_agent` transport. That raises a boundary question:
+if a developer mutates state inside a long-lived dev microVM, should later
+production/prod builds be able to "see" those changes automatically?
+
+The answer matters because mvm uses Nix and signed/admitted runtime contracts to
+make production behavior reproducible and auditable. If a prod build can depend
+on ambient mutable guest state, the system quietly regresses to "whatever
+happened in the dev VM" instead of "declared source + config + artifacts."
+
+The same question applies to SSH-agent authentication. ADR-002's "no SSH in
+microVMs, ever" remains the stricter rule: forwarding an agent socket is not
+permission to create an SSH session, install SSH clients or servers, bake SSH
+configuration into a template, or mount/copy SSH key material. A forwarded
+agent socket is a dev-tier host capability crossing into the guest and is
+acceptable only on an explicitly local/dev tier, never on the sealed/prod path.
+
+## Decision
+
+1. **Mutable dev-VM state is not a production input.** A dev microVM is a
+   mutable work surface only. Its rootfs mutations, ad hoc package installs,
+   and `dev.init` side effects never implicitly flow into a prod/sealed build or
+   runtime.
+
+2. **Prod/sealed builds consume declared inputs only.** A prod build may depend
+   on:
+   - host workspace files and committed source;
+   - declared config and lockfiles;
+   - explicitly mounted host directories/volumes that are part of the build
+     input model;
+   - explicitly exported or promoted artifacts that re-enter the system as
+     declared host-side inputs.
+
+   A prod build may not depend on opaque live guest state.
+
+3. **Promotion across the boundary is explicit.** If a dev workflow produces a
+   change that should matter to prod, that change must cross the boundary as
+   one of:
+   - a host workspace edit;
+   - an explicit sync/export from a dev volume back to the host;
+   - a signed/exported artifact that later re-enters through an admitted input
+     path.
+
+   "It existed in the dev VM" is not itself a promotion mechanism.
+
+4. **SSH-agent support is dev-tier only and does not authorize SSH sessions.**
+   When implemented, `ssh_agent` means Unix-socket forwarding of
+   `SSH_AUTH_SOCK` only. Private key files, `~/.ssh/`, host known-hosts
+   material, SSH clients, SSH servers, and SSH config are never copied,
+   mounted, or installed into guest templates. The feature is allowed only on
+   an explicitly dev-tier machine/run posture and is refused on standard,
+   sealed, or prod paths. Network/admission layers must still block SSH
+   sessions; the agent socket is not a transport exception.
+
+5. **Policy visibility is mandatory.** Whether a run/machine is using dev-only
+   hooks such as `ssh_agent`, writable volumes, or `dev.init` must stay visible
+   in dry-run, admission/audit, and receipts. The dev tier is not hidden behind
+   convenience defaults.
+
+## Consequences
+
+- Prod builds stay reproducible and reviewable: the source of truth is host
+  source/config/artifacts, not a mutable VM's leftover state.
+- Dev workflows keep their ergonomics. A developer can still use a persistent
+  mutable machine, but must explicitly promote anything that matters to prod.
+- SSH-agent forwarding remains a narrow local-development feature without
+  weakening the sealed/prod trust boundary or the project-wide SSH ban.
+- Future features such as "sync back to host" or "export dev artifact" are
+  allowed, but they must be explicit promotion verbs, not ambient leakage from
+  guest state into prod inputs.
+
+## Alternatives considered
+
+- **Let prod builds read live guest state directly.**
+  Rejected: breaks reproducibility, makes reviews/audit weaker, and turns
+  "works in my dev VM" into an undeclared build input.
+
+- **Disallow mutable dev machines entirely.**
+  Rejected: too strict for the product goal. Persistent dev machines, `dev.init`,
+  and future SSH-agent forwarding are useful, as long as their boundary to prod
+  is explicit.
+
+- **Support generic SSH by mounting keys, installing SSH clients/servers, or
+  baking `~/.ssh/` material into templates.**
+  Rejected: SSH sessions are banned by ADR-002, and host secret material must
+  not cross the boundary. Agent-socket forwarding is the maximum acceptable
+  dev-tier shape and does not permit an SSH session.
+
+## Out of scope
+
+- The concrete socket-forwarding transport for SSH-agent. This ADR sets the
+  allowed posture and boundary, not the implementation mechanics.
+- A particular host↔guest sync/export UX. This ADR requires explicit promotion
+  but does not pick the final command shape.
+- Changing the existing rule that prod/sealed machines reject dev-only hooks
+  such as `dev.init`.
+
+## References
+
+- [Plan 200](../plans/200-machine-ux-dx-layer.md)
+- [ADR-002](002-microvm-security-posture.md)
+- [ADR-071](071-stage0-bootstrap-trust-model.md)
+- [ADR-079](079-app-builder-product-surface.md)
+- [Plan 36](../plans/36-sealed-signed-builder-image.md)
+
+
+## Consolidated from ADR-104 — Cloud control-plane trust boundary (multi-tenant superset of ADR-002)
+
+- Status: Proposed
+- Date: 2026-07-01
+- Owner: MVM Project
+- Related: ADR-002 (microVM security posture — the 15 claims, single-host scope), ADR-041 (signed audited execution plans — claim 8), ADR-059 (host services broker — claim 12 binding-gated dispatch), ADR-049 (destination/time-bound secret substitution — claim 13). Design input: `specs/notes/mvm-client-facade-design.md`, `specs/research/mvmd-cloud-readiness-assessment.md`.
+- Sequenced by: cloud claim catalog + `two_org_isolation` witness (Task A, in `mvmd`); `mvm-client` facade Phase 2 (remote) is gated on this ADR being Accepted.
+
+## Context
+
+`mvm` (this repo) is the open-source, run-microVMs-locally product. `mvmd` (sibling
+repo) is the paid, multi-tenant cloud where users *deploy* microVMs onto hosts we
+operate. `mvm-studio` and — per the facade design — `mvmctl` reach **both**: a local
+in-process path and a remote REST path to an `mvmd-gateway`, through one `MvmClient`
+trait.
+
+ADR-002 is the source of truth for the local security posture. Its threat model is
+scoped, explicitly, to:
+
+- a **single trusted local host** (the user owns the machine),
+- **one guest = one workload** (no multi-tenant guests),
+- **malicious host out of scope**.
+
+The 15 CI-enforced claims all defend *that* boundary: a workload escaping onto the
+*user's own* machine.
+
+The cloud product **inverts every one of those assumptions**. We own the host; the
+user is untrusted; **many** untrusted tenants share our hosts. The threat becomes
+tenant→host and tenant→tenant escape — precisely the two items ADR-002 declares out of
+scope (multi-tenant guests; an untrusted-host relationship from the tenant's view).
+
+Introducing `mvmctl --remote <url>` also adds a **new actor** ADR-002 never modeled: a
+remote control plane reachable over a network, with a network in between. A trait that
+makes the local and remote calls look identical can hide that their security
+*guarantees* are enforced by different authorities. That is a mental-model hazard, not
+just a code one.
+
+This ADR establishes the cloud tier's trust boundary as an explicit **superset** of
+ADR-002, so "the cloud keeps every local guarantee, and adds the multi-tenant ones" is
+a *checkable* statement rather than an aspiration.
+
+## Decision
+
+### 1. The cloud tier is ADR-002 plus a named set of multi-tenant claims
+
+The 15 local claims remain necessary and continue to hold on the workload backends.
+The cloud tier adds, at minimum:
+
+- **CT-1 Cross-tenant isolation.** A principal scoped to tenant/org A cannot read or
+  mutate any resource of tenant/org B — enforced on the request hot path *and* backed
+  by a database-level fail-closed backstop (row-level security), so a forgotten
+  handler check is not a breach.
+- **CT-2 Admission under fleet authority.** Every deploy / lifecycle mutation is
+  authorized by the control plane's policy engine before state change and recorded in
+  the chain-signed audit log. (Mirrors claim 8, enforced by mvmd's authority.)
+- **CT-3 Control-plane replay resistance.** Signed control-plane requests carry
+  freshness (validity window + per-signer nonce) and are rejected on replay. (The
+  `mvm-core` primitive for this is Task B; the reconcile-path wiring is mvmd's.)
+- **CT-4 Per-tenant resource bounds.** A tenant's workloads cannot starve another's on
+  a shared host — resource caps and/or placement isolation, per the co-location
+  decision below.
+
+The catalog is seeded here and owned as a living `specs/claims/catalog.md` in `mvmd`
+(Task A). It is expected to grow (secret confidentiality across the boundary, egress
+attribution, etc.); this ADR fixes the *discipline*, not the final list.
+
+### 2. The trait unifies the call, never the trust
+
+There are two authorities, and they are never silently merged:
+
+- **Local path** — the authority is the local host, exactly as ADR-002 describes
+  (host-signed `ExecutionPlan`, broker, local audit chain). `LocalBackend` runs the
+  same `mvmctl` library over the same on-disk state.
+- **Remote path** — the authority is `mvmd`. `GatewayBackend` is a **dumb courier with
+  zero enforcement authority**: it presents credentials and ships intent; every
+  security decision (RBAC, quota, admission, audit, rate-limit) is made server-side and
+  the server treats the client as untrusted input regardless.
+
+Security is therefore never a property of the transport the caller picked; it is
+enforced at whichever authority owns that path. The facade must make the acting
+authority observable, never present remote guarantees as if they were the local ones.
+
+### 3. Key-domain separation
+
+Local signing keys (`~/.mvm/keys/host-signer`) are the *local host's* authority and
+must never be trusted by the fleet. The facade must not ship a locally-signed plan and
+have `mvmd` honor that local signature — that is key-trust confusion. Remote DTOs carry
+**intent**; `mvmd` re-admits and re-signs under its own fleet key. The shared wire
+contract must not leak local signing material or host paths across the boundary. This
+is a constraint on the DTO shapes, not only a runtime check.
+
+### 4. Client-side rules are fail-closed
+
+- **Prefer mTLS; require TLS.** HTTPS + cert validation by default; support the
+  gateway's `require_client_cert` mode; **refuse plaintext to any non-loopback host**
+  (the loopback sidecar is the only cleartext exception).
+- **Ride the server's auth model exactly** — scoped bearer keys, honor expiry warnings,
+  hard-fail on API-version skew. No bespoke client auth.
+- **Credentials** — OS keychain (studio) or env var / mode-0600 file (CLI); never a
+  token flag (leaks to `ps`/history); never logged; `zeroize` on drop; **endpoint-bound**
+  so a token is never sent to a different `--remote` URL.
+- **Untrusted-input hardening** — the shared DTOs are deserialized by the server from
+  anyone with network reach: `#[serde(deny_unknown_fields)]`, size/depth limits,
+  validation. Typed DTOs fail closed; today's `Result<Value>` surface does not.
+
+### 5. Built is not wired: enforcement must fail CI when absent
+
+A control that exists but is not on the request hot path with a passing witness is
+treated as **absent**. Each cloud claim maps to a named test/CI gate (the mvm
+claim→witness→gate discipline, ported to `mvmd`). This is a direct response to the
+present state, where a production-grade IAM + RLS subsystem shipped ~100% built and ~0%
+wired without turning CI red.
+
+### 6. Sequencing
+
+The `mvm-client` remote phase (`--remote` / mTLS / `GatewayBackend`) ships only once
+this ADR is Accepted **and** cross-tenant enforcement (CT-1) is wired with a green
+witness. Shipping a polished remote client over an unenforced authorization boundary
+would make the insecure path easier to reach — the worst outcome.
+
+## Threat model — new actors (relative to ADR-002)
+
+In scope for the cloud tier, additional to ADR-002:
+
+- **The network between client and `mvmd`.** Mitigated by TLS/mTLS, endpoint-bound
+  credentials, replay resistance (CT-3), fail-closed client rules.
+- **Other tenants on a shared host / control plane.** Mitigated by CT-1 (isolation +
+  RLS backstop), CT-4 (resource bounds), and the co-location decision.
+- **A tenant's untrusted workload versus the fleet host.** The ADR-002 guest-boundary
+  claims (1–15) carry over unchanged and are the first line; multi-tenancy raises the
+  blast-radius stakes but not the per-guest mechanism.
+
+Still out of scope (named, deliberately):
+
+- **A malicious `mvmd` operator / the host we operate.** We trust our own control-plane
+  operators with the hypervisor and fleet keys, mirroring ADR-002's malicious-host
+  exclusion. (Reducing this trust — confidential computing, hardware attestation — is a
+  separate future ADR.)
+- **Hardware-backed key attestation.** As ADR-002.
+
+## Consequences
+
+- "Same guarantees or stricter, in the cloud" becomes provable: the superset is
+  enumerated and each element has a CI witness.
+- The facade design gains a hard gate (§6): remote is not shippable until CT-1 is
+  enforced, not merely designed.
+- Honest current status at authorship: CT-1 is built (mvmd IAM + Postgres RLS) but not
+  wired; CT-3's `mvm-core` primitive has landed (Task B) with the mvmd reconcile-path
+  wiring outstanding; CT-2 is partial (prod-gated signature verify, no end-to-end
+  gateway→agent signing); CT-4 is open (unrestricted co-location). This ADR does not
+  claim these are done — it makes their absence a tracked, CI-visible gap.
+
+## Alternatives considered
+
+- **Keep ADR-002 as-is; handle cloud security ad hoc.** Rejected: there is then no
+  checkable superset, and the built-≠-wired failure mode has nothing to make it red.
+- **A separate cloud threat-model doc only, no ADR.** Partially adopted: a companion
+  `specs/threat-models/` doc in `mvmd` may hold the long-form analysis, but the *trust
+  boundary decision* belongs in the ADR ledger next to ADR-002 so the two are read
+  together.
+- **Make the trait fully uniform over local/remote, hiding the transport.** Rejected:
+  uniformity of *interface* is good DX; uniformity of *apparent trust* is a hazard. The
+  acting authority must stay observable (§2).
+
+## Co-location decision (to resolve; drives CT-4 and unit economics)
+
+Two honest options, called out so it is decided before more scheduler logic is built on
+the current co-locate-freely default:
+
+- **Dedicated node pools per tenant** — simplest, strongest isolation, lower density
+  and thinner margins.
+- **Hardened co-location** — denser and better economics, but defends the
+  Firecracker/VMM boundary, network segmentation, and noisy-neighbor between untrusted
+  tenants on shared silicon.
+
+This is a product+security decision, not purely security; this ADR records it as the
+open question gating CT-4 rather than pre-deciding it.
+
+
+## Consolidated from ADR-108 — Verb-grant measured trust policy and the key-separation ceiling
+
+- Status: Proposed
+- Date: 2026-07-04
+- Owner: MVM Project
+- Related: ADR-002 (microVM security posture — trusted-host and hardware-attestation out-of-scope; claim 3 verified boot, claim 4 `do_exec`, claim 15 sealed interactivity), ADR-103 (plan-bound agent verb capabilities — the `VerbGrant` this ADR anchors), ADR-041 (signed audited execution plans — claim 8), ADR-090 (resident daemon trust gradient)
+- Sequenced by: [Plan 215](../plans/215-plan-bound-agent-verb-capabilities.md) follow-on
+
+## Context
+
+ADR-103 delivered plan-bound agent-verb capabilities: a per-workload `VerbGrant`,
+minted host-side, delivered to the guest on the kernel cmdline
+(`mvm.verb_grant=<hex(VerbGrantEnvelope)>`), decoded by `/init` into
+`/run/mvm/verb-grant.json`, pinned by the agent at boot
+(`load_pinned_verb_grant`, `crates/mvm-guest/src/vsock.rs`), and enforced
+subtractively after the class gate.
+
+The `VerbGrantEnvelope` carries the grant **and** the verifying key
+(`pubkey_hex`) in one blob. So the guest verifies the grant against a key
+delivered by the same launcher, over the same channel, as the grant itself. The
+in-tree comment states the limitation plainly: *"the verifying key rides in the
+same launcher-provisioned envelope as the grant … NOT proof of an independent
+issuer … A build-time-provisioned anchor is tracked."* That tracked item
+(issue #1381 item 3) asked for "real cryptographic key separation via a
+build-time trust anchor."
+
+This ADR records the outcome of designing that anchor: **within ADR-002's scope,
+real cryptographic key separation for the verb grant is not achievable**, and
+states precisely why, what *is* achievable and valuable instead (a measured
+trust *policy*), and the exact future path that would make key separation real.
+
+## The ceiling: why in-scope key separation is not achievable
+
+ADR-002 fixes two scope boundaries that jointly foreclose key separation here:
+
+1. **The host is trusted.** mvmctl trusts the host with the hypervisor and the
+   private build/signing keys. A "malicious host" is explicitly out of scope.
+2. **No hardware-backed key attestation.** Explicitly out of scope.
+
+Given these, consider every anchor the guest could verify the grant against:
+
+- **Kernel cmdline** (today): launcher-provisioned, unmeasured by anything.
+- **The `mvm-config` drive** (per-launch, `crates/mvm-backend/src/microvm.rs`):
+  assembled by the host each boot, **no dm-verity sidecar, no roothash** —
+  plaintext and unmeasured. Moving the key here is the same launcher-controlled,
+  unmeasured channel as the cmdline: no gain.
+- **A dm-verity-sealed rootfs file** (claim 3): genuinely measured and
+  tamper-evident — **but the roothash is computed at *image-build* time** in the
+  Nix derivation (`nix/images/runtime-overlay/flake.nix`), and at launch
+  `probe_verity_sidecar` only *reads* the pre-baked roothash onto the cmdline.
+  There is no per-launch re-seal. The **host-signer key is per-host and
+  runtime-generated** (`~/.mvm/keys/host-signer.ed25519`, created on first
+  `mvmctl` run — `host_keypair::load_or_init_at`), so it **cannot** be baked into
+  a build-time-generic verity image: the key does not exist when the image is
+  built.
+- **A build-time key baked into the verity rootfs** could be measured, but a
+  per-host runtime key cannot be *certified* by it: the release/build
+  infrastructure never sees the host key, so no certificate chain from the
+  build-time anchor to the host-signer key can exist.
+
+Every anchor is therefore either (a) provisioned by the same trusted launcher
+that provisions the grant (cmdline, config drive — no independence), or (b)
+measured but build-time-generic and unable to carry the per-host key (verity
+rootfs). Nothing measures the cmdline itself. The one construction that would
+give a genuinely independent anchor — a launch-time key measured/attested by a
+root the launcher cannot forge — requires hardware attestation (a vTPM / measured
+boot quoting the launch key), which ADR-002 places out of scope.
+
+Note also that the in-scope guest adversary — a **compromised guest workload**
+attempting to escalate its own agent verbs — is already fully addressed by
+*pinning timing*: the agent pins the grant at boot **before** any untrusted
+workload runs, and the pinned value is immutable thereafter. Key separation adds
+no defense against that adversary. The only residual value of an independent
+anchor is defense-in-depth against a **trusted-but-buggy launch path**.
+
+**Conclusion.** "Real cryptographic key separation for the verb grant" is a
+non-goal under ADR-002. The delivered ADR-103 mechanism is, and remains,
+**trusted-channel provisioning**: integrity over a launcher-provisioned blob,
+rooted in kernel-cmdline provenance. It must **not** be promoted to the ADR-002
+numbered claim ledger. This is the honest ceiling.
+
+## Decision
+
+Ship the achievable, non-theater improvement: make the guest's grant-trust
+*policy* — not the key — **measured**, and make grant enforcement survive
+restore. Concretely:
+
+### 1. A measured `VerbTrustPolicy` baked into the sealed rootfs
+
+A policy is **generic** (identical for every launch of an image), so unlike the
+per-host key it *can* be baked at Nix-build time into the dm-verity-covered
+rootfs. Define `mvm_core::plan::VerbTrustPolicy`:
+
+```
+VerbTrustPolicy {
+    version: u32,                 // 1
+    require_grant: bool,          // guest fails closed if a grant is required but absent
+    grant_key_source: GrantKeySource,  // LaunchProvisioned (today) | Attested (future seam)
+}
+```
+
+`mkGuest` bakes `/etc/mvm/verb-trust.json` into the rootfs. For **sealed prod
+images** (`withDevShell = false`): `{ version: 1, require_grant: <staged, see
+Rollout>, grant_key_source: "launch_provisioned" }`. For **dev / OCI images**:
+the file is absent (⇒ no requirement — the permissive default is preserved).
+
+### 2. Policy-driven guest enforcement (fail-closed code, staged bit)
+
+At boot the agent reads the verity-measured `/etc/mvm/verb-trust.json` and acts
+on it with a single code path:
+
+- **No policy file** (dev / OCI) ⇒ no requirement; serve (permissive default).
+- **Policy present, valid grant pinned** ⇒ serve.
+- **Policy present, grant absent / malformed / verification-failed** ⇒ emit an
+  **audited observability signal** ("verb-trust policy present but no valid grant
+  pinned"), then fail closed **iff** enforcement is required. As shipped (see
+  Rollout / Stage A), the enforcement trigger is `trust_decision(policy,
+  grant_present, launch_requires_grant)`: fail closed when the launch asserts
+  `mvm.require_grant=1` **OR** the baked `require_grant: true` **OR**
+  `grant_key_source: attested`; otherwise serve (observe mode). Because Stage B/A
+  bake `require_grant: false`, the enforcement in practice comes from the
+  launch-asserted `mvm.require_grant=1` token (emitted only when the host
+  delivered a grant), leaving mvmd / direct-launch instances in observe mode.
+
+The fail-closed behavior is thus fully implemented in the guest from day one;
+whether it *bites* is driven entirely by the measured `require_grant` bit. This
+is the one genuinely valuable property: a sealed image's assertion *"I must run
+under a grant"* is **dm-verity-measured** (claim 3), so a launch-path bug — or
+tampering — that omits or corrupts the grant can no longer silently downgrade a
+sealed workload to permissive class-gate-only operation. The *key* is still
+launch-provisioned and honestly labeled `launch_provisioned`; only the *policy*
+is measured.
+
+An unexpected `grant_key_source: "attested"` (the future arm, not implemented
+here) is treated as fail-closed, never a silent downgrade.
+
+### Rollout (staged, to bound cross-repo risk)
+
+`mkGuest` is shared: the sealed images it builds are also run by **mvmd** (the
+separate fleet orchestrator), whose admission/launch/restore paths are not
+verified by this work. Baking `require_grant: true` unconditionally could brick
+an mvmd sealed workload whose launcher does not deliver a grant. Enforcement is
+therefore rolled out in two stages, each a distinct PR:
+
+- **Stage B (this ADR's implementation) — measure-now.** Ship the full mechanism
+  with `require_grant: false` baked for sealed images: the policy type, the
+  verity-measured file, the guest fail-closed **code path** (dormant at
+  `false`), the audited observe signal, restore reconciliation, and the
+  `grant_key_source` seam. Live-prove that every *mvmctl* sealed launch + restore
+  flavor delivers a valid grant.
+- **Stage A (shipped) — enforce, launcher-gated (Option A).** Investigating the
+  Stage-A precondition established that **mvmd cannot be relied on to deliver a
+  grant**: it boots instances through a *direct* Firecracker launch
+  (`mvmd-runtime` `instance_start_inner`) that synthesizes no `ExecutionPlan`,
+  mints no `VerbGrant`, and **bypasses mvm-backend's cmdline assembly entirely**.
+  So flipping the *baked* bit to `require_grant: true` would fail-close every
+  mvmd instance. Stage A therefore does **not** flip the baked bit (it stays
+  `false`); instead enforcement is **launcher-gated**:
+  - The host emits a `mvm.require_grant=1` kernel-cmdline token **only when it
+    delivered a grant** (`require_grant_cmdline_token`, keyed on the
+    `verb-grant.json` sidecar *existing* — so a corrupt sidecar still asserts
+    enforcement and the guest fails closed rather than running grant-less),
+    appended at the four mvm-backend cmdline builders
+    (`microvm`/`qemu`/`libkrun`/`vz`) — all of which mvmd bypasses.
+  - The guest reads it (`launch_requires_grant()` over `/proc/cmdline`) and
+    `trust_decision(policy, grant_present, launch_requires_grant)` fails closed
+    when enforcement is **launch-asserted OR baked-policy-required OR
+    `grant_key_source: attested`**, and no grant is pinned.
+
+  Net: mvmctl grant-delivering launches enforce; mvmd (and any direct-launch
+  path) asserts nothing → always serves → **no brick, no mvmd change**. The
+  measured `require_grant` field is retained for the observe signal and the
+  `attested` seam; the enforcement *trigger* moved to the launch token. Trade-off
+  vs. the original "flip the baked bit" plan: `require_grant` enforcement is now
+  launcher-asserted rather than rootfs-measured — a slight weakening of the
+  measured-policy property, accepted because a delivered grant is still
+  pinned+enforced and the launcher emits the flag in the same routine that
+  delivers the grant. A stale-sidecar guard unlinks a pre-existing
+  `verb-grant.json` on re-stash so a reused persistent name cannot inherit a
+  spurious enforcement assertion; an `xtask` gate machine-checks that
+  `mvm.require_grant=1` appears only in the four allowlisted builders (guards the
+  no-brick invariant).
+
+### 3. Restore reconciliation (grant survives every restore flavor)
+
+`require_grant` must hold across snapshot restore, not only fresh boot:
+
+- **Pause/resume + warm-restore** (guest RAM saved/restored): the agent's pinned
+  grant survives in memory; `require_grant` is already satisfied. No change.
+- **`fs_quick` fork** (rootfs-only; agent restarts): mint a fresh child grant at
+  fork admission and deliver it on the child's cmdline — the restarting agent
+  re-pins via the existing boot path.
+- **`vm_full` fork** (memory cloned; agent survives with the *parent's* grant
+  while a *fresh child plan* with a new session/nonce is admitted at
+  `checkpoint.rs`): the surviving grant is stale. Mint a fresh child grant and
+  deliver it over the **existing** `PostRestore` vsock frame, extended with an
+  optional `#[serde(default)] grant_envelope: Option<VerbGrantEnvelope>` (no
+  schema-version bump — consistent with the repo's no-ceremony rule and
+  `PostRestore`'s existing `serde(default)` fields). The guest re-pins via a new
+  `re_pin_verb_grant(envelope)` in the `PostRestore` handler.
+
+This also closes the pre-existing "forked children run class-gate-only"
+follow-up (`restrict_agent_verbs: false` at the fork sites): forked children of a
+sealed image now carry a valid grant matching their own admitted plan.
+
+### 4. The future attestation seam
+
+`grant_key_source` is the forward hook. When measured boot / a vTPM lands (an
+explicit ADR-002 scope expansion, out of scope here), sealed images bake
+`grant_key_source: "attested"`, and the guest requires the grant's verifying key
+to match an attested launch measurement rather than trusting the cmdline
+`pubkey_hex`. No wire/protocol churn is needed to reach that state — only the
+policy value and the guest's key-source branch. This ADR deliberately leaves the
+`Attested` arm defined-but-unimplemented (the guest treats an unexpected
+`Attested` policy as fail-closed, never as a silent downgrade).
+
+## Consequences
+
+**Positive**
+- A grant-delivering launch enforces the grant end-to-end: a launch that mints a
+  grant asserts `mvm.require_grant=1`, so a bug/corruption that drops or mangles
+  the delivered grant fails closed rather than silently downgrading to
+  class-gate-only. (The *policy* is dm-verity-measured; the enforcement *trigger*
+  is the launch token — see Rollout / Stage A for why.)
+- Enforcement holds across all restore flavors; the "forked children run
+  class-gate-only" gap is closed with a correct per-child grant.
+- The honest limitation is documented in one place, and the future
+  attestation upgrade has a defined, churn-free seam (`grant_key_source`).
+
+**Negative / accepted**
+- No real key separation is added (and, per the ceiling analysis, none is
+  achievable in scope). This ADR does **not** move the verb-grant story onto the
+  numbered claim ledger.
+- New surface: one optional `PostRestore` field, a guest re-pin path, and
+  mint-at-fork. All reuse existing frames/mechanisms.
+- Under Stage A, a grant-delivering launch that asserts `mvm.require_grant=1` but
+  then cannot pin a valid grant fails closed — the intended catch, but it raises
+  the bar on the correctness of the launch paths that deliver grants. The
+  launcher-gated design (Option A) bounds this to exactly the mvmctl paths that
+  emit the token; mvmd and other direct-launch paths never assert it, so they are
+  never fail-closed.
+
+**Neutral**
+- Dev / OCI images are unaffected (policy file absent ⇒ permissive default),
+  consistent with the item-2 change that already mints the default grant only
+  for sealed images (PR #1437).
+
+## Alternatives considered
+
+- **Bake the host-signer pubkey into the verity rootfs.** Infeasible: verity is
+  build-time-generic; the per-host key does not exist at build time; no
+  per-launch re-seal.
+- **Per-launch full-rootfs re-seal** (recompute the roothash with the key baked
+  in). Real "measured key," but heavyweight (per-launch verity over the whole
+  rootfs) and of ~nil marginal value in the trusted-host model (the host controls
+  key, roothash, and cmdline alike). Rejected.
+- **Move the key onto the `mvm-config` drive.** The config drive is unmeasured;
+  this is the same launcher-controlled channel as the cmdline. Security theater.
+  Rejected.
+- **Pull hardware attestation into scope.** The only construction that yields
+  real key separation, but a deliberate ADR-002 scope expansion beyond this
+  work; recorded as the future seam instead.
+- **Stage A as a baked `require_grant: true` flip** (the original Rollout plan).
+  Superseded before implementation: mvmd boots sealed images through a direct
+  Firecracker path that delivers no grant, so a baked flip would brick every
+  mvmd instance. Replaced by the launcher-gated `mvm.require_grant=1` token
+  (Option A, see Rollout / Stage A), which enforces only where a grant was
+  delivered and leaves mvmd untouched with no mvmd-side change.
+
+## Out of scope
+
+- A malicious host (ADR-002).
+- Hardware-backed key attestation / measured boot (ADR-002) — the future seam,
+  not built here.
+- Promotion of the verb-grant story to the ADR-002 numbered claim ledger.
+
+
+## Consolidated from ADR-109 — Attested launch anchor for real verb-grant key separation
+
+- Status: Proposed (scope-expansion proposal — needs maintainer decision + an ADR-002 threat-model update before any implementation)
+- Date: 2026-07-05
+- Owner: MVM Project
+- Related: ADR-108 (verb-grant measured trust policy — the honest ceiling this proposes to lift + the `grant_key_source: Attested` seam), ADR-002 (microVM security posture — currently lists hardware-backed key attestation / TPM / SEV out of scope for v1), ADR-041 (signed audited execution plans — claim 8), ADR-001 (Firecracker-only execution)
+- Tracks: #1458
+
+## Context
+
+ADR-108 established, and this ADR does not re-litigate, that **real cryptographic
+key separation for the verb grant is not achievable within ADR-002's current
+scope**. The delivered mechanism is honest *trusted-channel provisioning*: the
+guest verifies the grant against a key the trusted launcher provides, over a
+channel the launcher controls. Every in-scope anchor (kernel cmdline, config
+drive, even the dm-verity roothash) is launcher-provisioned, and the per-host
+runtime host-signer key cannot be baked into a build-time-generic verity image.
+The verb-grant story therefore deliberately stays **off** the numbered claim
+ledger.
+
+ADR-108 left a churn-free forward hook: `VerbTrustPolicy.grant_key_source` has an
+`Attested` arm (defined, treated fail-closed, unimplemented), and `trust_decision`
+already routes it. This ADR asks the real question that hook defers: **what would
+it take to give the guest an anchor for the grant's verifying key that the
+launcher — or a malicious host — cannot forge**, so the verb-grant story could
+be promoted to a numbered claim?
+
+## The requirement
+
+Real key separation needs a trust root the guest can verify that is **independent
+of the entity that provisions the grant**. In the trusted-host model that entity
+is the host; against a *malicious* host it is still the host. So the requirement
+splits by adversary:
+
+- **Against a trusted-but-buggy launch path** (defense-in-depth, in-scope today):
+  an anchor computed by something other than the launch code — e.g. a
+  measurement device — so a launch bug that mis-provisions the grant is caught.
+- **Against a malicious host** (currently out of scope): an anchor rooted in
+  **hardware the host cannot impersonate** — i.e. a CPU that signs an attestation
+  over the launch measurement with a key the host does not hold.
+
+Only the second yields *real* key separation. The first is a strictly weaker
+"measured, but still host-rooted" improvement.
+
+## The hard constraint: the workload VMM has no attestation surface
+
+**Firecracker — the workload VMM on Linux (ADR-001) — is deliberately minimal:
+no vTPM device, no measured-boot/PCR surface, no attestation report.** So the
+classic "guest reads a TPM quote" pattern is unavailable on the primary
+workload backend. Any attestation story therefore also implies a **VMM change**,
+not just a guest/host protocol addition. This is the crux that makes attestation
+a multi-quarter initiative rather than an incremental follow-up.
+
+## Options considered
+
+1. **Host-emulated vTPM under a vTPM-capable VMM** (QEMU / Cloud Hypervisor +
+   `swtpm`). The guest measures its boot into PCRs and the vTPM signs a quote.
+   *But* the vTPM is emulated by the (trusted) host process, and its
+   attestation key is host-held — so a **malicious host can forge the quote**.
+   Gives a *standard attestation shape* and independence from a *buggy launcher*
+   (the measurement is computed by the vTPM, not the launch code), but **not**
+   real separation against a malicious host. Requires abandoning/augmenting
+   Firecracker for workloads. Medium-heavy; modest security gain over ADR-108's
+   launcher-gated enforcement.
+
+2. **Confidential computing — SEV-SNP / TDX** (hardware memory encryption +
+   remote attestation). The **CPU**, not the host, signs an attestation report
+   over the launch measurement with a vendor-rooted key the host does not hold.
+   This is the **only option that achieves real key separation against a
+   malicious host** — the guest (or a relying party) verifies the report against
+   the CPU vendor's root, binds the grant's verifying key to the attested
+   measurement, and flips `grant_key_source: attested`. Requires: SEV-SNP/TDX
+   hardware, a CC-capable VMM (QEMU / Cloud Hypervisor — **not** Firecracker), an
+   attestation-verification service, and a threat-model change (a malicious host
+   moves partly in-scope). Heaviest; the genuine answer.
+
+3. **Per-install build-time anchor** (non-hardware, partial). At `mvmctl init`
+   provision a per-install trust anchor and bake its public half into images
+   built for that install; sign grants under a key certified by it. Independent
+   of the *per-launch* code path, so it catches a buggy launcher, but the anchor
+   is still host-generated and host-held — **no** defense against a malicious
+   host, and it complicates the image-build determinism invariant. Marginal.
+
+4. **Do nothing more; keep trusted-channel provisioning.** ADR-108's
+   launcher-gated enforcement (Stage A) already gives defense-in-depth against a
+   buggy launcher without any of the above cost. Against a malicious host,
+   nothing short of option 2 helps, and a malicious host is out of scope. This is
+   the honest status quo.
+
+## Recommendation
+
+**Do not pursue attestation as a near-term follow-up.** The only option that
+delivers what #1458 asks for (real key separation) is **option 2 (confidential
+computing)**, and it is gated on decisions far larger than the verb grant: a
+confidential-computing workload backend, SEV-SNP/TDX hardware, an
+attestation-verification service, and an ADR-002 threat-model expansion that
+brings a malicious host partly in-scope. Options 1 and 3 add real cost for a gain
+that does not exceed ADR-108's already-shipped launcher-gated enforcement in the
+trusted-host model.
+
+Concretely:
+
+1. **Keep the `grant_key_source: Attested` seam as-is** (defined, fail-closed,
+   unimplemented). No code change now.
+2. **Gate any attestation work on a prior, standalone decision to adopt a
+   confidential-computing workload backend.** That decision — not the verb grant
+   — is the real fork; the verb-grant binding is a small consumer of it.
+3. **Do not promote the verb-grant story to a numbered claim** until an anchor
+   with genuine host-independence exists (option 2). Trusted-channel provisioning
+   must not be described as key separation in the claim ledger.
+4. If a CC backend is later adopted, a *follow-on* ADR designs the concrete
+   binding: attestation-report verification, measurement→`pubkey` binding, the
+   guest/relying-party verification point, and the `attested` policy semantics.
+
+## Promotion criteria (what a numbered claim would require)
+
+A future "verb grant is bound to an attested launch measurement" claim is
+justifiable only when **all** hold, each with a machine-checked witness:
+
+- The grant's verifying key is bound to a launch measurement attested by a root
+  the host cannot forge (CPU vendor root, not a host-held key).
+- The guest (or a relying party) rejects a grant whose key does not match the
+  attested measurement — negative-path tested (forged report, wrong measurement,
+  replay).
+- The attestation-verification path is fuzzed / adversarially tested, consistent
+  with the existing claim-catalog discipline (`specs/claims/catalog.md`).
+
+Until then this stays a `Preview`-style note at most, never a numbered claim.
+
+## Consequences
+
+- **Positive:** the "future attestation" hand-wave becomes a concrete,
+  honestly-scoped roadmap with the hard constraints named (Firecracker has no
+  attestation surface; real independence needs confidential computing). Prevents
+  building options 1/3 as security theater.
+- **Negative / accepted:** no key separation is delivered now. #1458 is
+  effectively answered "yes, but only via confidential computing, which is a
+  separate large initiative" — this ADR records that answer rather than shipping
+  a partial mechanism.
+- **Neutral:** ADR-108's launcher-gated enforcement remains the current best
+  in-scope posture and is unaffected.
+
+## Out of scope (for this ADR)
+
+- Selecting or building a confidential-computing workload backend (its own ADR).
+- Any code change — this ADR is a direction/decision record, not an
+  implementation plan.
+- The malicious-host threat model itself, which ADR-002 would need to revise
+  before option 2 could be claimed.
+
+
+## Consolidated from ADR-111 — Runtime-owned reversible replacement on owned cleartext paths
+
+**Status:** Proposed — 2026-07-13
+
+## Summary
+
+Land the first runtime-owned detect -> replace -> reinject slice for sensitive
+values on owned cleartext request/response paths. The promise is narrow:
+request-scoped opaque token replacement on outbound traffic plus exact-token
+restore on the owned response path. No semantic recovery, no third-party async
+callbacks, and no guest-visible plaintext persistence.
+
+## Context
+
+The existing substitution/redaction stack in `mvm` already has two useful
+security properties:
+
+1. declared secrets can stay off the guest entirely through host-side
+   substitution
+2. undeclared secret-shaped or PII-shaped content can be redacted before egress
+
+That was still missing one product-critical capability: when the runtime owns
+both sides of a cleartext request/response flow, it had no way to replace
+sensitive spans on the outbound leg and restore them exactly on the inbound
+leg. Without that, policy could safely scrub prompts or payloads before an
+external AI/tool call, but any authorized caller-visible response still had to
+choose between one-way redaction and raw passthrough.
+
+The requirement for v1 is intentionally limited:
+
+- runtime-owned paths only
+- exact opaque-token restore only
+- request-scoped correlation only
+- no plaintext in proofs or ordinary audit/log views
+
+## Decision
+
+`mvm` adds a runtime-owned reversible replacement slice at the host
+substitution proxy boundary.
+
+### 1. Shared policy + proof types live in `mvm-core`
+
+`ExecutionPlan` now carries a `ReversibleReplacementPolicy` that is signed,
+admitted, and handed to `mvm-hostd` like the other policy-bearing plan fields.
+The shared contract includes:
+
+- sensitive classes: `secret`, `pii`
+- replace / reinject surfaces
+- fail-closed fallback mode
+- request-scoped flow ids
+- opaque rewrite tokens
+- plaintext-free proof records carrying keyed digests and byte spans only
+
+This keeps the policy part of the signed plan boundary rather than making it an
+ephemeral host-local toggle.
+
+### 2. Replacement happens before one-way redaction
+
+On the outbound host-owned request path:
+
+- the claim-10 destination gate still runs first
+- reversible replacement runs before one-way redaction and before host-side
+  declared-secret substitution
+- the replacement engine detects secret-shaped and structured-PII spans
+- matched values become request-scoped opaque tokens
+- identical values within one flow reuse the same token
+
+That ordering preserves the host-only placeholder model for declared secrets
+while still allowing undeclared secret/PII content to be tokenized for exact
+restore instead of only masked away.
+
+### 3. Reinjection is exact-token-only on the owned response path
+
+On the inbound response path, the runtime restores only exact token echoes from
+the same flow state. If the external service paraphrases, transforms, splits,
+or drops the token, nothing is restored. This is a deliberate contract, not a
+best-effort heuristic.
+
+### 4. Proofs and audit stay plaintext-free
+
+Each replace/reinject event records:
+
+- flow id
+- event index
+- sensitive class
+- surface
+- optional field name
+- offset and lengths
+- token id
+- keyed HMAC digest of original bytes
+- keyed HMAC digest of rewritten bytes
+- policy / authorization decision labels
+
+The audit chain carries those proof metadata records, not the plaintext value.
+
+## Consequences
+
+### Positive
+
+- `mvm` now has a concrete v1 implementation of “tokenize outbound, exact-token
+  restore inbound” for owned cleartext paths.
+- The policy is part of the signed execution plan and therefore travels through
+  the same admission / provenance path as the rest of the runtime controls.
+- The implementation composes with the existing substitution and redaction
+  layers instead of replacing them.
+
+### Negative
+
+- This is not a general semantic restoration mechanism. Model-transformed output
+  will not restore.
+- The v1 authority labels are local runtime labels such as `runtime_owned`; the
+  cloud-side permission authority lives in sibling `mvmd`.
+- The current proof substrate is an audit/proof metadata trail, not a full
+  durable proof-access service.
+
+## Non-goals
+
+- paraphrase-aware recovery
+- async callback or webhook reinjection
+- cross-flow or cross-tenant token reuse
+- guest-side plaintext reinjection defaults
+- claiming macOS parity beyond the currently owned substitution-proxy path
+
+## Follow-on work
+
+1. Bind the runtime-owned authorization label to the sibling `mvmd`
+   tenant/permission authority on cloud-managed paths.
+2. Extend the proof model to a dedicated retrieval surface where that is needed.
+3. Decide whether additional structured PII classes should become enabled by
+   default beyond the current detector set.

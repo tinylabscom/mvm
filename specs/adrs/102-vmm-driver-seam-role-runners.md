@@ -5,7 +5,7 @@
 guest↔world channel — this ADR makes its "single host gateway" the only egress
 mechanism for *every* backend), [ADR-101](101-hvf-vmm-unified-egress-substitution-gateway.md)
 (the hvf VMM's unified vsock gateway — the reference shape this ADR generalizes
-outward), [ADR-083](083-workload-backend-type-bar.md) (`WorkloadBackend` permission —
+outward), [ADR-002](002-microvm-security-posture.md) (`WorkloadBackend` permission, consolidated from ADR-083 —
 preserved unchanged), [ADR-093](093-linux-builder-libkrun-fallback.md) (builder auto-fallback —
 preserved), [ADR-002](002-microvm-security-posture.md) (claims 10/12/13 + per-backend
 tier matrix), [ADR-055](055-passt-virtio-net.md) (the gvproxy/passt gateway this
@@ -106,7 +106,7 @@ tree, one egress chokepoint.
 ## Consequences
 
 **Security posture — preserved by construction, with one hardening.** The admitted-
-launch funnel (claim 8) and the `WorkloadBackend` permission (ADR-083) are unchanged
+launch funnel (claim 8) and the `WorkloadBackend` permission (ADR-002, consolidated from ADR-083) are unchanged
 and implemented by the workload role type only; neither the driver nor the builder
 role can reach the funnel. The tier matrix gets *crisper*: "qemu is Tier-2, never a
 workload" becomes "there is a `QemuDriver` but no `QemuBackend: WorkloadBackend`" —

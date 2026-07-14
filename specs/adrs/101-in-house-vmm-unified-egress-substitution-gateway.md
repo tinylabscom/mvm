@@ -5,7 +5,7 @@
 guest↔world channel — this ADR is the concrete hvf realization of its "single
 host gateway"), [ADR-049](049-vsock-substitution-service.md) (vsock substitution),
 [ADR-059](059-host-services-broker.md) (claims 12/13), [ADR-082](082-rust-native-egress-gateway.md)
-(the gateway seam), [ADR-083](083-workload-backend-type-bar.md) (`WorkloadBackend`),
+(the gateway seam), [ADR-002](002-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
 [ADR-002](002-microvm-security-posture.md) (claim 10), [Plan 214](../plans/214-clean-replacement-architecture.md).
 
 ## Context

@@ -9,7 +9,7 @@ tier feeds). **Cross-refs:** ADR-002 (security posture — the claims the ship
 side must keep), ADR-041 (signed/audited execution plans — the admission path
 every promotion lands on), ADR-047 (app-deps audit — what re-validation means),
 ADR-049/ADR-067 (secret substitution — why Tier 0 never holds a raw secret),
-ADR-070 (mvm-primitive ↔ mvmd-product boundary), Plan 129 (secrets), Plan 169
+ADR-002 (mvm-primitive ↔ mvmd-product boundary, consolidated from ADR-070), Plan 129 (secrets), Plan 169
 (agent-RPC transport, the vsock leg of the relay).
 
 ## Context
@@ -92,7 +92,7 @@ optimization. mvm ships only a *single-session* relay primitive (one
 wasmtime, one client, one policy); the second-client-refusal witness above is
 also what keeps this premise from silently dissolving in a later PR. The
 multi-tenant streaming service that composes wasmtime-in-microVM sessions is
-mvmd's, per the ADR-070 split.
+mvmd's, per the ADR-002 split (consolidated from ADR-070).
 
 ### 2. Promotion is a trace, never a snapshot
 
