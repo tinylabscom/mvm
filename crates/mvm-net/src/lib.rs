@@ -24,6 +24,12 @@ pub mod guest_linux;
 #[cfg(feature = "host")]
 pub mod host;
 
+#[cfg(feature = "host")]
+pub mod stream_transform;
+
+#[cfg(feature = "host-tls")]
+pub mod host_tls;
+
 #[cfg(feature = "host-netd")]
 pub mod host_netd;
 

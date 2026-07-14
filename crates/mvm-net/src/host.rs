@@ -6,17 +6,17 @@
 //! listeners, host sockets, async runtimes, TLS transforms, and plugin runners
 //! plug into these traits from opt-in layers.
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr};
-use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 #[cfg(feature = "host-std")]
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     io::{self, Read, Write},
     net::{Ipv6Addr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs, UdpSocket},
+    ops::ControlFlow,
     path::Path,
     process::Command,
 };
@@ -2871,6 +2871,7 @@ fn closed_tcp_message(flow_id: FlowId, reason: CloseReason) -> NetMessage {
     NetMessage::CloseFlow(CloseFlow { flow_id, reason })
 }
 
+#[cfg(feature = "host-std")]
 fn host_closed_tcp_event(flow_id: FlowId) -> HostTcpEvent {
     HostTcpEvent::Close(CloseFlow {
         flow_id,
@@ -2878,6 +2879,7 @@ fn host_closed_tcp_event(flow_id: FlowId) -> HostTcpEvent {
     })
 }
 
+#[cfg(feature = "host-std")]
 fn host_guest_ack_event(flow_id: FlowId, sequence: u64) -> HostTcpEvent {
     HostTcpEvent::Data(StreamChunk::new(
         flow_id,

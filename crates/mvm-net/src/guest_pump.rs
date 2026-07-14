@@ -8,27 +8,36 @@
 use std::fmt;
 
 use crate::guest_packet::{GuestPacketError, GuestPacketTranslator};
-use crate::proto::NetMessage;
+use crate::proto::{NetMessage, ProtocolError};
 
 pub const DEFAULT_MAX_TUN_PACKET_BYTES: usize = 65_535;
 pub const DEFAULT_MAX_AUTHORITY_MESSAGES_PER_TICK: usize = 64;
+pub const MAX_AUTHORITY_MESSAGES_PER_TICK: usize = DEFAULT_MAX_AUTHORITY_MESSAGES_PER_TICK;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GuestPumpError {
-    Packet(GuestPacketError),
+    Packet {
+        context: GuestPacketContext,
+        error: GuestPacketError,
+    },
+    Protocol(ProtocolError),
     PacketSource(String),
     Authority(String),
     PacketSink(String),
     Wait(String),
     InvalidLoopConfig(&'static str),
-    InvalidPacketRead { bytes: usize, capacity: usize },
+    InvalidPacketRead {
+        bytes: usize,
+        capacity: usize,
+    },
     UnsupportedAuthorityMessage(&'static str),
 }
 
 impl fmt::Display for GuestPumpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Packet(err) => write!(f, "{err}"),
+            Self::Packet { context, error } => write!(f, "{context} failed: {error}"),
+            Self::Protocol(err) => write!(f, "{err}"),
             Self::PacketSource(err) => write!(f, "guest packet source failed: {err}"),
             Self::Authority(err) => write!(f, "authority transport failed: {err}"),
             Self::PacketSink(err) => write!(f, "guest packet sink failed: {err}"),
@@ -52,9 +61,42 @@ impl fmt::Display for GuestPumpError {
 
 impl std::error::Error for GuestPumpError {}
 
-impl From<GuestPacketError> for GuestPumpError {
-    fn from(value: GuestPacketError) -> Self {
-        Self::Packet(value)
+impl From<ProtocolError> for GuestPumpError {
+    fn from(value: ProtocolError) -> Self {
+        Self::Protocol(value)
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum GuestPacketContext {
+    OutboundGuestPacket,
+    AuthorityDnsResponse,
+    AuthorityIcmpEchoResponse,
+    AuthorityUdpDatagram,
+    AuthorityTcpOpenResult,
+    AuthorityTcpData,
+    AuthorityCloseFlow,
+}
+
+impl fmt::Display for GuestPacketContext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutboundGuestPacket => write!(f, "outbound guest packet translation"),
+            Self::AuthorityDnsResponse => write!(f, "authority DNS response handling"),
+            Self::AuthorityIcmpEchoResponse => {
+                write!(f, "authority ICMP echo response handling")
+            }
+            Self::AuthorityUdpDatagram => write!(f, "authority UDP datagram handling"),
+            Self::AuthorityTcpOpenResult => write!(f, "authority TCP open result handling"),
+            Self::AuthorityTcpData => write!(f, "authority TCP data handling"),
+            Self::AuthorityCloseFlow => write!(f, "authority close-flow handling"),
+        }
+    }
+}
+
+impl GuestPumpError {
+    fn packet(context: GuestPacketContext, error: GuestPacketError) -> Self {
+        Self::Packet { context, error }
     }
 }
 
@@ -178,6 +220,11 @@ impl GuestPumpLoopConfigBuilder {
         if self.max_authority_messages_per_tick == 0 {
             return Err(GuestPumpError::InvalidLoopConfig(
                 "max_authority_messages_per_tick must be non-zero",
+            ));
+        }
+        if self.max_authority_messages_per_tick > MAX_AUTHORITY_MESSAGES_PER_TICK {
+            return Err(GuestPumpError::InvalidLoopConfig(
+                "max_authority_messages_per_tick exceeds the hard maximum",
             ));
         }
         Ok(GuestPumpLoopConfig {
@@ -388,7 +435,12 @@ where
     A: GuestAuthority,
 {
     pub fn send_outbound_packet(&mut self, packet: &[u8]) -> Result<usize, GuestPumpError> {
-        let events = self.translator.translate_outbound_ipv4(packet)?;
+        let events = self
+            .translator
+            .translate_outbound_ipv4(packet)
+            .map_err(|error| {
+                GuestPumpError::packet(GuestPacketContext::OutboundGuestPacket, error)
+            })?;
         let mut sent = 0usize;
         for event in events {
             self.authority
@@ -407,16 +459,28 @@ where
     where
         S: GuestPacketSink,
     {
+        message.validate()?;
         match message {
             NetMessage::DnsResponse(response) => {
-                let packet = self.translator.synthesize_dns_response(&response)?;
+                let packet =
+                    self.translator
+                        .synthesize_dns_response(&response)
+                        .map_err(|error| {
+                            GuestPumpError::packet(GuestPacketContext::AuthorityDnsResponse, error)
+                        })?;
                 let bytes = packet.len();
                 sink.write_packet(&packet)
                     .map_err(|err| GuestPumpError::PacketSink(err.to_string()))?;
                 Ok(AuthorityMessageOutcome::WrotePacket { bytes })
             }
             NetMessage::IcmpEchoResponse(response) => {
-                if let Some(packet) = self.translator.synthesize_icmp_echo_response(&response)? {
+                if let Some(packet) = self
+                    .translator
+                    .synthesize_icmp_echo_response(&response)
+                    .map_err(|error| {
+                        GuestPumpError::packet(GuestPacketContext::AuthorityIcmpEchoResponse, error)
+                    })?
+                {
                     let bytes = packet.len();
                     sink.write_packet(&packet)
                         .map_err(|err| GuestPumpError::PacketSink(err.to_string()))?;
@@ -428,14 +492,25 @@ where
                 Ok(AuthorityMessageOutcome::IgnoredControl)
             }
             NetMessage::TcpOpenResult(result) => {
-                let packet = self.translator.synthesize_tcp_open_result(&result)?;
+                let packet = self
+                    .translator
+                    .synthesize_tcp_open_result(&result)
+                    .map_err(|error| {
+                        GuestPumpError::packet(GuestPacketContext::AuthorityTcpOpenResult, error)
+                    })?;
                 let bytes = packet.len();
                 sink.write_packet(&packet)
                     .map_err(|err| GuestPumpError::PacketSink(err.to_string()))?;
                 Ok(AuthorityMessageOutcome::WrotePacket { bytes })
             }
             NetMessage::TcpData(chunk) => {
-                if let Some(packet) = self.translator.synthesize_tcp_data(&chunk)? {
+                if let Some(packet) =
+                    self.translator
+                        .synthesize_tcp_data(&chunk)
+                        .map_err(|error| {
+                            GuestPumpError::packet(GuestPacketContext::AuthorityTcpData, error)
+                        })?
+                {
                     let bytes = packet.len();
                     sink.write_packet(&packet)
                         .map_err(|err| GuestPumpError::PacketSink(err.to_string()))?;
@@ -444,21 +519,41 @@ where
                 Ok(AuthorityMessageOutcome::DroppedWithoutPacket)
             }
             NetMessage::CloseFlow(close) => {
-                let packet = self.translator.synthesize_tcp_close(&close)?;
+                let packet = self
+                    .translator
+                    .synthesize_tcp_close(&close)
+                    .map_err(|error| {
+                        GuestPumpError::packet(GuestPacketContext::AuthorityCloseFlow, error)
+                    })?;
                 let bytes = packet.len();
                 sink.write_packet(&packet)
                     .map_err(|err| GuestPumpError::PacketSink(err.to_string()))?;
                 Ok(AuthorityMessageOutcome::WrotePacket { bytes })
             }
-            NetMessage::UdpDelivery(_) => {
-                Err(GuestPumpError::UnsupportedAuthorityMessage("UdpDelivery"))
+            NetMessage::UdpDatagram(datagram) => {
+                if let Some(packet) =
+                    self.translator
+                        .synthesize_udp_datagram(&datagram)
+                        .map_err(|error| {
+                            GuestPumpError::packet(GuestPacketContext::AuthorityUdpDatagram, error)
+                        })?
+                {
+                    let bytes = packet.len();
+                    sink.write_packet(&packet)
+                        .map_err(|err| GuestPumpError::PacketSink(err.to_string()))?;
+                    return Ok(AuthorityMessageOutcome::WrotePacket { bytes });
+                }
+                Ok(AuthorityMessageOutcome::DroppedWithoutPacket)
             }
-            NetMessage::OpenTcp(_)
-            | NetMessage::DnsQuery(_)
-            | NetMessage::UdpDatagram(_)
-            | NetMessage::IcmpEchoRequest(_) => Err(GuestPumpError::UnsupportedAuthorityMessage(
-                "guest-to-host message received from authority",
-            )),
+            NetMessage::UdpDelivery(delivery) => {
+                self.translator.apply_udp_delivery(&delivery);
+                Ok(AuthorityMessageOutcome::DroppedWithoutPacket)
+            }
+            NetMessage::OpenTcp(_) | NetMessage::DnsQuery(_) | NetMessage::IcmpEchoRequest(_) => {
+                Err(GuestPumpError::UnsupportedAuthorityMessage(
+                    "guest-to-host message received from authority",
+                ))
+            }
         }
     }
 }
@@ -474,12 +569,16 @@ mod tests {
     #[cfg(feature = "host")]
     use crate::host::{
         AllowAllHostPolicy, DenyAllHostPolicy, HostAuthority, HostRoute, HostTcpConnector,
-        NoopHostAuditSink,
+        NoopHostAuditSink, TcpConnectSpec,
     };
+    #[cfg(feature = "host-std")]
+    use crate::host::{HostAdmission, HostNetworkPolicy};
+    #[cfg(feature = "host")]
+    use crate::proto::{CloseReason, TransportError};
     use crate::proto::{
-        CloseReason, DnsAnswer, DnsName, DnsRecordData, DnsRecordType, DnsResponse,
-        DnsResponseCode, EndpointRole, FlowDirection, FlowId, Hello, IcmpEchoResponse,
-        IcmpEchoStatus, StreamChunk, Target, TcpOpenResult, TransportError,
+        DnsAnswer, DnsName, DnsRecordData, DnsRecordType, DnsResponse, DnsResponseCode,
+        EndpointRole, FlowDirection, FlowId, Hello, IcmpEchoResponse, IcmpEchoStatus,
+        MAX_DNS_TTL_SECONDS, StreamChunk, TcpOpenResult,
     };
 
     const DNS_PORT: u16 = 53;
@@ -489,7 +588,35 @@ mod tests {
     const IPPROTO_TCP: u8 = 6;
     const IPPROTO_UDP: u8 = 17;
     const IPV4_TTL: u8 = 64;
+    #[cfg(feature = "host")]
     const TCP_RST_ACK: u8 = 0x14;
+    const TCP_SYN_ACK: u8 = 0x12;
+    const TCP_PSH_ACK: u8 = 0x18;
+
+    #[cfg(feature = "host-std")]
+    #[derive(Debug, Clone, Copy)]
+    struct LoopbackTcpPolicy;
+
+    #[cfg(feature = "host-std")]
+    impl HostNetworkPolicy for LoopbackTcpPolicy {
+        fn decide_dns(&mut self, _query: &crate::proto::DnsQuery) -> HostAdmission {
+            HostAdmission::allowed()
+        }
+
+        fn decide_tcp_open(&mut self, _open: &crate::proto::OpenTcp) -> HostAdmission {
+            HostAdmission::allowed_with_route(HostRoute::resolved_ip(IpAddr::V4(
+                Ipv4Addr::LOCALHOST,
+            )))
+        }
+
+        fn decide_udp_datagram(&mut self, _datagram: &crate::proto::UdpDatagram) -> HostAdmission {
+            HostAdmission::allowed()
+        }
+
+        fn decide_icmp_echo(&mut self, _request: &crate::proto::IcmpEchoRequest) -> HostAdmission {
+            HostAdmission::allowed()
+        }
+    }
 
     #[derive(Debug, Default)]
     struct MockAuthority {
@@ -544,21 +671,15 @@ mod tests {
     #[cfg(feature = "host")]
     #[derive(Debug, Default)]
     struct RecordingConnector {
-        opens: Vec<(FlowId, String, u16, HostRoute)>,
+        opens: Vec<TcpConnectSpec>,
         sends: Vec<(FlowId, Vec<u8>, bool)>,
         closes: Vec<(FlowId, CloseReason)>,
     }
 
     #[cfg(feature = "host")]
     impl HostTcpConnector for RecordingConnector {
-        fn open(
-            &mut self,
-            flow_id: FlowId,
-            target: &Target,
-            route: &HostRoute,
-        ) -> Result<(), TransportError> {
-            self.opens
-                .push((flow_id, target.host().to_string(), target.port(), *route));
+        fn open(&mut self, spec: &TcpConnectSpec) -> Result<(), TransportError> {
+            self.opens.push(spec.clone());
             Ok(())
         }
 
@@ -571,6 +692,13 @@ mod tests {
         fn close(&mut self, flow_id: FlowId, reason: CloseReason) -> Result<(), TransportError> {
             self.closes.push((flow_id, reason));
             Ok(())
+        }
+
+        fn drain_events(
+            &mut self,
+            _max_events: usize,
+        ) -> Result<Vec<crate::host::HostTcpEvent>, TransportError> {
+            Ok(Vec::new())
         }
     }
 
@@ -745,11 +873,13 @@ mod tests {
         !(sum as u16)
     }
 
+    #[cfg(feature = "host")]
     fn dns_response_rcode(packet: &[u8]) -> u8 {
         let dns = IPV4_MIN_HEADER_LEN + UDP_HEADER_LEN;
         packet[dns + 3] & 0x0f
     }
 
+    #[cfg(feature = "host")]
     fn dns_answer_count(packet: &[u8]) -> u16 {
         let dns = IPV4_MIN_HEADER_LEN + UDP_HEADER_LEN;
         u16::from_be_bytes([packet[dns + 6], packet[dns + 7]])
@@ -757,6 +887,11 @@ mod tests {
 
     fn tcp_response_flags(packet: &[u8]) -> u8 {
         packet[IPV4_MIN_HEADER_LEN + 13]
+    }
+
+    fn tcp_payload_len(packet: &[u8]) -> usize {
+        let tcp_header_len = usize::from(packet[IPV4_MIN_HEADER_LEN + 12] >> 4) * 4;
+        packet.len() - IPV4_MIN_HEADER_LEN - tcp_header_len
     }
 
     fn query_id_from_last_dns(pump: &GuestBridgePump<MockAuthority>) -> crate::proto::QueryId {
@@ -780,7 +915,6 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "host")]
     fn pop_sent_message(pump: &mut GuestBridgePump<MockAuthority>) -> NetMessage {
         assert_eq!(
             pump.authority().sent.len(),
@@ -910,7 +1044,7 @@ mod tests {
                         name: DnsName::new("example.com").unwrap(),
                         record_type: DnsRecordType::A,
                         data: DnsRecordData::Ip(IpAddr::V4(Ipv4Addr::new(198, 19, 0, 2))),
-                        ttl_seconds: 60,
+                        ttl_seconds: MAX_DNS_TTL_SECONDS,
                     }],
                     denial: None,
                 },
@@ -924,6 +1058,47 @@ mod tests {
         assert_eq!(tick.authority_messages_read, 1);
         assert_eq!(tick.guest_packets_written, 1);
         assert_eq!(sink.packets.len(), 1);
+    }
+
+    #[test]
+    fn loop_tick_applies_ordered_tcp_data_chunks_after_open_result() {
+        let target_ip = Ipv4Addr::new(198, 19, 0, 44);
+        let mut pump = pump();
+        let syn = tcp_ipv4_packet(target_ip, 443, 0x02, &[]);
+        pump.send_outbound_packet(&syn).unwrap();
+        let flow_id = flow_id_from_last_tcp_open(&pump);
+
+        pump.authority_mut()
+            .incoming
+            .push_back(AuthorityRead::Message(NetMessage::TcpOpenResult(
+                TcpOpenResult::opened(flow_id),
+            )));
+        pump.authority_mut()
+            .incoming
+            .push_back(AuthorityRead::Message(NetMessage::TcpData(
+                StreamChunk::new(flow_id, FlowDirection::HostToGuest, 0, vec![0x16; 1271]),
+            )));
+        pump.authority_mut()
+            .incoming
+            .push_back(AuthorityRead::Message(NetMessage::TcpData(
+                StreamChunk::new(flow_id, FlowDirection::HostToGuest, 1271, vec![0x15; 7]),
+            )));
+
+        let mut source = MockSource::with_reads([MockSourceRead::WouldBlock]);
+        let mut sink = MockSink::default();
+        let mut pump_loop = GuestPumpLoop::default();
+
+        let tick = pump_loop.tick(&mut pump, &mut source, &mut sink).unwrap();
+
+        assert_eq!(tick.authority_messages_read, 3);
+        assert_eq!(tick.guest_packets_written, 3);
+        assert_eq!(sink.packets.len(), 3);
+
+        assert_eq!(tcp_response_flags(&sink.packets[0]), TCP_SYN_ACK);
+        assert_eq!(tcp_response_flags(&sink.packets[1]), TCP_PSH_ACK);
+        assert_eq!(tcp_payload_len(&sink.packets[1]), 1271);
+        assert_eq!(tcp_response_flags(&sink.packets[2]), TCP_PSH_ACK);
+        assert_eq!(tcp_payload_len(&sink.packets[2]), 7);
     }
 
     #[test]
@@ -1022,6 +1197,12 @@ mod tests {
                 .build(),
             Err(GuestPumpError::InvalidLoopConfig(_))
         ));
+        assert!(matches!(
+            GuestPumpLoopConfig::builder()
+                .max_authority_messages_per_tick(MAX_AUTHORITY_MESSAGES_PER_TICK + 1)
+                .build(),
+            Err(GuestPumpError::InvalidLoopConfig(_))
+        ));
     }
 
     #[test]
@@ -1047,7 +1228,7 @@ mod tests {
                         name: DnsName::new("example.com").unwrap(),
                         record_type: DnsRecordType::A,
                         data: DnsRecordData::Ip(IpAddr::V4(Ipv4Addr::new(198, 19, 0, 2))),
-                        ttl_seconds: 60,
+                        ttl_seconds: MAX_DNS_TTL_SECONDS,
                     }],
                     denial: None,
                 }),
@@ -1059,6 +1240,45 @@ mod tests {
             AuthorityMessageOutcome::WrotePacket { bytes } if bytes == sink.packets[0].len()
         ));
         assert_eq!(sink.packets.len(), 1);
+        assert_eq!(&sink.packets[0][16..20], &DEFAULT_GUEST_ADDRESS.octets());
+    }
+
+    #[test]
+    fn loopback_stub_dns_response_from_authority_writes_guest_packet() {
+        let mut pump = pump();
+        let packet = udp_ipv4_packet(
+            40000,
+            Ipv4Addr::new(127, 0, 0, 1),
+            DNS_PORT,
+            &dns_query_payload(0x2233, "example.com", 1),
+        );
+        pump.send_outbound_packet(&packet).unwrap();
+        let query_id = query_id_from_last_dns(&pump);
+        let mut sink = MockSink::default();
+
+        let outcome = pump
+            .apply_authority_message(
+                &mut sink,
+                NetMessage::DnsResponse(DnsResponse {
+                    query_id,
+                    code: DnsResponseCode::Ok,
+                    answers: vec![DnsAnswer {
+                        name: DnsName::new("example.com").unwrap(),
+                        record_type: DnsRecordType::A,
+                        data: DnsRecordData::Ip(IpAddr::V4(Ipv4Addr::new(198, 19, 0, 2))),
+                        ttl_seconds: MAX_DNS_TTL_SECONDS,
+                    }],
+                    denial: None,
+                }),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            AuthorityMessageOutcome::WrotePacket { bytes } if bytes == sink.packets[0].len()
+        ));
+        assert_eq!(sink.packets.len(), 1);
+        assert_eq!(&sink.packets[0][12..16], &[127, 0, 0, 1]);
         assert_eq!(&sink.packets[0][16..20], &DEFAULT_GUEST_ADDRESS.octets());
     }
 
@@ -1086,6 +1306,226 @@ mod tests {
             .unwrap();
 
         assert_eq!(outcome, AuthorityMessageOutcome::DroppedWithoutPacket);
+        assert!(sink.packets.is_empty());
+    }
+
+    #[test]
+    fn udp_delivery_status_drops_without_guest_packet() {
+        let mut pump = pump();
+        let mut sink = MockSink::default();
+        let outcome = pump
+            .apply_authority_message(
+                &mut sink,
+                NetMessage::UdpDelivery(crate::proto::UdpDelivery {
+                    flow_id: FlowId::new(9).unwrap(),
+                    status: crate::proto::DatagramStatus::Denied(crate::proto::Denial::new(
+                        crate::proto::DenialReason::NetworkDisabled,
+                    )),
+                }),
+            )
+            .unwrap();
+        assert_eq!(outcome, AuthorityMessageOutcome::DroppedWithoutPacket);
+        assert!(sink.packets.is_empty());
+    }
+
+    #[test]
+    fn terminal_udp_delivery_reclaims_guest_udp_flow_mapping() {
+        let mut pump = pump();
+        let dst_ip = Ipv4Addr::new(198, 19, 0, 56);
+        pump.send_outbound_packet(&udp_ipv4_packet(50000, dst_ip, 1234, b"ping"))
+            .unwrap();
+        let first_flow_id = match pop_sent_message(&mut pump) {
+            NetMessage::UdpDatagram(datagram) => datagram.flow_id,
+            other => panic!("unexpected outbound UDP message: {other:?}"),
+        };
+
+        let outcome = pump
+            .apply_authority_message(
+                &mut MockSink::default(),
+                NetMessage::UdpDelivery(crate::proto::UdpDelivery {
+                    flow_id: first_flow_id,
+                    status: crate::proto::DatagramStatus::Failed(
+                        crate::proto::TransportError::TimedOut,
+                    ),
+                }),
+            )
+            .unwrap();
+        assert_eq!(outcome, AuthorityMessageOutcome::DroppedWithoutPacket);
+
+        pump.send_outbound_packet(&udp_ipv4_packet(50000, dst_ip, 1234, b"ping"))
+            .unwrap();
+        let next_flow_id = match pop_sent_message(&mut pump) {
+            NetMessage::UdpDatagram(datagram) => datagram.flow_id,
+            other => panic!("unexpected outbound UDP message: {other:?}"),
+        };
+        assert_ne!(
+            first_flow_id, next_flow_id,
+            "terminal UDP delivery should free the guest tuple mapping"
+        );
+    }
+
+    #[test]
+    fn authority_udp_datagram_writes_guest_packet() {
+        let mut pump = pump();
+        let dst_ip = Ipv4Addr::new(198, 19, 0, 55);
+        pump.send_outbound_packet(&udp_ipv4_packet(50000, dst_ip, 1234, b"ping"))
+            .unwrap();
+        let flow_id = match pop_sent_message(&mut pump) {
+            NetMessage::UdpDatagram(datagram) => datagram.flow_id,
+            other => panic!("unexpected outbound UDP message: {other:?}"),
+        };
+        let mut sink = MockSink::default();
+
+        let outcome = pump
+            .apply_authority_message(
+                &mut sink,
+                NetMessage::UdpDatagram(crate::proto::UdpDatagram {
+                    flow_id,
+                    target: crate::proto::Target::new("ignored.example", 1234).unwrap(),
+                    direction: FlowDirection::HostToGuest,
+                    bytes: b"pong".to_vec(),
+                }),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            outcome,
+            AuthorityMessageOutcome::WrotePacket { bytes } if bytes == sink.packets[0].len()
+        ));
+        assert_eq!(sink.packets[0][9], IPPROTO_UDP);
+        assert_eq!(&sink.packets[0][12..16], &dst_ip.octets());
+        assert_eq!(&sink.packets[0][16..20], &DEFAULT_GUEST_ADDRESS.octets());
+        assert_eq!(
+            u16::from_be_bytes([sink.packets[0][20], sink.packets[0][21]]),
+            1234
+        );
+        assert_eq!(
+            u16::from_be_bytes([sink.packets[0][22], sink.packets[0][23]]),
+            50000
+        );
+        assert_eq!(&sink.packets[0][28..], b"pong");
+    }
+
+    #[test]
+    fn invalid_dns_response_from_authority_is_rejected_before_translation() {
+        let mut pump = pump();
+        let packet = udp_ipv4_packet(
+            40000,
+            DEFAULT_HOST_GATEWAY,
+            DNS_PORT,
+            &dns_query_payload(0x1234, "example.com", 1),
+        );
+        pump.send_outbound_packet(&packet).unwrap();
+        let query_id = query_id_from_last_dns(&pump);
+        let mut sink = MockSink::default();
+
+        let err = pump
+            .apply_authority_message(
+                &mut sink,
+                NetMessage::DnsResponse(DnsResponse {
+                    query_id,
+                    code: DnsResponseCode::Ok,
+                    answers: vec![DnsAnswer {
+                        name: DnsName::new("example.com").unwrap(),
+                        record_type: DnsRecordType::Txt,
+                        data: DnsRecordData::Txt(
+                            "x".repeat(crate::proto::MAX_DNS_TXT_RECORD_BYTES + 1),
+                        ),
+                        ttl_seconds: MAX_DNS_TTL_SECONDS,
+                    }],
+                    denial: None,
+                }),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            GuestPumpError::Protocol(ProtocolError::ValueTooLong {
+                field: "DNS TXT record",
+                bytes: crate::proto::MAX_DNS_TXT_RECORD_BYTES + 1,
+                max: crate::proto::MAX_DNS_TXT_RECORD_BYTES,
+            })
+        );
+        assert!(sink.packets.is_empty());
+    }
+
+    #[test]
+    fn mismatched_dns_answer_from_authority_is_rejected_before_translation() {
+        let mut pump = pump();
+        let packet = udp_ipv4_packet(
+            40000,
+            DEFAULT_HOST_GATEWAY,
+            DNS_PORT,
+            &dns_query_payload(0x1234, "example.com", 1),
+        );
+        pump.send_outbound_packet(&packet).unwrap();
+        let query_id = query_id_from_last_dns(&pump);
+        let mut sink = MockSink::default();
+
+        let err = pump
+            .apply_authority_message(
+                &mut sink,
+                NetMessage::DnsResponse(DnsResponse {
+                    query_id,
+                    code: DnsResponseCode::Ok,
+                    answers: vec![DnsAnswer {
+                        name: DnsName::new("example.com").unwrap(),
+                        record_type: DnsRecordType::A,
+                        data: DnsRecordData::Txt("not-an-ip".to_string()),
+                        ttl_seconds: MAX_DNS_TTL_SECONDS,
+                    }],
+                    denial: None,
+                }),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            GuestPumpError::Protocol(ProtocolError::InvalidValue {
+                field: "DNS answer data",
+                reason: "record type does not match answer data",
+            })
+        );
+        assert!(sink.packets.is_empty());
+    }
+
+    #[test]
+    fn oversized_dns_ttl_from_authority_is_rejected_before_translation() {
+        let mut pump = pump();
+        let packet = udp_ipv4_packet(
+            40000,
+            DEFAULT_HOST_GATEWAY,
+            DNS_PORT,
+            &dns_query_payload(0x1234, "example.com", 1),
+        );
+        pump.send_outbound_packet(&packet).unwrap();
+        let query_id = query_id_from_last_dns(&pump);
+        let mut sink = MockSink::default();
+
+        let err = pump
+            .apply_authority_message(
+                &mut sink,
+                NetMessage::DnsResponse(DnsResponse {
+                    query_id,
+                    code: DnsResponseCode::Ok,
+                    answers: vec![DnsAnswer {
+                        name: DnsName::new("example.com").unwrap(),
+                        record_type: DnsRecordType::A,
+                        data: DnsRecordData::Ip(IpAddr::V4(Ipv4Addr::new(198, 19, 0, 2))),
+                        ttl_seconds: MAX_DNS_TTL_SECONDS + 1,
+                    }],
+                    denial: None,
+                }),
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            GuestPumpError::Protocol(ProtocolError::InvalidValue {
+                field: "DNS answer TTL",
+                reason: "exceeds hard maximum",
+            })
+        );
         assert!(sink.packets.is_empty());
     }
 
@@ -1209,11 +1649,12 @@ mod tests {
         }
         assert_eq!(
             authority.tcp_connector_mut().opens,
-            vec![(
-                flow_id,
-                "example.com".to_string(),
-                80,
-                HostRoute::unresolved()
+            vec![TcpConnectSpec::from_open(
+                &crate::proto::OpenTcp::new(
+                    flow_id,
+                    crate::proto::Target::new("example.com", 80).unwrap(),
+                ),
+                HostRoute::unresolved(),
             )]
         );
         assert_eq!(
@@ -1244,6 +1685,260 @@ mod tests {
         assert_eq!(
             authority.tcp_connector_mut().sends,
             vec![(flow_id, request.to_vec(), false)]
+        );
+    }
+
+    #[cfg(feature = "host-std")]
+    #[test]
+    fn guest_tcp_roundtrip_returns_host_response_bytes() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 64];
+            let bytes = stream.read(&mut request).unwrap();
+            assert_eq!(&request[..bytes], b"GET / HTTP/1.0\r\n\r\n");
+            stream
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .unwrap();
+        });
+
+        let mut pump = pump();
+        let mut sink = MockSink::default();
+        let target = Ipv4Addr::new(198, 19, 0, 77);
+        pump.translator_mut()
+            .remember_synthetic_host(target, DnsName::new("loopback.test").unwrap());
+        let mut authority = HostAuthority::new(
+            LoopbackTcpPolicy,
+            NoopHostAuditSink,
+            crate::host::StdTcpConnector::new(),
+        );
+
+        assert_eq!(
+            pump.send_outbound_packet(&tcp_ipv4_packet(target, port, 0x02, &[])),
+            Ok(1)
+        );
+        for message in authority
+            .handle_message(pop_sent_message(&mut pump))
+            .unwrap()
+        {
+            pump.apply_authority_message(&mut sink, message).unwrap();
+        }
+
+        let request = b"GET / HTTP/1.0\r\n\r\n";
+        assert_eq!(
+            pump.send_outbound_packet(&tcp_ipv4_packet(target, port, 0x18, request)),
+            Ok(1)
+        );
+        let responses = authority
+            .handle_message(pop_sent_message(&mut pump))
+            .unwrap();
+        assert!(
+            responses.is_empty(),
+            "guest request bytes should forward upstream without an immediate synthetic reply"
+        );
+
+        let mut saw_payload = false;
+        let mut saw_close = false;
+        for _ in 0..50 {
+            let drained = authority.drain_messages(8).unwrap();
+            if drained.is_empty() {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            for message in drained {
+                if let NetMessage::CloseFlow(_) = &message {
+                    saw_close = true;
+                }
+                let outcome = pump.apply_authority_message(&mut sink, message).unwrap();
+                if matches!(outcome, AuthorityMessageOutcome::WrotePacket { .. })
+                    && sink
+                        .packets
+                        .last()
+                        .is_some_and(|packet| tcp_payload(packet).windows(2).any(|w| w == b"ok"))
+                {
+                    saw_payload = true;
+                }
+            }
+            if saw_payload && saw_close {
+                break;
+            }
+        }
+
+        join.join().unwrap();
+        assert!(
+            saw_payload,
+            "guest must receive upstream TCP response bytes"
+        );
+        assert!(saw_close, "guest must receive upstream TCP close");
+    }
+
+    #[cfg(feature = "host-std")]
+    #[test]
+    fn guest_udp_roundtrip_returns_host_response_bytes() {
+        use std::net::UdpSocket;
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        listener
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let join = thread::spawn(move || {
+            let mut request = [0u8; 64];
+            let (bytes, addr) = listener.recv_from(&mut request).unwrap();
+            assert_eq!(&request[..bytes], b"time?");
+            listener.send_to(b"pong", addr).unwrap();
+        });
+
+        let mut pump = pump();
+        let mut sink = MockSink::default();
+        let mut authority = HostAuthority::new(
+            AllowAllHostPolicy,
+            NoopHostAuditSink,
+            RecordingConnector::default(),
+        );
+
+        assert_eq!(
+            pump.send_outbound_packet(&udp_ipv4_packet(50000, Ipv4Addr::LOCALHOST, port, b"time?")),
+            Ok(1)
+        );
+        let responses = authority
+            .handle_message(pop_sent_message(&mut pump))
+            .unwrap();
+        assert!(responses.is_empty());
+
+        let mut received = false;
+        for _ in 0..50 {
+            let drained = authority.drain_messages(8).unwrap();
+            if drained.is_empty() {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            for message in drained {
+                let outcome = pump.apply_authority_message(&mut sink, message).unwrap();
+                if matches!(outcome, AuthorityMessageOutcome::WrotePacket { .. }) {
+                    received = true;
+                }
+            }
+            if received {
+                break;
+            }
+        }
+
+        join.join().unwrap();
+        assert!(received, "guest must receive upstream UDP response bytes");
+        assert_eq!(sink.packets.len(), 1);
+        assert_eq!(sink.packets[0][9], IPPROTO_UDP);
+        assert_eq!(&sink.packets[0][12..16], &Ipv4Addr::LOCALHOST.octets());
+        assert_eq!(&sink.packets[0][16..20], &DEFAULT_GUEST_ADDRESS.octets());
+        assert_eq!(
+            u16::from_be_bytes([sink.packets[0][20], sink.packets[0][21]]),
+            port
+        );
+        assert_eq!(
+            u16::from_be_bytes([sink.packets[0][22], sink.packets[0][23]]),
+            50000
+        );
+        assert_eq!(&sink.packets[0][28..], b"pong");
+    }
+
+    #[cfg(feature = "host-std")]
+    #[test]
+    fn guest_tcp_half_close_still_receives_host_response_bytes() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::Duration;
+
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            stream.read_to_end(&mut request).unwrap();
+            assert_eq!(request, b"GET / HTTP/1.0\r\n\r\n");
+            stream
+                .write_all(b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\n\r\ndone")
+                .unwrap();
+        });
+
+        let mut pump = pump();
+        let mut sink = MockSink::default();
+        let target = Ipv4Addr::new(198, 19, 0, 78);
+        pump.translator_mut()
+            .remember_synthetic_host(target, DnsName::new("loopback-half-close.test").unwrap());
+        let mut authority = HostAuthority::new(
+            LoopbackTcpPolicy,
+            NoopHostAuditSink,
+            crate::host::StdTcpConnector::new(),
+        );
+
+        assert_eq!(
+            pump.send_outbound_packet(&tcp_ipv4_packet(target, port, 0x02, &[])),
+            Ok(1)
+        );
+        for message in authority
+            .handle_message(pop_sent_message(&mut pump))
+            .unwrap()
+        {
+            pump.apply_authority_message(&mut sink, message).unwrap();
+        }
+
+        let request = b"GET / HTTP/1.0\r\n\r\n";
+        assert_eq!(
+            pump.send_outbound_packet(&tcp_ipv4_packet(target, port, 0x19, request)),
+            Ok(1)
+        );
+        let responses = authority
+            .handle_message(pop_sent_message(&mut pump))
+            .unwrap();
+        assert!(
+            responses.is_empty(),
+            "guest half-close request bytes should forward upstream without an immediate synthetic reply"
+        );
+
+        let mut saw_payload = false;
+        let mut saw_close = false;
+        for _ in 0..50 {
+            let drained = authority.drain_messages(8).unwrap();
+            if drained.is_empty() {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            for message in drained {
+                if let NetMessage::CloseFlow(_) = &message {
+                    saw_close = true;
+                }
+                let outcome = pump.apply_authority_message(&mut sink, message).unwrap();
+                if matches!(outcome, AuthorityMessageOutcome::WrotePacket { .. })
+                    && sink
+                        .packets
+                        .last()
+                        .is_some_and(|packet| tcp_payload(packet).windows(4).any(|w| w == b"done"))
+                {
+                    saw_payload = true;
+                }
+            }
+            if saw_payload && saw_close {
+                break;
+            }
+        }
+
+        join.join().unwrap();
+        assert!(
+            saw_payload,
+            "guest must receive upstream TCP response bytes after half-close"
+        );
+        assert!(
+            saw_close,
+            "guest must receive upstream TCP close after half-close"
         );
     }
 
@@ -1336,8 +2031,18 @@ mod tests {
                     b"hello".to_vec(),
                 )),
             ),
-            Err(GuestPumpError::Packet(GuestPacketError::UnknownTcpFlow))
+            Err(GuestPumpError::Packet {
+                context: GuestPacketContext::AuthorityTcpData,
+                error: GuestPacketError::UnknownTcpFlow,
+            })
         ));
         assert!(sink.packets.is_empty());
+    }
+
+    #[cfg(feature = "host-std")]
+    fn tcp_payload(packet: &[u8]) -> &[u8] {
+        let ipv4_header_len = usize::from(packet[0] & 0x0f) * 4;
+        let tcp_header_len = usize::from(packet[ipv4_header_len + 12] >> 4) * 4;
+        &packet[ipv4_header_len + tcp_header_len..]
     }
 }

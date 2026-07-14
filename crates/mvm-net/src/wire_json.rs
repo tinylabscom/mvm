@@ -9,14 +9,16 @@ use std::io::{self, ErrorKind, Read, Write};
 
 #[cfg(feature = "guest")]
 use crate::guest_pump::{AuthorityRead, GuestAuthority, GuestAuthorityReceiver};
-use crate::proto::NetMessage;
+use crate::proto::{NetMessage, ProtocolError};
 
-pub const DEFAULT_MAX_JSON_WIRE_FRAME_BYTES: usize = 1024 * 1024;
+pub const MAX_JSON_WIRE_FRAME_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_JSON_WIRE_FRAME_BYTES: usize = MAX_JSON_WIRE_FRAME_BYTES;
 
 #[derive(Debug)]
 pub enum JsonWireError {
     Io(io::Error),
     Json(serde_json::Error),
+    Protocol(ProtocolError),
     InvalidConfig(&'static str),
     FrameTooLarge { bytes: usize, max: usize },
     InvalidFrameLength { bytes: usize, max: usize },
@@ -28,6 +30,7 @@ impl fmt::Display for JsonWireError {
         match self {
             Self::Io(err) => write!(f, "json wire I/O failed: {err}"),
             Self::Json(err) => write!(f, "json wire decode failed: {err}"),
+            Self::Protocol(err) => write!(f, "json wire protocol validation failed: {err}"),
             Self::InvalidConfig(reason) => write!(f, "invalid json wire config: {reason}"),
             Self::FrameTooLarge { bytes, max } => {
                 write!(f, "json wire frame is {bytes} bytes; maximum is {max}")
@@ -50,6 +53,7 @@ impl std::error::Error for JsonWireError {
         match self {
             Self::Io(err) => Some(err),
             Self::Json(err) => Some(err),
+            Self::Protocol(err) => Some(err),
             Self::InvalidConfig(_)
             | Self::FrameTooLarge { .. }
             | Self::InvalidFrameLength { .. }
@@ -67,6 +71,12 @@ impl From<io::Error> for JsonWireError {
 impl From<serde_json::Error> for JsonWireError {
     fn from(value: serde_json::Error) -> Self {
         Self::Json(value)
+    }
+}
+
+impl From<ProtocolError> for JsonWireError {
+    fn from(value: ProtocolError) -> Self {
+        Self::Protocol(value)
     }
 }
 
@@ -118,9 +128,9 @@ impl JsonWireConfigBuilder {
                 "max_frame_bytes must be non-zero",
             ));
         }
-        if self.max_frame_bytes > u32::MAX as usize {
+        if self.max_frame_bytes > MAX_JSON_WIRE_FRAME_BYTES {
             return Err(JsonWireError::InvalidConfig(
-                "max_frame_bytes must fit in a 32-bit frame length",
+                "max_frame_bytes exceeds the hard maximum",
             ));
         }
         Ok(JsonWireConfig {
@@ -174,6 +184,7 @@ where
     T: Write,
 {
     pub fn write_message(&mut self, message: NetMessage) -> Result<(), JsonWireError> {
+        message.validate()?;
         let body = serde_json::to_vec(&message)?;
         if body.len() > self.config.max_frame_bytes {
             return Err(JsonWireError::FrameTooLarge {
@@ -231,7 +242,8 @@ where
                 } => match read_to_buffer(&mut self.inner, &mut bytes, &mut read, "frame body")? {
                     ReadStatus::Complete => {
                         self.read_state = ReadState::prefix();
-                        let message = serde_json::from_slice(&bytes)?;
+                        let message: NetMessage = serde_json::from_slice(&bytes)?;
+                        message.validate()?;
                         return Ok(JsonWireRead::Message(message));
                     }
                     ReadStatus::WouldBlock => {
@@ -318,7 +330,9 @@ where
                 *read += bytes;
             }
             Err(err) if err.kind() == ErrorKind::Interrupted => {}
-            Err(err) if err.kind() == ErrorKind::WouldBlock => return Ok(ReadStatus::WouldBlock),
+            Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                return Ok(ReadStatus::WouldBlock);
+            }
             Err(err) => return Err(JsonWireError::Io(err)),
         }
     }
@@ -331,7 +345,10 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::proto::{EndpointRole, Hello};
+    use crate::proto::{
+        DnsAnswer, DnsName, DnsRecordData, DnsRecordType, DnsResponse, DnsResponseCode,
+        EndpointRole, FlowDirection, FlowId, Hello, QueryId, StreamChunk,
+    };
 
     fn hello_message() -> NetMessage {
         NetMessage::Hello(Hello::new(EndpointRole::Guest, Vec::new()))
@@ -341,6 +358,14 @@ mod tests {
         let mut authority = LengthPrefixedJsonAuthority::new(Cursor::new(Vec::new()));
         authority.write_message(message).unwrap();
         authority.into_inner().into_inner()
+    }
+
+    fn encoded_frame_unvalidated(message: &NetMessage) -> Vec<u8> {
+        let body = serde_json::to_vec(message).expect("serialize raw test frame");
+        let len = u32::try_from(body.len()).expect("test frame fits u32");
+        let mut frame = len.to_be_bytes().to_vec();
+        frame.extend_from_slice(&body);
+        frame
     }
 
     #[test]
@@ -363,6 +388,23 @@ mod tests {
         let mut reader = ScriptedIo::new([
             ReadStep::Bytes(frame[..2].to_vec()),
             ReadStep::WouldBlock,
+            ReadStep::Bytes(frame[2..].to_vec()),
+        ]);
+        let mut authority = LengthPrefixedJsonAuthority::new(&mut reader);
+
+        assert_eq!(authority.read_message().unwrap(), JsonWireRead::WouldBlock);
+        assert!(matches!(
+            authority.read_message().unwrap(),
+            JsonWireRead::Message(NetMessage::Hello(_))
+        ));
+    }
+
+    #[test]
+    fn framed_json_treats_read_timeout_like_would_block() {
+        let frame = encoded_frame(hello_message());
+        let mut reader = ScriptedIo::new([
+            ReadStep::Bytes(frame[..2].to_vec()),
+            ReadStep::TimedOut,
             ReadStep::Bytes(frame[2..].to_vec()),
         ]);
         let mut authority = LengthPrefixedJsonAuthority::new(&mut reader);
@@ -405,6 +447,105 @@ mod tests {
     }
 
     #[test]
+    fn framed_json_rejects_protocol_invalid_inbound_message() {
+        let message = NetMessage::TcpData(StreamChunk::new(
+            FlowId::new(7).unwrap(),
+            FlowDirection::GuestToHost,
+            0,
+            vec![0; crate::proto::MAX_STREAM_CHUNK_BYTES + 1],
+        ));
+        let input = Cursor::new(encoded_frame_unvalidated(&message));
+        let mut authority = LengthPrefixedJsonAuthority::new(input);
+
+        assert!(matches!(
+            authority.read_message(),
+            Err(JsonWireError::Protocol(ProtocolError::ValueTooLong {
+                field: "TCP stream chunk payload",
+                bytes,
+                max,
+            })) if bytes == crate::proto::MAX_STREAM_CHUNK_BYTES + 1
+                && max == crate::proto::MAX_STREAM_CHUNK_BYTES
+        ));
+    }
+
+    #[test]
+    fn framed_json_rejects_protocol_invalid_outbound_message_before_writing() {
+        let message = NetMessage::TcpData(StreamChunk::new(
+            FlowId::new(7).unwrap(),
+            FlowDirection::GuestToHost,
+            0,
+            vec![0; crate::proto::MAX_STREAM_CHUNK_BYTES + 1],
+        ));
+        let mut authority = LengthPrefixedJsonAuthority::new(Cursor::new(Vec::new()));
+
+        assert!(matches!(
+            authority.write_message(message),
+            Err(JsonWireError::Protocol(ProtocolError::ValueTooLong {
+                field: "TCP stream chunk payload",
+                bytes,
+                max,
+            })) if bytes == crate::proto::MAX_STREAM_CHUNK_BYTES + 1
+                && max == crate::proto::MAX_STREAM_CHUNK_BYTES
+        ));
+        assert!(
+            authority.into_inner().into_inner().is_empty(),
+            "invalid outbound frames must be rejected before any bytes are written"
+        );
+    }
+
+    #[test]
+    fn framed_json_rejects_protocol_invalid_dns_response() {
+        let message = NetMessage::DnsResponse(DnsResponse {
+            query_id: QueryId::new(9).unwrap(),
+            code: DnsResponseCode::Ok,
+            answers: vec![DnsAnswer {
+                name: DnsName::new("example.com").unwrap(),
+                record_type: DnsRecordType::Txt,
+                data: DnsRecordData::Txt("x".repeat(crate::proto::MAX_DNS_TXT_RECORD_BYTES + 1)),
+                ttl_seconds: 30,
+            }],
+            denial: None,
+        });
+        let input = Cursor::new(encoded_frame_unvalidated(&message));
+        let mut authority = LengthPrefixedJsonAuthority::new(input);
+
+        assert!(matches!(
+            authority.read_message(),
+            Err(JsonWireError::Protocol(ProtocolError::ValueTooLong {
+                field: "DNS TXT record",
+                bytes,
+                max,
+            })) if bytes == crate::proto::MAX_DNS_TXT_RECORD_BYTES + 1
+                && max == crate::proto::MAX_DNS_TXT_RECORD_BYTES
+        ));
+    }
+
+    #[test]
+    fn framed_json_rejects_dns_answer_type_mismatch() {
+        let message = NetMessage::DnsResponse(DnsResponse {
+            query_id: QueryId::new(9).unwrap(),
+            code: DnsResponseCode::Ok,
+            answers: vec![DnsAnswer {
+                name: DnsName::new("example.com").unwrap(),
+                record_type: DnsRecordType::A,
+                data: DnsRecordData::Txt("not-an-ip".to_string()),
+                ttl_seconds: 30,
+            }],
+            denial: None,
+        });
+        let input = Cursor::new(encoded_frame_unvalidated(&message));
+        let mut authority = LengthPrefixedJsonAuthority::new(input);
+
+        assert!(matches!(
+            authority.read_message(),
+            Err(JsonWireError::Protocol(ProtocolError::InvalidValue {
+                field: "DNS answer data",
+                reason: "record type does not match answer data",
+            }))
+        ));
+    }
+
+    #[test]
     fn framed_json_reports_empty_stream_closed() {
         let mut authority = LengthPrefixedJsonAuthority::new(Cursor::new(Vec::new()));
 
@@ -419,7 +560,7 @@ mod tests {
         ));
         assert!(matches!(
             JsonWireConfig::builder()
-                .max_frame_bytes(u32::MAX as usize + 1)
+                .max_frame_bytes(MAX_JSON_WIRE_FRAME_BYTES + 1)
                 .build(),
             Err(JsonWireError::InvalidConfig(_))
         ));
@@ -444,6 +585,7 @@ mod tests {
     enum ReadStep {
         Bytes(Vec<u8>),
         WouldBlock,
+        TimedOut,
     }
 
     #[derive(Debug)]
@@ -474,6 +616,7 @@ mod tests {
                     Ok(copied)
                 }
                 Some(ReadStep::WouldBlock) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                Some(ReadStep::TimedOut) => Err(io::Error::from(io::ErrorKind::TimedOut)),
                 None => Ok(0),
             }
         }

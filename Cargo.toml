@@ -142,6 +142,10 @@ exclude = [
     # linker-flag constraints; CI gate at
     # `.github/workflows/security.yml::fuzz`.
     "crates/mvm-ext4/fuzz",
+    # Plan 234 F1 — guest transparent-network packet translator fuzz
+    # harness. Same libfuzzer-sys linker constraints as the other fuzz
+    # crates; CI gate at `.github/workflows/security.yml::fuzz`.
+    "crates/mvm-net/fuzz",
     # ADR-070 — browser audit-log verifier. Excluded so wasm-bindgen +
     # the wasm32 target stay out of `cargo build --workspace` and CI;
     # it depends on the in-workspace `mvm-verify` crate by path and is
@@ -209,6 +213,7 @@ base64 = "0.22"
 ed25519-dalek = "3"
 hmac = "0.13"
 rand = "0.8"
+rsa = { version = "0.9.8", features = ["getrandom"] }
 # Plan 129 Stage 2 (ADR-006): mint the per-VM name-constrained egress CA /
 # intermediate / leaf certs for transparent https substitution. 0.13+ for the
 # `nameConstraints` API. `ring` crypto backend (no cmake/C-toolchain like the
@@ -240,7 +245,7 @@ reqwest = { version = "0.13", features = ["blocking", "json", "rustls-no-provide
 # guest's https to bound hosts under the per-VM name-constrained intermediate).
 # `ring` backend (matches reqwest's rustls-tls + rcgen), no aws-lc-rs/cmake.
 # Direct dep of mvm-hostd only; the upstream re-origination leg reuses reqwest.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # Name generation
 names = { version = "0.14", default-features = false }
@@ -325,6 +330,7 @@ flate2 = "1"
 hex = "0.4"
 tar = "0.4"
 xattr = "1"
+zstd = "0.13"
 # Read-only ext4 walker (deps bitflags + crc only). Replaces hand-rolled
 # raw-byte ext4 poking in the Stage 0 validators with a real inode lookup
 # (`fs.exists("/sbin/mvm-host-vm-init")`). `std` enables `load_from_path`.

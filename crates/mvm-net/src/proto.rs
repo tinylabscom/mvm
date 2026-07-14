@@ -9,14 +9,54 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeStru
 pub const PROTOCOL_MAGIC: &str = "mvm.net";
 pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 0 };
 pub const MAX_STREAM_CHUNK_BYTES: usize = 64 * 1024;
+pub const MAX_ENDPOINT_CAPABILITIES: usize = 8;
+pub const MAX_TLS_TRANSFORM_ALPN_PROTOCOLS: usize = 8;
+pub const MAX_TLS_TRANSFORM_CHAIN_ENTRIES: usize = 8;
+pub const MAX_HOST_NAME_BYTES: usize = 255;
+pub const MAX_DNS_NAME_BYTES: usize = 253;
+pub const MAX_DNS_RESPONSE_ANSWERS: usize = 64;
+pub const MAX_DNS_TXT_RECORD_BYTES: usize = 255;
+pub const MAX_DNS_TTL_SECONDS: u32 = 30;
+pub const MAX_CORRELATION_ID_BYTES: usize = 128;
+pub const MAX_TRACE_ID_BYTES: usize = 128;
+pub const MAX_SPAN_ID_BYTES: usize = 128;
+pub const MAX_POLICY_DIGEST_BYTES: usize = 128;
+pub const MAX_PLUGIN_ID_BYTES: usize = 64;
+pub const MAX_ALPN_PROTOCOL_BYTES: usize = 255;
+pub const MAX_DENIAL_SAFE_DETAIL_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProtocolError {
-    BadMagic { received: String },
-    IncompatibleVersion { received: ProtocolVersion },
+    BadMagic {
+        received: String,
+    },
+    IncompatibleVersion {
+        received: ProtocolVersion,
+    },
+    TooManyCapabilities {
+        field: &'static str,
+        count: usize,
+        max: usize,
+    },
+    TooManyItems {
+        field: &'static str,
+        count: usize,
+        max: usize,
+    },
+    ValueTooLong {
+        field: &'static str,
+        bytes: usize,
+        max: usize,
+    },
+    InvalidValue {
+        field: &'static str,
+        reason: &'static str,
+    },
     EmptyHost,
     EmptyName,
-    EmptyValue { field: &'static str },
+    EmptyValue {
+        field: &'static str,
+    },
     ZeroPort,
     ZeroId,
 }
@@ -34,6 +74,18 @@ impl fmt::Display for ProtocolError {
                     received.major, received.minor
                 )
             }
+            Self::TooManyCapabilities { field, count, max } => {
+                write!(f, "{field} has {count} entries; maximum is {max}")
+            }
+            Self::TooManyItems { field, count, max } => {
+                write!(f, "{field} has {count} entries; maximum is {max}")
+            }
+            Self::ValueTooLong { field, bytes, max } => {
+                write!(f, "{field} is {bytes} bytes; maximum is {max}")
+            }
+            Self::InvalidValue { field, reason } => {
+                write!(f, "{field} is invalid: {reason}")
+            }
             Self::EmptyHost => write!(f, "network target host cannot be empty"),
             Self::EmptyName => write!(f, "DNS name cannot be empty"),
             Self::EmptyValue { field } => write!(f, "{field} cannot be empty"),
@@ -45,12 +97,60 @@ impl fmt::Display for ProtocolError {
 
 impl std::error::Error for ProtocolError {}
 
+fn validate_max_len(value: &str, field: &'static str, max: usize) -> Result<(), ProtocolError> {
+    if value.len() > max {
+        return Err(ProtocolError::ValueTooLong {
+            field,
+            bytes: value.len(),
+            max,
+        });
+    }
+    Ok(())
+}
+
+fn validate_max_bytes(bytes: &[u8], field: &'static str, max: usize) -> Result<(), ProtocolError> {
+    if bytes.len() > max {
+        return Err(ProtocolError::ValueTooLong {
+            field,
+            bytes: bytes.len(),
+            max,
+        });
+    }
+    Ok(())
+}
+
 fn trim_non_empty(value: impl Into<String>, field: &'static str) -> Result<String, ProtocolError> {
     let value = value.into().trim().to_string();
     if value.is_empty() {
         return Err(ProtocolError::EmptyValue { field });
     }
     Ok(value)
+}
+
+fn trim_non_empty_bounded(
+    value: impl Into<String>,
+    field: &'static str,
+    max: usize,
+) -> Result<String, ProtocolError> {
+    let value = trim_non_empty(value, field)?;
+    validate_max_len(&value, field, max)?;
+    Ok(value)
+}
+
+fn truncate_to_char_boundary(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    let mut end = 0usize;
+    for (index, ch) in value.char_indices() {
+        let next = index + ch.len_utf8();
+        if next > max_bytes {
+            break;
+        }
+        end = next;
+    }
+    value[..end].to_string()
 }
 
 fn canonical_host(value: impl Into<String>) -> Result<String, ProtocolError> {
@@ -62,6 +162,7 @@ fn canonical_host(value: impl Into<String>) -> Result<String, ProtocolError> {
     if value.is_empty() {
         return Err(ProtocolError::EmptyHost);
     }
+    validate_max_len(&value, "host", MAX_HOST_NAME_BYTES)?;
     Ok(value)
 }
 
@@ -74,7 +175,56 @@ fn canonical_dns_name(value: impl Into<String>) -> Result<String, ProtocolError>
     if value.is_empty() {
         return Err(ProtocolError::EmptyName);
     }
+    validate_max_len(&value, "DNS name", MAX_DNS_NAME_BYTES)?;
+    validate_dns_name_labels(&value, "DNS name")?;
     Ok(value)
+}
+
+fn validate_dns_name_labels(value: &str, field: &'static str) -> Result<(), ProtocolError> {
+    for label in value.split('.') {
+        if label.is_empty() {
+            return Err(ProtocolError::InvalidValue {
+                field,
+                reason: "DNS labels must not be empty",
+            });
+        }
+        if label.len() > 63 {
+            return Err(ProtocolError::InvalidValue {
+                field,
+                reason: "DNS labels must be 63 bytes or shorter",
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_capability_count(
+    capabilities: &[Capability],
+    field: &'static str,
+) -> Result<(), ProtocolError> {
+    if capabilities.len() > MAX_ENDPOINT_CAPABILITIES {
+        return Err(ProtocolError::TooManyCapabilities {
+            field,
+            count: capabilities.len(),
+            max: MAX_ENDPOINT_CAPABILITIES,
+        });
+    }
+    Ok(())
+}
+
+fn validate_item_count<T>(
+    items: &[T],
+    field: &'static str,
+    max: usize,
+) -> Result<(), ProtocolError> {
+    if items.len() > max {
+        return Err(ProtocolError::TooManyItems {
+            field,
+            count: items.len(),
+            max,
+        });
+    }
+    Ok(())
 }
 
 #[cfg(feature = "serde")]
@@ -150,6 +300,7 @@ impl Hello {
                 received: self.version,
             });
         }
+        validate_capability_count(&self.capabilities, "hello capabilities")?;
         Ok(())
     }
 }
@@ -176,6 +327,7 @@ impl HelloAck {
                 received: self.version,
             });
         }
+        validate_capability_count(&self.accepted_capabilities, "hello-ack capabilities")?;
         Ok(())
     }
 }
@@ -295,6 +447,10 @@ impl HostName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -311,6 +467,10 @@ impl DnsName {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
 }
 
 #[cfg(feature = "serde")]
@@ -321,7 +481,7 @@ pub struct CorrelationId(String);
 
 impl CorrelationId {
     pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
-        trim_non_empty(value, "correlation id").map(Self)
+        trim_non_empty_bounded(value, "correlation id", MAX_CORRELATION_ID_BYTES).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -337,7 +497,7 @@ pub struct TraceId(String);
 
 impl TraceId {
     pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
-        trim_non_empty(value, "trace id").map(Self)
+        trim_non_empty_bounded(value, "trace id", MAX_TRACE_ID_BYTES).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -353,7 +513,7 @@ pub struct SpanId(String);
 
 impl SpanId {
     pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
-        trim_non_empty(value, "span id").map(Self)
+        trim_non_empty_bounded(value, "span id", MAX_SPAN_ID_BYTES).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -369,7 +529,7 @@ pub struct PolicyDigest(String);
 
 impl PolicyDigest {
     pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
-        trim_non_empty(value, "policy digest").map(Self)
+        trim_non_empty_bounded(value, "policy digest", MAX_POLICY_DIGEST_BYTES).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -385,7 +545,7 @@ pub struct PluginId(String);
 
 impl PluginId {
     pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
-        trim_non_empty(value, "plugin id").map(Self)
+        trim_non_empty_bounded(value, "plugin id", MAX_PLUGIN_ID_BYTES).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -401,7 +561,7 @@ pub struct AlpnProtocol(String);
 
 impl AlpnProtocol {
     pub fn new(value: impl Into<String>) -> Result<Self, ProtocolError> {
-        trim_non_empty(value, "ALPN protocol").map(Self)
+        trim_non_empty_bounded(value, "ALPN protocol", MAX_ALPN_PROTOCOL_BYTES).map(Self)
     }
 
     pub fn as_str(&self) -> &str {
@@ -435,6 +595,14 @@ impl Target {
 
     pub const fn port(&self) -> u16 {
         self.port
+    }
+
+    pub fn host_and_port(&self) -> (&str, u16) {
+        (self.host(), self.port)
+    }
+
+    pub fn into_host_and_port(self) -> (String, u16) {
+        (self.host.into_string(), self.port)
     }
 }
 
@@ -549,6 +717,25 @@ pub enum NetMessage {
     IcmpEchoResponse(IcmpEchoResponse),
 }
 
+impl NetMessage {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        match self {
+            Self::Hello(hello) => hello.validate(),
+            Self::HelloAck(ack) => ack.validate(),
+            Self::OpenTcp(open) => open.validate(),
+            Self::TcpData(chunk) => chunk.validate(),
+            Self::DnsResponse(response) => response.validate(),
+            Self::UdpDatagram(datagram) => datagram.validate(),
+            Self::TcpOpenResult(_)
+            | Self::CloseFlow(_)
+            | Self::DnsQuery(_)
+            | Self::UdpDelivery(_)
+            | Self::IcmpEchoRequest(_)
+            | Self::IcmpEchoResponse(_) => Ok(()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[cfg_attr(feature = "serde", serde(deny_unknown_fields))]
@@ -578,6 +765,13 @@ impl OpenTcp {
         self.tls_policy = TlsPolicy::RequiredForTransform;
         self.tls_transform = Some(tls_transform);
         self
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if let Some(route) = &self.tls_transform {
+            route.validate()?;
+        }
+        Ok(())
     }
 }
 
@@ -617,6 +811,20 @@ impl TlsTransformRoute {
     pub fn with_transform_chain(mut self, transform_chain: Vec<PluginId>) -> Self {
         self.transform_chain = transform_chain;
         self
+    }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_item_count(
+            &self.alpn_protocols,
+            "TLS transform ALPN protocols",
+            MAX_TLS_TRANSFORM_ALPN_PROTOCOLS,
+        )?;
+        validate_item_count(
+            &self.transform_chain,
+            "TLS transform plugin chain",
+            MAX_TLS_TRANSFORM_CHAIN_ENTRIES,
+        )?;
+        Ok(())
     }
 }
 
@@ -685,7 +893,8 @@ impl Denial {
     pub fn with_safe_detail(mut self, safe_detail: impl Into<String>) -> Self {
         let safe_detail = safe_detail.into().trim().to_string();
         if !safe_detail.is_empty() {
-            self.safe_detail = Some(safe_detail);
+            let clamped = truncate_to_char_boundary(&safe_detail, MAX_DENIAL_SAFE_DETAIL_BYTES);
+            self.safe_detail = Some(clamped);
         }
         self
     }
@@ -745,6 +954,14 @@ impl StreamChunk {
         self.end_stream = true;
         self
     }
+
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_max_bytes(
+            &self.bytes,
+            "TCP stream chunk payload",
+            MAX_STREAM_CHUNK_BYTES,
+        )
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -800,6 +1017,20 @@ pub struct DnsResponse {
     pub denial: Option<Denial>,
 }
 
+impl DnsResponse {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_item_count(
+            &self.answers,
+            "DNS response answers",
+            MAX_DNS_RESPONSE_ANSWERS,
+        )?;
+        for answer in &self.answers {
+            answer.validate()?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum DnsResponseCode {
@@ -819,6 +1050,32 @@ pub struct DnsAnswer {
     pub ttl_seconds: u32,
 }
 
+impl DnsAnswer {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        if self.ttl_seconds > MAX_DNS_TTL_SECONDS {
+            return Err(ProtocolError::InvalidValue {
+                field: "DNS answer TTL",
+                reason: "exceeds hard maximum",
+            });
+        }
+        match (&self.record_type, &self.data) {
+            (DnsRecordType::A, DnsRecordData::Ip(IpAddr::V4(_)))
+            | (DnsRecordType::Aaaa, DnsRecordData::Ip(IpAddr::V6(_)))
+            | (DnsRecordType::Cname, DnsRecordData::Cname(_)) => {}
+            (DnsRecordType::Txt, DnsRecordData::Txt(value)) => {
+                validate_max_len(value, "DNS TXT record", MAX_DNS_TXT_RECORD_BYTES)?;
+            }
+            _ => {
+                return Err(ProtocolError::InvalidValue {
+                    field: "DNS answer data",
+                    reason: "record type does not match answer data",
+                });
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub enum DnsRecordData {
@@ -835,6 +1092,12 @@ pub struct UdpDatagram {
     pub target: Target,
     pub direction: FlowDirection,
     pub bytes: Vec<u8>,
+}
+
+impl UdpDatagram {
+    pub fn validate(&self) -> Result<(), ProtocolError> {
+        validate_max_bytes(&self.bytes, "UDP datagram payload", MAX_STREAM_CHUNK_BYTES)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -942,6 +1205,57 @@ mod tests {
     }
 
     #[test]
+    fn hello_rejects_overlong_capability_list() {
+        let hello = Hello::new(
+            EndpointRole::Guest,
+            vec![
+                Capability::Dns,
+                Capability::Tcp,
+                Capability::Udp,
+                Capability::IcmpEcho,
+                Capability::TlsTransform,
+                Capability::StreamTransforms,
+                Capability::AuditCorrelation,
+                Capability::PolicyDigest,
+                Capability::Dns,
+            ],
+        );
+
+        assert_eq!(
+            hello.validate(),
+            Err(ProtocolError::TooManyCapabilities {
+                field: "hello capabilities",
+                count: 9,
+                max: MAX_ENDPOINT_CAPABILITIES,
+            })
+        );
+    }
+
+    #[test]
+    fn hello_ack_rejects_overlong_capability_list() {
+        let ack = HelloAck::new(vec![
+            Capability::Dns,
+            Capability::Tcp,
+            Capability::Udp,
+            Capability::IcmpEcho,
+            Capability::TlsTransform,
+            Capability::StreamTransforms,
+            Capability::AuditCorrelation,
+            Capability::PolicyDigest,
+            Capability::Dns,
+        ]);
+
+        assert_eq!(
+            ack.validate(),
+            Err(ProtocolError::TooManyCapabilities {
+                field: "hello-ack capabilities",
+                count: 9,
+                max: MAX_ENDPOINT_CAPABILITIES,
+            })
+        );
+    }
+
+    #[test]
     fn protocol_ids_reject_zero() {
         assert_eq!(FlowId::new(0), Err(ProtocolError::ZeroId));
         assert_eq!(QueryId::new(0), Err(ProtocolError::ZeroId));
@@ -958,9 +1272,132 @@ mod tests {
     }
 
     #[test]
+    fn target_exposes_borrowed_and_owned_host_port_views() {
+        let target = Target::new(" API.Example.COM. ", 443).unwrap();
+
+        assert_eq!(target.host_and_port(), ("api.example.com", 443));
+        assert_eq!(
+            target.into_host_and_port(),
+            ("api.example.com".to_string(), 443)
+        );
+    }
+
+    #[test]
     fn dns_names_are_canonicalized_for_policy_matching() {
         let name = DnsName::new("API.Example.COM.").unwrap();
         assert_eq!(name.as_str(), "api.example.com");
+    }
+
+    #[test]
+    fn target_rejects_overlong_host() {
+        let host = "a".repeat(MAX_HOST_NAME_BYTES + 1);
+        assert_eq!(
+            Target::new(host, 443),
+            Err(ProtocolError::ValueTooLong {
+                field: "host",
+                bytes: MAX_HOST_NAME_BYTES + 1,
+                max: MAX_HOST_NAME_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn dns_name_rejects_overlong_value() {
+        let name = "a".repeat(MAX_DNS_NAME_BYTES + 1);
+        assert_eq!(
+            DnsName::new(name),
+            Err(ProtocolError::ValueTooLong {
+                field: "DNS name",
+                bytes: MAX_DNS_NAME_BYTES + 1,
+                max: MAX_DNS_NAME_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn dns_name_rejects_empty_or_overlong_labels() {
+        assert_eq!(
+            DnsName::new("example..com"),
+            Err(ProtocolError::InvalidValue {
+                field: "DNS name",
+                reason: "DNS labels must not be empty",
+            })
+        );
+
+        let label = "a".repeat(64);
+        assert_eq!(
+            DnsName::new(format!("{label}.com")),
+            Err(ProtocolError::InvalidValue {
+                field: "DNS name",
+                reason: "DNS labels must be 63 bytes or shorter",
+            })
+        );
+    }
+
+    #[test]
+    fn identifiers_reject_overlong_values() {
+        let correlation = "c".repeat(MAX_CORRELATION_ID_BYTES + 1);
+        assert_eq!(
+            CorrelationId::new(correlation),
+            Err(ProtocolError::ValueTooLong {
+                field: "correlation id",
+                bytes: MAX_CORRELATION_ID_BYTES + 1,
+                max: MAX_CORRELATION_ID_BYTES,
+            })
+        );
+
+        let trace = "t".repeat(MAX_TRACE_ID_BYTES + 1);
+        assert_eq!(
+            TraceId::new(trace),
+            Err(ProtocolError::ValueTooLong {
+                field: "trace id",
+                bytes: MAX_TRACE_ID_BYTES + 1,
+                max: MAX_TRACE_ID_BYTES,
+            })
+        );
+
+        let span = "s".repeat(MAX_SPAN_ID_BYTES + 1);
+        assert_eq!(
+            SpanId::new(span),
+            Err(ProtocolError::ValueTooLong {
+                field: "span id",
+                bytes: MAX_SPAN_ID_BYTES + 1,
+                max: MAX_SPAN_ID_BYTES,
+            })
+        );
+
+        let digest = "d".repeat(MAX_POLICY_DIGEST_BYTES + 1);
+        assert_eq!(
+            PolicyDigest::new(digest),
+            Err(ProtocolError::ValueTooLong {
+                field: "policy digest",
+                bytes: MAX_POLICY_DIGEST_BYTES + 1,
+                max: MAX_POLICY_DIGEST_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn plugin_and_alpn_identifiers_reject_overlong_values() {
+        let plugin = "p".repeat(MAX_PLUGIN_ID_BYTES + 1);
+        assert_eq!(
+            PluginId::new(plugin),
+            Err(ProtocolError::ValueTooLong {
+                field: "plugin id",
+                bytes: MAX_PLUGIN_ID_BYTES + 1,
+                max: MAX_PLUGIN_ID_BYTES,
+            })
+        );
+
+        let alpn = "a".repeat(MAX_ALPN_PROTOCOL_BYTES + 1);
+        assert_eq!(
+            AlpnProtocol::new(alpn),
+            Err(ProtocolError::ValueTooLong {
+                field: "ALPN protocol",
+                bytes: MAX_ALPN_PROTOCOL_BYTES + 1,
+                max: MAX_ALPN_PROTOCOL_BYTES,
+            })
+        );
     }
 
     #[test]
@@ -1006,6 +1443,201 @@ mod tests {
                 .map(PluginId::as_str),
             Some("secret-replacement")
         );
+        assert!(open.validate().is_ok());
+    }
+
+    #[test]
+    fn tls_transform_route_rejects_overlong_alpn_list() {
+        let route = TlsTransformRoute::new(
+            DnsName::new("api.example.com").unwrap(),
+            TlsTermination::TerminateAndReoriginate,
+        )
+        .with_alpn_protocols(
+            (0..(MAX_TLS_TRANSFORM_ALPN_PROTOCOLS + 1))
+                .map(|index| AlpnProtocol::new(format!("proto-{index}")).unwrap())
+                .collect(),
+        );
+
+        assert_eq!(
+            route.validate(),
+            Err(ProtocolError::TooManyItems {
+                field: "TLS transform ALPN protocols",
+                count: MAX_TLS_TRANSFORM_ALPN_PROTOCOLS + 1,
+                max: MAX_TLS_TRANSFORM_ALPN_PROTOCOLS,
+            })
+        );
+    }
+
+    #[test]
+    fn tls_transform_route_rejects_overlong_transform_chain() {
+        let route = TlsTransformRoute::new(
+            DnsName::new("api.example.com").unwrap(),
+            TlsTermination::TerminateAndReoriginate,
+        )
+        .with_transform_chain(
+            (0..(MAX_TLS_TRANSFORM_CHAIN_ENTRIES + 1))
+                .map(|index| PluginId::new(format!("plugin-{index}")).unwrap())
+                .collect(),
+        );
+
+        assert_eq!(
+            route.validate(),
+            Err(ProtocolError::TooManyItems {
+                field: "TLS transform plugin chain",
+                count: MAX_TLS_TRANSFORM_CHAIN_ENTRIES + 1,
+                max: MAX_TLS_TRANSFORM_CHAIN_ENTRIES,
+            })
+        );
+    }
+
+    #[test]
+    fn stream_chunk_rejects_overlong_payload() {
+        let chunk = StreamChunk::new(
+            flow_id(),
+            FlowDirection::GuestToHost,
+            0,
+            vec![0; MAX_STREAM_CHUNK_BYTES + 1],
+        );
+
+        assert_eq!(
+            chunk.validate(),
+            Err(ProtocolError::ValueTooLong {
+                field: "TCP stream chunk payload",
+                bytes: MAX_STREAM_CHUNK_BYTES + 1,
+                max: MAX_STREAM_CHUNK_BYTES,
+            })
+        );
+        assert_eq!(
+            NetMessage::TcpData(chunk).validate(),
+            Err(ProtocolError::ValueTooLong {
+                field: "TCP stream chunk payload",
+                bytes: MAX_STREAM_CHUNK_BYTES + 1,
+                max: MAX_STREAM_CHUNK_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn udp_datagram_rejects_overlong_payload() {
+        let datagram = UdpDatagram {
+            flow_id: flow_id(),
+            target: target(),
+            direction: FlowDirection::GuestToHost,
+            bytes: vec![0; MAX_STREAM_CHUNK_BYTES + 1],
+        };
+
+        assert_eq!(
+            datagram.validate(),
+            Err(ProtocolError::ValueTooLong {
+                field: "UDP datagram payload",
+                bytes: MAX_STREAM_CHUNK_BYTES + 1,
+                max: MAX_STREAM_CHUNK_BYTES,
+            })
+        );
+        assert_eq!(
+            NetMessage::UdpDatagram(datagram).validate(),
+            Err(ProtocolError::ValueTooLong {
+                field: "UDP datagram payload",
+                bytes: MAX_STREAM_CHUNK_BYTES + 1,
+                max: MAX_STREAM_CHUNK_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn dns_response_rejects_overlong_answer_list() {
+        let response = DnsResponse {
+            query_id: QueryId::new(9).unwrap(),
+            code: DnsResponseCode::Ok,
+            answers: (0..(MAX_DNS_RESPONSE_ANSWERS + 1))
+                .map(|_| DnsAnswer {
+                    name: DnsName::new("example.com").unwrap(),
+                    record_type: DnsRecordType::A,
+                    data: DnsRecordData::Ip(IpAddr::V4("198.19.0.2".parse().unwrap())),
+                    ttl_seconds: 30,
+                })
+                .collect(),
+            denial: None,
+        };
+
+        assert_eq!(
+            response.validate(),
+            Err(ProtocolError::TooManyItems {
+                field: "DNS response answers",
+                count: MAX_DNS_RESPONSE_ANSWERS + 1,
+                max: MAX_DNS_RESPONSE_ANSWERS,
+            })
+        );
+    }
+
+    #[test]
+    fn dns_txt_record_rejects_overlong_value() {
+        let response = DnsResponse {
+            query_id: QueryId::new(9).unwrap(),
+            code: DnsResponseCode::Ok,
+            answers: vec![DnsAnswer {
+                name: DnsName::new("example.com").unwrap(),
+                record_type: DnsRecordType::Txt,
+                data: DnsRecordData::Txt("x".repeat(MAX_DNS_TXT_RECORD_BYTES + 1)),
+                ttl_seconds: 30,
+            }],
+            denial: None,
+        };
+
+        assert_eq!(
+            response.validate(),
+            Err(ProtocolError::ValueTooLong {
+                field: "DNS TXT record",
+                bytes: MAX_DNS_TXT_RECORD_BYTES + 1,
+                max: MAX_DNS_TXT_RECORD_BYTES,
+            })
+        );
+    }
+
+    #[test]
+    fn dns_answer_rejects_record_type_mismatch() {
+        let response = DnsResponse {
+            query_id: QueryId::new(9).unwrap(),
+            code: DnsResponseCode::Ok,
+            answers: vec![DnsAnswer {
+                name: DnsName::new("example.com").unwrap(),
+                record_type: DnsRecordType::A,
+                data: DnsRecordData::Txt("not-an-ip".to_string()),
+                ttl_seconds: 30,
+            }],
+            denial: None,
+        };
+
+        assert_eq!(
+            response.validate(),
+            Err(ProtocolError::InvalidValue {
+                field: "DNS answer data",
+                reason: "record type does not match answer data",
+            })
+        );
+    }
+
+    #[test]
+    fn dns_answer_rejects_oversized_ttl() {
+        let response = DnsResponse {
+            query_id: QueryId::new(9).unwrap(),
+            code: DnsResponseCode::Ok,
+            answers: vec![DnsAnswer {
+                name: DnsName::new("example.com").unwrap(),
+                record_type: DnsRecordType::A,
+                data: DnsRecordData::Ip(IpAddr::V4("198.19.0.2".parse().unwrap())),
+                ttl_seconds: MAX_DNS_TTL_SECONDS + 1,
+            }],
+            denial: None,
+        };
+
+        assert_eq!(
+            response.validate(),
+            Err(ProtocolError::InvalidValue {
+                field: "DNS answer TTL",
+                reason: "exceeds hard maximum",
+            })
+        );
     }
 
     #[test]
@@ -1015,6 +1647,13 @@ mod tests {
 
         let detailed = Denial::new(DenialReason::HostNotAllowed).with_safe_detail(" denied ");
         assert_eq!(detailed.safe_detail.as_deref(), Some("denied"));
+
+        let overlong = Denial::new(DenialReason::HostNotAllowed)
+            .with_safe_detail("x".repeat(MAX_DENIAL_SAFE_DETAIL_BYTES + 1));
+        assert_eq!(
+            overlong.safe_detail.as_ref().map(String::len),
+            Some(MAX_DENIAL_SAFE_DETAIL_BYTES)
+        );
     }
 
     #[test]
@@ -1051,7 +1690,7 @@ mod tests {
                 name: DnsName::new("google.com").unwrap(),
                 record_type: DnsRecordType::A,
                 data: DnsRecordData::Ip("142.250.72.14".parse().unwrap()),
-                ttl_seconds: 60,
+                ttl_seconds: MAX_DNS_TTL_SECONDS,
             }],
             denial: None,
         });

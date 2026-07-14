@@ -430,6 +430,55 @@ jobs:
         # or rejected packet.
         run: cargo fuzz run fuzz_l3_gate -- -max_total_time="$DURATION"
 
+      - name: Fuzz guest transparent-network packet translator
+        working-directory: crates/mvm-net
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_guest_packet_translate -- -max_total_time="$DURATION"
+
+      - name: Fuzz host transparent-network wire framing
+        working-directory: crates/mvm-net
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_wire_json_authority -- -max_total_time="$DURATION"
+
+      - name: Fuzz transparent-network host authority state machine
+        working-directory: crates/mvm-net
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_host_authority_state_machine -- -max_total_time="$DURATION"
+
+      - name: Fuzz transparent-network guest pump runtime seam
+        working-directory: crates/mvm-net
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_guest_pump_state_machine -- -max_total_time="$DURATION"
+
+      - name: Fuzz transparent-network host runner seam
+        working-directory: crates/mvm-net
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_host_runner_state_machine -- -max_total_time="$DURATION"
+
+      - name: Fuzz transparent-network host-netd config and stdio seam
+        working-directory: crates/mvm-net
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_host_netd_state_machine -- -max_total_time="$DURATION"
+
+      - name: Fuzz decrypted-stream transform state machine
+        working-directory: crates/mvm-net
+        env:
+          DURATION: ${{ steps.duration.outputs.secs }}
+          RUSTUP_TOOLCHAIN: nightly-2026-06-11
+        run: cargo fuzz run fuzz_stream_transform_state_machine -- -max_total_time="$DURATION"
+
       - name: Fuzz runtime recording (SDK trace)
         working-directory: crates/mvm-sdk
         env:
@@ -484,6 +533,8 @@ jobs:
             crates/mvm-oci/fuzz/artifacts/
             crates/mvm-vm-host/fuzz/corpus/
             crates/mvm-vm-host/fuzz/artifacts/
+            crates/mvm-net/fuzz/corpus/
+            crates/mvm-net/fuzz/artifacts/
             crates/mvm-sdk/fuzz/corpus/
             crates/mvm-sdk/fuzz/artifacts/
 

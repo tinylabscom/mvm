@@ -285,11 +285,16 @@ fn estimated_effective_plugin_chain_capacity(
     plugin_ids: &[PluginId],
     config: &StreamTransformConfig,
 ) -> usize {
-    let mut additional = usize::from(!config.response_leak_guard_secret_values.is_empty());
     #[cfg(feature = "host-tls")]
-    if !config.secret_replacement_bindings.is_empty() {
-        additional += 1;
-    }
+    let additional = {
+        let mut additional = usize::from(!config.response_leak_guard_secret_values.is_empty());
+        if !config.secret_replacement_bindings.is_empty() {
+            additional += 1;
+        }
+        additional
+    };
+    #[cfg(not(feature = "host-tls"))]
+    let additional = usize::from(!config.response_leak_guard_secret_values.is_empty());
     plugin_ids.len().saturating_add(additional)
 }
 
@@ -1564,14 +1569,17 @@ fn append_u64_decimal(formatted: &mut String, value: u64) {
     }
 }
 
+#[cfg(feature = "host-tls")]
 fn initial_plugin_buffer(max_buffered_bytes: usize) -> Vec<u8> {
     Vec::with_capacity(max_buffered_bytes)
 }
 
+#[cfg(feature = "host-tls")]
 fn initial_plugin_output_buffer(buffered_bytes: usize) -> Vec<u8> {
     Vec::with_capacity(buffered_bytes)
 }
 
+#[cfg(feature = "host-tls")]
 fn consume_buffer_prefix_in_place(buffer: &mut Vec<u8>, consumed: usize) {
     if consumed == 0 {
         return;

@@ -1,0 +1,69 @@
+[package]
+name = "mvm-net-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mvm-core]
+path = "../../mvm-core"
+
+[dependencies.mvm-net]
+path = ".."
+features = ["guest", "host-netd"]
+
+[[bin]]
+name = "fuzz_guest_packet_translate"
+path = "fuzz_targets/fuzz_guest_packet_translate.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_wire_json_authority"
+path = "fuzz_targets/fuzz_wire_json_authority.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_host_authority_state_machine"
+path = "fuzz_targets/fuzz_host_authority_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_guest_pump_state_machine"
+path = "fuzz_targets/fuzz_guest_pump_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_host_runner_state_machine"
+path = "fuzz_targets/fuzz_host_runner_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_host_netd_state_machine"
+path = "fuzz_targets/fuzz_host_netd_state_machine.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_stream_transform_state_machine"
+path = "fuzz_targets/fuzz_stream_transform_state_machine.rs"
+test = false
+doc = false
+bench = false

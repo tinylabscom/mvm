@@ -19,28 +19,53 @@ name = "mvm-host-netd"
 path = "src/bin/mvm-host-netd.rs"
 required-features = ["host-netd"]
 
+[[bin]]
+name = "mvm-net-bench"
+path = "src/bin/mvm-net-bench.rs"
+required-features = ["bench"]
+
 [features]
+bench = ["guest", "host-runner", "dep:cpu-time"]
 default = ["proto"]
 guest = ["proto"]
 guest-linux = ["guest", "dep:libc"]
 guest-linux-runner = ["guest-linux", "wire-json"]
 host = ["proto"]
 host-mvm-core = ["host", "dep:mvm-core"]
-host-netd = ["host-runner", "host-std", "host-mvm-core"]
+host-netd = [
+    "host-runner",
+    "host-std",
+    "host-tls",
+    "host-mvm-core",
+    "dep:base64",
+    "dep:ed25519-dalek",
+    "dep:sha2",
+]
+host-tls-boring = ["host-tls", "dep:boring"]
 host-runner = ["host", "wire-json"]
 host-std = ["host"]
+host-tls = ["host-std", "dep:mvm-core", "dep:rustls", "dep:rustls-platform-verifier"]
 proto = []
 serde = ["dep:serde"]
 wire-json = ["proto", "serde", "dep:serde_json"]
 
 [dependencies]
+base64 = { workspace = true, optional = true }
+boring = { version = "5.1.0", optional = true }
+cpu-time = { version = "1.0.0", optional = true }
+ed25519-dalek = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
-mvm-core = { workspace = true, optional = true }
+mvm-core = { workspace = true, optional = true, features = ["egress-ca"] }
+rustls = { workspace = true, optional = true }
+rustls-platform-verifier = { version = "0.7.0", optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 [dev-dependencies]
+mvm-verify = { path = "../mvm-verify" }
 serde_json.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

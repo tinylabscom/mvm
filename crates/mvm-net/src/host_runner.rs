@@ -14,6 +14,7 @@ use crate::proto::NetMessage;
 use crate::wire_json::{JsonWireConfig, JsonWireError, JsonWireRead, LengthPrefixedJsonAuthority};
 
 pub const DEFAULT_MAX_HOST_MESSAGES_PER_RUN: usize = 1024;
+pub const MAX_HOST_MESSAGES_PER_RUN: usize = DEFAULT_MAX_HOST_MESSAGES_PER_RUN;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostRunnerError {
@@ -95,6 +96,11 @@ impl HostRunnerConfigBuilder {
                 "max_messages_per_run must be non-zero",
             ));
         }
+        if self.max_messages_per_run > MAX_HOST_MESSAGES_PER_RUN {
+            return Err(HostRunnerError::InvalidConfig(
+                "max_messages_per_run exceeds the hard maximum",
+            ));
+        }
         Ok(HostRunnerConfig {
             max_messages_per_run: self.max_messages_per_run,
         })
@@ -152,10 +158,21 @@ where
     W: HostAuthorityWire,
 {
     let mut stats = HostRunnerStats::new(HostRunnerOutcome::WouldBlock);
+    let mut processed_messages = 0usize;
     loop {
-        if stats.messages_read >= config.max_messages_per_run() {
+        if processed_messages >= config.max_messages_per_run() {
             stats.outcome = HostRunnerOutcome::MaxMessages;
             return Ok(stats);
+        }
+        let drained = drain_network_messages(
+            authority,
+            wire,
+            config.max_messages_per_run() - processed_messages,
+            &mut stats,
+        )?;
+        processed_messages += drained;
+        if drained > 0 {
+            continue;
         }
         match wire
             .receive_message()
@@ -163,6 +180,7 @@ where
         {
             HostAuthorityRead::Message(message) => {
                 stats.messages_read += 1;
+                processed_messages += 1;
                 let responses = authority.handle_message(message)?;
                 for response in responses {
                     wire.send_message(response)
@@ -180,6 +198,28 @@ where
             }
         }
     }
+}
+
+fn drain_network_messages<P, A, T, W>(
+    authority: &mut HostAuthority<P, A, T>,
+    wire: &mut W,
+    max_messages: usize,
+    stats: &mut HostRunnerStats,
+) -> Result<usize, HostRunnerError>
+where
+    P: HostNetworkPolicy,
+    A: HostAuditSink,
+    T: HostTcpConnector,
+    W: HostAuthorityWire,
+{
+    let responses = authority.drain_messages(max_messages)?;
+    let drained = responses.len();
+    for response in responses {
+        wire.send_message(response)
+            .map_err(|err| HostRunnerError::Wire(err.to_string()))?;
+        stats.messages_written += 1;
+    }
+    Ok(drained)
 }
 
 impl<T> HostAuthorityWire for LengthPrefixedJsonAuthority<T>
@@ -263,12 +303,12 @@ mod tests {
 
     use super::*;
     use crate::host::{
-        AllowAllHostPolicy, DenyAllHostPolicy, HostAuditEvent, NoopHostAuditSink,
-        RefusingTcpConnector,
+        AllowAllHostPolicy, DenyAllHostPolicy, HostAuditEvent, HostTcpConnector, HostTcpEvent,
+        NoopHostAuditSink, RefusingTcpConnector,
     };
     use crate::proto::{
-        Capability, DnsName, DnsQuery, DnsRecordType, EndpointRole, FlowId, Hello, NetMessage,
-        OpenTcp, Target,
+        Capability, DnsName, DnsQuery, DnsRecordType, EndpointRole, FlowDirection, FlowId, Hello,
+        NetMessage, OpenTcp, StreamChunk, Target,
     };
 
     #[derive(Debug, Default)]
@@ -296,6 +336,47 @@ mod tests {
         fn send_message(&mut self, message: NetMessage) -> Result<(), Self::Error> {
             self.writes.push(message);
             Ok(())
+        }
+    }
+
+    #[derive(Debug)]
+    struct DrainingConnector {
+        drains: VecDeque<Vec<HostTcpEvent>>,
+    }
+
+    impl DrainingConnector {
+        fn with_drains(drains: impl IntoIterator<Item = Vec<HostTcpEvent>>) -> Self {
+            Self {
+                drains: drains.into_iter().collect(),
+            }
+        }
+    }
+
+    impl HostTcpConnector for DrainingConnector {
+        fn open(
+            &mut self,
+            _spec: &crate::host::TcpConnectSpec,
+        ) -> Result<(), crate::proto::TransportError> {
+            Ok(())
+        }
+
+        fn send(&mut self, _chunk: &StreamChunk) -> Result<(), crate::proto::TransportError> {
+            Ok(())
+        }
+
+        fn close(
+            &mut self,
+            _flow_id: FlowId,
+            _reason: crate::proto::CloseReason,
+        ) -> Result<(), crate::proto::TransportError> {
+            Ok(())
+        }
+
+        fn drain_events(
+            &mut self,
+            _max_events: usize,
+        ) -> Result<Vec<HostTcpEvent>, crate::proto::TransportError> {
+            Ok(self.drains.pop_front().unwrap_or_default())
         }
     }
 
@@ -368,6 +449,55 @@ mod tests {
     }
 
     #[test]
+    fn runner_drains_host_tcp_events_before_reporting_would_block() {
+        let flow_id = FlowId::new(9).unwrap();
+        let mut authority = HostAuthority::new(
+            AllowAllHostPolicy,
+            NoopHostAuditSink,
+            DrainingConnector::with_drains([
+                Vec::new(),
+                vec![HostTcpEvent::Data(StreamChunk::new(
+                    flow_id,
+                    FlowDirection::HostToGuest,
+                    0,
+                    b"pong".to_vec(),
+                ))],
+            ]),
+        );
+        let open = OpenTcp::new(flow_id, Target::new("example.com", 443).unwrap());
+        let mut wire = MemoryWire::with_reads([
+            HostAuthorityRead::Message(NetMessage::OpenTcp(open)),
+            HostAuthorityRead::WouldBlock,
+        ]);
+
+        let stats = run_host_authority_until_blocked(
+            &mut authority,
+            &mut wire,
+            &HostRunnerConfig::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            stats,
+            HostRunnerStats {
+                messages_read: 1,
+                messages_written: 2,
+                outcome: HostRunnerOutcome::WouldBlock,
+            }
+        );
+        assert!(matches!(wire.writes[0], NetMessage::TcpOpenResult(_)));
+        assert_eq!(
+            wire.writes[1],
+            NetMessage::TcpData(StreamChunk::new(
+                flow_id,
+                FlowDirection::HostToGuest,
+                0,
+                b"pong".to_vec(),
+            ))
+        );
+    }
+
+    #[test]
     fn runner_surfaces_authority_errors_before_writing_responses() {
         let mut authority =
             HostAuthority::new(DenyAllHostPolicy, FailingAudit, RefusingTcpConnector);
@@ -393,6 +523,12 @@ mod tests {
     fn runner_config_rejects_zero_budget() {
         assert!(matches!(
             HostRunnerConfig::builder().max_messages_per_run(0).build(),
+            Err(HostRunnerError::InvalidConfig(_))
+        ));
+        assert!(matches!(
+            HostRunnerConfig::builder()
+                .max_messages_per_run(MAX_HOST_MESSAGES_PER_RUN + 1)
+                .build(),
             Err(HostRunnerError::InvalidConfig(_))
         ));
     }
