@@ -98,6 +98,16 @@ let
     # KVM_GUEST make the kernel detect KVM and use kvm-clock; PARAVIRT is their
     # prerequisite. arm64 boots under the architected timer and needs none of it.
     "HYPERVISOR_GUEST" "PARAVIRT" "KVM_GUEST"
+
+    # libkrun on x86 has no device tree (aarch64) and no PCI enumeration (vz):
+    # it advertises its virtio-mmio devices *only* through
+    # `virtio_mmio.device=<size>@<addr>:<irq>` kernel-cmdline params. Without
+    # VIRTIO_MMIO_CMDLINE_DEVICES the guest ignores them, the root virtio-blk
+    # never binds, /dev/vda never appears, and boot hangs forever at "Waiting
+    # for root device /dev/vda". arm64 discovers the same devices via FDT, so it
+    # neither needs nor compiles this in (keeping it off the arm64 built-in
+    # symbol budget).
+    "VIRTIO_MMIO_CMDLINE_DEVICES"
   ];
 
   # ── Base disables ──
