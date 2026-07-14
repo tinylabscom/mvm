@@ -139,9 +139,6 @@ jobs:
       - name: No overclaiming (gated phrases from specs/claims/)
         run: cargo run -p xtask -- check-no-overclaim
 
-      - name: Unique spec numbers
-        run: cargo run -p xtask -- check-spec-numbers
-
       # Plan 115 / ADR-065 — Rust manifest ⇔ Nix attrset parity.
       # Adding or renaming a host binary requires updating both
       # crates/mvm-cli/src/host_binaries/manifest.rs and
@@ -260,7 +257,6 @@ jobs:
   # Note: cargo-audit, cargo-deny, reproducibility, and prod-agent-no-exec
   # were duplicated here AND in security.yml. They now live only in
   # security.yml (which fires on the same triggers — push to main + PRs).
-  # See specs/plans/40-cli-surface-polish.md follow-up note.
 
   # ── Lane: sealed-prod vsock allowlist locked (plan 76 Phase 1) ────
   # Plan 76 §"Phase 8 — Security regression gate" (partial). The big
@@ -709,7 +705,6 @@ jobs:
               - 'crates/mvm-backend/src/libkrun.rs'
               - 'crates/mvm-backend/Cargo.toml'
               - 'crates/mvm-providers/src/apple_container/**'
-              - 'specs/plans/57-libkrun-spike.md'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain

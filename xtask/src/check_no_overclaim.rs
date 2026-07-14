@@ -421,7 +421,7 @@ status: Cheese
 
     #[test]
     fn glob_matches_prefix_and_doublestar() {
-        assert!(glob_match("specs/**", "specs/plans/75.md"));
+        assert!(glob_match("specs/**", "specs/claims/75.md"));
         assert!(glob_match("specs/**", "specs/adrs/049.md"));
         assert!(!glob_match("specs/**", "public/docs/index.md"));
         assert!(glob_match("CHANGELOG.md", "CHANGELOG.md"));

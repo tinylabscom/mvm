@@ -1,9 +1,9 @@
 name: Security
 
 # ADR-002 §W6.3 — single workflow that hosts every CI-side security
-# gate. Lanes correspond to the workstreams in
-# specs/plans/25-microvm-hardening.md and the seven claims in
-# CLAUDE.md::Security model. Failure on any lane blocks merge.
+# gate. Lanes correspond to the microVM hardening workstreams and the
+# seven claims in CLAUDE.md::Security model. Failure on any lane
+# blocks merge.
 #
 # Triggers: PRs against main, release-tag pushes (final pre-publish
 # gate), plus a nightly cron so advisory-DB additions get caught even

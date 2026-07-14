@@ -103,9 +103,6 @@ jobs:
       - name: No overclaiming
         run: cargo run -p xtask -- check-no-overclaim
 
-      - name: Unique spec numbers
-        run: cargo run -p xtask -- check-spec-numbers
-
       - name: Two product surfaces only (host + user)
         run: cargo run -p xtask -- check-two-surfaces
 

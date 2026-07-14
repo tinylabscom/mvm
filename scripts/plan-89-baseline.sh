@@ -3,8 +3,8 @@
 #
 # Runs N cold-boot `mvmctl build` invocations against a small flake,
 # parses each run's `boot-timings.json` (written by `mvm-host-vm-init`
-# at `<job_dir>/boot-timings.json`), and emits a markdown summary at
-# `specs/notes/plan-89-baseline.md`.
+# at `<job_dir>/boot-timings.json`), and emits a markdown summary
+# (default: `/tmp/plan-89-baseline.md`).
 #
 # Per the plan §Order of operations: if the median `job_start_ms`
 # (boot fan-out — time from init anchor to first build instruction)
@@ -36,13 +36,13 @@
 #     gvproxy/passt installed per platform).
 #   - `jq` on PATH.
 #
-# Output: `specs/notes/plan-89-baseline.md` (default).
+# Output: `/tmp/plan-89-baseline.md` (default).
 
 set -euo pipefail
 
 RUNS=5
 FLAKE="tests/fixtures/plan-89-baseline"
-OUT="specs/notes/plan-89-baseline.md"
+OUT="/tmp/plan-89-baseline.md"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

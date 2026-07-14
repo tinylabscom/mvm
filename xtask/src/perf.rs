@@ -28,9 +28,8 @@
 //!
 //! - **Regression alert against historical p50.** A ">10% p50
 //!   increase fails the test" gate would need a historical-baseline
-//!   file (probably in `specs/perf/baseline.json`) that this command
-//!   compares against. Substrate-only today; the boot subcommand
-//!   asserts against absolute thresholds.
+//!   file that this command compares against. Substrate-only today;
+//!   the boot subcommand asserts against absolute thresholds.
 //! - **Snapshot-clone-boot benchmark.** Currently the boot
 //!   subcommand only times cold boots. Snapshot-clone timing
 //!   needs the snapshot pool, which doesn't ship in this slice.
