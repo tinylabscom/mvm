@@ -22,7 +22,6 @@ members = [
     "crates/mvm-guest",
     "crates/mvm-cli",
     "crates/mvm-hostd",
-    "crates/mvm-vm-host",
     "crates/mvm-guest-helpers",
     # C-ABI veneer over the in-guest host-services broker clients. One
     # JSON-in/JSON-out cdylib every language SDK loads through a thin FFI
@@ -132,7 +131,7 @@ exclude = [
     # CI gate at `.github/workflows/security.yml::fuzz` runs both
     # targets on release-tag pushes + nightly cron + manual
     # dispatch only (not on every PR — the lane is heavy).
-    "crates/mvm-vm-host/fuzz",
+    "crates/mvm-hostd/fuzz-vmhost",
     # Plan 141 / ADR-003 — gateway packet parse + payload-rebuild fuzz
     # harness (`fuzz_packet_parse`). Same libfuzzer-sys linker constraints;
     # CI gate at `.github/workflows/security.yml::fuzz`.

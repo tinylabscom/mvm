@@ -1588,7 +1588,7 @@ pub struct SupervisorBaseConfig {
 /// Workload-**specific** supervisor config — the bytes that arrive over the
 /// control UDS at attach. The only attacker-reachable-post-spawn surface
 /// (fuzzed by `fuzz_attach_message`). The plan re-verify in
-/// `mvm_vm_host::prelaunch` is what makes accepting these bytes safe.
+/// `mvm_hostd::prelaunch` is what makes accepting these bytes safe.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SupervisorAttachConfig {
@@ -1626,7 +1626,7 @@ pub struct SupervisorAttachConfig {
 }
 
 /// Failure modes of [`SupervisorConfig::from_base_and_attach`]. The plan
-/// re-verify failures live in `mvm_vm_host::prelaunch::AttachVerifyError` —
+/// re-verify failures live in `mvm_hostd::prelaunch::AttachVerifyError` —
 /// this leaf crate can't depend on `mvm-core::plan`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AttachMergeError {
@@ -1655,7 +1655,7 @@ impl SupervisorConfig {
     /// [`SupervisorAttachConfig`] received over the control UDS, validating the
     /// echoed binding nonce, into a whole `SupervisorConfig` the existing
     /// `run_with_bridge` path consumes verbatim. Does **not** verify the plan
-    /// signature — that is `mvm_vm_host::prelaunch::verify_and_merge_attach`'s
+    /// signature — that is `mvm_hostd::prelaunch::verify_and_merge_attach`'s
     /// job (this crate is a leaf with no `mvm-core` dep).
     pub fn from_base_and_attach(
         base: SupervisorBaseConfig,

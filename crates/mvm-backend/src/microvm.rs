@@ -3295,7 +3295,7 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
     let gateway_raw = gateway_socket.as_raw_fd();
     let supervisor_raw = supervisor_socket.as_raw_fd();
 
-    // Unified `mvm_vm_host::bridge::parse::BridgeConfigJson` shape (built as raw
+    // Unified `mvm_hostd::bridge::parse::BridgeConfigJson` shape (built as raw
     // JSON because mvm-backend cannot depend on the leaf bin crate). The passt
     // binary + hashes + inherited fds live under the `passt` endpoint variant.
     // `network_policy_json` carries `unrestricted` so the bridge's flow gate

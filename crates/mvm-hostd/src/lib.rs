@@ -7,7 +7,8 @@
 //!
 //! - [`supervisor`] — the trusted host-side supervisor library (egress
 //!   proxy, tool gate, key release, audit signing, plan execution state
-//!   machine). Run in-process by `mvm-vm-host`'s per-VM bins, not as a
+//!   machine). Run in-process by this crate's per-VM supervisor bins
+//!   (`mvm-libkrun-supervisor`, `mvm-hvf-supervisor`, `mvm-bridge`), not as a
 //!   standalone process.
 //! - [`broker`] — host services broker subprocess (vsock dispatch).
 //! - [`host_signer`] — Ed25519 host-key signer subprocess.
@@ -15,10 +16,21 @@
 //! - [`jailer`] — the `mvm-jailer-lite` seccomp + landlock confinement
 //!   helper, applied in-process by each role before it touches keys or
 //!   untrusted input.
+//! - [`bridge`] / [`firecracker_bridge`] / [`prelaunch`] / [`exit_capture`] —
+//!   the shared per-VM supervisor host-process substrate: bridge-sidecar
+//!   config parsing, the prelaunched-standby attach-verify, and the
+//!   workload-exit control listener.
 
 pub mod audit;
 pub mod audit_signer;
+/// Unified per-VM bridge-sidecar stdin contract. The shared `mvm-bridge`
+/// sidecar parses [`bridge::parse::BridgeConfigJson`] and dispatches on its
+/// endpoint discriminant; reuses the `firecracker_bridge::parse` plan-decode +
+/// passt-hash helpers verbatim.
+pub mod bridge;
 pub mod broker;
+pub mod exit_capture;
+pub mod firecracker_bridge;
 /// Length-prefixed message framing (4-byte BE length + body,
 /// cap-before-alloc) for the same-uid UDS control channels. Relocated
 /// from `mvm_core::framing` so `mvm-core`'s default build pulls no
@@ -46,6 +58,9 @@ pub mod network_tunnel;
 /// spawn-side `PR_SET_PDEATHSIG` attach leaves open.
 pub mod parent_death;
 pub mod plan_admission;
+/// The prelaunched-supervisor attach verify+merge. Pure (no VM, no
+/// `start_enter`) so the rejection ladder is unit-testable.
+pub mod prelaunch;
 pub mod run;
 /// Userspace TCP/IP egress for the packet tunnel: terminate admitted guest
 /// flows in an in-process `smoltcp` stack and bridge each to an ordinary host

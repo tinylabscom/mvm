@@ -13,13 +13,18 @@ authors.workspace = true
 # listeners plus the broker / host-signer / audit-signer subprocess UDS
 # servers are all legitimate substrate servers (was the per-crate metadata
 # on mvm-broker/mvm-host-signer/mvm-audit-signer + the per-file globs on
-# mvm-supervisor; consolidated here).
+# mvm-supervisor; consolidated here). The per-VM supervisor host processes
+# (mvm-libkrun-supervisor / mvm-hvf-supervisor / mvm-bridge) are per-VM
+# substrate too — one supervisor process per guest VM, not an orchestration
+# control-plane server. The first such listener: mvm-libkrun-supervisor binds
+# the host side of the listen=false workload-exit control vsock port
+# (<vm_state_dir>/vsock-5251.sock) to capture a one-shot workload's exit code
+# before poweroff.
 [package.metadata.mvm.architecture]
-substrate_server_category = "host daemon roles substrate (supervisor + broker + key signers)"
+substrate_server_category = "host daemon roles substrate (supervisor + broker + key signers) + per-VM supervisor host processes (workload-exit control listener + vsock proxy)"
 
 # Each key subprocess is its own process — the moat. The supervisor and
-# jailer are library modules (the per-VM supervisor processes live in
-# mvm-vm-host; the jailer is applied in-process by each role).
+# jailer are library modules; the jailer is applied in-process by each role.
 [[bin]]
 name = "mvm-broker"
 path = "src/bin/mvm-broker.rs"
@@ -46,6 +51,27 @@ path = "src/bin/mvm-signer-helper.rs"
 name = "mvm-substitution-endpoint"
 path = "src/bin/mvm-substitution-endpoint.rs"
 
+# Per-VM supervisor host processes — one process per guest VM. libkrun VMM +
+# merged in-process bridge; libkrun-sys-gated so a host without libkrun.h
+# skips it on a default workspace build.
+[[bin]]
+name = "mvm-libkrun-supervisor"
+path = "src/bin/mvm-libkrun-supervisor.rs"
+required-features = ["libkrun-sys"]
+
+# Shared per-VM bridge sidecar — the single external-VMM gateway/audit bridge
+# for Firecracker. Cross-platform (not a whole-binary cfg gate): the Passt arm
+# is Linux-only and confined; per-arm cfg gating lives inside.
+[[bin]]
+name = "mvm-bridge"
+path = "src/bin/mvm-bridge.rs"
+
+# Per-VM host process for the raw HVF macOS backend. cfg-gated to
+# macOS/aarch64 in source; a stub elsewhere.
+[[bin]]
+name = "mvm-hvf-supervisor"
+path = "src/bin/mvm-hvf-supervisor.rs"
+
 [dependencies]
 # `egress-ca`: the https terminator mints per-SNI leaves
 # under the per-VM intermediate (`mvm_core::crypto::egress_ca`).
@@ -62,6 +88,12 @@ mvm.workspace = true
 # guest vsock exec protocol (`send_exec_streaming`, `GUEST_AGENT_PORT`) —
 # the healthcheck probe's host->guest exec leg.
 mvm-guest.workspace = true
+# builder-vm: pulls libkrun_network_provider::vsock_egress_opt_in (Phase A egress
+# server wiring in mvm-libkrun-supervisor); gated here so it only activates in the
+# per-VM supervisor process, not in library users.
+mvm-build = { workspace = true, features = ["builder-vm"] }
+# libkrun bindings/wrapper; FFI linkage gated by the libkrun-sys feature.
+libkrun-sys = { workspace = true }
 anyhow.workspace = true
 async-trait = "0.1"
 base64.workspace = true
@@ -96,7 +128,7 @@ reqwest = { workspace = true }
 # Server-side TLS termination for bound-host https egress.
 rustls = { workspace = true }
 zeroize.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
@@ -137,6 +169,10 @@ custom-dns = ["dep:hickory-resolver"]
 # normal workspace build; a consumer that only spawns the worker (mvm-cli) sets
 # default-features = false to keep the stack out of its closure.
 packet-forwarder = ["dep:smoltcp"]
+# Build the libkrun supervisor bin against libkrun's FFI.
+libkrun-sys = ["libkrun-sys/libkrun-sys"]
+# Live-boot integration tests (dev host with libkrun). Never in CI's no-VM lanes.
+libkrun-live = ["libkrun-sys"]
 
 [lints]
 workspace = true

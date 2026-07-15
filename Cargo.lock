@@ -2509,8 +2509,10 @@ dependencies = [
  "ipnet",
  "landlock",
  "libc",
+ "libkrun-sys",
  "mvm",
  "mvm-backend",
+ "mvm-build",
  "mvm-core",
  "mvm-guest",
  "mvm-net",
@@ -2614,31 +2616,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
-]
-
-[[package]]
-name = "mvm-vm-host"
-version = "0.18.0"
-dependencies = [
- "anyhow",
- "chrono",
- "ed25519-dalek",
- "libc",
- "libkrun-sys",
- "mvm-backend",
- "mvm-build",
- "mvm-core",
- "mvm-guest",
- "mvm-hostd",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

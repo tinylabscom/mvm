@@ -3,7 +3,7 @@
 //! The shared `mvm-bridge` sidecar reads a single [`parse::BridgeConfigJson`]
 //! document on stdin regardless of backend, dispatching on an
 //! [`parse::BridgeEndpointKind`] discriminant to build the matching
-//! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant. This folds
+//! `crate::supervisor::gateway_bridge::BridgeEndpoints` variant. This folds
 //! the previously per-backend stdin contract (`mvm-firecracker-bridge`'s
 //! `BridgeConfigJson`) into the shared sidecar — the contract the source
 //! already described as "identical across backends".

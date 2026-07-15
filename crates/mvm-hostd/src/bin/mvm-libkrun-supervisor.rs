@@ -189,7 +189,7 @@ fn dispatch_config(cfg: SupervisorConfig) -> ExitCode {
         match UnixListener::bind(&control_sock) {
             Ok(listener) => {
                 std::thread::spawn(move || {
-                    if let Err(e) = mvm_vm_host::exit_capture::capture_once(&listener, &state_dir) {
+                    if let Err(e) = mvm_hostd::exit_capture::capture_once(&listener, &state_dir) {
                         eprintln!("mvm-libkrun-supervisor: exit capture: {e}");
                     }
                 });
@@ -289,7 +289,7 @@ fn run_prelaunched(base: SupervisorBaseConfig) -> ExitCode {
     };
 
     let mut nonce_store = NonceStore::new();
-    let cfg = match mvm_vm_host::prelaunch::verify_and_merge_attach(
+    let cfg = match mvm_hostd::prelaunch::verify_and_merge_attach(
         base,
         &attach_bytes,
         Utc::now(),

@@ -20,7 +20,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use mvm_vm_host::firecracker_bridge::parse::BridgeConfigJson;
+use mvm_hostd::firecracker_bridge::parse::BridgeConfigJson;
 
 fuzz_target!(|data: &[u8]| {
     if let Ok(s) = std::str::from_utf8(data) {

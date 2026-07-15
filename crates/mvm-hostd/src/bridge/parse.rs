@@ -4,7 +4,7 @@
 //! audit/plan substrate plus a [`BridgeEndpointKind`] discriminant that selects
 //! the transport. The `mvm-bridge` binary parses this once
 //! and builds the matching
-//! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant, applying
+//! `crate::supervisor::gateway_bridge::BridgeEndpoints` variant, applying
 //! `mvm-jailer-lite` confinement through one cfg-gated codepath wherever the OS
 //! supports it (the Linux `Passt` endpoint). The macOS native-gateway arm runs
 //! unconfined — `confine_self` is Linux-only (Landlock+seccomp).

@@ -1,10 +1,10 @@
 [package]
-name = "mvm-vm-host-fuzz"
+name = "mvm-hostd-vmhost-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
 
-# Detach from the parent workspace — `crates/mvm-vm-host/fuzz`
+# Detach from the parent workspace — `crates/mvm-hostd/fuzz-vmhost`
 # is listed under `workspace.exclude` in the repo root Cargo.toml
 # because `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper
 # (which injects sanitizer + linker flags). An empty `[workspace]`
@@ -21,14 +21,14 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 serde_json = "1"
 toml = "0.8"
-# rcgen (pulled in transitively via mvm-vm-host's bound-host TLS path) carries
+# rcgen (pulled in transitively via mvm-hostd's bound-host TLS path) carries
 # a blanket `impl<T: Into<String>> From<T>` that collides with an impl
 # `time` 0.3.48 added, breaking the build with E0119. There is no committed
 # lock here (cargo-fuzz gitignores it), so the bound lives in the manifest —
 # drop it once rcgen or time resolves the coherence clash.
 time = ">=0.3, <0.3.48"
 
-[dependencies.mvm-vm-host]
+[dependencies.mvm-hostd]
 path = ".."
 
 # Fuzz the host-side `BridgeConfigJson` JSON parser. The bridge binary
@@ -37,7 +37,7 @@ path = ".."
 # before installing Landlock + seccomp). Analog of
 # `fuzz_supervisor_config` and `fuzz_guest_request`; harness goal is
 # "never panic on any input." See
-# `crates/mvm-vm-host/fuzz/fuzz_targets/fuzz_bridge_config_json.rs`
+# `crates/mvm-hostd/fuzz-vmhost/fuzz_targets/fuzz_bridge_config_json.rs`
 # for the harness body.
 [[bin]]
 name = "fuzz_bridge_config_json"

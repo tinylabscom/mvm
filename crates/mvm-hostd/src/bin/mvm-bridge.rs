@@ -1,7 +1,7 @@
 //! Shared per-VM bridge sidecar.
 //!
 //! One sidecar binary for every backend. Reads a single
-//! [`mvm_vm_host::bridge::parse::BridgeConfigJson`] document on stdin and
+//! [`mvm_hostd::bridge::parse::BridgeConfigJson`] document on stdin and
 //! dispatches on its [`BridgeEndpointKind`] discriminant to build the matching
 //! `mvm_hostd::supervisor::gateway_bridge::BridgeEndpoints` variant, then hands
 //! the packet/flow loop to the unchanged
@@ -42,14 +42,14 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use ed25519_dalek::SigningKey;
 use mvm_core::policy::PolicyBundle;
+use mvm_hostd::bridge::parse::{
+    BridgeConfigJson, BridgeEndpointKind, decode_network_policy, decode_plan_json,
+};
 use mvm_hostd::supervisor::audit::AuditSigner;
 use mvm_hostd::supervisor::audit_file::FileAuditSigner;
 use mvm_hostd::supervisor::gateway_bridge::{BridgeConfig, BridgeEndpoints, spawn_bridge_thread};
 use mvm_hostd::supervisor::network::{
     ObserverAllowlist, Pipeline, ProviderCapabilities, resolve_observer_chain_from_policy_source,
-};
-use mvm_vm_host::bridge::parse::{
-    BridgeConfigJson, BridgeEndpointKind, decode_network_policy, decode_plan_json,
 };
 
 fn main() -> ExitCode {
@@ -96,7 +96,7 @@ fn run() -> Result<()> {
         ..
     } = &cfg.endpoint
     {
-        mvm_vm_host::bridge::parse::verify_passt_hash(passt_path, passt_hashes_path)
+        mvm_hostd::bridge::parse::verify_passt_hash(passt_path, passt_hashes_path)
             .context("verify passt binary hash against operator allowlist")?;
     }
 

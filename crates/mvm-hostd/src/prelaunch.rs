@@ -37,7 +37,7 @@ pub enum AttachVerifyError {
 /// existing `run_with_bridge` path. **Never boots** — the caller calls
 /// `start_enter` only on `Ok`.
 ///
-/// Order mirrors `mvm_hostd::supervisor::aggregate::launch`:
+/// Order mirrors `crate::supervisor::aggregate::launch`:
 /// merge (binding-nonce echo) → signature → G4 window → nonce-replay.
 pub fn verify_and_merge_attach(
     base: SupervisorBaseConfig,
