@@ -1,98 +1,77 @@
----
-title: "ADR-012: CI execution policy — push runs CI; release runs everything else; githooks run tests on commit"
-status: Proposed
-date: 2026-05-07
-related: ADR-010 (code-quality enforcement), plan 60-mvm-libkrun-migration
----
+# ADR-012: CI execution policy — push runs a lean lane; the full matrix and release gates are separately triggered
 
 ## Status
 
-Proposed. Implementation: workflow trigger updates land in Phase 0; githook upgrades follow.
+Accepted.
 
 ## Context
 
-The previous iteration's CI workflows triggered on `pull_request` against `main` plus tag pushes. That was an "ecosystem-wide CI cost reduction" move — but it has two side-effects we want to fix:
-
-1. Pushes to feature branches with no PR open get **no CI feedback at all**, which delays surfacing regressions until PR creation.
-2. Heavy gates (security audit, Windows lane, reproducibility) run on every PR push, doubling effort for trivial changes.
-
-The user already shipped a pre-commit hook (`.githooks/pre-commit`) from the previous repo. The hook is light by design (cargo fmt + nix fmt only) because Linux-specific deps don't compile cleanly on the macOS host. The intent is:
-
-- **Local**: pre-commit runs format + (planned) test set on the dev's machine. macOS contributors run heavier checks via a Linux builder configured under Nix (`nix-darwin`'s `linux-builder` is the documented path); Linux contributors run them natively. ADR-004 dropped Lima from mvm's dependency surface, so the local-test path is now host-Nix-direct rather than going through a Lima VM.
-- **Remote on push**: a single, focused CI workflow runs on every push to give feedback on feature branches.
-- **Remote on release**: heavier gates (security audit, full Windows lane, cross-platform matrix, reproducibility check, release artifact build) run when a tag is pushed.
-
-This split mirrors what the user wants: "only run the CI github action when we push — the rest when we do a release."
+A push with no PR open still needs fast feedback, and every push
+shouldn't pay for platform lanes (macOS, live KVM), OCI ratification, or
+a dependency audit that only need to run before a release or on
+deliberate request. Heavy, expensive lanes running on every push slow
+down day-to-day iteration for no proportional benefit.
 
 ## Decision
 
-### Triggers
+### Triggers, by workflow
 
-| Workflow | Trigger | Rationale |
+| Workflow | Trigger | Purpose |
 |---|---|---|
-| `ci.yml` | `push:` (any branch) + `workflow_dispatch:` | Fast feedback on every push; no PR gating delay |
-| `security.yml` | `push: tags: ["v*"]` + nightly cron + `workflow_dispatch:` | Security audit is heavy; run at release + nightly catches new CVEs |
-| `windows.yml` | `push: tags: ["v*"]` + `workflow_dispatch:` | Windows lane is expensive; release-time backstop only |
-| `release.yml` | `push: tags: ["v*"]` | Builds release artifacts |
-| `publish-crates.yml` | `release: types: [published]` + `workflow_dispatch:` | Publishes to crates.io on GitHub release |
-| `pages.yml` | `workflow_dispatch:` | Manual docs publish |
+| `ci.yml` | `push` (any branch, excluding merge-queue transient refs) + `merge_group` + `workflow_dispatch` | day-to-day signal on every push; a required merge-queue check |
+| `architecture.yml` | `push: main` + `pull_request` + `merge_group` + `workflow_dispatch` | structural/architectural invariants; a required merge-queue check |
+| `ci-full.yml` | `workflow_dispatch` only | the full platform + live-VM + OCI-ratification matrix; operator-triggered, never automatic |
+| `security.yml` | `push: tags: v*` + nightly cron + `workflow_dispatch` | dependency audit / advisory scan; release-time backstop plus nightly catch for new advisories |
+| `windows.yml` | `push: tags: v*` + `workflow_dispatch` | non-blocking informational Windows build check; never a required check |
+| `release.yml` | `push: tags: v*` | builds and publishes release artifacts |
 
-`pull_request:` triggers are **dropped from `ci.yml`, `security.yml`, `windows.yml`** because they run on the source branch's push instead. Forks needing PR-time runs use `workflow_dispatch` (operator escape hatch).
+### `ci.yml` is capped at four jobs
 
-### Concurrency
+`lint` (fmt, clippy, and the full battery of `xtask` architectural
+checks — see ADR-010), `test` (the workspace nextest run),
+`mcp-server-smoke`, and `nix-flake-check`. Nothing
+platform-specific (macOS, live KVM, Windows) or slow (OCI ratification,
+dependency audit, the full builder-VM image build) runs on every push —
+those live in `ci-full.yml`, run only by explicit `workflow_dispatch`.
 
-Each workflow keeps its `concurrency.group: ${{ github.workflow }}-${{ github.ref }}` with `cancel-in-progress: true` so superseded SHAs don't pile up.
+### The merge queue's required checks
+
+`ci.yml` and `architecture.yml` are the only two workflows that run on
+`merge_group`, making them the required checks a PR must pass before it
+merges. `ci-full.yml`, `security.yml`, and `windows.yml` are not part of
+the merge-queue gate.
 
 ### Pre-commit hook (`.githooks/pre-commit`)
 
-Stays light at first: `cargo fmt --all` + `nix fmt` on staged files (current behaviour). **Phase 1 upgrades** to also run the heavier checks where the host can run them:
+Activated via `git config core.hooksPath .githooks`, it runs on every
+local commit: `cargo fmt --all` (auto-fixes and re-stages), then
+`cargo clippy --workspace --all-targets -- -D warnings` — the same
+`-D warnings` gate CI enforces, skippable per-commit via
+`MVM_SKIP_CLIPPY=1` for fast iteration (CI still gates the merge) — and
+`nix fmt` on any staged `.nix` file when the `nix` CLI is present,
+skipped silently otherwise. `cargo test --workspace`, `cargo deny check`,
+and `just ci` are documented pre-push checks, not pre-commit ones — too
+slow to run on every commit.
 
-- Linux contributors: `cargo clippy --workspace --all-targets -- -D warnings` + `cargo nextest run --workspace` (native; everything just works).
-- macOS contributors: same commands, run through a configured Linux Nix builder (`nix-darwin`'s `linux-builder`, or a remote `nix-daemon`). The hook detects the builder via a `nix store ping` against the configured remote-store URL; if unavailable it prints a clear hint and skips the heavy checks.
+### `just ci`
 
-ADR-004 dropped Lima from mvm's dependency surface, so the heavy-check path is host-Nix-direct rather than `limactl shell …`. Contributors who prefer a local Linux VM are free to use one (Lima still works, OrbStack works, a remote Linux box works) — the hook just doesn't depend on a specific tool.
-
-### `just ci` recipe
-
-A single `just ci` target reproduces what the on-push CI does, so devs can sanity-check before pushing. Phase 0 ships a stub; Phase 1 fills it out.
-
-### In-`ci.yml` job gating (per-PR lane set)
-
-The trigger split above ("push runs CI; release runs everything else") is also enforced **inside `ci.yml` at the job level**, because everything lives in one workflow. `ci.yml` had drifted to spawn ~22 jobs per push (many gated only at the *step* level, so the runner still spun up + checked out + ran a paths-filter before skipping). The gate is now at the **job** level:
-
-- **Per feature-branch push — five lanes:** `lint`, `test`, `mcp-server-smoke`, `nix-flake-check`, and `security-gates`.
-- **`security-gates`** consolidates the fast ubuntu cargo/script claim checks (claims 9/11/14 — sealed-prod allowlist, app-deps-audit, and the OCI adversarial/digest/manifest/prod/reproducibility/ext4 tests) into **one** runner instead of ~8. It runs only on feature branches (`if: github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/v')`).
-- **Everything else** — the macOS lanes (`apple`, `libkrun-macos`), KVM lanes (`ch-linux`, `workload-spawn-smoke-linux`), the nix `builder-vm-image-linux` build, `jailer-lite-property` (claims 1/2 — needs a Landlock-capable kernel + passt), `e2e`, and the per-claim OCI jobs — carries `if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')`. The per-claim OCI jobs are skipped on feature branches (covered by `security-gates`) and run individually on main + tags (where `security-gates` is skipped), so there is no duplication.
-
-Net: a feature-branch push runs **5 lanes instead of ~22**. Per-PR claim coverage (ADR-001) is preserved for claims 9/11/14 via `security-gates`; claims 1/2 (seccomp/Landlock) move to main + release because they require kernel features the hosted ubuntu PR runner can't guarantee. Full coverage still runs at merge-to-main and at release tags.
+`just ci` (`lint`, `test`, `test-doc`, `bdd`) reproduces what `ci.yml`'s
+push lane checks, so a contributor can sanity-check locally before
+pushing.
 
 ## Consequences
 
-**Positive**:
-- Feature-branch developers get CI feedback on every push.
-- Release-time gates aren't paid on every PR.
-- Pre-commit + on-push CI + release CI form three checkpoints with clear responsibilities.
-- Forks still have a path (`workflow_dispatch`).
+An ordinary push gets fast, complete feedback from the checks that
+matter for almost every change — four Linux-only jobs plus the
+architecture-invariant lane. An operator opts into the expensive
+platform, live-VM, and OCI-ratification matrix deliberately through
+`ci-full.yml`, rather than paying for it on every push.
 
-**Negative**:
-- `push:` (any branch) means `ci.yml` runs even on draft / experimental branches. Mitigated by concurrency cancellation: only the latest SHA matters.
-- Loss of pre-merge guarantee: a PR may merge without CI having run if the source branch was pushed before the PR was opened. Mitigated by branch-protection requiring `ci.yml` to be a required check.
+A change that only breaks on macOS or under live KVM is not caught until
+someone runs `ci-full.yml`, or until a release-time gate runs — there is
+a real gap between "push is green" and "every platform has been
+exercised."
 
-**Neutral**:
-- Existing workflows keep their structure; only triggers change.
-
-## Alternatives considered
-
-- **Keep `pull_request` triggers**: rejected. Doubles CI cost on PR pushes for the same SHA.
-- **`push:` to main only + `pull_request:`**: rejected. Drops feature-branch feedback entirely.
-- **Run everything on every push**: rejected. Cost-prohibitive (Windows runners are 2× Linux; the security audit lane is slow).
-
-## Threat model impact
-
-- The release gates (security audit, reproducibility, signing) all still run before any artifact ships. No regression.
-- A subverted release would have to bypass the `release.yml` + `publish-crates.yml` chain, which is signed and gated.
-
-## Compliance impact
-
-- SOC 2: positive — separation of dev-time vs. release-time controls is a documented control distinction.
-- All others: neutral.
+Release-time-only gates (`security.yml`, `windows.yml`, `release.yml`)
+stay timed to minimize per-push cost while still forming a hard backstop
+before anything ships.
