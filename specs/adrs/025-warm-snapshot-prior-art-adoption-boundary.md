@@ -1,196 +1,111 @@
-# ADR-025 — Warm-snapshot prior art: adoption boundary
+# ADR-025: Warm-snapshot prior art — adoption boundary
 
-**Status:** Proposed
-**Date:** 2026-06-05
-**Numbering:** 073 is next-after-highest in `specs/adrs/` (main tops at 072 —
-`072-qemu-dev-builder-backend` landed first, so this was renumbered 072 → 073).
-`xtask check-spec-numbers` (a Lint gate) hard-fails on a duplicate integer prefix —
-re-confirm 073 is free against open PRs before merge and renumber if taken.
+## Status
 
-> **Update (superseded in part):** Decision #2 below ("mvm stays on
-> Virtualization.framework") did not hold — mvm subsequently dropped the Vz
-> (Apple Virtualization.framework) backend entirely and replaced it with an
-> in-house HVF backend that binds Hypervisor.framework directly (Plan 214 /
-> Plan 226 R1P1). The rest of this ADR's analysis (page-cache priming, refusal
-> of cross-workload guest reuse, refusal of TSI networking) is unaffected and
-> still holds.
+Proposed. Records a design boundary for future warm-path work; nothing
+in this ADR has shipped yet.
 
 ## Context
 
-A wider prior-art sweep of the macOS fast-boot microVM space turned up a
-**pooled OCI-microVM runtime** — a single-crate Rust library that runs any
-OCI/Docker image as a hardware-isolated microVM, production-ready on Apple
-Silicon. (Referred to obliquely per the repo naming policy
-[[feedback_no_competitor_names_anywhere]]; trait disambiguation lives in auto-memory
-`reference_objc2_vz_external_references`. It is a *commercial* sandbox product,
-not an OSS research sibling like the one Plan 157 cites — hence the oblique handling.)
+A wider survey of the fast-boot microVM space turned up a commercial
+sandbox runtime that binds the host hypervisor interface directly and
+runs OCI images as hardware-isolated microVMs with measured boot times in
+the tens of milliseconds and cold snapshot-restore times under 100 ms on
+Apple Silicon. It is the closest external proof point for the warm-boot
+work mvm's own snapshot/restore and fork/fan-out design is aiming at, so
+it is worth a deliberate record of what mvm takes from it and what it
+refuses — because its fastest paths are built on tradeoffs mvm's security
+posture forbids.
 
-It is the closest external proof point yet for the warm-path cluster mvm is
-building (Plan 140 snapshot/restore productionization, Plan 148 fork-fanout,
-Plan 157 warmed-parent recipes, Plan 152/159 Rust-native VZ). Its measured
-numbers — ~10–50 ms boot, sub-100 ms cold snapshot restore on Apple Silicon —
-are the bar mvm's warm path is reaching for. So it is worth a deliberate record
-of **what we take from it and what we refuse**, because its fastest paths are
-built on tradeoffs mvm's security posture forbids.
+This ADR is clean-room: it records design-level learnings from public
+documentation, not copied code. Nothing here vendors or links the
+runtime it studies; it is inspiration, never a dependency.
 
-Defining traits (by which the oblique reference is keyed):
-
-- **HVF-direct.** Binds Hypervisor.framework directly (`applevisor-sys`), a layer
-  *below* both mvm's Vz (Virtualization.framework) and libkrun paths. That
-  low-level control over guest memory is what buys the CoW snapshot/restore speed.
-- **Page-cache-baked warm snapshots.** A `with_warmup` bake runs the workload once
-  during image build and captures a snapshot whose **guest page cache is already
-  populated**; a tag (`with_warmup_tag`) invalidates stale bakes. New workers start
-  warm, not merely booted — the restored guest does not pay cold page-fault cost on
-  first access to its working set.
-- **CoW restore as the boot primitive.** An `Image` *is* a baked snapshot; restore
-  maps it copy-on-write, so memory overhead per restored VM stays low.
-- **Auto-scaling pool with cross-cycle reuse.** A pool (`min`/`max`/`idle_timeout`)
-  hands out workers; `restore_on_release(false)` ("skip-restore") drops a released
-  worker straight back to idle **without** restoring snapshot state, keeping the
-  guest page cache hot across cycles (~7× on rustc-class jobs). Safe *only* because
-  the workloads it targets overwrite their own outputs.
-- **TSI networking.** AF_INET TCP/UDP is handled transparently by the host TSI
-  socket family; AF_NETLINK, raw sockets, multicast, TUN/TAP, and ICMP are
-  unsupported.
-- Bundled guest kernel + init shim, extracted at build/runtime — the same shape as
-  mvm's libkrunfw `extract_bundled_kernel()` and embedded `stage0-init` (ADR-004).
-
-This ADR is clean-room: it records *design-level* learnings from public docs, not
-copied code. The runtime is Apache-2.0; nothing here vendors or links it
-([[feedback_replace_over_workaround]], [[feedback_limit_dependencies]] — inspiration,
-never a dependency, exactly as Plan 152/159 treat the VZ references).
+Its defining techniques: driving the host hypervisor interface directly
+(a layer below both of mvm's macOS backends) for tighter control over
+guest memory; baking a "warmed" snapshot at image-build time whose guest
+page cache is already populated, so a restored guest doesn't pay cold
+page-fault cost on first access to its working set; treating a restored
+image as a copy-on-write mapping of that baked snapshot, so restore
+overhead stays low; an auto-scaling pool that can hand a released worker
+straight back to idle *without* restoring snapshot state, keeping the
+guest's page cache hot across job cycles; and routing guest network I/O
+through a host-side socket-translation layer that handles ordinary
+TCP/UDP transparently but has no support for raw sockets, multicast,
+TUN/TAP, or ICMP.
 
 ## Decision
 
-Four sub-decisions. Two adopt, two refuse.
+### Adopt — page-cache priming at freeze time
 
-### 1. Adopt — page-cache priming at freeze time
+When a warm-parent snapshot is taken at its ready point, prime the guest
+page cache (touch the declared working set) so the snapshot captures a
+warm cache, and let restore inherit that warmth. This is a refinement of
+the freeze step in mvm's own warm-snapshot design, not a new mechanism —
+it composes with the existing three-layer model (immutable verity rootfs
+plus sealed warm overlay plus memory snapshot): page-cache warmth becomes
+a property of the memory-snapshot layer, captured once at freeze, costing
+nothing at child boot. This is pure upside under mvm's model because the
+warmth lives inside a snapshot that is already signed, sealed, and
+single-workload — nothing about admission, provenance, or the audit
+chain has to change to get it.
 
-Fold a page-cache-priming step into the existing warm-path producer/consumer, not
-a new mechanism: when Plan 157's freeze takes the memory snapshot at the ready
-point, prime the guest page cache (touch the declared working set) so the snapshot
-captures a warm cache, and let Plan 140's restore inherit that warmth. This is a
-*refinement of the freeze step*, distinct from Plan 157's existing warmup (which
-primes **disk** state — `initdb` output into a warm overlay). Page-cache priming
-primes **memory** — the same files paged in — so the first post-restore access
-does not fault from disk.
+**Scope constraint — the immutable rootfs only, never volumes, never
+secrets.** A primed page cache becomes part of the memory snapshot every
+forked child restores from, so priming anything mutable or sensitive
+would share it across every fork. Priming is therefore confined to the
+read-only, verity-sealed root volume; a declared working set that
+resolves outside it is rejected. Mounted data and app-dependency volumes
+are never primed into the shared base — each fork gets its own
+per-instance volume disposition — and secrets never live in any volume
+to begin with, since they arrive as destination-bound signed credentials
+over the host broker, never as raw bytes in the guest.
 
-It composes cleanly with the three-layer warm-parent model (immutable verity rootfs
-+ sealed warm overlay + memory snapshot): page-cache warmth is a *property of the
-memory-snapshot layer*, captured once at freeze, costing nothing at child boot.
-Tracked as a Plan 157 deferred follow-up; it sequences behind the same memory-
-snapshot substrate (Plan 123 Phase C / Plan 140) the rest of the freeze leg needs.
+### Refuse — cross-workload guest reuse
 
-**Why adopt:** it is the one mechanism here that is pure upside under mvm's model —
-it makes a *signed, sealed, single-workload* snapshot boot faster without touching
-isolation, provenance, or the audit chain. The warmth lives in the snapshot the
-freeze already produces and admits.
+The studied runtime's fastest path reuses a dirty guest across jobs:
+page cache and other in-memory state survive from one workload to the
+next. That directly violates two standing invariants: one guest is one
+workload (a reused guest is a multi-workload guest, which mvm's threat
+model does not cover), and every workload boots from a freshly
+synthesized, signed execution plan that is admitted and audited — a
+worker pulled hot from a pool with prior in-memory state has no fresh
+admission and carries un-attested residue across the audit boundary.
+mvm's warm path is the opposite shape: fork fresh children from one
+paused base, each getting its own identity (address, instance id, secrets
+disk, nonce) and post-resume hygiene (entropy reseed, clock resync,
+generation-id rotation). mvm adopts warm *snapshots*; it refuses warm
+*guests*. The only tier where cross-cycle reuse is even conceivable is
+the dev-only builder VM, a different security tier where the hardened
+workload claims don't apply — and even there it is out of scope for this
+ADR, needing its own decision and its own threat-model note if ever
+pursued. It is never available to workload microVMs.
 
-**Scope constraint — prime the immutable rootfs only, never volumes, never secrets.**
-A primed page cache becomes part of the memory snapshot that forked children
-(Plan 157 / 148) all restore from, so priming anything mutable or sensitive would
-share it across every fork — a claim-1 / claim-11 confidentiality leak. Priming is
-therefore confined to the read-only, verity'd **root volume** (binaries/libs); the
-declared working set must resolve inside it. Mounted data / app-dep volumes are never
-primed into the shared base (each fork gets its own per-instance volume disposition),
-and secrets never live in any volume to begin with — they arrive as destination-bound
-signed credentials over the host broker (`host.secrets.v1`, claims 12/13), never as
-raw bytes in the guest. The freeze step must reject a `prime_paths` that escapes the
-rootfs.
+### Refuse — transparent host-socket networking
 
-### 2. Adopt (as a data point, no direction change) — HVF-direct as a reference for the Rust-native VZ path
+The studied runtime routes guest network I/O through a host-side socket
+translation layer rather than a real virtio-net device. mvm removed the
+equivalent shortcut from its own history for the same reason it refuses
+to adopt one here: bypassing virtio-net means guest traffic never crosses
+the auditable network bridge every byte leaving a guest is required to
+traverse. This ADR does not reopen that decision; the studied runtime's
+own documented limitation list for that approach — no raw sockets, no
+multicast, no TUN/TAP, no ICMP — is cited here as independent supporting
+evidence for the cost mvm already chose to pay by staying on virtio-net,
+not as a reason to reconsider.
 
-> Superseded — the Vz/Virtualization.framework backend was removed; HVF is the macOS
-> backend. The "mvm stays on Virtualization.framework" call below did not hold (see the
-> top-of-doc update note); the design record is kept for its HVF-direct analysis, not as
-> a live decision.
+## Out of scope
 
-The runtime's HVF-direct design demonstrates that driving the hypervisor a layer
-below Virtualization.framework is viable and is where its snapshot/restore speed
-comes from. Record this as a reference data point for Plan 152's Rust-native VZ
-supervisor — **not** a direction change. mvm stays on Virtualization.framework: the
-entitled-TCB-as-a-tiny-separate-process invariant, the entitlement model, and the
-maintenance cost of an HVF-direct VMM all argue against dropping to raw HVF
-(ADR-007, Plan 152 Decision). The honest tradeoff — VZ.framework gives less control
-over guest memory, which is exactly the lever fast CoW restore wants — belongs in
-Plan 152/140's design notes, not in a backend rewrite.
-
-### 3. Refuse — cross-workload guest reuse (skip-restore / pooled hot cache)
-
-The runtime's fastest path (`restore_on_release(false)`) **reuses a dirty guest
-across workloads** — page cache, and any other in-memory state, survive from one job
-to the next. That directly violates two standing mvm invariants:
-
-- **One guest = one workload** (ADR-001 §"Out of scope" — multi-tenant guests are
-  explicitly not in the threat model). A reused guest is a multi-workload guest.
-- **Per-run admission + audit** (claim 8 / ADR-014): every workload boots from a
-  freshly synthesized, signed `ExecutionPlan` and emits `plan.admitted` /
-  `plan.launched` to the chain. A worker pulled hot from a pool with prior in-memory
-  state has no fresh admission and carries un-attested residue across the audit
-  boundary.
-
-mvm's warm path is the *opposite* shape: fork/restore N **fresh** children from one
-*paused* base (Plan 148), each getting fresh per-instance identity (IP, instance-id,
-secrets disk, nonce) and post-resume hygiene — entropy reseed, clock resync, VMGenID
-(Plan 140 gaps #2/#3, Plan 122 D). The runtime's pool is the anti-pattern that
-machinery exists to prevent. We adopt warm *snapshots*; we refuse warm *guests*.
-
-The single place reuse is even conceivable is the **dev-tier builder VM** — a
-different security tier where the hardened workload claims do not apply
-([[feedback_dev_vm_vs_prod_security_tiers]]). Even there it is out of scope for this
-ADR: builder-VM warm reuse, if ever pursued, gets its own plan with its own
-threat-model note. It is **never** available to workload microVMs.
-
-### 4. Refuse — TSI networking (already decided; cited as supporting evidence)
-
-The runtime routes guest network I/O through the host TSI socket family. mvm removed
-TSI entirely (ADR-014 §W6.A amendment / Plan 102 W6.A / Plan 142): TSI bypasses
-virtio-net, violating the claim-10 no-bypass invariant — every byte leaving a guest
-must traverse the auditable gvproxy/passt bridge. This ADR does **not** reopen that;
-it cites the runtime's own documented TSI limitation list (AF_NETLINK, raw sockets,
-multicast, TUN/TAP, ICMP all unsupported) as **independent supporting evidence** for
-the cost mvm already chose to pay by going virtio-net. The limitation list is a
-witness, not a reconsideration.
-
-## Out of scope (named)
-
-Adjacent surfaces this ADR deliberately does not own, named so readers do not expect
-them here:
-
-- **Pool orchestration policy** — warm-pool sizing, wake-time admission, fan-out
-  count. Fleet concern; lives in mvmd (`../mvmd/specs/plans/53-warm-pool-ms-restore.md`)
-  and Plan 148 / 159 WS-1.
-- **The warmed-parent producer lifecycle** — declarative warmup contract, ready
-  probe, freeze, provenance. Owned by Plan 157; this ADR only adds the page-cache
-  follow-up to it.
-- **Restore correctness gaps** — seccomp-on-restore, entropy reseed, clock resync,
-  wake admission. Owned by Plan 140.
-- **The Rust-native VZ supervisor migration** — drop-Swift, objc2-virtualization,
-  in-process payload tap. Owned by Plan 152; HVF-direct is a data point for it, not
-  a deliverable here.
-- **Builder-VM warm reuse** — the one dev-tier place cross-cycle reuse is
-  conceivable; needs its own plan + threat-model note if ever pursued.
+Warm-pool sizing and admission policy at the fleet level; the warmed-
+parent producer's declarative warmup contract and its ready probe;
+restore-correctness gaps (seccomp-on-restore, entropy reseed, clock
+resync); and builder-VM warm reuse, which needs its own plan and
+threat-model note if ever pursued. Each is a decision for the workstream
+that owns it, not this one.
 
 ## Consequences
 
-- Plan 157 gains a deferred follow-up (page-cache priming at freeze); no schema or
-  code change lands from this ADR — it is a design record plus a tracked follow-up.
-- The oblique reference is added to the auto-memory disambiguation key
-  (`reference_objc2_vz_external_references`) so future sessions can decode "the
-  pooled OCI-microVM runtime" without a name reaching repo text or memory.
-- No claim changes. This is a prior-art/adoption-boundary ADR, not a security-claim
-  ADR; the ADR-001 numbered table is untouched.
-
-## References
-
-- [ADR-001](001-microvm-security-posture.md) — security posture; one-guest-one-workload, claim numbering
-- [ADR-014](014-signed-audited-execution-plans.md) — claim 8, signed/audited `ExecutionPlan` (per-run admission)
-- [ADR-007](007-vmbackend-single-trait.md) — `VmBackend` trait; the now-superseded Vz backend design and its replacement by HVF
-- [ADR-014](014-signed-audited-execution-plans.md) §W6.A — no-bypass invariant, TSI removed
-- [ADR-004](004-sealed-signed-builder-image.md) — bundled-kernel/embedded-init extraction shape
-- [Plan 140](../plans/140-snapshot-restore-productionization.md) — restore productionization (inherits page-cache warmth)
-- [Plan 148](../plans/148-microvm-fork-fanout-and-branch.md) — fork-fanout of fresh children from a paused base
-- [Plan 152](../plans/152-rust-native-vz-and-init-lifecycle-parity.md) — Rust-native VZ supervisor (HVF-direct data point)
-- [Plan 157](../plans/157-warmed-parent-recipes.md) — warmed-parent producer (page-cache follow-up lands here)
-- [Plan 159](../plans/159-vz-inspired-macos-dx.md) — vz-inspired macOS DX (warm path WS-1)
+Page-cache priming at freeze time is a deferred follow-up on mvm's
+existing warm-snapshot design; no code or schema exists yet. No security
+claim changes as a result of this ADR — it is a prior-art boundary
+record, not a security-claim ADR.
