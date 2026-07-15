@@ -606,7 +606,7 @@ All notable changes to mvm are documented in this file.
 - **plan-200**: Frame old verbs as advanced/underlying surfaces (§A 821)
 - **plan-204**: Sync REFACTOR-STATUS WS-D state (FlakeCheck routing landed; build route blocked)
 - **plan-200**: Record live Firecracker-lane machine-run phase timing (KVM)
-- **machine**: Unified `machine run` lifecycle — ADR-091 + Plan 207
+- **machine**: Unified `machine run` lifecycle — ADR-077 + Plan 207
 - **adr-092**: `machine` as the sole workload CLI surface (consolidation)
 - **adr-093**: Linux builder auto-fallback over libkrun, default unchanged
 - **plan-210**: Kernel-pin security watcher (ADR-014 §6 follow-up)
@@ -623,7 +623,7 @@ All notable changes to mvm are documented in this file.
 - ADR-041 + Plan 215 plan-bound agent verb capabilities
 - Plan 216 — mvm-client local/remote facade implementation plan
 - Mvm-client facade design + mvmd cloud-readiness assessment (research)
-- ADR-105 + Plan 218 — converge SDK/facade machine-driving on MvmClient
+- ADR-077 + Plan 218 — converge SDK/facade machine-driving on MvmClient
 - **plan**: Plan 221 — in-process rootfs materialization (no subprocess)
 - **adr**: ADR-005 — Phase-A/Phase-B build boundary (Plan 221 B0)
 - **adr**: ADR-005 virtiofs-root integrity decision + Plan 223 impl plan
