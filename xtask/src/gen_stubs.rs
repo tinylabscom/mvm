@@ -82,8 +82,8 @@ fn artifacts() -> &'static [StubArtifact] {
                 "emit_workload_schema",
             ],
             schema_path: "schema/workload-ir-v0.json",
-            python_path: "crates/mvm-sdk/python/mvm/_ir/workload.py",
-            ts_path: "crates/mvm-sdk/typescript/src/ir/workload.ts",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_ir/workload.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/ir/workload.ts",
             class_name: "Workload",
             stem: "workload-ir-v0",
         },
@@ -100,8 +100,8 @@ fn artifacts() -> &'static [StubArtifact] {
                 "emit_protocol_schema",
             ],
             schema_path: "schema/protocol-v0.json",
-            python_path: "crates/mvm-sdk/python/mvm/_protocol/protocol.py",
-            ts_path: "crates/mvm-sdk/typescript/src/protocol/protocol.ts",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_protocol/protocol.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/protocol/protocol.ts",
             class_name: "Protocol",
             stem: "protocol-v0",
         },
@@ -118,8 +118,8 @@ fn artifacts() -> &'static [StubArtifact] {
                 "emit_broker_schema",
             ],
             schema_path: "schema/broker-services-v0.json",
-            python_path: "crates/mvm-sdk/python/mvm/_broker/services.py",
-            ts_path: "crates/mvm-sdk/typescript/src/broker/services.ts",
+            python_path: "crates/mvm-sdk/sdks/python/mvm/_broker/services.py",
+            ts_path: "crates/mvm-sdk/sdks/typescript/src/broker/services.ts",
             class_name: "BrokerServices",
             stem: "broker-services-v0",
         },
@@ -358,11 +358,11 @@ mod tests {
         assert!(proto.emit_args.contains(&"emit_protocol_schema"));
         assert_eq!(
             proto.python_path,
-            "crates/mvm-sdk/python/mvm/_protocol/protocol.py"
+            "crates/mvm-sdk/sdks/python/mvm/_protocol/protocol.py"
         );
         assert_eq!(
             proto.ts_path,
-            "crates/mvm-sdk/typescript/src/protocol/protocol.ts"
+            "crates/mvm-sdk/sdks/typescript/src/protocol/protocol.ts"
         );
         assert_eq!(proto.class_name, "Protocol");
     }

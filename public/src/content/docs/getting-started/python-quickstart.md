@@ -5,7 +5,7 @@ description: Use the current Python SDK runtime surface and the static decorator
 
 This page shows the three Python paths: the one-shot `exec` (the quickest), the imperative sandbox lifecycle, and static workload declaration.
 
-> **Status:** The Python package in `crates/mvm-sdk/python` has `Sandbox.create(...)`, `Sandbox.exec(...)`, `commands.start(...)`, `files.write(...)`, record mode, live mode, and context-manager cleanup. Higher-level helpers such as `commands.run(...)`, file read/list/remove, ports, logs, and cold-mode methods are parity work.
+> **Status:** The Python package in `crates/mvm-sdk/sdks/python` has `Sandbox.create(...)`, `Sandbox.exec(...)`, `commands.start(...)`, `files.write(...)`, record mode, live mode, and context-manager cleanup. Higher-level helpers such as `commands.run(...)`, file read/list/remove, ports, logs, and cold-mode methods are parity work.
 
 ## Run a command (five lines)
 

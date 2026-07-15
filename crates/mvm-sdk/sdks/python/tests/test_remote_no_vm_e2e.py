@@ -37,7 +37,7 @@ import pytest
 import mvm
 
 # Repo root is five levels up from this file:
-#   crates/mvm-sdk/python/tests/test_remote_no_vm_e2e.py → repo root
+#   crates/mvm-sdk/sdks/python/tests/test_remote_no_vm_e2e.py → repo root
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 _DEFAULT_DEBUG_BIN = _REPO_ROOT / "target" / "debug" / "mvmctl"
 

@@ -42,7 +42,7 @@ git clone https://github.com/tinylabscom/mvm.git && cd mvm
 cargo build --release && cp target/release/mvmctl ~/.local/bin/
 
 # Language SDKs
-pip install mvm                 # Python  (or: pip install ./crates/mvm-sdk/python)
+pip install mvm                 # Python  (or: pip install ./crates/mvm-sdk/sdks/python)
 npm install @runmvm/mvm         # TypeScript
 ```
 
@@ -499,8 +499,8 @@ attestation.
   [Python quickstart](public/src/content/docs/getting-started/python-quickstart.md)
 - [CLI reference](public/src/content/docs/reference/cli-commands.md)
 - [SDK docs](public/src/content/docs/sdk/) ·
-  [Python SDK](crates/mvm-sdk/python/README.md) ·
-  [TypeScript SDK](crates/mvm-sdk/typescript/README.md)
+  [Python SDK](crates/mvm-sdk/sdks/python/README.md) ·
+  [TypeScript SDK](crates/mvm-sdk/sdks/typescript/README.md)
 - [Writing Nix flakes for guests (mkGuest)](public/src/content/docs/guides/nix-flakes.md)
 - [Secrets and credentials](public/src/content/docs/guides/secrets-and-credentials.mdx) ·
   [Network egress policy](public/src/content/docs/guides/network-egress-policy.mdx) ·

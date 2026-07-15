@@ -93,18 +93,18 @@ runtime-overlay-build *ARGS:
 # Build the publishable SDK artifacts without building the full Rust workspace.
 sdk-build: sdk-build-python sdk-build-typescript
 
-# Build the Python SDK wheel + sdist into crates/mvm-sdk/python/dist/.
+# Build the Python SDK wheel + sdist into crates/mvm-sdk/sdks/python/dist/.
 sdk-build-python:
-    uv build crates/mvm-sdk/python --out-dir crates/mvm-sdk/python/dist
+    uv build crates/mvm-sdk/sdks/python --out-dir crates/mvm-sdk/sdks/python/dist
 
 # Install TypeScript SDK dependencies locally. Run once after a fresh clone or
 # whenever package-lock.json changes.
 sdk-install-typescript:
-    npm --prefix crates/mvm-sdk/typescript ci
+    npm --prefix crates/mvm-sdk/sdks/typescript ci
 
-# Build the TypeScript SDK into crates/mvm-sdk/typescript/dist/.
+# Build the TypeScript SDK into crates/mvm-sdk/sdks/typescript/dist/.
 sdk-build-typescript:
-    npm --prefix crates/mvm-sdk/typescript run build
+    npm --prefix crates/mvm-sdk/sdks/typescript run build
 
 # ── Testing (nextest) ────────────────────────────────────────────────────
 

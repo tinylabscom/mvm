@@ -5,7 +5,7 @@ description: Use the current TypeScript SDK runtime surface and static workload 
 
 This page shows the current TypeScript SDK shape for local sandbox lifecycle and static workload declarations.
 
-> **Status:** The TypeScript package in `crates/mvm-sdk/typescript` has `Sandbox.create(...)`, `commands.start(...)`, `files.write(...)`, record mode, live mode, and `Symbol.dispose` cleanup. Higher-level runtime methods are parity work.
+> **Status:** The TypeScript package in `crates/mvm-sdk/sdks/typescript` has `Sandbox.create(...)`, `commands.start(...)`, `files.write(...)`, record mode, live mode, and `Symbol.dispose` cleanup. Higher-level runtime methods are parity work.
 
 ## Imperative runtime
 
