@@ -66,6 +66,32 @@ None — purely a refactor of the abstraction layer. The same security operation
 None.
 
 
+## Consolidated from ADR-030 — Multi-Backend VM Execution
+
+mvmctl runs isolated microVM workloads across platforms with uneven
+hypervisor availability, so the original decision (ADR-030, superseding
+ADR-001's Firecracker-only scope) was to keep Firecracker as the primary
+production backend but put every backend behind one interface — the
+`VmBackend` trait this ADR defines — and auto-select the best one for the
+host rather than require manual configuration. That framing (multiple VM
+backends, one trait, capability-driven auto-select) is unchanged and is the
+premise the rest of this document builds on.
+
+The concrete backend list ADR-030 named has since moved: Docker (a Tier-3
+fallback) and Cloud Hypervisor were deleted outright (see §"Consolidated
+from ADR-076" above — neither carried unique claim coverage), and the Apple
+Virtualization.framework (`Vz`) / `apple-container` backends were removed in
+favor of the in-house HVF backend (see §"Consolidated from ADR-098" above).
+The current, live backend matrix is: **Firecracker** — the Tier-1 production
+workload runtime on Linux `/dev/kvm`; **libkrun** — macOS 13-25 and Linux
+(both the execution and, where selected, the builder-VM role); **HVF** —
+the in-house Hypervisor.framework VMM and macOS 26+ Apple Silicon default.
+Every backend consumes artifacts from the same build pipeline (a Nix-built
+rootfs, or an OCI-derived rootfs per claim 14) — only the runtime driving
+the VM differs, exactly as ADR-030's "same rootfs, different runtime"
+principle intended.
+
+
 ## Consolidated from ADR-046 — Move the builder VM off libkrun onto libkrun + firecracker
 
 > **Consolidation note:** an earlier draft of this ADR proposed itself as the canonical builder-VM architecture doc, consolidating ADR-013, ADR-057, and ADR-065 — that merge was never carried out (those three remained standalone files). The ADR-wide consolidation pass folded ADR-046 itself into this document (ADR-007, the backends/hypervisor-abstraction canonical); ADR-013, ADR-057, and ADR-065 were separately folded into ADR-004 (the builder-VM/Stage-0/seed canonical). Current state reflects ADR-065's single `builder-vm` flake with `default`/`dev` attrs.

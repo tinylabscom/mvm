@@ -1,4 +1,4 @@
-# ADR-031: Pivot to libkrun + libkrun + microvm.nix
+# ADR-030: Pivot to libkrun + libkrun + microvm.nix
 
 ## Status
 
@@ -100,7 +100,7 @@ If a microvm.nix per-bump audit (`xtask audit-flake`) surfaces a security regres
 ## Alternatives considered
 
 - **Keep Lima as a fallback** — rejected. Maintains a code path that doesn't get exercised in the pivot's primary use case. Either Lima is good enough to be the macOS path (it isn't, per UX measurements) or it's dead code.
-- **Cloud Hypervisor as primary** — rejected for now. CH is heavier than Firecracker and lacks the existing security work; revisit when GPU passthrough (VFIO) is needed (covered in ADR-030 in the spec tree).
+- **Cloud Hypervisor as primary** — rejected for now. CH is heavier than Firecracker and lacks the existing security work; revisit when GPU passthrough (VFIO) is needed (covered in ADR-007 in the spec tree).
 - **Hand-rolled Nix flake (no microvm.nix)** — rejected. The previous iteration's hand-rolled flake was ~5000 LOC of NixOS module work; microvm.nix replaces most of that and is actively maintained.
 
 ## Threat model impact
