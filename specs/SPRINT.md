@@ -29,6 +29,8 @@ AI-driven development left the tree far larger and more tangled than the product
 
 The bar: a codebase an **expert human can read and navigate**, fully tested, following the Rust guidelines in the referenced gist. **Non-negotiable:** security, auditability, attestation-via-nix, and data governance are preserved or strengthened, never traded away.
 
+**Core goal — wasm containers from the same architecture.** The `VmBackend` seam + `Workload` IR + one host egress/audit boundary must also run a workload as a **wasm container** (a `WasmBackend`, WASI wasm module), not only a microVM — supporting more backends from one model and reaching hosts without KVM/HVF (CI, edge, the browser). This is enabled by, and makes non-optional, a **`no_std` core**: `mvm-protocol` builds `#![no_std] + alloc` on `wasm32` with tests, CI-gated. Full design in `specs/refactor/02-architecture.md` §Wasm-container; workstream is WS11 (promoted to core).
+
 ### Reference models (studied, not copied)
 - **supermachine** (single crate, 4 bins, ~20 deps, **one** feature, bundled kernel, HVF via `applevisor-sys`, KVM via `kvm-ioctls`, `mio` event loop instead of a full async runtime, `mimalloc`, sub-100ms snapshot restore). North star for lean deps + low memory + external API shape (`Image`/`Vm`/`Pool`/`ExecBuilder`, warmup/snapshot/streaming-exec/`expose_tcp`/live host mounts).
 - **microsandbox** crate naming: `agentd`, `cli`, `filesystem`, `image`, `network`, `protocol`, `runtime`, `utils`. Adopted (with `mvm-` prefix).
@@ -96,9 +98,9 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 
 ### 2.5 Backend & egress model
 
-- Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload). QEMU **dropped**. `mock` behind `test-support`.
+- Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload), and **wasm** (`WasmBackend` — WASI wasm-container; core goal, see §1 + WS11). QEMU **dropped**. `mock` behind `test-support`.
 - Selected via the existing `BackendKind` enum + `backend_catalog!` registry — **never string-matched**. The ~6 remaining `backend.name() == "…"` sites in `mvm-cli` and the dead `"vz"` arms are removed.
-- **Vsock/UDS is the sole egress seam on every workload backend.** libkrun + HVF already comply; **Firecracker moves off TAP+iptables onto the smoltcp vsock tunnel** (folds PR #1717 / issue #1701). Any backend that cannot mediate egress through the host fails closed on `--network-allow`.
+- **One host-mediated, default-deny, audited egress boundary on every workload backend**, transport-abstracted via `VmDuplexTransport`: vsock/UDS for the microVM backends, WASI host-calls for the wasm backend (one auditable seam, many transports — vsock is the microVM transport, not the invariant). libkrun + HVF already comply; **Firecracker moves off TAP+iptables onto the smoltcp vsock tunnel** (folds PR #1717 / issue #1701). Any backend that cannot mediate egress through the host fails closed on `--network-allow`.
 - Mount ordering is `rootfs → runtime-overlay → custom`, with an **explicit no-shadow rule**: a later mount may never shadow an earlier target; `/mvm` and `/mvm/runtime` join the deny-prefix set.
 
 ### 2.6 Security & data-governance model (preserved/strengthened)
@@ -296,10 +298,13 @@ Then unify + retire the old paths:
 - [ ] Fold each still-relevant intent into its WS; close the 8 issues + 4 PRs with a pointer to the superseding WS. Keep **#1637** open.
 - Gate: only #1637 remains open.
 
-**WS11 — wasm-container (exploratory, non-gating)**
-- [ ] Verify `mvm-protocol` builds + runs on `wasm32` in the browser.
-- [ ] Define a `WasmBackend` seam implementing the same `VmBackend`/Workload shape (run the workload as a wasm container); a browser POC. Scaffold only — not a v1 gate.
-- Gate: `mvm-protocol` wasm demo runs; the backend seam compiles.
+**WS11 — wasm-container backend + `no_std` core (CORE goal; see §2.5 + `specs/refactor/02-architecture.md` §Wasm-container)**
+- [ ] `mvm-protocol` is `#![no_std] + alloc`, `unsafe_code = "forbid"`, with a `wasm32-unknown-unknown` CI build **and its tests running under wasm**; CI-gated `no_std` boundary (nothing workload-execution-relevant reaches for `std`/OS/crypto-impl). Lands with 1a-protocol + 1b (one designed pass).
+- [ ] `WasmBackend` implements the same `VmBackend`/Workload contract, selected via `BackendKind`; runs a workload as a WASI wasm module under a host wasm runtime (`wasmtime`/`wasmer`), end-to-end.
+- [ ] Wasm egress/audit/secret-substitution rides a `VmDuplexTransport` **WASI variant** through the same default-deny host seam; wasm guest sees no secrets / emits no PII (data-governance witness covers it; `${mvm.NAME}` and all).
+- [ ] Browser POC: `mvm-protocol` + the `no_std` OCI layer decoders (per holospaces) run in the browser.
+- [ ] Resolve open design Qs: wasm-workload definition (user WASI module vs mvm-compiled), overlay/agent mapping onto a wasm instance with no Linux init, browser `mvm-fs` slice.
+- Gate: `mvm-protocol` wasm CI build + tests green; no_std-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
 
 **WS14 — mvmd contract (secondary)**
 - [ ] Freeze the mvmd-facing surface (`mvm-protocol` + `mvm-client` + `BuildEnvironment`/`ShellEnvironment` traits); document it; file the coordinated rename for the mvmd repo.
@@ -324,6 +329,7 @@ WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net`
 - Both surfaces build; `cargo nextest run --workspace` + `cargo test --workspace --doc` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all --check` green.
 - ~11 crates, 2 features, 1 host + 1 guest + 1 CLI binary, 1 base dir, 0 non-test files > 1500 lines, no `Command` outside the allow-list, no hardcoded IPs/ports, vsock-only egress on every workload backend with the data-governance witness passing.
 - All security claims still witnessed; live egress + boot smoke on Mac (HVF) and Linux (libkrun + FC); **sub-second launch** proven by the timed e2e; guest RAM demand-faulted for density.
+- **Wasm-container capable (core goal):** `mvm-protocol` builds + tests on `wasm32-unknown-unknown` in CI with a CI-enforced `no_std` boundary; a `WasmBackend` runs a workload end-to-end through the same `VmBackend` + egress/audit/secret-substitution seam (POC-gated — the v1 bar is the seam proven, not full production parity).
 - Workload stdout/stderr + exit code flow over vsock; the builder VM runs the same single guest binary.
 - `just bdd` green; every security claim and top-level CLI verb has a passing Gherkin scenario; `just ci` runs the BDD suite.
 - Root is ~8 dirs (§2.8); SDKs live under `crates/`.

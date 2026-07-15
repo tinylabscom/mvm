@@ -66,12 +66,21 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 
 ## Backend & egress model
 
-- Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload). QEMU **dropped**. `mock` behind `test-support`.
+- Backends: **libkrun** (macOS 13–25 + Linux), **HVF** (macOS 26+), **Firecracker** (Linux workload), and **wasm** (a WASI wasm-container — a core goal, see [§Wasm-container backend & `no_std` core](#wasm-container-backend--no_std-core-core-goal) below). QEMU **dropped**. `mock` behind `test-support`.
 - Selected via the existing `BackendKind` enum + `backend_catalog!` registry — **never string-matched**. The ~6 remaining `backend.name() == "…"` sites in `mvm-cli` and the dead `"vz"` arms are removed.
-- **Vsock/UDS is the sole egress seam on every workload backend.** libkrun + HVF already comply; **Firecracker moves off TAP+iptables onto the smoltcp vsock tunnel** (folds PR #1717 / issue #1701). Any backend that cannot mediate egress through the host fails closed on `--network-allow`.
+- **One host-mediated, default-deny, audited egress boundary for every backend**, transport-abstracted via `VmDuplexTransport`: vsock/UDS for the microVM backends, WASI host-calls for the wasm backend. libkrun + HVF already comply; **Firecracker moves off TAP+iptables onto the smoltcp vsock tunnel** (folds PR #1717 / issue #1701). Any backend that cannot mediate egress through the host fails closed on `--network-allow`. (The old "vsock-only" wording generalizes to "one auditable host seam, many transports" — vsock is the transport for microVMs, not the invariant.)
 - Mount ordering is `rootfs → runtime-overlay → custom`, with an **explicit no-shadow rule**: a later mount may never shadow an earlier target; `/mvm` and `/mvm/runtime` join the deny-prefix set.
 
 Full networking design (protocol, frame shape, data path): [03-networking.md](03-networking.md). Full security model built on this seam: [04-security.md](04-security.md).
+
+## Wasm-container backend & `no_std` core (core goal)
+
+The `VmBackend` seam, the `Workload` IR, and the one host-mediated egress/audit boundary are hypervisor-agnostic by construction — so the **same architecture also runs a workload as a wasm container, not only as a microVM**. This is a core goal, not a stretch: it is how mvm's sandbox reaches environments without KVM/HVF (CI runners, edge, the browser), and it is the clearest proof that the design *supports more backends from one model*.
+
+- **`WasmBackend`** implements the same `VmBackend`/Workload contract as libkrun/HVF/Firecracker and is selected through the same `BackendKind` registry (never string-matched). Instead of booting a Linux microVM it instantiates the workload as a WASI wasm module under a wasm runtime — host-side (`wasmtime`/`wasmer`) and, for the browser path, wasm-in-wasm.
+- **`no_std` is the enabling discipline, and it is CI-gated.** `mvm-protocol` (Workload IR + wire protocol + policy/audit DTOs + audit-log verifier) is `#![no_std] + alloc`, `unsafe_code = "forbid"`, and builds — with its tests — on `wasm32-unknown-unknown` in CI, so mvm's core contract compiles *into* the wasm sandbox and the browser (the holospaces path). Everything workload-execution-relevant stays `no_std`-clean; anything that reaches for `std`/OS/crypto-impl stays above the protocol line in `mvm-core` and up. This is exactly the boundary the `mvm-protocol` extraction has to draw (see [07-progress-and-decisions.md](07-progress-and-decisions.md)) — the wasm-container goal is now a **second, independent reason that cut must be clean**, which is why 1a-protocol and 1b are one designed pass. A `no_std` slice of `mvm-fs` (the OCI layer decoders, per holospaces) feeds the browser path.
+- **Same security model, WASI transport.** A wasm container has no vsock, so its egress rides WASI host-calls — but through the *same* default-deny, audited, secret-substituting host seam. The `VmDuplexTransport` abstraction ([03-networking.md](03-networking.md)) gains a WASI variant alongside Firecracker-UDS / libkrun-unixgram / HVF-vsock. A wasm guest **sees no secrets and emits no PII, identically to a microVM guest**; the chain-signed audit log covers it identically. Secrets stay host-side and are substituted only on a bound destination, `${mvm.NAME}` placeholders and all.
+- **Open design questions** (resolved when the seam is built — tracked in [06-execution-plan.md](06-execution-plan.md) WS11): what a wasm *workload* is (a user-supplied WASI module vs. an mvm-compiled workload), how the runtime-overlay/agent model maps onto a wasm instance that has no Linux init, and which slice of `mvm-fs` the browser path actually needs.
 
 ## Top-level layout (root ~30 dirs → ~8)
 

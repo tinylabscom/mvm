@@ -154,10 +154,13 @@ Then unify + retire the old paths:
 - [ ] Fold each still-relevant intent into its WS; close the 8 issues + 4 PRs with a pointer to the superseding WS. Keep **#1637** open.
 - Gate: only #1637 remains open.
 
-**WS11 — wasm-container (exploratory, non-gating)**
-- [ ] Verify `mvm-protocol` builds + runs on `wasm32` in the browser.
-- [ ] Define a `WasmBackend` seam implementing the same `VmBackend`/Workload shape (run the workload as a wasm container); a browser POC. Scaffold only — not a v1 gate.
-- Gate: `mvm-protocol` wasm demo runs; the backend seam compiles.
+**WS11 — wasm-container backend + `no_std` core (CORE goal)** (see [02-architecture.md](02-architecture.md) §Wasm-container backend & `no_std` core)
+- [ ] `mvm-protocol` is `#![no_std] + alloc`, `unsafe_code = "forbid"`, with a `wasm32-unknown-unknown` CI build **and its tests running under wasm**; a CI-gated `no_std` boundary keeps anything workload-execution-relevant off `std`/OS/crypto-impl. (Lands with 1a-protocol + 1b — one designed pass.)
+- [ ] `WasmBackend` implements the same `VmBackend`/Workload contract, selected via `BackendKind`; runs a workload as a WASI wasm module under a host wasm runtime (`wasmtime`/`wasmer`), end-to-end.
+- [ ] Egress/audit/secret-substitution for the wasm backend rides a `VmDuplexTransport` **WASI variant** through the same default-deny host seam; a wasm guest sees no secrets / emits no PII (the data-governance witness covers it, `${mvm.NAME}` and all).
+- [ ] Browser POC: `mvm-protocol` + the `no_std` OCI layer decoders (per holospaces) run in the browser.
+- [ ] Resolve the open design questions (§Wasm-container): the wasm-workload definition (user WASI module vs. mvm-compiled), the overlay/agent mapping onto a wasm instance with no Linux init, and the browser `mvm-fs` slice.
+- Gate: `mvm-protocol` wasm CI build + tests green; the `no_std`-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
 
 **WS14 — mvmd contract (secondary)**
 - [ ] Freeze the mvmd-facing surface (`mvm-protocol` + `mvm-client` + `BuildEnvironment`/`ShellEnvironment` traits); document it; file the coordinated rename for the mvmd repo.
@@ -170,9 +173,9 @@ Phase 0 (hygiene)  ─┐   parallel-safe, do first
 Phase 1 (foundations: crates, single-dir, features, trait/hardcoding) ─┐  the spine
 Phase 2 (binaries, egress invariant, lifecycle) ─┐  depends on Phase 1 crate boundaries
 Phase 3 (size, dead-code, CLI, kernel/memory)    ─┐  depends on the new crates existing
-Phase 4 (docs, close-out, wasm stretch, mvmd)     ─   last
+Phase 4 (docs, close-out, wasm-backend seam, mvmd)  ─   last
 ```
 
-WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS-NET depends on `mvm-net` (1d). WS2 depends on the guest/host crate merges (1e/1h). WS10's de-tokio depends on WS2's single-binary shape.
+WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS-NET depends on `mvm-net` (1d). WS2 depends on the guest/host crate merges (1e/1h). WS10's de-tokio depends on WS2's single-binary shape. **WS11 is a core goal, not a Phase-4 stretch: its `no_std` core lands *with* `mvm-protocol` (1a/1b) and is CI-gated from then on; only the `WasmBackend` seam itself is sequenced late (once the protocol crate is wasm-clean).**
 
 Current position in this sequence: Phase 0 complete, Phase 1a (the `WS1 execution progress` list above) 6 of 7 done — see [07-progress-and-decisions.md](07-progress-and-decisions.md) for the full status and the reasoning behind what's still open.

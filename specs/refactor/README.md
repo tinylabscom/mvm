@@ -6,6 +6,8 @@ Index and status dashboard for the disposable-v1 restructure of `mvm`.
 
 The current tree is treated as a disposable v1. This effort restructures it completely — no legacy paths, no compatibility shims, no aliases, hard renames only. The bar is a codebase an expert human can read and navigate end to end: fully tested, following established Rust best practice, radically smaller than what AI-driven development left behind. Security, auditability, attestation-via-nix, and data governance are non-negotiable — they are preserved or strengthened at every step, never traded away for simplicity.
 
+Two capabilities are **core goals** in their own right, not by-products of simplification: one auditable host egress seam for every backend, and **producing wasm containers** — a `WasmBackend` running workloads as WASI wasm modules, enabled by a `no_std` core that compiles to `wasm32`/the browser (more backends from one model). See [01-goals.md](01-goals.md) and [02-architecture.md](02-architecture.md) §Wasm-container backend & `no_std` core.
+
 ## Status
 
 **Phase 0 — COMPLETE.** Spec sweep, ADR consolidation (92 → 30, contiguous, absolute decision form), dead-dep drop, BDD harness scaffolding, worktree sweep, SDK relocation, `bin/dev` → `scripts/dev`, and the `${mvm.NAME}` secrets decision are all landed. Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).

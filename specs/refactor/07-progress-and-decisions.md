@@ -69,7 +69,7 @@ Phases 1b through 4 have not started. One line each:
 - **WS-DX** developer experience & performance (sub-second launch, warm start, snapshot/fork).
 - **WS12** ADRs-alive + website docs.
 - **WS13** issue/PR close-out.
-- **WS11** wasm-container (exploratory, non-gating).
+- **WS11** wasm-container backend + `no_std` core (**core goal** — its `no_std` core lands with `mvm-protocol` in 1a/1b and is CI-gated from then; the `WasmBackend` seam follows once the protocol crate is wasm-clean).
 - **WS14** mvmd contract freeze.
 
 Full descriptions and acceptance gates for every item above: [06-execution-plan.md](06-execution-plan.md).
