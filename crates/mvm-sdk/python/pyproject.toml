@@ -50,7 +50,7 @@ include = [
     "pyproject.toml",
 ]
 
-# Dev-tool versions are pinned per ADR-0003 §6 (and reaffirmed by ADR-0004).
+# Dev-tool versions are pinned for reproducible SDK builds.
 # `datamodel-code-generator` lives in the workspace xtask, not here.
 [dependency-groups]
 dev = [
