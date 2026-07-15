@@ -12,7 +12,7 @@ The execution reality: what's landed, what's been deliberately deviated from pla
 - **Worktrees swept** to the 2-tree working set.
 - **SDK python/typescript moved** to `crates/mvm-sdk/sdks/`.
 - **`bin/dev` → `scripts/dev`.**
-- **Secrets decision made and committed:** the `${mvm.NAME}` named-placeholder design (ADR-023 + WS-NET) — see [04-security.md](04-security.md) for the design and [03-networking.md](03-networking.md) for where it rides the wire.
+- **Secrets decision made and committed:** the `${NAME}` named-placeholder design (ADR-023 + WS-NET) — see [04-security.md](04-security.md) for the design and [03-networking.md](03-networking.md) for where it rides the wire.
 
 ## Phase 1a — 6 of 7 crate consolidations done (crate count 20 → 15)
 

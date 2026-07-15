@@ -20,7 +20,7 @@ sealing must be a transparent upgrade, never a prerequisite.
 
 A secret is a reference. The host substitutes the real value into
 outbound traffic at the egress boundary; the guest holds only a
-**named placeholder the user chooses** — `${mvm.<NAME>}` — never the value.
+**named placeholder the user chooses** — `${NAME}` — never the value.
 
 ### Mechanism — a host-side transparent terminator, no SDK required
 
@@ -91,11 +91,14 @@ process ever sees.
   `allowed_hosts`: an unbound secret is a build-time error, not a
   runtime surprise.
 - The placeholder handed to the guest is a **user-defined named token,
-  `${mvm.<NAME>}`** — the `mvm.` namespace makes it impossible to collide
-  with the guest's own ordinary `${VAR}` content. Substitution fires only
-  when `<NAME>` names a defined secret **and** the request is routed to a
+  `${NAME}`** (the operator chooses `NAME`). Substitution fires only
+  when `NAME` names a defined secret **and** the request is routed to a
   destination that secret is bound to; an undefined name passes through
-  untouched. A leaked placeholder reveals only the *name*, never the value,
+  untouched. A bare `${NAME}` can textually coincide with the guest's own
+  shell/template `${VAR}` expansion, so operators pick distinctive secret
+  names — but a coincidence is harmless: it substitutes only if the name is
+  a defined secret *and* the flow matches that secret's binding, and the
+  sole outcome is then the intended injection. A leaked placeholder reveals only the *name*, never the value,
   and cannot be substituted for a destination outside its binding — the
   security is the destination-binding and host-side-only injection, not the
   token's opacity.
@@ -159,13 +162,13 @@ exempt_paths:
 
 ### Assertion
 
-The guest receives a named placeholder (`${mvm.<NAME>}`) where its
+The guest receives a named placeholder (`${NAME}`) where its
 credential would go; the host substitution endpoint holds the real value
 and substitutes it on the outbound forward leg, after binding-checking
 the request's destination. Three invariants back this:
 
 - **No secret value reaches a guest-facing artifact.** The env/argv pairs
-  handed to the guest carry only named `${mvm.<NAME>}` placeholders — never
+  handed to the guest carry only named `${NAME}` placeholders — never
   the value.
 - **Substitution fires only for bound destinations.** A placeholder bound
   to host A and routed to host B is refused before the forward leg runs.

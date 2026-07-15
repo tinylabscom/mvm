@@ -94,7 +94,7 @@ First vertical slice (build in this order):
 
 Then unify + retire the old paths:
 - [ ] Route Firecracker off TAP+iptables onto this tunnel (#1717, #1701); HVF host-vsock-proxy (#1601); fail-closed on `--network-allow` where the host can't mediate.
-- [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution via user-defined **`${mvm.NAME}`** named placeholders (guest holds the placeholder, host injects the value only for the secret's bound destination — ADR-023) + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
+- [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution via user-defined **`${NAME}`** named placeholders (guest holds the placeholder, host injects the value only for the secret's bound destination — ADR-023) + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
 - [ ] Delete the dead rvproxy / native-gateway subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`. Enforce the mount no-shadow rule (`/mvm` in deny prefixes).
 - [ ] Snapshot/restore/warm-start: fresh boot_id + nonce + handshake; stale flows closed; no live-vsock-survives-restore assumption.
 - [ ] A networking ADR (networking cluster): why vsock-mandatory, guest-TUN, L3-over-smoltcp, typed-connectors-separate; threat/trust/privilege boundaries; snapshot behavior; transport abstraction.
@@ -157,7 +157,7 @@ Then unify + retire the old paths:
 **WS11 — wasm-container backend + `no_std` core (CORE goal)** (see [02-architecture.md](02-architecture.md) §Wasm-container backend & `no_std` core)
 - [ ] `mvm-protocol` is `#![no_std] + alloc`, `unsafe_code = "forbid"`, with a `wasm32-unknown-unknown` CI build **and its tests running under wasm**; a CI-gated `no_std` boundary keeps anything workload-execution-relevant off `std`/OS/crypto-impl. (Lands with 1a-protocol + 1b — one designed pass.)
 - [ ] `WasmBackend` implements the same `VmBackend`/Workload contract, selected via `BackendKind`; runs a workload as a WASI wasm module under a host wasm runtime (`wasmtime`/`wasmer`), end-to-end.
-- [ ] Egress/audit/secret-substitution for the wasm backend rides a `VmDuplexTransport` **WASI variant** through the same default-deny host seam; a wasm guest sees no secrets / emits no PII (the data-governance witness covers it, `${mvm.NAME}` and all).
+- [ ] Egress/audit/secret-substitution for the wasm backend rides a `VmDuplexTransport` **WASI variant** through the same default-deny host seam; a wasm guest sees no secrets / emits no PII (the data-governance witness covers it, `${NAME}` and all).
 - [ ] Browser POC: `mvm-protocol` + the `no_std` OCI layer decoders (per holospaces) run in the browser.
 - [ ] Resolve the open design questions (§Wasm-container): the wasm-workload definition (user WASI module vs. mvm-compiled), the overlay/agent mapping onto a wasm instance with no Linux init, and the browser `mvm-fs` slice.
 - Gate: `mvm-protocol` wasm CI build + tests green; the `no_std`-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.

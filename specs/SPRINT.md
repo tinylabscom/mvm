@@ -105,7 +105,7 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 
 ### 2.6 Security & data-governance model (preserved/strengthened)
 
-- **Guest sees no secrets, emits no PII** becomes a *universal* invariant once all egress crosses the host seam: bidirectional secret **substitution** (user-named `${mvm.NAME}` placeholders in the guest, real secret injected host-side on egress only for the secret's bound destination) + bidirectional **PII redaction/masking**, both written to the chain-signed audit log. Backed by a CI witness across all workload backends. (Architecture guarantees the host inspects every byte; ruleset completeness is a policy concern.)
+- **Guest sees no secrets, emits no PII** becomes a *universal* invariant once all egress crosses the host seam: bidirectional secret **substitution** (user-named `${NAME}` placeholders in the guest, real secret injected host-side on egress only for the secret's bound destination) + bidirectional **PII redaction/masking**, both written to the chain-signed audit log. Backed by a CI witness across all workload backends. (Architecture guarantees the host inspects every byte; ruleset completeness is a policy concern.)
 - Verified boot (dm-verity rootfs + sealed runtime overlay), signed `ExecutionPlan` admission, content-addressed bundles, and the chain-signed audit log are all retained. Attestation via nix templates and the machine-checked claims catalog stay.
 - **Auditable logging everywhere:** `mvm-core::log` emits operational logs *and* chain-signed audit entries for every security-relevant action; secrets/PII redacted at the boundary; the audit chain stays verifiable via `mvmctl trust audit verify`.
 - The guest binary ships **only** as the read-only, dm-verity-sealed **runtime-overlay volume** every microVM mounts — updating the overlay updates every microVM; it is never baked per-rootfs.
@@ -238,7 +238,7 @@ First vertical slice (build in this order):
 
 Then unify + retire the old paths:
 - [ ] Route Firecracker off TAP+iptables onto this tunnel (#1717, #1701); HVF host-vsock-proxy (#1601); fail-closed on `--network-allow` where the host can't mediate.
-- [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution via user-defined **`${mvm.NAME}`** named placeholders (guest holds the placeholder, host injects the value only for the secret's bound destination — ADR-023) + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
+- [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution via user-defined **`${NAME}`** named placeholders (guest holds the placeholder, host injects the value only for the secret's bound destination — ADR-023) + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
 - [ ] Delete the dead rvproxy / native-gateway subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`. Enforce the mount no-shadow rule (`/mvm` in deny prefixes).
 - [ ] Snapshot/restore/warm-start: fresh boot_id + nonce + handshake; stale flows closed; no live-vsock-survives-restore assumption.
 - [ ] A networking ADR (networking cluster): why vsock-mandatory, guest-TUN, L3-over-smoltcp, typed-connectors-separate; threat/trust/privilege boundaries; snapshot behavior; transport abstraction.
@@ -301,7 +301,7 @@ Then unify + retire the old paths:
 **WS11 — wasm-container backend + `no_std` core (CORE goal; see §2.5 + `specs/refactor/02-architecture.md` §Wasm-container)**
 - [ ] `mvm-protocol` is `#![no_std] + alloc`, `unsafe_code = "forbid"`, with a `wasm32-unknown-unknown` CI build **and its tests running under wasm**; CI-gated `no_std` boundary (nothing workload-execution-relevant reaches for `std`/OS/crypto-impl). Lands with 1a-protocol + 1b (one designed pass).
 - [ ] `WasmBackend` implements the same `VmBackend`/Workload contract, selected via `BackendKind`; runs a workload as a WASI wasm module under a host wasm runtime (`wasmtime`/`wasmer`), end-to-end.
-- [ ] Wasm egress/audit/secret-substitution rides a `VmDuplexTransport` **WASI variant** through the same default-deny host seam; wasm guest sees no secrets / emits no PII (data-governance witness covers it; `${mvm.NAME}` and all).
+- [ ] Wasm egress/audit/secret-substitution rides a `VmDuplexTransport` **WASI variant** through the same default-deny host seam; wasm guest sees no secrets / emits no PII (data-governance witness covers it; `${NAME}` and all).
 - [ ] Browser POC: `mvm-protocol` + the `no_std` OCI layer decoders (per holospaces) run in the browser.
 - [ ] Resolve open design Qs: wasm-workload definition (user WASI module vs mvm-compiled), overlay/agent mapping onto a wasm instance with no Linux init, browser `mvm-fs` slice.
 - Gate: `mvm-protocol` wasm CI build + tests green; no_std-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
