@@ -144,7 +144,7 @@ both. Claim 11 (app-dep audit pipeline — claim 9 in
 8 + the SDK-port follow-on) was added by ADR-047 / Plan 73
 Followups A + B.1/B.2/B.3 + C + D. Claims 12 and 13 (host services
 broker — binding-gated dispatch + workload audit-entry attribution)
-were added by Plan 104 / ADR-059, with Claim 13 rewritten by ADR-062
+were added by Plan 104 / ADR-059, with Claim 13 rewritten by ADR-059's rescope
 when `host.secrets.v1` was dropped from v1 scope and `host.audit.v1`
 took its place as the load-bearing workload service. Claim 15
 (no interactive access to a sealed production microVM) was added by
@@ -168,7 +168,7 @@ catalog ledger rather than reused.
 | 10 | No untrusted workload reaches the network unless explicitly admitted by policy | cross-cutting (data containment) | Sprint 52 W3 | `policy_default_is_deny_all` + `test_resolve_network_policy_default_is_deny_all`; `mvmctl up` emits an opt-in warning when the resolved policy is `unrestricted` (escape hatch is `MVM_ACK_UNRESTRICTED_NETWORK=1`); libkrun/Vz admitted `up` boots thread the signed plan by default so the gateway bridge enforces default-deny; non-deny CLI/template policies are lowered into a generated signed-policy bundle rather than an unsigned bare carrier |
 | 11 | Every application-dep volume is hash-locked, attestation-checked, CVE-scanned, SBOM-enumerated, and bound to the workload's audit chain | cross-cutting (supply chain — app-layer deps) | ADR-047, Plan 73 Followups A + B.1/B.2/B.3 + C + D | `mvm_sdk::compile::deps_audit::{seal_volume, verify_sealed_volume}` tamper-detection unit tests; `mvm_build::app_deps_gate::apply_install_gate` prod/dev rejection tests; `app-deps-audit` CI lane in `ci.yml` (Followup D) — drives `mvmctl compile` on `examples/python/hello-app-with-deps/`, seals a clean + a HIGH-CVE fixture via `mvm-app-deps-fixture-tool`, asserts `mvmctl deps inspect --json` produces a well-formed report, asserts the prod gate refuses the HIGH-CVE fixture and the dev gate admits it, asserts a byte-flip on `cve.json` makes inspect refuse |
 | 12 | Every host-side service the broker exposes is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited via the chain-signed log | cross-cutting (policy + audit) | Plan 104 W2, ADR-059 | `service_call_denied_when_unbound` + `service_call_denied_outside_profile` + `audit_chain_contains_service_call_entries` + `audit_chain_carries_no_payload_bytes` rejection-ladder tests; `xtask check-handler-adr-coverage` + `xtask check-handler-policy-schema` + `xtask check-handler-composition` lints; `fuzz_service_call.rs` lane (Plan 104 W6) |
-| 13 | No raw secret value crosses the broker channel; `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space | cross-cutting (data containment) | Plan 104 W5, ADR-049, ADR-059 | `host_secrets_v1_denied_outside_allowed_destinations` + `zeroize_drop_zeros_secret_bytes` + `handler_inter_call_memory_hygiene` + `host_secrets_v1_signed_payload_jcs_roundtrip` + `secrets_subprocess_cannot_reach_supervisor_memory` + `placeholder_in_outbound_request_dropped_and_audited` (S25 backstop) tests; ADR-049 hostile-guest matrix in W7 |
+| 13 | No raw secret value crosses the broker channel; `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space | cross-cutting (data containment) | Plan 104 W5, ADR-067, ADR-059 | `host_secrets_v1_denied_outside_allowed_destinations` + `zeroize_drop_zeros_secret_bytes` + `handler_inter_call_memory_hygiene` + `host_secrets_v1_signed_payload_jcs_roundtrip` + `secrets_subprocess_cannot_reach_supervisor_memory` + `placeholder_in_outbound_request_dropped_and_audited` (S25 backstop) tests; ADR-067 hostile-guest matrix in W7 |
 | 15 | No interactive access to a sealed production microVM | L4 | Plan 165 WS-C | `prod-agent-no-console` symbol-grep job in `security.yml` (the agent's PTY-over-vsock console is `dev-shell`-gated, so a sealed prod agent links no console symbol — same shape as claim 4's `do_exec` gate); host `console_refused_on_sealed_image` accessible-gate test; `prod_console_attachment_has_no_input` write-only-console-capture test |
 
 L1 (host + hypervisor) has no claim of its own — the host is trusted
@@ -579,7 +579,7 @@ Listed here for the audit-cleanly reader.
 | Reproducibility double-build of host code | **pass** | claim 7 |
 | Production guest agent ships without `do_exec` | **pass** | claim 4 |
 | Host-side broker dispatch is binding-gated and audited | **pass** | claim 12 (Plan 104 / ADR-059) |
-| No raw secret crosses the broker channel | **pass** | claim 13 (Plan 104 / ADR-049 / ADR-059) |
+| No raw secret crosses the broker channel | **pass** | claim 13 (Plan 104 / ADR-067 / ADR-059) |
 
 ### Cardoso three-question summary
 
@@ -633,7 +633,7 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 | 10 | No untrusted workload reaches the network unless policy-admitted | fn:policy_default_is_deny_all, fn:run_net_default_is_deny_all | default-deny network policy (Sprint 52 W3) | Shipped |
 | 11 | Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated | ci:app-deps-audit, fn:verify_sealed_volume, fn:apply_install_gate | CycloneDX + pip-audit (ADR-047) | Shipped |
 | 12 | Every host-side service binding is plan-gated and audited | fn:unbound_service_returns_not_bound, fn:service_call_rejects_unknown_envelope_fields | ExecutionPlan.services binding (ADR-059) | Shipped |
-| 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-049) | Shipped |
+| 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-067) | Shipped |
 | 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md) | Shipped |
 | 15 | No interactive access to a sealed production microVM | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + dev-shell-gated agent (Plan 165 WS-C, ADR-002 §W4.3 extension) | Shipped |
 | 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-067, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
@@ -1035,9 +1035,9 @@ This document maps each SOC 2 Trust Services Criterion to the implementing artif
 - **Status:** Proposed
 - **Date:** 2026-05-27
 - **Owner:** MVM Project
-- **Related:** [ADR-002 microvm security posture](../adrs/002-microvm-security-posture.md), [ADR-059 host services broker (original two-process design)](../adrs/059-host-services-broker.md), [ADR-061 host services broker — four-subprocess hardening (supersession)](../adrs/061-host-services-broker-hardening.md), [Plan 104 host services broker](../plans/104-host-services-broker.md), [ADR-049 secret substitution mechanism](../adrs/049-secret-substitution-mechanism.md), [SECURITY.md (CVE response runbook)](../../SECURITY.md), [mvmd ADR-0023](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md), [threat model 01 — runtime baseline](01-runtime-baseline.md) (TBD)
+- **Related:** ADR-002 (this document, microvm security posture), [ADR-059 host services broker (original two-process design, and the four-subprocess hardening supersession)](059-host-services-broker.md), [Plan 104 host services broker](../plans/104-host-services-broker.md), [ADR-067 secret substitution mechanism](067-secrets-subsystem-egress-substitution.md), [SECURITY.md (CVE response runbook)](../../SECURITY.md), [mvmd ADR-0023](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md), [threat model 01 — runtime baseline](01-runtime-baseline.md) (TBD)
 
-This document is the STRIDE walk for the host services broker introduced by ADR-059 / Plan 104 and refined by [ADR-061's four-subprocess hardening](../adrs/061-host-services-broker-hardening.md). The ADRs are the decision records (architecture, choices); this document is the structured-threat enumeration with mitigation cross-references into Plan 104's §Hardening posture (Layers 1–11).
+This document is the STRIDE walk for the host services broker introduced by ADR-059 / Plan 104 and refined by ADR-059's four-subprocess hardening section (§"Consolidated from ADR-061"). The ADRs are the decision records (architecture, choices); this document is the structured-threat enumeration with mitigation cross-references into Plan 104's §Hardening posture (Layers 1–11).
 
 ## Scope
 
@@ -1049,12 +1049,12 @@ This document is the STRIDE walk for the host services broker introduced by ADR-
 - The cross-VM path from the supervisor to mvmd-agent over iroh ALPN, with respect to the four services Plan 104 ships.
 - The `ExecutionPlan.services` admission ceremony and audit chain entries it generates.
 
-**Out of scope** (per ADR-002, ADR-059, and ADR-061):
+**Out of scope** (per ADR-002 and ADR-059):
 
 - Physical attacks on the host (cold-boot DRAM, DMA via Thunderbolt/PCIe, chip-off, side-channel power analysis, unauthorized firmware flashing).
 - Multi-tenant guests (one guest = one workload).
 - Hardware-backed key attestation by the workload itself.
-- Vulnerabilities in the hypervisor's vsock implementation (KVM `vhost-vsock`, Firecracker, libkrun, cloud-hypervisor, Apple `vz`) — these are dependency-CVE-managed per [ADR-061 §"Dependency CVE surface"](../adrs/061-host-services-broker-hardening.md#dependency-cve-surface).
+- Vulnerabilities in the hypervisor's vsock implementation (KVM `vhost-vsock`, Firecracker, libkrun, cloud-hypervisor, Apple `vz`) — these are dependency-CVE-managed per ADR-059 §"Dependency CVE surface".
 
 ## Adversary model
 
@@ -1064,7 +1064,7 @@ Three adversary classes, in order of decreasing access:
 | --- | --- | --- |
 | **G — Hostile guest** | A workload running inside a microVM (the primary adversary). Has full control over guest userspace; cannot break out of the VM. | Sends arbitrary bytes to vsock 5300 + 5301; receives responses; observes timing |
 | **N — Hostile network peer** | A network attacker on the path between the supervisor and mvmd-agent. | Observes + tampers with iroh ALPN traffic (mitigated by mvmd identity pinning + TLS 1.3) |
-| **I — Software insider** | An unauthorized human with shell access to the host as some Unix user. **Newly in scope** per [ADR-061's §Threat model](../adrs/061-host-services-broker-hardening.md#threat-model) narrowing of ADR-002's "malicious host" clause (which remains true for *physical* attacks). | Executes arbitrary code on the host; cannot escalate to root if not already root; cannot perform physical attacks |
+| **I — Software insider** | An unauthorized human with shell access to the host as some Unix user. **Newly in scope** per ADR-059's §Threat model narrowing of ADR-002's "malicious host" clause (which remains true for *physical* attacks). | Executes arbitrary code on the host; cannot escalate to root if not already root; cannot perform physical attacks |
 
 For each service below, the STRIDE table notes which adversary class the threat applies to in the **Adv.** column.
 
@@ -1115,9 +1115,9 @@ For each service below, the STRIDE table notes which adversary class the threat 
 | COST-I2 | I | G | Cost numeric values quantize-leak workload behavior to a multi-step attacker | Considered low-impact for v1; future plan may quantize values to coarse units |
 | COST-D1 | D | N | mvmd slow → blocks broker thread | Per-handler call timeout (`host.cost.v1::tenant=150ms`); circuit breaker after 5 failures (S13) |
 
-### `host.audit.v1` (workload-emitted audit entries — new in ADR-062)
+### `host.audit.v1` (workload-emitted audit entries — new in ADR-059's rescope)
 
-> **Note.** This section replaces the previous `host.secrets.v1` table. `host.secrets.v1` and the entire `SECRET-*` threat set are dropped by [ADR-062](../adrs/062-host-services-broker-rescope-drop-secrets.md). `host.audit.v1` becomes the load-bearing workload-callable service in its place.
+> **Note.** This section replaces the previous `host.secrets.v1` table. `host.secrets.v1` and the entire `SECRET-*` threat set are dropped by ADR-059 (§"Consolidated from ADR-062"). `host.audit.v1` becomes the load-bearing workload-callable service in its place.
 
 | ID | STRIDE | Adv. | Threat | Mitigation |
 | --- | --- | --- | --- | --- |
@@ -1143,7 +1143,7 @@ For each service below, the STRIDE table notes which adversary class the threat 
 
 **Hostile network peer (N):** Limited to the mvmd path. Mitigated by TLS 1.3 + ChaCha20-Poly1305 + X25519 + mvmd identity pinning + signed catalog responses. The supervisor-to-subprocess UDS paths are not network-reachable.
 
-**Software insider (I):** Newly in scope per ADR-061 (supersedes ADR-059's two-process design's threat-model boundary). The L1+L2+L5 hardening (key isolation + HW enclave + at-rest encryption + cgroup/namespace) means shell access yields neither the host signer key, nor the audit chain-signing key, nor the audit log plaintext, nor in-flight secrets. The remaining insider capability is "modify a subprocess binary on disk and wait for the next spawn," which is defeated by cosign-verify + Sigstore/Rekor transparency.
+**Software insider (I):** Newly in scope per ADR-059's four-subprocess hardening (supersedes its own original two-process design's threat-model boundary). The L1+L2+L5 hardening (key isolation + HW enclave + at-rest encryption + cgroup/namespace) means shell access yields neither the host signer key, nor the audit chain-signing key, nor the audit log plaintext, nor in-flight secrets. The remaining insider capability is "modify a subprocess binary on disk and wait for the next spawn," which is defeated by cosign-verify + Sigstore/Rekor transparency.
 
 ## Open issues / explicitly accepted residual risk
 
@@ -1158,7 +1158,7 @@ For each service below, the STRIDE table notes which adversary class the threat 
 - ADR-059 (decision record) for architecture + claims.
 - Plan 104 (implementation specifics) for build sequence + verification.
 - ADR-002 (microvm security posture) for the broader trust model this narrows.
-- ADR-049 (secret substitution mechanism) for the `host.secrets.v1` design.
+- ADR-067 (secret substitution mechanism) for the `host.secrets.v1` design.
 
 ## Runbook: W3 verified-boot verification (consolidated from specs/runbooks/w3-verified-boot.md)
 
@@ -1928,7 +1928,7 @@ acceptable only on an explicitly local/dev tier, never on the sealed/prod path.
 - Status: Proposed
 - Date: 2026-07-01
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture — the 15 claims, single-host scope), ADR-041 (signed audited execution plans — claim 8), ADR-059 (host services broker — claim 12 binding-gated dispatch), ADR-049 (destination/time-bound secret substitution — claim 13). Design input: `specs/notes/mvm-client-facade-design.md`, `specs/research/mvmd-cloud-readiness-assessment.md`.
+- Related: ADR-002 (microVM security posture — the 15 claims, single-host scope), ADR-041 (signed audited execution plans — claim 8), ADR-059 (host services broker — claim 12 binding-gated dispatch), ADR-067 (destination/time-bound secret substitution — claim 13). Design input: `specs/notes/mvm-client-facade-design.md`, `specs/research/mvmd-cloud-readiness-assessment.md`.
 - Sequenced by: cloud claim catalog + `two_org_isolation` witness (Task A, in `mvmd`); `mvm-client` facade Phase 2 (remote) is gated on this ADR being Accepted.
 
 ## Context

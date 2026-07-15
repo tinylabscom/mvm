@@ -864,7 +864,7 @@ the sibling had to hand.
    wake-on-access `VmBackend` hook, the task/files vsock protocol with an
    SSE-ready event shape, and the idle-TTL/keepalive contract. mvm does **not**
    grow a multi-tenant HTTP listener or tenant auth; that transport + auth +
-   wildcard-DNS/TLS surface is mvmd's (Plan 33 / ADR-002 §"Consolidated from ADR-002" §5). This is the same
+   wildcard-DNS/TLS surface is mvmd's (Plan 33 / ADR-002 §"Consolidated from ADR-070" §5). This is the same
    boundary Plan 170 drew for density.
 
 3. **One exception: a local, single-machine dev ingress lives in mvm.** So
@@ -910,7 +910,7 @@ the sibling had to hand.
 - [ ] Decide L4-only-now vs. a fuller local HTTP router (Plan 181 WS-A open
   decision); recommendation is L4 + loopback proxy first.
 - [ ] If/when a hosted (non-localhost) preview surface is wanted, it is an mvmd
-  effort (Plan 33), not mvm — same disposition as ADR-002 §"Consolidated from ADR-002"'s hosted console.
+  effort (Plan 33), not mvm — same disposition as ADR-002 §"Consolidated from ADR-070"'s hosted console.
 
 ## Alternatives considered
 
@@ -937,7 +937,7 @@ the sibling had to hand.
 - Note: Landed in two stages — the signed-type + guest-enforcement core (Plan 215 Tasks 1–5a) first; the out-of-band host-signer-key provisioning + wire delivery (5b–5d) as a follow-on, since the key separation becomes an active boundary only under the ADR-059 decomposition.
 - Date: 2026-06-30
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture — claim 4 `do_exec`, claim 15 sealed interactivity), ADR-041 (signed audited execution plans — claim 8), ADR-049 (secret substitution — time/destination-bound signed credentials), ADR-059 / ADR-059 (host services broker — claim 12 binding-gated dispatch), ADR-059 (resident daemon trust gradient)
+- Related: ADR-002 (microVM security posture — claim 4 `do_exec`, claim 15 sealed interactivity), ADR-041 (signed audited execution plans — claim 8), ADR-067 (secret substitution — time/destination-bound signed credentials), ADR-059 / ADR-059 (host services broker — claim 12 binding-gated dispatch), ADR-059 (resident daemon trust gradient)
 - Sequenced by: [Plan 215](../plans/215-plan-bound-agent-verb-capabilities.md)
 
 ## Context
@@ -1001,7 +1001,7 @@ before its workload's plan exists, then claim it later. A boot-time artifact
 attenuate a VM that is claimed for a plan minted after boot. Each claim redoes
 `ProtocolHello`, so the handshake is the one delivery point that re-pins per workload.
 
-This mirrors the shape ADR-049 / claim 13 already ship for secrets: a **time-bound,
+This mirrors the shape ADR-067 / claim 13 already ship for secrets: a **time-bound,
 context-bound, signed credential** rather than a static blob.
 
 ### The grant

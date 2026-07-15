@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-05-14
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture, claims 2 + 3 + 4), ADR-014 (builder VM via libkrun), ADR-041 (claim-safe sandbox parity), ADR-049 (TLS substitution mechanism), ADR-050 (verity posture for pulled OCI images), Plan 74 W1 + W3 + W4
+- Related: ADR-002 (microVM security posture, claims 2 + 3 + 4), ADR-014 (builder VM via libkrun), ADR-041 (claim-safe sandbox parity), ADR-067 (TLS substitution mechanism), ADR-050 (verity posture for pulled OCI images), Plan 74 W1 + W3 + W4
 
 > **Consolidation (2026-05-31 — see [ADR-066](066-target-architecture.md) §"ADR consolidation"):** ADR-051 is the **canonical** image & runtime-overlay ADR. It **consolidates** ADR-039 (runtime-overlay composition) and ADR-050 (OCI image verity posture); those are **superseded** and physically archived to `archive/adrs/` in Stage E. The universal verity-sealed runtime overlay (this ADR's "Option B") is the one-agent-everywhere path.
 
@@ -13,7 +13,7 @@ Plan 74 W1 lets users launch arbitrary OCI images in microVMs. An
 OCI image's rootfs is **user content**: bytes the user pulled from
 a registry, pinned by a content digest the user controls. mvm
 needs the *guest agent*, the *seccomp shim*, and the per-language
-*SDK runtime library* (ADR-049 vsock substitution hooks) present
+*SDK runtime library* (ADR-067 vsock substitution hooks) present
 in every microVM regardless of how that rootfs got there.
 
 Today mvm-built images bake the agent in:
@@ -177,7 +177,7 @@ the issue.
 - Mvm controls its own runtime story in one place. A CVE in the
   guest agent ships one fix (rebuild the overlay, bump the
   roothash, push the artifact) rather than N flake bumps.
-- The SDK runtime library (per-language, ADR-049 vsock hooks)
+- The SDK runtime library (per-language, ADR-067 vsock hooks)
   has a stable mount point. SDK upgrades become "rebuild the
   overlay"; no per-image work.
 - Verity claim 3 is *strengthened*: a tampered overlay panics

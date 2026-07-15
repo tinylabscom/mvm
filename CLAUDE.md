@@ -183,11 +183,11 @@ Claim lineage:
 - Claim 10 (default-deny egress) is Sprint 52 W3.
 - Claim 11 (app-dep volume sealed) was added by ADR-041 / Plan 73
   Followups A + B.1/B.2/B.3 + C + D
-  (`specs/adrs/047-app-deps-audit-pipeline.md`).
+  (`specs/adrs/041-signed-audited-execution-plans.md`).
 - Claims 12 + 13 (host services broker — binding-gated dispatch and
   no raw secret over broker channel) were added by Plan 104 / ADR-059
   (`specs/adrs/059-host-services-broker.md`) /
-  ADR-049 (`specs/adrs/049-vsock-substitution-service.md`).
+  ADR-067 (`specs/adrs/067-secrets-subsystem-egress-substitution.md`).
 - Claim 15 (no interactive access to a sealed production microVM) was
   added by Plan 165 WS-C
   (`specs/plans/165-entrypoint-presence-and-sealed-interactivity.md`) —
@@ -313,14 +313,14 @@ the source gap analysis is at
 13. **No raw secret value crosses the broker channel.**
     `host.secrets.v1` returns destination-bound, time-bound signed
     credentials only; raw secret bytes never leave the supervisor's
-    address space. Plan 104 W5 / ADR-049 / ADR-059.
+    address space. Plan 104 W5 / ADR-067 / ADR-059.
     `host_secrets_v1_denied_outside_allowed_destinations` +
     `zeroize_drop_zeros_secret_bytes` +
     `handler_inter_call_memory_hygiene` +
     `host_secrets_v1_signed_payload_jcs_roundtrip` +
     `secrets_subprocess_cannot_reach_supervisor_memory` +
     `placeholder_in_outbound_request_dropped_and_audited`
-    (S25 backstop) tests; ADR-049 hostile-guest matrix in W7.
+    (S25 backstop) tests; ADR-067 hostile-guest matrix in W7.
 14. **Every `mvmctl run --image <oci-ref>` admission records the OCI
     image provenance in the chain-signed audit log.** Tracked as a
     standalone claim doc at

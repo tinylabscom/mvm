@@ -813,7 +813,7 @@ All notable changes to mvm are documented in this file.
 - **exit-capture**: Move file convention + reader to mvm-core (dep direction)
 - **mvm-guest**: Extract read_exec_stream (shared by Exec + RunCode)
 - **mvm-guest**: Remove single-frame ExecResult (superseded by ExecEvent)
-- **sdk**: Retire dead in-guest substitution scaffolding (ADR-049)
+- **sdk**: Retire dead in-guest substitution scaffolding (ADR-067)
 - **deps**: Replace opendal with object_store in the template registry (plan 126 B2)
 - **backend**: Backend matrix consolidation 8→4 (Plan 177 Phase 1)
 - **cli**: CLI surface consolidation ~56→~28 (Plan 178)

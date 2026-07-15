@@ -8,7 +8,7 @@ the Tier-0 substrate this ADR promotes *from*) and
 tier feeds). **Cross-refs:** ADR-002 (security posture — the claims the ship
 side must keep), ADR-041 (signed/audited execution plans — the admission path
 every promotion lands on), ADR-041 (app-deps audit — what re-validation means),
-ADR-049/ADR-067 (secret substitution — why Tier 0 never holds a raw secret),
+ADR-067 (secret substitution — why Tier 0 never holds a raw secret),
 ADR-002 (mvm-primitive ↔ mvmd-product boundary, consolidated from ADR-070), Plan 129 (secrets), Plan 169
 (agent-RPC transport, the vsock leg of the relay).
 

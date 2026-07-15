@@ -34,7 +34,7 @@ members = [
     # manifest fetch, digest verification; layer fetch + ext4 unpack +
     # verity generation land in subsequent W1 PRs). Anonymous-only at
     # W1.1; private auth lands later behind the credential redaction
-    # contract from ADR-049. mvmd consumes this crate as a library per
+    # contract from ADR-067. mvmd consumes this crate as a library per
     # ADR-041 §"Runtime Ownership" — keep its dep closure small.
     "crates/mvm-oci",
     "crates/mvm-ext4",

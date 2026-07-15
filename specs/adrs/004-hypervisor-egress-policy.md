@@ -1617,7 +1617,7 @@ regression here is a claim-10 regression.
 
 **Status:** Accepted (2026-06-29)
 **Relates to:** [ADR-002](002-microvm-security-posture.md) (claim 10 — default-deny
-egress), [ADR-049](049-vsock-substitution-service.md) (vsock substitution),
+egress), [ADR-067](067-secrets-subsystem-egress-substitution.md) (vsock substitution),
 [ADR-059](059-host-services-broker.md) (host-services broker over vsock),
 ADR-004 §"Consolidated from ADR-082" (hvf egress gateway),
 [ADR-002](002-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
@@ -1640,7 +1640,7 @@ A guest can reach the host/outside world over two planes:
   puts a NIC + IP stack inside the guest.
 
 An hvf vsock-mediated egress path already exists (the substitution service —
-ADR-049 — and the `WorkloadBackend` seam, ADR-002 consolidated from ADR-083), but it is parity-gated, not
+ADR-067 — and the `WorkloadBackend` seam, ADR-002 consolidated from ADR-083), but it is parity-gated, not
 the universal default.
 
 The Plan 214 brief is explicit: **no guest NIC by default; host/vsock-mediated
@@ -1664,7 +1664,7 @@ future backend, e.g. KVM/WHP):
 2. **All egress is vsock-mediated** through a single host gateway that enforces
    the signed `ExecutionPlan`'s network policy (default-deny; ADR-002 claim 10),
    the same code on every backend (the gateway is the seam from ADR-082/083, fed
-   by the substitution service from ADR-049).
+   by the substitution service from ADR-067).
 3. **All host services** (secrets, broker, console, exec, file ops) remain over
    vsock (already true; ADR-059).
 
@@ -1688,7 +1688,7 @@ The guest therefore has exactly one device class for talking to anything: vsock.
 ## Cost / consequences
 
 - The host gateway is an **L4/L7 proxy** (the hvf gateway, ADR-082; fed by
-  the substitution service, ADR-049), not transparent IP routing. Every protocol
+  the substitution service, ADR-067), not transparent IP routing. Every protocol
   flows through it; protocols it doesn't model don't get out (which is the point —
   fail-closed — but it must cover what workloads need: TCP connect, DNS, TLS
   passthrough).
@@ -1964,7 +1964,7 @@ security-touching, per-backend change. See
 **Status:** Accepted (2026-06-30)
 **Relates to:** ADR-004 §"Consolidated from ADR-100" (vsock is the sole
 guest↔world channel — this ADR is the concrete hvf realization of its "single
-host gateway"), [ADR-049](049-vsock-substitution-service.md) (vsock substitution),
+host gateway"), [ADR-067](067-secrets-subsystem-egress-substitution.md) (vsock substitution),
 [ADR-059](059-host-services-broker.md) (claims 12/13), ADR-004 §"Consolidated from ADR-082"
 (the gateway seam), [ADR-002](002-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
 [ADR-002](002-microvm-security-posture.md) (claim 10), [Plan 214](../plans/214-clean-replacement-architecture.md).
