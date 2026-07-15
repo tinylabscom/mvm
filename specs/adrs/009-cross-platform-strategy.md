@@ -1,67 +1,64 @@
----
-title: "ADR-009: Cross-platform strategy — Linux native, macOS native, Windows Tauri-only"
-status: Proposed
-date: 2026-05-07
-related: ADR-004 (libkrun pivot), plan 60-mvm-libkrun-migration, plan 53-cross-platform-roadmap
----
+# ADR-009: Cross-platform strategy — Linux and macOS native, Windows via the studio app
 
 ## Status
 
-Proposed. CI matrix expansion lands in Phase 0; Windows Tauri path validated in Phase 5.
+Accepted.
 
 ## Context
 
-Three host classes need first-class support:
+mvm runs directly on the two host classes that expose a real hypervisor
+primitive its backends can drive: Linux (`/dev/kvm`) and macOS
+(Hypervisor.framework). Windows exposes no equivalent primitive any
+`VmBackend` implementation targets, and CI cannot assert live-microVM
+behavior on a Windows runner the way it can on Linux and macOS.
 
-1. **Linux** — primary deploy target + dev environment. KVM available; Firecracker is the preferred backend.
-2. **macOS** — dev environment (developers running mvm locally) + `mvm-studio` Tauri host. Hypervisor.framework available; libkrun via libkrun is the backend.
-3. **Windows** — dev + `mvm-studio` Tauri host. Hyper-V / WHvPlatform is theoretically available, but libkrun/libkrun's native Windows support is unverified at the time of this ADR.
-
-A naive "support all three at the CLI level" plan implies Windows-native builds of `mvmctl`, `mvm-hostd`, and the SDK. That commits us to a long-tail Windows-specific test surface for a small slice of users.
-
-The user clarified the intent: **`mvm-studio` (Tauri) is the supported Windows surface**. The mvm/mvmd binaries can run inside the Tauri host's bundled environment (potentially WSL2-backed). Native Windows CLI is best-effort.
+mvm's non-CLI consumers already reach the runtime through one stable,
+backend-agnostic trait (`mvm-client`'s `MvmClient`) regardless of whether
+the target is in-process or remote. That seam is exactly what a
+Windows-native GUI needs: it never has to run a `VmBackend` itself.
 
 ## Decision
 
-| Platform | CLI support | SDK support | Backend | Notes |
-|---|---|---|---|---|
-| Linux x86_64 | first-class (release wheel) | first-class | Firecracker preferred; libkrun fallback | Production target |
-| Linux aarch64 | first-class | first-class | Firecracker (where KVM available) | Production target |
-| macOS arm64 (Apple Silicon) | first-class | first-class | libkrun (libkrun on Hypervisor.framework) | Dev + mvm-studio |
-| macOS x86_64 | best-effort (no CI gating) | best-effort | libkrun | Apple is deprecating; we follow |
-| Windows x86_64 | **Tauri-only** | first-class via `mvm-studio` | libkrun if available; WSL2-backed otherwise | mvm-studio bundles |
+Linux and macOS are the two native execution hosts. Every `VmBackend`
+implementation (Firecracker, libkrun, HVF, QEMU) runs only on these two;
+none targets Windows.
 
-**Specifically**:
-- Linux + macOS get full CI gating (build, test, lint, smoke).
-- Windows CI gating covers: SDK builds (Python wheel, npm package), `mvmctl --version` smoke, but NOT live microVM integration tests.
-- `mvm-studio` (sibling repo `../mvm-studio`) packages mvmd + mvm + libkrun in a Tauri shell. Windows users install one Tauri app, get the full UX.
+Windows is not a native execution host and never gets a `VmBackend`
+implementation. The supported Windows path is the **studio** desktop app
+(a Tauri shell): it links `mvm-client` and, by default, talks to a remote
+fleet or sidecar over `GatewayBackend` — no local hypervisor requirement
+on Windows at all. An in-process `LocalBackend` build (`--features local`)
+is available for a Windows host with a working libkrun path, but it is
+not the default and is not asserted by CI.
+
+CI mirrors this split exactly:
+
+- `ci.yml` (every push) and `ci-full.yml` (the full platform matrix) build
+  and test Linux and macOS.
+- `windows.yml` runs a **non-blocking, informational** Windows lane —
+  `cargo check --workspace` (`continue-on-error: true`) plus a build and
+  test of `mvm-core` alone, the one crate required to compile everywhere
+  (no shell-out, no vsock, no platform-specific VMM binding) — triggered
+  only at release tags or by manual dispatch, never gating a push or a
+  merge.
+
+No code path assumes a Windows-native hypervisor. Crates that shell out,
+open a vsock socket, or link a platform VMM (`mvm-backend`, `mvm-build`,
+`mvm-guest`, `mvm-hostd`, `mvm-vm-host`) are not asserted to build on
+Windows and are outside the informational lane's scope.
 
 ## Consequences
 
-**Positive**:
-- Engineering effort scales with user value: Linux/macOS get the deepest investment.
-- Windows gets a quality user experience (Tauri app) without subjecting the codebase to Windows-specific bug tail (registry quirks, path encodings, console-vs-GUI shenanigans).
-- `mvm-studio` becomes the single test point for Windows correctness.
+No Windows-specific VMM code, no Windows-specific integration-test
+surface, and no long-tail Windows bug queue competing with Linux/macOS
+engineering time. The studio app is the one place Windows-specific UX
+work happens, and it already exercises the same `MvmClient` trait every
+other consumer uses — Windows support work and runtime-library work stay
+decoupled.
 
-**Negative**:
-- A Windows developer wanting a pure terminal CLI workflow gets best-effort, not first-class. Acceptable for our user base (AI-agent operators, primarily macOS/Linux).
-- Tauri + libkrun + WSL2 stacking adds layers; if any one layer breaks, the user is far from the bug.
+A Windows user who wants a bare terminal `mvmctl` workflow with a local
+backend gets an unverified, best-effort path, not a first-class one.
 
-**Neutral**:
-- The Rust core compiles on Windows (no `unix`-only deps in the workspace lints); we just don't gate CI on Windows-CLI integration tests.
-
-## Alternatives considered
-
-- **Windows first-class CLI**: rejected. Too much surface for too few users; would slow Linux/macOS work.
-- **Drop Windows entirely**: rejected. Tauri gives us a Windows path at low marginal cost.
-- **WSL2 as the "official" Windows path**: partially adopted — Tauri can use WSL2 internally where libkrun-native isn't available.
-
-## Threat model impact
-
-- The Tauri shell on Windows is itself an additional surface; threat-modeled separately in the `mvm-studio` repo.
-- Windows-specific keystore (Credential Manager) is wired through the existing `keyring` crate; same `Keystore` trait, different OS impl.
-
-## Compliance impact
-
-- SOC 2: neutral — compliance happens at the deployment layer, not the dev OS.
-- PCI/HIPAA: neutral — see above.
+The Windows CI lane exists purely to catch a `mvm-core`-level compile
+break early; it asserts nothing about VM lifecycle behavior and is not a
+required check.
