@@ -1,98 +1,84 @@
----
-title: "ADR-010: Code-quality enforcement — `forbid(unsafe_code)`, lint deny list, file-size cap, builder structs"
-status: Proposed
-date: 2026-05-07
-related: ADR-001 (security posture), plan 60-mvm-libkrun-migration
----
+# ADR-010: Code-quality enforcement — mechanical, not aspirational
 
 ## Status
 
-Proposed. CI gating lands in Phase 0.
+Accepted.
 
 ## Context
 
-The user's code-quality bar for this migration:
-
-> Code that's documented, broken into small files, idiomatic Rust, builder-pattern instead of long arg lists (no `#[allow(clippy::too_many_arguments)]` ever), tests everywhere (unit, integration, fuzz, smoke), no AI-smell.
-
-A good bar, but only if it's enforced in CI. Otherwise it drifts. This ADR codifies the lint set and file-size discipline so PRs that violate the bar fail before review.
+A code-quality bar that lives only in review conventions drifts. Two
+kinds of rule need mechanical enforcement so a violating PR fails before
+review, not during it: a small set of workspace-wide lint rules, and a
+larger set of architecture-specific invariants unique to this codebase
+(no spec references leaking into code comments, no `Display`/`Debug` on
+a secret-bearing type, no shell-out to host Nix, exactly two root
+feature surfaces, and more) that no off-the-shelf lint can express.
 
 ## Decision
 
-The following are CI-enforced, repo-wide, with no `#[allow(...)]` exceptions. Any exception requires its own ADR.
-
-### Workspace lints (in root `Cargo.toml`)
+### Workspace lint
 
 ```toml
-[workspace.lints.rust]
-unsafe_code = "deny"
-unsafe_op_in_unsafe_fn = "deny"
-missing_docs = "warn"
-
 [workspace.lints.clippy]
 too_many_arguments = "deny"
-pedantic = "warn"
-nursery = "warn"
-cargo = "warn"
 ```
 
-Crates that genuinely need `unsafe` (FFI to libkrun/libkrun, vsock ioctls, `mlock`) flip `unsafe_code = "allow"` only at the **module** scope (`#![allow(unsafe_code)]` at the top of `unsafe-bridge.rs`), and the module's name + scope is reviewed by the type-design-analyzer agent.
+`#[allow(clippy::too_many_arguments)]` is banned outright in hand-written
+code — no exceptions. A function that trips the lint gets refactored into
+a config/params struct instead. The one standing exception is
+bindgen-generated FFI (`crates/deps/libkrun-sys/src/sys.rs`), which is
+generated, not hand-written.
 
-### File-size soft cap
+### `unsafe_code` — opt-in `forbid`, not a workspace-wide ban
 
-400 LOC. Soft cap because a generated file (e.g., `_types.rs` from a Rust→Python stub generator) may exceed it. Hard exceptions go in `tools/lint/file-size-overrides.txt`. CI prints a warning (not failure) when a file crosses 400 LOC.
+There is no workspace-wide `unsafe_code = "deny"`. Instead, the two
+crates that parse untrusted bytes into structures where a memory-safety
+bug would be worst — `mvm-ext4` (the deterministic ext4 image writer) and
+`mvm-oci` (OCI layer unpacking) — declare `#![forbid(unsafe_code)]` at
+the crate root. Crates that genuinely need `unsafe` (FFI bindings, vsock
+ioctls, and similar host-integration work) use it directly, scoped to
+the block that needs it, with no lint ceremony required.
 
-### Builder pattern instead of long arg lists
+### Architectural invariants as dedicated `xtask` checks
 
-Functions taking >5 arguments use a struct + `bon`-derived builder. Crate dep: `bon = "3"`. Eliminates `clippy::too_many_arguments` cleanly.
+Every architecture-specific rule is a small, independently testable Rust
+module under `xtask/src/check_*.rs`, each wired as its own named step in
+`ci.yml`'s `lint` job — so a violation fails a specific, greppable check
+name instead of a generic warning. Representative examples: no spec
+references in source comments, no `Display`/`Debug` derive on a
+secret-named type, no shell-out to host Nix, no forbidden dependency
+family, exactly two root feature surfaces (`host`/`user`), the claims
+ledger and trust-gradient tables stay in sync with the code that backs
+them, `mvm-core`'s default build stays free of an async runtime, and the
+`mvmctl` default dependency closure stays within budget. Adding a new
+architectural rule means adding a new `xtask` check, not amending a
+shared config file — `ci.yml`'s `lint` job is the actual index of what's
+enforced.
 
-### Test discipline
+### `cargo fmt` and `cargo clippy`
 
-- Unit tests live next to code (`#[cfg(test)] mod tests { ... }`).
-- Integration tests in `tests/`.
-- Fuzz harnesses in `crates/mvm-guest/fuzz/` (existing convention).
-- CI lint forbids `unwrap()` and `expect()` outside `tests/` and `examples/`.
-- CI lint forbids `println!` / `eprintln!` outside `mvm-cli/src/output.rs` (the one CLI output module).
-
-### Doc discipline
-
-- All `pub` items have doc comments (the `missing_docs = "warn"` lint catches drift).
-- `cargo doc --workspace --no-deps -D warnings` runs in CI; broken doc links fail the build.
-
-### Forbidden patterns
-
-- `#[allow(clippy::too_many_arguments)]` — banned outright. No exceptions.
-- `Display` / `Debug` derivation on secret-bearing types (`secrecy::SecretBox<T>` and types containing one). Custom CI lint enforces.
-- `==` comparison on cryptographic types (use `subtle::ConstantTimeEq`). Custom CI lint.
-- Bare `tokio::spawn` (must use `mvm_core::trace::spawn_traced` to propagate trace context). Custom CI lint.
+`cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`
+gate every push through `ci.yml`'s `lint` job, and run locally on every
+commit via `.githooks/pre-commit` (`cargo fmt --all`, auto-fixing and
+re-staging, then `cargo clippy --workspace --all-targets -- -D warnings`,
+skippable per-commit via `MVM_SKIP_CLIPPY=1` for fast iteration — CI
+still gates the merge).
 
 ## Consequences
 
-**Positive**:
-- Code-quality bar is mechanical, not aspirational.
-- AI-generated code that drifts toward verbose patterns gets caught.
-- New contributors learn the conventions from CI feedback, not from code review back-and-forth.
+The bar is mechanical and centralized: one clippy invocation catches
+argument-count drift, and a new architectural rule is a new, nameable
+`xtask` check rather than a review-thread convention that has to be
+re-litigated on every PR.
 
-**Negative**:
-- `bon` adds a build dependency. Acceptable — it's small, popular, and well-maintained.
-- Some PRs will fail CI for trivial reasons (e.g., a 401-LOC file crosses the soft cap warning). Explicit warning, not failure, mitigates this.
+Growing the invariant set means growing `xtask`, one module per rule —
+there is no single manifest enumerating every check; `ci.yml`'s `lint`
+job step list is the source of truth for what's currently gated.
 
-**Neutral**:
-- The lint deny list will grow. Each addition gets a one-line entry in this ADR's "Decision" section.
-
-## Alternatives considered
-
-- **Style-only review**: rejected. Doesn't scale; drift accumulates.
-- **`rustfmt` only**: rejected. Formatting ≠ quality; the lint set is the actual bar.
-- **Strict file-size hard cap**: rejected. Generated code legitimately exceeds; hard cap creates churn.
-
-## Threat model impact
-
-- `forbid(unsafe_code)` reduces the attack surface for memory-safety bugs in non-FFI code.
-- `subtle::ConstantTimeEq` enforcement closes timing side-channels on cryptographic comparisons.
-- Trace-context propagation (`spawn_traced`) ensures every action is auditable, even from background tasks.
-
-## Compliance impact
-
-- SOC 2: positive — code-quality controls map to "Change Management" trust services criterion.
-- All others: neutral.
+No file-size cap, no doc-comment coverage gate, and no `unwrap`/`println`
+ban exist today. Code quality here is enforced narrowly — argument
+count, unsafe-free parsing in the two highest-risk crates, and a growing
+set of named architectural invariants — rather than broadly through
+style or coverage metrics. A broader bar is a deliberate, separate
+`xtask` check the day someone decides to add it, not an implicit
+aspiration.
