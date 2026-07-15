@@ -181,7 +181,7 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [ ] 1b `mvm-core`: rebuild on `mvm-protocol`; own single-dir config, crypto, keystore, attestation, catalog, `log`.
 - [ ] 1c `mvm-fs`: fold `mvm-ext4` + `mvm-oci` + rootfs/overlay/unpack; one ext4 writer + one reader; "image → rootfs + vmlinux" is its public surface. _(`mvm-ext4`+`mvm-oci` merged into `mvm-fs` with `ext4`/`oci` submodules; build's rootfs/overlay/unpack absorption pending)_ Prefer **virtiofs-root for OCI** (boot directly off the unpacked OCI dir, skipping ext4 materialize) where the backend supports it; keep materialize as the fallback.
 - [ ] 1d `mvm-net`: fold `mvm-network` + host tunnel/gateway/dns + guest net; vsock/UDS transport + egress seam. _(crate rename `mvm-network`→`mvm-net` landed; tunnel/dns/guest-net absorption pending)_
-- [ ] 1e `mvm-runtime`: fold `mvm` + `mvm-backend`; `VmBackend` trait + libkrun/hvf/firecracker; delete `qemu.rs`.
+- [x] 1e `mvm-runtime`: fold `mvm` + `mvm-backend`; `VmBackend` trait + libkrun/hvf/firecracker. _(merged flat, workspace green; `qemu.rs` KEPT — drop deferred/contested)_
 - [ ] 1f `mvm-build`: slim the builder pipeline.
 - [ ] 1g `mvm-sdk`: authoring + the tree-sitter → Workload IR → **nix-template** pipeline (IR from `mvm-protocol`); user-specified **base OCI image** as the template base.
   - **`PackageType` trait** under `crates/mvm-sdk/languages/` (moved off the root): each language detects its manifest and surfaces a **locked** dependency set — prefer `uv.lock`/`poetry.lock` over `requirements.txt`, the lockfile over `package.json`, `Cargo.lock`, `Package.resolved`; fall back to the loose manifest and flag it. Built-ins: Python / TypeScript / Rust / Swift; **users register their own**.
@@ -190,6 +190,17 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - [ ] 1h `mvm-client`: facade covering every runtime operation the CLI needs.
 - [ ] 1i `mvm-cli`: delete direct reaches into runtime internals; route through `mvm-client`.
 - Gate: `cargo build --workspace` for both `user` and `host` surfaces; full suite green; dependency graph acyclic and matches §2.1.
+
+**WS1 execution progress (structure-first, single green branch — `cargo check --workspace --all-targets` green after each; crate count 20→15):**
+- [x] `mvm-network`→`mvm-net` rename — `6ae57b438`
+- [x] `mvm-ext4`+`mvm-oci`→`mvm-fs` (`ext4`/`oci` submodules) — `10977e915`
+- [x] `mvm-vm-host`→`mvm-hostd` (flat; 3 supervisor bins) — `3fc1dae6d`
+- [x] `mvm-mcp`→`mvm-cli` `crate::mcp` (behind `mcp` feature) — `42b432b89`
+- [x] `mvm`+`mvm-backend`→`mvm-runtime` (flat, 96 files) — `764b7d897`
+- [x] `mvm-guest`+`mvm-guest-helpers`→`mvm-agentd` (214 files) — `19f1830ba`. **`mvm-host-services-ffi` kept SEPARATE** — it is a `cdylib` (`mvm_host_services`) the SDK runtimes `dlopen` + nix bakes into the overlay; folding it would break that FFI/nix contract (deviation from §2.1).
+- [ ] `mvm-protocol` extraction is a **design effort, not a mechanical merge**: `mvm-core`'s `plan/`+`policy/`+`protocol/` carry ~126 `crate::` refs into `config`/`crypto`/`security`/`instance`/`tenant`, so pulling "wire+policy" below `mvm-core` inverts much of the foundation. The `no_std` lens (1b) is what defines the clean pure-DTO boundary — do 1a-protocol + 1b as one designed pass.
+- [ ] `mvm-storage` placement — no target crate in §2.1; fold into `mvm-core` or `mvm-runtime` (decide).
+- [ ] Full `nextest --workspace` + `clippy` + nightly `fmt --all` + xtask gates (the real 1a gate, beyond per-move `cargo check`).
 
 **WS4 — single `~/.mvm`** (can land alongside 1b)
 - [ ] Reparent cache/state/share/runtime/config under `~/.mvm`; `MVM_HOME` override; delete the `~/microvm/vms` const; move per-VM UDS under `~/.mvm/run` (#1654).
