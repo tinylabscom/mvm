@@ -1,8 +1,8 @@
 ---
-title: "ADR-045: Hermetic testing for the VM-lifecycle Emits rows"
+title: "ADR-016: Hermetic testing for the VM-lifecycle Emits rows"
 status: Accepted
 date: 2026-05-12
-related: ADR-041 (audit_emit! macro); plan 60 Phase 4 (persistent observability); plan 37 §6 (no unaudited control-plane mutation); plans 65/66/67/68/69/70 (per-row hermetic test work)
+related: ADR-014 (audit_emit! macro); plan 60 Phase 4 (persistent observability); plan 37 §6 (no unaudited control-plane mutation); plans 65/66/67/68/69/70 (per-row hermetic test work)
 ---
 
 ## Status
@@ -26,7 +26,7 @@ per-cluster substrate work (plans 65–70).
 
 ## Context
 
-ADR-041 established `audit_emit!` as the canonical emit surface and
+ADR-014 established `audit_emit!` as the canonical emit surface and
 required every state-changing CLI verb to have a live drive-and-assert
 test pinning its `LocalAuditKind` emit. Pinning the easy rows shipped
 in PRs #106 / #107 / #108 — 40 live tests at PR #108 close, covering
@@ -68,7 +68,7 @@ existing PR #106/#107/#108 substrate (`audit_emit!`, `MockBackend`,
    list.
 
 ```
-ADR-041 → ADR-045 (this doc) → six independent plans
+ADR-014 → ADR-016 (this doc) → six independent plans
                               ├─ plan 65: pause/resume via AnyBackend + snapshot extension
                               ├─ plan 66: vsock guest-agent mock layer (fs + proc)
                               ├─ plan 67: volume mount/unmount with mock virtio-fs
@@ -118,7 +118,7 @@ meaningful way and can ship in parallel. Suggested priority order:
   block the snapshot refactor (plan 65) from landing.
 - **Compounding leverage.** Plan 66's vsock mock unlocks future
   `exec`/`run-code`/`console` test work; plan 65's `AnyBackend.pause`
-  routing unlocks the snapshot CLI ergonomics that ADR-038 wants
+  routing unlocks the snapshot CLI ergonomics that ADR-012 wants
   (single-host preview of mvmd's sleep/wake).
 - **Documentation trail.** Each plan is a discoverable, dated record of
   what was done and why. Audit-emit campaigns started by future
@@ -149,7 +149,7 @@ meaningful way and can ship in parallel. Suggested priority order:
 
 ## References
 
-- **ADR-041** — `audit_emit!` macro convention
+- **ADR-014** — `audit_emit!` macro convention
 - **Plan 37 §6** — "no unaudited control-plane mutation"
 - **Plan 60 Phase 4** — persistent observability
 - **PR #106** — macro + lint + 37 emit-site migrations

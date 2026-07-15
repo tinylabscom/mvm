@@ -6,7 +6,7 @@
 # binary built in its PRODUCTION configuration (no `dev-shell` feature), assert:
 #
 #   1. `handle_run_entrypoint` is PRESENT — the constrained RunEntrypoint
-#      handler ships (ADR-007 §W5). It is `#[inline(never)]` precisely so it
+#      handler ships (ADR-005 §W5). It is `#[inline(never)]` precisely so it
 #      survives optimization. This also serves as a CANARY: if it's missing,
 #      the symbol table was stripped and the absence check below would be
 #      meaningless (vacuously true), so we fail instead of trusting it.
@@ -49,7 +49,7 @@ fail=0
 if grep -q 'mvm_guest_agent.*handle_run_entrypoint' <<<"$prod_syms"; then
   echo "ok: handle_run_entrypoint present (W5 handler ships; symbol table is populated)"
 else
-  echo "::error::ADR-007 §W5: handle_run_entrypoint is ABSENT from the production agent." >&2
+  echo "::error::ADR-005 §W5: handle_run_entrypoint is ABSENT from the production agent." >&2
   echo "Either the constrained RunEntrypoint handler was removed, or the symbol table" >&2
   echo "was stripped — which would make the console absence check below vacuous. The" >&2
   echo "no-interactivity guarantee cannot be trusted until this is resolved." >&2

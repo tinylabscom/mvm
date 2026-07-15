@@ -4,7 +4,7 @@
 //! by named tests and CI lanes. Prose drifts: a witness gets renamed,
 //! the claim paragraph still names the old one, and nothing notices.
 //! This lint makes the claims ledger table embedded in
-//! `specs/adrs/002-microvm-security-posture.md` (between the
+//! `specs/adrs/001-microvm-security-posture.md` (between the
 //! `<!-- claims-catalog:begin -->` / `<!-- claims-catalog:end -->`
 //! markers) the machine-checked map from each claim to its witnesses
 //! and fails when a named witness no longer exists in the tree — the
@@ -35,7 +35,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     let adr_path = workspace
         .join("specs")
         .join("adrs")
-        .join("002-microvm-security-posture.md");
+        .join("001-microvm-security-posture.md");
     let source = std::fs::read_to_string(&adr_path)
         .with_context(|| format!("reading {}", adr_path.display()))?;
     let ledger = extract_ledger_section(&source).with_context(|| {
@@ -75,7 +75,7 @@ pub fn run(workspace: &Path) -> Result<()> {
             eprintln!("[error] {e}");
         }
         bail!(
-            "check-claim-catalog: {} problem(s) in the claims ledger (specs/adrs/002-microvm-security-posture.md)",
+            "check-claim-catalog: {} problem(s) in the claims ledger (specs/adrs/001-microvm-security-posture.md)",
             errors.len()
         );
     }

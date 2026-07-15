@@ -188,7 +188,7 @@ fn build_is_byte_deterministic_for_same_workspace() {
     assert_eq!(
         bytes_a, bytes_b,
         "byte-deterministic invariant: overlay.ext4 must be \
-         byte-identical across builds (ADR-051 verity cache)"
+         byte-identical across builds (ADR-018 verity cache)"
     );
 }
 

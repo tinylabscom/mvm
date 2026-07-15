@@ -483,13 +483,13 @@ claims), each backed by a named test or workflow gate. In summary:
     write-only, and the host gate refuses `console` on a sealed VM.
 
 The guest agent runs as an unprivileged uid under `setpriv`; `~/.mvm` and
-`~/.cache/mvm` are mode 0700. **Out of scope** (named in ADR-002): a malicious
+`~/.cache/mvm` are mode 0700. **Out of scope** (named in ADR-001): a malicious
 *host* (mvmctl trusts the host with the hypervisor and private keys),
 multi-tenant guests (one guest = one workload), and hardware-backed key
 attestation.
 
 - The claim ledger (claim → witness, machine-checked): [`specs/claims/catalog.md`](specs/claims/catalog.md)
-- The source of truth (threat model, tier matrix): [ADR-002](specs/adrs/002-microvm-security-posture.md)
+- The source of truth (threat model, tier matrix): [ADR-001](specs/adrs/001-microvm-security-posture.md)
 - Live posture on your host: `mvmctl doctor`
 - Audit chain verification: `mvmctl trust audit verify` (exits nonzero on drift)
 

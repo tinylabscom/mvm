@@ -1,14 +1,14 @@
 ---
-title: "ADR-003: local Model Context Protocol server (`mvmctl mcp`)"
+title: "ADR-002: local Model Context Protocol server (`mvmctl mcp`)"
 status: Proposed
 date: 2026-04-30
-related: ADR-002 (microVM security posture); plan 32 (MCP + LLM-agent adoption); plan 33 (hosted MCP transport — mvmd cross-repo)
+related: ADR-001 (microVM security posture); plan 32 (MCP + LLM-agent adoption); plan 33 (hosted MCP transport — mvmd cross-repo)
 ---
 
 ## Status
 
 Proposed. Implementation tracked in `specs/plans/32-mcp-agent-adoption.md`
-Proposal A. Composes with ADR-002 — does not introduce new attacker
+Proposal A. Composes with ADR-001 — does not introduce new attacker
 surfaces, only a new dispatch path on top of the existing
 `mvmctl exec` machinery.
 
@@ -33,10 +33,10 @@ from the internet"; mvm already has that backend. The combination
 — mvm's isolation strength with that MCP server's tool-design
 ergonomics — is the point.
 
-## Threat model (additive over ADR-002)
+## Threat model (additive over ADR-001)
 
 The MCP server is a host-local stdio process spawned by the user's
-LLM client. There is **no new attacker** beyond ADR-002:
+LLM client. There is **no new attacker** beyond ADR-001:
 
 1. The transport is `stdin`/`stdout` of the same user's shell
    environment. No network listener.
@@ -49,7 +49,7 @@ LLM client. There is **no new attacker** beyond ADR-002:
    already-isolated microVM. The microVM is the security boundary;
    `code` cannot escape.
 4. The dispatch chain goes through `crate::exec::run_captured` →
-   guest agent's `Exec` over vsock. ADR-002 §W4.3's
+   guest agent's `Exec` over vsock. ADR-001 §W4.3's
    `prod-agent-no-exec` CI gate ensures production guest agents
    are built without `dev-shell`, so the `Exec` handler is
    physically absent from the binary; production workloads return
@@ -78,7 +78,7 @@ Surfaces specific to this ADR:
 
 2. **No new external dependencies.** Hand-roll the JSON-RPC 2.0
    frames in `mvm-mcp` (~200 LoC) instead of adopting `rmcp`. Every
-   workspace dep needs to clear ADR-002's supply-chain bar
+   workspace dep needs to clear ADR-001's supply-chain bar
    (`cargo-deny`, `cargo-audit`); a hand-rolled protocol is cheaper
    to audit than a third-party impl.
 
@@ -89,7 +89,7 @@ Surfaces specific to this ADR:
 
 4. **No CLI-level feature gate.** `mvmctl mcp` is always present in
    CLI builds. The dispatch path requires a dev-feature guest agent
-   (per ADR-002 §W4.3), so the CI gate that already enforces
+   (per ADR-001 §W4.3), so the CI gate that already enforces
    `do_exec` symbol absence in production agents transitively covers
    this surface. Adding a separate CLI gate would duplicate the
    existing one and complicate consumer flows.
@@ -163,6 +163,6 @@ existing audit logs. Keep them even if the MCP server is dropped.
 
 - Plan 32: `specs/plans/32-mcp-agent-adoption.md`
 - Plan 33: `specs/plans/33-hosted-mcp-transport.md`
-- Related ADRs: ADR-002 (microVM security posture)
+- Related ADRs: ADR-001 (microVM security posture)
 - Upstream design: the external single-tool Nix sandbox MCP server — single-tool design pattern
 - MCP protocol spec: <https://modelcontextprotocol.io/>

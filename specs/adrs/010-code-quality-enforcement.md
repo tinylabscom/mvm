@@ -1,8 +1,8 @@
 ---
-title: "ADR-033: Code-quality enforcement — `forbid(unsafe_code)`, lint deny list, file-size cap, builder structs"
+title: "ADR-010: Code-quality enforcement — `forbid(unsafe_code)`, lint deny list, file-size cap, builder structs"
 status: Proposed
 date: 2026-05-07
-related: ADR-002 (security posture), plan 60-mvm-libkrun-migration
+related: ADR-001 (security posture), plan 60-mvm-libkrun-migration
 ---
 
 ## Status

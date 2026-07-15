@@ -1,8 +1,8 @@
 ---
-title: "ADR-043: hostd-IPC protocol versioning"
+title: "ADR-015: hostd-IPC protocol versioning"
 status: Accepted
 date: 2026-05-11
-related: ADR-002 (microVM security posture); ADR-041 (signed audited execution plans); plan 60 Phase 8 (mvmd integration contract verification)
+related: ADR-001 (microVM security posture); ADR-014 (signed audited execution plans); plan 60 Phase 8 (mvmd integration contract verification)
 ---
 
 ## Status
@@ -90,7 +90,7 @@ If a field name on any of these changes, the fixture-set must regenerate. The ti
 
 ### Out of scope (named)
 
-- **Plumbing the version into a handshake frame.** Today both sides just verify equality before talking. The frame-level negotiation lands when mvm-hostd ships a real bind/accept loop (Phase 8 mvmd-side work; ADR-041 documents the supervisor lift this depends on).
+- **Plumbing the version into a handshake frame.** Today both sides just verify equality before talking. The frame-level negotiation lands when mvm-hostd ships a real bind/accept loop (Phase 8 mvmd-side work; ADR-014 documents the supervisor lift this depends on).
 - **Multi-version compatibility shims.** If mvmd needs to talk to a mvm-hostd at v1 while it itself is at v2, the shim layer lives in mvmd — not in mvm-core::protocol.
 - **Wire-format migration helpers.** The "v1 → v2 fixture upgrade" tool is mvmd's concern; mvm-core::protocol just defines the current shape.
 
@@ -99,5 +99,5 @@ If a field name on any of these changes, the fixture-set must regenerate. The ti
 - `crates/mvm-core/src/protocol/protocol.rs` — `PROTOCOL_VERSION` constant + bump-policy docstring.
 - `crates/mvm-core/src/protocol/protocol.rs` — `HostdRequest` / `HostdResponse` definitions.
 - `specs/plans/60-mvm-libkrun-migration.md` Phase 8 — the cornerstone this ADR enables.
-- ADR-002 §"Out of scope" — host-trust assumptions; the wire format trusts the peer above the socket-perms layer.
-- ADR-041 — signed audited ExecutionPlan; the mvm-hostd lift consumes the plan after Phase 8 ships.
+- ADR-001 §"Out of scope" — host-trust assumptions; the wire format trusts the peer above the socket-perms layer.
+- ADR-014 — signed audited ExecutionPlan; the mvm-hostd lift consumes the plan after Phase 8 ships.

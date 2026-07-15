@@ -46,7 +46,7 @@ consumers construct from the same descriptors via `instantiate` / `instantiate_d
 ## What runs where: the trust gradient
 
 mvm runs long-lived processes in three layers, one per trust tier. Authority decreases as
-you move away from the host, and each layer is trusted accordingly (see ADR-002 and ADR-090).
+you move away from the host, and each layer is trusted accordingly (see ADR-001 and ADR-090).
 
 | Layer | Process | Owns | Authority | Trust |
 |-------|---------|------|-----------|-------|

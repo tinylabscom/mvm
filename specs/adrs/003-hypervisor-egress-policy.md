@@ -1,14 +1,14 @@
 ---
-title: "ADR-004: hypervisor-level egress policy with domain-pinning"
+title: "ADR-003: hypervisor-level egress policy with domain-pinning"
 status: Proposed (v1 = L3 shipped; L7 + DNS-pinning scoped in plan 34)
 date: 2026-04-30
-related: ADR-002 (microVM security posture); ADR-003 (local MCP server); plan 32 (MCP + LLM-agent adoption); plan 34 (L7 egress proxy follow-up); plan 25 (microVM hardening)
+related: ADR-001 (microVM security posture); ADR-002 (local MCP server); plan 32 (MCP + LLM-agent adoption); plan 34 (L7 egress proxy follow-up); plan 25 (microVM hardening)
 ---
 
 ## Status
 
 Proposed. v1 implementation tracked in
-`specs/plans/32-mcp-agent-adoption.md` Proposal D. ADR-002 named
+`specs/plans/32-mcp-agent-adoption.md` Proposal D. ADR-001 named
 hypervisor-level egress policy as an explicit non-goal for Sprint 42's
 hardening; this ADR moves it on-roadmap for the next sprint with a
 deliberately smaller v1 scope than the full three-layer model.
@@ -37,9 +37,9 @@ missing:
 
 This ADR captures both decisions and limits.
 
-## Threat model (additive over ADR-002)
+## Threat model (additive over ADR-001)
 
-The adversary is **a malicious guest workload** (per ADR-002 §1):
+The adversary is **a malicious guest workload** (per ADR-001 §1):
 code running inside a microVM trying to talk to a host the operator
 did not authorize. Specifically:
 
@@ -53,7 +53,7 @@ did not authorize. Specifically:
 4. The guest may attempt SNI to a permitted name then perform
    ALPN-protocol smuggling.
 
-A **malicious host** is out of scope (per ADR-002). A **malicious
+A **malicious host** is out of scope (per ADR-001). A **malicious
 DNS resolver upstream of the host** is also out of scope.
 
 ## The three-layer model
@@ -126,7 +126,7 @@ is small but the IP-pin/iptables-update plumbing has corner cases
    `mvmctl up --network-preset agent`.
 
 3. **No L7 today; ADR documents it.** When L7 lands, it composes
-   on top of L3 (defense in depth, per ADR-002 §"Decisions" 2).
+   on top of L3 (defense in depth, per ADR-001 §"Decisions" 2).
    Operator chooses the layer per `--network-mode` (future flag),
    not by separate commands.
 
@@ -193,7 +193,7 @@ is small but the IP-pin/iptables-update plumbing has corner cases
 ## References
 
 - Plan: `specs/plans/32-mcp-agent-adoption.md` Proposal D
-- Related ADRs: ADR-002 (microVM security posture), ADR-003 (local
+- Related ADRs: ADR-001 (microVM security posture), ADR-002 (local
   MCP server)
 - Existing infrastructure: `mvm-core::policy::network_policy`,
   `mvm::vm::network::{apply,cleanup}_network_policy`
@@ -270,13 +270,13 @@ operator's bank, anything. The CA is not a guest secret — it lives at
 libraries can read it. There is no useful place to hide it from the
 agent the operator is trying to constrain.
 
-ADR-002 §"out of scope: malicious host" assumes the host is trusted
+ADR-001 §"out of scope: malicious host" assumes the host is trusted
 and the guests aren't. A shared CA inverts that — the most powerful
 trust anchor lives in the *guest*. That violates the threat model.
 
-## Threat model (additive over ADR-002 + ADR-004)
+## Threat model (additive over ADR-001 + ADR-003)
 
-The adversary is **a malicious guest workload** (per ADR-002 §1) that
+The adversary is **a malicious guest workload** (per ADR-001 §1) that
 has read access to its own filesystem (always true — `cat
 /etc/ssl/certs/mvm-egress-ca.crt` is one syscall). With a shared CA:
 
@@ -408,7 +408,7 @@ The default mitmproxy approach. Documented above as the wrong move
 for mvm's threat model — a shared CA in a guest is a universal MITM
 credential.
 
-**Why rejected:** violates ADR-002's threat model (guest-side
+**Why rejected:** violates ADR-001's threat model (guest-side
 secrets must not have host-wide blast radius).
 
 ### B. Per-VM self-signed CA (rejected)
@@ -440,7 +440,7 @@ suit. ACME may be the right answer when mvmd ships its own CA service.
 
 Don't ship L7 at all; let DNS rotation slip through.
 
-**Why rejected:** ADR-004 §"L7" already documents why L3 alone is
+**Why rejected:** ADR-003 §"L7" already documents why L3 alone is
 insufficient (DNS rotation, SNI-hopping, Host-header abuse). The
 question this ADR answers is "given that we *are* shipping L7, how
 do we do the CA right." Not "should we ship L7."
@@ -525,8 +525,8 @@ short-lived leaves), so the reversal cost is bounded.
 
 ## References
 
-- ADR-002: `specs/adrs/002-microvm-security-posture.md`
-- ADR-004: `specs/adrs/004-hypervisor-egress-policy.md`
+- ADR-001: `specs/adrs/001-microvm-security-posture.md`
+- ADR-003: `specs/adrs/003-hypervisor-egress-policy.md`
 - Plan 34: `specs/plans/34-egress-l7-proxy.md`
 - RFC 5280 §4.2.1.10 — Name Constraints
 - mitmproxy CA docs: <https://docs.mitmproxy.org/stable/concepts-certificates/>
@@ -538,7 +538,7 @@ short-lived leaves), so the reversal cost is bounded.
 
 ## Consolidated from ADR-055 — libkrun networking via passt + virtio-net
 
-**Status:** accepted 2026-05-19, implements Plan 87. Default flipped from TSI → Passt by Plan 87 W5 / PR3. **Amended 2026-05-19 by Plan 88** to add gvproxy as the macOS backend (passt is Linux-only — see §"Cross-platform backends" below). **Amended 2026-05-26 by [Plan 102 W6.A](../plans/102-gateway-audit-substrate-impl.md) / [ADR-041](041-signed-audited-execution-plans.md):** TSI removed entirely — it bypassed virtio-net (no host fd to splice), which violates the claim-10 no-bypass invariant. `MVM_NETWORKING=tsi` is no longer accepted; only `passt` and `gvproxy` resolve. The historical TSI context below is retained for archaeology.
+**Status:** accepted 2026-05-19, implements Plan 87. Default flipped from TSI → Passt by Plan 87 W5 / PR3. **Amended 2026-05-19 by Plan 88** to add gvproxy as the macOS backend (passt is Linux-only — see §"Cross-platform backends" below). **Amended 2026-05-26 by [Plan 102 W6.A](../plans/102-gateway-audit-substrate-impl.md) / [ADR-014](014-signed-audited-execution-plans.md):** TSI removed entirely — it bypassed virtio-net (no host fd to splice), which violates the claim-10 no-bypass invariant. `MVM_NETWORKING=tsi` is no longer accepted; only `passt` and `gvproxy` resolve. The historical TSI context below is retained for archaeology.
 
 ## Context
 
@@ -810,7 +810,7 @@ plumbing differs.
 
 **Status**: Proposed
 **Date**: 2026-05-29
-**Cross-refs**: ADR-002 (security posture, claim 1 / claim 5 / claim 10), ADR-041 (signed/audited ExecutionPlan, claim 8), ADR-055 (passt/gvproxy cross-platform backends), ADR-058 (claim 10 leg 2 / "bytes leaving the trust boundary"), ADR-059 (host services broker — vsock-only scope boundary), Plan 102 (gateway audit substrate impl), Plan 112 (W6.A Phase 3c producer activation, merged 2026-05-29).
+**Cross-refs**: ADR-001 (security posture, claim 1 / claim 5 / claim 10), ADR-014 (signed/audited ExecutionPlan, claim 8), ADR-055 (passt/gvproxy cross-platform backends), ADR-058 (claim 10 leg 2 / "bytes leaving the trust boundary"), ADR-020 (host services broker — vsock-only scope boundary), Plan 102 (gateway audit substrate impl), Plan 112 (W6.A Phase 3c producer activation, merged 2026-05-29).
 
 ## Context
 
@@ -1090,7 +1090,7 @@ Stress-tests the trust-store mechanism with one real tenant-facing observer. Hos
 | 9 (signed bundles content-addressed) | Preserved | Bundle verification stays in admission. |
 | 10 (default-deny egress) | Preserved | Bridge **observes**; policy enforcement stays at the gateway (pre-bridge). The trait can't accidentally weaken default-deny. |
 | 11 (sealed deps volume) | Preserved | Unrelated. |
-| 12 + 13 (host services broker) | **Boundary explicit** | `NetworkProvider` is virtio-net only. Vsock stays with the host-services broker (ADR-059). The ADR-002 §boundary table gains an entry. |
+| 12 + 13 (host services broker) | **Boundary explicit** | `NetworkProvider` is virtio-net only. Vsock stays with the host-services broker (ADR-020). The ADR-001 §boundary table gains an entry. |
 | 14 (OCI image provenance) | Preserved | Upstream of bridge. |
 
 **Net**: 11 preserved unchanged, 2 require concrete additions (claim 5 fuzz extension, claim 7 cargo-deny pins), 1 boundary statement (claim 12/13 vs network/vsock split).
@@ -1370,8 +1370,8 @@ virtio-net egress gateway (rvproxy) is dropped along with the gvproxy/passt
 guest-NIC model: the target architecture gives the guest **no NIC** and brokers
 all egress over host vsock. The rvproxy implementation, its `native` networking
 mode, and the parity CI gate are removed. Historical context retained below.
-**Amends:** ADR-004 §"Consolidated from ADR-055" (libkrun/Vz networking via gvproxy + passt)
-**Preserves:** [ADR-041](041-signed-audited-execution-plans.md) no-bypass invariant; claim 10 (default-deny egress); Plan 141 flow observation; Plan 129 egress secret substitution
+**Amends:** ADR-003 §"Consolidated from ADR-055" (libkrun/Vz networking via gvproxy + passt)
+**Preserves:** [ADR-014](014-signed-audited-execution-plans.md) no-bypass invariant; claim 10 (default-deny egress); Plan 141 flow observation; Plan 129 egress secret substitution
 
 ## Context
 
@@ -1398,7 +1398,7 @@ need from that chokepoint has to be bolted on around it:
 - **Hidden tuning.** Transport parameters (MTU, buffer sizes) are not surfaced
   through our spawn path; we pass `-listen-vfkit`, `-log-file`, `-ssh-port` and
   take the defaults.
-- **A foreign binary inside the trust boundary.** ADR-002 trusts the host, but
+- **A foreign binary inside the trust boundary.** ADR-001 trusts the host, but
   a Go dependency carrying every guest's egress is the largest unaudited
   surface in the substrate, and it cannot be reviewed or fuzzed the way the
   rest of the host path is.
@@ -1464,7 +1464,7 @@ not a blind swap of the security seam.
 **Gains:** the egress seam becomes owned, typed, reviewable, and fuzzable;
 claim 10 / Plan 141 / Plan 129 become first-class instead of reconstructed from
 spliced bytes; logging, teardown, and MTU come under our control; one fewer
-foreign binary in the trust boundary (aligns with ADR-002 and the
+foreign binary in the trust boundary (aligns with ADR-001 and the
 limit-dependencies posture).
 
 **Costs / risks:** the gateway is the security chokepoint — a regression is a
@@ -1516,9 +1516,9 @@ this ADR is the userspace-gateway substrate only).
 ## Consolidated from ADR-085 — The egress gateway ships inside the mvmctl artifact
 
 **Status:** Proposed
-**Extends:** ADR-004 §"Consolidated from ADR-082" — from "adopt the Rust-native gateway" to "ship it in the box"
+**Extends:** ADR-003 §"Consolidated from ADR-082" — from "adopt the Rust-native gateway" to "ship it in the box"
 **Depends on:** [Plan 193](../plans/193-rvproxy-network-substrate.md) (substrate cutover), [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) (host packaging)
-**Preserves:** [ADR-041](041-signed-audited-execution-plans.md) no-bypass invariant; claim 10 (default-deny egress); [Plan 129](../plans/129-secrets-subsystem.md) substitution; [Plan 141](../plans/141-vz-payload-tap-and-rust-owned-shuffle.md) flow observation
+**Preserves:** [ADR-014](014-signed-audited-execution-plans.md) no-bypass invariant; claim 10 (default-deny egress); [Plan 129](../plans/129-secrets-subsystem.md) substitution; [Plan 141](../plans/141-vz-payload-tap-and-rust-owned-shuffle.md) flow observation
 
 ## Context
 
@@ -1597,7 +1597,7 @@ regression here is a claim-10 regression.
 ## Out of scope
 
 - Vendoring libkrun/libkrunfw and the full relocatable dependency-free bundle —
-  [ADR-086](086-relocatable-dependency-free-host-bundle.md).
+  [ADR-028](028-relocatable-dependency-free-host-bundle.md).
 - Inbound TLS (mvmd's edge, per ADR-058).
 - Linux/passt-replacement parity timing (Plan 193 follow-on).
 - Bring-up performance — the gateway does not own it (ADR-082 §"not a
@@ -1605,9 +1605,9 @@ regression here is a claim-10 regression.
 
 ## References
 
-- ADR-004 §"Consolidated from ADR-082" — adopt the Rust-native gateway
-- [ADR-041](041-signed-audited-execution-plans.md) — no-bypass invariant, claim 10
-- ADR-004 §"Consolidated from ADR-055" — gvproxy / passt gateway choice
+- ADR-003 §"Consolidated from ADR-082" — adopt the Rust-native gateway
+- [ADR-014](014-signed-audited-execution-plans.md) — no-bypass invariant, claim 10
+- ADR-003 §"Consolidated from ADR-055" — gvproxy / passt gateway choice
 - [Plan 193](../plans/193-rvproxy-network-substrate.md) — substrate cutover
 - [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) — host packaging
 - [Plan 129](../plans/129-secrets-subsystem.md), [Plan 141](../plans/141-vz-payload-tap-and-rust-owned-shuffle.md), [Plan 156](../plans/156-binary-size-reduction.md)
@@ -1616,12 +1616,12 @@ regression here is a claim-10 regression.
 ## Consolidated from ADR-100 — vsock is the sole guest↔world channel (no guest NIC; egress via a host vsock gateway)
 
 **Status:** Accepted (2026-06-29)
-**Relates to:** [ADR-002](002-microvm-security-posture.md) (claim 10 — default-deny
-egress), [ADR-067](067-secrets-subsystem-egress-substitution.md) (vsock substitution),
-[ADR-059](059-host-services-broker.md) (host-services broker over vsock),
-ADR-004 §"Consolidated from ADR-082" (hvf egress gateway),
-[ADR-002](002-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
-[ADR-014](014-vmbackend-single-trait.md) (the backend seam),
+**Relates to:** [ADR-001](001-microvm-security-posture.md) (claim 10 — default-deny
+egress), [ADR-023](023-secrets-subsystem-egress-substitution.md) (vsock substitution),
+[ADR-020](020-host-services-broker.md) (host-services broker over vsock),
+ADR-003 §"Consolidated from ADR-082" (hvf egress gateway),
+[ADR-001](001-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
+[ADR-007](007-vmbackend-single-trait.md) (the backend seam),
 [Plan 214](../plans/214-clean-replacement-architecture.md).
 
 ## Context
@@ -1640,7 +1640,7 @@ A guest can reach the host/outside world over two planes:
   puts a NIC + IP stack inside the guest.
 
 An hvf vsock-mediated egress path already exists (the substitution service —
-ADR-067 — and the `WorkloadBackend` seam, ADR-002 consolidated from ADR-083), but it is parity-gated, not
+ADR-023 — and the `WorkloadBackend` seam, ADR-001 consolidated from ADR-083), but it is parity-gated, not
 the universal default.
 
 The Plan 214 brief is explicit: **no guest NIC by default; host/vsock-mediated
@@ -1662,11 +1662,11 @@ future backend, e.g. KVM/WHP):
 1. **No virtio-net device** is attached to a workload guest. No tap, no
    passt/gvproxy bridge, no in-guest IP stack on the workload path.
 2. **All egress is vsock-mediated** through a single host gateway that enforces
-   the signed `ExecutionPlan`'s network policy (default-deny; ADR-002 claim 10),
+   the signed `ExecutionPlan`'s network policy (default-deny; ADR-001 claim 10),
    the same code on every backend (the gateway is the seam from ADR-082/083, fed
-   by the substitution service from ADR-067).
+   by the substitution service from ADR-023).
 3. **All host services** (secrets, broker, console, exec, file ops) remain over
-   vsock (already true; ADR-059).
+   vsock (already true; ADR-020).
 
 The guest therefore has exactly one device class for talking to anything: vsock.
 
@@ -1688,7 +1688,7 @@ The guest therefore has exactly one device class for talking to anything: vsock.
 ## Cost / consequences
 
 - The host gateway is an **L4/L7 proxy** (the hvf gateway, ADR-082; fed by
-  the substitution service, ADR-067), not transparent IP routing. Every protocol
+  the substitution service, ADR-023), not transparent IP routing. Every protocol
   flows through it; protocols it doesn't model don't get out (which is the point —
   fail-closed — but it must cover what workloads need: TCP connect, DNS, TLS
   passthrough).
@@ -1705,11 +1705,11 @@ The guest therefore has exactly one device class for talking to anything: vsock.
 - **Workload guests: in scope, mandatory.** Every backend that carries an
   untrusted workload (`AnyBackend::as_workload_backend == Some`).
 - **The builder VM is a separate, explicitly-tracked case.** It is a dev/test
-  substrate (Tier 2, outside the numbered claims — ADR-002 §tier matrix) that
+  substrate (Tier 2, outside the numbered claims — ADR-001 §tier matrix) that
   fetches nixpkgs; during the transition it may retain a host gateway NIC. Moving
   the builder onto the same vsock gateway is desirable but tracked independently
   of the workload invariant so it never blocks it.
-- The **QEMU** backend is dev/test only (Tier 2, claim-10 not wired — ADR-002);
+- The **QEMU** backend is dev/test only (Tier 2, claim-10 not wired — ADR-001);
   it is held to the invariant on the workload path for uniformity, but its
   non-enforcement is already documented and it is never `auto_select`ed.
 
@@ -1962,12 +1962,12 @@ security-touching, per-backend change. See
 ## Consolidated from ADR-101 — In-house VMM: one unified vsock egress gateway (claims 10/12/13 in one endpoint)
 
 **Status:** Accepted (2026-06-30)
-**Relates to:** ADR-004 §"Consolidated from ADR-100" (vsock is the sole
+**Relates to:** ADR-003 §"Consolidated from ADR-100" (vsock is the sole
 guest↔world channel — this ADR is the concrete hvf realization of its "single
-host gateway"), [ADR-067](067-secrets-subsystem-egress-substitution.md) (vsock substitution),
-[ADR-059](059-host-services-broker.md) (claims 12/13), ADR-004 §"Consolidated from ADR-082"
-(the gateway seam), [ADR-002](002-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
-[ADR-002](002-microvm-security-posture.md) (claim 10), [Plan 214](../plans/214-clean-replacement-architecture.md).
+host gateway"), [ADR-023](023-secrets-subsystem-egress-substitution.md) (vsock substitution),
+[ADR-020](020-host-services-broker.md) (claims 12/13), ADR-003 §"Consolidated from ADR-082"
+(the gateway seam), [ADR-001](001-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
+[ADR-001](001-microvm-security-posture.md) (claim 10), [Plan 214](../plans/214-clean-replacement-architecture.md).
 
 ## Context
 
@@ -2263,7 +2263,7 @@ only if the numbers force it.
   `host_tun_nat_live` witness; generalize `smoltcp_egress`; add `HostIcmpEcho`.
 - **Drops the `CAP_NET_ADMIN` requirement on Linux** — workload egress becomes
   uniformly unprivileged.
-- Correct the **stale claim-12/13 prose in ADR-002**: it still describes a removed
+- Correct the **stale claim-12/13 prose in ADR-001**: it still describes a removed
   signed-credential broker (`host.secrets.v1`); the real, shipped mechanism is
   host-side egress substitution. Reconcile the numbered claims with the substitution
   path.

@@ -45,7 +45,7 @@ fn parse_adr_filename(name: &str) -> Option<(u32, String)> {
 }
 
 /// In-code reference pattern: `ADR-N`, `ADR-NN`, or `ADR-NNN`.
-/// Matches `ADR-002`, `ADR-014`, `ADR-7`, etc. Case-sensitive on
+/// Matches `ADR-001`, `ADR-007`, `ADR-7`, etc. Case-sensitive on
 /// `ADR` so we don't pick up `adr-`-prefixed filenames.
 ///
 /// mvm ADR numbers are 1–3 digits. Cross-repo references like
@@ -214,26 +214,26 @@ fn discover_adrs(root: &Path) -> Result<BTreeMap<u32, String>> {
 const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     (
         9,
-        "function-call entrypoints — split across ADR-007/008/010/011 during the function-service \
+        "function-call entrypoints — split across ADR-005/008/010/011 during the function-service \
          refactor; references to the original ADR-009 number are historical",
     ),
     (
         15,
         "legacy plan-era ADR reference; no canonical doc shipped — replace refs with the relevant \
-         ADR-027/028/029 (encryption layering) or delete during a follow-up sweep",
+         ADR-008/028/029 (encryption layering) or delete during a follow-up sweep",
     ),
     (
         16,
-        "single legacy ref; superseded by the encryption-substrate ADRs (042 / 027) — delete in a \
+        "single legacy ref; superseded by the encryption-substrate ADRs (042 / 008) — delete in a \
          follow-up sweep",
     ),
     (
         17,
-        "legacy refs predating the cross-platform-strategy split — successor is ADR-031",
+        "legacy refs predating the cross-platform-strategy split — successor is ADR-009",
     ),
     (
         18,
-        "47 refs to a legacy provider-CLI concept — successor is ADR-012 (mvm-provider-cli-contract)",
+        "47 refs to a legacy provider-CLI concept — successor is ADR-006 (mvm-provider-cli-contract)",
     ),
     (
         19,
@@ -242,7 +242,7 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     ),
     (
         20,
-        "legacy refs to a runtime-overlay precursor — successor is ADR-007 (runtime-overlay-composition, folded into the function-call-entrypoints canonical)",
+        "legacy refs to a runtime-overlay precursor — successor is ADR-005 (runtime-overlay-composition, folded into the function-call-entrypoints canonical)",
     ),
     (
         26,
@@ -250,16 +250,13 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     ),
     (
         28,
-        "legacy refs to an unwritten ADR; concept folded into ADR-027 (iroh-aware encryption and \
+        "legacy refs to an unwritten ADR; concept folded into ADR-008 (iroh-aware encryption and \
          encryption substrate, post-consolidation)",
     ),
-    (
-        29,
-        "single legacy ref; concept folded into ADR-027",
-    ),
+    (29, "single legacy ref; concept folded into ADR-008"),
     (
         36,
-        "AI-agent threat model — flagged TBD in the SOC 2 controls mapping under ADR-002 \
+        "AI-agent threat model — flagged TBD in the SOC 2 controls mapping under ADR-001 \
          §\"Compliance mapping\"; ADR pending the agent threat model write-up",
     ),
     (
@@ -346,10 +343,10 @@ mod tests {
 
     #[test]
     fn extract_adr_refs_finds_padded_and_unpadded() {
-        let body = "See ADR-014 for the pivot; ADR-2 the security \
-                    posture; ADR-038 for CI policy.";
+        let body = "See ADR-007 for the pivot; ADR-2 the security \
+                    posture; ADR-012 for CI policy.";
         let refs = extract_adr_refs(body);
-        assert_eq!(refs, vec![14, 2, 38]);
+        assert_eq!(refs, vec![7, 2, 12]);
     }
 
     #[test]
@@ -362,9 +359,9 @@ mod tests {
     fn extract_adr_refs_handles_section_suffix() {
         // ADR refs in code often carry a section suffix; our extractor
         // pulls just the number.
-        let body = "ADR-002 §W4.3 / ADR-014§\"Boot budget\"";
+        let body = "ADR-001 §W4.3 / ADR-007§\"Boot budget\"";
         let refs = extract_adr_refs(body);
-        assert_eq!(refs, vec![2, 14]);
+        assert_eq!(refs, vec![1, 7]);
     }
 
     #[test]
@@ -377,11 +374,11 @@ mod tests {
         let refs = extract_adr_refs(body);
         assert!(refs.is_empty(), "4-digit ADR refs must be skipped");
 
-        // Mixed: mvm ADR-014 alongside mvmd ADR-0007 — only the
+        // Mixed: mvm ADR-007 alongside mvmd ADR-0007 — only the
         // 3-digit mvm form should land in the output.
-        let mixed = "ADR-014 plus mvmd ADR-0007 in the same line";
+        let mixed = "ADR-007 plus mvmd ADR-0007 in the same line";
         let refs = extract_adr_refs(mixed);
-        assert_eq!(refs, vec![14]);
+        assert_eq!(refs, vec![7]);
     }
 
     /// Build the literal `ADR-N` token at runtime so this source file

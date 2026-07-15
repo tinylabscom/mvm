@@ -40,12 +40,12 @@ fn flake_nix_exists_and_imports_microvm_nix() {
     let content =
         fs::read_to_string(&path).unwrap_or_else(|e| panic!("nix/flake.nix must be present: {e}"));
 
-    // ADR-005 invariant: the flake imports microvm.nix as the foundation.
+    // ADR-004 invariant: the flake imports microvm.nix as the foundation.
     // Any future PR that drops this input violates the ADR.
     assert!(
         content.contains("microvm-nix/microvm.nix"),
         "nix/flake.nix must reference microvm-nix/microvm.nix as an input \
-         (per ADR-005); content excerpt: {}",
+         (per ADR-004); content excerpt: {}",
         &content[..content.len().min(200)]
     );
 
@@ -67,7 +67,7 @@ fn flake_nix_exists_and_imports_microvm_nix() {
     assert!(
         content.contains("lib") && content.contains("mkGuest"),
         "nix/flake.nix must expose lib.<system>.mkGuest as the \
-         user-facing API (per ADR-005 + plan 60). Got: ...{}",
+         user-facing API (per ADR-004 + plan 60). Got: ...{}",
         &content[..content.len().min(200)]
     );
 
@@ -482,14 +482,14 @@ fn minimal_profile_exists_and_has_required_settings() {
     let content = fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("nix/profiles/minimal.nix must be present: {e}"));
 
-    // SSH disabled — load-bearing invariant from ADR-002 / CLAUDE.md
+    // SSH disabled — load-bearing invariant from ADR-001 / CLAUDE.md
     // ("No SSH in microVMs, ever"). Asserted as plain string match
     // because a NixOS module's effective `services.openssh.enable`
     // can only be checked by evaluating the flake; the source line
     // is the closest we can get without booting Nix.
     assert!(
         content.contains("services.openssh.enable = false"),
-        "minimal profile must explicitly disable SSH per ADR-002"
+        "minimal profile must explicitly disable SSH per ADR-001"
     );
 
     // The microvm.hypervisor must be declared — that's what
@@ -498,7 +498,7 @@ fn minimal_profile_exists_and_has_required_settings() {
     assert!(
         content.contains("microvm.hypervisor") || content.contains("hypervisor"),
         "minimal profile must declare a microvm.hypervisor (defaults \
-         to firecracker per ADR-005)"
+         to firecracker per ADR-004)"
     );
 
     // system.stateVersion is mandatory for any NixOS module — a
@@ -583,7 +583,7 @@ fn mk_guest_eval_assertions_all_pass_when_nix_available() {
     );
 }
 
-/// Plan 74 W1.4b (ADR-051) — `mkGuest` must carry the overlay-
+/// Plan 74 W1.4b (ADR-018) — `mkGuest` must carry the overlay-
 /// aware contract in its rootfs + /init script. We can't easily
 /// build the rootfs without Nix on the host, but the source of
 /// truth is a single file we can scan for the three load-bearing
@@ -614,14 +614,14 @@ fn mk_guest_carries_overlay_aware_contract() {
     assert!(
         content.contains("mkdir -p \"$out/mvm/runtime\""),
         "mk-guest.nix must create /mvm/runtime in the rootfs as the \
-         ADR-051 bind-mount target. Missing the `mkdir -p \"$out/mvm/runtime\"` \
+         ADR-018 bind-mount target. Missing the `mkdir -p \"$out/mvm/runtime\"` \
          line means the verity-init bind-mount target is missing and the \
          agent never starts."
     );
 
     assert!(
         content.contains("/mvm/runtime/agent"),
-        "mk-guest.nix /init must reference /mvm/runtime/agent (ADR-051). \
+        "mk-guest.nix /init must reference /mvm/runtime/agent (ADR-018). \
          Without this resolution path the overlay-attached agent isn't \
          exec'd and the rootfs falls back to the baked-in copy on every \
          boot — defeating the W1.4b refactor."
@@ -630,7 +630,7 @@ fn mk_guest_carries_overlay_aware_contract() {
     assert!(
         content.contains("overlayAware = true"),
         "mk-guest.nix mvmMeta passthru must declare `overlayAware = true` \
-         (Plan 74 W1.4b / ADR-051). Admission-time gates read this to \
+         (Plan 74 W1.4b / ADR-018). Admission-time gates read this to \
          refuse boot of cached pre-W1.4b templates."
     );
 
@@ -874,7 +874,7 @@ fn mk_guest_accepts_compact_and_legacy_egress_ca_cmdline_tokens() {
     );
 }
 
-/// ADR-050 / issue #223 — the OCI-pull verity path runs
+/// ADR-017 / issue #223 — the OCI-pull verity path runs
 /// `veritysetup format` inside the builder VM, while the Nix-built
 /// runtime-overlay baseline runs it in the runtime-overlay flake.
 /// Both must use the same explicit cryptsetup release pin so a
@@ -904,7 +904,7 @@ fn cryptsetup_pin_is_shared_by_builder_vm_and_runtime_overlay() {
     ] {
         assert!(
             content.contains("pinnedCryptsetupVersion = \"2.8.6\""),
-            "{name} must pin cryptsetup 2.8.6 explicitly for ADR-050 / #223"
+            "{name} must pin cryptsetup 2.8.6 explicitly for ADR-017 / #223"
         );
         assert!(
             content.contains(
@@ -942,7 +942,7 @@ fn cryptsetup_pin_is_shared_by_builder_vm_and_runtime_overlay() {
 fn flake_lock_pins_microvm_input_by_hash() {
     // The flake.lock must exist and pin the microvm.nix input by
     // commit hash, not by tag or branch — that's the supply-chain
-    // gate from ADR-005 §"Threat model impact" / plan 60 §"Code
+    // gate from ADR-004 §"Threat model impact" / plan 60 §"Code
     // review gate." A PR that removes flake.lock or drops the
     // microvm pin breaks this assertion.
     let path = nix_dir().join("flake.lock");
@@ -967,7 +967,7 @@ fn flake_lock_pins_microvm_input_by_hash() {
     );
 }
 
-/// Plan 199 WS-B — the no-release-binary contract (ADR-014) must hold for
+/// Plan 199 WS-B — the no-release-binary contract (ADR-007) must hold for
 /// *every* host package under `nix/packages/`, not just `mvmctl.nix`. A new
 /// sidecar package that pulled a project release tarball or carried
 /// `binaryNativeCode` provenance would silently bypass the source-build
@@ -1006,7 +1006,7 @@ fn no_host_package_uses_release_binary_provenance() {
                 !content.contains(needle),
                 "host package nix/packages/{name} must not use {needle:?} — host \
                  packages are source-built, never mvm-published release binaries \
-                 (ADR-014 / Plan 199 WS-B)"
+                 (ADR-007 / Plan 199 WS-B)"
             );
         }
         scanned += 1;

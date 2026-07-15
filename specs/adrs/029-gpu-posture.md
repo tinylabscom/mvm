@@ -1,8 +1,8 @@
-# ADR-087 — GPU posture: paravirtual display GPU is a deferred fast-follow; compute passthrough is out of scope
+# ADR-029 — GPU posture: paravirtual display GPU is a deferred fast-follow; compute passthrough is out of scope
 
 **Status:** Accepted
-**Relates to:** [ADR-002](002-microvm-security-posture.md) (tier matrix, out-of-scope discipline); [Plan 60](../plans/60-mvm-libkrun-migration.md) Phase 7b (`gpu-virgl` scaffold); [Plan 111](../plans/111-cardoso-gap-coordination.md) Workstream D (GPU deferral); [Plan 37](../plans/37-whitepaper-alignment.md) (`GpuRequirement` enum stub)
-**Does not gate:** [ADR-004](004-hypervisor-egress-policy.md) / [ADR-086](086-relocatable-dependency-free-host-bundle.md) — the host bundle ships without GPU
+**Relates to:** [ADR-001](001-microvm-security-posture.md) (tier matrix, out-of-scope discipline); [Plan 60](../plans/60-mvm-libkrun-migration.md) Phase 7b (`gpu-virgl` scaffold); [Plan 111](../plans/111-cardoso-gap-coordination.md) Workstream D (GPU deferral); [Plan 37](../plans/37-whitepaper-alignment.md) (`GpuRequirement` enum stub)
+**Does not gate:** [ADR-003](003-hypervisor-egress-policy.md) / [ADR-028](028-relocatable-dependency-free-host-bundle.md) — the host bundle ships without GPU
 
 ## Context
 
@@ -34,7 +34,7 @@ away from the sealed-prod claim set.
 ## Decision
 
 1. **(A) is a deferred fast-follow, not a launch requirement.** The host bundle
-   (ADR-004/086) and the `machine`/pack UX ship first; the security substrate is
+   (ADR-003/086) and the `machine`/pack UX ship first; the security substrate is
    the moat and the GPU demo is a fast-follow. GPU does not gate launch.
 
 2. **When (A) lands, it is a dev / computer-use tier feature**, modelled exactly
@@ -47,7 +47,7 @@ away from the sealed-prod claim set.
      and not assumed. "GPU ⇒ libkrun" is the routing rule.
 
 3. **(A) stays out of the default zero-dependency bundle.** venus needs a host
-   Vulkan userspace present, which fights ADR-086's zero-dep promise. GPU is an
+   Vulkan userspace present, which fights ADR-028's zero-dep promise. GPU is an
    opt-in add-on component with its own `mvmctl doctor` probe; it must not
    reintroduce a brew-trio-style first-run dependency into the core install.
 
@@ -63,7 +63,7 @@ away from the sealed-prod claim set.
 - (A) is cheap when scheduled — flip an already-scaffolded flag on the libkrun
   path — but carries one obligation: the venus/virgl parser is a new fuzz target
   if GPU is ever proposed for anything beyond the dev/computer-use tier. Any such
-  promotion is a separate ADR-002 amendment (new claim + parser fuzzing), and is
+  promotion is a separate ADR-001 amendment (new claim + parser fuzzing), and is
   expected to be resisted.
 - The `GpuRequirement` enum (Plan 37) and Plan 60 Phase 7b scaffold remain valid;
   this ADR sets their posture and tier, it does not schedule the work.
@@ -78,8 +78,8 @@ away from the sealed-prod claim set.
 
 ## References
 
-- [ADR-002](002-microvm-security-posture.md) — security posture, tier matrix, out-of-scope discipline
-- [ADR-004](004-hypervisor-egress-policy.md), [ADR-086](086-relocatable-dependency-free-host-bundle.md) — the bundle GPU does not gate
+- [ADR-001](001-microvm-security-posture.md) — security posture, tier matrix, out-of-scope discipline
+- [ADR-003](003-hypervisor-egress-policy.md), [ADR-028](028-relocatable-dependency-free-host-bundle.md) — the bundle GPU does not gate
 - [Plan 60](../plans/60-mvm-libkrun-migration.md) — Phase 7b `gpu-virgl` scaffold
 - [Plan 111](../plans/111-cardoso-gap-coordination.md) — Workstream D GPU deferral
 - [Plan 37](../plans/37-whitepaper-alignment.md) — `GpuRequirement` enum

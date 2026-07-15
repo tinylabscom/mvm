@@ -1,8 +1,8 @@
 ---
-title: "ADR-041: Signed, audited `ExecutionPlan` — the contract behind every `mvmctl up`"
+title: "ADR-014: Signed, audited `ExecutionPlan` — the contract behind every `mvmctl up`"
 status: Accepted
 date: 2026-05-11
-related: ADR-002 (microVM security posture); ADR-005 (libkrun + libkrun pivot); plan 60 (libkrun migration); plan 64 (supervisor wiring)
+related: ADR-001 (microVM security posture); ADR-004 (libkrun + libkrun pivot); plan 60 (libkrun migration); plan 64 (supervisor wiring)
 ---
 
 ## Status
@@ -164,7 +164,7 @@ The CLI surface intentionally stops short of `mvmctl plan create / sign / verify
 
 - `specs/plans/64-supervisor-wiring.md` — full sprint plan for plan 64.
 - `specs/plans/60-mvm-libkrun-migration.md` Phase 6 — the cornerstone this ADR documents the shipping of.
-- ADR-002 (`specs/adrs/002-microvm-security-posture.md`) — the seven claims this ADR's claim 8 joins.
+- ADR-001 (`specs/adrs/001-microvm-security-posture.md`) — the seven claims this ADR's claim 8 joins.
 - `crates/mvm-plan/src/` — `ExecutionPlan`, `SignedExecutionPlan`, `sign_plan`, `verify_plan`, `check_window`, `NonceStore`.
 - `crates/mvm-supervisor/src/audit.rs` + `audit_file.rs` — `AuditEntry`, `AuditSigner`, `FileAuditSigner`, `verify_audit_chain`.
 - `crates/mvm-cli/src/commands/vm/plan_builder.rs` — W1 synthesis.
@@ -296,18 +296,18 @@ The lint runs in CI's Test/Lint job. The audit module itself (`crates/mvm-core/s
 - **PR #108** — MockBackend substrate + VM-lifecycle live tests (VmStart, VmStop, VmTtlSet)
 - **Plan 37 §6** — "no unaudited control-plane mutation" invariant
 - **Plan 60 Phase 4** — Persistent observability (audit chain + emission)
-- **ADR-041** — Signed, audited `ExecutionPlan` (the chain-signed audit stream this complements)
+- **ADR-014** — Signed, audited `ExecutionPlan` (the chain-signed audit stream this complements)
 
 
 ## Consolidated from ADR-047 — Application Dependency Audit Pipeline (Security Claim 9)
 
 **Status**: Accepted (Phase 9 primitives landed; full pipeline ships post-Plan-71)
 **Date**: 2026-05-13
-**Cross-refs**: ADR-002 (microvm security posture, claims 1–8), ADR-014 (builder VM via libkrun), SDK port plan §"Auditing the dep volume"
+**Cross-refs**: ADR-001 (microvm security posture, claims 1–8), ADR-007 (builder VM via libkrun), SDK port plan §"Auditing the dep volume"
 
 ## Context
 
-mvm's existing security claims (ADR-002 claims 1–8) cover the
+mvm's existing security claims (ADR-001 claims 1–8) cover the
 host↔guest boundary, the verified-boot path, the audited
 ExecutionPlan, and a hardened guest agent. They do **not** cover
 the *application-dependency* surface — every Python `pip`, Node
@@ -416,7 +416,7 @@ builds the project's examples, asserts the four sealed artifacts
 emit cleanly, and that no example's CVE scan returns high or
 critical findings.
 
-### Claim 9 (new, additive to ADR-002)
+### Claim 9 (new, additive to ADR-001)
 
 > Every application-dependency volume is hash-locked,
 > attestation-checked, CVE-scanned, SBOM-enumerated, and bound to
@@ -435,7 +435,7 @@ parity is enforced by Plan 98 §2.S2 (sealed volume content
 byte-equivalence on the same Install input) + §2.S10 (`meta.json`
 hash-chain backend-neutrality — identical content yields identical
 volume_hash regardless of which VMM booted the builder). Full
-backend-parity discussion lives in **ADR-014 §"Vz as a second
+backend-parity discussion lives in **ADR-007 §"Vz as a second
 builder backend (Plan 98)" → "Security claim parity"**.
 
 ## Status of the implementation
@@ -460,7 +460,7 @@ The primitives ship now so:
 
 **Positive.**
 
-- Closes the largest gap left by ADR-002 claims 1–8 — app deps
+- Closes the largest gap left by ADR-001 claims 1–8 — app deps
   were the only runtime-mutable input not bound to an audit chain.
 - Re-audit is incremental: rewriting `cve.json` updates the volume
   hash without rebuilding `content/`. CI can cheaply rerun the
@@ -499,9 +499,9 @@ roll in without breaking existing builds.
 
 ## References
 
-- ADR-002 — `specs/adrs/002-microvm-security-posture.md` (claims
+- ADR-001 — `specs/adrs/001-microvm-security-posture.md` (claims
   1–8)
-- ADR-014 — `specs/adrs/014-vmbackend-single-trait.md` (the host
+- ADR-007 — `specs/adrs/007-vmbackend-single-trait.md` (the host
   for the install path)
 - Plan 72 (W4/W5) — `specs/plans/72-builder-vm-via-libkrun.md`
   (cutover that unblocks the install + admission wiring)
@@ -515,7 +515,7 @@ roll in without breaking existing builds.
 - Status: Proposed
 - Date: 2026-05-14
 - Owner: MVM Project
-- Related: ADR-004 (egress policy), ADR-031 (cross-platform strategy), ADR-041 (signed audited execution plans), ADR-047 (app dependency audit pipeline), mvmd ADR-0020 (OCI images as microVM workloads)
+- Related: ADR-003 (egress policy), ADR-009 (cross-platform strategy), ADR-014 (signed audited execution plans), ADR-047 (app dependency audit pipeline), mvmd ADR-0020 (OCI images as microVM workloads)
 
 ## Context
 
@@ -675,31 +675,31 @@ Tracked in [`specs/plans/74-claim-safe-sandbox-parity.md`](../plans/74-claim-saf
 
 ## Context
 
-ADR-002 §"Out of scope" today carves out *a malicious host* — "mvmctl trusts the host with the hypervisor and private build keys." That carve-out is correct as stated, but the current implementation is too permissive: it grants the host more capability than the threat model requires.
+ADR-001 §"Out of scope" today carves out *a malicious host* — "mvmctl trusts the host with the hypervisor and private build keys." That carve-out is correct as stated, but the current implementation is too permissive: it grants the host more capability than the threat model requires.
 
 Specifically:
 
 - **RW tenant volumes are plaintext.** `mvmctl volume create` produces an AES-256-GCM archive (`crates/mvm-security/src/secret_store.rs`) that protects the volume's host-side file at rest *when locked*. But once a volume is opened and mounted into a guest, the backing storage on the host is decrypted ext4 / virtiofs. A host process with read access to the volume directory can read every byte the workload is writing or reading.
 - **Gateway flows are not in the audit chain.** `crates/mvm-core/src/policy/audit.rs` (`LocalAuditKind` enum) has plan/admission events and Stage 0 boot events, but no flow events. gvproxy (macOS) and passt (Linux) handle all guest network I/O at the host level; neither emits attested flow metadata. A compromised host can route, log, or exfil any traffic with no record landing in the chain.
-- **App-deps volumes have integrity, not confidentiality.** dm-verity-sealed deps volumes (claim 9, [Plan 73](../plans/73-app-deps-audit-pipeline.md) / ADR-041 §"Consolidated from ADR-047") prove "what's on disk hasn't been tampered with." They don't hide what's on disk. Different property.
+- **App-deps volumes have integrity, not confidentiality.** dm-verity-sealed deps volumes (claim 9, [Plan 73](../plans/73-app-deps-audit-pipeline.md) / ADR-014 §"Consolidated from ADR-047") prove "what's on disk hasn't been tampered with." They don't hide what's on disk. Different property.
 
 Result: a host whose userland (not kernel — that's a different threat tier) has been compromised can read tenant data and silently exfil network traffic, and nothing in the audit chain notices.
 
 ## Threat model
 
-This ADR narrows ADR-002's "out of scope: a malicious host" carve-out. The new posture:
+This ADR narrows ADR-001's "out of scope: a malicious host" carve-out. The new posture:
 
-- **Still trusted:** the hypervisor binary, the host kernel, the host signer's private key. Compromise of any of these defeats mvmctl's isolation by definition; out of scope here as in ADR-002.
+- **Still trusted:** the hypervisor binary, the host kernel, the host signer's private key. Compromise of any of these defeats mvmctl's isolation by definition; out of scope here as in ADR-001.
 - **No longer trusted (this ADR):** the host userland's *passive* read access. A user-space process on the host should not be able to (a) read tenant volume bytes at rest, or (b) exfil tenant network traffic, *without that fact being attested in the audit chain.*
 
-Adversary capability assumed: read access to host filesystem and host network namespace. Not assumed: kernel module load, hypervisor hijack, signer key exfiltration (those are ADR-002's still-out-of-scope tier).
+Adversary capability assumed: read access to host filesystem and host network namespace. Not assumed: kernel module load, hypervisor hijack, signer key exfiltration (those are ADR-001's still-out-of-scope tier).
 
 **Adjacent surface — not addressed here, named so readers don't expect it:** inbound TLS termination is mvmd's concern, not mvm's. mvmd manages tenant certs at its multi-tenant edge and is the natural place to terminate inbound TLS. Workload-level TLS (the user's own HTTPS listener inside the microVM) stays encrypted end-to-end. This ADR's threat model is *outbound exfil from the workload*, not *inbound eavesdrop or auth* — different threat model, different ADR if/when it gets one.
 
 
 ## Decision
 
-Add claim 10 to ADR-002's CI-enforced security claims, in three legs.
+Add claim 10 to ADR-001's CI-enforced security claims, in three legs.
 
 ### Leg 1 — Volume confidentiality
 
@@ -767,7 +767,7 @@ isolation) — out of mvm's scope by design.
 
 Every key fingerprint, key rotation, and key-unwrap-failure event lands in the audit chain. `mvmctl audit verify` covers volume-key events alongside flow events alongside the existing plan events. A new CI lane `claim-10-audit-tamper` exercises tamper detection: emit a known sequence, byte-flip one entry, assert `mvmctl audit verify` exits non-zero.
 
-## Out of scope (named, like ADR-002)
+## Out of scope (named, like ADR-001)
 
 - **Host filesystem encryption (FDE).** That's the user's concern — full-disk encryption protects host backups; this ADR protects per-volume at-rest exposure during active workload runs.
 - **Per-byte traffic audit.** Aggregated `flow_bytes` only ([Plan 101](../plans/101-in-guest-volume-encryption-and-gateway-audit.md) W8); coverage of every byte through the bridge is structural (W6.A amendment above), capture is opt-in future mode ([Plan 203](../plans/203-forensic-network-transcript-capture.md)).
@@ -776,7 +776,7 @@ Every key fingerprint, key rotation, and key-unwrap-failure event lands in the a
 ### Added by W6.A amendment
 
 - **East-west microVM ↔ microVM lateral flows.** Different capture mechanism (`tc mirred` / eBPF / per-TAP libpcap), different policy surface. W11 candidate; named here so readers don't expect it from W6.
-- **L7 URL inspection (path-level allowlist).** Composes via `L7EgressProxy` Phase 2 (TLS MITM with workload-trusted host CA per [ADR-004](004-hypervisor-egress-policy.md)); substrate exists, not yet finalized. Separate plan from W6.
+- **L7 URL inspection (path-level allowlist).** Composes via `L7EgressProxy` Phase 2 (TLS MITM with workload-trusted host CA per [ADR-003](003-hypervisor-egress-policy.md)); substrate exists, not yet finalized. Separate plan from W6.
 - **DNS-over-HTTPS bypass mitigation.** Workloads using DoH (e.g., 1.1.1.1:443) hide queries inside encrypted HTTPS to a public resolver, evading admission-time DNS pinning. Separate Plan 74 follow-up: mandatory-deny well-known DoH endpoints.
 - **SNI hostname allowlist.** Cleartext SNI extraction from TLS ClientHello → `FlowPolicy::evaluate` with `sni_hostname` populated. Substrate seam exists in W6.A's `FlowDecisionCtx`; inspector implementation is a separate plan.
 - **Side-channel information leakage via flow timing.** Inherent to any flow audit; accepted.
@@ -793,10 +793,10 @@ Every key fingerprint, key rotation, and key-unwrap-failure event lands in the a
 
 ## References
 
-- [ADR-002](002-microvm-security-posture.md) — microVM security posture (claim list extends to 10)
-- ADR-041 (this document) — claim 8, signed ExecutionPlans (volume keys ride this signing path)
-- ADR-041 §"Consolidated from ADR-047" — claim 9, app-deps audit (analogous structure for the audit chain extension)
-- [ADR-004](004-hypervisor-egress-policy.md) — gvproxy / passt gateway choice
+- [ADR-001](001-microvm-security-posture.md) — microVM security posture (claim list extends to 10)
+- ADR-014 (this document) — claim 8, signed ExecutionPlans (volume keys ride this signing path)
+- ADR-014 §"Consolidated from ADR-047" — claim 9, app-deps audit (analogous structure for the audit chain extension)
+- [ADR-003](003-hypervisor-egress-policy.md) — gvproxy / passt gateway choice
 - [Plan 101](../plans/101-in-guest-volume-encryption-and-gateway-audit.md) — implementation rollout
 
 
@@ -804,12 +804,12 @@ Every key fingerprint, key rotation, and key-unwrap-failure event lands in the a
 
 **Status:** Accepted 2026-06-10. Implemented by
 [`specs/plans/181-app-builder-product-surface.md`](../plans/181-app-builder-product-surface.md).
-**Extends** [ADR-002](002-microvm-security-posture.md) (consolidated from ADR-070) (the
+**Extends** [ADR-001](001-microvm-security-posture.md) (consolidated from ADR-070) (the
 mvm-primitive ↔ mvmd-transport boundary), and builds on
-[ADR-004](004-hypervisor-egress-policy.md) / Plan 179 (the first-party gateway
+[ADR-003](003-hypervisor-egress-policy.md) / Plan 179 (the first-party gateway
 seam preview ingress publishes through) and the network-provider seam in
-ADR-004. **Cross-refs:** ADR-002 (security posture — claims 1/2/10 are the lines
-this ADR refuses to cross), ADR-041 (signed/audited execution plans — where
+ADR-003. **Cross-refs:** ADR-001 (security posture — claims 1/2/10 are the lines
+this ADR refuses to cross), ADR-014 (signed/audited execution plans — where
 published ports get signed), Plan 33 (hosted transport — mvmd owns it),
 Plan 170 (the same primitive↔product split applied to density), Plan 118 /
 Plan 123 C4 / Plan 175 (warm pool + warm-start, the wake-on-access machinery),
@@ -841,7 +841,7 @@ claims 1–15) behind a CLI-first surface that does not deliver the product loop
 The question this ADR settles is **which half of the sibling's design we take.**
 
 The ergonomics do not depend on the isolation. The preview loop rides the
-gateway seam we already own (ADR-004); wake-on-access rides warm-start
+gateway seam we already own (ADR-003); wake-on-access rides warm-start
 (Plan 123 C4 / Plan 175); the task/files surface rides agent-RPC + streamed
 exec (Plan 169 / Plan 172); the lifecycle verbs and install/uninstall are CLI
 plumbing on the `vm`/`env` groups. None of it requires relaxing a claim. The
@@ -859,12 +859,12 @@ the sibling had to hand.
    they are not relitigated when the DX gap is felt again.
 
 2. **Split every capability into an mvm-side primitive and an mvmd-side product
-   leg, per ADR-002 (consolidated from ADR-070).** mvm ships the bridgeable primitives — a signed
+   leg, per ADR-001 (consolidated from ADR-070).** mvm ships the bridgeable primitives — a signed
    published-ports model, a per-port routing label at the gateway seam, a
    wake-on-access `VmBackend` hook, the task/files vsock protocol with an
    SSE-ready event shape, and the idle-TTL/keepalive contract. mvm does **not**
    grow a multi-tenant HTTP listener or tenant auth; that transport + auth +
-   wildcard-DNS/TLS surface is mvmd's (Plan 33 / ADR-002 §"Consolidated from ADR-070" §5). This is the same
+   wildcard-DNS/TLS surface is mvmd's (Plan 33 / ADR-001 §"Consolidated from ADR-070" §5). This is the same
    boundary Plan 170 drew for density.
 
 3. **One exception: a local, single-machine dev ingress lives in mvm.** So
@@ -910,7 +910,7 @@ the sibling had to hand.
 - [ ] Decide L4-only-now vs. a fuller local HTTP router (Plan 181 WS-A open
   decision); recommendation is L4 + loopback proxy first.
 - [ ] If/when a hosted (non-localhost) preview surface is wanted, it is an mvmd
-  effort (Plan 33), not mvm — same disposition as ADR-002 §"Consolidated from ADR-070"'s hosted console.
+  effort (Plan 33), not mvm — same disposition as ADR-001 §"Consolidated from ADR-070"'s hosted console.
 
 ## Alternatives considered
 
@@ -918,7 +918,7 @@ the sibling had to hand.
   Rejected: it discards claims 1/2/10 and mvm's reason to exist. The DX does not
   require it.
 - **Build the full multi-tenant preview/ingress + auth in mvm.** Rejected:
-  violates the ADR-002 (consolidated from ADR-070) / Plan 33 boundary that reserves transport + tenant auth
+  violates the ADR-001 (consolidated from ADR-070) / Plan 33 boundary that reserves transport + tenant auth
   for mvmd. mvm ships primitives + a single-machine dev ingress only.
 - **Ambient (unsigned) port exposure for convenience.** Rejected: it would make
   egress reachability an unrecorded side effect, weakening claim 10. Published
@@ -934,10 +934,10 @@ the sibling had to hand.
 ## Consolidated from ADR-103 — Plan-bound agent verb capabilities
 
 - Status: Proposed
-- Note: Landed in two stages — the signed-type + guest-enforcement core (Plan 215 Tasks 1–5a) first; the out-of-band host-signer-key provisioning + wire delivery (5b–5d) as a follow-on, since the key separation becomes an active boundary only under the ADR-059 decomposition.
+- Note: Landed in two stages — the signed-type + guest-enforcement core (Plan 215 Tasks 1–5a) first; the out-of-band host-signer-key provisioning + wire delivery (5b–5d) as a follow-on, since the key separation becomes an active boundary only under the ADR-020 decomposition.
 - Date: 2026-06-30
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture — claim 4 `do_exec`, claim 15 sealed interactivity), ADR-041 (signed audited execution plans — claim 8), ADR-067 (secret substitution — time/destination-bound signed credentials), ADR-059 / ADR-059 (host services broker — claim 12 binding-gated dispatch), ADR-059 (resident daemon trust gradient)
+- Related: ADR-001 (microVM security posture — claim 4 `do_exec`, claim 15 sealed interactivity), ADR-014 (signed audited execution plans — claim 8), ADR-023 (secret substitution — time/destination-bound signed credentials), ADR-020 / ADR-020 (host services broker — claim 12 binding-gated dispatch), ADR-020 (resident daemon trust gradient)
 - Sequenced by: [Plan 215](../plans/215-plan-bound-agent-verb-capabilities.md)
 
 ## Context
@@ -971,7 +971,7 @@ Two forces make that gap worth closing:
    `ExecutionPlan.services` → broker dispatch gate). The agent verb surface is the
    symmetric guest-side capability and is currently unbound.
 
-2. **The host is decomposing.** Under the ADR-059 trust gradient the plan is signed by
+2. **The host is decomposing.** Under the ADR-020 trust gradient the plan is signed by
    the host-signer moat at admission, but the component holding the 5252 client may be
    a less-trusted control process. A guest-side, plan-bound verb check is only
    meaningful when the *signing authority is separated from the calling authority* — so
@@ -1001,7 +1001,7 @@ before its workload's plan exists, then claim it later. A boot-time artifact
 attenuate a VM that is claimed for a plan minted after boot. Each claim redoes
 `ProtocolHello`, so the handshake is the one delivery point that re-pins per workload.
 
-This mirrors the shape ADR-067 / claim 13 already ship for secrets: a **time-bound,
+This mirrors the shape ADR-023 / claim 13 already ship for secrets: a **time-bound,
 context-bound, signed credential** rather than a static blob.
 
 ### The grant
@@ -1056,7 +1056,7 @@ out is the default and dev/interactive flows are unaffected.
 
 The guest already obtains a host `VerifyingKey` + `session_id` at `ProtocolHello`
 (`vsock.rs:2290`). The `VerbGrant` signature MUST chain to the **plan-admission
-(host-signer) authority**, which under ADR-059 is distinct from the 5252 caller. If the
+(host-signer) authority**, which under ADR-020 is distinct from the 5252 caller. If the
 grant were signed by (or forgeable by) the caller, a compromised caller would simply mint
 the verb it wants and the check would buy nothing. The Plan must therefore provision the
 guest with the host-signer verifying key (or a delegation chain to it) and verify the
@@ -1076,7 +1076,7 @@ and minted at admission, so no independent pre-provisioned anchor exists to chec
 Achieving real key separation requires provisioning a trust anchor the grant-issuer cannot
 swap (e.g. a signing key baked into the verity-sealed image at build time) — tracked as a
 follow-up; until then, this ADR's "key separation" is an aspiration the delivered code does
-not meet, and the claim must not be promoted to the ADR-002 ledger on the strength of the
+not meet, and the claim must not be promoted to the ADR-001 ledger on the strength of the
 cmdline mechanism alone.
 
 ### Denials are audited (claim-12 parity)
@@ -1100,17 +1100,17 @@ denials.
   static property of a verb, not a per-workload one. No number of classes expresses "this
   particular workload needs this particular subset."
 - **Encrypt the channel.** Out of scope and unrelated: vsock has one host endpoint and
-  one guest endpoint inside the TCB; ADR-002 puts a malicious host out of scope. The need
+  one guest endpoint inside the TCB; ADR-001 puts a malicious host out of scope. The need
   here is attenuation and authenticity, not confidentiality.
 
 ## Threat model
 
-- **In scope:** a less-trusted host-side 5252 caller (ADR-059 gradient) invoking a
+- **In scope:** a less-trusted host-side 5252 caller (ADR-020 gradient) invoking a
   `ProdSafe` verb the workload's admitted plan did not authorize; replay of a broader
   grant captured from an earlier plan (defended by `plan_nonce` + `not_after` riding the
   claim-8 validity/replay machinery); a grant forged by the caller (defended by the
   host-signer key separation).
-- **Out of scope (unchanged from ADR-002):** a malicious host holding the hypervisor and
+- **Out of scope (unchanged from ADR-001):** a malicious host holding the hypervisor and
   the host-signer private key; confidentiality of vsock bytes; a guest that is already
   compromised attempting verbs — that is the class gate's and claim 4/15's job, which
   this ADR strengthens but does not replace.
@@ -1119,7 +1119,7 @@ denials.
 
 - Strengthens the claim 4 / claim 15 family (interactive/exec surface minimization) with
   a per-workload dimension. Whether this becomes a numbered or `Preview` claim in the
-  ADR-002 ledger is a maintainer decision and is deliberately **not** asserted here
+  ADR-001 ledger is a maintainer decision and is deliberately **not** asserted here
   (cf. claim 16's pending promotion).
 - New signed field on `ExecutionPlan`; synthesis populates `agent_verbs` from workload
   requirements, admission mints + signs the `VerbGrant`.

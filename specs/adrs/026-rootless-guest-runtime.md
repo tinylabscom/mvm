@@ -1,8 +1,8 @@
 ---
-title: "ADR-075: Rootless guest runtime — no uid 0 reaches workload or guest-controlled code, and no usable root account exists"
+title: "ADR-026: Rootless guest runtime — no uid 0 reaches workload or guest-controlled code, and no usable root account exists"
 status: Proposed
 date: 2026-06-09
-related: ADR-002 (microVM security posture — claim 2 / §W2); ADR-066 (target architecture; guest layout); Plan 25 (microVM hardening); Plan 26 (W2 defense in depth); Plan 165 (entrypoint presence + sealed interactivity — claim 15); specs/02-project.md (the product-level rootless-runtime statement this ADR backs)
+related: ADR-001 (microVM security posture — claim 2 / §W2); ADR-022 (target architecture; guest layout); Plan 25 (microVM hardening); Plan 26 (W2 defense in depth); Plan 165 (entrypoint presence + sealed interactivity — claim 15); specs/02-project.md (the product-level rootless-runtime statement this ADR backs)
 ---
 
 ## Status
@@ -20,7 +20,7 @@ witness, so the catalog row cannot land ahead of the test).
 
 ## Context
 
-Claim 2 in ADR-002 is narrow: **"no guest binary can elevate to uid 0."** Its
+Claim 2 in ADR-001 is narrow: **"no guest binary can elevate to uid 0."** Its
 witnesses are `setpriv --no-new-privs` (a process cannot *gain* privileges via
 `execve` of a setuid binary) plus read-only config binds so a compromised service
 cannot mint a uid 0 `/etc/passwd` entry. That is an *anti-escalation* property.
@@ -74,7 +74,7 @@ exact, honest shape of the guarantee — not a claim that uid 0 never exists.
 ### 2. No usable root account
 
 - **No root login and no root shell.** The sole interactive surface is the
-  dev-only PTY-over-vsock console (ADR-002 §claim 15 / Plan 165), which is absent
+  dev-only PTY-over-vsock console (ADR-001 §claim 15 / Plan 165), which is absent
   from production builds and, even in dev, attaches to a shell running as the
   unprivileged workload uid — never a root shell. A sealed production guest has
   no interactive surface at all.
@@ -89,7 +89,7 @@ exact, honest shape of the guarantee — not a claim that uid 0 never exists.
 
 ### 3. Numbering: a new claim, reinforcing claim 2
 
-Add a **new numbered security claim** to ADR-002 / the catalog rather than
+Add a **new numbered security claim** to ADR-001 / the catalog rather than
 overloading claim 2:
 
 > **Claim 16 — The guest runtime runs rootless.** No workload or guest-controlled
@@ -115,7 +115,7 @@ sit *before* the drop inside the boot shim, so they do not weaken the property;
 any early privileged setup a backend needs is done in the shim, never by leaving
 the workload at uid 0. The WASM sandbox backend has no POSIX uid model and is out
 of scope for this claim — its isolation is provided by the WASM sandbox itself
-(ADR-069), and the catalog row scopes claim 16 to the Linux-guest backends.
+(ADR-024), and the catalog row scopes claim 16 to the Linux-guest backends.
 
 ## Consequences
 
@@ -160,5 +160,5 @@ of scope for this claim — its isolation is provided by the WASM sandbox itself
   runs as the unprivileged workload uid.
 - [ ] Append Claim 16 to `specs/claims/catalog.md` with its resolvable witnesses
   (runtime euid test + setuid-scan CI lane), and add the narrative row to
-  ADR-002's claim table. The catalog gate requires the witness to exist, so this
+  ADR-001's claim table. The catalog gate requires the witness to exist, so this
   step lands with the tests, not ahead of them.

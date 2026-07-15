@@ -24,7 +24,7 @@ pub enum OciUnpackError {
     /// rejected at admission time.
     #[error(
         "OCI image carries content at reserved path {entry_path:?} \
-         (reserved by ADR-051 for the mvm runtime overlay)"
+         (reserved by ADR-018 for the mvm runtime overlay)"
     )]
     ReservedPathCollision { entry_path: PathBuf },
 

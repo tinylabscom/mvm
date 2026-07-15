@@ -16,7 +16,7 @@ core dumps + reproducible in tests.
 `SeccompAction::Trap` (vs `SeccompAction::Errno(EACCES)`) is
 intentional: the `mvm-bridge` sidecar is *expected* to be
 killed by SIGSYS on a forbidden syscall, and the supervisor's
-`BridgeRestartPolicy::HardFail` (ADR-004 §Decision 6) is the cleanup
+`BridgeRestartPolicy::HardFail` (ADR-003 §Decision 6) is the cleanup
 mechanism — the dead bridge tears down the VM. `Errno` would let a
 compromised bridge observe the rejection, retry, or pivot to a
 different attack, which is exactly what we want to forbid: there is

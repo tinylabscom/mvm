@@ -203,7 +203,7 @@ mvm runs Nix builds inside the project builder VM and copies the finished kernel
 
 - **Linux**: the builder VM provides the Linux build boundary and cache policy. Firecracker is the default runtime backend when `/dev/kvm` is available.
 - **macOS**: the host `mvmctl build` command orchestrates a Linux builder VM. The resulting runtime image boots on the HVF backend by default on macOS 26+ (Hypervisor.framework, vsock-only), or libkrun on macOS 13–25.
-- **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-031](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/031-cross-platform-strategy.md).
+- **Windows**: Tauri-only (the `mvm-studio` desktop app packages a WSL2-backed builder + runtime). See [ADR-009](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/009-cross-platform-strategy.md).
 
 ## Rootless workloads
 
@@ -220,7 +220,7 @@ PID 1 must be uid 0 (kernel mandate). Everything else can — and by default in 
 The dev/prod default split is intentional:
 
 - **Dev** keeps entrypoint as root because debug shells expect root: `apt install`, `mount`, `tcpdump`. Forcing rootless dev would break those flows on first try.
-- **Prod** drops to uid 1000 by default per ADR-002 W2.1 — "no guest binary can elevate to uid 0." A workload that *isn't* root can't be re-elevated.
+- **Prod** drops to uid 1000 by default per ADR-001 W2.1 — "no guest binary can elevate to uid 0." A workload that *isn't* root can't be re-elevated.
 
 `/init` uses `setpriv --reuid=N --regid=N --clear-groups --no-new-privs --` to drop. `--no-new-privs` blocks `setuid` re-elevation, so even if the workload finds a SUID binary, it can't reach uid 0.
 

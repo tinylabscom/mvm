@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-05-14
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture, claim 3), ADR-005 (image acquisition), ADR-014 (builder VM via libkrun), ADR-041 (claim-safe sandbox parity), Plan 74 W1, Plan 74 §Risks R3, mvmd ADR-0020 (OCI images as microVM workloads)
+- Related: ADR-001 (microVM security posture, claim 3), ADR-004 (image acquisition), ADR-007 (builder VM via libkrun), ADR-014 (claim-safe sandbox parity), Plan 74 W1, Plan 74 §Risks R3, mvmd ADR-0020 (OCI images as microVM workloads)
 
 ## Context
 
@@ -123,7 +123,7 @@ yesterday. These cover different threats:
 Option B leaves four of the five rows uncovered. Conflating
 "audit covers it" with "verity covers it" produces a two-tier
 trust story that's hard to message and easy for users to misread.
-ADR-041 §"Non-goals" already forbids
+ADR-014 §"Non-goals" already forbids
 "bypassing verified artifact checks for developer ergonomics" —
 Option B is on the spectrum of that.
 
@@ -325,7 +325,7 @@ team can use it freely.
 
 ## Cross-refs
 
-- ADR-002 §"Security model" — claims 1–8 (pre-plan-75) and 9 (deps).
+- ADR-001 §"Security model" — claims 1–8 (pre-plan-75) and 9 (deps).
 - OCI provenance planning — defines this claim in its security
   implications section.
 - CLAUDE.md §"Security model" — claim 10 line landed when Plan 85
@@ -373,7 +373,7 @@ with no extension path:
 Today these users have two bad options: fork mvm and patch the
 closed list, or carry an out-of-band rootfs that bypasses
 `resolve_base_image` entirely. Both lose the security posture
-guarantees ADR-002 makes about how a base image lands on disk.
+guarantees ADR-001 makes about how a base image lands on disk.
 
 The SDK port plan §"Well-known base-image trust" explicitly called
 this out as a v1 deferral, and Plan 73 Followup G tracks it. The
@@ -410,7 +410,7 @@ inventing a parallel signing format for the same job.
 
 ### Registry layout
 
-Mirrors the sealed-volume layout from ADR-041 §"Sealed artifact
+Mirrors the sealed-volume layout from ADR-014 §"Sealed artifact
 layout" so the supervisor can treat both as the same shape of
 admission input:
 
@@ -453,7 +453,7 @@ cve_scan_at = "2026-05-14T12:00:00Z"
 sbom_sha256 = "fedc...0987"
 attestation = "sigstore-bundle.json"
 
-# forward-compat with ADR-041 (claim 9): a base template can declare
+# forward-compat with ADR-014 (claim 9): a base template can declare
 # its own dependency volumes that the supervisor verifies as part of
 # admitting the workload.
 [[dependencies]]
@@ -465,7 +465,7 @@ mount_path     = "/opt/cuda"
 `#[serde(deny_unknown_fields)]` on the deserialized
 `TemplateManifest` ensures a future publisher that adds new fields
 fails closed on an older mvm host — same rule as the existing
-host↔guest types in ADR-002 claim 5.
+host↔guest types in ADR-001 claim 5.
 
 ### CLI surface
 
@@ -529,7 +529,7 @@ already dispatched on attacker-controlled JSON.
 
 ### Lifecycle gates
 
-Mirroring ADR-041 §"Lifecycle gates":
+Mirroring ADR-014 §"Lifecycle gates":
 
 **Publish-time (inside `mvmctl image push`):**
 
@@ -540,7 +540,7 @@ Mirroring ADR-041 §"Lifecycle gates":
    `manifest.rootfs_sha256`.
 3. **CVE scan (--prod)** — if `--prod`, the rootfs is mounted
    read-only in the builder VM and scanned via the same pipeline
-   ADR-041 uses for app-deps volumes. High/critical findings fail
+   ADR-014 uses for app-deps volumes. High/critical findings fail
    closed. Under `--dev`, the scan runs but only warns.
 4. **SBOM emission (--prod)** — `cyclonedx-cli` over the rootfs's
    `/var/lib/dpkg` or `/nix/store` index produces
@@ -579,10 +579,10 @@ closed-list entry — the fast path runs before the registry lookup.
 This prevents a malicious publisher from shadowing a trusted name
 even if the user has granted trust to that publisher.
 
-### Forward-compat with claim 9 (ADR-041)
+### Forward-compat with claim 9 (ADR-014)
 
 A base template's `[[dependencies]]` entries are sealed volumes in
-the ADR-041 shape. The supervisor's admission verifier (Followup A)
+the ADR-014 shape. The supervisor's admission verifier (Followup A)
 already calls `verify_sealed_volume` for workload-level deps; it
 calls the same code for template-level deps. The audit-chain entry
 records both the template fingerprint *and* every dependency
@@ -601,12 +601,12 @@ posture extends to it without new code.
 | Threat | Mitigation |
 |---|---|
 | Malicious template publisher ships a backdoored rootfs | Cosign-signing + explicit `mvmctl image trust add`. mvm trusts the signature, not the publisher's claimed identity. |
-| Trust-store compromise (attacker drops a pubkey under `~/.mvm/trusted-image-keys/`) | Out of scope for mvm in v1 — handled by host filesystem perms (`~/.mvm` is mode 0700 per ADR-002 §"Security model"). Future hardening: trust-store entries chain-signed by `host-signer.ed25519`. |
+| Trust-store compromise (attacker drops a pubkey under `~/.mvm/trusted-image-keys/`) | Out of scope for mvm in v1 — handled by host filesystem perms (`~/.mvm` is mode 0700 per ADR-001 §"Security model"). Future hardening: trust-store entries chain-signed by `host-signer.ed25519`. |
 | Stolen signing key | Cosign + Sigstore rekor (transparency log) gives a path to detection; full revocation is out of scope for v1 but the schema reserves an `attestation` field for the Sigstore bundle that makes the rekor lookup possible. |
-| Manifest forward-incompat field smuggling | `#[serde(deny_unknown_fields)]` on `TemplateManifest`; same posture as ADR-002 claim 5. |
+| Manifest forward-incompat field smuggling | `#[serde(deny_unknown_fields)]` on `TemplateManifest`; same posture as ADR-001 claim 5. |
 | Rootfs tampered after signing | `rootfs_sha256` recompute at admission. |
 | Name shadowing of closed-list entries | Closed-list fast path runs before registry lookup. |
-| Dependency-volume tampering | Routed through ADR-041 `verify_sealed_volume`; the supervisor cannot tell a template-declared volume from a workload-declared volume, so the existing claim-9 enforcement applies uniformly. |
+| Dependency-volume tampering | Routed through ADR-014 `verify_sealed_volume`; the supervisor cannot tell a template-declared volume from a workload-declared volume, so the existing claim-9 enforcement applies uniformly. |
 
 ### Non-goals
 
@@ -659,7 +659,7 @@ follow-up `list` flip back to `[untrusted: bad sig]`.
 
 **Scope:** the publish path — manifest validation, rootfs hash
 compute, optional CVE scan + SBOM emission in the builder VM
-(reusing ADR-041 plumbing), cosign sign, write to the registry
+(reusing ADR-014 plumbing), cosign sign, write to the registry
 dir. Optional `--registry <url>` pushes the sealed bundle
 externally.
 
@@ -694,7 +694,7 @@ marked done.
 - The trust model reuses cosign + Sigstore — no novel signing
   scheme to audit. The mvm-side code is "verify a signature in a
   trust store and parse a manifest."
-- Forward-compat with ADR-041 falls out for free: template-level
+- Forward-compat with ADR-014 falls out for free: template-level
   deps are workload-level deps from the supervisor's perspective.
 - Phasing is incremental — G.1 is shippable in a day; each
   subsequent phase is additive and reverts cleanly.
@@ -708,7 +708,7 @@ marked done.
   create a worse failure mode — a publisher trusted for one
   scope automatically trusted for the other.
 - Custom templates can pin to specific CVE-scan timestamps but
-  cannot pin to "freshest CVE feed." That's the same trade ADR-041
+  cannot pin to "freshest CVE feed." That's the same trade ADR-014
   makes for app-deps volumes; the `mvmctl deps audit` re-audit
   mechanism (Plan 73 Followup C) will extend to templates in a
   later followup once base templates exist in production.
@@ -726,14 +726,14 @@ marked done.
 
 ## References
 
-- ADR-002 — `specs/adrs/002-microvm-security-posture.md` —
+- ADR-001 — `specs/adrs/001-microvm-security-posture.md` —
   claims 1–8 (no regressions: the rootfs verity claim 3, the
   audited plan claim 8, the deny-unknown-fields claim 5, and the
   `~/.mvm` 0700 posture all apply unchanged).
-- ADR-041 — `specs/adrs/041-signed-audited-execution-plans.md` —
+- ADR-014 — `specs/adrs/014-signed-audited-execution-plans.md` —
   the audit-chain consumer that records template resolutions in
   G.4.
-- ADR-041 — `specs/adrs/041-signed-audited-execution-plans.md` — the
+- ADR-014 — `specs/adrs/014-signed-audited-execution-plans.md` — the
   sealed-artifact layout this ADR mirrors, and the
   `verify_sealed_volume` primitive G.4 reuses for template-level
   deps.
@@ -819,7 +819,7 @@ implementation; the difference between local and fleet is only *who ticks it*
   `mvmctl down` would be worse than the drift it fixes.
 - **Observability:** convergence actions and idle/pressure lifecycle
   transitions emit to the shared local audit log via `audit_emit!`
-  (consistent with ADR-041 / the Stage 0 audit contract), so density and
+  (consistent with ADR-014 / the Stage 0 audit contract), so density and
   self-heal behavior are auditable and `audit verify` still chains.
 - **Boundary preserved:** this is host-side lifecycle bookkeeping only. It
   never touches the guest trust boundary or any of claims 1–15.
@@ -842,13 +842,13 @@ implementation; the difference between local and fleet is only *who ticks it*
 
 **Status:** Proposed
 **Date:** 2026-06-24 (amended 2026-07-07: §9 release signing custody)
-**Relates to:** [ADR-041](041-signed-audited-execution-plans.md),
-[ADR-014](014-vmbackend-single-trait.md),
-[ADR-005](005-sealed-signed-builder-image.md),
-[ADR-073](073-warm-snapshot-prior-art-adoption-boundary.md),
-[ADR-086](086-relocatable-dependency-free-host-bundle.md),
-[ADR-059](059-host-services-broker.md),
-[ADR-014](014-vmbackend-single-trait.md)
+**Relates to:** [ADR-014](014-signed-audited-execution-plans.md),
+[ADR-007](007-vmbackend-single-trait.md),
+[ADR-004](004-sealed-signed-builder-image.md),
+[ADR-025](025-warm-snapshot-prior-art-adoption-boundary.md),
+[ADR-028](028-relocatable-dependency-free-host-bundle.md),
+[ADR-020](020-host-services-broker.md),
+[ADR-007](007-vmbackend-single-trait.md)
 
 ## Context
 

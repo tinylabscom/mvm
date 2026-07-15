@@ -28,7 +28,7 @@ All notable changes to mvm are documented in this file.
   checkpoint/fork` is temporarily unsupported on macOS pending HVF save/restore
   (Plan 226 WS-E); the macOS-26 dev VM temporarily falls back to libkrun.
 
-### ADR-004
+### ADR-003
 - Rust-native egress gateway replaces the vendored Go gateway (Proposed)
 
 ### Added
@@ -67,7 +67,7 @@ All notable changes to mvm are documented in this file.
 - **secrets**: SecretRef gains auth_type + allowed_hosts; lift the not-implemented gate (plan 129 Phase A)
 - **plan-166**: QEMU run_build — steady-state builds (Task 1.5)
 - **plan-166**: Route mvmctl build through the selected builder backend
-- **plan-166**: Skip egress lockdown on the dev-tier QEMU builder (ADR-014)
+- **plan-166**: Skip egress lockdown on the dev-tier QEMU builder (ADR-007)
 - **plan-124 C1/2a**: Wire runtime-overlay resolver into the up/run boot path
 - **mvm-backend**: Public sign_binaries/entitlements_present API
 - **mvm-backend**: Collect_sign_targets aggregator
@@ -174,13 +174,13 @@ All notable changes to mvm are documented in this file.
 - **dev**: Add `dev up --json` lifecycle envelope (plan 189 WS-3)
 - **pool**: Vz saved-standby warm pool — up claims a prebooted standby
 - **pool**: Vz warm pool self-replenishes via a detached re-warm
-- **net**: MVM_NETWORKING=native gateway flag (ADR-004 Phase 1)
+- **net**: MVM_NETWORKING=native gateway flag (ADR-003 Phase 1)
 - **sdk**: Generate host↔guest protocol type stubs from protocol-v0.json (plan 124 D1.2a)
 - **backend**: WorkloadBackend type-bar — core security features non-skippable (Plan 197 Phase 1)
 - **guest**: Machine-readable host↔guest RPC request→response contract (plan 124 D1.2 step 2a)
 - MacOS egress secret substitution — vsock-5253 channel on libkrun + vz (Plan 197 Phase 2a)
 - **guest**: Contract-checked host-side RPC client over the response contract (plan 124 D1.2 step 2b)
-- **core**: WASI fs/env capability projection (ADR-069 A1 / Plan 192)
+- **core**: WASI fs/env capability projection (ADR-024 A1 / Plan 192)
 - **up**: `--console` boots straight into an interactive shell
 - **sdk**: Sandbox copy_in/copy_out in both Python + TS SDKs (plan 125 B1a)
 - **sdk**: Sandbox forward/ports in both Python + TS SDKs (plan 125 B1b)
@@ -309,7 +309,7 @@ All notable changes to mvm are documented in this file.
 - **plan-204**: Default guest-image builds to the typed mvm-builderd route + raw-shell debug gate (WS-D)
 - **machine**: --volume host shares + auto-recreate for managed `machine run`
 - **cli**: Fold `up`/`run` into `machine run` — source axis (Plan 208 Task 4, pt 1)
-- **vm-host**: ADR-014 + Plan 209 Tasks 1–2 — unified mvm-bridge sidecar contract + binary
+- **vm-host**: ADR-007 + Plan 209 Tasks 1–2 — unified mvm-bridge sidecar contract + binary
 - **vm-host**: Plan 209 Task 4 — fold FC+vz sidecars into mvm-bridge (libkrun merged); live-verified
 - Add attested pack manifest verifier core
 - **backend**: Fail-closed capability model (Plan 214 slice 1)
@@ -368,11 +368,11 @@ All notable changes to mvm are documented in this file.
 - **machine**: Actionable "machine does not exist" errors
 - **machine**: `machine rm` prompts for confirmation like `machine stop`
 - **machine**: `ps` as a visible alias for `machine ls`
-- **verb-grant**: Measured verb-trust policy + restore reconciliation (ADR-002, #1381 item 3)
+- **verb-grant**: Measured verb-trust policy + restore reconciliation (ADR-001, #1381 item 3)
 - **machine**: Auto-generate a name for `machine create` when omitted
 - **machine**: Batch `machine stop <name>...`
 - **machine**: Batch `machine start <name>...`
-- **verb-grant**: Stage A — launcher-gated enforcement flip (ADR-005, #1381 item 3)
+- **verb-grant**: Stage A — launcher-gated enforcement flip (ADR-004, #1381 item 3)
 - **run**: Virtiofs-root tier gate + backend capability (Plan 223 A4/A1)
 - **machine**: Aligned `machine ls` table with header + AGE column
 - **mvm-client**: Add inspect/create/start/remove to the MvmClient trait
@@ -429,14 +429,14 @@ All notable changes to mvm are documented in this file.
 - **plan-152**: Record minimal-VZ-launcher prior art; flip Plan 134 gate
 - **plan-166**: Promote cold-state guarantee to a witnessed non-persistence claim
 - **plan-167**: Renumber non-persistence plan 166->167 (collision with feat/plan-166-qemu-builder)
-- ADR-014 + Plan 165 — QEMU dev/builder backend (Firecracker stays prod)
+- ADR-007 + Plan 165 — QEMU dev/builder backend (Firecracker stays prod)
 - **adr-072,plan-165**: Scope QEMU to Linux; Vz is the macOS built-in equivalent
-- **claim15**: Catalog row + ADR-002 + CLAUDE.md — no interactive access to a sealed prod microVM (Plan 165 WS-C)
+- **claim15**: Catalog row + ADR-001 + CLAUDE.md — no interactive access to a sealed prod microVM (Plan 165 WS-C)
 - **plan-165**: Tick WS-B/WS-C; defer A4 invoke witness + note latent B4 gate
 - **sdk**: Clarify B1 comment — B4 enforces via the entrypoint_present wire field, not this predicate (Plan 165 review fix)
 - **plan-124 A4**: Record the −27-crate cut; defer A2 (serde_json unremovable)
 - **plan-157,adr-072**: Warm-snapshot prior-art adoption boundary
-- **adr**: Renumber ADR-014 (then numbered 072) → ADR-073 (072 taken by qemu-dev-builder-backend on main)
+- **adr**: Renumber ADR-007 (then numbered 072) → ADR-025 (072 taken by qemu-dev-builder-backend on main)
 - **adr-073**: Fix half-applied renumber (072→073 in headings + Plan 157 links)
 - **adr-073,plan-157**: Scope page-cache priming to the immutable rootfs
 - **plan-166**: Record QEMU run_build reachability gap found on box
@@ -499,17 +499,17 @@ All notable changes to mvm are documented in this file.
 - Feature-surface reduction — ADRs + plans (backend + CLI consolidation)
 - **refactor-status**: Plan 178 ✅ DONE (run-family merged in #768)
 - **refactor-status**: WS-2 complete  — flip restored after the Plan 178 merge dropped it
-- **plan-181**: App-builder product surface — ADR-041 + plan + rollups
+- **plan-181**: App-builder product surface — ADR-014 + plan + rollups
 - **refactor-status**: Add top-level 'Plans at a glance' checklist above the details
 - **refactor-status**: Sync glance with details (Plan 180 done, 129 reachability fixed, 177 P2 in progress)
 - Plan 183 — builder-VM egress posture + guest network bootstrap
 - **plan-129**: Record clean-room recipe e2e (QEMU green) + FC-leg follow-ups
-- **plan-177**: Record Phase 2 landing  — prune ADR-002 tier matrix; sync rollup
+- **plan-177**: Record Phase 2 landing  — prune ADR-001 tier matrix; sync rollup
 - **plan-177**: Mark Phase 2 DONE; spin DX-parity into Plan 189
 - **adr-002**: Record the wasm-sandbox Tier-0 preview substrate in the tier matrix
-- **specs**: ADR-069 program rollup (REFACTOR-STATUS + SPRINT 62) + Plan 190 kernel-wiring spec
+- **specs**: ADR-024 program rollup (REFACTOR-STATUS + SPRINT 62) + Plan 190 kernel-wiring spec
 - **sprint**: Refresh stale Current Status header (v0.13.0 → v0.16.1)
-- ADR-069 wasm-component runner + Plan 192 (A1 capability projection fs/env)
+- ADR-024 wasm-component runner + Plan 192 (A1 capability projection fs/env)
 - **plan-192**: Propose rvproxy network substrate (replace gvproxy/passt) + record gvproxy/build-perf findings
 - **rollup+sprint**: Record Vz warm-pool self-replenish
 - **plan-189**: WS-2 who-calls audit — vz boot surface is already fast-boot-default
@@ -578,7 +578,7 @@ All notable changes to mvm are documented in this file.
 - **dev**: Close out builder VM fingerprint narrowing
 - Propose builder VM resident control plane
 - **plan-200**: Draft the Vz up --wait verdict-capture slice
-- Plan 205 / ADR-059 — resident builder control plane + residency model (umbrella)
+- Plan 205 / ADR-020 — resident builder control plane + residency model (umbrella)
 - **plan-205**: Workstream F — what-runs-where, residency config, threat-model delta
 - **plan-205**: Make the "instant" bar a CI-gated latency budget
 - **troubleshooting**: Stage 0 BadActivate on a fresh isolated cache
@@ -606,10 +606,10 @@ All notable changes to mvm are documented in this file.
 - **plan-200**: Frame old verbs as advanced/underlying surfaces (§A 821)
 - **plan-204**: Sync REFACTOR-STATUS WS-D state (FlakeCheck routing landed; build route blocked)
 - **plan-200**: Record live Firecracker-lane machine-run phase timing (KVM)
-- **machine**: Unified `machine run` lifecycle — ADR-077 + Plan 207
+- **machine**: Unified `machine run` lifecycle — ADR-027 + Plan 207
 - **adr-092**: `machine` as the sole workload CLI surface (consolidation)
 - **adr-093**: Linux builder auto-fallback over libkrun, default unchanged
-- **plan-210**: Kernel-pin security watcher (ADR-014 §6 follow-up)
+- **plan-210**: Kernel-pin security watcher (ADR-007 §6 follow-up)
 - **adr-096**: Stage 0 seed Nix 2.31.1 narHash regression — write-up + open decision
 - **agents**: Forbid spec/ADR/PR refs in code comments (matches CI lint gate)
 - **plan-204**: WS-D build-default flip + raw-shell gate merged
@@ -619,21 +619,21 @@ All notable changes to mvm are documented in this file.
 - Plan attested fast first boot packs
 - **plan-211**: Task 5 cleanup — repoint bridge fuzz labels + stale-ref sweep
 - **release**: Record why Linux intentionally doesn't ship mvm-libkrun-supervisor
-- Plan 214 clean-replacement architecture + ADR-014
-- ADR-041 + Plan 215 plan-bound agent verb capabilities
+- Plan 214 clean-replacement architecture + ADR-007
+- ADR-014 + Plan 215 plan-bound agent verb capabilities
 - Plan 216 — mvm-client local/remote facade implementation plan
 - Mvm-client facade design + mvmd cloud-readiness assessment (research)
-- ADR-077 + Plan 218 — converge SDK/facade machine-driving on MvmClient
+- ADR-027 + Plan 218 — converge SDK/facade machine-driving on MvmClient
 - **plan**: Plan 221 — in-process rootfs materialization (no subprocess)
-- **adr**: ADR-005 — Phase-A/Phase-B build boundary (Plan 221 B0)
-- **adr**: ADR-005 virtiofs-root integrity decision + Plan 223 impl plan
-- **claims**: Scope claim 3 to block+ext4 backends; note virtiofs-root posture (ADR-005)
-- **adr**: ADR-002 — attested launch anchor for real verb-grant key separation
+- **adr**: ADR-004 — Phase-A/Phase-B build boundary (Plan 221 B0)
+- **adr**: ADR-004 virtiofs-root integrity decision + Plan 223 impl plan
+- **claims**: Scope claim 3 to block+ext4 backends; note virtiofs-root posture (ADR-004)
+- **adr**: ADR-001 — attested launch anchor for real verb-grant key separation
 - **plan**: Plan 227 — instant-resume sandboxes over a vsock-only auditable data plane
 - **plan**: Plan 228 — release 0.17.0 (HVF default, working & documented)
 - **release**: Backfill CHANGELOG (0.15.2–0.16.1) + guard release flow + fix claim-3 scoping (Plan 228 WS-2/WS-4)
 - Refresh CLI command tree (compile→build compile, up→machine run)
-- CLI-tree cleanup — exec split, backend names (HVF-aware), Docker/Tier-3 → ADR-002
+- CLI-tree cleanup — exec split, backend names (HVF-aware), Docker/Tier-3 → ADR-001
 - **plan**: Land Plan 226 clean-replacement roadmap as a strategic reference
 - Add DEPLOYMENT.md and update version pins
 - **release**: Reconcile Plan 228 for 0.17.0 — WS-1/2/3/4/5 done, only WS-6 (cut) remains
@@ -751,7 +751,7 @@ All notable changes to mvm are documented in this file.
 - **sdk-python**: Migrate live-mode Sandbox ops to `machine` verbs
 - **build**: Stream typed mvm-builderd build progress to stderr (no more silent "hang")
 - **builder**: Page-align the libkrun builder kernel (Linux KVM rc -22)
-- **stage0**: Bump seed Nix 2.31.1 → 2.34.7 (lock-matching narHash; fixes ADR-005 regression)
+- **stage0**: Bump seed Nix 2.31.1 → 2.34.7 (lock-matching narHash; fixes ADR-004 regression)
 - **kernel**: Harden --boot-check — force libkrun + builder-image precondition
 - **cli**: Name a manifest/source change in the machine-recreate diff
 - **builder**: Pin builder VM materialize toolchain as a GC root so cap-GC can't reap mkfs.ext4
@@ -813,7 +813,7 @@ All notable changes to mvm are documented in this file.
 - **exit-capture**: Move file convention + reader to mvm-core (dep direction)
 - **mvm-guest**: Extract read_exec_stream (shared by Exec + RunCode)
 - **mvm-guest**: Remove single-frame ExecResult (superseded by ExecEvent)
-- **sdk**: Retire dead in-guest substitution scaffolding (ADR-067)
+- **sdk**: Retire dead in-guest substitution scaffolding (ADR-023)
 - **deps**: Replace opendal with object_store in the template registry (plan 126 B2)
 - **backend**: Backend matrix consolidation 8→4 (Plan 177 Phase 1)
 - **cli**: CLI surface consolidation ~56→~28 (Plan 178)
@@ -864,7 +864,7 @@ All notable changes to mvm are documented in this file.
 - **secrets**: E2e substitution over real AF_VSOCK loopback (plan 129)
 - **plan-152**: WS-B Swift↔Rust supervisor parity gate (P1: boot)
 - **storage**: S3 MountProvider coverage without S3 (plan 123 B4)
-- **network**: Add rvproxy↔gvproxy gateway parity gate (ADR-004 / Plan 193 WS-1.5)
+- **network**: Add rvproxy↔gvproxy gateway parity gate (ADR-003 / Plan 193 WS-1.5)
 - **core**: Migrate mvm-core env tests onto TestEnv + close out Plan 182
 - **hostd,build**: Migrate env tests onto TestEnv (Plan 185 tail)
 - **build**: Migrate libkrun_builder + builder_vm_runtime onto TestEnv (Plan 185)
@@ -940,7 +940,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **cli**: Kernel build --source download/auto + --arch
 - **cli**: Dev up --kernel-source (boot on a downloaded kernel)
 - **xtask**: Machine-check the security-claim → witness map
-- **verify**: Serverless in-browser audit-log verifier (ADR-069)
+- **verify**: Serverless in-browser audit-log verifier (ADR-024)
 - **builder**: Add verbose-gated console echo helper
 - **builder**: Thread --verbose to stream Stage 0 console to stderr
 - **kernel**: Elapsed heartbeat + --verbose console stream on compile
@@ -1003,9 +1003,9 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **plan-158**: Plan to restore the bundled default microVM image
 - **specs**: Scrub prior-art product name from Plan 143
 - **specs**: Record host-side Landlock-envelope widening as a deferred Plan 143 follow-up
-- **specs**: Plan 161 — OCI-unpacker openat2 TOCTTOU fix + ADR-002 note
+- **specs**: Plan 161 — OCI-unpacker openat2 TOCTTOU fix + ADR-001 note
 - **plan-158**: Dual dev/prod default image keyed on BuildMode
-- **crates**: Finalize plan 121 — ADR-066 corrections, CLAUDE.md, old→new ident map
+- **crates**: Finalize plan 121 — ADR-022 corrections, CLAUDE.md, old→new ident map
 - **adr**: Descope B4 framing — authenticated frame stays its own protocol
 - **plan**: Record B4 Option B as a tracked deferred follow-up
 - **vz**: Stop over-claiming in-supervisor share refusal
@@ -1032,7 +1032,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 ### Fixed
 - **nix**: Keep kernel base.nix inside the builder-vm flake tree
 - **cli**: Gate host_arch + download_kernel behind builder-vm
-- **specs**: Renumber duplicate ADR-069 (browser verifier) to 070
+- **specs**: Renumber duplicate ADR-024 (browser verifier) to 070
 - **gvproxy**: Free ssh-port + reap orphaned daemons on startup
 - **nix**: Default-tenant flake evals — description must be a literal
 - **nix**: Expose passthru.rootfs so the builder-VM dev build emits mvm-meta.json
@@ -1072,7 +1072,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
 - **hostd**: Consolidate supervisor/broker/signers/jailer into mvm-hostd
 - **vm-host**: Consolidate per-VM supervisors into mvm-vm-host (cfg-gated [[bin]]s)
 - **guest**: Consolidate addon-dns + vsock-bridge into mvm-guest-helpers
-- **build**: Move host-vm-init + egress-proxy into mvm-build [[bin]]s (ADR-005)
+- **build**: Move host-vm-init + egress-proxy into mvm-build [[bin]]s (ADR-004)
 - **core**: Dedup length-prefixed framing into core::framing (B4 Option A)
 - **core**: Route mvm-core data-dir derivations through a strict resolver (plan 121 B4)
 - **cli,hostd,build**: Route data/cache-dir derivations through canonical resolvers (plan 121 B4)
@@ -1152,7 +1152,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
   the VM stays up instead of rebooting at ~5s (previously boot→ping only
   "passed" via the agent answering inside that window).
 - OCI→ext4 materialization is byte-deterministic on e2fsprogs ≥1.47
-  (`-O ^orphan_file`), restoring the ADR-050 verity-cache invariant.
+  (`-O ^orphan_file`), restoring the ADR-017 verity-cache invariant.
 
 - **Plan 63 Phase 2 — encryption everywhere.** Closed in six
   workstreams (commits `b9e4e64`, `1ea9352`, `f7e39a7`, `a30f866`,
@@ -1193,7 +1193,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
     keyed-tenant as a downgrade defence (override via
     `MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1` for one-time migration).
     19 tests.
-  - **W6** — ADR-027 ("Encryption substrate") documents the full
+  - **W6** — ADR-008 ("Encryption substrate") documents the full
     surface + this CHANGELOG entry. Plan 63 closes.
 
   Tests: workspace at **2082 passed / 0 failed** post-W6. Plan-60
@@ -1207,7 +1207,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
   validity window + nonce replay-store, and emits chain-signed
   audit entries to `~/.mvm/audit/<tenant>.jsonl`. CLAUDE.md
   security claim 8 ("every workload runs from a signed, audited
-  ExecutionPlan") is now user-observably true. ADR-041 documents
+  ExecutionPlan") is now user-observably true. ADR-014 documents
   the lifecycle; `policy_resolver::resolve_supervisor_components`
   (W5) is the substrate that hands `ResolvedSlots` to a future
   `Supervisor::launch` consumer once the mvm-hostd lift lands.
@@ -1238,7 +1238,7 @@ ossified around Firecracker. v2 is a 13-crate workspace built around:
 - **Lima removed entirely** — direct host execution on Linux; Apple
   Container or libkrun on macOS
 - **Busybox as PID 1** in guests (replaces NixOS+systemd; meets the
-  ≤300 ms cold-boot p50 floor recorded in ADR-005)
+  ≤300 ms cold-boot p50 floor recorded in ADR-004)
 - **`ExecutionPlan`-shaped substrate** for the supervisor / audit /
   policy work in plans 37 and 60 Phases 2–10
 
@@ -1248,7 +1248,7 @@ ossified around Firecracker. v2 is a 13-crate workspace built around:
   `mvm-plan`, `mvm-policy`, `mvm-supervisor`, `mvm-providers`,
   `mvm-backend`, `mvm-base`, `mvm`, `mvm-build`, `mvm-guest`,
   `mvm-cli`, `mvm-mcp` (plus root `mvmctl` facade and `xtask`)
-- `AnyBackend` dispatch with `auto_select()` per ADR-005: Linux+KVM →
+- `AnyBackend` dispatch with `auto_select()` per ADR-004: Linux+KVM →
   Firecracker; macOS 26+ on Apple Silicon → Apple Container or
   libkrun; KVM-less Linux / older macOS / Intel → libkrun;
   Cloud Hypervisor opt-in for VFIO/GPU

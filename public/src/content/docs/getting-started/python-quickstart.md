@@ -19,7 +19,7 @@ with mvm.Sandbox.create(image="python-3.12") as sb:
     print(result.stdout.strip())   # -> 4
 ```
 
-`exec(*argv) -> ExecResult` is a one-shot over `commands.start` (start → wait → collect `stdout`/`stderr`/`exit_code`). `image=` is the friendly alias for the positional template. It is **live-mode only** (dev tier) — run the script with `mvmctl run --mode live ./quickstart.py`; against a prod template it refuses with `SandboxDevOnly` (no silent fallback — ADR-002 claim 4). The `with` block kills the sandbox on exit.
+`exec(*argv) -> ExecResult` is a one-shot over `commands.start` (start → wait → collect `stdout`/`stderr`/`exit_code`). `image=` is the friendly alias for the positional template. It is **live-mode only** (dev tier) — run the script with `mvmctl run --mode live ./quickstart.py`; against a prod template it refuses with `SandboxDevOnly` (no silent fallback — ADR-001 claim 4). The `with` block kills the sandbox on exit.
 
 ## Imperative runtime
 

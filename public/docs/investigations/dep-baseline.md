@@ -149,7 +149,7 @@ generation `sha2 0.11`, `digest 0.11`, `crypto-common 0.2`, `hmac 0.13`,
 cornerstones are not: `aes-gcm` latest stable is `0.10.3` (newest `0.11.0-rc.4`)
 and `ed25519-dalek` latest stable is `2.2.0` (newest `3.0.0-rc.1`). Shipping RC
 crypto for AEAD (snapshot/secret_store) and signing (host signer / audit chain /
-attestation) is a non-starter under ADR-002, and a partial migration just
+attestation) is a non-starter under ADR-001, and a partial migration just
 recreates the split. **So B4 is gated on upstream stable `aes-gcm 0.11` +
 `ed25519-dalek 3.0` — revisit then** (and re-check the others have not moved off
 the line in the interim).
@@ -186,7 +186,7 @@ So reducing the 168-crate `pgp` closure is **not** a minisign swap. The
 options, each a real decision (not mechanical):
 
 1. **Drop the PGP verify, keep the SHA-256 pin** (−168 crates). Removes a
-   defense-in-depth layer; needs security-owner sign-off + an ADR-002
+   defense-in-depth layer; needs security-owner sign-off + an ADR-001
    note, and a documented version-bump procedure (verify the new tarball's
    PGP signature out-of-band before pinning its hash).
 2. **Keep PGP, find a lighter verifier.** rpgp *is* the lean option for
@@ -213,7 +213,7 @@ remaining work, honestly scoped:
    first — may need an oci-client bump or a fork-of-features).
 2. **B3 (`pgp`, −168)** — biggest number, but a **security decision**:
    drop or feature-gate the Alpine-tarball PGP verify (defense-in-depth
-   over the existing SHA-256 pin). Needs owner sign-off + an ADR-002 note.
+   over the existing SHA-256 pin). Needs owner sign-off + an ADR-001 note.
 3. **B1/B2** — no default-build benefit left (already feature-gated);
    pursue only for feature-on builds / the cross-repo sigstore relocation,
    sequenced with 123.

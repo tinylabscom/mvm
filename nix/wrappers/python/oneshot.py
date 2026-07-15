@@ -22,7 +22,7 @@
 Single-shot invariant
 ---------------------
 This wrapper assumes exactly one invocation per process — the substrate
-agent spawns a fresh wrapper for every call (mvm ADR-007 §6 hygiene).
+agent spawns a fresh wrapper for every call (mvm ADR-005 §6 hygiene).
 The wrapper takes shortcuts that depend on this:
 
   * `os.chdir(working_dir)` — never undone.
@@ -256,7 +256,7 @@ def main() -> int:
         # and ensure all per-call state is scrubbed first.
         raise RuntimeError(
             "wrapper main() called twice without MVM_WRAPPER_ALLOW_REENTRY=1; "
-            "this wrapper assumes per-call respawn (mvm ADR-007 §6)"
+            "this wrapper assumes per-call respawn (mvm ADR-005 §6)"
         )
     _main_invoked = True
     cfg = _load_config()

@@ -101,7 +101,7 @@ export class SandboxLiveError extends Error {
 /** Raised when the SDK refuses a live-mode `commands.start` call
  *  because the resolved template is a *prod* template.
  *
- *  Per ADR-002 §W4.3 (security claim 4 in `CLAUDE.md`) the guest
+ *  Per ADR-001 §W4.3 (security claim 4 in `CLAUDE.md`) the guest
  *  agent strips the `do_exec` handler in production builds. The
  *  agent itself fails closed, but the SDK refuses *before* any
  *  vsock traffic so a typo doesn't make a spurious round-trip.
@@ -471,7 +471,7 @@ export class LiveTransport {
     if (this.buildMode !== "dev") {
       throw new SandboxDevOnly(
         `\`commands.start\` requires a dev-mode template; resolved template ` +
-          `build_mode=${JSON.stringify(this.buildMode)}. ADR-002 §W4.3 (security ` +
+          `build_mode=${JSON.stringify(this.buildMode)}. ADR-001 §W4.3 (security ` +
           `claim 4) strips the agent's \`do_exec\` handler in prod builds — ` +
           `re-build the template with \`mvmctl template build --dev <name>\`, ` +
           `or use \`files.write\` to stage inputs into the running VM instead.`,
@@ -521,7 +521,7 @@ export class LiveTransport {
     if (this.buildMode !== "dev") {
       throw new SandboxDevOnly(
         `\`exec\` requires a dev-mode template; resolved template ` +
-          `build_mode=${JSON.stringify(this.buildMode)}. ADR-002 §W4.3 (security ` +
+          `build_mode=${JSON.stringify(this.buildMode)}. ADR-001 §W4.3 (security ` +
           `claim 4) strips the agent's \`do_exec\` handler in prod builds — ` +
           `re-build the template with \`mvmctl template build --dev <name>\`, ` +
           `or use \`files.write\` to stage inputs into the running VM instead.`,

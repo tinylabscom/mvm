@@ -238,7 +238,7 @@ fn main() -> Result<()> {
                 "  check-no-spec-refs-in-comments         Reject plan/PR/ADR/sprint/workstream citations in source comments"
             );
             eprintln!(
-                "  check-claim-catalog                    Verify the claims ledger embedded in specs/adrs/002-microvm-security-posture.md — witnesses still exist in the tree"
+                "  check-claim-catalog                    Verify the claims ledger embedded in specs/adrs/001-microvm-security-posture.md — witnesses still exist in the tree"
             );
             eprintln!(
                 "  check-trust-gradient                   Verify trust-gradient ledger: monotonic tiers, workload forbidden authorities, witnesses"
@@ -247,7 +247,7 @@ fn main() -> Result<()> {
                 "  check-require-grant-token-allowlist     assert mvm.require_grant=1 appears only in the four backend builders + mvm-guest/vsock.rs"
             );
             eprintln!(
-                "  check-mvm-host-binaries-sync            Plan 115 / ADR-005: assert Rust manifest and Nix attrset agree"
+                "  check-mvm-host-binaries-sync            Plan 115 / ADR-004: assert Rust manifest and Nix attrset agree"
             );
             eprintln!(
                 "  perf <subcommand>                       Plan 60 Phase 9 perf gates (rootfs-size, boot)"

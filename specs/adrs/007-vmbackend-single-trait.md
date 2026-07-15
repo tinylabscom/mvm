@@ -1,5 +1,5 @@
 ---
-title: "ADR-014: `VmBackend` single trait; backend-as-impl pattern"
+title: "ADR-007: `VmBackend` single trait; backend-as-impl pattern"
 status: Proposed
 date: 2026-05-07
 related: ADR-013 (libkrun pivot), plan 60-mvm-libkrun-migration
@@ -68,7 +68,7 @@ None.
 
 ## Consolidated from ADR-046 — Move the builder VM off libkrun onto libkrun + firecracker
 
-> **Consolidation note:** an earlier draft of this ADR proposed itself as the canonical builder-VM architecture doc, consolidating ADR-013, ADR-057, and ADR-065 — that merge was never carried out (those three remained standalone files). The ADR-wide consolidation pass folded ADR-046 itself into this document (ADR-014, the backends/hypervisor-abstraction canonical); ADR-013, ADR-057, and ADR-065 were separately folded into ADR-005 (the builder-VM/Stage-0/seed canonical). Current state reflects ADR-065's single `builder-vm` flake with `default`/`dev` attrs.
+> **Consolidation note:** an earlier draft of this ADR proposed itself as the canonical builder-VM architecture doc, consolidating ADR-013, ADR-057, and ADR-065 — that merge was never carried out (those three remained standalone files). The ADR-wide consolidation pass folded ADR-046 itself into this document (ADR-007, the backends/hypervisor-abstraction canonical); ADR-013, ADR-057, and ADR-065 were separately folded into ADR-004 (the builder-VM/Stage-0/seed canonical). Current state reflects ADR-065's single `builder-vm` flake with `default`/`dev` attrs.
 
 ## Status
 
@@ -186,7 +186,7 @@ Is this a source checkout?
    │
    ├─ Step 1: ensure builder VM image
    │    No flake to build from — download the mvm-published prebuilt
-   │    matching mvmctl's version. Hash-verified per ADR-002 §W5.1
+   │    matching mvmctl's version. Hash-verified per ADR-001 §W5.1
    │    against the release's `builder-checksums-sha256.txt`. Cache
    │    at ~/.cache/mvm/builder-vm/v<version>/.
    │
@@ -244,11 +244,11 @@ The mvm-published builder VM image exists for *end users* who installed mvmctl a
 | Bind-mount surface on the user-facing path | libkrun volume API (Bind/Named/Tmpfs/DiskImage) | virtio-fs (DAX-on-Linux, share-on-macOS) |
 | Sandbox lifecycle on the user-facing path | `Sandbox::create_detached`, `.shell()`, `.stop()` | `mvm_libkrun::start_with_config` + power-off-from-guest |
 | Snapshot/named volumes/agent | Available, unused | Not implemented (unused features dropped) |
-| User-facing build-trust boundary | libkrun + nixos/nix OCI image | Our own builder VM image (hash-verified per ADR-002 §W5.1) |
+| User-facing build-trust boundary | libkrun + nixos/nix OCI image | Our own builder VM image (hash-verified per ADR-001 §W5.1) |
 
 ### Trust-zone shift
 
-ADR-013 §"Linux builder via libkrun" placed the user-facing builder behind a pinned third-party OCI image (`docker.io/nixos/nix:2.24.10`). Plan 72 replaces that **on the user-facing path** with an mvm-published builder VM image — kernel + rootfs.ext4 built on a Linux CI runner via `nix/images/builder-vm/flake.nix` (a slimmed split of the current `nix/images/builder/`), signed by the project's release key, and verified by the same SHA-256 manifest path used today for `download_dev_image` (`mvm_cli::commands::env::apple_container::download_dev_image`, ADR-002 §W5.1).
+ADR-013 §"Linux builder via libkrun" placed the user-facing builder behind a pinned third-party OCI image (`docker.io/nixos/nix:2.24.10`). Plan 72 replaces that **on the user-facing path** with an mvm-published builder VM image — kernel + rootfs.ext4 built on a Linux CI runner via `nix/images/builder-vm/flake.nix` (a slimmed split of the current `nix/images/builder/`), signed by the project's release key, and verified by the same SHA-256 manifest path used today for `download_dev_image` (`mvm_cli::commands::env::apple_container::download_dev_image`, ADR-001 §W5.1).
 
 - **End users**: trust boundary is mvm's release pipeline + signing + hash manifest. Same as the dev image today.
 - **Contributors**: source-checkout builds use the same builder VM artifact path as end users unless they are directly changing the builder VM image, in which case validation happens through the builder-image build pipeline.
@@ -285,7 +285,7 @@ The trade we're accepting: we now ship a kernel + rootfs as part of every mvm re
 ### Neutral
 
 - ADR-013 §"Execution backend selection" is unchanged. Linux + KVM → Firecracker; macOS / Windows / no-KVM → libkrun (per plan 57). libkrun stays available as an opt-in execution backend during the deprecation window; it just isn't the default and isn't on the builder path.
-- ADR-002 §W5.1 (image hash verification) applies to the builder image with no change — same manifest + streaming SHA-256 path as the dev image.
+- ADR-001 §W5.1 (image hash verification) applies to the builder image with no change — same manifest + streaming SHA-256 path as the dev image.
 - The flake (`nix/images/builder/flake.nix`) and the in-sandbox build script (`crates/mvm-build/src/builder_vm.rs:543`) keep the three fixes from plan 72 W0 (workspace mount at `/work`, `MVM_WORKSPACE_PATH=/work`, `git config --global` before cd). They're correct regardless of launcher and they're load-bearing for the published builder image too.
 
 ## Fallback / escape hatch
@@ -351,24 +351,24 @@ Both backends resolve the builder VM image (`vmlinux` + `rootfs.ext4` + `cmdline
 
 ### Security claim parity
 
-The builder VM is the dev tier per `feedback_dev_vm_vs_prod_security_tiers.md`, *but* its Install arm (ADR-047, Claim 9) is the prod-grade path that produces the sealed deps volumes the runtime supervisor verifies. So the ADR-002 security claims that apply to the builder VM hold across **both** backends, with the same evidence:
+The builder VM is the dev tier per `feedback_dev_vm_vs_prod_security_tiers.md`, *but* its Install arm (ADR-047, Claim 9) is the prod-grade path that produces the sealed deps volumes the runtime supervisor verifies. So the ADR-001 security claims that apply to the builder VM hold across **both** backends, with the same evidence:
 
 - **Claim 1** (no host-fs access beyond explicit shares). Both backends construct `VirtioFsShare`s for `/work` `/out` `/job` `/nix-store` only. §2.S8 ships a hermetic test asserting set-equality of `(host_path, guest_path, read_only)` triples between the two drivers for the same input.
-- **Claim 5** (vsock framing + supervisor-config JSON fuzzed). libkrun's `crates/mvm-libkrun/fuzz/fuzz_supervisor_config.rs` covers the libkrun supervisor's parser. Vz's `crates/mvm-vz/fuzz/` adds a parallel target against `mvm_vz::SupervisorConfig` — Slice 2C §2.S6. The host-side Vz control-socket parser (Phase E pause/resume/balloon/snapshot) is host-process-local with `0700` parent dir; ADR-002's host-trust assumption covers the residual surface (justified in the Slice 2C ADR-002 sub-note).
+- **Claim 5** (vsock framing + supervisor-config JSON fuzzed). libkrun's `crates/mvm-libkrun/fuzz/fuzz_supervisor_config.rs` covers the libkrun supervisor's parser. Vz's `crates/mvm-vz/fuzz/` adds a parallel target against `mvm_vz::SupervisorConfig` — Slice 2C §2.S6. The host-side Vz control-socket parser (Phase E pause/resume/balloon/snapshot) is host-process-local with `0700` parent dir; ADR-001's host-trust assumption covers the residual surface (justified in the Slice 2C ADR-001 sub-note).
 - **Claim 7** (cargo deps audited). `crates/mvm-vz` participates in `deny` + `audit` like every other workspace member; Slice 2C §2.S5 confirms `deny.toml` scope.
 - **Claim 8** (signed/audited `ExecutionPlan`). `mvmctl up --prod` admission emits `plan.admitted` / `plan.launched` / `plan.failed` from the same `AuditEmitter` regardless of which builder backend resolved the Install. Slice 2C §2.S3 runs `mvmctl audit verify` after a Vz-driven `mvmctl up --prod` to assert chain cleanliness.
 - **Claim 9** (sealed deps volumes hash-locked + attestation-checked + CVE-scanned + SBOM-enumerated + audit-bound). Cross-backend byte-equivalence of the sealed volume contents (`content/` tree, `sbom.cdx.json`, `fetch.log`, `cve.json`) is asserted by Slice 2C §2.S2. Builder VM kernel + rootfs parity (the Install-arm prod-grade path) is §2.S9 — if divergence is unavoidable, the volume-byte-level equivalence still holds because both backends produce the same Nix store closure. `meta.json` backend-neutrality (§2.S10) is asserted by decoding a libkrun-sealed and a Vz-sealed Install on the same input and comparing byte-for-byte.
 
-The other ADR-002 claims (2, 3, 4, 6, 10) are guest-side or end-user-runtime concerns — they don't depend on which host VMM booted the builder, so the existing libkrun-side evidence applies unchanged.
+The other ADR-001 claims (2, 3, 4, 6, 10) are guest-side or end-user-runtime concerns — they don't depend on which host VMM booted the builder, so the existing libkrun-side evidence applies unchanged.
 
-Per `feedback_adr_out_of_scope_discipline.md` this Security-claim-parity subsection lists ONLY items in the same threat model as the parent ADR-002 claim. Adjacent surfaces (Sprint 56 Claim 10 in-guest volume encryption, Plan 101 gateway audit) belong in their own ADRs and are not in scope here.
+Per `feedback_adr_out_of_scope_discipline.md` this Security-claim-parity subsection lists ONLY items in the same threat model as the parent ADR-001 claim. Adjacent surfaces (Sprint 56 Claim 10 in-guest volume encryption, Plan 101 gateway audit) belong in their own ADRs and are not in scope here.
 
 ### Cross-reference summary
 
 - **Plan 97** — Vz runtime backend (Phase A/B/D/E shipped, C parked → continued by Plan 98).
 - **Plan 98** — this extension's implementation plan.
 - **Plan 99 PR-1** — Stage 0 cache contract the prefix-agnostic reaper depends on.
-- **ADR-002** — security posture; per-claim sub-notes in Claims 1, 5, 7, 8, 9 point back here.
+- **ADR-001** — security posture; per-claim sub-notes in Claims 1, 5, 7, 8, 9 point back here.
 - **ADR-047** — Claim 9 evidence pipeline; gains a one-paragraph "Backend symmetry" sub-section citing §2.S2 + §2.S10.
 - **ADR-056** — Vz runtime backend ADR; gains a "Persistent builder variant" pointer to this section.
 - **ADR-057** — Sprint 56 symmetric trust boundary; bidirectional cross-link (Vz builder narrows the asymmetric-trust gap on macOS that ADR-057 fully closes).
@@ -449,7 +449,7 @@ the dev tier) is unchanged and not re-litigated here.
 macOS backend (`MVM_BACKEND=vz` / `--backend vz`); `auto_select`
 remains unchanged so libkrun is still the macOS default and
 Firecracker the Linux deploy default. **Amended 2026-06-10 by
-ADR-014 §"Consolidated from ADR-076":** Vz becomes the
+ADR-007 §"Consolidated from ADR-076":** Vz becomes the
 **macOS-26 auto-default** and **absorbs `AppleContainerBackend`** — the
 in-process `providers/apple_container` AVF path is deleted, leaving one
 honestly-named `vz` AVF backend on the per-VM supervisor model. The
@@ -530,7 +530,7 @@ Vz sits at the same isolation tier as libkrun. The reasoning:
   it adds a *containerization* abstraction on top of Vz. Vz used
   directly skips that abstraction.
 
-ADR-002 claim coverage under Vz:
+ADR-001 claim coverage under Vz:
 
 | Claim | Status   | Why                                                  |
 |-------|----------|------------------------------------------------------|
@@ -574,8 +574,8 @@ Defense-in-depth additions on top of the trait-level requirements:
 
 ## Relationship to other ADRs
 
-- **ADR-002 (microvm security posture).** Adds a Vz row to the
-  per-backend claim table at `specs/adrs/002-microvm-security-posture.md`.
+- **ADR-001 (microvm security posture).** Adds a Vz row to the
+  per-backend claim table at `specs/adrs/001-microvm-security-posture.md`.
   Tier 2; claim 3 partial (matches libkrun's posture).
 - **ADR-013 (libkrun pivot).** Vz *adds* a parallel macOS backend; it
   does not retract ADR-013's decision to use libkrun as the macOS
@@ -769,7 +769,7 @@ Plan 121 crate consolidation (repointed to `mvm-build`/`mvm-vm-host` here).
 
 **Status**: Proposed
 **Date**: 2026-06-05
-**Cross-refs**: ADR-001 (Firecracker-only *execution* — the production runtime path), ADR-002 (security posture / per-backend tier matrix), ADR-055 (passt/gvproxy virtio-net), ADR-066 §1 (name by role, front with a trait, hide impls), ADR-068 (Stage 0 dispatches through the `BuilderVm` trait), Plan 98 (`98-vz-builder-vm.md` — builder-backend selection libkrun/vz). Planning input: Plan 164 (multi-arch embed — surfaced the Linux provisioning pain that motivated this) + Plan 166 (this ADR's implementation).
+**Cross-refs**: ADR-001 (Firecracker-only *execution* — the production runtime path), ADR-001 (security posture / per-backend tier matrix), ADR-055 (passt/gvproxy virtio-net), ADR-022 §1 (name by role, front with a trait, hide impls), ADR-068 (Stage 0 dispatches through the `BuilderVm` trait), Plan 98 (`98-vz-builder-vm.md` — builder-backend selection libkrun/vz). Planning input: Plan 164 (multi-arch embed — surfaced the Linux provisioning pain that motivated this) + Plan 166 (this ADR's implementation).
 
 ## Context
 
@@ -803,7 +803,7 @@ QEMU is the obvious fit for the *dev/builder* role: it is packaged everywhere (`
 Two insertion points, mirroring the two roles:
 
 1. **Builder VM** — add `Qemu` to `BuilderBackendChoice` (alongside `Libkrun`, `Vz`) implementing the `BuilderVm` trait (`run_build` + `run_stage0`, ADR-068). QEMU becomes the portable, trivially-provisioned Linux builder: KVM-accelerated where available, TCG where not.
-2. **Dev/test workload runtime** — add a real `Qemu(QemuBackend)` variant to `AnyBackend` (replacing the vestigial `from_hypervisor("qemu") → MicrovmNix` alias) so a workload can be *run for dev/test* on a no-KVM host. This is a **dev tier only** — it is outside the ADR-002 security claims and is never selected for production.
+2. **Dev/test workload runtime** — add a real `Qemu(QemuBackend)` variant to `AnyBackend` (replacing the vestigial `from_hypervisor("qemu") → MicrovmNix` alias) so a workload can be *run for dev/test* on a no-KVM host. This is a **dev tier only** — it is outside the ADR-001 security claims and is never selected for production.
 
 ### Production favors Firecracker — non-negotiable
 
@@ -817,9 +817,9 @@ The QEMU dev backend defaults to **user-mode networking** (`-netdev user`, slirp
 
 ### Security framing
 
-QEMU is a **dev tier**, classified like the builder VM (ADR-002 out-of-scope for the hardened workload claims):
+QEMU is a **dev tier**, classified like the builder VM (ADR-001 out-of-scope for the hardened workload claims):
 
-- **KVM-backed QEMU → Tier 2** (`tier2-fast-local`): real hardware virtualization, but unaudited against ADR-002.
+- **KVM-backed QEMU → Tier 2** (`tier2-fast-local`): real hardware virtualization, but unaudited against ADR-001.
 - **TCG QEMU → Tier 3** (`tier3-fallback`): software emulation, no isolation guarantees; `mvmctl up`/`doctor` emit the loud Tier-3 banner already used for the Docker fallback.
 
 Neither tier is ever promoted to production. The security claims (1–14) remain Firecracker/libkrun-specific; QEMU adds no claims and removes none.
@@ -836,7 +836,7 @@ Neither tier is ever promoted to production. The security claims (1–14) remain
 ## Alternatives considered
 
 - **Keep libkrun-only on Linux.** Rejected: leaves no-KVM hosts unable to dev and keeps the from-source provisioning tax.
-- **QEMU as a production runtime too.** Rejected: forks the security story (TCG has no isolation; KVM-QEMU is unaudited vs ADR-002) and contradicts ADR-001. QEMU is dev/test only; production favors Firecracker.
+- **QEMU as a production runtime too.** Rejected: forks the security story (TCG has no isolation; KVM-QEMU is unaudited vs ADR-001) and contradicts ADR-001. QEMU is dev/test only; production favors Firecracker.
 - **Reuse the existing `MicrovmNix` ("qemu") path.** Rejected as the primary mechanism: it boots via a microvm.nix runner script, not a directly-driven QEMU process, so it can't offer the KVM/TCG portability or the zero-config dev networking. Plan 166 retires the `"qemu" → MicrovmNix` alias in favor of the real backend.
 
 
@@ -845,10 +845,10 @@ Neither tier is ever promoted to production. The security claims (1–14) remain
 **Status:** accepted 2026-06-10. Implemented by
 `specs/plans/177-backend-consolidation.md`. **Amends ADR-056** (Vz is no
 longer opt-in — it becomes the macOS-26 default and absorbs
-`AppleContainerBackend`) and **ADR-002** (the per-backend tier matrix loses
+`AppleContainerBackend`) and **ADR-001** (the per-backend tier matrix loses
 four rows — the matrix edit lands with Plan 177). Cross-refs: ADR-001
-(multi-backend execution), ADR-013 (libkrun pivot), ADR-014 (single
-`VmBackend` trait), ADR-066 (target architecture), ADR-073 (warm-snapshot
+(multi-backend execution), ADR-013 (libkrun pivot), ADR-007 (single
+`VmBackend` trait), ADR-022 (target architecture), ADR-025 (warm-snapshot
 prior-art boundary).
 
 ## Context
@@ -912,13 +912,13 @@ qemu**.
 ### Why the supervisor model wins the AVF convergence
 
 - **Capability.** The supervisor path owns snapshot/restore — the
-  warm-start / checkpoint / fork foundation (ADR-073, Plan 153). Keeping the
+  warm-start / checkpoint / fork foundation (ADR-025, Plan 153). Keeping the
   in-process path as the survivor would amputate it.
 - **Isolation.** One process per VM matches `LibkrunBackend`'s contract
   (uniform host architecture = less cognitive load), contains crashes,
   isolates the `!Send` `VZVirtualMachine` hazard, and gives each VM a
   sandboxable process boundary — load-bearing for the untrusted-workload
-  posture (ADR-002, ADR-066 §"process isolation ≠ crate count").
+  posture (ADR-001, ADR-022 §"process isolation ≠ crate count").
 - **Prior art.** The best-regarded external Rust AVF driver tools are
   themselves daemon-mediated (CLI → runtime daemon over UDS → AVF). The
   supervisor model *is* that architecture; mvm runs one supervisor per VM
@@ -958,7 +958,7 @@ through the shared console transport.
   task. Trades a permanent capability for convenience.
 - **Keep `cloud_hypervisor` for future VFIO/GPU passthrough.** Deferred, not
   kept — when a workload genuinely needs VFIO, re-add a backend then (YAGNI).
-  The ADR-002 matrix note about CH's VFIO niche is removed with the row.
+  The ADR-001 matrix note about CH's VFIO niche is removed with the row.
 
 ## Out of scope
 
@@ -972,7 +972,7 @@ through the shared console transport.
 
 **Status:** Proposed
 **Date:** 2026-06-22
-**Relates to:** [ADR-002](002-microvm-security-posture.md) §"Per-backend tier
+**Relates to:** [ADR-001](001-microvm-security-posture.md) §"Per-backend tier
 matrix", [Plan 98 — builder backend selection](../plans/98-vz-builder-vm.md),
 [Plan 166 — QEMU dev builder backend](../plans/166-qemu-dev-builder-backend.md)
 
@@ -1067,7 +1067,7 @@ fallback).
   VMM-level failure), and explicit `--builder` is honoured.
 - The qemu builder is reached only by the **local** dev/build path, not mvmd's
   `pool_build` — staying inside its "`mvm`-only dev/test" boundary
-  (ADR-002 §"Per-backend tier matrix").
+  (ADR-001 §"Per-backend tier matrix").
 - On an affected host every build pays a one-time ~5s libkrun-failure before
   qemu takes over. A per-host "libkrun builder unhealthy" cache to skip the
   doomed attempt is possible but out of scope.
@@ -1129,8 +1129,8 @@ unaligned-kernel EINVAL as one of its triggers.
 ## Consolidated from ADR-094 — Fold the external-VMM bridge sidecars into one `mvm-bridge`; keep libkrun merged
 
 **Status:** Accepted
-**Amends:** [ADR-002](002-microvm-security-posture.md) — its per-backend tier matrix (the external-VMM backends share one bridge-sidecar process) and its consolidated-in ADR-083 section (the shared egress/audit funnel gains a single, shared transport process for FC + vz instead of two near-identical ones).
-**Preserves:** every numbered claim — in particular claim 10 (default-deny egress), claim 12 (binding-gated host services), and claim 13 (no raw secret over the broker channel), all of which ride the gateway bridge. The `spawn_bridge_thread` enforcement core is unchanged; signed-plan admission ([ADR-041](041-signed-audited-execution-plans.md)) is untouched.
+**Amends:** [ADR-001](001-microvm-security-posture.md) — its per-backend tier matrix (the external-VMM backends share one bridge-sidecar process) and its consolidated-in ADR-083 section (the shared egress/audit funnel gains a single, shared transport process for FC + vz instead of two near-identical ones).
+**Preserves:** every numbered claim — in particular claim 10 (default-deny egress), claim 12 (binding-gated host services), and claim 13 (no raw secret over the broker channel), all of which ride the gateway bridge. The `spawn_bridge_thread` enforcement core is unchanged; signed-plan admission ([ADR-014](014-signed-audited-execution-plans.md)) is untouched.
 **Relates:** does **not** drop Firecracker or pick a single VMM — it is the topology cleanup that should land *before* any future libkrun-only / backend-consolidation decision, and is independently valuable if that decision is never taken.
 
 ## Context
@@ -1309,9 +1309,9 @@ Implementation is sequenced in Plan 211
 
 **Status:** Proposed
 **Date:** 2026-06-21
-**Relates to:** [ADR-002](002-microvm-security-posture.md),
-ADR-014 §"Consolidated from ADR-046",
-[ADR-004](004-hypervisor-egress-policy.md)
+**Relates to:** [ADR-001](001-microvm-security-posture.md),
+ADR-007 §"Consolidated from ADR-046",
+[ADR-003](003-hypervisor-egress-policy.md)
 
 ## Context
 
@@ -1336,7 +1336,7 @@ and the larger untapped attack-surface win.
 Three forces converge on changing this:
 
 1. **Attack surface (primary).** Every subsystem we do *not* compile in is an
-   entire class of kernel CVEs that cannot apply to us. ADR-002's posture is
+   entire class of kernel CVEs that cannot apply to us. ADR-001's posture is
    the frame; a smaller kernel is fewer things that can be exploited *and*
    fewer bumps to chase when a CVE lands.
 2. **Resources (secondary).** Smaller kernels boot faster and carry a smaller
@@ -1441,7 +1441,7 @@ This is what makes a kernel CVE a **kernel-only release**.
 - **In scope (mvm):** the single-VM primitive — rebuild a VM from a new kernel
   pin and relaunch it.
 - **Designed-for follow-ups (named, not built here):**
-  - **Detection watcher** — sibling to ADR-002 claim 7's `cargo audit`: flags
+  - **Detection watcher** — sibling to ADR-001 claim 7's `cargo audit`: flags
     when the `linux_6_12.y` pin trails the latest LTS point release or is hit
     by a published Linux CVE. New sibling plan.
   - **Fleet rollout** — drain-and-roll across running microVMs lives in
@@ -1524,9 +1524,9 @@ note.
 
 **Status:** Accepted (2026-07-08)
 **Date:** 2026-06-27
-**Relates to:** [ADR-002](002-microvm-security-posture.md),
-[ADR-073](073-warm-snapshot-prior-art-adoption-boundary.md),
-[ADR-050](050-oci-image-verity-posture.md),
+**Relates to:** [ADR-001](001-microvm-security-posture.md),
+[ADR-025](025-warm-snapshot-prior-art-adoption-boundary.md),
+[ADR-017](017-oci-image-verity-posture.md),
 [Plan 212](../plans/212-subsecond-machine-run.md),
 [Plan 214](../plans/214-clean-replacement-architecture.md),
 [Research note](../research/clean-replacement-architecture-review.md)
@@ -1716,8 +1716,8 @@ discipline as the existing vsock and supervisor-config parsers.
 
 **Status:** Accepted (2026-06-29)
 **Relates to:** [Plan 214](../plans/214-clean-replacement-architecture.md) ("no VMM lock-in"),
-ADR-014 §"Consolidated from ADR-098" (raw HVF macOS backend),
-the no-VMM-lock-in principle in [ADR-066](066-target-architecture.md).
+ADR-007 §"Consolidated from ADR-098" (raw HVF macOS backend),
+the no-VMM-lock-in principle in [ADR-022](022-target-architecture.md).
 
 ## Context
 
@@ -1897,14 +1897,14 @@ the seam) wants an aarch64 KVM box, but the x86 backend stands on its own proof.
 ## Consolidated from ADR-102 — One VMM driver seam; backends collapse to two role runners
 
 **Status:** Accepted (2026-06-30)
-**Relates to:** [ADR-004](004-hypervisor-egress-policy.md) (vsock is the sole
+**Relates to:** [ADR-003](003-hypervisor-egress-policy.md) (vsock is the sole
 guest↔world channel — this ADR makes its "single host gateway" the only egress
-mechanism for *every* backend), [ADR-004](004-hypervisor-egress-policy.md)
+mechanism for *every* backend), [ADR-003](003-hypervisor-egress-policy.md)
 (the hvf VMM's unified vsock gateway — the reference shape this ADR generalizes
-outward), [ADR-002](002-microvm-security-posture.md) (`WorkloadBackend` permission, consolidated from ADR-083 —
-preserved unchanged), ADR-014 §"Consolidated from ADR-093" (builder auto-fallback —
-preserved), [ADR-002](002-microvm-security-posture.md) (claims 10/12/13 + per-backend
-tier matrix), [ADR-004](004-hypervisor-egress-policy.md) (the gvproxy/passt gateway this
+outward), [ADR-001](001-microvm-security-posture.md) (`WorkloadBackend` permission, consolidated from ADR-083 —
+preserved unchanged), ADR-007 §"Consolidated from ADR-093" (builder auto-fallback —
+preserved), [ADR-001](001-microvm-security-posture.md) (claims 10/12/13 + per-backend
+tier matrix), [ADR-003](003-hypervisor-egress-policy.md) (the gvproxy/passt gateway this
 ADR removes), [Plan 214](../plans/214-clean-replacement-architecture.md) (implementation).
 
 ## Context
@@ -2002,7 +2002,7 @@ tree, one egress chokepoint.
 ## Consequences
 
 **Security posture — preserved by construction, with one hardening.** The admitted-
-launch funnel (claim 8) and the `WorkloadBackend` permission (ADR-002, consolidated from ADR-083) are unchanged
+launch funnel (claim 8) and the `WorkloadBackend` permission (ADR-001, consolidated from ADR-083) are unchanged
 and implemented by the workload role type only; neither the driver nor the builder
 role can reach the funnel. The tier matrix gets *crisper*: "qemu is Tier-2, never a
 workload" becomes "there is a `QemuDriver` but no `QemuBackend: WorkloadBackend`" —
@@ -2081,7 +2081,7 @@ rather than the general shape.
 ## Out of scope
 
 A malicious host (the host holds the hypervisor and build keys — unchanged from
-ADR-002). The hvf VMM's *lower* `hv.rs` seam and its HVF/KVM/WHP coverage —
+ADR-001). The hvf VMM's *lower* `hv.rs` seam and its HVF/KVM/WHP coverage —
 that is ADR-101's territory and is consumed unchanged here. Multi-tenant guests (one
 guest = one workload, unchanged). The auto-detect default flips toward the hvf
 VMM remain gated on live verification and are not decided by this ADR.

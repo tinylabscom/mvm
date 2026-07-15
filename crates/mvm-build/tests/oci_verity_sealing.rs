@@ -157,13 +157,13 @@ fn seal_is_byte_deterministic_for_identical_rootfs_bytes() {
 
     assert_eq!(
         sealed_a.roothash, sealed_b.roothash,
-        "ADR-050 verity-cache invariant: identical rootfs → identical roothash"
+        "ADR-017 verity-cache invariant: identical rootfs → identical roothash"
     );
     let sidecar_a = std::fs::read(&sealed_a.sidecar_path).unwrap();
     let sidecar_b = std::fs::read(&sealed_b.sidecar_path).unwrap();
     assert_eq!(
         sidecar_a, sidecar_b,
-        "ADR-050 verity-cache invariant: identical rootfs → identical sidecar bytes"
+        "ADR-017 verity-cache invariant: identical rootfs → identical sidecar bytes"
     );
 }
 

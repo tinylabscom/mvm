@@ -1,18 +1,18 @@
-# ADR-067 — Secrets subsystem: egress substitution, never in the guest
+# ADR-023 — Secrets subsystem: egress substitution, never in the guest
 
-**Status:** Accepted (2026-05-31). Supersedes ADR-049 (in-guest resolve-over-vsock). Fills the gap ADR-059 left when it dropped `host.secrets.v1` from the broker. Implemented by plan 129; the `SecretsNotImplemented` gate in `mvm-ir/src/validate.rs` lifts when 129 lands. Backs claims 12 + 13.
+**Status:** Accepted (2026-05-31). Supersedes ADR-049 (in-guest resolve-over-vsock). Fills the gap ADR-020 left when it dropped `host.secrets.v1` from the broker. Implemented by plan 129; the `SecretsNotImplemented` gate in `mvm-ir/src/validate.rs` lifts when 129 lands. Backs claims 12 + 13.
 
 ## Context
 
 The guest is the untrusted workload. A raw secret reaching it can be exfiltrated, logged, or baked into a snapshot. The requirement: **a raw secret value never enters guest RAM.** The workload still needs secrets to reach external services (an API key, a SigV4 signature, a webhook HMAC).
 
-The model already half-exists. `mvm-ir` carries `EnvValue::SecretRef` — a secret-store *key* plus a mount shape, never bytes ("No secret bytes ever live in this struct"). `mvm-sdk/src/runtime_substitution.rs` (ADR-049) resolved placeholders over vsock so the *guest* SDK could sign — but that brings the credential into the guest, which we now reject. ADR-059 dropped the broker's `host.secrets.v1` handler without a replacement, so the subsystem is gated (`SecretsNotImplemented`).
+The model already half-exists. `mvm-ir` carries `EnvValue::SecretRef` — a secret-store *key* plus a mount shape, never bytes ("No secret bytes ever live in this struct"). `mvm-sdk/src/runtime_substitution.rs` (ADR-049) resolved placeholders over vsock so the *guest* SDK could sign — but that brings the credential into the guest, which we now reject. ADR-020 dropped the broker's `host.secrets.v1` handler without a replacement, so the subsystem is gated (`SecretsNotImplemented`).
 
 Constraints that shaped the decision:
 
 - **Same story with or without `mvmd`.** mvm runs standalone (local dev) and under `mvmd` (production, multi-tenant). The secret API, the workload's view, and the substitution flow must be identical; only the value's *source* differs.
 - **No hardware requirement.** Requiring a Secure Enclave/TPM to run the demo is an unacceptable DX. Hardware sealing must be a transparent upgrade, never a gate.
-- **Don't trust-the-host-with-everything more than necessary.** ADR-002 trusts the host, but the blast radius of a host bug should be one small audited component, not "every secret in plaintext in a general proxy." (This is where the adjacent MITM-everything designs are weakest: one proxy terminates all guest TLS and sees every secret.)
+- **Don't trust-the-host-with-everything more than necessary.** ADR-001 trusts the host, but the blast radius of a host bug should be one small audited component, not "every secret in plaintext in a general proxy." (This is where the adjacent MITM-everything designs are weakest: one proxy terminates all guest TLS and sees every secret.)
 
 ## Decision
 
@@ -27,7 +27,7 @@ A secret is a reference. The host substitutes the real value into outbound traff
 > guest's outbound `:80`/`:443` to a per-VM terminator that recovers the
 > original destination (`SO_ORIGINAL_DST`), substitutes on bound hosts, and —
 > for `https` — terminates TLS under a **per-VM name-constrained intermediate**
-> the guest trusts (ADR-004), splicing unbound hosts through untouched. A
+> the guest trusts (ADR-003), splicing unbound hosts through untouched. A
 > generic `curl https://<bound-host> -H "Authorization: Bearer $PLACEHOLDER"`
 > with **no SDK** now gets the real credential substituted host-side. The SDK
 > forward-proxy (`HTTP_PROXY` + placeholder env) remains supported as an
@@ -45,7 +45,7 @@ The workload's HTTP client routes a secret-bearing request to a **host substitut
 
 The workload never makes its own TLS to the destination for a secret-bearing request and never holds the value. We do **not** MITM the guest's other TLS — only requests the workload explicitly routes for substitution are seen host-side.
 
-The egress proxy (claim-10 default-deny, ADR-004 `NetworkProvider`) is the catch-all underneath: **all** egress traverses it. Secret-bearing requests are routed for substitution; everything else is policy-checked and **leak-scanned** — a placeholder or a known secret value appearing in non-substitution egress is dropped and audited. This is the "detect" backstop for the case a workload tries to smuggle a placeholder out a side channel; it cannot smuggle a *value* because it never had one.
+The egress proxy (claim-10 default-deny, ADR-003 `NetworkProvider`) is the catch-all underneath: **all** egress traverses it. Secret-bearing requests are routed for substitution; everything else is policy-checked and **leak-scanned** — a placeholder or a known secret value appearing in non-substitution egress is dropped and audited. This is the "detect" backstop for the case a workload tries to smuggle a placeholder out a side channel; it cannot smuggle a *value* because it never had one.
 
 Coverage caveat, stated honestly: a workload that bypasses the SDK and emits a placeholder via a raw `curl` to an arbitrary host gets the placeholder dropped (the proxy never substitutes for an unbound destination), not a secret. That is the correct failure — you only get substitution on the bound path.
 
@@ -84,7 +84,7 @@ Honest framing for the docs and tests: *software default = encrypted at rest, de
 
 ## Alternatives considered
 
-- **TLS MITM of *all* guest egress** (the adjacent-SDK approach). Rejected: the host terminates every TLS session and sees all plaintext, the guest's end-to-end TLS is broken, and it requires the guest to trust a long-lived blanket-trust host CA. Maximum host visibility for a platform whose pitch is minimal blast radius. **Note (plan 129 Stage 2):** the scoped terminator we *did* build is not this — it terminates **only bound hosts** (the host already sees their plaintext via substitution → zero added visibility), splices everything else untouched, and trusts a **per-VM name-constrained** intermediate that cannot vouch for any host outside the plan's allow-list (ADR-004), not a blanket CA.
+- **TLS MITM of *all* guest egress** (the adjacent-SDK approach). Rejected: the host terminates every TLS session and sees all plaintext, the guest's end-to-end TLS is broken, and it requires the guest to trust a long-lived blanket-trust host CA. Maximum host visibility for a platform whose pitch is minimal blast radius. **Note (plan 129 Stage 2):** the scoped terminator we *did* build is not this — it terminates **only bound hosts** (the host already sees their plaintext via substitution → zero added visibility), splices everything else untouched, and trusts a **per-VM name-constrained** intermediate that cannot vouch for any host outside the plan's allow-list (ADR-003), not a blanket CA.
 - **Pure SDK-cooperative with no proxy detection.** Rejected: no backstop for a placeholder leaking via a non-cooperative side channel. The default-deny proxy + leak-scan is cheap and closes it.
 - **Hardware-sealed required.** Rejected: unacceptable DX; hardware is a transparent upgrade, not a gate.
 - **Resolve into the guest for signing** (ADR-049). Rejected and superseded: it brings the credential into guest RAM, which is the thing we are eliminating. Signing moves to the host keyholder.
@@ -113,7 +113,7 @@ exempt_paths:
 
 ## Assertion
 
-The egress substitution model (ADR-067) keeps raw secret values off the
+The egress substitution model (ADR-023) keeps raw secret values off the
 untrusted guest. The guest receives an opaque placeholder
 (`mvm-secret-<hex>`) where its credential would go; the host substitution
 endpoint holds the real value and substitutes it on the outbound forward
@@ -180,18 +180,18 @@ the tree on every PR, so renaming or deleting one trips the gate.
   enforced; the claim's guarded phrases stay blocked in user-facing
   surface until a maintainer promotes it.
 
-Promotion to a numbered claim in the ADR-002 source-of-truth table is the
+Promotion to a numbered claim in the ADR-001 source-of-truth table is the
 maintainer's call — exactly like the OCI image provenance claim
 (`claim-10-oci-image-provenance.md`), which is tracked via its own doc
 and only later folded into the numbered set. This doc + the catalog row
 register the witnesses for machine-checking without asserting the claim
-in ADR-002's prose.
+in ADR-001's prose.
 
 ## Cross-refs
 
-- ADR-067 §"Decision" — egress substitution, never in the guest; the
+- ADR-023 §"Decision" — egress substitution, never in the guest; the
   per-VM name-constrained terminator and the placeholder model.
-- ADR-002 §"Security model" — claims 12 + 13, which these invariants
+- ADR-001 §"Security model" — claims 12 + 13, which these invariants
   reinforce on the egress (vs. broker) delivery.
 - `specs/claims/catalog.md` — the witness ledger row for this leak-gate.
 - `specs/claims/claim-10-oci-image-provenance.md` — the precedent for a
@@ -200,10 +200,10 @@ in ADR-002's prose.
 
 ## Consolidated from ADR-049 — TLS substitution mechanism for guest secret placeholders
 
-- **Status: SUPERSEDED 2026-05-28 by [ADR-059](059-host-services-broker.md).** Runtime secret substitution is no longer an mvm responsibility in v1. The vsock-substitution-vs-TLS-proxy comparison below is kept as historical context; the design itself is not being implemented. `host.secrets.v1` and `mvm-secrets-dispatcher` are dropped from Plan 104.
+- **Status: SUPERSEDED 2026-05-28 by [ADR-020](020-host-services-broker.md).** Runtime secret substitution is no longer an mvm responsibility in v1. The vsock-substitution-vs-TLS-proxy comparison below is kept as historical context; the design itself is not being implemented. `host.secrets.v1` and `mvm-secrets-dispatcher` are dropped from Plan 104.
 - Date: 2026-05-14 (superseded 2026-05-28)
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture), ADR-004 (egress policy), ADR-041 (signed audited execution plans), ADR-041 (claim-safe sandbox parity), [ADR-059 (rescope — drop secrets)](059-host-services-broker.md), Plan 74 W2 + W3, Plan 74 §Risks R9
+- Related: ADR-001 (microVM security posture), ADR-003 (egress policy), ADR-014 (signed audited execution plans), ADR-014 (claim-safe sandbox parity), [ADR-020 (rescope — drop secrets)](020-host-services-broker.md), Plan 74 W2 + W3, Plan 74 §Risks R9
 
 ## Context
 
@@ -212,7 +212,7 @@ receive an opaque `mvm-secret://<grant-id>` placeholder instead of
 the real secret value, and the host swaps the placeholder for the
 real value at egress time, only when destination policy passes.
 
-ADR-041 §"Secret non-leakage" gates the claim on
+ADR-014 §"Secret non-leakage" gates the claim on
 "substitution is bound to destination policy and transport
 identity." Plan 74 W3 says "integrate substitution with the L7
 egress proxy after destination policy passes." Both are consistent
@@ -332,7 +332,7 @@ Two paths offered:
   egress closed. Workloads that need DB or SSH egress declare a
   destination policy explicitly; secrets for those destinations
   flow via in-image config bound by `unsafe_guest_secret_materialization`
-  (ADR-041 documents this as "not a non-leakage claim").
+  (ADR-014 documents this as "not a non-leakage claim").
 - **Future ADR.** Non-HTTP substitution can land later via a
   per-protocol hook contract; the vsock service is protocol-agnostic.
 
@@ -372,7 +372,7 @@ complexity of just shipping (b) for everything.
 
 - No expansion of the host trust boundary. The supervisor's
   responsibilities grow (substitution service, grant registry) but
-  the **guest's** trust store is unchanged. ADR-002's threat model
+  the **guest's** trust store is unchanged. ADR-001's threat model
   holds without revision.
 - Protocol-agnostic. HTTP/1.1, HTTP/2, HTTP/3, gRPC, mTLS — the
   guest emits a request shape the proxy already supports; the
@@ -412,7 +412,7 @@ complexity of just shipping (b) for everything.
   content scanning). The substitution service is bound to grant
   semantics; broader inspection requires (a) and a separate ADR.
 - Claiming non-leakage for the legacy `unsafe_guest_secret_materialization`
-  env/file flow. ADR-041 §"Non-goals" already forbids this.
+  env/file flow. ADR-014 §"Non-goals" already forbids this.
 
 ## Open questions
 

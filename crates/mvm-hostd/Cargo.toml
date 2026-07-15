@@ -1,6 +1,6 @@
 [package]
 name = "mvm-hostd"
-description = "Host-side daemon roles for mvm: the trusted supervisor library + the broker / host-signer / audit-signer subprocess binaries + the jailer-lite confinement helper. One crate, separate [[bin]]s so each role stays its own process (ADR-066 §3 process moat). Consolidated from mvm-supervisor + mvm-broker + mvm-host-signer + mvm-audit-signer + mvm-jailer-lite (plan 121 D1)."
+description = "Host-side daemon roles for mvm: the trusted supervisor library + the broker / host-signer / audit-signer subprocess binaries + the jailer-lite confinement helper. One crate, separate [[bin]]s so each role stays its own process (ADR-022 §3 process moat). Consolidated from mvm-supervisor + mvm-broker + mvm-host-signer + mvm-audit-signer + mvm-jailer-lite (plan 121 D1)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

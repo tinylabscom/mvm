@@ -1,11 +1,11 @@
 ---
-title: "ADR-007: Function-call entrypoints"
+title: "ADR-005: Function-call entrypoints"
 status: Proposed
 date: 2026-05-04
-related: ADR-002 (microVM security posture); ADR-005 (sealed signed builder image); plan 41 (function-call entrypoints implementation)
+related: ADR-001 (microVM security posture); ADR-004 (sealed signed builder image); plan 41 (function-call entrypoints implementation)
 ---
 
-> **Consolidation:** ADR-007 is the **canonical** function-entrypoints ADR. An earlier draft of this note anticipated consolidating ADR-008 + ADR-010 (function-service-factories — a duplicate-numbered pair) and ADR-011 (entrypoint control protocol) with physical archival to `archive/adrs/`; that specific mechanism was never carried out at the time. A later ADR-wide consolidation pass completed the merge for real: ADR-008, ADR-010, ADR-011, and ADR-039 (runtime overlay composition) are folded into this document below (their content is removed from the tree, retrievable via git history, not moved to a separate archive directory). The dev-only fd-3 control channel stays compiled out of prod (claim 4).
+> **Consolidation:** ADR-005 is the **canonical** function-entrypoints ADR. An earlier draft of this note anticipated consolidating ADR-008 + ADR-010 (function-service-factories — a duplicate-numbered pair) and ADR-011 (entrypoint control protocol) with physical archival to `archive/adrs/`; that specific mechanism was never carried out at the time. A later ADR-wide consolidation pass completed the merge for real: ADR-008, ADR-010, ADR-011, and ADR-039 (runtime overlay composition) are folded into this document below (their content is removed from the tree, retrievable via git history, not moved to a separate archive directory). The dev-only fd-3 control channel stays compiled out of prod (claim 4).
 
 ## Status
 
@@ -40,11 +40,11 @@ language-specific wrapper (Python/Node runner) that reads stdin,
 dispatches to the IR-declared function, and writes the return on
 stdout. mvm doesn't need to learn Python or TS — it needs a verb
 that runs the baked program with stdin piped and stdout/stderr
-captured, with all the security invariants ADR-002 demands.
+captured, with all the security invariants ADR-001 demands.
 
-## Threat model (additive over ADR-002)
+## Threat model (additive over ADR-001)
 
-The adversary set inherits ADR-002 §1: a malicious or compromised
+The adversary set inherits ADR-001 §1: a malicious or compromised
 guest workload, plus the call-payload dimension introduced here.
 
 New threats:
@@ -73,7 +73,7 @@ New threats:
    written at image build time but resolved at every call could
    redirect to a writable mount.
 
-Out of scope (inherited from ADR-002): malicious host, multi-tenant
+Out of scope (inherited from ADR-001): malicious host, multi-tenant
 guests within one VM, microarch side channels.
 
 ## Decision
@@ -204,7 +204,7 @@ Risks:
 
 - HMAC key compromise on the host = snapshot integrity gone. Same
   threat as compromising the host generally; acceptable per
-  ADR-002's "malicious host out of scope" carve-out.
+  ADR-001's "malicious host out of scope" carve-out.
 - Wire-format ossification. The `EntrypointEvent` enum needs to
   cover streaming, partial errors, and back-pressure cleanly enough
   that v2 doesn't break v1 callers. Addressed via
@@ -245,13 +245,13 @@ See plan 41. Files touched:
 - Integration test: build a fake "echo function" rootfs, run
   `mvmctl invoke` with stdin, assert stdout. Runs on Linux/KVM CI
   via the Firecracker backend, and on macOS dev hosts via the
-  libkrun backend (ADR-005); both expose vsock natively.
+  libkrun backend (ADR-004); both expose vsock natively.
 - `mvmctl doctor` reports live posture: entrypoint contract, snapshot
   dir mode, network mode for any running VM.
 
 ## Out of scope
 
-- Multi-tenant guests within one VM (ADR-002).
+- Multi-tenant guests within one VM (ADR-001).
 - Authenticated invoke from non-local callers — vsock socket mode
   0700 (W1.2) gates to local user; cross-host authn is mvmd's
   problem.
@@ -284,7 +284,7 @@ the substrate-side commitment.
 
 ## Context
 
-Per ADR-007, function-call entrypoints are a first-class workload
+Per ADR-005, function-call entrypoints are a first-class workload
 shape in mvm. mvmforge generates the artifacts (`flake.nix`,
 `launch.json`, source bundle) that `mvmctl up` consumes for these
 workloads. Today mvmforge also ships the Nix factories that bake
@@ -321,7 +321,7 @@ Each accepts the args specified in
 `mvmforge/specs/contracts/mvm-mkfunctionservice.md` and returns the
 record `{ extraFiles, servicePackages, service }`. The contract is
 the binding interface; mvm guarantees backward compatibility under
-the schema-version rules in ADR-007.
+the schema-version rules in ADR-005.
 
 The factories live at `mvm/nix/lib/factories/` (mirroring the
 existing `mvm/nix/lib/minimal-init/` precedent). They are exposed
@@ -380,7 +380,7 @@ workstream.
 
 ## Context
 
-The function-entrypoint wire contract (ADR-007 + mvmforge ADR-0009)
+The function-entrypoint wire contract (ADR-005 + mvmforge ADR-0009)
 currently relies on stderr scanning for a `MVMFORGE_ENVELOPE: {...}`
 marker to convey structured errors from the in-VM wrapper to the
 host. User code can print this marker on stderr and forge errors —
@@ -521,10 +521,10 @@ Proposed. Implementation sequenced in plan 61.
 
 Two features need to coexist:
 
-1. **A slim, secure production rootfs** — minimal attack surface, dm-verity-able, signed, hash-stable, suitable for the seven security claims of ADR-002.
+1. **A slim, secure production rootfs** — minimal attack surface, dm-verity-able, signed, hash-stable, suitable for the seven security claims of ADR-001.
 2. **A fully-featured dev experience** — bash, coreutils, debugging tools (strace, tcpdump, gdb), interactive shell, the things a developer expects when they `mvmctl dev` into a microVM.
 
-Post-Lima (ADR-005), `mvmctl dev` boots a real microVM via apple-container (macOS 26+) or libkrun (Linux). So whatever tools the developer uses live *inside* a microVM. The question is **how to put them there without compromising claim #1**.
+Post-Lima (ADR-004), `mvmctl dev` boots a real microVM via apple-container (macOS 26+) or libkrun (Linux). So whatever tools the developer uses live *inside* a microVM. The question is **how to put them there without compromising claim #1**.
 
 User constraint, stated explicitly: "the tooling needs to be transparent to the user. This library/repo should be able to determine what needs to be in the binary in which what context the user is operating in." This rules out:
 
@@ -621,7 +621,7 @@ For `mvmctl debug <vm>` (live attach), the runtime hot-attaches the overlay disk
 - **No rootfs hash drift**: prod artifact is the same bytes whether or not the overlay is attached. The dm-verity check covers only the workload rootfs; the overlay is verified separately by its own roothash.
 - **Capability containment**: the overlay can add binaries but not grant capabilities. setpriv `--bounding-set=-all --no-new-privs` (W2.3) is set per-service in init *after* the overlay mounts. A SUID binary in the overlay would be neutered by `--no-new-privs`.
 - **Live-attach trust**: `mvmctl debug <vm>` requires host-side authority to invoke. The hypervisor enforces who can attach disks; the running VM cannot self-attach. No new vsock RPC for disk attach.
-- **Audit**: every overlay attach emits a `DiskAttached { kind: Overlay }` usage event (per ADR-040), making the dev/debug path observable in the audit log.
+- **Audit**: every overlay attach emits a `DiskAttached { kind: Overlay }` usage event (per ADR-013), making the dev/debug path observable in the audit log.
 
 ## Compliance impact
 

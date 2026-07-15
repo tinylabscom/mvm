@@ -253,7 +253,7 @@ export function literal(value: string): EnvValue {
 const AUTH_TYPES: readonly AuthType[] = ["bearer", "basic", "sigv4", "hmac"];
 
 /** Reference a named secret from the host keystore for egress
- *  substitution (ADR-067 / Plan 129). The guest only ever receives an
+ *  substitution (ADR-023 / Plan 129). The guest only ever receives an
  *  opaque placeholder in the env var `var` (defaults to `name`); the
  *  host substitution endpoint injects/signs the real credential on
  *  outbound requests — it never enters the guest.

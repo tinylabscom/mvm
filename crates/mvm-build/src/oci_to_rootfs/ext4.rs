@@ -168,7 +168,7 @@ pub fn materialize_to_ext4(
         let _ = (staged, output, options);
         Err(OciUnpackError::HostUnsupported {
             operation: "ext4 image materialization (mke2fs)",
-            reason: "mke2fs is Linux-only; the W1.5 CLI orchestrator routes this through the libkrun builder VM (ADR-050)",
+            reason: "mke2fs is Linux-only; the W1.5 CLI orchestrator routes this through the libkrun builder VM (ADR-017)",
         })
     }
 }

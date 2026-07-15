@@ -3,9 +3,9 @@
 - Status: Proposed
 - Date: 2026-05-14
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture, claims 2 + 3 + 4), ADR-014 (builder VM via libkrun), ADR-041 (claim-safe sandbox parity), ADR-067 (TLS substitution mechanism), ADR-050 (verity posture for pulled OCI images), Plan 74 W1 + W3 + W4
+- Related: ADR-001 (microVM security posture, claims 2 + 3 + 4), ADR-007 (builder VM via libkrun), ADR-014 (claim-safe sandbox parity), ADR-023 (TLS substitution mechanism), ADR-017 (verity posture for pulled OCI images), Plan 74 W1 + W3 + W4
 
-> **Consolidation note:** an earlier draft of this ADR proposed itself as the canonical image & runtime-overlay ADR, consolidating the runtime-overlay-composition ADR and ADR-050 (OCI image verity posture) — that merge was never carried out (both remained standalone documents). The ADR-wide consolidation pass instead folded the runtime-overlay-composition decision into ADR-007 (the function-entrypoints canonical, its original topical home) and left ADR-050 and this document (ADR-051) as independent, un-merged ADRs — ADR-051 is not in the current consolidation's cluster list and stands as-is. The universal verity-sealed runtime overlay (this ADR's "Option B") is the one-agent-everywhere path.
+> **Consolidation note:** an earlier draft of this ADR proposed itself as the canonical image & runtime-overlay ADR, consolidating the runtime-overlay-composition ADR and ADR-017 (OCI image verity posture) — that merge was never carried out (both remained standalone documents). The ADR-wide consolidation pass instead folded the runtime-overlay-composition decision into ADR-005 (the function-entrypoints canonical, its original topical home) and left ADR-017 and this document (ADR-018) as independent, un-merged ADRs — ADR-018 is not in the current consolidation's cluster list and stands as-is. The universal verity-sealed runtime overlay (this ADR's "Option B") is the one-agent-everywhere path.
 
 ## Context
 
@@ -13,7 +13,7 @@ Plan 74 W1 lets users launch arbitrary OCI images in microVMs. An
 OCI image's rootfs is **user content**: bytes the user pulled from
 a registry, pinned by a content digest the user controls. mvm
 needs the *guest agent*, the *seccomp shim*, and the per-language
-*SDK runtime library* (ADR-067 vsock substitution hooks) present
+*SDK runtime library* (ADR-023 vsock substitution hooks) present
 in every microVM regardless of how that rootfs got there.
 
 Today mvm-built images bake the agent in:
@@ -158,7 +158,7 @@ Those binaries come from the overlay at boot. Net effect:
   to ship a security fix to (single overlay rebuild, not N
   per-image flake bumps).
 - A microVM running an old mvmctl with an old overlay still boots
-  — the agent's vsock protocol is versioned (ADR-002 §W4.1 with
+  — the agent's vsock protocol is versioned (ADR-001 §W4.1 with
   `#[serde(deny_unknown_fields)]`), so a newer host talking to an
   older guest agent fails admission cleanly rather than silently
   misbehaving.
@@ -177,7 +177,7 @@ the issue.
 - Mvm controls its own runtime story in one place. A CVE in the
   guest agent ships one fix (rebuild the overlay, bump the
   roothash, push the artifact) rather than N flake bumps.
-- The SDK runtime library (per-language, ADR-067 vsock hooks)
+- The SDK runtime library (per-language, ADR-023 vsock hooks)
   has a stable mount point. SDK upgrades become "rebuild the
   overlay"; no per-image work.
 - Verity claim 3 is *strengthened*: a tampered overlay panics
@@ -236,7 +236,7 @@ the issue.
   for backward-compat windows ("any agent v2.x speaks to any
   host v2.y for y >= x")? Probably yes; the vsock protocol
   already has this shape (`#[serde(deny_unknown_fields)]` +
-  versioned envelope per ADR-002 W4.1). Pin the policy in the
+  versioned envelope per ADR-001 W4.1). Pin the policy in the
   W1.3 implementation PR.
 - **Overlay size budget.** ~10-20 MB is the rough target. Hard
   cap of 32 MB is reasonable; bump only with an ADR amendment.
@@ -259,7 +259,7 @@ the issue.
 Tracked in [`specs/plans/74-claim-safe-sandbox-parity.md`](../plans/74-claim-safe-sandbox-parity.md)
 §W1.3 (layer unpack — needs the `/mvm` collision check) and §W1.4
 (verity generation — extends to also generate the overlay).
-ADR-051's task list folds into W1 as:
+ADR-018's task list folds into W1 as:
 
 - `nix/images/runtime-overlay/flake.nix` — new flake building the
   per-arch overlay ext4 + verity sidecar + roothash.

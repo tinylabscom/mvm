@@ -1,4 +1,4 @@
-# CLI command grouping map (Plan 178 / ADR-077) — LOCKED
+# CLI command grouping map (Plan 178 / ADR-027) — LOCKED
 
 Old→new mapping, settled (decisions D1–D6). ~57 flat top-level variants →
 top-level daily verbs + a small set of noun groups; internals hidden.

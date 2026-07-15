@@ -505,7 +505,7 @@ status: Cheese
         // key — it must not be mistaken for a claim doc.
         let src = "\
 ---
-title: \"ADR-002: something\"
+title: \"ADR-001: something\"
 status: Accepted
 date: 2026-04-30
 ---
@@ -548,7 +548,7 @@ more prose
     fn multiple_blocks_in_one_file_are_all_found() {
         let src = "\
 ---
-title: \"ADR-050\"
+title: \"ADR-017\"
 status: Proposed
 ---
 
@@ -596,7 +596,7 @@ more prose
             adrs.join("002-example.md"),
             "\
 ---
-title: \"ADR-002\"
+title: \"ADR-001\"
 status: Accepted
 ---
 

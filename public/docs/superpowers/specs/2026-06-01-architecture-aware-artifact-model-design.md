@@ -10,9 +10,9 @@ The goal is a Rust-orchestrated, architecture- and backend-aware model for micro
 
 A full investigation showed **most of the requested capability already exists, scattered**: `mvm_libkrun::KernelFormat`, six backend impls behind `VmBackend`/`VmBackendForBuilder` in `mvm-backend`, an `Arch` enum in `mvm-build`, `ArtifactManifest` + `.mvm-provenance.json` + `.mvm-artifacts.sha256`, deterministic ext4 via `mke2fs` (`oci_to_rootfs::ext4`), and Firecracker config in `mvm-backend`. Three project rules shape the approach:
 
-- **ADR-066** consolidates 32→17 crates and prefers *modules over crates*; a new crate must earn its place (external-consumer trait seam, separate process, proc-macro, or distinct dep closure). A greenfield `mvm-artifacts` crate meets none today.
+- **ADR-022** consolidates 32→17 crates and prefers *modules over crates*; a new crate must earn its place (external-consumer trait seam, separate process, proc-macro, or distinct dep closure). A greenfield `mvm-artifacts` crate meets none today.
 - **Dependency-limiting rule**: reuse in-tree crates; question every new one.
-- **ADR-050 / hermetic invariant**: production ext4 is built *inside* the builder VM (`mke2fs`), never on the host; `mvmctl` never uses host Nix/tools.
+- **ADR-017 / hermetic invariant**: production ext4 is built *inside* the builder VM (`mke2fs`), never on the host; `mvmctl` never uses host Nix/tools.
 
 **Decision: option B — extend the existing primitives in place.** The real value the original spec adds is the *typed model* that's missing today (a `GuestArch` enum, a data-driven backend-compat matrix, a unified validator + manifest, a CLI surface) — not new builders. We reuse the validated, CI-gated, claim-backed builders and add the typed layer over them.
 
@@ -118,7 +118,7 @@ New **`ArtifactManifest`** (`manifest.json`, written next to artifacts): `artifa
 
 ## Out of scope (future slices, each its own spec→plan)
 
-- `Ext4RootfsBuilder` via `arcbox_ext4` (host-side pure-Rust ext4) — prototype + benchmark; must not replace the hermetic `mke2fs`-in-VM production path (ADR-050).
+- `Ext4RootfsBuilder` via `arcbox_ext4` (host-side pure-Rust ext4) — prototype + benchmark; must not replace the hermetic `mke2fs`-in-VM production path (ADR-017).
 - QEMU + vfkit/Apple-Virtualization `BackendConfigWriter`s.
 - Dynamic boot smoke-tests (`mvmctl artifact smoke-test`).
 - `microvm.nix` integration (`MicrovmNixBuilder`).

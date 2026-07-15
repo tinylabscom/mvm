@@ -101,7 +101,7 @@ fn materialize_is_byte_deterministic_for_the_same_input() {
     assert_eq!(
         a, b,
         "byte-deterministic output must produce identical bytes \
-         (verity cache invariant — see ADR-050)"
+         (verity cache invariant — see ADR-017)"
     );
 }
 

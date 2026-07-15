@@ -248,7 +248,7 @@ _release-prep VERSION:
     rm Cargo.toml.bak
     cargo update -w
     # The runtime-overlay flake pins its version to the workspace version
-    # (check-runtime-overlay-version fails closed on a mismatch, ADR-051); the
+    # (check-runtime-overlay-version fails closed on a mismatch, ADR-018); the
     # nix package versions should track too. Bump them alongside Cargo.toml.
     sed -i.bak -E "s/(overlayVersion[[:space:]]*=[[:space:]]*\")[^\"]*(\")/\1$V\2/" nix/images/runtime-overlay/flake.nix
     rm nix/images/runtime-overlay/flake.nix.bak
@@ -429,19 +429,19 @@ audit:
 deny:
     cargo deny check
 
-# Combined supply-chain gate (ADR-002 §W5.2)
+# Combined supply-chain gate (ADR-001 §W5.2)
 supply-chain: audit deny
 
-# Verify production guest agent has no dev-only Exec symbols (ADR-002 §W4.3)
+# Verify production guest agent has no dev-only Exec symbols (ADR-001 §W4.3)
 security-gate-prod-agent:
     ./scripts/check-prod-agent-no-exec.sh
 
-# Run the GuestRequest deserializer fuzzer (ADR-002 §W4.2). Default 5min.
+# Run the GuestRequest deserializer fuzzer (ADR-001 §W4.2). Default 5min.
 # Override with: just fuzz-guest-request 3600
 fuzz-guest-request SECONDS="300":
     cd crates/mvm-guest && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{SECONDS}}
 
-# Run the AuthenticatedFrame envelope fuzzer (ADR-002 §W4.2). Default 5min.
+# Run the AuthenticatedFrame envelope fuzzer (ADR-001 §W4.2). Default 5min.
 fuzz-authenticated-frame SECONDS="300":
     cd crates/mvm-guest && cargo +nightly fuzz run fuzz_authenticated_frame -- -max_total_time={{SECONDS}}
 

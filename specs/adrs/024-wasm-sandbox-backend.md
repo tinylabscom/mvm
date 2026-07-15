@@ -2,8 +2,8 @@
 
 **Status**: Proposed
 **Date**: 2026-06-03
-**Cross-refs**: ADR-002 (security posture — wasm-sandbox is OUTSIDE its claim
-set), ADR-066 (target architecture — `VmBackend` seam), Plan 144
+**Cross-refs**: ADR-001 (security posture — wasm-sandbox is OUTSIDE its claim
+set), ADR-022 (target architecture — `VmBackend` seam), Plan 144
 
 ## Context
 
@@ -33,9 +33,9 @@ return an explicit typed `WasmSandboxError` naming the supported alternative.
 The artifact validator rejects any artifact whose `BackendCompat` row demands a
 kernel format (wasm-sandbox accepts none).
 
-### 3. It provides NONE of the ADR-002 numbered security claims
+### 3. It provides NONE of the ADR-001 numbered security claims
 
-The wasm-sandbox is a portability/demo tier, not an isolation tier. ADR-002's
+The wasm-sandbox is a portability/demo tier, not an isolation tier. ADR-001's
 threat model and per-backend tier matrix do not extend to it, and this ADR does
 not request claim-table promotion.
 
@@ -58,20 +58,20 @@ not request claim-table promotion.
   websocket/MessageChannel transports, a `wasm32` browser build target.
 
 
-## Consolidated from ADR-069 — ADR-069 — Tier-0 wasm preview, ship-time promotion, and the capability-policy bridge
+## Consolidated from ADR-024 — ADR-024 — Tier-0 wasm preview, ship-time promotion, and the capability-policy bridge
 
-# ADR-069 — Tier-0 wasm preview, ship-time promotion, and the capability-policy bridge
+# ADR-024 — Tier-0 wasm preview, ship-time promotion, and the capability-policy bridge
 
 **Status:** Proposed 2026-06-11. Adversarially reviewed 2026-06-11; this
 revision folds in those findings.
-**Extends** [ADR-069](069-wasm-sandbox-backend.md) (the `wasm-sandbox` backend —
+**Extends** [ADR-024](024-wasm-sandbox-backend.md) (the `wasm-sandbox` backend —
 the Tier-0 substrate this ADR promotes *from*) and
-[ADR-041](041-signed-audited-execution-plans.md) (the product loop this preview
-tier feeds). **Cross-refs:** ADR-002 (security posture — the claims the ship
-side must keep), ADR-041 (signed/audited execution plans — the admission path
-every promotion lands on), ADR-041 (app-deps audit — what re-validation means),
-ADR-067 (secret substitution — why Tier 0 never holds a raw secret),
-ADR-002 (mvm-primitive ↔ mvmd-product boundary, consolidated from ADR-070), Plan 129 (secrets), Plan 169
+[ADR-014](014-signed-audited-execution-plans.md) (the product loop this preview
+tier feeds). **Cross-refs:** ADR-001 (security posture — the claims the ship
+side must keep), ADR-014 (signed/audited execution plans — the admission path
+every promotion lands on), ADR-014 (app-deps audit — what re-validation means),
+ADR-023 (secret substitution — why Tier 0 never holds a raw secret),
+ADR-001 (mvm-primitive ↔ mvmd-product boundary, consolidated from ADR-070), Plan 129 (secrets), Plan 169
 (agent-RPC transport, the vsock leg of the relay).
 
 ## Context
@@ -79,9 +79,9 @@ ADR-002 (mvm-primitive ↔ mvmd-product boundary, consolidated from ADR-070), Pl
 We want the fastest possible "wow" loop: a developer authors and *runs* a
 workload live, in the browser or against a streamed host sandbox, with zero
 infrastructure — then ships, and what they shipped is a real microVM carrying
-every ADR-002 claim. ADR-069 gave us the honest substrate: a `wasm-sandbox`
+every ADR-001 claim. ADR-024 gave us the honest substrate: a `wasm-sandbox`
 `VmBackend` that declares `browser_compatible=true` and provides **none** of
-the numbered claims. ADR-041 gave us the product loop around real microVMs.
+the numbered claims. ADR-014 gave us the product loop around real microVMs.
 What neither decides is the bridge: **how does work done in a no-claims tier
 become a claims-bearing microVM without laundering anything past the claims?**
 
@@ -108,8 +108,8 @@ their symbol-grep gates exist.
 ### 1. The trust boundary is *ship*, not preview
 
 Tier 0 — the `wasm-sandbox` backend in a browser tab, or a host-side wasmtime
-session streamed to a browser — asserts zero isolation claims (ADR-069 §3
-already says so; this ADR adds it to ADR-002's threat-model notes rather than
+session streamed to a browser — asserts zero isolation claims (ADR-024 §3
+already says so; this ADR adds it to ADR-001's threat-model notes rather than
 the claim table). It is **single-principal for isolation purposes**: the
 developer's own code, in their own session, so no *other tenant* is at risk
 and no production claim is asserted or needed.
@@ -121,7 +121,7 @@ dependency or hostile previewed package would exfiltrate. Tier 0 therefore
 has its own (claim-free, but real) posture:
 
 - **Preview egress is mediated, not ambient.** The browser tier inherits
-  ADR-069's `network_mode=ProxyOnly`; the preview surface ships a CSP that
+  ADR-024's `network_mode=ProxyOnly`; the preview surface ships a CSP that
   denies arbitrary outbound from the preview UI itself. Workload egress in
   preview flows through the decision-honest resolver (§3) — denied egress is
   *simulated as denied*, not silently allowed.
@@ -129,7 +129,7 @@ has its own (claim-free, but real) posture:
   (§5) — the input path runs the same detector the ship gate uses.
 
 **Session binding on the relay.** The host-side relay's WebSocket leg is an
-untrusted-client surface on a multi-tab machine: ADR-041's local ingress is
+untrusted-client surface on a multi-tab machine: ADR-014's local ingress is
 deliberately loopback-only/no-auth, so *any page in the developer's browser*
 can attempt a WebSocket to it. "Single-session" is therefore an enforced
 property, not a naming convention: the relay mints a short-lived random
@@ -154,7 +154,7 @@ optimization. mvm ships only a *single-session* relay primitive (one
 wasmtime, one client, one policy); the second-client-refusal witness above is
 also what keeps this premise from silently dissolving in a later PR. The
 multi-tenant streaming service that composes wasmtime-in-microVM sessions is
-mvmd's, per the ADR-002 split (consolidated from ADR-070).
+mvmd's, per the ADR-001 split (consolidated from ADR-070).
 
 ### 2. Promotion is a trace, never a snapshot
 
@@ -205,7 +205,7 @@ guest's authority beyond what admission grants.
   `security.yml` beside `fuzz_supervisor_config` *in the same plan that
   builds the parser* (a ship criterion, not a follow-up), and rejection tests
   for oversize/duplicate/contradictory ops.
-- **Trace integrity at rest.** A trace on disk is tamperable by ADR-002's
+- **Trace integrity at rest.** A trace on disk is tamperable by ADR-001's
   same-host hostile process — and a swapped dep name inside a schema-valid
   trace steers the build while every schema check passes. Traces persist
   under the `mvm-core::config` state dir at mode 0600, and the recording is
@@ -229,7 +229,7 @@ backdoors. A trace requesting `numpy-malware-fork` by name builds "clean."
 The residual malicious-package risk is real and stated; what bounds it is
 exact-name+version pinning of trace-sourced deps into the IR (the user
 reviews the pinned list, not a fuzzy request), with registry allowlisting and
-provenance checks as the existing ADR-041 trajectory hardens. Claim 11 is not
+provenance checks as the existing ADR-014 trajectory hardens. Claim 11 is not
 represented as malware protection.
 
 ### 3. One capability policy, two enforcement fidelities
@@ -285,7 +285,7 @@ Two corollaries:
 - **Prod wasm workloads run least-privilege at both layers.** "Open up wasm
   and lean on the microVM" is rejected: it discards the finer of the two
   layers. The double posture folds into the claim 1–3 and claim 10 narratives
-  — no new claim number is requested now; promotion to the ADR-002 table can
+  — no new claim number is requested now; promotion to the ADR-001 table can
   follow the same path the OCI-provenance claim took, once witnesses exist.
 - **The preview is decision-honest from day 1.** Tier 0 runs the same pure
   policy resolver and *shows* the verdict ("this egress would be denied by
@@ -356,7 +356,7 @@ promote-time, not a silently-promoted leak.
 - **wasmtime/WASI** becomes a large parser of untrusted wasm bytes on the
   workload path. It gets the dependency treatment claims 5/7 prescribe: pinned
   version, `cargo deny`/`audit` coverage, upstream fuzzing relied upon and
-  tracked (ADR-004 precedent), and at runtime it is confined exactly as any
+  tracked (ADR-003 precedent), and at runtime it is confined exactly as any
   guest service — dedicated uid under setpriv, seccomp `standard`, no
   ambient fs (claims 1–2 narratives extend to it).
 - **The projection seam** (resolved policy → WasiCtx, resolved policy →
@@ -401,7 +401,7 @@ discipline applies: when these land, their witnesses are named in
   code under default-deny while adding no enforcement the two-projection
   design lacks.
 - **Kernel emulation in the browser** for native-deps fidelity — already
-  rejected by ADR-069 as a framing for the backend itself; remains available
+  rejected by ADR-024 as a framing for the backend itself; remains available
   later as an explicitly-labeled high-fidelity preview fallback if the
   source-language gap proves painful. Out of scope here.
 - **Defer policy honesty** (preview runs open, policy appears at ship) —
@@ -423,7 +423,7 @@ discipline applies: when these land, their witnesses are named in
   relay (websocket leg client-facing with session-token binding, vsock leg
   unchanged, one framed protocol over a transport trait); the secret-scan
   admission hook.
-- ADR-002 gains a Tier-0 threat-model note; claims 1–3/10 narratives grow the
+- ADR-001 gains a Tier-0 threat-model note; claims 1–3/10 narratives grow the
   double-posture and wasmtime-confinement language. `xtask
   check-claim-catalog` keeps every named witness honest as they land.
 - mvmd inherits clean primitives: the relay, the policy projection, and the
@@ -436,28 +436,28 @@ discipline applies: when these land, their witnesses are named in
   (bounded by ProxyOnly + CSP + paste-time refusal, claim-free by design).
 
 
-## Consolidated from ADR-069 — ADR-069 — Production in-microVM wasm-component runner
+## Consolidated from ADR-024 — ADR-024 — Production in-microVM wasm-component runner
 
-# ADR-069 — Production in-microVM wasm-component runner
+# ADR-024 — Production in-microVM wasm-component runner
 
 **Status:** Proposed 2026-06-12.
-**Extends** [ADR-069](069-wasm-sandbox-backend.md) (§4 two
+**Extends** [ADR-024](024-wasm-sandbox-backend.md) (§4 two
 fidelity regimes — this ADR builds the prod-tier execution for the WASM-component
 regime; §6 wasmtime as a new untrusted-input surface). **Builds on**
-[ADR-069](069-wasm-sandbox-backend.md) (the off-isolation-scale wasm-sandbox
+[ADR-024](024-wasm-sandbox-backend.md) (the off-isolation-scale wasm-sandbox
 *preview* backend; this ADR is the *production microVM* path, not that backend).
-**Cross-refs:** ADR-002 (claims 1–3 isolation, 5 untrusted parsers, 8 signed
-plan, 10 egress, 11 sealed deps, 13 secrets), ADR-041 (app-deps audit — the
-builder already compiles untrusted inputs), ADR-005 (symmetric builder VM — the
+**Cross-refs:** ADR-001 (claims 1–3 isolation, 5 untrusted parsers, 8 signed
+plan, 10 egress, 11 sealed deps, 13 secrets), ADR-014 (app-deps audit — the
+builder already compiles untrusted inputs), ADR-004 (symmetric builder VM — the
 sandbox the AOT compile runs in), Plan 188 (the capability projection/clamp seam
 this extends from network to fs/env).
 
 ## Context
 
-ADR-069 §4 names two fidelity regimes for the Tier-0→ship promotion. The
+ADR-024 §4 names two fidelity regimes for the Tier-0→ship promotion. The
 **WASM-component** regime is the clean one: a workload that *is* a `.wasm`
 runs on the same engine in preview and prod (wasmtime ≈ wasmtime), so the
-microVM just wraps it. ADR-069 deferred building that prod runner to its own
+microVM just wraps it. ADR-024 deferred building that prod runner to its own
 design. This ADR is that design — the **production, in-microVM wasm-component
 runner**: make "a `.wasm` is a workload" real, with the component executing on
 **wasmtime inside the guest**, the microVM providing isolation.
@@ -471,7 +471,7 @@ code never links wasmtime.** The work is to wire the surrounding pieces:
 admit the `.wasm` as an artifact, project policy into the guest's WASI config,
 and bake the engine.
 
-The browser / host-streamed *preview* execution of components (ADR-069's P8
+The browser / host-streamed *preview* execution of components (ADR-024's P8
 relay) is a **separate** subsystem that consumes the same component artifact;
 it is out of scope here.
 
@@ -510,7 +510,7 @@ from Plan 188**, now extended from network to fs/env: the workload **requests**
 fs/env capabilities in its IR; the authoritative **tenant policy bounds** them;
 the granted set is the **intersection** (a request can attenuate, never widen).
 **Default-deny** on both sides — a component is denied every dir/var not
-granted. This makes ADR-069 §3's "one capability policy, two enforcement
+granted. This makes ADR-024 §3's "one capability policy, two enforcement
 fidelities" literal:
 
 - **fine:** the resolved capability policy → wasmtime fs preopens + env grants,
@@ -534,7 +534,7 @@ artifact. Consequences:
   workload-bearing tier (the whole point of running in a locked-down microVM).
 - The compiler runs on attacker bytes in the **builder**, which already
   executes attacker-influenced build logic (`nix build`, `uv pip install`) in
-  its own sandbox (ADR-041/057) — no *new* privileged trust boundary, one more
+  its own sandbox (ADR-014/057) — no *new* privileged trust boundary, one more
   build step in a place designed for it.
 - **Deterministic** (claim 7 double-build) given a pinned wasmtime version,
   which is recorded in provenance; the `.cwasm` is same-arch as the guest by
@@ -565,7 +565,7 @@ The new surfaces beyond the existing claim set:
    the *execution* of precompiled code in the sealed guest with no JIT), version
    pinning + `cargo deny`/audit, and confining the in-guest wasmtime as the
    uid-901 setpriv service (claims 1–2). **We do not fuzz wasmtime ourselves —
-   we rely on its upstream OSS-Fuzz coverage** (the ADR-004 precedent for the
+   we rely on its upstream OSS-Fuzz coverage** (the ADR-003 precedent for the
    virtio parsers) and record that as the posture.
 2. **The WASI config generator is new security-critical code**, peer to the
    Plan 188 projection seam: it turns the resolved policy into the actual
@@ -596,7 +596,7 @@ A wasm-component workload runs in a microVM, so it inherits claims 1–3
 (isolation), 8 (signed plan), 10 (default-deny egress), 11 (sealed deps, if it
 has any), 13 (secrets), 15 (no interactive sealed access). The new fine-grained
 fs/env enforcement (Decision 3) is a *strengthening* within claims 1–2, not a
-new numbered claim — promotion to the ADR-002 table can follow the OCI-provenance
+new numbered claim — promotion to the ADR-001 table can follow the OCI-provenance
 precedent once witnesses exist. The AOT-no-JIT-in-guest posture (Decision 4)
 strengthens the claim-1/2 seccomp story.
 
@@ -635,7 +635,7 @@ guest seccomp, output returns, provenance recorded.
   enough to run on every step of an agent loop — concrete evidence for the
   dependency-budget review that gates pulling a Wasm engine in (Plan 144's
   `wasm-sandbox` follow-up) and for the preview tier's fast author-loop
-  (ADR-069 P8). It is **rejected as the production shape here** for two
+  (ADR-024 P8). It is **rejected as the production shape here** for two
   reasons: (1) it collapses the VMM into the orchestrator's address space,
   abandoning the supervisor/jailer/broker **process moat** mvm relies on; and
   (2) a kernel-less guest forgoes the Linux microVM boundary that earns claims
@@ -657,5 +657,5 @@ guest seccomp, output returns, provenance recorded.
 - New code/gates owned by plans A1–A3: the fs/env projection + WASI-config
   generator (with the clamp/deny-by-default witnesses), the `.wasm` admission,
   the AOT build step + the tightened guest seccomp, the Nix wasmtime bake.
-- Out of scope: the preview/relay tier (ADR-069 P8), SDK-compile-to-wasm
+- Out of scope: the preview/relay tier (ADR-024 P8), SDK-compile-to-wasm
   (Decision 2 deferred), and WASI P2 (Decision 1 seam).

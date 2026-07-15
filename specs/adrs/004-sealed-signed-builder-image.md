@@ -180,14 +180,14 @@ which is exactly the failure mode this ADR exists to prevent.
 **Neutral:**
 - Manifest schema versioning needed from day one so older mvmctl/mvmd
   binaries fail closed on unknown versions.
-- The dev variant continues to be verity-exempt per ADR-002 §W3.4.
+- The dev variant continues to be verity-exempt per ADR-001 §W3.4.
   Only the builder variant gets verity protection.
 
 ## References
 
 - Sprint 42 commit `688b7de` — "make dev VM the only build environment;
   delete HostBuildEnv"
-- `specs/adrs/002-microvm-security-posture.md` — the seven-claim
+- `specs/adrs/001-microvm-security-posture.md` — the seven-claim
   threat model that drove sprint 42
 - `specs/plans/29-w5-supply-chain.md` — W5.1 SHA-256 verification this
   plan extends
@@ -261,7 +261,7 @@ The new direction:
 
 **Negative**:
 - Adds a third-party dep (microvm.nix) to the build trust boundary — pinned by hash and CI-audited (`xtask audit-flake`).
-- Some Linux-specific guarantees (dm-verity at boot, seccomp tier "strict") only hold on the Firecracker path. The libkrun path uses image-hash-on-load + HMAC chain instead. Documented in the per-backend tier matrix in ADR-002.
+- Some Linux-specific guarantees (dm-verity at boot, seccomp tier "strict") only hold on the Firecracker path. The libkrun path uses image-hash-on-load + HMAC chain instead. Documented in the per-backend tier matrix in ADR-001.
 - Loss of the Lima dev-VM means macOS users without libkrun installed get a clearer error instead of a working but slow path.
 
 **Neutral**:
@@ -296,7 +296,7 @@ The previous iteration shipped this exact strategy and was approaching the upstr
 | **Cloud Hypervisor (Linux/KVM)** | ≤ 300 ms | ≤ 50 ms | Tier-1 peer of Firecracker; rust-vmm-based; passes the §"fork test." Picks up where FC stops: VFIO passthrough, virtio-gpu, virtio-fs, larger guests. Opt-in via `--hypervisor cloud-hypervisor`. |
 | libkrun / libkrun (Linux/KVM) | ≤ 300 ms | ≤ 30 ms | libkrunfw bundles kernel; matches Firecracker on Linux. |
 | libkrun / libkrun (macOS HVF) | ≤ 300 ms | ≤ 60 ms | HVF init overhead is real; reaching the floor needs the kernel + initramfs trim from §"Boot-time budget" to be tight. |
-| Apple Virtualization framework | ≤ 300 ms | ≤ 200 ms | Apple's hypervisor overhead. If we can't hit 300 ms here we drop the backend (see ADR-031 — macOS path is libkrun-direct anyway). |
+| Apple Virtualization framework | ≤ 300 ms | ≤ 200 ms | Apple's hypervisor overhead. If we can't hit 300 ms here we drop the backend (see ADR-009 — macOS path is libkrun-direct anyway). |
 
 CI perf gate: `xtask perf --backend <name> --p50-ms 300 --runs 100` (Phase 9). The smoke at `tests/smoke_e2e_boot.rs` (Phase 1 W6) runs a single boot and asserts the floor on every PR that touches the boot path.
 
@@ -380,11 +380,11 @@ PID 1 must be uid 0 (Linux kernel requirement; user-namespace tricks bring their
 | `mvm-guest-agent` | 990 | Vsock RPC handler. Never needs root. Always non-root regardless of mode. |
 | Entrypoint (workload) | 0 (dev) / 1000 (prod) | Root by default in dev for debug ergonomics (`apt`, `mount`, etc.); non-root by default in prod for defense in depth. Override via `uids = { entrypoint = … }`. |
 
-`setpriv` invocation uses `--reuid + --regid + --clear-groups + --no-new-privs` (matches ADR-002 W2.3). `--no-new-privs` blocks `setuid` re-elevation in the workload — a compromise of the entrypoint can't reach uid 0 even if it finds a SUID binary.
+`setpriv` invocation uses `--reuid + --regid + --clear-groups + --no-new-privs` (matches ADR-001 W2.3). `--no-new-privs` blocks `setuid` re-elevation in the workload — a compromise of the entrypoint can't reach uid 0 even if it finds a SUID binary.
 
 **Why dev defaults to root:** dev shells are interactive debug surfaces. `apt install`, `mount /dev/sdX`, `tcpdump -i any` — all expect root. Defaulting dev to non-root would break those flows on first try and push users to flip the override, which is friction without payoff. Dev is *already* a less-secure mode (the `accessible` distinction in ADR-013 §"Sealed vs accessible"); rootful entrypoint is consistent with that posture.
 
-**Why prod defaults to non-root:** the ADR-002 W2.1 commitment — "no guest binary can elevate to uid 0." Defending against this requires the workload not *being* uid 0 to begin with. The rootless default lands a meaningful slice of W2.1 ahead of Phase 6's full security overlay; the rest of W2 (per-service uids, read-only `/etc`, dm-verity) layers on top without breaking the surface.
+**Why prod defaults to non-root:** the ADR-001 W2.1 commitment — "no guest binary can elevate to uid 0." Defending against this requires the workload not *being* uid 0 to begin with. The rootless default lands a meaningful slice of W2.1 ahead of Phase 6's full security overlay; the rest of W2 (per-service uids, read-only `/etc`, dm-verity) layers on top without breaking the surface.
 
 **Override knob:** `uids = { agent = N; entrypoint = M; }` on the `mkGuest` call. Valid permutations:
 - `{ entrypoint = 1000 }` — rootless dev shell (forces non-root in dev mode)
@@ -435,7 +435,7 @@ CVE roller — that's a metadata path, not a runtime path.
 
 - **microvm.nix** as a third-party dep widens the supply-chain surface. Mitigated by hash-pinning in `flake.lock`, CI re-audit on every bump, and reproducibility double-build.
 - **libkrun 0.4.5** is itself a third-party dep. Same mitigation.
-- The per-backend tier matrix from ADR-002 is updated: Firecracker tier remains "strict"; libkrun tier is "standard" until parity work lands (post-Phase 6).
+- The per-backend tier matrix from ADR-001 is updated: Firecracker tier remains "strict"; libkrun tier is "standard" until parity work lands (post-Phase 6).
 
 ## Compliance impact
 
@@ -640,9 +640,9 @@ trust root as the dev image. The release CI must produce the
 - Plan 72 — `specs/plans/72-builder-vm-via-libkrun.md` (libkrun
   builder VM, W5.D fix list — the catalog of "what breaks at each
   layer" that informed the ur-seed contents)
-- ADR-014 — `specs/adrs/014-vmbackend-single-trait.md` (the
+- ADR-007 — `specs/adrs/007-vmbackend-single-trait.md` (the
   two-artifact-layers invariant)
-- ADR-002 — `specs/adrs/002-microvm-security-posture.md` (Claim 6)
+- ADR-001 — `specs/adrs/001-microvm-security-posture.md` (Claim 6)
 - Memory `feedback_no_prebuilt_builder_vm_artifact.md` — the
   contributor-host policy this ADR honours.
 
@@ -662,7 +662,7 @@ Today's execution paths are asymmetric across host operating systems:
 
 Builder-backend dispatch lives at `crates/mvm-build/src/builder_backend_select.rs:86-91` (`resolve_builder_backend()`). On Linux, the host's userland sits in the TCB for every workload because workload microVMs share Linux's host kernel and a host process can `ptrace` Firecracker or read its `/proc/<pid>/mem` without ever crossing a hypervisor boundary. On macOS the same operations would first require breaching the libkrun Linux VM that sits between mvmctl and the workload — a different threat tier.
 
-This asymmetry undermines the security claims listed in ADR-002. Claim 1 ("no host-fs access from a guest beyond explicit shares") is meaningful only relative to the host being trusted not to peek. ADR-002 explicitly carves out "a malicious host" as out-of-scope, granting the host the hypervisor and the private build keys — but no more. On Linux today the host has more capability than the carve-out grants it, by virtue of running the workload directly. On macOS, it doesn't. The claim should hold uniformly.
+This asymmetry undermines the security claims listed in ADR-001. Claim 1 ("no host-fs access from a guest beyond explicit shares") is meaningful only relative to the host being trusted not to peek. ADR-001 explicitly carves out "a malicious host" as out-of-scope, granting the host the hypervisor and the private build keys — but no more. On Linux today the host has more capability than the carve-out grants it, by virtue of running the workload directly. On macOS, it doesn't. The claim should hold uniformly.
 
 ## Decision
 
@@ -703,8 +703,8 @@ Plan 98's macOS work narrows the asymmetric-trust gap *on macOS* (it stops requi
 ## References
 
 - [ADR-001](001-firecracker-only.md) — Firecracker-only execution (needs update for nested model)
-- [ADR-002](002-microvm-security-posture.md) — microVM security posture (claim 1 reworded by Plan 100 W8)
-- [ADR-014](014-vmbackend-single-trait.md) — builder VM via libkrun + Plan 98 Vz extension
+- [ADR-001](001-microvm-security-posture.md) — microVM security posture (claim 1 reworded by Plan 100 W8)
+- [ADR-007](007-vmbackend-single-trait.md) — builder VM via libkrun + Plan 98 Vz extension
 - [Plan 100](../plans/100-symmetric-builder-vm-rollout.md) — implementation rollout
 
 
@@ -1268,13 +1268,13 @@ change. Specifically:
 
 **Status**: Accepted
 **Date**: 2026-06-01
-**Cross-refs**: ADR-013 (libkrun pivot — host never needs Nix), ADR-046 (builder VM via libkrun, the canonical builder-VM ADR), ADR-065 (single builder/dev image, embedded host binaries), ADR-066 §1 (name by role, front with a trait, hide impls), ADR-002 (security posture — dev-tier builder VM). Planning input: Plan 91 (Alpine-minirootfs Stage 0), Plan 97 (`VmBackendForBuilder` hypervisor-agnostic seam), Plan 98 (libkrun/Vz builder-backend selection).
+**Cross-refs**: ADR-013 (libkrun pivot — host never needs Nix), ADR-046 (builder VM via libkrun, the canonical builder-VM ADR), ADR-065 (single builder/dev image, embedded host binaries), ADR-022 §1 (name by role, front with a trait, hide impls), ADR-001 (security posture — dev-tier builder VM). Planning input: Plan 91 (Alpine-minirootfs Stage 0), Plan 97 (`VmBackendForBuilder` hypervisor-agnostic seam), Plan 98 (libkrun/Vz builder-backend selection).
 
 ## Context
 
 "Stage 0" is the from-source bootstrap that produces the steady-state builder VM (`vmlinux` + `rootfs.ext4`) on a contributor host with no host Nix and no prebuilt artifacts (ADR-046). The live path (Plan 91) boots an Alpine minirootfs guest under libkrun whose `/init` runs `apk add nix`, builds `nix/images/builder-vm/flake.nix`, and writes the artifacts to `/out`.
 
-The build path (`run_build`) and the per-VM spawn primitive (`VmBackendForBuilder`, Plan 97) are already fronted by traits with libkrun + Vz impls. **Stage 0 was the exception:** `run_stage0` lived as a libkrun-*inherent* method on `LibkrunBuilderVm`, and the orchestration in `mvm-cli` called `LibkrunBuilderVm::default().run_stage0(...)` directly. That hard-wires the bootstrap to one VMM and violates ADR-066 §1 ("name by role, front with a trait, hide impls"). It also reads as a hack: the very first thing the tool does on a fresh host is welded to libkrun, even though macOS 26+ Apple Silicon defaults to the Vz builder backend (Plan 98) for every *subsequent* build.
+The build path (`run_build`) and the per-VM spawn primitive (`VmBackendForBuilder`, Plan 97) are already fronted by traits with libkrun + Vz impls. **Stage 0 was the exception:** `run_stage0` lived as a libkrun-*inherent* method on `LibkrunBuilderVm`, and the orchestration in `mvm-cli` called `LibkrunBuilderVm::default().run_stage0(...)` directly. That hard-wires the bootstrap to one VMM and violates ADR-022 §1 ("name by role, front with a trait, hide impls"). It also reads as a hack: the very first thing the tool does on a fresh host is welded to libkrun, even though macOS 26+ Apple Silicon defaults to the Vz builder backend (Plan 98) for every *subsequent* build.
 
 ## Decision
 
@@ -1306,10 +1306,10 @@ Plan 97 already landed `VmBackendForBuilder` — the lower-level spawn primitive
 
 ## Consequences
 
-- The `mvm-cli` Stage 0 orchestration no longer names a concrete VMM in its call path — it holds `&dyn BuilderVm`. Adding a backend is an impl, never an orchestration edit (ADR-066 §1).
+- The `mvm-cli` Stage 0 orchestration no longer names a concrete VMM in its call path — it holds `&dyn BuilderVm`. Adding a backend is an impl, never an orchestration edit (ADR-022 §1).
 - No behavior change today: libkrun remains the sole Stage 0 backend; the artifact bytes and the `.mvm-artifacts.sha256` / `.mvm-provenance.json` sidecars are unchanged.
 - A backend that forgets to implement Stage 0 fails loudly with a recovery hint, not silently.
-- Security posture unchanged: Stage 0 is the dev-tier builder VM (ADR-002 out-of-scope for the hardened workload claims); this is a structural refactor of the dispatch, not of the trust model.
+- Security posture unchanged: Stage 0 is the dev-tier builder VM (ADR-001 out-of-scope for the hardened workload claims); this is a structural refactor of the dispatch, not of the trust model.
 
 ## Status of work
 
@@ -1320,7 +1320,7 @@ Libkrun dispatch + the fail-closed default + tests landed with this ADR. Vz and 
 
 **Status**: Accepted
 **Date**: 2026-06-05
-**Cross-refs**: ADR-013 (libkrun pivot — host never needs Nix), ADR-046 (two artifact layers; contributor path never downloads mvm-published artifacts), ADR-065 (single builder/dev image; host-vm binaries cross-compiled to static `aarch64-musl` + embedded by `mvm-cli/build.rs`), ADR-068 (Stage 0 dispatches through the `BuilderVm` trait), ADR-002 (security posture — Stage 0 is the dev-tier builder VM, out of scope for the hardened workload claims). Planning input: Plan 160 (this seed swap), Plan 126 A1/B3 (dependency baseline — `pgp` was the single biggest closure in the default `mvmctl` binary).
+**Cross-refs**: ADR-013 (libkrun pivot — host never needs Nix), ADR-046 (two artifact layers; contributor path never downloads mvm-published artifacts), ADR-065 (single builder/dev image; host-vm binaries cross-compiled to static `aarch64-musl` + embedded by `mvm-cli/build.rs`), ADR-068 (Stage 0 dispatches through the `BuilderVm` trait), ADR-001 (security posture — Stage 0 is the dev-tier builder VM, out of scope for the hardened workload claims). Planning input: Plan 160 (this seed swap), Plan 126 A1/B3 (dependency baseline — `pgp` was the single biggest closure in the default `mvmctl` binary).
 
 ## Context
 
@@ -1361,7 +1361,7 @@ Instead the seed's PID 1 is **`stage0-init`** — a small static `aarch64-unknow
 - **`pgp` is deleted outright** — no feature gate, no caveat. `cargo tree -i pgp` is empty; the default `mvmctl` closure drops ~168 crates (379 unique vs the 407 Plan 126 A1 baseline, net of overlap).
 - **One userland story.** Everything mvm boots is busybox: the seed's shell, the builder VM rootfs, every workload microVM. Alpine, `apk`, the embedded release key, and `init.sh` are gone from the tree.
 - **`MVM_STAGE0_SEED` is gone.** The nix seed is the only Stage 0 path; there is no Alpine fallback to select. (No backwards compatibility — this is the first version.)
-- **Security posture unchanged.** Stage 0 is the dev-tier builder VM (ADR-002 out-of-scope for the hardened workload claims). The seed integrity check is *strengthened in surface* (one hash-pinned upstream artifact, fail-closed at fetch + extract) and *narrowed in trust* (no third-party signing key).
+- **Security posture unchanged.** Stage 0 is the dev-tier builder VM (ADR-001 out-of-scope for the hardened workload claims). The seed integrity check is *strengthened in surface* (one hash-pinned upstream artifact, fail-closed at fetch + extract) and *narrowed in trust* (no third-party signing key).
 
 ## Status of work — validation caveat
 
@@ -1377,7 +1377,7 @@ Outstanding, sequenced as Plan 160 follow-ups (do not block this ADR):
 ## Consolidated from ADR-096 — Stage 0 seed Nix (2.31.1) computes divergent flake narHashes; fresh-machine builder-VM build is broken
 
 **Status:** Proposed — **decision needed** (do not merge a fix from this doc; this is the write-up + the question)
-**Relates:** ADR-005 §"Consolidated from ADR-071" (Stage 0 seed Nix is URL+SHA-256 pinned), ADR-014 (consolidated from ADR-093) (builder auto-fallback — why this stays masked), Plan 160 (the nix-seed Stage 0 cutover that introduced the seed version).
+**Relates:** ADR-004 §"Consolidated from ADR-071" (Stage 0 seed Nix is URL+SHA-256 pinned), ADR-007 (consolidated from ADR-093) (builder auto-fallback — why this stays masked), Plan 160 (the nix-seed Stage 0 cutover that introduced the seed version).
 
 ## Symptom
 
@@ -1500,8 +1500,8 @@ built artifact's hash is unchanged vs. a warm-cache build (claims 3/6).
 - Status: Proposed
 - Date: 2026-07-04
 - Owner: MVM Project
-- Related: ADR-050 (supersedes its **mechanism**, preserves its **guarantee**),
-  ADR-002 (microVM security posture — claim 3, claim 7, claim 11),
+- Related: ADR-017 (supersedes its **mechanism**, preserves its **guarantee**),
+  ADR-001 (microVM security posture — claim 3, claim 7, claim 11),
   ADR-046 / ADR-013 (no host tools / no host Nix),
   ADR-093 (builder auto-fallback), ADR-107 (virtiofs-root integrity — future),
   Plan 221 (this decision is its B0 deliverable), Plan 214 (HVF VMM),
@@ -1526,9 +1526,9 @@ unpacked OCI tree into an ext4 image + dm-verity Merkle tree + roothash. This
 phase runs **no untrusted code** — it is deterministic byte-assembly over a
 fixed input tree.
 
-ADR-050 mandated materialize + verity *inside the builder VM* because that is
+ADR-017 mandated materialize + verity *inside the builder VM* because that is
 where `veritysetup` and `mkfs.ext4` live and where the result is deterministic.
-But ADR-050's **security property is the roothash**, not the *location* the
+But ADR-017's **security property is the roothash**, not the *location* the
 roothash is computed in. Once a pure-Rust, memory-safe writer can produce a
 byte-identical ext4 + verity tree, the location constraint is incidental.
 
@@ -1546,7 +1546,7 @@ Two forces make the split worth formalizing now:
 The tension: moving Phase B onto the host **removes the VM sandbox that
 currently isolates materialize**. Materialize consumes attacker-influenced OCI
 trees and its output feeds dm-verity (claim 3), so the writer becomes a new
-host-side trusted-input surface. The host is nominally trusted (ADR-002 lists
+host-side trusted-input surface. The host is nominally trusted (ADR-001 lists
 "malicious host" out of scope), but that governs what we *defend*, not an
 invitation to *widen* the host attack surface carelessly.
 
@@ -1615,7 +1615,7 @@ Removing the builder-VM sandbox around materialize is only acceptable because:
 
 ## Consequences
 
-- **ADR-050 is superseded in mechanism, preserved in guarantee.** Materialize +
+- **ADR-017 is superseded in mechanism, preserved in guarantee.** Materialize +
   verity move from the builder VM to in-process pure Rust; the roothash +
   determinism + no-host-tools guarantees are unchanged. A vendored pure-Rust
   crate is *not a host tool*, so this does not weaken ADR-046/013.
@@ -1649,7 +1649,7 @@ Removing the builder-VM sandbox around materialize is only acceptable because:
   invariant (ADR-046/013), hands claim 11's threat model a host-level
   code-execution path, and is impossible on macOS anyway. The out-of-scope
   "malicious host" caveat is not license to widen the surface.
-- **Keep materialize in the builder VM (status quo, ADR-050 as-is).** Rejected as
+- **Keep materialize in the builder VM (status quo, ADR-017 as-is).** Rejected as
   the default — it keeps the last mandatory subprocess on the run path and all
   its plumbing fragility, and is unavailable where the host lacks `mkfs`. Retained
   only as the auto-fallback when the pure path can't handle an input (e.g. an
@@ -1676,7 +1676,7 @@ tree into the writer's node set, behind a `pure-mkfs` feature.
 **Remaining:** wire the run path (`LocalBackend::run_machine` → pure materialize,
 builder-VM fallback); resolve the xattr and multi-block-group open items; flip
 the pure path to the run-path default and update the CLAUDE.md "never on the
-host — ADR-050" note to cite this ADR.
+host — ADR-017" note to cite this ADR.
 
 Note the order things actually landed diverged from a strict "ADR first" plan:
 the writer, verity, and fuzz coverage merged before this record. That is fine for
@@ -1692,10 +1692,10 @@ boundary. Option A (virtiofs root) continues under ADR-107.
 - Status: Accepted
 - Date: 2026-07-04
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture — **claim 3**, threat model, tier
+- Related: ADR-001 (microVM security posture — **claim 3**, threat model, tier
   matrix), ADR-106 (in-process rootfs materialization — Option B, block+verity),
-  ADR-050 (materialize + verity; ADR-106 supersedes its mechanism, preserves its
-  guarantee), ADR-051 (runtime overlay sealed like the rootfs), Plan 214
+  ADR-017 (materialize + verity; ADR-106 supersedes its mechanism, preserves its
+  guarantee), ADR-018 (runtime overlay sealed like the rootfs), Plan 214
   (HVF VMM), Plan 221 (this is its Option A / A0 deliverable),
   Plan 223 (virtiofs-root implementation, gated on this ADR).
 
@@ -1723,7 +1723,7 @@ provides, and therefore whether Option A can carry prod workloads.
 
 ### What does claim 3 actually buy, given the threat model?
 
-ADR-002 puts a **trusted host** at the center: "mvmctl trusts the host with the
+ADR-001 puts a **trusted host** at the center: "mvmctl trusts the host with the
 hypervisor and private build keys… a malicious host is out of scope." So claim 3
 is **not** defending against a host that tampers with the rootfs at serve time.
 What it *does* buy, on top of the trusted host:
@@ -1743,7 +1743,7 @@ What it *does* buy, on top of the trusted host:
 For a virtiofs root, the content's authenticity is instead established **at pull
 / unpack time**: `mvm-oci` verifies every layer's sha256 against the manifest,
 and `--prod` additionally cosign-verifies the resolved manifest digest before
-the layers are unpacked (ADR-002 claim 14). After that, the *trusted host*
+the layers are unpacked (ADR-001 claim 14). After that, the *trusted host*
 serves those exact files read-only. The gap versus claim 3 is precisely
 properties (1)–(3): there is **no guest-enforced, plan-bound, continuous
 re-verification** of the served files. A corruption or substitution of the
@@ -1786,9 +1786,9 @@ Option B.** Concretely:
    > digest when a registry policy demands it), then served **read-only** from a
    > trusted host over virtiofs. There is no guest-enforced, plan-bound
    > re-verification of served files; integrity after unpack rests on the
-   > trusted-host axiom (ADR-002 threat model).
+   > trusted-host axiom (ADR-001 threat model).
 
-   This is recorded as a documented posture, **not** promoted into ADR-002's
+   This is recorded as a documented posture, **not** promoted into ADR-001's
    numbered claim-3 prose. The claims catalog gains a note that claim 3's
    witness (dm-verity) applies to the **block+ext4** backends
    (Firecracker + Option B), and that the virtiofs-root dev path carries the
@@ -1823,7 +1823,7 @@ Option B.** Concretely:
   materialization on the fast dev/local loop. Gating it behind a full guest-side
   file-verification subsystem would erase that win. The tiered decision ships the
   dev-loop speedup now without weakening any *numbered* prod guarantee.
-- **It matches the existing architecture.** ADR-002 already grades guarantees by
+- **It matches the existing architecture.** ADR-001 already grades guarantees by
   tier; this is one more per-tier distinction, made explicit and CI-notable
   rather than implicit.
 
@@ -1841,7 +1841,7 @@ Option B.** Concretely:
   *only* content-authenticity step for a virtiofs boot, so it must run before the
   tree is exposed to the guest and must fail closed. (It already does for the
   materialize path; the virtiofs path must not bypass it.)
-- **Documentation debt is explicit, not hidden.** A reader of ADR-002 will find
+- **Documentation debt is explicit, not hidden.** A reader of ADR-001 will find
   claim 3 scoped to block+ext4 and a pointer to this ADR for the virtiofs-root
   posture, so no one mistakes a dev-tier virtiofs boot for a claim-3 boot.
 
@@ -1858,7 +1858,7 @@ Option B.** Concretely:
 - **Ship virtiofs-root for all tiers and quietly relax claim 3.** Rejected:
   claim 3 is CI-enforced and load-bearing for the prod distribution story;
   silently weakening it to cover a dev optimization is exactly the overclaiming
-  ADR-002's discipline exists to prevent.
+  ADR-001's discipline exists to prevent.
 - **Never ship virtiofs-root; keep Option B everywhere.** Rejected as the
   default: it forfeits the dev-loop speedup and the Plan-214 end state for a
   prod property the dev tier does not need. Option B remains the prod path.

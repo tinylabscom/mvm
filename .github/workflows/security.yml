@@ -1,6 +1,6 @@
 name: Security
 
-# ADR-002 §W6.3 — single workflow that hosts every CI-side security
+# ADR-001 §W6.3 — single workflow that hosts every CI-side security
 # gate. Lanes correspond to the microVM hardening workstreams and the
 # seven claims in CLAUDE.md::Security model. Failure on any lane
 # blocks merge.
@@ -13,7 +13,7 @@ name: Security
 # per-merge cost, so the duplicate post-merge run was pure waste.
 
 on:
-  # Per ADR-038: heavy security gates run at release time + nightly
+  # Per ADR-012: heavy security gates run at release time + nightly
   # cron only. Day-to-day per-push CI feedback comes from ci.yml; the
   # nightly cron picks up new RUSTSEC advisories that landed in the
   # advisory-db without anyone touching the repo.
@@ -40,10 +40,10 @@ env:
 
 jobs:
   # ── Lane 1: Supply chain ──────────────────────────────────────────
-  # Maps to ADR-002 §W5.2 — advisories, license allowlist, multi-
+  # Maps to ADR-001 §W5.2 — advisories, license allowlist, multi-
   # version bans, and registry source allowlist. Cheap (<2 min).
   cargo-deny:
-    name: Supply chain — cargo-deny (ADR-002 §W5.2)
+    name: Supply chain — cargo-deny (ADR-001 §W5.2)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -58,7 +58,7 @@ jobs:
         run: cargo deny check
 
   cargo-audit:
-    name: Supply chain — cargo-audit (ADR-002 §W5.2)
+    name: Supply chain — cargo-audit (ADR-001 §W5.2)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -73,7 +73,7 @@ jobs:
         run: cargo audit --ignore RUSTSEC-2025-0057 --ignore RUSTSEC-2024-0384 --ignore RUSTSEC-2025-0119 --ignore RUSTSEC-2023-0071 --ignore RUSTSEC-2024-0370 --ignore RUSTSEC-2026-0009 --ignore RUSTSEC-2025-0052 --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0173 --ignore RUSTSEC-2025-0134
 
   # ── Lane 2: Production-agent symbol contract ─────────────────────
-  # ADR-002 §W4.3 + ADR-007 §W5 — combined contract on the production
+  # ADR-001 §W4.3 + ADR-005 §W5 — combined contract on the production
   # guest agent binary. ONE build, ONE step, BOTH assertions:
   #   • mvm_guest_agent::do_exec is ABSENT (W4.3 — no dev-shell leak)
   #   • mvm_guest_agent::handle_run_entrypoint is PRESENT (W5 — the
@@ -81,7 +81,7 @@ jobs:
   # Asserting both on the *same* binary in a single step prevents
   # feature-flag drift from regressing half the contract silently.
   prod-agent-runentry-contract:
-    name: Guest agent — symbol contract (ADR-002 §W4.3 + ADR-007 §W5)
+    name: Guest agent — symbol contract (ADR-001 §W4.3 + ADR-005 §W5)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -179,7 +179,7 @@ jobs:
       - name: No host-signer / admission symbols in the builder daemon
         run: ./scripts/check-builderd-no-authority.sh
 
-  # ── Lane 2b: Seccomp tier functional denial (ADR-002 §W2.4) ───────
+  # ── Lane 2b: Seccomp tier functional denial (ADR-001 §W2.4) ───────
   # Tier-structure unit tests in `mvm-security` cover cumulative-subset
   # and serde shapes; they don't exercise the BPF program at runtime.
   # This lane spawns `mvm-seccomp-apply <tier> -- syscall-probe` on
@@ -190,7 +190,7 @@ jobs:
   # but fails to translate to a working seccomp filter (e.g., wrong
   # syscall number, missing arch coverage, NNP not set).
   seccomp-functional:
-    name: Seccomp tier functional denial (ADR-002 §W2.4)
+    name: Seccomp tier functional denial (ADR-001 §W2.4)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -212,11 +212,11 @@ jobs:
         run: cargo test -p mvm-guest --test seccomp_apply
 
   # ── Lane 3: Reproducibility ────────────────────────────────────────
-  # ADR-002 §W5.3 — two clean builds must produce byte-identical
+  # ADR-001 §W5.3 — two clean builds must produce byte-identical
   # binaries. Catches build-time non-determinism that could mask
   # supply-chain injection.
   reproducibility:
-    name: Reproducibility (ADR-002 §W5.3)
+    name: Reproducibility (ADR-001 §W5.3)
     runs-on: ubuntu-latest
     env:
       SOURCE_DATE_EPOCH: "1700000000"
@@ -262,7 +262,7 @@ jobs:
           echo "ok: matching sha256 across two clean builds: $a"
 
   # ── Lane 4: Parser fuzzing (best-effort, time-boxed) ───────────────
-  # ADR-002 §W4.2 + Plan 85 §R1 — cargo-fuzz harnesses for
+  # ADR-001 §W4.2 + Plan 85 §R1 — cargo-fuzz harnesses for
   # GuestRequest, the authenticated-frame envelope, the libkrun
   # SupervisorConfig parser, and the OCI layer-unpack ingress.
   # Run for 5 minutes per tag-push / dispatch; the nightly cron
@@ -488,12 +488,12 @@ jobs:
             crates/mvm-sdk/fuzz/artifacts/
 
   # ── Lane 5: Hash-verify regression ─────────────────────────────────
-  # ADR-002 §W5.1 — the unit tests that exercise the
+  # ADR-001 §W5.1 — the unit tests that exercise the
   # download-and-verify code path live in mvm-cli. Run them in
   # isolation so a regression is visible in this workflow even when
   # the broader test job in ci.yml is skipped.
   hash-verify-tests:
-    name: Hash-verify regression (ADR-002 §W5.1)
+    name: Hash-verify regression (ADR-001 §W5.1)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -509,7 +509,7 @@ jobs:
         run: cargo test -p mvm-cli --lib hash_verify_tests
 
   # ── Lane 6: Verified boot artifact gate ────────────────────────────
-  # ADR-002 §W3.4 — the production verity-sealed image must emit its
+  # ADR-001 §W3.4 — the production verity-sealed image must emit its
   # ext4 + `*.verity` + `*.roothash` sidecars. If a refactor disables
   # the dm-verity seal on the prod path, this gate fails the merge
   # before the verity claim breaks silently. Witnesses the shipped seal
@@ -517,7 +517,7 @@ jobs:
   # once built was retired by Plan 115; the rootfs/OCI seal itself is
   # unit-tested in `mvm_build::oci_to_rootfs::verity`).
   verified-boot-artifacts:
-    name: Verified boot artifacts (ADR-002 §W3.4)
+    name: Verified boot artifacts (ADR-001 §W3.4)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -533,7 +533,7 @@ jobs:
           # `mvm_build::oci_to_rootfs::verity::seal_with_verity` (veritysetup
           # format + a 64-hex roothash) — is unchanged and unit-tested in
           # mvm-build, and is exercised end-to-end by the verity-sealed
-          # runtime overlay (ADR-051: "sealed the same way it seals rootfs"),
+          # runtime overlay (ADR-018: "sealed the same way it seals rootfs"),
           # which every microVM attaches at boot. Assert that sealed image
           # emits its ext4 + verity sidecar + a valid roothash.
           nix build "./nix/images/runtime-overlay#packages.x86_64-linux.default" \
@@ -542,7 +542,7 @@ jobs:
           for f in overlay.ext4 overlay.verity overlay.roothash; do
             if [ ! -f "$out/$f" ]; then
               echo "::error::missing $f in $out" >&2
-              echo "ADR-002 §W3.4 requires the production verity-sealed image" >&2
+              echo "ADR-001 §W3.4 requires the production verity-sealed image" >&2
               echo "to emit {ext4,verity,roothash}; a missing sidecar usually" >&2
               echo "means the dm-verity seal was disabled on the prod path." >&2
               exit 1
@@ -557,7 +557,7 @@ jobs:
           echo "ok: overlay.{ext4,verity,roothash} present, roothash=${hash:0:12}…"
 
   # ── Lane 6b: Sealed-prod rootfs has no SSH (plan 76 Phase 8) ──────
-  # Plan 76 §Phase 8 + ADR-002 §"No SSH inside microVMs". The vsock-
+  # Plan 76 §Phase 8 + ADR-001 §"No SSH inside microVMs". The vsock-
   # only claim is enforced at runtime by the `mvm-guest-agent`
   # dispatcher (Plan 76 Phase 1 + the `sealed-prod-allowlist` CI
   # lane in `ci.yml`). This lane is the static counterpart: it
@@ -618,7 +618,7 @@ jobs:
           fi
 
           # SSH host keys (ssh_host_*), anywhere — a ready-to-serve SSH
-          # leak per ADR-002 §"No SSH inside microVMs".
+          # leak per ADR-001 §"No SSH inside microVMs".
           if sudo find "$mnt" -type f -name 'ssh_host_*' -print -quit | grep -q .; then
             echo "::error::SSH host keys present in the sealed image:" >&2
             sudo find "$mnt" -type f -name 'ssh_host_*' >&2 || true
@@ -633,7 +633,7 @@ jobs:
           fi
 
           if [ "$fail" -ne 0 ]; then
-            echo "::error::ADR-002 violated; sealed-prod images must not ship SSH artifacts." >&2
+            echo "::error::ADR-001 violated; sealed-prod images must not ship SSH artifacts." >&2
             exit 1
           fi
           echo "ok: sealed image has no sshd / host keys / sshd_config"
@@ -764,7 +764,7 @@ jobs:
             echo "::error::Builder-VM image is non-deterministic — two clean builds produced different artifacts" >&2
             echo "Plan 107 A2.5 requires the builder-vm rootfs (now carrying firecracker, A2.1) to reproduce" >&2
             echo "byte-for-byte so contributors and CI agree on the same rootfs hash. Investigate before merging" >&2
-            echo "— non-determinism can mask supply-chain injection (ADR-002 §W5.3)." >&2
+            echo "— non-determinism can mask supply-chain injection (ADR-001 §W5.3)." >&2
             echo >&2
             echo "Build A:" >&2
             cat /tmp/bvm-hash-a.txt >&2

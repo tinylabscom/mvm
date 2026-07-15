@@ -98,7 +98,7 @@ as ephemeral.
 ## Why a separate doc and not just CI?
 
 A self-hosted GitHub runner on Hetzner is the eventual home for this
-(see ADR-002 §W4 — fuzz cadence wants a beefier box than `ubuntu-latest`).
+(see ADR-001 §W4 — fuzz cadence wants a beefier box than `ubuntu-latest`).
 But:
 
 - It's a bigger lift: runner registration, secret management, auto-reconnect.

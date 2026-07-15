@@ -932,7 +932,7 @@ let
     if bootCommand != null && !(extraFiles ? "/etc/mvm/entrypoint")
     then throw ''
       mkGuest: `bootCommand` is set but `extraFiles` does not provide
-      "/etc/mvm/entrypoint" (the guest agent's per-call marker, ADR-007).
+      "/etc/mvm/entrypoint" (the guest agent's per-call marker, ADR-005).
       The function-service factory must bake it.
     ''
     else true;

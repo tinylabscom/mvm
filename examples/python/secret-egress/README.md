@@ -1,6 +1,6 @@
 # secret-egress (Python)
 
-Egress-secret substitution — **Plan 129 / ADR-067**. The workload declares a
+Egress-secret substitution — **Plan 129 / ADR-023**. The workload declares a
 secret with `mvm.secret(name, type=..., hosts=[...])`; the host substitutes the
 real credential on outbound requests and **the raw secret never enters the
 guest**.

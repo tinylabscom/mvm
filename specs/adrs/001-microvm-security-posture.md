@@ -1,5 +1,5 @@
 ---
-title: "ADR-002: microVM security posture — explicit guarantees, layered defenses"
+title: "ADR-001: microVM security posture — explicit guarantees, layered defenses"
 status: Accepted
 date: 2026-04-30
 revised: 2026-06-05
@@ -136,7 +136,7 @@ defend; many claims have ripple effects across multiple layers, but
 the primary defended layer is the one the gate fails first.
 
 The original ADR shipped with seven claims. Claim 8 (signed
-`ExecutionPlan`) was added by plan 64 / ADR-041 and named in
+`ExecutionPlan`) was added by plan 64 / ADR-014 and named in
 CLAUDE.md but not in this table until now. Claim 9 (signed
 bundles) is Sprint 52 W2 — this commit catches the table up to
 both. Claim 11 (app-dep audit pipeline — claim 9 in
@@ -144,7 +144,7 @@ both. Claim 11 (app-dep audit pipeline — claim 9 in
 8 + the SDK-port follow-on) was added by ADR-047 / Plan 73
 Followups A + B.1/B.2/B.3 + C + D. Claims 12 and 13 (host services
 broker — binding-gated dispatch + workload audit-entry attribution)
-were added by Plan 104 / ADR-059, with Claim 13 rewritten by ADR-059's rescope
+were added by Plan 104 / ADR-020, with Claim 13 rewritten by ADR-020's rescope
 when `host.secrets.v1` was dropped from v1 scope and `host.audit.v1`
 took its place as the load-bearing workload service. Claim 15
 (no interactive access to a sealed production microVM) was added by
@@ -163,12 +163,12 @@ catalog ledger rather than reused.
 | 5 | Vsock framing + supervisor-config JSON are fuzzed | L2/L4 | W4.1, W4.2, Plan 88 W6 | `cargo-fuzz` targets in `crates/mvm-guest/fuzz/` (`GuestRequest`, `AuthenticatedFrame`, `fuzz_authed_path`) and `crates/mvm-libkrun/fuzz/` (`fuzz_supervisor_config`); `deny_unknown_fields` audit |
 | 6 | Pre-built dev image is hash-verified | cross-cutting (supply chain) | W5.1 | `download_dev_image` SHA-256 check; `MVM_SKIP_HASH_VERIFY` only documented escape |
 | 7 | Cargo deps are audited on every PR | cross-cutting (supply chain) | W5.2 | `cargo-deny` + `cargo-audit` jobs; reproducibility double-build (W5.3) |
-| 8 | Every workload runs from a signed, audited `ExecutionPlan` | cross-cutting (policy + audit) | plan 64 W1–W4, ADR-041 | `synthesize_plan` / `host_signer::load_or_init_at` / `admit_for_run` / `AuditEmitter` round-trip + tamper rejection tests; `xtask check-no-display-on-secret-types` |
+| 8 | Every workload runs from a signed, audited `ExecutionPlan` | cross-cutting (policy + audit) | plan 64 W1–W4, ADR-014 | `synthesize_plan` / `host_signer::load_or_init_at` / `admit_for_run` / `AuditEmitter` round-trip + tamper rejection tests; `xtask check-no-display-on-secret-types` |
 | 9 | Every published bundle is content-addressed, key_id-pinned, and re-verified at fetch **and at admit time** | cross-cutting (supply chain + integrity) | Sprint 52 W2 + admit-time re-verify follow-on | `mvm_plan::bundle::read_and_verify_bundle` + `mvm_plan::bundle::verify_plan_bundle` rejection-ladder tests: unknown-key, tampered manifest, key_id mismatch, tampered artifact, missing artifact, unsafe path, schema bump, pin-archive sha256 drift, pin-signature drift; `mvmctl bundle fetch` round-trip + `admit_for_run` tests asserting refusal on pin-without-context and pin-archive mismatch |
 | 10 | No untrusted workload reaches the network unless explicitly admitted by policy | cross-cutting (data containment) | Sprint 52 W3 | `policy_default_is_deny_all` + `test_resolve_network_policy_default_is_deny_all`; `mvmctl up` emits an opt-in warning when the resolved policy is `unrestricted` (escape hatch is `MVM_ACK_UNRESTRICTED_NETWORK=1`); libkrun/Vz admitted `up` boots thread the signed plan by default so the gateway bridge enforces default-deny; non-deny CLI/template policies are lowered into a generated signed-policy bundle rather than an unsigned bare carrier |
 | 11 | Every application-dep volume is hash-locked, attestation-checked, CVE-scanned, SBOM-enumerated, and bound to the workload's audit chain | cross-cutting (supply chain — app-layer deps) | ADR-047, Plan 73 Followups A + B.1/B.2/B.3 + C + D | `mvm_sdk::compile::deps_audit::{seal_volume, verify_sealed_volume}` tamper-detection unit tests; `mvm_build::app_deps_gate::apply_install_gate` prod/dev rejection tests; `app-deps-audit` CI lane in `ci.yml` (Followup D) — drives `mvmctl compile` on `examples/python/hello-app-with-deps/`, seals a clean + a HIGH-CVE fixture via `mvm-app-deps-fixture-tool`, asserts `mvmctl deps inspect --json` produces a well-formed report, asserts the prod gate refuses the HIGH-CVE fixture and the dev gate admits it, asserts a byte-flip on `cve.json` makes inspect refuse |
-| 12 | Every host-side service the broker exposes is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited via the chain-signed log | cross-cutting (policy + audit) | Plan 104 W2, ADR-059 | `service_call_denied_when_unbound` + `service_call_denied_outside_profile` + `audit_chain_contains_service_call_entries` + `audit_chain_carries_no_payload_bytes` rejection-ladder tests; `xtask check-handler-adr-coverage` + `xtask check-handler-policy-schema` + `xtask check-handler-composition` lints; `fuzz_service_call.rs` lane (Plan 104 W6) |
-| 13 | No raw secret value crosses the broker channel; `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space | cross-cutting (data containment) | Plan 104 W5, ADR-067, ADR-059 | `host_secrets_v1_denied_outside_allowed_destinations` + `zeroize_drop_zeros_secret_bytes` + `handler_inter_call_memory_hygiene` + `host_secrets_v1_signed_payload_jcs_roundtrip` + `secrets_subprocess_cannot_reach_supervisor_memory` + `placeholder_in_outbound_request_dropped_and_audited` (S25 backstop) tests; ADR-067 hostile-guest matrix in W7 |
+| 12 | Every host-side service the broker exposes is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited via the chain-signed log | cross-cutting (policy + audit) | Plan 104 W2, ADR-020 | `service_call_denied_when_unbound` + `service_call_denied_outside_profile` + `audit_chain_contains_service_call_entries` + `audit_chain_carries_no_payload_bytes` rejection-ladder tests; `xtask check-handler-adr-coverage` + `xtask check-handler-policy-schema` + `xtask check-handler-composition` lints; `fuzz_service_call.rs` lane (Plan 104 W6) |
+| 13 | No raw secret value crosses the broker channel; `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space | cross-cutting (data containment) | Plan 104 W5, ADR-023, ADR-020 | `host_secrets_v1_denied_outside_allowed_destinations` + `zeroize_drop_zeros_secret_bytes` + `handler_inter_call_memory_hygiene` + `host_secrets_v1_signed_payload_jcs_roundtrip` + `secrets_subprocess_cannot_reach_supervisor_memory` + `placeholder_in_outbound_request_dropped_and_audited` (S25 backstop) tests; ADR-023 hostile-guest matrix in W7 |
 | 15 | No interactive access to a sealed production microVM | L4 | Plan 165 WS-C | `prod-agent-no-console` symbol-grep job in `security.yml` (the agent's PTY-over-vsock console is `dev-shell`-gated, so a sealed prod agent links no console symbol — same shape as claim 4's `do_exec` gate); host `console_refused_on_sealed_image` accessible-gate test; `prod_console_attachment_has_no_input` write-only-console-capture test |
 
 L1 (host + hypervisor) has no claim of its own — the host is trusted
@@ -196,7 +196,7 @@ images: the workload **rootfs** — sealed-prod `.mvm` artifacts carry
 `rootfs.verity` + `roothash`, which the backend wires as a dm-verity
 device on the kernel cmdline (`mvm-backend/src/microvm.rs`) and
 `mvm-verity-init` mounts — and the **runtime overlay** attached to
-every microVM (ADR-051, "sealed the same way it seals rootfs"). The
+every microVM (ADR-018, "sealed the same way it seals rootfs"). The
 `verified-boot-artifacts` CI lane witnesses the seal end-to-end via the
 runtime-overlay build (the standalone bundled prod image it formerly
 built was retired by Plan 115); the live-KVM tamper test exercises the
@@ -391,15 +391,15 @@ in Phase 2.
 
 | Backend | L1 | L2 | L3 | L4 | L5 | Notes |
 |---|---|---|---|---|---|---|
-| Firecracker (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-002. All seven claims hold. |
+| Firecracker (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-001. All seven claims hold. |
 | HVF / Hypervisor.framework (macOS 26+ Apple Silicon) | ✅ HVF | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — the in-house Hypervisor.framework VMM (Plan 214). vsock-only guest I/O: claim-10 egress is enforced through a per-VM gating endpoint over vsock — no gvproxy/vmnet, no guest NIC. Same `Hypervisor.framework` primitive as libkrun/Vz. Claim 3 partial (dm-verity targets Firecracker today); claims 1, 2, 4, 5, 6, 7 hold. **The macOS 26+ Apple Silicon auto-default** (`auto_select` picks HVF). |
 | Vz / Virtualization.framework (macOS 13+) | ✅ HVF | ✅ Vz (Apple-controlled API surface on top of HVF) | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — the single AVF backend (the former in-process Apple-Container path folded in here, Plan 177 Phase 2). Same `Hypervisor.framework` primitive as libkrun, smaller Apple-controlled API surface, balloon + snapshots. Claim 3 partial — dm-verity pipeline targets Firecracker today; claims 1, 2, 4, 5, 6, 7 hold. Opt-in on macOS via `--builder vz` / `--hypervisor vz`, and **sunsetting** in favor of the HVF backend (above) — no longer the macOS-26 auto-default. |
 | libkrun / libkrun (Linux KVM, macOS HVF) | ✅ | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; comparable VMM TCB to Firecracker; the macOS 13-25 default and the Linux-without-KVM fallback per ADR-013. |
 | QEMU (Linux KVM/TCG) | ✅ KVM | ⚠️ QEMU TCB much larger | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (Plan 166, was microvm.nix): selected by `mvm` for a Linux dev/test loop, never by `mvmd` — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately *not* wired into its start path (see the egress-enforcement note below). |
-| `wasm-sandbox` (browser / WASI) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale** (ADR-069). A portable backend for browser/wasm demos and previews (real WASI execution is deferred — Plan 144) — no KVM, no real kernel, no TAP/virtio/vsock. Asserts **none** of the numbered claims, declares its own non-virtualization honestly (`hardware_virtualization=false`), and fails closed on any kernel/TAP/vsock request. Opt-in only (`--hypervisor wasm-sandbox` / `browser`); `auto_select()` never returns it. See the Tier-0 preview note below. |
+| `wasm-sandbox` (browser / WASI) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale** (ADR-024). A portable backend for browser/wasm demos and previews (real WASI execution is deferred — Plan 144) — no KVM, no real kernel, no TAP/virtio/vsock. Asserts **none** of the numbered claims, declares its own non-virtualization honestly (`hardware_virtualization=false`), and fails closed on any kernel/TAP/vsock request. Opt-in only (`--hypervisor wasm-sandbox` / `browser`); `auto_select()` never returns it. See the Tier-0 preview note below. |
 
 **Tier discipline**: Tier 1 is the production default and the only
-tier that carries the *full* ADR-002 promise. Tier 2 carries six of
+tier that carries the *full* ADR-001 promise. Tier 2 carries six of
 the seven claims with claim 3 (verified boot) tracked as a follow-up
 once verified-boot lands for VZ/HVF. There is no Tier 3 anymore — the
 only Tier-3 backend was Docker (a shared-kernel container that held
@@ -434,7 +434,7 @@ predates Plan 123's host-side enforcement. As of ADR-083 (see
 `WorkloadBackend` marker, so it cannot reach the admitted workload-launch
 path at all — the carve-out is a compile-time constraint, not only prose.
 (The mock backend implements the marker as the hermetic lifecycle test
-double per ADR-045; it never carries a real workload.)
+double per ADR-016; it never carries a real workload.)
 
 **Deny-all control-plane posture (DHCP/ARP).** A networked guest brings up
 `eth0` at boot — link-up, then DHCP, then a static fallback on the gvproxy
@@ -459,7 +459,7 @@ flows normally. This is pinned by
 **Tier-0 preview substrate (a naming bridge).** The `wasm-sandbox` backend
 above asserts none of the numbered claims by design, so it sits *outside* the
 Tier 1/2 isolation scale rather than below it — there is no "Tier 3" to demote
-it to (Docker held that slot and was deleted). ADR-069 (proposed) builds a
+it to (Docker held that slot and was deleted). ADR-024 (proposed) builds a
 dev-preview workflow on this backend and refers to it as the **Tier 0**
 preview tier — "Tier 0" there meaning *zero production claims asserted*, not a
 rung on the ascending-is-weaker scale used here. The two names describe the
@@ -475,7 +475,7 @@ claim 11 sealed deps, and claim 3 verified boot where the target backend
 supports it), so nothing produced in a no-claims tier carries authority into a
 claim-bearing one. The moment a `wasm-sandbox` host serves *more than one*
 principal, this single-principal justification lapses and it would need to run
-inside a real microVM — a requirement ADR-069 (proposed) would impose, not a
+inside a real microVM — a requirement ADR-024 (proposed) would impose, not a
 property enforced by this backend today.
 
 ## Consequences
@@ -561,7 +561,7 @@ workstream tracker at
 | Default-deny outbound, then allowlist (or policy proxy) | **pass** | **claim 10** | `policy_default_is_deny_all`; `test_resolve_network_policy_default_is_deny_all`; `mvmctl up` warns on `unrestricted` policy with explicit env opt-out; libkrun/Vz `up` defaults to the gateway bridge and generated signed-policy bundles for non-deny egress. DNS / broker / vsock carve-out audit tracked in Plan 111 Workstream A. |
 | No long-lived credentials; short-lived scoped tokens | **pass** | **claim 8** + **claim 13** | G4 validity window + nonce on signed `ExecutionPlan`; Plan 104 `host.secrets.v1` returns destination-bound, time-bound signed credentials; raw secret bytes never leave the supervisor's address space. |
 | Workspace-only filesystem; no host mounts beyond explicit shares | **pass** | **claim 1** | Per-service uid; seccomp `standard`; setpriv `--no-new-privs`; read-only bind-mounts on `/etc/{passwd,group,nsswitch.conf}`. |
-| Resource limits: CPU / memory / disk / timeouts / PIDs | **partial** | CPU + memory + disk wired; `ExecutionPlan.resources` scaffolded; `timeout_seconds` / `pid_limit` not populated | Plan 37 §3.3 to be extended; ADR-041 schema table to be amended (Plan 111 Workstream C). |
+| Resource limits: CPU / memory / disk / timeouts / PIDs | **partial** | CPU + memory + disk wired; `ExecutionPlan.resources` scaffolded; `timeout_seconds` / `pid_limit` not populated | Plan 37 §3.3 to be extended; ADR-014 schema table to be amended (Plan 111 Workstream C). |
 | Observability — log process tree, network egress, failures | **pass** | **claim 8** + **claim 10** + **claim 12** | Chain-signed `~/.mvm/audit/<tenant>.jsonl`; `mvmctl audit verify` exits non-zero on tampering; service-call entries via `audit_chain_contains_service_call_entries`. |
 
 ### Beyond Cardoso's minimum
@@ -578,8 +578,8 @@ Listed here for the audit-cleanly reader.
 | dm-verity rootfs that panics on tamper | **pass** | claim 3 |
 | Reproducibility double-build of host code | **pass** | claim 7 |
 | Production guest agent ships without `do_exec` | **pass** | claim 4 |
-| Host-side broker dispatch is binding-gated and audited | **pass** | claim 12 (Plan 104 / ADR-059) |
-| No raw secret crosses the broker channel | **pass** | claim 13 (Plan 104 / ADR-067 / ADR-059) |
+| Host-side broker dispatch is binding-gated and audited | **pass** | claim 12 (Plan 104 / ADR-020) |
+| No raw secret crosses the broker channel | **pass** | claim 13 (Plan 104 / ADR-023 / ADR-020) |
 
 ### Cardoso three-question summary
 
@@ -602,7 +602,7 @@ exempt_paths: []
 # Conformance claim catalog
 
 The machine-checked map from each numbered security claim (the narrative
-lives in `CLAUDE.md` §"Security model" and `specs/adrs/002-microvm-security-posture.md`)
+lives in `CLAUDE.md` §"Security model" and `specs/adrs/001-microvm-security-posture.md`)
 to the witnesses that ratify it. `xtask check-claim-catalog` parses the
 table below on every PR and fails when a named witness no longer exists,
 so the claim list cannot silently drift from the tree.
@@ -621,27 +621,27 @@ tracked separately as a follow-up audit (see "deferred follow-ups").
 
 | #  | Claim | Witnesses | Authority | Status |
 |----|-------|-----------|-----------|--------|
-| 1  | No host-fs access from a guest beyond explicit shares | fn:seccomp_allows_listed_denies_unlisted, ci:seccomp-functional, fn:validated_conversion_enforces_mount_allow_list, fn:dir_share_two_part_defaults_ro, fn:libkrun_refuses_read_only_virtiofs_share, fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched | seccomp + setpriv (ADR-002 §W2) + user-volume allow-list / ro-default / admission-enforced shares (mvm-cli + mvm-backend) | Shipped |
-| 2  | No guest binary can elevate to uid 0 | fn:set_no_new_privs, fn:virtiofs_mount_flags_keep_workspace_read_only | setpriv --no-new-privs + RO config binds (ADR-002 §W2.2) | Shipped |
-| 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts | dm-verity + roothash on **block+ext4** backends — Firecracker + Option B (ADR-002 §W3, ADR-106); virtiofs-root is a dev-tier path with a weaker contract that does **not** witness this claim (ADR-107) | Shipped |
-| 4  | The guest agent has no do_exec in production builds | ci:prod-agent-runentry-contract | ELF symbol contract (ADR-002 §W4.3) | Shipped |
-| 5  | Vsock framing + supervisor-config JSON are fuzzed | ci:fuzz | cargo-fuzz (ADR-002 §W4.1/W4.2) | Shipped |
-| 6  | The pre-built dev image is hash-verified | ci:hash-verify-tests, fn:download_runtime_overlay_rejects_checksum_mismatch | SHA-256 manifest (ADR-002 §W5.1) | Shipped |
-| 7  | Cargo deps are audited on every PR | ci:cargo-deny, ci:cargo-audit, ci:reproducibility | RUSTSEC + deny.toml (ADR-002 §W5.2/W5.3) | Shipped |
-| 8  | Every workload runs from a signed, audited ExecutionPlan | fn:synthesize_plan, fn:admit_for_run, fn:verify_audit_chain | Ed25519 + chain-signed audit log (ADR-041) | Shipped |
+| 1  | No host-fs access from a guest beyond explicit shares | fn:seccomp_allows_listed_denies_unlisted, ci:seccomp-functional, fn:validated_conversion_enforces_mount_allow_list, fn:dir_share_two_part_defaults_ro, fn:libkrun_refuses_read_only_virtiofs_share, fn:enforce_admitted_shares_refuses_unadmitted_or_mismatched | seccomp + setpriv (ADR-001 §W2) + user-volume allow-list / ro-default / admission-enforced shares (mvm-cli + mvm-backend) | Shipped |
+| 2  | No guest binary can elevate to uid 0 | fn:set_no_new_privs, fn:virtiofs_mount_flags_keep_workspace_read_only | setpriv --no-new-privs + RO config binds (ADR-001 §W2.2) | Shipped |
+| 3  | A tampered rootfs ext4 fails to boot | ci:verified-boot-artifacts | dm-verity + roothash on **block+ext4** backends — Firecracker + Option B (ADR-001 §W3, ADR-106); virtiofs-root is a dev-tier path with a weaker contract that does **not** witness this claim (ADR-107) | Shipped |
+| 4  | The guest agent has no do_exec in production builds | ci:prod-agent-runentry-contract | ELF symbol contract (ADR-001 §W4.3) | Shipped |
+| 5  | Vsock framing + supervisor-config JSON are fuzzed | ci:fuzz | cargo-fuzz (ADR-001 §W4.1/W4.2) | Shipped |
+| 6  | The pre-built dev image is hash-verified | ci:hash-verify-tests, fn:download_runtime_overlay_rejects_checksum_mismatch | SHA-256 manifest (ADR-001 §W5.1) | Shipped |
+| 7  | Cargo deps are audited on every PR | ci:cargo-deny, ci:cargo-audit, ci:reproducibility | RUSTSEC + deny.toml (ADR-001 §W5.2/W5.3) | Shipped |
+| 8  | Every workload runs from a signed, audited ExecutionPlan | fn:synthesize_plan, fn:admit_for_run, fn:verify_audit_chain | Ed25519 + chain-signed audit log (ADR-014) | Shipped |
 | 9  | Every published bundle is content-addressed and re-verified | fn:read_and_verify_bundle, fn:verify_plan_bundle | SHA-256 content-addressing (Sprint 52 W2) | Shipped |
 | 10 | No untrusted workload reaches the network unless policy-admitted | fn:policy_default_is_deny_all, fn:run_net_default_is_deny_all | default-deny network policy (Sprint 52 W3) | Shipped |
 | 11 | Every app-dep volume is hash-locked, CVE-scanned and SBOM-enumerated | ci:app-deps-audit, fn:verify_sealed_volume, fn:apply_install_gate | CycloneDX + pip-audit (ADR-047) | Shipped |
-| 12 | Every host-side service binding is plan-gated and audited | fn:unbound_service_returns_not_bound, fn:service_call_rejects_unknown_envelope_fields | ExecutionPlan.services binding (ADR-059) | Shipped |
-| 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-067) | Shipped |
+| 12 | Every host-side service binding is plan-gated and audited | fn:unbound_service_returns_not_bound, fn:service_call_rejects_unknown_envelope_fields | ExecutionPlan.services binding (ADR-020) | Shipped |
+| 13 | No raw secret value crosses the broker channel | fn:encode_secret_env_cmdline_round_trips_pairs_as_single_token, fn:substitute | destination-bound signed credentials (ADR-023) | Shipped |
 | 14 | OCI image provenance is recorded in the chain-signed audit log | fn:prod_pull_requires_digest_pin_before_network, fn:prod_run_image_requires_digest_pin_before_network | cosign + OCI digest (specs/claims/claim-10-oci-image-provenance.md) | Shipped |
-| 15 | No interactive access to a sealed production microVM | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + dev-shell-gated agent (Plan 165 WS-C, ADR-002 §W4.3 extension) | Shipped |
-| 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-067, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
+| 15 | No interactive access to a sealed production microVM | fn:console_refused_on_sealed_image, ci:prod-agent-no-console, fn:prod_console_attachment_has_no_input | dev-image-only console + dm-verity + host accessible-gate + dev-shell-gated agent (Plan 165 WS-C, ADR-001 §W4.3 extension) | Shipped |
+| 16 | Egress substitution keeps a raw secret off the guest, bound-only, no value in audit | fn:handed_placeholders_never_contain_the_secret_value, fn:substitution_endpoint_refuses_unbound_destination, fn:audit_chain_carries_no_secret_value | egress substitution leak-gate; reinforces claims 12+13 on the egress delivery (ADR-023, specs/claims/claim-egress-no-secret-to-guest.md) | Preview |
 
 Row 16 is the egress-substitution leak-gate. Like claim 14 (OCI provenance),
 it is registered here for witness machine-checking and tracked by its own doc
 (`claim-egress-no-secret-to-guest.md`) at status `Preview`; promotion to a
-numbered claim in ADR-002's source-of-truth table is a separate maintainer
+numbered claim in ADR-001's source-of-truth table is a separate maintainer
 decision. It does not restate or replace the broker rows 12/13 — those are the
 shipped broker delivery; row 16 backs the same two invariants on the egress
 substitution path.
@@ -753,7 +753,7 @@ GDPR is largely operational (privacy notices, lawful basis, controller/processor
 
 - [ ] (TBD) Data minimization: PII redactor (ADR-020) reduces what's logged.
 - [ ] (TBD) Storage limitation: snapshot retention policies (plan 60 §"Snapshots — first-class feature") + audit log rotation.
-- [ ] (TBD) Integrity and confidentiality: encryption layers (ADR-027).
+- [ ] (TBD) Integrity and confidentiality: encryption layers (ADR-008).
 
 ### Article 17 — Right to erasure ("right to be forgotten")
 
@@ -780,7 +780,7 @@ GDPR is largely operational (privacy notices, lawful basis, controller/processor
 
 ### Article 32 — Security of processing
 
-- [ ] (TBD) Encryption (in transit + at rest) per ADR-027.
+- [ ] (TBD) Encryption (in transit + at rest) per ADR-008.
 - [ ] (TBD) Pseudonymization where applicable (PII redactor's tokenization scheme).
 - [ ] (TBD) Resilience (snapshot pool + supervisor restart).
 - [ ] (TBD) Process for regularly testing (continuous fuzzing, reproducibility).
@@ -852,7 +852,7 @@ This document maps each technical safeguard from 45 CFR §164.312 (the HIPAA Sec
 ## §164.312(d) — Person or Entity Authentication
 
 - [ ] (TBD) Attestation chain (ADR-018)
-- [ ] (TBD) mTLS at mvmd-agent ↔ mvm-hostd hop (ADR-027)
+- [ ] (TBD) mTLS at mvmd-agent ↔ mvm-hostd hop (ADR-008)
 - [ ] (TBD) Ed25519 identity keys per VM
 
 ## §164.312(e) — Transmission Security
@@ -862,7 +862,7 @@ This document maps each technical safeguard from 45 CFR §164.312 (the HIPAA Sec
 - [ ] (TBD) Replay protection (nonce + monotonic timestamp)
 
 ### (e)(2)(i) — Encryption (Addressable)
-- [ ] (TBD) iroh QUIC TLS 1.3 (ADR-027)
+- [ ] (TBD) iroh QUIC TLS 1.3 (ADR-008)
 - [ ] (TBD) mTLS at hostd hop
 - [ ] (TBD) X25519 ephemeral session keys for vsock (forward secrecy)
 
@@ -927,7 +927,7 @@ For the rare customer who insists on processing PCI inside mvm, an opt-in templa
 - [ ] (TBD) PII redactor configurable for cardholder-data patterns (ADR-020)
 
 ### Requirement 4 — Protect Cardholder Data with Strong Cryptography
-- [ ] (TBD) TLS 1.3 mandatory; rustls + iroh (ADR-027)
+- [ ] (TBD) TLS 1.3 mandatory; rustls + iroh (ADR-008)
 
 ### Requirement 5 — Anti-Malware
 - [ ] (TBD) Out of scope at the library level; deployment concern.
@@ -969,7 +969,7 @@ This document maps each SOC 2 Trust Services Criterion to the implementing artif
 
 ### CC1 — Control Environment
 - [ ] (TBD) Documented governance model
-- [ ] (TBD) Code-quality controls (ADR-033)
+- [ ] (TBD) Code-quality controls (ADR-010)
 - [ ] (TBD) Two-person review for security paths (CODEOWNERS)
 
 ### CC2 — Communication and Information
@@ -985,7 +985,7 @@ This document maps each SOC 2 Trust Services Criterion to the implementing artif
 - [ ] (TBD) Audit total-coverage test (`tests/audit_total_coverage.rs`)
 
 ### CC5 — Control Activities
-- [ ] (TBD) Encryption layers (ADR-027)
+- [ ] (TBD) Encryption layers (ADR-008)
 - [ ] (TBD) Access controls (mvm-policy)
 - [ ] (TBD) Default-deny network egress (ADR-017)
 
@@ -1020,7 +1020,7 @@ This document maps each SOC 2 Trust Services Criterion to the implementing artif
 
 ### Confidentiality (C)
 - [ ] (TBD) Encryption at rest (LUKS, AEAD snapshots)
-- [ ] (TBD) Encryption in transit (ADR-027)
+- [ ] (TBD) Encryption in transit (ADR-008)
 - [ ] (TBD) Tenant destruction certificates (ADR-028)
 
 ### Privacy (P)
@@ -1035,9 +1035,9 @@ This document maps each SOC 2 Trust Services Criterion to the implementing artif
 - **Status:** Proposed
 - **Date:** 2026-05-27
 - **Owner:** MVM Project
-- **Related:** ADR-002 (this document, microvm security posture), [ADR-059 host services broker (original two-process design, and the four-subprocess hardening supersession)](059-host-services-broker.md), [Plan 104 host services broker](../plans/104-host-services-broker.md), [ADR-067 secret substitution mechanism](067-secrets-subsystem-egress-substitution.md), [SECURITY.md (CVE response runbook)](../../SECURITY.md), [mvmd ADR-0023](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md), [threat model 01 — runtime baseline](01-runtime-baseline.md) (TBD)
+- **Related:** ADR-001 (this document, microvm security posture), [ADR-020 host services broker (original two-process design, and the four-subprocess hardening supersession)](020-host-services-broker.md), [Plan 104 host services broker](../plans/104-host-services-broker.md), [ADR-023 secret substitution mechanism](023-secrets-subsystem-egress-substitution.md), [SECURITY.md (CVE response runbook)](../../SECURITY.md), [mvmd ADR-0023](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md), [threat model 01 — runtime baseline](01-runtime-baseline.md) (TBD)
 
-This document is the STRIDE walk for the host services broker introduced by ADR-059 / Plan 104 and refined by ADR-059's four-subprocess hardening section (§"Consolidated from ADR-061"). The ADRs are the decision records (architecture, choices); this document is the structured-threat enumeration with mitigation cross-references into Plan 104's §Hardening posture (Layers 1–11).
+This document is the STRIDE walk for the host services broker introduced by ADR-020 / Plan 104 and refined by ADR-020's four-subprocess hardening section (§"Consolidated from ADR-061"). The ADRs are the decision records (architecture, choices); this document is the structured-threat enumeration with mitigation cross-references into Plan 104's §Hardening posture (Layers 1–11).
 
 ## Scope
 
@@ -1049,12 +1049,12 @@ This document is the STRIDE walk for the host services broker introduced by ADR-
 - The cross-VM path from the supervisor to mvmd-agent over iroh ALPN, with respect to the four services Plan 104 ships.
 - The `ExecutionPlan.services` admission ceremony and audit chain entries it generates.
 
-**Out of scope** (per ADR-002 and ADR-059):
+**Out of scope** (per ADR-001 and ADR-020):
 
 - Physical attacks on the host (cold-boot DRAM, DMA via Thunderbolt/PCIe, chip-off, side-channel power analysis, unauthorized firmware flashing).
 - Multi-tenant guests (one guest = one workload).
 - Hardware-backed key attestation by the workload itself.
-- Vulnerabilities in the hypervisor's vsock implementation (KVM `vhost-vsock`, Firecracker, libkrun, cloud-hypervisor, Apple `vz`) — these are dependency-CVE-managed per ADR-059 §"Dependency CVE surface".
+- Vulnerabilities in the hypervisor's vsock implementation (KVM `vhost-vsock`, Firecracker, libkrun, cloud-hypervisor, Apple `vz`) — these are dependency-CVE-managed per ADR-020 §"Dependency CVE surface".
 
 ## Adversary model
 
@@ -1064,7 +1064,7 @@ Three adversary classes, in order of decreasing access:
 | --- | --- | --- |
 | **G — Hostile guest** | A workload running inside a microVM (the primary adversary). Has full control over guest userspace; cannot break out of the VM. | Sends arbitrary bytes to vsock 5300 + 5301; receives responses; observes timing |
 | **N — Hostile network peer** | A network attacker on the path between the supervisor and mvmd-agent. | Observes + tampers with iroh ALPN traffic (mitigated by mvmd identity pinning + TLS 1.3) |
-| **I — Software insider** | An unauthorized human with shell access to the host as some Unix user. **Newly in scope** per ADR-059's §Threat model narrowing of ADR-002's "malicious host" clause (which remains true for *physical* attacks). | Executes arbitrary code on the host; cannot escalate to root if not already root; cannot perform physical attacks |
+| **I — Software insider** | An unauthorized human with shell access to the host as some Unix user. **Newly in scope** per ADR-020's §Threat model narrowing of ADR-001's "malicious host" clause (which remains true for *physical* attacks). | Executes arbitrary code on the host; cannot escalate to root if not already root; cannot perform physical attacks |
 
 For each service below, the STRIDE table notes which adversary class the threat applies to in the **Adv.** column.
 
@@ -1115,9 +1115,9 @@ For each service below, the STRIDE table notes which adversary class the threat 
 | COST-I2 | I | G | Cost numeric values quantize-leak workload behavior to a multi-step attacker | Considered low-impact for v1; future plan may quantize values to coarse units |
 | COST-D1 | D | N | mvmd slow → blocks broker thread | Per-handler call timeout (`host.cost.v1::tenant=150ms`); circuit breaker after 5 failures (S13) |
 
-### `host.audit.v1` (workload-emitted audit entries — new in ADR-059's rescope)
+### `host.audit.v1` (workload-emitted audit entries — new in ADR-020's rescope)
 
-> **Note.** This section replaces the previous `host.secrets.v1` table. `host.secrets.v1` and the entire `SECRET-*` threat set are dropped by ADR-059 (§"Consolidated from ADR-062"). `host.audit.v1` becomes the load-bearing workload-callable service in its place.
+> **Note.** This section replaces the previous `host.secrets.v1` table. `host.secrets.v1` and the entire `SECRET-*` threat set are dropped by ADR-020 (§"Consolidated from ADR-062"). `host.audit.v1` becomes the load-bearing workload-callable service in its place.
 
 | ID | STRIDE | Adv. | Threat | Mitigation |
 | --- | --- | --- | --- | --- |
@@ -1143,11 +1143,11 @@ For each service below, the STRIDE table notes which adversary class the threat 
 
 **Hostile network peer (N):** Limited to the mvmd path. Mitigated by TLS 1.3 + ChaCha20-Poly1305 + X25519 + mvmd identity pinning + signed catalog responses. The supervisor-to-subprocess UDS paths are not network-reachable.
 
-**Software insider (I):** Newly in scope per ADR-059's four-subprocess hardening (supersedes its own original two-process design's threat-model boundary). The L1+L2+L5 hardening (key isolation + HW enclave + at-rest encryption + cgroup/namespace) means shell access yields neither the host signer key, nor the audit chain-signing key, nor the audit log plaintext, nor in-flight secrets. The remaining insider capability is "modify a subprocess binary on disk and wait for the next spawn," which is defeated by cosign-verify + Sigstore/Rekor transparency.
+**Software insider (I):** Newly in scope per ADR-020's four-subprocess hardening (supersedes its own original two-process design's threat-model boundary). The L1+L2+L5 hardening (key isolation + HW enclave + at-rest encryption + cgroup/namespace) means shell access yields neither the host signer key, nor the audit chain-signing key, nor the audit log plaintext, nor in-flight secrets. The remaining insider capability is "modify a subprocess binary on disk and wait for the next spawn," which is defeated by cosign-verify + Sigstore/Rekor transparency.
 
 ## Open issues / explicitly accepted residual risk
 
-- **Non-enclave hosts retain TOFU posture for the host signer.** Plan 104 §H-L11.5 and ADR-059 §"Threat model" both acknowledge this. `mvmctl doctor` surfaces it as a downgrade row. Mitigation deferred to W8 hardware-enclave integration; software fallback retained for hosts without TPM/SE.
+- **Non-enclave hosts retain TOFU posture for the host signer.** Plan 104 §H-L11.5 and ADR-020 §"Threat model" both acknowledge this. `mvmctl doctor` surfaces it as a downgrade row. Mitigation deferred to W8 hardware-enclave integration; software fallback retained for hosts without TPM/SE.
 - **Single-tenant `mvm-audit-signer` per host.** All workloads on a host share the audit-signer subprocess (per-VM still, but one subprocess per VM). A `mvm-audit-signer` UAF affects all entries for that workload — mitigated by the audit-signer subprocess being minimal-code and security-reviewed.
 - **`mvm-host-signer` is a single point of admission availability.** If down, no plans can be signed and no workloads can admit. Restart-with-backoff is the v1 mitigation; m-of-n quorum deferred. Documented operational behavior.
 - **No alerting in v1 (G10).** Audit logs are forensics. Detection-time discovery of a compromise depends on downstream log-shipping which is out of scope.
@@ -1155,10 +1155,10 @@ For each service below, the STRIDE table notes which adversary class the threat 
 
 ## See also
 
-- ADR-059 (decision record) for architecture + claims.
+- ADR-020 (decision record) for architecture + claims.
 - Plan 104 (implementation specifics) for build sequence + verification.
-- ADR-002 (microvm security posture) for the broader trust model this narrows.
-- ADR-067 (secret substitution mechanism) for the `host.secrets.v1` design.
+- ADR-001 (microvm security posture) for the broader trust model this narrows.
+- ADR-023 (secret substitution mechanism) for the `host.secrets.v1` design.
 
 ## Runbook: W3 verified-boot verification (consolidated from specs/runbooks/w3-verified-boot.md)
 
@@ -1167,7 +1167,7 @@ For each service below, the STRIDE table notes which adversary class the threat 
 > Created: 2026-04-30
 > Last updated: 2026-04-30 (full pass after initramfs fix)
 > Parent plan: `specs/plans/27-w3-verified-boot.md`
-> ADR: `specs/adrs/002-microvm-security-posture.md`
+> ADR: `specs/adrs/001-microvm-security-posture.md`
 >
 > **Status: ✅ all 5 steps PASS as of 2026-04-30.** The original
 > Step 3 failure (Firecracker's aarch64 boot path auto-appends
@@ -1177,7 +1177,7 @@ For each service below, the STRIDE table notes which adversary class the threat 
 > level `root=` setting is now irrelevant. Tamper test confirms
 > the kernel panics with `data block N is corrupted`.
 
-This runbook is the manual end-to-end verification for ADR-002 §W3
+This runbook is the manual end-to-end verification for ADR-001 §W3
 (verified boot via dm-verity). The `security.yml::verified-boot-artifacts`
 CI gate covers the static-shape check; this runbook covers the live-
 boot side that needs `/dev/kvm`, `firecracker`, and `veritysetup` —
@@ -1396,7 +1396,7 @@ is not accounted for, so a verity-enabled production microVM still
 boots off raw `/dev/vda`. Verity is initialized but doesn't gate
 reads against the rootfs the running guest is actually using.
 
-**Status**: ADR-002 §W3 claim (#3 — "a tampered rootfs ext4 fails to
+**Status**: ADR-001 §W3 claim (#3 — "a tampered rootfs ext4 fails to
 boot") **does not yet hold in practice**. Static structure passes
 (Steps 1, 2, 5 all green), the kernel constructs the verity device
 correctly, but the cmdline plumbing means the kernel ignores the
@@ -1440,7 +1440,7 @@ build cost is small, and it gives us full control over the boot
 sequence without depending on Firecracker behavior.
 
 **Action**: file as a follow-up under §W3 in plan 27 and gate the
-ADR-002 claim #3 on it. Mark §W3 status as "host-side wired,
+ADR-001 claim #3 on it. Mark §W3 status as "host-side wired,
 not enforcing — initramfs work outstanding" until this is closed.
 
 ### Finding #2 — `pkgs.cryptsetup` build is heavy on first build
@@ -1463,7 +1463,7 @@ and check off:
 
 All five green as of 2026-04-30. The runbook + the
 `security.yml::verified-boot-artifacts` CI gate together provide the
-technical receipt for ADR-002 claim #3 ("a tampered rootfs ext4
+technical receipt for ADR-001 claim #3 ("a tampered rootfs ext4
 fails to boot").
 
 
@@ -1539,7 +1539,7 @@ Phase 9 ships `specs/compliance/{soc2-controls,pci-scope,hipaa-mapping,gdpr-mapp
 
 **Status**: Proposed
 **Date**: 2026-05-28
-**Cross-refs**: ADR-002 (security posture), ADR-060 (pid0 portability boundary), Plan 109 (guest control-layer dep-reduction + encryption design), Sprint 42 §Track E (Zig evaluation gates)
+**Cross-refs**: ADR-001 (security posture), ADR-021 (pid0 portability boundary), Plan 109 (guest control-layer dep-reduction + encryption design), Sprint 42 §Track E (Zig evaluation gates)
 
 ## Context
 
@@ -1558,7 +1558,7 @@ mvm's default boundary language is **Rust**. Adoption of any other language at t
 
 ### 1. Default: Rust everywhere at the boundary
 
-Every binary that runs in the guest's blast radius (pid0 control surface per ADR-060: init, netinit, agent, in-boot addons) and every host-side binary that participates in the audit chain or signs material is **Rust by default**.
+Every binary that runs in the guest's blast radius (pid0 control surface per ADR-021: init, netinit, agent, in-boot addons) and every host-side binary that participates in the audit chain or signs material is **Rust by default**.
 
 The default is not negotiable case-by-case. Adopting a non-Rust binary requires the explicit process in §3.
 
@@ -1598,7 +1598,7 @@ Any PR proposing a non-Rust boundary binary MUST include, before any prototype m
 3. **Fuzz harness** equivalent to the existing `cargo-fuzz` targets covering the binary's parser surface. The non-Rust fuzzer must run in CI on the same PR cadence.
 4. **Reproducible-build proof** — byte-identical rebuilds on `aarch64-linux` and `x86_64-linux` musl-static. Claim 7's invariant doesn't get a language carve-out.
 5. **Supply-chain attestation** equivalent to `cargo-deny` / `cargo-audit`: a documented inventory of every external dependency (stdlib modules, compiler version, transitive includes) and a CI gate that fails on yanked / advisory-flagged inputs.
-6. **Schema parity test** (per ADR-060 §8): the non-Rust binary consumes the Rust-canonical wire types and the build fails if the Rust types drift.
+6. **Schema parity test** (per ADR-021 §8): the non-Rust binary consumes the Rust-canonical wire types and the build fails if the Rust types drift.
 
 Each deliverable is **a CI gate**, not a discretionary review item. Without all six, the PR is not mergeable regardless of measurement outcome.
 
@@ -1641,8 +1641,8 @@ Adoption is then a separate PR that flips the default. Removal of the Rust binar
 
 ## References
 
-- ADR-002 (microVM security posture, claims 1-10)
-- ADR-060 (pid0 portability boundary — what the boundary binaries must do regardless of language)
+- ADR-001 (microVM security posture, claims 1-10)
+- ADR-021 (pid0 portability boundary — what the boundary binaries must do regardless of language)
 - ADR-056 (Vz backend — grandfathered Swift shim, see §6)
 - Plan 98 (Vz builder VM — Swift supervisor wiring)
 - Plan 109 (guest control-layer dep-reduction + encryption design — this ADR is W4c)
@@ -1655,13 +1655,13 @@ Adoption is then a separate PR that flips the default. Removal of the Rust binar
 
 **Status**: Accepted
 **Date**: 2026-06-03
-**Cross-refs**: ADR-002 (security posture — the signed/audited artifacts this verifies), ADR-041 (signed, audited execution plans — claim 8), ADR-014 (VmBackend single trait — the seam a wasm backend would *not* fit), Plan 33 (hosted MCP transport — mvm owns protocol, mvmd owns transport). Input: a comparison against a sibling browser-VM project that boots Linux in the browser via a RISC-V→wasm emulator.
+**Cross-refs**: ADR-001 (security posture — the signed/audited artifacts this verifies), ADR-014 (signed, audited execution plans — claim 8), ADR-007 (VmBackend single trait — the seam a wasm backend would *not* fit), Plan 33 (hosted MCP transport — mvm owns protocol, mvmd owns transport). Input: a comparison against a sibling browser-VM project that boots Linux in the browser via a RISC-V→wasm emulator.
 
 ## Context
 
 A sibling browser-VM project runs full environments **in the browser**: a RISC-V RV64GC interpreter compiled to `wasm32`, booting an unmodified kernel, with a WebSocket relay for egress. The natural question for mvm was "should we grow an analogous browser capability?"
 
-The answer turns on one distinction that is easy to miss. That project **emulates** a CPU; mvm **virtualizes** on real hardware (Firecracker/libkrun/Vz over KVM/HVF). You can ship a CPU emulator as wasm and run it in a tab. You **cannot** run KVM in a tab. So the headline browser-emulator capability — "boot the workload in the browser, serverless" — has no path into mvm's runtime model, and a `wasm`/emulator `VmBackend` is the wrong shape for the `VmBackend` trait (kernel path, ext4 rootfs, TAP, pause/resume, vsock — nearly all N/A; ADR-014). That dead end should be recorded so it is not relitigated.
+The answer turns on one distinction that is easy to miss. That project **emulates** a CPU; mvm **virtualizes** on real hardware (Firecracker/libkrun/Vz over KVM/HVF). You can ship a CPU emulator as wasm and run it in a tab. You **cannot** run KVM in a tab. So the headline browser-emulator capability — "boot the workload in the browser, serverless" — has no path into mvm's runtime model, and a `wasm`/emulator `VmBackend` is the wrong shape for the `VmBackend` trait (kernel path, ext4 rootfs, TAP, pause/resume, vsock — nearly all N/A; ADR-007). That dead end should be recorded so it is not relitigated.
 
 What *does* transfer is the part underneath the emulator: **content-addressed, self-verifying artifacts that any peer can check by re-derivation, with no server to trust** (its Law L5 — `verify_kappa()`). mvm already produces exactly such artifacts — signed `ExecutionPlan`s, content-addressed bundles, and a chain-signed audit log (claims 8/9/14). Those are verifiable from bytes alone. That is the idea that maps cleanly onto mvm's strengths.
 
@@ -1699,8 +1699,8 @@ What *does* transfer is the part underneath the emulator: **content-addressed, s
 ## Consolidated from ADR-083 — Core security enforcement is a compile-time obligation on workload backends
 
 **Status:** Accepted
-**Amends:** [ADR-002](002-microvm-security-posture.md) (per-backend tier matrix — the workload / non-workload split becomes type-enforced rather than prose)
-**Preserves:** all numbered claims; [ADR-004](004-hypervisor-egress-policy.md) and Plan 129 egress secret substitution (now a tracked compile-time obligation on macOS, not an optional follow-up)
+**Amends:** [ADR-001](001-microvm-security-posture.md) (per-backend tier matrix — the workload / non-workload split becomes type-enforced rather than prose)
+**Preserves:** all numbered claims; [ADR-003](003-hypervisor-egress-policy.md) and Plan 129 egress secret substitution (now a tracked compile-time obligation on macOS, not an optional follow-up)
 
 ## Context
 
@@ -1740,7 +1740,7 @@ pub trait WorkloadBackend: VmBackend {}
 ```
 
 - `FirecrackerBackend`, `LibkrunBackend`, `VzBackend` implement it. `mock`
-  also implements it — it is the hermetic lifecycle test double (ADR-045)
+  also implements it — it is the hermetic lifecycle test double (ADR-016)
   that stands in for a workload backend on the admitted path in tests and
   carries no real workload, so permitting it has no security cost. `qemu`
   (a real Tier-2 dev/test VMM) does **not** — it is the meaningful carve-out.
@@ -1766,7 +1766,7 @@ in a follow-on phase, so it cannot be omitted either.
 - **A new backend cannot reach the workload path silently.** It must either
   implement `WorkloadBackend` (and therefore the shared funnel applies) or
   be deliberately excluded — a visible, reviewable decision.
-- **ADR-002's Tier-2 carve-out is now a type constraint.** QEMU's exclusion
+- **ADR-001's Tier-2 carve-out is now a type constraint.** QEMU's exclusion
   from claim-10 egress enforcement was previously prose ("dev/test only, not
   wired"); it is now enforced by types — `qemu` is not a `WorkloadBackend`,
   so it cannot be passed to the admitted launch path. (`mock` is permitted —
@@ -1792,7 +1792,7 @@ in a follow-on phase, so it cannot be omitted either.
   actual failure (a missing implementation) for free.
 - **Every backend enforces (close the Tier-2 carve-out).** Put the core
   obligation on `VmBackend` so even `qemu` must enforce egress. Deferred: it
-  reopens ADR-002's settled Tier-2 decision and forces enforcement onto a
+  reopens ADR-001's settled Tier-2 decision and forces enforcement onto a
   dev/test backend that carries no untrusted workload. Recorded as a future
   option.
 - **Shared launch funnel with a per-backend transport seam only
@@ -1807,9 +1807,9 @@ Implementation is sequenced in Plan 197.
 ## Consolidated from ADR-088 — Dev VM mutation promotion boundary: mutable dev state never implicitly feeds prod, and SSH-agent stays dev-tier only
 
 **Status:** Accepted
-**Relates to:** [ADR-002](002-microvm-security-posture.md) (prod vs dev posture),
-[ADR-005](005-sealed-signed-builder-image.md) (declared-input trust model),
-[ADR-041](041-signed-audited-execution-plans.md) (product ergonomics without
+**Relates to:** [ADR-001](001-microvm-security-posture.md) (prod vs dev posture),
+[ADR-004](004-sealed-signed-builder-image.md) (declared-input trust model),
+[ADR-014](014-signed-audited-execution-plans.md) (product ergonomics without
 weakening the engine), [Plan 200](../plans/200-machine-ux-dx-layer.md) (machine
 UX/DX), and [Plan 36](../plans/36-sealed-signed-builder-image.md) (dev vs prod
 image posture)
@@ -1827,7 +1827,7 @@ make production behavior reproducible and auditable. If a prod build can depend
 on ambient mutable guest state, the system quietly regresses to "whatever
 happened in the dev VM" instead of "declared source + config + artifacts."
 
-The same question applies to SSH-agent authentication. ADR-002's "no SSH in
+The same question applies to SSH-agent authentication. ADR-001's "no SSH in
 microVMs, ever" remains the stricter rule: forwarding an agent socket is not
 permission to create an SSH session, install SSH clients or servers, bake SSH
 configuration into a template, or mount/copy SSH key material. A forwarded
@@ -1901,7 +1901,7 @@ acceptable only on an explicitly local/dev tier, never on the sealed/prod path.
 
 - **Support generic SSH by mounting keys, installing SSH clients/servers, or
   baking `~/.ssh/` material into templates.**
-  Rejected: SSH sessions are banned by ADR-002, and host secret material must
+  Rejected: SSH sessions are banned by ADR-001, and host secret material must
   not cross the boundary. Agent-socket forwarding is the maximum acceptable
   dev-tier shape and does not permit an SSH session.
 
@@ -1917,18 +1917,18 @@ acceptable only on an explicitly local/dev tier, never on the sealed/prod path.
 ## References
 
 - [Plan 200](../plans/200-machine-ux-dx-layer.md)
-- [ADR-002](002-microvm-security-posture.md)
-- [ADR-005](005-sealed-signed-builder-image.md)
-- [ADR-041](041-signed-audited-execution-plans.md)
+- [ADR-001](001-microvm-security-posture.md)
+- [ADR-004](004-sealed-signed-builder-image.md)
+- [ADR-014](014-signed-audited-execution-plans.md)
 - [Plan 36](../plans/36-sealed-signed-builder-image.md)
 
 
-## Consolidated from ADR-104 — Cloud control-plane trust boundary (multi-tenant superset of ADR-002)
+## Consolidated from ADR-104 — Cloud control-plane trust boundary (multi-tenant superset of ADR-001)
 
 - Status: Proposed
 - Date: 2026-07-01
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture — the 15 claims, single-host scope), ADR-041 (signed audited execution plans — claim 8), ADR-059 (host services broker — claim 12 binding-gated dispatch), ADR-067 (destination/time-bound secret substitution — claim 13). Design input: `specs/notes/mvm-client-facade-design.md`, `specs/research/mvmd-cloud-readiness-assessment.md`.
+- Related: ADR-001 (microVM security posture — the 15 claims, single-host scope), ADR-014 (signed audited execution plans — claim 8), ADR-020 (host services broker — claim 12 binding-gated dispatch), ADR-023 (destination/time-bound secret substitution — claim 13). Design input: `specs/notes/mvm-client-facade-design.md`, `specs/research/mvmd-cloud-readiness-assessment.md`.
 - Sequenced by: cloud claim catalog + `two_org_isolation` witness (Task A, in `mvmd`); `mvm-client` facade Phase 2 (remote) is gated on this ADR being Accepted.
 
 ## Context
@@ -1939,7 +1939,7 @@ operate. `mvm-studio` and — per the facade design — `mvmctl` reach **both**:
 in-process path and a remote REST path to an `mvmd-gateway`, through one `MvmClient`
 trait.
 
-ADR-002 is the source of truth for the local security posture. Its threat model is
+ADR-001 is the source of truth for the local security posture. Its threat model is
 scoped, explicitly, to:
 
 - a **single trusted local host** (the user owns the machine),
@@ -1951,22 +1951,22 @@ The 15 CI-enforced claims all defend *that* boundary: a workload escaping onto t
 
 The cloud product **inverts every one of those assumptions**. We own the host; the
 user is untrusted; **many** untrusted tenants share our hosts. The threat becomes
-tenant→host and tenant→tenant escape — precisely the two items ADR-002 declares out of
+tenant→host and tenant→tenant escape — precisely the two items ADR-001 declares out of
 scope (multi-tenant guests; an untrusted-host relationship from the tenant's view).
 
-Introducing `mvmctl --remote <url>` also adds a **new actor** ADR-002 never modeled: a
+Introducing `mvmctl --remote <url>` also adds a **new actor** ADR-001 never modeled: a
 remote control plane reachable over a network, with a network in between. A trait that
 makes the local and remote calls look identical can hide that their security
 *guarantees* are enforced by different authorities. That is a mental-model hazard, not
 just a code one.
 
 This ADR establishes the cloud tier's trust boundary as an explicit **superset** of
-ADR-002, so "the cloud keeps every local guarantee, and adds the multi-tenant ones" is
+ADR-001, so "the cloud keeps every local guarantee, and adds the multi-tenant ones" is
 a *checkable* statement rather than an aspiration.
 
 ## Decision
 
-### 1. The cloud tier is ADR-002 plus a named set of multi-tenant claims
+### 1. The cloud tier is ADR-001 plus a named set of multi-tenant claims
 
 The 15 local claims remain necessary and continue to hold on the workload backends.
 The cloud tier adds, at minimum:
@@ -1993,7 +1993,7 @@ attribution, etc.); this ADR fixes the *discipline*, not the final list.
 
 There are two authorities, and they are never silently merged:
 
-- **Local path** — the authority is the local host, exactly as ADR-002 describes
+- **Local path** — the authority is the local host, exactly as ADR-001 describes
   (host-signed `ExecutionPlan`, broker, local audit chain). `LocalBackend` runs the
   same `mvmctl` library over the same on-disk state.
 - **Remote path** — the authority is `mvmd`. `GatewayBackend` is a **dumb courier with
@@ -2043,25 +2043,25 @@ this ADR is Accepted **and** cross-tenant enforcement (CT-1) is wired with a gre
 witness. Shipping a polished remote client over an unenforced authorization boundary
 would make the insecure path easier to reach — the worst outcome.
 
-## Threat model — new actors (relative to ADR-002)
+## Threat model — new actors (relative to ADR-001)
 
-In scope for the cloud tier, additional to ADR-002:
+In scope for the cloud tier, additional to ADR-001:
 
 - **The network between client and `mvmd`.** Mitigated by TLS/mTLS, endpoint-bound
   credentials, replay resistance (CT-3), fail-closed client rules.
 - **Other tenants on a shared host / control plane.** Mitigated by CT-1 (isolation +
   RLS backstop), CT-4 (resource bounds), and the co-location decision.
-- **A tenant's untrusted workload versus the fleet host.** The ADR-002 guest-boundary
+- **A tenant's untrusted workload versus the fleet host.** The ADR-001 guest-boundary
   claims (1–15) carry over unchanged and are the first line; multi-tenancy raises the
   blast-radius stakes but not the per-guest mechanism.
 
 Still out of scope (named, deliberately):
 
 - **A malicious `mvmd` operator / the host we operate.** We trust our own control-plane
-  operators with the hypervisor and fleet keys, mirroring ADR-002's malicious-host
+  operators with the hypervisor and fleet keys, mirroring ADR-001's malicious-host
   exclusion. (Reducing this trust — confidential computing, hardware attestation — is a
   separate future ADR.)
-- **Hardware-backed key attestation.** As ADR-002.
+- **Hardware-backed key attestation.** As ADR-001.
 
 ## Consequences
 
@@ -2077,11 +2077,11 @@ Still out of scope (named, deliberately):
 
 ## Alternatives considered
 
-- **Keep ADR-002 as-is; handle cloud security ad hoc.** Rejected: there is then no
+- **Keep ADR-001 as-is; handle cloud security ad hoc.** Rejected: there is then no
   checkable superset, and the built-≠-wired failure mode has nothing to make it red.
 - **A separate cloud threat-model doc only, no ADR.** Partially adopted: a companion
   `specs/threat-models/` doc in `mvmd` may hold the long-form analysis, but the *trust
-  boundary decision* belongs in the ADR ledger next to ADR-002 so the two are read
+  boundary decision* belongs in the ADR ledger next to ADR-001 so the two are read
   together.
 - **Make the trait fully uniform over local/remote, hiding the transport.** Rejected:
   uniformity of *interface* is good DX; uniformity of *apparent trust* is a hazard. The
@@ -2107,7 +2107,7 @@ open question gating CT-4 rather than pre-deciding it.
 - Status: Proposed
 - Date: 2026-07-04
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture — trusted-host and hardware-attestation out-of-scope; claim 3 verified boot, claim 4 `do_exec`, claim 15 sealed interactivity), ADR-103 (plan-bound agent verb capabilities — the `VerbGrant` this ADR anchors), ADR-041 (signed audited execution plans — claim 8), ADR-090 (resident daemon trust gradient)
+- Related: ADR-001 (microVM security posture — trusted-host and hardware-attestation out-of-scope; claim 3 verified boot, claim 4 `do_exec`, claim 15 sealed interactivity), ADR-103 (plan-bound agent verb capabilities — the `VerbGrant` this ADR anchors), ADR-014 (signed audited execution plans — claim 8), ADR-090 (resident daemon trust gradient)
 - Sequenced by: [Plan 215](../plans/215-plan-bound-agent-verb-capabilities.md) follow-on
 
 ## Context
@@ -2128,14 +2128,14 @@ issuer … A build-time-provisioned anchor is tracked."* That tracked item
 (issue #1381 item 3) asked for "real cryptographic key separation via a
 build-time trust anchor."
 
-This ADR records the outcome of designing that anchor: **within ADR-002's scope,
+This ADR records the outcome of designing that anchor: **within ADR-001's scope,
 real cryptographic key separation for the verb grant is not achievable**, and
 states precisely why, what *is* achievable and valuable instead (a measured
 trust *policy*), and the exact future path that would make key separation real.
 
 ## The ceiling: why in-scope key separation is not achievable
 
-ADR-002 fixes two scope boundaries that jointly foreclose key separation here:
+ADR-001 fixes two scope boundaries that jointly foreclose key separation here:
 
 1. **The host is trusted.** mvmctl trusts the host with the hypervisor and the
    private build/signing keys. A "malicious host" is explicitly out of scope.
@@ -2168,7 +2168,7 @@ measured but build-time-generic and unable to carry the per-host key (verity
 rootfs). Nothing measures the cmdline itself. The one construction that would
 give a genuinely independent anchor — a launch-time key measured/attested by a
 root the launcher cannot forge — requires hardware attestation (a vTPM / measured
-boot quoting the launch key), which ADR-002 places out of scope.
+boot quoting the launch key), which ADR-001 places out of scope.
 
 Note also that the in-scope guest adversary — a **compromised guest workload**
 attempting to escalate its own agent verbs — is already fully addressed by
@@ -2178,9 +2178,9 @@ no defense against that adversary. The only residual value of an independent
 anchor is defense-in-depth against a **trusted-but-buggy launch path**.
 
 **Conclusion.** "Real cryptographic key separation for the verb grant" is a
-non-goal under ADR-002. The delivered ADR-103 mechanism is, and remains,
+non-goal under ADR-001. The delivered ADR-103 mechanism is, and remains,
 **trusted-channel provisioning**: integrity over a launcher-provisioned blob,
-rooted in kernel-cmdline provenance. It must **not** be promoted to the ADR-002
+rooted in kernel-cmdline provenance. It must **not** be promoted to the ADR-001
 numbered claim ledger. This is the honest ceiling.
 
 ## Decision
@@ -2310,7 +2310,7 @@ sealed image now carry a valid grant matching their own admitted plan.
 ### 4. The future attestation seam
 
 `grant_key_source` is the forward hook. When measured boot / a vTPM lands (an
-explicit ADR-002 scope expansion, out of scope here), sealed images bake
+explicit ADR-001 scope expansion, out of scope here), sealed images bake
 `grant_key_source: "attested"`, and the guest requires the grant's verifying key
 to match an attested launch measurement rather than trusting the cmdline
 `pubkey_hex`. No wire/protocol churn is needed to reach that state — only the
@@ -2362,7 +2362,7 @@ policy value and the guest's key-source branch. This ADR deliberately leaves the
   this is the same launcher-controlled channel as the cmdline. Security theater.
   Rejected.
 - **Pull hardware attestation into scope.** The only construction that yields
-  real key separation, but a deliberate ADR-002 scope expansion beyond this
+  real key separation, but a deliberate ADR-001 scope expansion beyond this
   work; recorded as the future seam instead.
 - **Stage A as a baked `require_grant: true` flip** (the original Rollout plan).
   Superseded before implementation: mvmd boots sealed images through a direct
@@ -2373,24 +2373,24 @@ policy value and the guest's key-source branch. This ADR deliberately leaves the
 
 ## Out of scope
 
-- A malicious host (ADR-002).
-- Hardware-backed key attestation / measured boot (ADR-002) — the future seam,
+- A malicious host (ADR-001).
+- Hardware-backed key attestation / measured boot (ADR-001) — the future seam,
   not built here.
-- Promotion of the verb-grant story to the ADR-002 numbered claim ledger.
+- Promotion of the verb-grant story to the ADR-001 numbered claim ledger.
 
 
 ## Consolidated from ADR-109 — Attested launch anchor for real verb-grant key separation
 
-- Status: Proposed (scope-expansion proposal — needs maintainer decision + an ADR-002 threat-model update before any implementation)
+- Status: Proposed (scope-expansion proposal — needs maintainer decision + an ADR-001 threat-model update before any implementation)
 - Date: 2026-07-05
 - Owner: MVM Project
-- Related: ADR-108 (verb-grant measured trust policy — the honest ceiling this proposes to lift + the `grant_key_source: Attested` seam), ADR-002 (microVM security posture — currently lists hardware-backed key attestation / TPM / SEV out of scope for v1), ADR-041 (signed audited execution plans — claim 8), ADR-001 (Firecracker-only execution)
+- Related: ADR-108 (verb-grant measured trust policy — the honest ceiling this proposes to lift + the `grant_key_source: Attested` seam), ADR-001 (microVM security posture — currently lists hardware-backed key attestation / TPM / SEV out of scope for v1), ADR-014 (signed audited execution plans — claim 8), ADR-001 (Firecracker-only execution)
 - Tracks: #1458
 
 ## Context
 
 ADR-108 established, and this ADR does not re-litigate, that **real cryptographic
-key separation for the verb grant is not achievable within ADR-002's current
+key separation for the verb grant is not achievable within ADR-001's current
 scope**. The delivered mechanism is honest *trusted-channel provisioning*: the
 guest verifies the grant against a key the trusted launcher provides, over a
 channel the launcher controls. Every in-scope anchor (kernel cmdline, config
@@ -2474,7 +2474,7 @@ a multi-quarter initiative rather than an incremental follow-up.
 delivers what #1458 asks for (real key separation) is **option 2 (confidential
 computing)**, and it is gated on decisions far larger than the verb grant: a
 confidential-computing workload backend, SEV-SNP/TDX hardware, an
-attestation-verification service, and an ADR-002 threat-model expansion that
+attestation-verification service, and an ADR-001 threat-model expansion that
 brings a malicious host partly in-scope. Options 1 and 3 add real cost for a gain
 that does not exceed ADR-108's already-shipped launcher-gated enforcement in the
 trusted-host model.
@@ -2526,7 +2526,7 @@ Until then this stays a `Preview`-style note at most, never a numbered claim.
 - Selecting or building a confidential-computing workload backend (its own ADR).
 - Any code change — this ADR is a direction/decision record, not an
   implementation plan.
-- The malicious-host threat model itself, which ADR-002 would need to revise
+- The malicious-host threat model itself, which ADR-001 would need to revise
   before option 2 could be claimed.
 
 

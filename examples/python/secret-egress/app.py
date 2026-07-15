@@ -1,4 +1,4 @@
-"""Egress-secret example — Plan 129 / ADR-067.
+"""Egress-secret example — Plan 129 / ADR-023.
 
 Declares a **bearer** secret bound to a single destination host. The guest
 never sees the real credential: `mvm.secret(...)` only puts an opaque

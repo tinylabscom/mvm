@@ -98,7 +98,7 @@ unwanted symbols are gone.
 
 ## Why no TSI patches
 
-Plan 87 / Plan 88 / ADR-004 moved builder-VM networking to passt
+Plan 87 / Plan 88 / ADR-003 moved builder-VM networking to passt
 (Linux) / gvproxy (macOS) via virtio-net. The TSI syscall-hijack
 path is no longer used in any builder VM. The vendored TSI patch
 series (22 files) was removed by Plan 92.

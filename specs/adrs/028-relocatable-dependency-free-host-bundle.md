@@ -1,11 +1,11 @@
-# ADR-086 — The mvmctl distribution is a relocatable, dependency-free, signed bundle
+# ADR-028 — The mvmctl distribution is a relocatable, dependency-free, signed bundle
 
 **Status:** Accepted — Option A (vendor + sign the VMM ourselves), staged. One pre-merge checklist item remains (see §"Why Option A, and how it's staged")
 **Date:** 2026-06-17
 **Owner:** MVM Project
-**Builds on:** [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) (host runtime packaging); [ADR-004](004-hypervisor-egress-policy.md) (bundled gateway)
-**Touches the trust model:** [ADR-002](002-microvm-security-posture.md) — who builds and signs the in-box VMM
-**Preserves:** [ADR-014](014-vmbackend-single-trait.md) two-artifact-layers rule; claim 6 (hash-verified download)
+**Builds on:** [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) (host runtime packaging); [ADR-003](003-hypervisor-egress-policy.md) (bundled gateway)
+**Touches the trust model:** [ADR-001](001-microvm-security-posture.md) — who builds and signs the in-box VMM
+**Preserves:** [ADR-007](007-vmbackend-single-trait.md) two-artifact-layers rule; claim 6 (hash-verified download)
 
 ## Context
 
@@ -24,7 +24,7 @@ past step one — DX is the gate, the substrate is the moat behind it.
 The mechanics of a relocatable bundle are well understood and already partly in
 our toolbox:
 
-- Ship the CLI, the VMM dylibs, the gateway (ADR-004), the guest kernel, and the
+- Ship the CLI, the VMM dylibs, the gateway (ADR-003), the guest kernel, and the
   agent rootfs in one directory.
 - Make dynamic linkage load-relative: `$ORIGIN`-relative rpath on Linux
   (patchelf), `@loader_path` install names on macOS. Nothing resolves to a
@@ -42,7 +42,7 @@ ADR extends the same "ship what the runtime needs in the artifact" instinct from
 those binaries to the VMM, kernel, and gateway.
 
 This does **not** weaken the source-checkout invariant. Source checkouts still
-build every image locally from the in-repo flakes (ADR-014). Only the *published*
+build every image locally from the in-repo flakes (ADR-007). Only the *published*
 artifact is prebuilt — the same posture the GitHub-release prebuilts already
 hold. The consumer-relocates-prebuilt path is an end-user path, never a
 source-checkout prerequisite.
@@ -58,7 +58,7 @@ dependency-free bundle**. On a supported host the one-line installer drops a
 self-contained directory and `mvmctl machine run ...` works with **no
 package-manager prerequisites**.
 
-- The bundle vendors: the CLI, the egress gateway (ADR-004), libkrun, libkrunfw,
+- The bundle vendors: the CLI, the egress gateway (ADR-003), libkrun, libkrunfw,
   the guest kernel (baked at build time), and the agent rootfs.
 - Dynamic linkage is load-relative (`$ORIGIN` / `@loader_path`); a wrapper points
   the CLI at the bundled rootfs.
@@ -81,7 +81,7 @@ for three reasons:
 - **It is a supply-chain upgrade, not a downgrade.** Today we depend on whatever
   version the tap ships: unpinned, mutable, signed by someone else, and a
   `brew upgrade` can silently break our FFI (`extract_bundled_kernel` from the
-  dylib `.rodata`, `krun_add_net_unixgram`, the `libkrun-sys` bindings). ADR-002
+  dylib `.rodata`, `krun_add_net_unixgram`, the `libkrun-sys` bindings). ADR-001
   already trusts the host with the hypervisor binary; vendoring does not widen
   that boundary, it changes the *origin* to a pinned-rev, reproducible,
   release-key-signed build. Pinned + signed + reproducible beats mutable +
@@ -92,17 +92,17 @@ for three reasons:
   any VMM source is pinned.
 
 **Staging.** Each step ships and is useful on its own. macOS first — the trio
-pain is worst there and gateway interop is proven (ADR-004 / ADR-004
+pain is worst there and gateway interop is proven (ADR-003 / ADR-003
 §Validation):
 
-1. **Bundle machinery.** Gateway (ADR-004) + kernel + agent rootfs in one
+1. **Bundle machinery.** Gateway (ADR-003) + kernel + agent rootfs in one
    relocatable, load-relative, signed artifact with a verifying installer. These
    are components we already build; this proves the plumbing.
 2. **Vendor the VMM.** Add libkrun + libkrunfw as pinned submodules built by the
    root flake into the same artifact. This is the only A-specific increment and
    it lands last, after step 1 is trusted. After this, macOS first-run is
    genuinely zero-dependency.
-3. **Linux.** Follows ADR-004 / Plan 193 gateway timing (passt replacement).
+3. **Linux.** Follows ADR-003 / Plan 193 gateway timing (passt replacement).
 
 **Pre-merge checklist** (gates the step-2 vendoring, not this decision):
 
@@ -130,17 +130,17 @@ pain is worst there and gateway interop is proven (ADR-004 / ADR-004
 ## Out of scope
 
 - GPU passthrough — a separate strategic decision, not a packaging one.
-- Inbound TLS (mvmd's edge, per ADR-041).
+- Inbound TLS (mvmd's edge, per ADR-014).
 - The `machine` / pack UX surface ([Plan 200](../plans/200-machine-ux-dx-layer.md), [Plan 155](../plans/155-portable-runnable-artifacts.md)) — this ADR ships the substrate that surface runs on, not the surface.
-- Bring-up performance (kernel prebuilt / store persistence own it — ADR-004
+- Bring-up performance (kernel prebuilt / store persistence own it — ADR-003
   §"not a performance decision").
 
 ## References
 
 - [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) — host runtime packaging (this ADR is its missing "dependency-free bundle" decision)
-- [ADR-004](004-hypervisor-egress-policy.md) — bundled egress gateway
-- [ADR-004](004-hypervisor-egress-policy.md) — Rust-native gateway
-- [ADR-002](002-microvm-security-posture.md) — security posture / who builds the VMM
-- [ADR-014](014-vmbackend-single-trait.md) — two artifact layers, two acquisition paths
-- [ADR-005](005-sealed-signed-builder-image.md) — libkrun pivot (runtime kernel extraction)
+- [ADR-003](003-hypervisor-egress-policy.md) — bundled egress gateway
+- [ADR-003](003-hypervisor-egress-policy.md) — Rust-native gateway
+- [ADR-001](001-microvm-security-posture.md) — security posture / who builds the VMM
+- [ADR-007](007-vmbackend-single-trait.md) — two artifact layers, two acquisition paths
+- [ADR-004](004-sealed-signed-builder-image.md) — libkrun pivot (runtime kernel extraction)
 - [Plan 155](../plans/155-portable-runnable-artifacts.md), [Plan 156](../plans/156-binary-size-reduction.md), [Plan 200](../plans/200-machine-ux-dx-layer.md)

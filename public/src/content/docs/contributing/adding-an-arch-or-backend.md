@@ -82,13 +82,13 @@ If mvm ever genuinely needs to *read* a setup header — extract a kernel versio
 for `KernelArtifact.version`, or support bzImage on some future firmware-boot
 backend — reuse the `linux-boot-params` crate (pure `boot_params`/`setup_header`
 structs, from the Asterinas project) rather than hand-defining the layout. It's a
-new third-party dependency, so weigh it against the ADR-002 trust model first;
+new third-party dependency, so weigh it against the ADR-001 trust model first;
 no current backend needs it.
 
 ## What stays out of scope
 
 Production rootfs images are built **inside the builder VM** (`mke2fs`,
-ADR-050) — the artifact model validates and configures them, it does not build
+ADR-017) — the artifact model validates and configures them, it does not build
 ext4 on the host. Pure-Rust host-side rootfs creation, QEMU/vfkit config
 writers, dynamic boot smoke-tests, and `microvm.nix` integration are tracked as
 their own follow-up slices (see `specs/plans/134-architecture-aware-artifact-model.md`

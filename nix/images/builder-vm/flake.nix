@@ -88,7 +88,7 @@
         in if envPath != ""
            then /. + envPath
            else throw ''
-             MVM_HOST_BIN_DIR is not set. Plan 115 / ADR-005 contract:
+             MVM_HOST_BIN_DIR is not set. Plan 115 / ADR-004 contract:
              mvmctl populates this dir via host_binaries::ensure_extracted()
              before invoking `nix build path:... --impure`. To run nix
              build by hand: extract the embedded binaries from your

@@ -5,7 +5,7 @@
 //! every named witness still exists in the tree.
 //!
 //! The ledger lives embedded in
-//! `specs/adrs/059-host-services-broker.md` (folded in from the former
+//! `specs/adrs/020-host-services-broker.md` (folded in from the former
 //! standalone resident-daemon-trust-gradient doc during an ADR
 //! consolidation pass), between the `<!-- trust-gradient:begin -->` /
 //! `<!-- trust-gradient:end -->` markers — scoping to that region keeps
@@ -23,7 +23,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     let path = workspace
         .join("specs")
         .join("adrs")
-        .join("059-host-services-broker.md");
+        .join("020-host-services-broker.md");
     let source =
         std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let ledger = extract_ledger_section(&source).with_context(|| {
@@ -54,7 +54,7 @@ pub fn run(workspace: &Path) -> Result<()> {
         }
         bail!(
             "check-trust-gradient: {} problem(s) in the trust-gradient ledger \
-             (specs/adrs/059-host-services-broker.md)",
+             (specs/adrs/020-host-services-broker.md)",
             errors.len()
         );
     }

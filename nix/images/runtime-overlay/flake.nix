@@ -1,5 +1,5 @@
 {
-  description = "mvm runtime overlay disk — verity-sealed ext4 carrying the guest agent + seccomp shim + netinit + netd + runner, mounted at /mvm/runtime in every microVM (ADR-051)";
+  description = "mvm runtime overlay disk — verity-sealed ext4 carrying the guest agent + seccomp shim + netinit + netd + runner, mounted at /mvm/runtime in every microVM (ADR-018)";
 
   # ── Why this flake exists ─────────────────────────────────────────
   #

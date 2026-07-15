@@ -1,8 +1,8 @@
-# ADR-077 — CLI surface consolidation (grouped command namespaces)
+# ADR-027 — CLI surface consolidation (grouped command namespaces)
 
 **Status:** accepted 2026-06-10. Implemented by
-`specs/plans/178-cli-surface-consolidation.md`. Cross-refs: ADR-012
-(mvm-provider CLI contract — the mvmd/provider boundary, unaffected), ADR-066
+`specs/plans/178-cli-surface-consolidation.md`. Cross-refs: ADR-006
+(mvm-provider CLI contract — the mvmd/provider boundary, unaffected), ADR-022
 (target architecture). No security claim changes — command paths move, not
 behavior.
 
@@ -18,7 +18,7 @@ space present ~20 commands under a few noun groups and read as one cohesive
 product; the gap between mvm and them is cohesion, not capability.
 
 This is the CLI half of the feature-reduction effort (the backend half is
-ADR-014). The product's "no backwards compatibility — this is the first
+ADR-007). The product's "no backwards compatibility — this is the first
 version" stance means commands can be renamed and regrouped hard, with no
 alias layer.
 
@@ -63,7 +63,7 @@ mode aliases exactly. No merge from memory.
   under the no-backcompat stance, and the right time to pay it (first
   version). Docs (`public/.../cli-commands.md`, `CLAUDE.md` examples) update
   with the change.
-- Independent of the backend work (ADR-014); safe to land in parallel with
+- Independent of the backend work (ADR-007); safe to land in parallel with
   that plan's Phase 1.
 
 ## Alternatives considered
@@ -78,16 +78,16 @@ mode aliases exactly. No merge from memory.
 
 ## Out of scope
 
-- The mvmd/provider CLI contract (ADR-012) — a different surface.
+- The mvmd/provider CLI contract (ADR-006) — a different surface.
 - Adding new commands (e.g. cleanly surfaced `save`/`restore`) — that rides
-  with the DX-parity follow-on once ADR-014's `vz` convergence lands.
+  with the DX-parity follow-on once ADR-007's `vz` convergence lands.
 
 
 ## Consolidated from ADR-091 — Unified `machine run` lifecycle (transient / persistent / interactive)
 
 **Status:** Proposed
 **Date:** 2026-06-21
-**Relates to:** [ADR-002](002-microvm-security-posture.md) (security posture, claim 15),
+**Relates to:** [ADR-001](001-microvm-security-posture.md) (security posture, claim 15),
 [Plan 165](../plans/165-entrypoint-presence-and-sealed-interactivity.md) (sealed interactivity / claim 15),
 [Plan 207](../plans/207-machine-run-unified-lifecycle.md) (implementation),
 design note `specs/notes/2026-06-21-machine-run-unified-lifecycle-design.md`.
@@ -112,7 +112,7 @@ Two capabilities common to comparable microVM tooling are missing:
 
 The naïve fix — teach `Exec` to carry stdin/PTY, or auto-attach a shell whenever
 `/bin/sh` is passed — collides with the security posture: interactive access to a
-**sealed production** microVM is forbidden and CI-gated (claim 15, ADR-002 / Plan
+**sealed production** microVM is forbidden and CI-gated (claim 15, ADR-001 / Plan
 165). Any solution must keep that invariant intact.
 
 ## Decision
@@ -227,8 +227,8 @@ that adds a shell or an idle keep-alive, and none should be added.
 
 **Status:** Proposed
 **Date:** 2026-06-21
-**Relates to:** [ADR-002](002-microvm-security-posture.md),
-ADR-077 §"Consolidated from ADR-091",
+**Relates to:** [ADR-001](001-microvm-security-posture.md),
+ADR-027 §"Consolidated from ADR-091",
 [Plan 200](../plans/200-machine-ux-dx-layer.md),
 [Plan 207](../plans/207-machine-run-unified-lifecycle.md)
 
@@ -265,7 +265,7 @@ noun**.
 
 A second object is in scope only to keep it *out* of scope: `dev` (the builder
 VM) is a genuinely different thing — host build substrate, not a workload — and
-stays its own command. ADR-002 (consolidated from ADR-088) already draws that boundary.
+stays its own command. ADR-001 (consolidated from ADR-088) already draws that boundary.
 
 ## Decision
 
@@ -398,7 +398,7 @@ tracks the task-by-task, TDD breakdown; this ADR records only the decision.
 - Status: Proposed
 - Date: 2026-07-01
 - Owner: MVM Project
-- Related: `specs/notes/mvm-client-facade-design.md` + Plan 216 (the `mvm-client` facade), ADR-002 (cloud control-plane trust boundary — the facade's remote path, consolidated from ADR-104), ADR-041 (signed audited execution plans — claim 8, the admission the local `run` path must not skip). Sequenced by: Plan 218.
+- Related: `specs/notes/mvm-client-facade-design.md` + Plan 216 (the `mvm-client` facade), ADR-001 (cloud control-plane trust boundary — the facade's remote path, consolidated from ADR-104), ADR-014 (signed audited execution plans — claim 8, the admission the local `run` path must not skip). Sequenced by: Plan 218.
 
 ## Update (2026-07-06): the trait lives in `mvm-core`, one user-facing crate
 

@@ -1,8 +1,8 @@
 ---
-title: "ADR-027: Iroh-aware encryption layering"
+title: "ADR-008: Iroh-aware encryption layering"
 status: Proposed
 date: 2026-05-07
-related: ADR-002 (security posture), ADR-005 (libkrun pivot), plan 60-mvm-libkrun-migration
+related: ADR-001 (security posture), ADR-004 (libkrun pivot), plan 60-mvm-libkrun-migration
 ---
 
 ## Status
@@ -218,8 +218,8 @@ mvm-side `make_backend` returns `VolumeError::UnsupportedBackend` for `ObjectSto
 - `specs/plans/63-phase-2-encryption-everywhere.md` — full sprint plan for plan 63, with per-workstream status.
 - `specs/plans/60-mvm-libkrun-migration.md` Phase 2 — the cornerstone this ADR documents the closing of.
 - `specs/plans/45-filesystem-volumes.md` §D5 / Path C — convergence rule for where `EncryptedBackend<B>` lives.
-- ADR-002 (`specs/adrs/002-microvm-security-posture.md`) — the security claims the substrate underpins.
-- ADR-027 (`specs/adrs/027-iroh-aware-encryption-layering.md`) — broader encryption layering across iroh + on-disk surfaces.
+- ADR-001 (`specs/adrs/001-microvm-security-posture.md`) — the security claims the substrate underpins.
+- ADR-008 (`specs/adrs/008-iroh-aware-encryption-layering.md`) — broader encryption layering across iroh + on-disk surfaces.
 - `crates/mvm-core/src/domain/volume.rs` — `WrappedKey`, `MasterKeyRef`, `WrapAlgorithm::{AesKwp, Aes256Gcm}`.
 - `crates/mvm-security/src/snapshot_crypto.rs` — AES-256-GCM over slices.
 - `crates/mvm-security/src/snapshot_encryption.rs` — AES-256-GCM over files (chunked).

@@ -33,7 +33,7 @@ pub fn run(workspace: &Path) -> Result<()> {
         bail!(
             "check-runtime-overlay-version: the runtime-overlay flake's overlayVersion \
              ({overlay_ver}) does not match the workspace version ({ws_ver}). The resolver pins \
-             the overlay by exact version (ADR-051) and fails closed on a mismatch — a stale pin \
+             the overlay by exact version (ADR-018) and fails closed on a mismatch — a stale pin \
              means the verity overlay silently never loads. Bump `overlayVersion` in \
              {OVERLAY_FLAKE} to {ws_ver}."
         );

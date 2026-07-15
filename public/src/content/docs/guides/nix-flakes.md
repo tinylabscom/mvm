@@ -375,4 +375,4 @@ secret refs instead.
 
 Why a microVM and not a process sandbox: process sandboxes share the host kernel and trust it. A microVM gives the agent its own kernel, so a kernel exploit can't pivot to the host.
 
-Full security composition (per-service uid, seccomp tier, secrets mode, verified boot) is documented in [ADR-002](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/002-microvm-security-posture.md) and the [Rootless workloads section](/guides/building-microvm-images#rootless-workloads).
+Full security composition (per-service uid, seccomp tier, secrets mode, verified boot) is documented in [ADR-001](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/001-microvm-security-posture.md) and the [Rootless workloads section](/guides/building-microvm-images#rootless-workloads).

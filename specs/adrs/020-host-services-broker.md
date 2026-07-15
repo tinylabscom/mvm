@@ -1,9 +1,9 @@
-# ADR-059: Host services broker over vsock
+# ADR-020: Host services broker over vsock
 
 - Status: Proposed
 - Date: 2026-05-26
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture), ADR-041 (signed audited execution plans), ADR-047 (app-deps audit pipeline), ADR-048 (workload secrets), ADR-067 (TLS substitution mechanism), ADR-053 (guest protocol versioning + readiness), ADR-058 (claim 10 — bytes leaving trust boundary), mvmd ADR 0008 (tenant-scoped authz), mvmd ADR 0023 (mvmd as cross-VM delegate, proposed)
+- Related: ADR-001 (microVM security posture), ADR-014 (signed audited execution plans), ADR-047 (app-deps audit pipeline), ADR-048 (workload secrets), ADR-023 (TLS substitution mechanism), ADR-019 (guest protocol versioning + readiness), ADR-058 (claim 10 — bytes leaving trust boundary), mvmd ADR 0008 (tenant-scoped authz), mvmd ADR 0023 (mvmd as cross-VM delegate, proposed)
 - Sequenced by: [Plan 104 — Host Services Broker over vsock](../plans/104-host-services-broker.md)
 
 ## Context
@@ -13,7 +13,7 @@ Today, anything a microVM needs from the host arrives one of two ways:
 1. **Boot-time only.** A read-only ext4 drive mounted at `/mnt/secrets` or `/mnt/config` (`mvmctl up --volume host_dir:/mnt/secrets`). ADR-048 explicitly tags this `unsafe_guest_secret_materialization` and declines to make a non-leakage claim about it.
 2. **A small fixed-verb reverse channel.** `HostBoundRequest` on vsock port 53 carries `WakeInstance`, `QueryInstanceStatus`, `QueryHostTime` (`crates/mvm-guest/src/vsock.rs`). Each new verb is a code change to an enum.
 
-There is also a **half-built secrets path**: `ExecutionPlan.secrets: Vec<SecretBinding>` exists in `crates/mvm-plan/src/plan.rs`; `KeystoreReleaser` trait stubs in `crates/mvm-supervisor/src/keystore.rs` return `NotWired` / `NotImplemented`; the `secrets:` field is hardcoded empty in synthesis. ADR-067 has committed to a vsock side-channel for secret substitution as the v1 mechanism — described in prose, stubbed in code.
+There is also a **half-built secrets path**: `ExecutionPlan.secrets: Vec<SecretBinding>` exists in `crates/mvm-plan/src/plan.rs`; `KeystoreReleaser` trait stubs in `crates/mvm-supervisor/src/keystore.rs` return `NotWired` / `NotImplemented`; the `secrets:` field is hardcoded empty in synthesis. ADR-023 has committed to a vsock side-channel for secret substitution as the v1 mechanism — described in prose, stubbed in code.
 
 What is needed is broader than secrets: a **host-side services layer** microVMs call at runtime — secrets today, then cost / time / logging / audit / monitoring as the catalog grows — with one auth model, one capability model, one audit chain, and one extension point that supports built-in *and* addon-provided services without protocol churn.
 
@@ -102,7 +102,7 @@ Before any handler dispatch, a call traverses five rules **in order**. They are 
 
 ### Audit chain
 
-Extend `EventCategory` in `crates/mvm-supervisor/src/audit_recorder.rs` with one new variant `ServiceCall`. Every dispatch — allowed or denied — emits one entry: `(service, verb, outcome, correlation_id)`. **Payload content is never logged** (ADR-053 §4 redaction invariant); per-handler audit subentries take typed `AuditFields` (no `String` payload param).
+Extend `EventCategory` in `crates/mvm-supervisor/src/audit_recorder.rs` with one new variant `ServiceCall`. Every dispatch — allowed or denied — emits one entry: `(service, verb, outcome, correlation_id)`. **Payload content is never logged** (ADR-019 §4 redaction invariant); per-handler audit subentries take typed `AuditFields` (no `String` payload param).
 
 Three contracts on the chain entry format (load-bearing for the future host-logging follow-up plan's mvmd-agent sync mechanism):
 
@@ -114,7 +114,7 @@ Three contracts on the chain entry format (load-bearing for the future host-logg
 
 Cross-VM concerns (tenant-aggregated cost, peer discovery, tenant config) belong in mvmd (per CLAUDE.md: "mvmd owns tenant isolation; mvmctl never reaches across workloads"). `MvmdClient` trait in `crates/mvm-supervisor/src/services/mvmd_client.rs`; real impl uses **mvmd-agent's iroh ALPN transport** with new typed `AgentRequest` variants — NOT raw QUIC+mTLS, NOT new HTTP routes the agent proxies. mvmd Plan 52 and mvmd ADR 0023 sequence the mvmd side.
 
-This is an **architectural boundary, not a trust boundary** — see mvmd ADR 0023 for the full elaboration. A compromised supervisor forges arbitrary workload-ids; mvmd accepts them. The "blast radius stays single-tenant" property only holds under the uncompromised-supervisor assumption, which is itself in scope under ADR-002.
+This is an **architectural boundary, not a trust boundary** — see mvmd ADR 0023 for the full elaboration. A compromised supervisor forges arbitrary workload-ids; mvmd accepts them. The "blast radius stays single-tenant" property only holds under the uncompromised-supervisor assumption, which is itself in scope under ADR-001.
 
 ### Built-in handler split
 
@@ -129,16 +129,16 @@ A1 versioned ServiceIds with parallel versions + deprecation; A2 Cargo feature f
 
 ### New claims
 
-ADR-002's live list runs through Claim 11. This ADR adds two new claims:
+ADR-001's live list runs through Claim 11. This ADR adds two new claims:
 
 | # | Claim | Primary layer | Workstream | CI gate |
 |---|---|---|---|---|
 | 12 | Every host-side service the broker exposes is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited via the chain-signed log | cross-cutting (policy + audit) | Plan 104 W2 | `service_call_denied_when_unbound` + `audit_chain_contains_service_call_entries` tests; `xtask check-handler-adr-coverage` lint |
-| 13 | No raw secret value crosses the broker channel; `host.secrets.v1` returns destination-bound, time-bound signed credentials only. Raw secret bytes never leave the supervisor's address space | cross-cutting (data containment) | Plan 104 W5 | `host_secrets_v1_denied_outside_allowed_destinations` + `zeroize_drop_zeros_secret_bytes` + `host_secrets_v1_signed_payload_jcs_roundtrip` + ADR-067 hostile-guest matrix |
+| 13 | No raw secret value crosses the broker channel; `host.secrets.v1` returns destination-bound, time-bound signed credentials only. Raw secret bytes never leave the supervisor's address space | cross-cutting (data containment) | Plan 104 W5 | `host_secrets_v1_denied_outside_allowed_destinations` + `zeroize_drop_zeros_secret_bytes` + `host_secrets_v1_signed_payload_jcs_roundtrip` + ADR-023 hostile-guest matrix |
 
 Claim 12 is the binding-gated dispatch invariant. A tampered binding fails plan verification under Claim 8; an unbound call is refused with an audited deny.
 
-Claim 13 is the secret-value-never-leaves invariant. `host.secrets.v1` returns destination-bound signed credentials (per ADR-067); raw secrets stay in the supervisor's keystore. The S25 placeholder-egress backstop in gvproxy/passt (Plan 104 W6 / W7) is a defense-in-depth net against SDK-bypass attacks at the L4/L7 boundary.
+Claim 13 is the secret-value-never-leaves invariant. `host.secrets.v1` returns destination-bound signed credentials (per ADR-023); raw secrets stay in the supervisor's keystore. The S25 placeholder-egress backstop in gvproxy/passt (Plan 104 W6 / W7) is a defense-in-depth net against SDK-bypass attacks at the L4/L7 boundary.
 
 ### Threat model
 
@@ -158,21 +158,21 @@ The broker is a new attack surface. Threats and mitigations (numbered per Plan 1
 ### Surfaces that do not expand
 
 - No new host process or persistent socket on disk in v1 beyond the per-VM secrets dispatcher subprocess and its two UDS endpoints (mode 0600, supervisor-owned). v2 third-party addons add per-addon UDS in a separate plan.
-- Trust boundary unchanged from ADR-002 — supervisor was already trusted.
+- Trust boundary unchanged from ADR-001 — supervisor was already trusted.
 - Egress policy unchanged — broker is host↔guest only.
-- `prod-agent-no-exec` (ADR-002 Claim 4) unchanged — no broker verb is code-execution-shaped.
+- `prod-agent-no-exec` (ADR-001 Claim 4) unchanged — no broker verb is code-execution-shaped.
 
 ## Alternatives considered
 
 **(A) Stay with the fixed-verb `HostBoundRequest` enum.** Rejected: every new service is a code change to a guest-side enum; no auth model beyond the proxy socket; no audit; no per-workload binding. Doesn't scale to secrets + cost + logging + future telemetry.
 
-**(B) ADR-067's TLS-terminating proxy with injected CA.** Considered as the secret-substitution alternative. The cost is significant: it **expands the host's trust boundary into the guest's trust store** — a CA the host controls is now trusted by the guest's TLS stack for *all* outbound connections, not just secret-bearing ones. (B) ships separately as the `unsafe_guest_tls_inspection` opt-in for workloads that can't be modified (vendored binaries, third-party agents).
+**(B) ADR-023's TLS-terminating proxy with injected CA.** Considered as the secret-substitution alternative. The cost is significant: it **expands the host's trust boundary into the guest's trust store** — a CA the host controls is now trusted by the guest's TLS stack for *all* outbound connections, not just secret-bearing ones. (B) ships separately as the `unsafe_guest_tls_inspection` opt-in for workloads that can't be modified (vendored binaries, third-party agents).
 
 **(B′) Vsock substitution via SDK hook — the default chosen here.** SDK hooks the HTTP client *before* TLS, asks the host for a destination-bound signed credential, injects it into the outbound request, and the guest does its own TLS to upstream. The guest's trust store is untouched. Protocol-agnostic (HTTP/1.1, HTTP/2, HTTP/3, gRPC, mTLS). Cost: per-language hook matrix (Plan 104 W7).
 
 Plan 104 takes the strongest property of each: (B′) is the primary path; S25 adds the network-layer enforcement property from (B) as a fallback.
 
-**(C) CBOR wire format with COSE signing.** Considered for v1. Switched to JSON via `serde_json` (Plan 104 T3 decision): no genuinely binary payload in v1; SDK matrix friction in Python/TS/Rust CBOR libraries is real; `jq` debuggability over project lifetime matters; consistency with existing `GuestRequest` / `HostBoundRequest` JSON channels. Future binary payloads use base64-in-JSON on the specific field. ADR-067's signing scheme is Ed25519-on-bytes (not COSE), so JSON-with-JCS is appropriate.
+**(C) CBOR wire format with COSE signing.** Considered for v1. Switched to JSON via `serde_json` (Plan 104 T3 decision): no genuinely binary payload in v1; SDK matrix friction in Python/TS/Rust CBOR libraries is real; `jq` debuggability over project lifetime matters; consistency with existing `GuestRequest` / `HostBoundRequest` JSON channels. Future binary payloads use base64-in-JSON on the specific field. ADR-023's signing scheme is Ed25519-on-bytes (not COSE), so JSON-with-JCS is appropriate.
 
 **(D) Single-process broker with all services (including secrets) in-process inside the supervisor.** Considered, rejected (Plan 104 T4 decision). Process-level isolation is the production-ready pattern for credential issuers (AWS STS, Vault, K8s SA token controllers — all out-of-process). The split-task→split-process migration later would be more painful under the no-backcompat rule. Cost: ~50% W1+W5 scope growth — a new crate, subprocess lifecycle, UDS proxy code path. Justified by (a) user-stated concern that control-plane compromise is a security risk and (b) the substrate then has a concrete v1 consumer (kills the "speculative substrate" criticism — see T5).
 
@@ -196,14 +196,14 @@ Plan 104 takes the strongest property of each: (B′) is the primary path; S25 a
 
 ## Migration
 
-No backwards-compatibility path is shipped. v4 `ExecutionPlan` instances hard-fail at verification under v5. `KeystoreReleaser` / `NoopKeystoreReleaser` / `LiveKeystoreReleaser` stubs are deleted in Plan 104 W5. `HostBoundRequest::QueryHostTime` is deleted in Plan 104 W3; the only internal caller is migrated to the broker in the same commit. ADR-067's prose is updated in W5 with a one-line "Implementation: lands as `host.secrets.v1` in the broker (ADR-059, Plan 104)" — no semantic change to ADR-067.
+No backwards-compatibility path is shipped. v4 `ExecutionPlan` instances hard-fail at verification under v5. `KeystoreReleaser` / `NoopKeystoreReleaser` / `LiveKeystoreReleaser` stubs are deleted in Plan 104 W5. `HostBoundRequest::QueryHostTime` is deleted in Plan 104 W3; the only internal caller is migrated to the broker in the same commit. ADR-023's prose is updated in W5 with a one-line "Implementation: lands as `host.secrets.v1` in the broker (ADR-020, Plan 104)" — no semantic change to ADR-023.
 
 ## Out of scope
 
 - Streaming responses (monitoring, log tail). Envelope is request/response only in v1.
 - Addon-provided handlers shipping in v1. v1 ships only the substrate (the addon-proxy path is implemented and exercised by the secrets dispatcher; no third-party addons are consumed).
-- `unsafe_guest_tls_inspection` proxy-with-CA path from ADR-067 — separate plan.
-- Non-HTTP secret substitution — out of scope per ADR-067 §"Non-HTTP egress."
+- `unsafe_guest_tls_inspection` proxy-with-CA path from ADR-023 — separate plan.
+- Non-HTTP secret substitution — out of scope per ADR-023 §"Non-HTTP egress."
 - Cross-VM cost aggregation across tenants — `host.cost.v1::tenant` is single-tenant.
 - Hardware enclave integration for `host.secrets.v1` signing key (Apple Secure Enclave, TPM) — future hardening ADR.
 - Runtime-mutable bindings (supplemental signatures) — future plan if demand emerges. Per Plan 104 C5, plans are immutable post-admission; a binding change requires workload restart.
@@ -212,23 +212,23 @@ No backwards-compatibility path is shipped. v4 `ExecutionPlan` instances hard-fa
 
 ## Consolidated from ADR-061 — Host services broker — four-subprocess hardening
 
-- **Status:** Proposed — supersedes ADR-059 (this document) §Architecture and §Security model
+- **Status:** Proposed — supersedes ADR-020 (this document) §Architecture and §Security model
 - **Date:** 2026-05-27
 - **Owner:** MVM Project
-- **Related:** [ADR-002 microvm security posture](002-microvm-security-posture.md), [ADR-041 signed audited execution plans](041-signed-audited-execution-plans.md), [ADR-041 app deps audit pipeline](041-signed-audited-execution-plans.md), [ADR-041 claim-safe sandbox parity](041-signed-audited-execution-plans.md), [ADR-067 secret substitution mechanism](067-secrets-subsystem-egress-substitution.md), [ADR-053 guest protocol versioning and readiness](053-guest-protocol-versioning-and-readiness.md), [ADR-041 claim-10 bytes leaving trust boundary](041-signed-audited-execution-plans.md), ADR-059 (this document, original text), [Plan 104 host services broker](../plans/104-host-services-broker.md), mvmd [ADR-0023 mvmd host services delegation](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md)
+- **Related:** [ADR-001 microvm security posture](001-microvm-security-posture.md), [ADR-014 signed audited execution plans](014-signed-audited-execution-plans.md), [ADR-014 app deps audit pipeline](014-signed-audited-execution-plans.md), [ADR-014 claim-safe sandbox parity](014-signed-audited-execution-plans.md), [ADR-023 secret substitution mechanism](023-secrets-subsystem-egress-substitution.md), [ADR-019 guest protocol versioning and readiness](019-guest-protocol-versioning-and-readiness.md), [ADR-014 claim-10 bytes leaving trust boundary](014-signed-audited-execution-plans.md), ADR-020 (this document, original text), [Plan 104 host services broker](../plans/104-host-services-broker.md), mvmd [ADR-0023 mvmd host services delegation](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md)
 
 ## Context
 
-ADR-059 (this document) shipped a **two-process design** for the host services broker: the supervisor hosts the general broker in-process (`host.time.v1`, `host.cost.v1`, `broker.v1`), and `mvm-secrets-dispatcher` runs in a separate subprocess for `host.secrets.v1`. ADR-059 records that decision and the JSON wire format, JCS-canonical signing, capability-gating, and audit-chain shapes.
+ADR-020 (this document) shipped a **two-process design** for the host services broker: the supervisor hosts the general broker in-process (`host.time.v1`, `host.cost.v1`, `broker.v1`), and `mvm-secrets-dispatcher` runs in a separate subprocess for `host.secrets.v1`. ADR-020 records that decision and the JSON wire format, JCS-canonical signing, capability-gating, and audit-chain shapes.
 
 Subsequent threat-modeling under the directive to make this design "as tight as practical" identified four key isolation gaps the two-process design does not address:
 
 1. **Host signer key extraction.** The supervisor reads `~/.mvm/keys/host-signer.ed25519` to sign `ExecutionPlan`s. A supervisor UAF therefore extracts the key, which compromises *all future* plans (claim 8) across the entire host until the key is rotated.
 2. **Audit chain forgery.** The supervisor holds the audit chain-signing key and is the sole writer to `~/.mvm/audit/<tenant>.jsonl`. A supervisor compromise can forge entries arbitrarily, defeating claim 8's chain-signed audit invariant.
 3. **General broker bug pivots into the supervisor TCB.** A use-after-free or integer overflow in the in-process broker's JSON parser, registry, or quota logic runs in the supervisor's address space — it can pivot into admission, plan signing, or audit signing code paths.
-4. **Software insider attacks.** ADR-002's "malicious host" out-of-scope clause assumes the host operator is trusted. With shell access to the host on the two-process design, an insider can read all of the above: the host signer key, the audit chain key, the audit log plaintext, and the in-flight secrets in process memory.
+4. **Software insider attacks.** ADR-001's "malicious host" out-of-scope clause assumes the host operator is trusted. With shell access to the host on the two-process design, an insider can read all of the above: the host signer key, the audit chain key, the audit log plaintext, and the in-flight secrets in process memory.
 
-This ADR records the decision to pivot to a **four-subprocess design** that addresses all four gaps and narrows ADR-002's "malicious host" clause to exclude software insiders. Plan 104's "Hardening posture (Layers 1–11)" section carries the implementation specifics.
+This ADR records the decision to pivot to a **four-subprocess design** that addresses all four gaps and narrows ADR-001's "malicious host" clause to exclude software insiders. Plan 104's "Hardening posture (Layers 1–11)" section carries the implementation specifics.
 
 ## Decision
 
@@ -262,17 +262,17 @@ Additional new decisions in this hardening:
 - **`cargo-mutants` mutation testing** lane targeting the four subprocess crates + supervisor services module.
 - **`mvmctl doctor` refuses admission on weak hosts** (KASLR, KPTI, SMEP/SMAP, Spectre-v2, KSM, THP, LSM, kernel hardening sysctls; macOS SIP+AMFI+kext). `--insecure-host` audits + warns.
 
-## What this supersedes from ADR-059
+## What this supersedes from ADR-020
 
-| ADR-059 section | Status under ADR-061 |
+| ADR-020 section | Status under ADR-061 |
 | --- | --- |
-| §Architecture (two-process design) | **Superseded.** Replaced by the four-subprocess design above. The narrative in ADR-059 still applies as the *original* design; readers should treat ADR-061 as the current architectural source of truth. |
-| §Security model | **Extended.** ADR-059's threat model assumed the supervisor was a single trust boundary; ADR-061 splits it into four subprocesses and adds software insider attacks to the in-scope set (see §Threat model below). |
+| §Architecture (two-process design) | **Superseded.** Replaced by the four-subprocess design above. The narrative in ADR-020 still applies as the *original* design; readers should treat ADR-061 as the current architectural source of truth. |
+| §Security model | **Extended.** ADR-020's threat model assumed the supervisor was a single trust boundary; ADR-061 splits it into four subprocesses and adds software insider attacks to the in-scope set (see §Threat model below). |
 | §Decision (high-level) | **Refined.** The high-level "we ship a broker" decision stands. The architectural specifics under it are superseded. |
 
-## What remains from ADR-059 unchanged
+## What remains from ADR-020 unchanged
 
-| ADR-059 section | Status |
+| ADR-020 section | Status |
 | --- | --- |
 | §Wire format (JSON; `serde_json` envelopes; `deny_unknown_fields`) | Unchanged. |
 | §JCS canonical signing (RFC 8785; `serde_jcs`) | Unchanged. |
@@ -280,7 +280,7 @@ Additional new decisions in this hardening:
 | §Audit chain (one new `EventCategory::ServiceCall`; chain-signed JSONL; payload bytes never logged) | Unchanged in shape; mechanism moves to `mvm-audit-signer` per Layer 1. |
 | §Cross-VM via mvmd (iroh ALPN; new `AgentRequest` variants; mvmd-side Plan 52 + ADR-0023) | Unchanged. |
 | §ExecutionPlan schema bump 4→5 (`services: Vec<ServiceBinding>`; no shim) | Unchanged. |
-| §Comparison of SDK-hook vsock vs TLS-terminating proxy (ADR-067 alternatives) | Unchanged. |
+| §Comparison of SDK-hook vsock vs TLS-terminating proxy (ADR-023 alternatives) | Unchanged. |
 | Claims 12 + 13 numbering | Unchanged. ADR-061 carries the implementation details under which Claim 13's "supervisor's address space" reads through as a strict tightening (raw secrets are now in `mvm-secrets-dispatcher`'s + `mvm-host-signer`'s subprocess address spaces — both subsets of the supervisor's previous responsibility). |
 
 ## Implementation choices
@@ -302,7 +302,7 @@ All crates are present in `deny.toml` with advisory + license enforcement.
 
 ## Deployment modes
 
-Threats and mitigations apply differently across deployment shapes; ADR-061 inherits ADR-059's framing and adds the insider-threat distinction:
+Threats and mitigations apply differently across deployment shapes; ADR-061 inherits ADR-020's framing and adds the insider-threat distinction:
 
 | Mode | Description | Threats in scope | Notes |
 | --- | --- | --- | --- |
@@ -338,7 +338,7 @@ Named here so future readers don't re-litigate:
 
 ## Threat model
 
-ADR-002's "malicious host" out-of-scope clause is **narrowed**, not removed.
+ADR-001's "malicious host" out-of-scope clause is **narrowed**, not removed.
 
 **Physical attacks remain out of scope:** cold-boot DRAM extraction, DMA via Thunderbolt/PCIe, hardware tampering (chip-off, side-channel power analysis), unauthorized firmware flashing.
 
@@ -357,21 +357,21 @@ On **non-enclave hosts** (no Apple SE, no Linux TPM), the host signer is **trust
 
 - TCB minimization: a supervisor UAF no longer extracts host signer keys, audit signing keys, or in-flight credentials.
 - Threat-model expansion: software insider attacks newly in scope.
-- Extensibility unchanged from ADR-059: built-in handlers and v2 addon handlers share one substrate.
+- Extensibility unchanged from ADR-020: built-in handlers and v2 addon handlers share one substrate.
 - Observability unchanged: every call audited; operator actions audited; `broker.v1/list_services` exposes the runtime catalog.
 - Falsifiability: a fourth service `host.dev.echo.v1` can land in one handler file in `mvm-broker` without touching envelope, registry, or auth — verified at Plan 104 W6.
 
 **Negative:**
 
-- Scope: roughly 3–4 sprints of work where the original ADR-059 / Plan 104 v1 was 1.
-- Operational surface: four new subprocess binaries per VM (was 1 under ADR-059); new doctor checks; new release-pipeline lanes (cosign per binary, Sigstore, in-toto, reproducibility-per-binary).
+- Scope: roughly 3–4 sprints of work where the original ADR-020 / Plan 104 v1 was 1.
+- Operational surface: four new subprocess binaries per VM (was 1 under ADR-020); new doctor checks; new release-pipeline lanes (cosign per binary, Sigstore, in-toto, reproducibility-per-binary).
 - Single points of availability: `mvm-host-signer` and `mvm-audit-signer` are now load-bearing for admission and audit respectively; restart-with-backoff is the v1 mitigation, with m-of-n quorum deferred.
 - Cross-backend complexity: the vz (Apple Silicon) backend needs a new `VZVirtioSocketListener` Swift class — substantial sub-task.
 - Hardware-enclave dependency (W8): macOS SE + Linux TPM 2.0 integration is first-time work in `mvm`; software fallback retained but flagged as a downgrade.
 
 ## Non-goals
 
-(Inherits ADR-059's non-goals; lists only the *additions* this hardening makes explicit so they don't quietly become assumed-covered.)
+(Inherits ADR-020's non-goals; lists only the *additions* this hardening makes explicit so they don't quietly become assumed-covered.)
 
 - **m-of-n quorum for host signer key rotation.** Operationally heavy. Future plan once W11 FIDO ceremony exists.
 - **Hybrid Ed25519 + Dilithium signatures (PQC).** The algorithm-identifier byte (above) is sufficient preparation; full hybrid signing waits until CRQC pressure is real.
@@ -381,36 +381,36 @@ On **non-enclave hosts** (no Apple SE, no Linux TPM), the host signer is **trust
 - **Disaster recovery / key escrow** (Plan 104 §G11). Future plan once W11 lands FIDO.
 - **Supervisor split** (admission verifier + IPC router as separate processes). v1 supervisor remains the single launcher + IPC router + admission controller. Deferred to v2.
 
-## Migration from ADR-059's two-process design
+## Migration from ADR-020's two-process design
 
-Per the project's no-backcompat rule: there is no shim, no migration path, no transitional period. ADR-059's two-process design has not yet been implemented (Plan 104 v1 is the implementation plan; nothing was built yet). Implementation begins directly under ADR-061's four-subprocess design. Plan 104 W1 scaffolds all four subprocesses from day one.
+Per the project's no-backcompat rule: there is no shim, no migration path, no transitional period. ADR-020's two-process design has not yet been implemented (Plan 104 v1 is the implementation plan; nothing was built yet). Implementation begins directly under ADR-061's four-subprocess design. Plan 104 W1 scaffolds all four subprocesses from day one.
 
 ## See also
 
 - [Plan 104 — host services broker](../plans/104-host-services-broker.md) §Hardening posture (Layers 1–11) for the per-subprocess hardening matrix and the build sequence W1–W11.
-- ADR-059 — host services broker (this document, original text) for the JSON wire format, JCS signing, capability gating, audit chain, and cross-VM delegation decisions that ADR-061 inherits unchanged.
-- [ADR-002 §"Security claims"](002-microvm-security-posture.md) for Claims 12 + 13 (pending merge from `worktree-adr-002-claims-12-13`).
-- [ADR-067 — secret substitution mechanism](067-secrets-subsystem-egress-substitution.md) for the `host.secrets.v1` substitution flow that lands inside `mvm-secrets-dispatcher`.
+- ADR-020 — host services broker (this document, original text) for the JSON wire format, JCS signing, capability gating, audit chain, and cross-VM delegation decisions that ADR-061 inherits unchanged.
+- [ADR-001 §"Security claims"](001-microvm-security-posture.md) for Claims 12 + 13 (pending merge from `worktree-adr-002-claims-12-13`).
+- [ADR-023 — secret substitution mechanism](023-secrets-subsystem-egress-substitution.md) for the `host.secrets.v1` substitution flow that lands inside `mvm-secrets-dispatcher`.
 - [mvmd ADR-0023 — mvmd host services delegation](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md) for the cross-VM trust model.
 
 
 ## Consolidated from ADR-062 — Host services broker — drop `host.secrets.v1`, add `host.audit.v1`
 
-- **Status:** Proposed — supersedes [ADR-067](067-secrets-subsystem-egress-substitution.md) in full, supersedes parts of ADR-059 §"Architecture" and ADR-059 §"Consolidated from ADR-061" §"Decision" (subprocess count + secrets-specific reasoning)
+- **Status:** Proposed — supersedes [ADR-023](023-secrets-subsystem-egress-substitution.md) in full, supersedes parts of ADR-020 §"Architecture" and ADR-020 §"Consolidated from ADR-061" §"Decision" (subprocess count + secrets-specific reasoning)
 - **Date:** 2026-05-28
 - **Owner:** MVM Project
-- **Related:** [ADR-002 microvm security posture](002-microvm-security-posture.md), [ADR-067 secret substitution mechanism](067-secrets-subsystem-egress-substitution.md) (superseded), ADR-059 (this document), ADR-059 §"Consolidated from ADR-061", [Plan 104 host services broker](../plans/104-host-services-broker.md), [threat model 02 host services broker](../threat-models/02-host-services-broker.md)
+- **Related:** [ADR-001 microvm security posture](001-microvm-security-posture.md), [ADR-023 secret substitution mechanism](023-secrets-subsystem-egress-substitution.md) (superseded), ADR-020 (this document), ADR-020 §"Consolidated from ADR-061", [Plan 104 host services broker](../plans/104-host-services-broker.md), [threat model 02 host services broker](../threat-models/02-host-services-broker.md)
 
-> **Consolidation note:** an earlier draft of this section proposed itself (then-ADR-062) as the canonical host-services-broker ADR, consolidating the original secret-substitution ADR, ADR-059, and ADR-061 — that merge was never carried out (those remained standalone files). The ADR-wide consolidation pass instead folded ADR-062 into ADR-059 (this document, the host-services-broker canonical), alongside ADR-061, ADR-084, ADR-089, and ADR-090; the original secret-substitution ADR was separately folded into ADR-067 (the secrets-substitution canonical). Per ADR-066 §3 the broker / host-signer / audit-signer / supervisor remain four separate processes built from the one `mvm-hostd` crate.
+> **Consolidation note:** an earlier draft of this section proposed itself (then-ADR-062) as the canonical host-services-broker ADR, consolidating the original secret-substitution ADR, ADR-020, and ADR-061 — that merge was never carried out (those remained standalone files). The ADR-wide consolidation pass instead folded ADR-062 into ADR-020 (this document, the host-services-broker canonical), alongside ADR-061, ADR-084, ADR-089, and ADR-090; the original secret-substitution ADR was separately folded into ADR-023 (the secrets-substitution canonical). Per ADR-022 §3 the broker / host-signer / audit-signer / supervisor remain four separate processes built from the one `mvm-hostd` crate.
 
 ## Context
 
-[ADR-067](067-secrets-subsystem-egress-substitution.md) committed mvm to a vsock side-channel for runtime secret substitution. ADR-059 (this document) generalised that into the host services broker with `host.secrets.v1` as the forcing function. ADR-059 §"Consolidated from ADR-061" hardened the design with a four-subprocess architecture, where the dedicated `mvm-secrets-dispatcher` subprocess was the primary justification for the L1 TCB-minimization split.
+[ADR-023](023-secrets-subsystem-egress-substitution.md) committed mvm to a vsock side-channel for runtime secret substitution. ADR-020 (this document) generalised that into the host services broker with `host.secrets.v1` as the forcing function. ADR-020 §"Consolidated from ADR-061" hardened the design with a four-subprocess architecture, where the dedicated `mvm-secrets-dispatcher` subprocess was the primary justification for the L1 TCB-minimization split.
 
 Subsequent project-direction review (2026-05-28) decided to **drop runtime secret substitution as an mvm responsibility** in v1. Reasoning:
 
 - The `host.secrets.v1` design pulls credential issuance into the host's trust boundary; the alternative ("workloads bring their own secret material") is materially simpler, and the security claims of mvm's broker are not load-bearing for whether *external* secret material is available to workloads.
-- ADR-067's SDK-matrix cost (Python `requests`/`httpx`/`aiohttp`, TypeScript `fetch`/`axios`, Rust `reqwest`/`hyper`/`tonic` hook libraries) is substantial and the per-language hook surface is ongoing maintenance.
+- ADR-023's SDK-matrix cost (Python `requests`/`httpx`/`aiohttp`, TypeScript `fetch`/`axios`, Rust `reqwest`/`hyper`/`tonic` hook libraries) is substantial and the per-language hook surface is ongoing maintenance.
 - The hostile-guest threat surface (raw socket bypass, library bypass, placeholder egress, S25 backstop) is large and growing.
 - Workloads typically already have credential delivery mechanisms (env vars, file mounts, in-cloud IMDS, vault sidecars). Adding a fourth one in mvm's name is feature creep.
 
@@ -420,7 +420,7 @@ Separately, project-direction review wants **workloads to emit their own audit e
 
 ## Decision
 
-**Drop `host.secrets.v1` and `mvm-secrets-dispatcher` from Plan 104 v1.** Delete the crate, delete the supervisor's `secrets_proxy.rs`, remove the secrets references from Plan 104 / ADR-067 / ADR-059 / ADR-061 / threat-model 02 / ADR-002 Claim 13.
+**Drop `host.secrets.v1` and `mvm-secrets-dispatcher` from Plan 104 v1.** Delete the crate, delete the supervisor's `secrets_proxy.rs`, remove the secrets references from Plan 104 / ADR-023 / ADR-020 / ADR-061 / threat-model 02 / ADR-001 Claim 13.
 
 **Add `host.audit.v1` as a workload-callable service in `mvm-broker`.** Verbs `emit` (one entry) + `emit_batch` (≤100 entries, ≤4 KiB each). Workload-emitted entries flow through `mvm-broker` → supervisor's `AuditSignerProxy` → `mvm-audit-signer`, chain-signed with a new `EventCategory::WorkloadAudit` variant so the chain verifier can distinguish workload-asserted from system-asserted entries.
 
@@ -438,14 +438,14 @@ The `mvm-secrets-dispatcher` subprocess (uid 902) is removed. The vsock listener
 
 | ADR / artifact | Status under ADR-062 |
 | --- | --- |
-| ADR-067 (entire) | **Superseded.** The vsock-substitution-vs-TLS-proxy comparison stays as historical context but the design itself is not being implemented. ADR-067's "Implementation: lands as `host.secrets.v1` in the host services broker" line is now false. |
-| ADR-059 §"Architecture" (two-process design) | **Already superseded by ADR-061**; further narrowed to three subprocesses here. |
+| ADR-023 (entire) | **Superseded.** The vsock-substitution-vs-TLS-proxy comparison stays as historical context but the design itself is not being implemented. ADR-023's "Implementation: lands as `host.secrets.v1` in the host services broker" line is now false. |
+| ADR-020 §"Architecture" (two-process design) | **Already superseded by ADR-061**; further narrowed to three subprocesses here. |
 | ADR-061 §"Decision" (four-subprocess table) | **Superseded** by the three-subprocess table above. The reasoning for splitting `mvm-secrets-dispatcher` (credential-minting threat surface) is no longer applicable. The reasoning for the other three subprocesses (key isolation, audit isolation) **remains valid and is the basis for keeping them**. |
 | ADR-061 §"Decision" — additional Layer-1 reasoning | **Preserved.** Host-signer isolation (H-L1.1) still load-bearing for Claim 8. Audit-signer isolation (H-L1.2) still load-bearing for chain integrity. General broker isolation (H-L1.3) still load-bearing for parser-bug containment. |
 | ADR-061 §"Threat model" — software insider clause | **Preserved with edits.** Software-insider attacks on the host signer key and audit chain key are still in scope. The "secrets in process memory" threat goes away — there are no secrets to extract. |
-| ADR-002 Claim 13 (no raw secret over broker) | **Rewritten** (see §"Security claims" below). |
+| ADR-001 Claim 13 (no raw secret over broker) | **Rewritten** (see §"Security claims" below). |
 
-## What remains unchanged from ADR-059 / ADR-061
+## What remains unchanged from ADR-020 / ADR-061
 
 - Wire format: JSON via `serde_json` for envelopes; JCS (RFC 8785) via `serde_jcs` for signed payloads.
 - Algorithm-identifier byte in `AuthenticatedFrame` (§H-L4.1).
@@ -465,7 +465,7 @@ The `mvm-secrets-dispatcher` subprocess (uid 902) is removed. The vsock listener
 - `crates/mvm-secrets-dispatcher/` (entire crate)
 - `crates/mvm-supervisor/src/services/secrets_proxy.rs`
 - Plan 104 W5 (secrets dispatcher wiring)
-- Plan 104 W7 (ADR-067 SDK matrix — Python/TS/Rust hook libraries)
+- Plan 104 W7 (ADR-023 SDK matrix — Python/TS/Rust hook libraries)
 - §H-L4.3 per-call session-key rotation (was secrets-specific timing-oracle defense)
 - §S22 (audit batch durability for secrets) — replaced by generic audit-durability discussion
 - §S24 (privileged composition leaks secrets) — no secrets to leak
@@ -501,13 +501,13 @@ The handler forwards each entry to the supervisor's `AuditSignerProxy::append_en
 
 ## Security claims
 
-ADR-002's claim 12 stays (binding-gated service dispatch). **Claim 13 is rewritten** to apply to workload-emitted audit entries:
+ADR-001's claim 12 stays (binding-gated service dispatch). **Claim 13 is rewritten** to apply to workload-emitted audit entries:
 
 > **Claim 13 (rewritten).** Every workload-emitted audit entry (via `host.audit.v1`) is chain-signed by `mvm-audit-signer` under the `WorkloadAudit` category, distinguishable from supervisor-emitted entries in the audit chain. An entry whose bytes are tampered with after signing fails `mvmctl audit verify`; an entry claiming a workload id the caller doesn't own is refused at admission.
 
 Two new tests verify the claim: `workload_audit_entries_chain_signed_with_workload_audit_category` + `workload_audit_entry_workload_id_mismatch_refused`.
 
-The ADR-002 framework-references row for Claim 13 is rewritten too — drops the credential-exfiltration MITRE references; adds T1078 (Valid Accounts — unauthorized audit attribution) under `D3FEND: Authentication`.
+The ADR-001 framework-references row for Claim 13 is rewritten too — drops the credential-exfiltration MITRE references; adds T1078 (Valid Accounts — unauthorized audit attribution) under `D3FEND: Authentication`.
 
 ## Consequences
 
@@ -521,7 +521,7 @@ The ADR-002 framework-references row for Claim 13 is rewritten too — drops the
 
 **Negative:**
 
-- ADR-067's substantial design work is now historical — superseded but not deleted (kept for future reference if the question of mvm-managed credentials comes up again).
+- ADR-023's substantial design work is now historical — superseded but not deleted (kept for future reference if the question of mvm-managed credentials comes up again).
 - Operators who *want* a managed-credential service have to look elsewhere. mvm's stance becomes: "bring your own secret material; mvm's job is to launch and audit the workload."
 - The W1b.1 `mvm-secrets-dispatcher` crate (PR #480, already merged) gets deleted as dead code under the no-backcompat rule. Mechanical work but visible in git history as scaffold-then-removal.
 - Claim 13 changes meaning between this rewrite and any external references to its prior form (none known in the wild as of 2026-05-28; project-internal references will be updated in the same PR sequence).
@@ -529,7 +529,7 @@ The ADR-002 framework-references row for Claim 13 is rewritten too — drops the
 ## Non-goals (additions over ADR-061)
 
 - **No "BYOK" secret-delivery path** in mvm's name. Workloads use their own credential pipelines.
-- **No drop-in `host.secrets.v2`** placeholder. If a future ADR brings secrets back, it gets a fresh design rather than picking up where ADR-067 left off.
+- **No drop-in `host.secrets.v2`** placeholder. If a future ADR brings secrets back, it gets a fresh design rather than picking up where ADR-023 left off.
 - **No backwards-compat shim** for callers expecting `host.secrets.v1`. Per the no-backcompat rule, callers either don't exist (the service was never deployed) or get a `NotBound` envelope.
 - **No `host.logging.v1` in this rescope.** That stays in the host-logging follow-on plan. `host.audit.v1` is specifically the audit-chain emission path, not general structured logging.
 
@@ -544,8 +544,8 @@ The ADR-002 framework-references row for Claim 13 is rewritten too — drops the
 
 - [Plan 104 — host services broker](../plans/104-host-services-broker.md) §"Rescope (ADR-062)" — the spec changes that land alongside this ADR
 - [threat model 02 — host services broker](../threat-models/02-host-services-broker.md) §"Per-service threat walk" — `SECRET-*` tables removed; new `AUDIT-*` tables added
-- [ADR-067 — secret substitution mechanism](067-secrets-subsystem-egress-substitution.md) — superseded
-- ADR-059 §"Consolidated from ADR-061" — host services broker — four-subprocess hardening — partially superseded (subprocess count reduced)
+- [ADR-023 — secret substitution mechanism](023-secrets-subsystem-egress-substitution.md) — superseded
+- ADR-020 §"Consolidated from ADR-061" — host services broker — four-subprocess hardening — partially superseded (subprocess count reduced)
 
 
 ## Consolidated from ADR-084 — Host services as a per-tenant daemon, not per-VM spawn
@@ -553,12 +553,12 @@ The ADR-002 framework-references row for Claim 13 is rewritten too — drops the
 - Status: Accepted
 - Date: 2026-06-16
 - Owner: MVM Project
-- Related: ADR-059 (host services broker over vsock — this revises its process model), ADR-067 (TLS substitution mechanism), ADR-002 (microVM security posture — claims 12/13), ADR-041 (signed audited execution plans — claim 8), mvmd Plan 52 (host-services consumer, complete)
+- Related: ADR-020 (host services broker over vsock — this revises its process model), ADR-023 (TLS substitution mechanism), ADR-001 (microVM security posture — claims 12/13), ADR-014 (signed audited execution plans — claim 8), mvmd Plan 52 (host-services consumer, complete)
 - Sequenced by: [Plan 202 — Host services daemon](../plans/202-host-services-daemon.md)
 
 ## Context
 
-ADR-059 specified the host-services broker as an **in-process** listener inside the per-VM supervisor, with `host.secrets.v1` split into a dedicated subprocess. The implementation that actually shipped (the E5.3b-2 spawn stack) diverged: both the broker **and** the audit-signer became **per-VM detached subprocesses**, forked from `mvmctl up` via `mvm_backend::broker_services_spawn::spawn_broker_services_if_admitted` — one `mvm-broker` and one `mvm-audit-signer` `setsid` child per admitted VM, each binding a UDS, readiness-polled, then reaped on stop.
+ADR-020 specified the host-services broker as an **in-process** listener inside the per-VM supervisor, with `host.secrets.v1` split into a dedicated subprocess. The implementation that actually shipped (the E5.3b-2 spawn stack) diverged: both the broker **and** the audit-signer became **per-VM detached subprocesses**, forked from `mvmctl up` via `mvm_backend::broker_services_spawn::spawn_broker_services_if_admitted` — one `mvm-broker` and one `mvm-audit-signer` `setsid` child per admitted VM, each binding a UDS, readiness-polled, then reaped on stop.
 
 That model has two problems we hit grounding the first live in-guest `host.audit.v1` round-trip:
 
@@ -602,7 +602,7 @@ The host agent holds no secrets, so a single host-wide agent serving every tenan
 
 ### Registration control plane
 
-The daemons listen on a per-tenant control socket under the run dir (e.g. `<run>/broker-control-<tenant>.sock`, mode 0700, host-owned). `Register`/`Deregister` are signed by the host (the same host identity that signs plans), so a guest — which has no access to the control socket — cannot register or unbind sockets. The wire `ServiceCall`/`ServiceResponse` shape on `BROKER_PORT` is unchanged from ADR-059; only the *owner* of the per-VM socket moves from a per-VM fork to the resident daemon.
+The daemons listen on a per-tenant control socket under the run dir (e.g. `<run>/broker-control-<tenant>.sock`, mode 0700, host-owned). `Register`/`Deregister` are signed by the host (the same host identity that signs plans), so a guest — which has no access to the control socket — cannot register or unbind sockets. The wire `ServiceCall`/`ServiceResponse` shape on `BROKER_PORT` is unchanged from ADR-020; only the *owner* of the per-VM socket moves from a per-VM fork to the resident daemon.
 
 ### Crash and restart
 
@@ -620,14 +620,14 @@ Broker dispatch folds into the **host-agent daemon** (a host-side control proces
 
 `mvmd` separates tenants in layers, strongest first. The host-services daemon model is defense in depth on top of the VM boundary, not the primary isolation.
 
-1. **Hypervisor + jailer, per microVM — primary.** Each workload is its own guest (Firecracker + jailer on the fleet path) with its own kernel, seccomp, cgroups, and namespaces. ADR-002 holds: one guest = one tenant's workload; multi-tenant *inside* a guest is out of scope. Two tenants' VMs are isolated because they are separate jailed VMs — full stop.
+1. **Hypervisor + jailer, per microVM — primary.** Each workload is its own guest (Firecracker + jailer on the fleet path) with its own kernel, seccomp, cgroups, and namespaces. ADR-001 holds: one guest = one tenant's workload; multi-tenant *inside* a guest is out of scope. Two tenants' VMs are isolated because they are separate jailed VMs — full stop.
 2. **Host services — separation by replication.** `mvmd` runs one (host-agent daemon + signer helper) per tenant, so there is no shared mutable host-services state across tenants: separate **process** (a parser bug or crash in one tenant's daemon can't reach another's), separate **key** (each helper holds only its tenant's signing keys — it cannot sign as another tenant, and compromising it yields nothing of another's), separate **audit** (a tenant's chains are written only by its helper, signed by its key, verified against its pubkey). Within a tenant, cross-VM is blocked by the server-derived `vm_id`; a VM reaches only its own tenant's daemon because that daemon is the only one that binds its socket.
 3. **`mvmd` is the cross-tenant arbiter — and in the TCB.** It assigns VMs to tenants, scopes each tenant's network/egress policy, and arbitrates cross-VM/cross-tenant requests under tenant-scoped authz. The orchestration-layer tenant boundary is exactly as strong as `mvmd`'s authz — `mvmd`'s to harden.
 
 Two constraints make this real:
 
 - **Per-tenant keys are required, not optional.** The key/audit boundaries mean nothing if tenants share one host key; each tenant's helper holds that tenant's signing key(s). Local single-tenant `mvm` is the degenerate case (one key, one helper).
-- **The trust root is the host.** All tenants share one host and one hypervisor; a VM escape or host compromise defeats tenant isolation (ADR-002 trusts the hypervisor and puts a malicious host out of scope). Daemon-set replication contains *host-services-layer* faults to a tenant — it does not change the trust root.
+- **The trust root is the host.** All tenants share one host and one hypervisor; a VM escape or host compromise defeats tenant isolation (ADR-001 trusts the hypervisor and puts a malicious host out of scope). Daemon-set replication contains *host-services-layer* faults to a tenant — it does not change the trust root.
 
 ## Security model
 
@@ -640,12 +640,12 @@ The claim-12 (binding-gated dispatch) and claim-13 (no raw secret over the broke
 
 ### Surfaces that do not expand
 
-The guest-facing wire (`ServiceCall` over `AuthenticatedFrame` on `BROKER_PORT`) is byte-identical to ADR-059. The new surface is the **host-side control socket** (Register/Deregister), reachable only by the host (mode 0700, host-signed messages), never by a guest. No new guest-reachable verb, port, or frame type.
+The guest-facing wire (`ServiceCall` over `AuthenticatedFrame` on `BROKER_PORT`) is byte-identical to ADR-020. The new surface is the **host-side control socket** (Register/Deregister), reachable only by the host (mode 0700, host-signed messages), never by a guest. No new guest-reachable verb, port, or frame type.
 
 ## Alternatives considered
 
 - **Per-VM subprocess (status quo).** Correct moat, wrong granularity: `2N` processes + per-boot spawn latency. Fails mvmd density. This ADR replaces it.
-- **In-process broker in the supervisor (original ADR-059).** Avoids a separate broker process but puts guest-service dispatch in the VMM's address space and is still per-VM. Rejected for TCB and granularity reasons.
+- **In-process broker in the supervisor (original ADR-020).** Avoids a separate broker process but puts guest-service dispatch in the VMM's address space and is still per-VM. Rejected for TCB and granularity reasons.
 - **Single host-wide broker for all tenants.** Fewest processes, but a parsing bug becomes a cross-tenant boundary and one signer would hold every tenant's key. Rejected for tenant isolation; per-tenant is the chosen middle.
 - **Lazy spawn on first guest dial.** Defers the cost but reintroduces per-VM processes and adds first-call latency inside the request path. The register-at-boot daemon gets the same "only when needed" property without per-VM processes.
 
@@ -670,8 +670,8 @@ Phased in [Plan 202](../plans/202-host-services-daemon.md). The wire protocol on
 
 ## Out of scope
 
-- The guest-facing wire format, the service catalog, and the capability-gating rules — all unchanged from ADR-059.
-- Cross-VM / cross-tenant data delegation, which remains mvmd's tenant-scoped-authz responsibility (ADR-059 §Cross-VM delegation).
+- The guest-facing wire format, the service catalog, and the capability-gating rules — all unchanged from ADR-020.
+- Cross-VM / cross-tenant data delegation, which remains mvmd's tenant-scoped-authz responsibility (ADR-020 §Cross-VM delegation).
 - The egress gateway bridge and its L4 policy enforcement — a separate axis that this ADR deliberately stops conflating with host-service availability.
 
 
@@ -679,15 +679,15 @@ Phased in [Plan 202](../plans/202-host-services-daemon.md). The wire protocol on
 
 **Status:** Proposed
 **Date:** 2026-06-19
-**Relates to:** [ADR-005](005-sealed-signed-builder-image.md),
-[ADR-014](014-vmbackend-single-trait.md),
-[ADR-005](005-sealed-signed-builder-image.md),
-[ADR-005](005-sealed-signed-builder-image.md),
-[ADR-041](041-signed-audited-execution-plans.md),
+**Relates to:** [ADR-004](004-sealed-signed-builder-image.md),
+[ADR-007](007-vmbackend-single-trait.md),
+[ADR-004](004-sealed-signed-builder-image.md),
+[ADR-004](004-sealed-signed-builder-image.md),
+[ADR-014](014-signed-audited-execution-plans.md),
 [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md),
 [Plan 200](../plans/200-machine-ux-dx-layer.md),
 [Plan 204](../plans/204-builder-vm-resident-control-plane.md), and
-ADR-059 §"Consolidated from ADR-090" (its trust-gradient and residency complement)
+ADR-020 §"Consolidated from ADR-090" (its trust-gradient and residency complement)
 
 ## Context
 
@@ -866,12 +866,12 @@ No user command rename is required.
 
 **Status:** Proposed
 **Date:** 2026-06-19
-**Relates to:** [ADR-002](002-microvm-security-posture.md),
-[ADR-014](014-vmbackend-single-trait.md),
-[ADR-005](005-sealed-signed-builder-image.md),
-ADR-059 §"Consolidated from ADR-084",
-[ADR-002](002-microvm-security-posture.md) (consolidated from ADR-088),
-ADR-059 §"Consolidated from ADR-089",
+**Relates to:** [ADR-001](001-microvm-security-posture.md),
+[ADR-007](007-vmbackend-single-trait.md),
+[ADR-004](004-sealed-signed-builder-image.md),
+ADR-020 §"Consolidated from ADR-084",
+[ADR-001](001-microvm-security-posture.md) (consolidated from ADR-088),
+ADR-020 §"Consolidated from ADR-089",
 [Plan 118](../plans/118-supervisor-standby-pool-and-live-bench.md),
 [Plan 152](../plans/152-rust-native-vz-and-init-lifecycle-parity.md),
 [Plan 159](../plans/159-vz-inspired-macos-dx.md),
@@ -904,9 +904,9 @@ are the source of the present design risk:
    were treated as competing strategies with opposite cost profiles.
 2. What is the trust relationship among the three daemons, and what stops "make it
    instant" pressure from pushing authority (keys, admission) into the builder VM or
-   fattening the workload agent — either of which would regress ADR-002?
+   fattening the workload agent — either of which would regress ADR-001?
 
-ADR-002 is unambiguous that the host is the trusted computing base and the guest is
+ADR-001 is unambiguous that the host is the trusted computing base and the guest is
 not. Any redesign that improves latency by relocating authority toward the guest is a
 security regression, however fast it feels. This ADR fixes the trust relationship and
 the residency model together so they cannot drift apart.
@@ -942,7 +942,7 @@ Concretely:
   into one global key-holding daemon is forbidden — it would regress claims 12/13.
 - The builder daemon is the resident service from ADR-089. It is the *only* daemon that
   may grow to host residency for performance, because building is its whole job and it
-  is dev-tier (ADR-002, consolidated from ADR-088).
+  is dev-tier (ADR-001, consolidated from ADR-088).
 - The workload guest agent stays the runt by construction: prod builds strip `do_exec`
   (claim 4) and the console (claim 15), both `dev-shell`-gated. It must never acquire
   orchestration authority or hold secrets. Fattening it is the primary smell this ADR
@@ -979,7 +979,7 @@ split and Plan 159's snapshot/fork).
 
 ### 3. Residency introduces no claim regression
 
-- The builder VM is dev-tier (ADR-002, consolidated from ADR-088), so snapshotting and resuming it requires no
+- The builder VM is dev-tier (ADR-001, consolidated from ADR-088), so snapshotting and resuming it requires no
   hardened kernel or verified boot and weakens no numbered claim.
 - The security-sensitive case — claim-11 application-dependency volumes — stays safe
   because the sealed volume is content-addressed and **re-verified host-side at admit
@@ -1023,7 +1023,7 @@ Negative:
 ### Collapse the host control plane into the builder VM
 
 Rejected. It is the literal reading of "let the daemon be the builder VM," but it moves
-signing keys and admission into a Linux guest, directly inverting ADR-002. The builder
+signing keys and admission into a Linux guest, directly inverting ADR-001. The builder
 daemon may be resident; it may not be trusted with keys.
 
 ### One global host daemon holding every tenant's keys
@@ -1054,7 +1054,7 @@ park/resume into the parked state; add the cold-acquisition snapshot-bake; docum
 ## Threat-model delta (residency landed)
 
 The residency policy (Plan 205 WS-B) and parked-standby demotion (WS-D) are in the tree. This
-section records why neither changes the trust boundary or weakens an ADR-002 claim:
+section records why neither changes the trust boundary or weakens an ADR-001 claim:
 
 - **Keys, admission, and audit stay host-side at every residency setting.** Residency only
   changes how warm the standby pool is kept and whether an idle standby is parked or reaped.

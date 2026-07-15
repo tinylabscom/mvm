@@ -1,4 +1,4 @@
-# Browser audit-log verifier (ADR-002)
+# Browser audit-log verifier (ADR-001)
 
 A serverless, static page that verifies an mvm chain-signed audit log
 in the browser — the same Ed25519 chain check `mvmctl audit verify` runs
@@ -20,7 +20,7 @@ needed to use or test the verifier — all of the logic lives in the
 If you ever do want the browser bundle, build it **inside the builder/dev
 VM** (`mvmctl dev`), never with a host toolchain — same invariant as
 every other build in this repo: builder tools never live on the host
-(ADR-005, ADR-014). The wasm32 target + `wasm-pack` belong in that guest,
+(ADR-004, ADR-007). The wasm32 target + `wasm-pack` belong in that guest,
 not on a contributor's machine. The output (`pkg/*.js` + `…_bg.wasm`) is
 what `index.html` imports; serve the directory statically and the page is
 fully offline after load — nothing you paste leaves the tab.
@@ -31,7 +31,7 @@ fully offline after load — nothing you paste leaves the tab.
   (the private key lives at `~/.mvm/keys/host-signer.ed25519`, mode 0600).
   There is no CLI subcommand to print the public half yet — a small
   `mvmctl audit pubkey` printer is the obvious follow-up (noted in
-  ADR-002). Until then, derive it from the keypair.
+  ADR-001). Until then, derive it from the keypair.
 - **Audit log**: the contents of a per-tenant `~/.mvm/audit/<tenant>.jsonl`
   stream (paste, or pick the file).
 

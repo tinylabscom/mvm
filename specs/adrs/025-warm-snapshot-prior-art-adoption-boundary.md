@@ -1,4 +1,4 @@
-# ADR-073 — Warm-snapshot prior art: adoption boundary
+# ADR-025 — Warm-snapshot prior art: adoption boundary
 
 **Status:** Proposed
 **Date:** 2026-06-05
@@ -46,7 +46,7 @@ Defining traits (by which the oblique reference is keyed):
   socket family; AF_NETLINK, raw sockets, multicast, TUN/TAP, and ICMP are
   unsupported.
 - Bundled guest kernel + init shim, extracted at build/runtime — the same shape as
-  mvm's libkrunfw `extract_bundled_kernel()` and embedded `stage0-init` (ADR-005).
+  mvm's libkrunfw `extract_bundled_kernel()` and embedded `stage0-init` (ADR-004).
 
 This ADR is clean-room: it records *design-level* learnings from public docs, not
 copied code. The runtime is Apache-2.0; nothing here vendors or links it
@@ -99,7 +99,7 @@ comes from. Record this as a reference data point for Plan 152's Rust-native VZ
 supervisor — **not** a direction change. mvm stays on Virtualization.framework: the
 entitled-TCB-as-a-tiny-separate-process invariant, the entitlement model, and the
 maintenance cost of an HVF-direct VMM all argue against dropping to raw HVF
-(ADR-014, Plan 152 Decision). The honest tradeoff — VZ.framework gives less control
+(ADR-007, Plan 152 Decision). The honest tradeoff — VZ.framework gives less control
 over guest memory, which is exactly the lever fast CoW restore wants — belongs in
 Plan 152/140's design notes, not in a backend rewrite.
 
@@ -109,9 +109,9 @@ The runtime's fastest path (`restore_on_release(false)`) **reuses a dirty guest
 across workloads** — page cache, and any other in-memory state, survive from one job
 to the next. That directly violates two standing mvm invariants:
 
-- **One guest = one workload** (ADR-002 §"Out of scope" — multi-tenant guests are
+- **One guest = one workload** (ADR-001 §"Out of scope" — multi-tenant guests are
   explicitly not in the threat model). A reused guest is a multi-workload guest.
-- **Per-run admission + audit** (claim 8 / ADR-041): every workload boots from a
+- **Per-run admission + audit** (claim 8 / ADR-014): every workload boots from a
   freshly synthesized, signed `ExecutionPlan` and emits `plan.admitted` /
   `plan.launched` to the chain. A worker pulled hot from a pool with prior in-memory
   state has no fresh admission and carries un-attested residue across the audit
@@ -132,7 +132,7 @@ threat-model note. It is **never** available to workload microVMs.
 ### 4. Refuse — TSI networking (already decided; cited as supporting evidence)
 
 The runtime routes guest network I/O through the host TSI socket family. mvm removed
-TSI entirely (ADR-041 §W6.A amendment / Plan 102 W6.A / Plan 142): TSI bypasses
+TSI entirely (ADR-014 §W6.A amendment / Plan 102 W6.A / Plan 142): TSI bypasses
 virtio-net, violating the claim-10 no-bypass invariant — every byte leaving a guest
 must traverse the auditable gvproxy/passt bridge. This ADR does **not** reopen that;
 it cites the runtime's own documented TSI limitation list (AF_NETLINK, raw sockets,
@@ -167,15 +167,15 @@ them here:
   (`reference_objc2_vz_external_references`) so future sessions can decode "the
   pooled OCI-microVM runtime" without a name reaching repo text or memory.
 - No claim changes. This is a prior-art/adoption-boundary ADR, not a security-claim
-  ADR; the ADR-002 numbered table is untouched.
+  ADR; the ADR-001 numbered table is untouched.
 
 ## References
 
-- [ADR-002](002-microvm-security-posture.md) — security posture; one-guest-one-workload, claim numbering
-- [ADR-041](041-signed-audited-execution-plans.md) — claim 8, signed/audited `ExecutionPlan` (per-run admission)
-- [ADR-014](014-vmbackend-single-trait.md) — Vz backend (why we stay on Virtualization.framework)
-- [ADR-041](041-signed-audited-execution-plans.md) §W6.A — no-bypass invariant, TSI removed
-- [ADR-005](005-sealed-signed-builder-image.md) — bundled-kernel/embedded-init extraction shape
+- [ADR-001](001-microvm-security-posture.md) — security posture; one-guest-one-workload, claim numbering
+- [ADR-014](014-signed-audited-execution-plans.md) — claim 8, signed/audited `ExecutionPlan` (per-run admission)
+- [ADR-007](007-vmbackend-single-trait.md) — Vz backend (why we stay on Virtualization.framework)
+- [ADR-014](014-signed-audited-execution-plans.md) §W6.A — no-bypass invariant, TSI removed
+- [ADR-004](004-sealed-signed-builder-image.md) — bundled-kernel/embedded-init extraction shape
 - [Plan 140](../plans/140-snapshot-restore-productionization.md) — restore productionization (inherits page-cache warmth)
 - [Plan 148](../plans/148-microvm-fork-fanout-and-branch.md) — fork-fanout of fresh children from a paused base
 - [Plan 152](../plans/152-rust-native-vz-and-init-lifecycle-parity.md) — Rust-native VZ supervisor (HVF-direct data point)
