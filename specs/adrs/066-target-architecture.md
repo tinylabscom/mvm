@@ -2,7 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-05-31
-**Cross-refs**: ADR-002 (security posture, the 14 claims), ADR-014 (VmBackend single trait), ADR-027 (encryption layering) + ADR-042 (encryption substrate), ADR-031 (cross-platform), ADR-040 (metering), ADR-041 (signed/audited ExecutionPlan, claim 8), ADR-043 + ADR-053 (protocol versioning / readiness), ADR-014 (builder VM via libkrun — the canonical builder-VM ADR post-consolidation), ADR-041 (sealed app-deps, claim 11), ADR-051 (runtime overlay disk), ADR-059 (host services broker — the canonical broker ADR post-consolidation), ADR-002 (boundary language: lean Rust, consolidated from ADR-063), ADR-004 (NetworkProvider trait), ADR-005 (single builder/dev image, embedded host binaries). Planning input: Plan 117 (cleanup & rearchitecture brief).
+**Cross-refs**: ADR-002 (security posture, the 14 claims), ADR-014 (VmBackend single trait), ADR-027 (encryption layering + substrate), ADR-031 (cross-platform), ADR-040 (metering), ADR-041 (signed/audited ExecutionPlan, claim 8), ADR-043 + ADR-053 (protocol versioning / readiness), ADR-014 (builder VM via libkrun — the canonical builder-VM ADR post-consolidation), ADR-041 (sealed app-deps, claim 11), ADR-051 (runtime overlay disk), ADR-059 (host services broker — the canonical broker ADR post-consolidation), ADR-002 (boundary language: lean Rust, consolidated from ADR-063), ADR-004 (NetworkProvider trait), ADR-005 (single builder/dev image, embedded host binaries). Planning input: Plan 117 (cleanup & rearchitecture brief).
 
 ## Context
 
@@ -105,9 +105,9 @@ The full process-isolation map (the moat, made verifiable) is the table above pl
 
 *(This corrects Plan 117 §A16 / §3, which floated "triple consumption" with `mvm` itself as a sidecar.)*
 
-### 5. Encryption + key lifecycle (implements ADR-027 + ADR-042 — build it, don't re-decide it)
+### 5. Encryption + key lifecycle (implements ADR-027 — build it, don't re-decide it)
 
-The accepted layering (ADR-027 table, ADR-042 substrate) is designed but largely unbuilt; this ADR maps it onto the crate graph. **All data is encrypted at rest and in flight.**
+The accepted layering (ADR-027 table + substrate) is designed but largely unbuilt; this ADR maps it onto the crate graph. **All data is encrypted at rest and in flight.**
 
 - **At rest — every mounted dir/volume + snapshots + audit + keys.** Envelope encryption owned by the `StorageProvider` `encrypted` impl in `mvm-storage`: each volume/snapshot has a data key (DEK) encrypting its bytes (AES-XTS via dm-crypt/LUKS2 on Linux — through `crates/deps/libcryptsetup-sys`; a per-file AES-256-GCM AEAD on macOS/non-Linux — plan 122 A2 `mvm_core::crypto::volume`, funnelled through the one `crypto::aead` entry point, A1). Each DEK is wrapped by a per-tenant KEK in the OS keystore / Secure Enclave / TPM (`keyring`). The guest sees plaintext (inside the trust boundary); host-side bytes are always ciphertext. **Decided: the mvm-managed AEAD envelope on both platforms** — not host FileVault — because the DEK model is portable, mvm-controlled, rotatable, and attestable.
 - **Key rotation.** KEK rotation = re-wrap DEKs (cheap) on a timer (default 90 days, configurable). DEK rotation rides the rebuild cycle — microVMs are rebuilt never mutated, so every rebuild is a free re-key point. Each per-volume DEK is bound to the content hash + signed plan + audit chain so rotation is attestable. Key material zeroizes on drop (`zeroize`). *(Plan 122 B1 ships the 90-day KEK-rotation timer (`crypto::rotation_policy`); B2 adds the `WrappedKey.bound` field — mvm wires the content-hash half at the local volume admit gate, mvmd owns the per-rebuild plan/audit halves.)*

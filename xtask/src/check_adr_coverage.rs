@@ -250,12 +250,12 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     ),
     (
         28,
-        "legacy refs to an unwritten ADR; concept folded into ADR-027 (iroh-aware encryption) and \
-         ADR-042 (encryption substrate)",
+        "legacy refs to an unwritten ADR; concept folded into ADR-027 (iroh-aware encryption and \
+         encryption substrate, post-consolidation)",
     ),
     (
         29,
-        "single legacy ref; concept folded into ADR-027 / ADR-042",
+        "single legacy ref; concept folded into ADR-027",
     ),
     (
         36,

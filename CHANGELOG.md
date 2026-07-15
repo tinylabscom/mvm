@@ -1193,7 +1193,7 @@ uses [SemVer](https://semver.org/) once it reaches 1.0.
     keyed-tenant as a downgrade defence (override via
     `MVM_ALLOW_UNENCRYPTED_SNAPSHOT=1` for one-time migration).
     19 tests.
-  - **W6** — ADR-042 ("Encryption substrate") documents the full
+  - **W6** — ADR-027 ("Encryption substrate") documents the full
     surface + this CHANGELOG entry. Plan 63 closes.
 
   Tests: workspace at **2082 passed / 0 failed** post-W6. Plan-60
