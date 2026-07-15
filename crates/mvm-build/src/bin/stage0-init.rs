@@ -1364,7 +1364,8 @@ mod linux {
                 xattrs: vec![],
             }];
             let options = mvm_fs::ext4::BuildOptions::default().with_volume_name(b"mvm-work");
-            let image = mvm_fs::ext4::build_image_with_options(&nodes, &options).expect("build image");
+            let image =
+                mvm_fs::ext4::build_image_with_options(&nodes, &options).expect("build image");
             assert_eq!(
                 ext4_volume_label_from_superblock(&image),
                 Some("mvm-work".to_string())

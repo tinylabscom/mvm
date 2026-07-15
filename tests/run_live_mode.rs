@@ -174,7 +174,9 @@ fn sdk_live_dev_template_shells_to_proc_start() {
         .env("MVM_CLI_BIN", &fixture)
         .env(
             "PYTHONPATH",
-            std::env::current_dir().unwrap().join("crates/mvm-sdk/sdks/python"),
+            std::env::current_dir()
+                .unwrap()
+                .join("crates/mvm-sdk/sdks/python"),
         )
         .arg(&script);
 
@@ -234,7 +236,9 @@ fn sdk_live_prod_template_raises_sandbox_dev_only_before_proc_start() {
         .env("MVM_CLI_BIN", &fixture)
         .env(
             "PYTHONPATH",
-            std::env::current_dir().unwrap().join("crates/mvm-sdk/sdks/python"),
+            std::env::current_dir()
+                .unwrap()
+                .join("crates/mvm-sdk/sdks/python"),
         )
         .arg(&script);
 
