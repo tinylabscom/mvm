@@ -1,25 +1,17 @@
----
-title: "ADR-015: hostd-IPC protocol versioning"
-status: Accepted
-date: 2026-05-11
-related: ADR-001 (microVM security posture); ADR-014 (signed audited execution plans); plan 60 Phase 8 (mvmd integration contract verification)
----
+# ADR-015: hostd IPC carries an explicit wire-protocol version
 
 ## Status
 
-Accepted. `mvm_core::protocol::PROTOCOL_VERSION` shipped 2026-05-11 alongside the mvm-side stability test that pins the constant. mvmd's `tests/mvmd_compat.rs` (Phase 8, mvmd-repo work) reads it as the fixed point its frozen-byte fixtures pin against.
+Accepted.
 
 ## Context
 
-`mvm-hostd` ↔ `mvmd` IPC runs over a Unix socket at `/run/mvm/hostd.sock` (default; configurable). The wire format is length-prefixed JSON envelopes carrying `HostdRequest` and `HostdResponse` enums defined in `mvm_core::protocol::protocol`. Plan 60 Phase 8 closes the cross-repo contract: mvmd's CI must catch wire-format drift before a PR merges, regardless of which repo the breaking change lands in.
-
-Until this ADR, the protocol surface had no version label. Add a field to a `HostdRequest` variant, rebuild both sides locally, observe nothing breaking — and downstream consumers on a pinned mvm version would fail mysteriously when their mvmd talked to the new mvm-hostd.
-
-Three problems the version constant solves:
-
-1. **Compatibility detection at handshake.** A daemon receiving an envelope can read `PROTOCOL_VERSION` from the peer's identification frame and refuse cleanly if the peer is ahead or behind by a known-incompatible step.
-2. **CI gate against drift.** mvmd's `tests/mvmd_compat.rs` pins frozen-byte fixtures for the canonical envelope shapes (`AgentRequest::Reconcile`, `HostdRequest::Start`, `HostdResponse::Started`). If the bytes change without the constant bumping, the test fails on the mvmd side — caught before merge.
-3. **Documented bump policy.** Operators auditing a deployment can `grep PROTOCOL_VERSION` and see which generation of the wire format the binary speaks.
+`mvm-hostd` speaks a length-prefixed JSON envelope protocol
+(`HostdRequest` / `HostdResponse`, defined in `mvm_core::protocol`) over
+a Unix socket. Without a version label on that wire format, adding a
+field to a request variant, rebuilding both sides locally, and observing
+nothing break would let a downstream consumer pinned to an older mvm
+version fail mysteriously once its peer moved ahead.
 
 ## Decision
 
@@ -27,77 +19,83 @@ Three problems the version constant solves:
 
 ```rust
 // crates/mvm-core/src/protocol/protocol.rs
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 ```
 
-`u32` (not `u8` / `u64`) because:
-
-- `u8` caps at 255, which is conservative for a long-lived project where the constant might bump every few months over years.
-- `u64` is overkill; a wire-format version that exceeds 4 billion suggests something deeper has gone wrong.
-- `u32` matches the existing `SIDECAR_SCHEMA_VERSION: u32` in `mvm_security::snapshot_hmac` and `SCHEMA_VERSION: u32` in `mvm_plan` — consistent type across the project's various schema versions.
+`u32`: large enough that a long-lived project bumping every few months
+for years won't run out, small enough that exceeding it would signal
+something has gone wrong elsewhere.
 
 ### Bump policy
 
-**Increment `PROTOCOL_VERSION` when ANY of the following change in a way that's not backward-compatible with a peer at the previous version:**
+**Increment `PROTOCOL_VERSION` when any of the following change in a way
+that is not backward-compatible with a peer at the previous version:**
 
-- A new `HostdRequest` or `HostdResponse` variant is added that older peers can't downgrade or ignore gracefully. (Most variant additions are NOT forward-compat because serde rejects unknown variants on the receive side; adding a variant usually requires a bump unless deliberately gated behind feature negotiation.)
-- A field is added to an existing variant in a position that shifts wire layout. (serde JSON is name-keyed, so positional shifts are rare — but if we ever migrate to CBOR or bincode, positional changes become breaking.)
-- A field's semantic meaning changes. Same name, different semantics — for example, `timeout_secs` previously meant total wall-clock but now means per-attempt. Wire is unchanged; semantics aren't.
-- The frame encoding shifts. (length-prefixed JSON today; switching to CBOR or msgpack is a wire-level break.)
+- A new `HostdRequest` or `HostdResponse` variant is added that an older
+  peer can't downgrade or ignore gracefully. Serde rejects unknown
+  variants on receipt, so most variant additions are not forward-
+  compatible and require a bump unless deliberately gated by feature
+  negotiation.
+- A field is added to an existing variant in a position that shifts wire
+  layout. Rare under name-keyed JSON, but a future move to a
+  position-sensitive encoding would make this common.
+- A field's semantic meaning changes with the same name — e.g. a
+  `timeout_secs` field that used to mean total wall-clock now meaning
+  per-attempt. The wire is unchanged; the semantics aren't.
+- The frame encoding itself shifts (e.g. length-prefixed JSON to CBOR).
 
-**Do NOT bump for:**
+**Do not bump for:** new fields carrying `#[serde(default)]` (older
+clients keep parsing; older messages keep being parseable — the standard
+forward-compatible extension shape); new variants an older client
+refuses cleanly with a typed error rather than crashing; or comments,
+docstrings, internal helpers, and test-only changes.
 
-- New fields with `#[serde(default)]` — older clients keep parsing; older messages keep being parseable. This is the standard forward-compat extension shape.
-- New variants that older clients refuse with a typed error rather than crashing. (Requires the receiving end's match to be `#[serde(other)]`-tagged or to handle deserialization errors gracefully — not the default behaviour, but worth designing for.)
-- Comments, docstrings, internal helpers, or test-only changes.
+### History
 
-### The mvmd-side gate
+- `1` — initial shape.
+- `2` — workspace-volume attach: `workspace_id` threaded through every
+  instance-scoped `HostdRequest` variant, and `volumes: Vec<VolumeAttach>`
+  added to `StartInstance`. Every new field carries `#[serde(default)]`
+  so old payloads still deserialize; the bump exists because the byte
+  output changes (JSON keys appear once defaults are present), which is
+  exactly the kind of drift the downstream fixture pin needs to catch.
 
-`tests/mvmd_compat.rs` in the mvmd repo:
+### The cross-repo gate
 
-1. Reads `mvm_core::protocol::PROTOCOL_VERSION` from the linked-in mvm dependency.
-2. Loads its own frozen-byte fixtures from `tests/fixtures/v{N}/{request_name}.json`.
-3. For each canonical envelope (`AgentRequest::Reconcile`, `HostdRequest::Start`, `HostdResponse::Started`):
-   - Constructs the value in code with deterministic field contents.
-   - Serializes via `serde_json::to_string`.
-   - Compares byte-for-byte against the on-disk fixture.
+The mvmd repo's `tests/mvmd_compat.rs` reads `PROTOCOL_VERSION` from its
+linked mvm dependency and compares canonical envelope instances —
+`HostdRequest::StartInstance` and `HostdResponse::Ok` — against its own
+frozen-byte fixtures under `tests/fixtures/v{N}/`. When the constant
+bumps, the test refuses to run until the matching fixture set is added,
+forcing the bump and the wire-shape recapture into the same commit. The
+fixture set stays deliberately minimal — one canonical instance per
+top-level envelope — so it stays sensitive to real wire changes without
+becoming brittle to unrelated refactors.
 
-When the constant bumps, the test refuses to run until the fixture set under `tests/fixtures/v{NEW}/` is added — forcing the bump and the wire-shape recapture into the same commit.
-
-### What goes in a fresh fixture set
-
-The fixtures cover one canonical instance of each top-level envelope. They're deliberately minimal — extending them to cover every variant would make the test brittle to legitimate refactors. The canonical instances:
-
-- `AgentRequest::Reconcile { tenant_id, pool_id, expected_instances: 1, force: false }`
-- `HostdRequest::StartInstance { tenant_id, pool_id, instance_id }`
-- `HostdResponse::Started { instance_id, pid, started_at_unix_secs }`
-
-If a field name on any of these changes, the fixture-set must regenerate. The tighter the canonical set, the more aggressive the "did we mean to change this?" check.
+mvm-side, `protocol_version_is_two` pins the constant directly, so a PR
+can't silently change it without the test failing and prompting the
+mvmd-side fixture regeneration.
 
 ## Consequences
 
-### Positive
+Wire drift gets caught at PR review: a diff that changes `HostdRequest`
+or `HostdResponse` shape without bumping the constant fails mvmd's CI in
+one place, with a fixture diff a reviewer can read directly.
 
-- **Wire drift gets caught at PR review.** A diff that changes `HostdRequest` shape without bumping the constant fails mvmd's CI; the reviewer sees the breakage in one place.
-- **Compat negotiation is grounded.** The mvmd↔mvm-hostd handshake can refuse incompatible versions immediately rather than fail-on-first-bad-message.
-- **Operators get a grep-able version.** `mvmctl --version` could later surface this alongside the binary version; ops can answer "what wire format does this build speak?" without reading source.
+The bump policy is enforced by convention plus test, not by the type
+system — a maintainer could still forget to bump on a subtler
+compatibility break, and the fixture tests are the backstop, not a
+guarantee.
 
-### Negative
+There is no graceful cross-version negotiation. A peer at a different
+version refuses to talk rather than partially interoperating — correct
+for the current single-deploy-unit posture, and revisited only if mvmd
+needs to support a heterogeneous fleet of hostd versions at once.
 
-- **The bump policy is enforced by convention + test, not by the type system.** A maintainer could forget to bump. The mvmd-side fixture test is the main backstop; reviewers checking for "did the wire change?" are the secondary.
-- **Frozen-byte fixtures are brittle to JSON whitespace.** Solved by using `serde_json::to_string` (compact) consistently on both the fixture-gen and the comparison side.
-- **No graceful downgrade.** A peer at v2 refusing to talk to a v1 peer is correct but inflexible. Future variant additions might want feature-flag negotiation to allow partial-compat communication; the current contract is "match versions or refuse." Sufficient for the single-deploy-unit posture we have today; revisit if mvmd starts supporting heterogeneous clusters.
-
-### Out of scope (named)
-
-- **Plumbing the version into a handshake frame.** Today both sides just verify equality before talking. The frame-level negotiation lands when mvm-hostd ships a real bind/accept loop (Phase 8 mvmd-side work; ADR-014 documents the supervisor lift this depends on).
-- **Multi-version compatibility shims.** If mvmd needs to talk to a mvm-hostd at v1 while it itself is at v2, the shim layer lives in mvmd — not in mvm-core::protocol.
-- **Wire-format migration helpers.** The "v1 → v2 fixture upgrade" tool is mvmd's concern; mvm-core::protocol just defines the current shape.
-
-## References
-
-- `crates/mvm-core/src/protocol/protocol.rs` — `PROTOCOL_VERSION` constant + bump-policy docstring.
-- `crates/mvm-core/src/protocol/protocol.rs` — `HostdRequest` / `HostdResponse` definitions.
-- `specs/plans/60-mvm-libkrun-migration.md` Phase 8 — the cornerstone this ADR enables.
-- ADR-001 §"Out of scope" — host-trust assumptions; the wire format trusts the peer above the socket-perms layer.
-- ADR-014 — signed audited ExecutionPlan; the mvm-hostd lift consumes the plan after Phase 8 ships.
+This constant versions the hostd Unix-socket IPC protocol only. The
+guest-agent vsock protocol (`mvm_guest::vsock::PROTOCOL_VERSION`) and the
+builder daemon's protocol (`mvm_build::builderd_protocol::PROTOCOL_VERSION`)
+are separate wire protocols with their own version constants and their
+own compatibility rules — each is versioned independently because each
+connects a different pair of processes with a different compatibility
+requirement.
