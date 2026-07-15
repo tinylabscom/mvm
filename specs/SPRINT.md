@@ -103,7 +103,7 @@ Kill: `~/.cache/mvm`, `~/.config/mvm`, `~/.local/{state,share}/mvm`, `$XDG_RUNTI
 
 ### 2.6 Security & data-governance model (preserved/strengthened)
 
-- **Guest sees no secrets, emits no PII** becomes a *universal* invariant once all egress crosses the host seam: bidirectional secret **substitution** (placeholders in the guest, real secret injected host-side on egress) + bidirectional **PII redaction/masking**, both written to the chain-signed audit log. Backed by a CI witness across all workload backends. (Architecture guarantees the host inspects every byte; ruleset completeness is a policy concern.)
+- **Guest sees no secrets, emits no PII** becomes a *universal* invariant once all egress crosses the host seam: bidirectional secret **substitution** (user-named `${mvm.NAME}` placeholders in the guest, real secret injected host-side on egress only for the secret's bound destination) + bidirectional **PII redaction/masking**, both written to the chain-signed audit log. Backed by a CI witness across all workload backends. (Architecture guarantees the host inspects every byte; ruleset completeness is a policy concern.)
 - Verified boot (dm-verity rootfs + sealed runtime overlay), signed `ExecutionPlan` admission, content-addressed bundles, and the chain-signed audit log are all retained. Attestation via nix templates and the machine-checked claims catalog stay.
 - **Auditable logging everywhere:** `mvm-core::log` emits operational logs *and* chain-signed audit entries for every security-relevant action; secrets/PII redacted at the boundary; the audit chain stays verifiable via `mvmctl trust audit verify`.
 - The guest binary ships **only** as the read-only, dm-verity-sealed **runtime-overlay volume** every microVM mounts — updating the overlay updates every microVM; it is never baked per-rootfs.
@@ -225,7 +225,7 @@ First vertical slice (build in this order):
 
 Then unify + retire the old paths:
 - [ ] Route Firecracker off TAP+iptables onto this tunnel (#1717, #1701); HVF host-vsock-proxy (#1601); fail-closed on `--network-allow` where the host can't mediate.
-- [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
+- [ ] Typed connectors = the existing broker/substitution, kept separate from the generic tunnel; secret-substitution via user-defined **`${mvm.NAME}`** named placeholders (guest holds the placeholder, host injects the value only for the secret's bound destination — ADR-023) + PII-redaction as host-side L7 inspection on inspectable flows; data-governance CI witness on all workload backends.
 - [ ] Delete the dead rvproxy / native-gateway subsystem (~1,281 lines); collapse `NetworkingPreference`; drop `MVM_NETWORKING`. Enforce the mount no-shadow rule (`/mvm` in deny prefixes).
 - [ ] Snapshot/restore/warm-start: fresh boot_id + nonce + handshake; stale flows closed; no live-vsock-survives-restore assumption.
 - [ ] A networking ADR (networking cluster): why vsock-mandatory, guest-TUN, L3-over-smoltcp, typed-connectors-separate; threat/trust/privilege boundaries; snapshot behavior; transport abstraction.
