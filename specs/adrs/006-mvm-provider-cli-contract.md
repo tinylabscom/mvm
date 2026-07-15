@@ -136,8 +136,7 @@ Future provider names may include:
 ```text
 firecracker
 libkrun
-apple-vz
-libkrun
+hvf
 cloud-hypervisor
 containerd
 incus
@@ -217,7 +216,7 @@ or:
 mvm vm create --provider linux --image ./guest.img
 ```
 
-The CLI must not expose backend-specific assumptions unless explicitly requested. For example, a user should not need to know whether the Linux provider is backed by Apple Virtualization.framework, Firecracker, libkrun, libkrun, Incus, or another runtime unless they ask for implementation details.
+The CLI must not expose backend-specific assumptions unless explicitly requested. For example, a user should not need to know whether the Linux provider is backed by HVF, Firecracker, libkrun, Incus, or another runtime unless they ask for implementation details.
 
 ## MLX Provider Contract
 
@@ -493,7 +492,7 @@ This ADR does not define:
 - provider placement algorithms
 - host reconciliation loops
 - Firecracker-specific configuration
-- Apple Virtualization.framework implementation details
+- HVF (Hypervisor.framework) implementation details
 - direct Metal passthrough to Linux guests
 - MLX model serving internals
 - tenant billing or pricing
@@ -575,15 +574,16 @@ Keep `0047-provider-architecture.md` in `mvmd` as the canonical provider runtime
 The mvm tree has *two* concerns that share the word "provider":
 
 1. **Public Provider** (this ADR) — user-facing identity selectable from
-   the CLI: `linux`, `mlx`, eventually `firecracker`, `apple-vz`, etc.
+   the CLI: `linux`, `mlx`, eventually `firecracker`, `hvf`, etc.
    Owned by `mvmd` (per the canonical ADR `0047-provider-architecture.md`
    in mvmd). `mvm` only speaks the contract.
 
 2. **Internal `mvm-providers` crate** — the FFI / SDK shim layer that
    wraps low-level virtualization frameworks. Today it contains:
    - `mvm_providers::libkrun`        — Red Hat libkrun C library bindings
-   - `mvm_providers::apple_container` — Apple Virtualization.framework
-     via objc2 + Swift bridge
+   - the in-house HVF backend — binds Hypervisor.framework directly in
+     Rust (no FFI shim crate of its own; the Vz/`apple_container` Swift
+     bridge this bullet used to describe was removed)
 
    Future modules: `cloud_hypervisor`, `windows_wfp`, etc. This crate
    is consumed by `mvm-backend` (the `VmBackend` impls), which is

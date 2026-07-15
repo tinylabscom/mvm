@@ -13,6 +13,17 @@ hypervisor-level egress policy as an explicit non-goal for Sprint 42's
 hardening; this ADR moves it on-roadmap for the next sprint with a
 deliberately smaller v1 scope than the full three-layer model.
 
+> **Note on `Vz` references throughout this doc:** this is a long-running
+> consolidated ADR that chronicles the egress-substrate migration in
+> chronological order, ending with the "Consolidated from ADR-110" section
+> at the bottom. Earlier sections (through "Consolidated from ADR-101")
+> describe the Vz (Apple Virtualization.framework) backend as it existed
+> at each point in that history, including the plan to eventually delete
+> it. Vz has since been removed in full (Plan 226 R1P1); HVF is the
+> current macOS backend. Treat every `Vz`/`vz` reference above the
+> ADR-110 section as historical narrative, not current architecture — the
+> ADR-110 section already describes the current, Vz-free state.
+
 ## Context
 
 When mvm runs an LLM agent (or any other workload that the user wants

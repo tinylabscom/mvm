@@ -4,6 +4,13 @@
 **Date**: 2026-05-31
 **Cross-refs**: ADR-001 (security posture, the 14 claims), ADR-007 (VmBackend single trait), ADR-008 (encryption layering + substrate), ADR-009 (cross-platform), ADR-013 (metering), ADR-014 (signed/audited ExecutionPlan, claim 8), ADR-015 + ADR-019 (protocol versioning / readiness), ADR-007 (builder VM via libkrun — the canonical builder-VM ADR post-consolidation), ADR-014 (sealed app-deps, claim 11), ADR-018 (runtime overlay disk), ADR-020 (host services broker — the canonical broker ADR post-consolidation), ADR-001 (boundary language: lean Rust, consolidated from ADR-063), ADR-003 (NetworkProvider trait), ADR-004 (single builder/dev image, embedded host binaries). Planning input: Plan 117 (cleanup & rearchitecture brief).
 
+> **Update (superseded in part):** this ADR's plan-121 snapshot (2026-06) still
+> carries the Swift `mvm-vz-supervisor` crate and an anticipated `vz-sys`
+> binding. Both are gone: the Vz (Apple Virtualization.framework) backend was
+> removed (Plan 226 R1P1) and replaced by an in-house HVF backend written in
+> Rust — there is no Swift crate and no `vz-sys` in the current workspace. The
+> rest of the plan-121 crate-graph snapshot is otherwise historically accurate.
+
 ## Context
 
 `mvm` grew through many AI-assisted sessions into **32 workspace crates / ~247k LOC** with duplicated subsystems (six vsock/framing impls, four config/secret loaders, three signer-subprocess templates), stubs, and a sparse ADR set — while holding a **14-claim, CI-enforced security posture** (ADR-001) that must survive the cleanup. Plan 117 is the planning input; this ADR is the canonical architecture decision the rewrite executes against.
@@ -46,7 +53,7 @@ The target is **17 architectural crates** (from 32), plus a bracketed-off `crate
 | `mvm-addon-dns`, `mvm-addon-vsock-bridge` | → **`mvm-guest-helpers`** (`[[bin]]`s) | in-guest helper daemons |
 | `mvm-supervisor`, `mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`, `mvm-jailer-lite` | → **`mvm-hostd`** | one crate, **four separate `[[bin]]`s** (see §3); jailer-lite is a module |
 | `mvm-libkrun-supervisor`, `mvm-vz-drainer`, `mvm-firecracker-bridge` | → **`mvm-vm-host`** | one crate, cfg-gated per-backend `[[bin]]`s (one process per VM) |
-| `mvm-vz-supervisor` (Swift) | **`mvm-vz-supervisor`** (keep) | non-Rust; separate build, outside the cargo workspace |
+| `mvm-vz-supervisor` (Swift) | **`mvm-vz-supervisor`** (keep) | non-Rust; separate build, outside the cargo workspace. **Since removed (Plan 226 R1P1)** along with the rest of the Vz backend; superseded by the Rust `mvm-hvf-supervisor` `[[bin]]` in `mvm-vm-host`. |
 | `mvm-verify` | **`mvm-verify`** (keep) | **omitted from the original table; preserved by plan 121.** wasm-clean, dependency-light verifier for the chain-signed audit log (ADR-024); zero `mvm-*` deps, external consumer `web/audit-verify/`, drift-tripwire in `mvm-hostd` tests — earns separate existence. |
 | `xtask` | **`xtask`** (keep) | workspace tooling + the claim-gate lints |
 
@@ -63,7 +70,7 @@ Anything that **binds, vendors, or compiles** an external or C/C++ library is a 
 | `crates/deps/` crate | Binds | Consumed by | Status |
 |---|---|---|---|
 | `libkrun-sys` | libkrun C ABI (the in-process VMM) | `mvm-backend` | **exists today** (`mvm-libkrun`) |
-| `vz-sys` | Apple Virtualization.framework, if bound directly rather than via the Swift supervisor | `mvm-backend` | anticipated |
+| `vz-sys` | Apple Virtualization.framework, if bound directly rather than via the Swift supervisor | `mvm-backend` | **moot — the Vz backend was removed (Plan 226 R1P1); HVF binds Hypervisor.framework directly in Rust with no `-sys` crate of its own** |
 | `libgvproxy-sys` | gvproxy userspace gateway, if vendored as a lib instead of shelling the binary | `mvm-network` | anticipated |
 | `e2fsprogs-sys` | ext4 `mkfs`/tooling, if vendored instead of shelling `mkfs.ext4` | `mvm-build` / `mvm-storage` | anticipated |
 | `libcryptsetup-sys` | LUKS2 / dm-crypt for the encrypted `StorageProvider` on Linux | `mvm-storage` | anticipated (see §5) |
@@ -149,7 +156,7 @@ The CI claim-gates hardcode symbols/paths, so **every rename updates its gate in
 | 3 tampered rootfs fails to boot | `security.yml::verified-boot-artifacts` (greps `nix/images/default-tenant` outputs) | **gate is path-keyed to `nix/`**; the `mvm-verity-init` bin is in **`mvm-guest`** (not mvm-build) | gate safe (path-keyed); §8's old "mvm-build" location was wrong |
 | 4 no `do_exec` in prod agent | `security.yml::prod-agent-runentry-contract` → `scripts/check-prod-agent-no-exec.sh` | `mvm_guest_agent::{do_exec, handle_run_entrypoint}` **already in `mvm-guest`** | **BROKEN — restore the missing script first**; the `mvm-runner`→`mvm-guest` fold is irrelevant (symbol already in mvm-guest) |
 | 5 vsock framing + config fuzzed | `security.yml::fuzz` (8 targets in `crates/{mvm-guest,mvm-libkrun,mvm-vz,mvm-oci,mvm-firecracker-bridge}/fuzz`); `deny_unknown_fields` | those 5 fuzz dirs | move fuzz `working-directory` + upload paths: `mvm-libkrun`→`deps/libkrun-sys`, `mvm-firecracker-bridge`→`mvm-vm-host`, **`mvm-vz` config-fuzz→`mvm-backend`** |
-| 6 pre-built dev image hash-verified | `security.yml::hash-verify-tests` (`cargo test -p mvm-cli --lib hash_verify_tests`) | `download_dev_image` @ `mvm-cli/.../env/apple_container.rs` | keep `-p mvm-cli` + module name |
+| 6 pre-built dev image hash-verified | `security.yml::hash-verify-tests` (`cargo test -p mvm-cli --lib hash_verify_tests`) | `download_dev_image` @ `mvm-cli/.../env/` (as-built: `dev_vz/stage0_cache.rs`, the file has since moved from the removed `apple_container.rs`) | keep `-p mvm-cli` + module name |
 | 7 cargo deps audited + reproducible | `security.yml::{cargo-deny, cargo-audit, reproducibility}` | workspace + `deny.toml` | low |
 | 8 signed audited ExecutionPlan | workspace `cargo test` (`synthesize_plan`/`admit_for_run`/`host_signer`/`AuditEmitter`); `mvmctl audit verify`; `check-no-display-on-secret-types`; **new** key-symbol-linkage lint (§3) | **`mvm-cli/src/commands/vm/{plan_builder,plan_admission,host_signer,audit_chain}.rs`** today; primitives in `mvm-plan`; `verify_audit_chain` in `mvm-supervisor` | **move admit/host-signer/audit-emit OUT of `mvm-cli`** → `mvm-hostd`; `mvm_plan::*`→`mvm_core::plan::*` |
 | 9 content-addressed bundles | workspace `cargo test` (`read_and_verify_bundle`/`verify_plan_bundle`) | `mvm-plan/src/bundle.rs` | `mvm_plan::bundle`→`mvm_core::plan::bundle` |
@@ -175,7 +182,7 @@ A close analog (an embeddable AI-agent compute substrate) informed several choic
 
 **Build-layer — move off the heavy `microvm.nix` substrate.** v2's image build is layered on `microvm.nix` (ADR-004 / CHANGELOG), which produces *full NixOS* microVMs (systemd PID-1, large closure) — too heavy for the slim busybox / tiny-kernel base the boot budget (§7) demands. The rewrite **replaces it with a slim `mkGuest` build**: a minimal non-NixOS rootfs assembled with `mkfs.ext4 -d <staged-dir>` (populate-at-format, ADR-004). Worth keeping from the `microvm.nix` design: its per-hypervisor **runner** abstraction (validates `VmBackend` — "add a backend = add a runner") + the hypervisor restriction matrix (e.g. Firecracker: no 9p/virtiofs shares); **erofs** as a read-only-root option to measure against squashfs (smaller vs faster); and the read-only-root + writable-overlay model, which validates ADR-018's runtime overlay as the **transparent, image-source-agnostic agent injection** (slim base + agent-on-overlay = "every nix gets the agent" without `mkGuest` baking it in).
 
-**Naming cleanups (kill the "sidecar" overload).** Three unrelated things were all called "sidecar": the dropped REST daemon (mvmd's), a per-VM helper process, and a build-artifact metadata file. Rewrite renames: the metadata file type `ArtifactSidecar` → **`ArtifactManifest`** (`mvm-meta.json` stays), and the per-VM crate/process `mvm-vm-sidecar` → **`mvm-vm-host`**. **The per-VM process is the VM-host, not a bolted-on sidecar** — every microVM runs in one host process (one hypervisor process per VM); it becomes *two* only for libkrun's `start_enter` takeover (Vz and Firecracker don't take over the caller) or an external gateway's audit bridge (Firecracker + passt). Aim for **one process per VM**; on macOS 26+, Vz's no-takeover model is the reason to prefer it over libkrun where available.
+**Naming cleanups (kill the "sidecar" overload).** Three unrelated things were all called "sidecar": the dropped REST daemon (mvmd's), a per-VM helper process, and a build-artifact metadata file. Rewrite renames: the metadata file type `ArtifactSidecar` → **`ArtifactManifest`** (`mvm-meta.json` stays), and the per-VM crate/process `mvm-vm-sidecar` → **`mvm-vm-host`**. **The per-VM process is the VM-host, not a bolted-on sidecar** — every microVM runs in one host process (one hypervisor process per VM); it becomes *two* only for libkrun's `start_enter` takeover (HVF and Firecracker don't take over the caller) or an external gateway's audit bridge (Firecracker + passt). Aim for **one process per VM**; on macOS 26+, HVF's no-takeover model is the reason to prefer it over libkrun where available.
 
 **Lima — a future test/dev-tier `VmBackend`** (owner-refined 2026-05-31): re-addable via the `VmBackend` trait like any backend, carrying a **test/dev-only `BackendSecurityProfile`** (admission-visible, **prod-refused** — like the Docker fallback tier) so prod admission can never silently land on it. That single impl serves the Linux/KVM **test environment** now (a virtual `/dev/kvm` for Firecracker E2E that can't run on the builder VM or GitHub-hosted runners) *and* is the clean on-ramp for the possible future broader path. Not built in this rewrite; never used for builds/evals (AGENTS.md). The live-KVM testing tier (§9) may use it.
 

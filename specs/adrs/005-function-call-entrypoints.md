@@ -524,7 +524,7 @@ Two features need to coexist:
 1. **A slim, secure production rootfs** — minimal attack surface, dm-verity-able, signed, hash-stable, suitable for the seven security claims of ADR-001.
 2. **A fully-featured dev experience** — bash, coreutils, debugging tools (strace, tcpdump, gdb), interactive shell, the things a developer expects when they `mvmctl dev` into a microVM.
 
-Post-Lima (ADR-004), `mvmctl dev` boots a real microVM via apple-container (macOS 26+) or libkrun (Linux). So whatever tools the developer uses live *inside* a microVM. The question is **how to put them there without compromising claim #1**.
+Post-Lima (ADR-004), `mvmctl dev` boots a real microVM via HVF (macOS 26+) or libkrun (Linux). So whatever tools the developer uses live *inside* a microVM. The question is **how to put them there without compromising claim #1**.
 
 User constraint, stated explicitly: "the tooling needs to be transparent to the user. This library/repo should be able to determine what needs to be in the binary in which what context the user is operating in." This rules out:
 

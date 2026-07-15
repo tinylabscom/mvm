@@ -85,7 +85,7 @@ The second job is already migrating to a direct libkrun integration (`crates/mvm
 
 ### What we actually use libkrun for, and what it costs
 
-The builder-VM call site (`mvm_cli::commands::env::apple_container::build_image_via_libkrun` → `mvm_build::builder_vm::LibkrunBuilderVm`) needs:
+The builder-VM call site (originally `mvm_cli::commands::env::apple_container::build_image_via_libkrun`, since moved when the apple-container backend was removed → `mvm_build::builder_vm::LibkrunBuilderVm`) needs:
 
 | Need | libkrun API surface |
 |---|---|
@@ -248,7 +248,7 @@ The mvm-published builder VM image exists for *end users* who installed mvmctl a
 
 ### Trust-zone shift
 
-ADR-013 §"Linux builder via libkrun" placed the user-facing builder behind a pinned third-party OCI image (`docker.io/nixos/nix:2.24.10`). Plan 72 replaces that **on the user-facing path** with an mvm-published builder VM image — kernel + rootfs.ext4 built on a Linux CI runner via `nix/images/builder-vm/flake.nix` (a slimmed split of the current `nix/images/builder/`), signed by the project's release key, and verified by the same SHA-256 manifest path used today for `download_dev_image` (`mvm_cli::commands::env::apple_container::download_dev_image`, ADR-001 §W5.1).
+ADR-013 §"Linux builder via libkrun" placed the user-facing builder behind a pinned third-party OCI image (`docker.io/nixos/nix:2.24.10`). Plan 72 replaces that **on the user-facing path** with an mvm-published builder VM image — kernel + rootfs.ext4 built on a Linux CI runner via `nix/images/builder-vm/flake.nix` (a slimmed split of the current `nix/images/builder/`), signed by the project's release key, and verified by the same SHA-256 manifest path used today for `download_dev_image` (originally `mvm_cli::commands::env::apple_container::download_dev_image`, since moved to `env/dev_vz/stage0_cache.rs` when the apple-container backend was removed, ADR-001 §W5.1).
 
 - **End users**: trust boundary is mvm's release pipeline + signing + hash manifest. Same as the dev image today.
 - **Contributors**: source-checkout builds use the same builder VM artifact path as end users unless they are directly changing the builder VM image, in which case validation happens through the builder-image build pipeline.
@@ -301,77 +301,14 @@ The vendoring path is *not* the same as the libkrun path. It addresses one sympt
 3. **First-build latency**: cold cache pulls ~2 GB of substitutes. virtio-blk-backed `/nix` persists across builds, so warm cache is fast. Plan 72 acceptance criterion: warm-cache rebuild of the unchanged dev image completes in <30 s.
 4. **GPU / SIMD acceleration for cryptography**: not needed for the builder path. Documented to avoid scope creep.
 
-## Vz as a second builder backend (Plan 98)
+## Vz as a second builder backend (Plan 98) — superseded, removed
 
-> Added 2026-05-27 by Plan 98 — extends this ADR's scope from "the builder VM is libkrun" to "the builder VM is one of {libkrun, Vz}, picked by host platform."
-
-### Selection policy
-
-The builder backend is selected by a single resolver
-(`mvm_build::builder_backend_select::resolve_choice_with_override`)
-with the following priority:
-
-1. **CLI flag** `--builder <libkrun|vz>` — highest priority. Folded into `MVM_BUILDER_BACKEND` at startup by `mvm_cli::commands::run`.
-2. **Env var** `MVM_BUILDER_BACKEND` — case-insensitive, whitespace-trimmed; unrecognised values log `tracing::warn!` and fall through to auto-detect (no abort).
-3. **Auto-detect**:
-   - macOS 26+ Apple Silicon → **Vz**.
-   - Everywhere else (macOS 13-25, Linux, Windows) → **libkrun**.
-
-Vz on macOS 13-25 stays opt-in only via the override path. The auto-detect predicate is intentionally conservative — the deployment baseline is macOS 26+ Apple Silicon (mirrors the Apple Container runtime tier), so the older macOS minor versions stay on the libkrun path that's been hardened since 2026-05-14 (Lima removal). When Slice 2C eventually adds the entitlement / MDM probe (§2.S4), auto-detect refuses Vz when the entitlement check fails and falls through to libkrun rather than failing mid-build.
-
-### Parallel drivers, not a generic seam
-
-The Vz path ships as a **parallel** driver (`VzBuilderVm`, `VzPersistentBuilderVm`) alongside the libkrun driver (`LibkrunBuilderVm`, `LibkrunPersistentBuilderVm`), each implementing `BuilderVm` independently. Both drivers share the orchestration helpers extracted by Plan 97 Phase C (`stage_job_dir`, `JobResult`, `finalize_flake_job`, `finalize_install_job`, `NixStoreImageLock`, `builder_vm_timeout`, stderr-tail formatters) via `mvm_build::builder_vm_runtime`, but each driver owns its own `start()` / `run_build()` / handle.
-
-This was a deliberate choice over a single `BuilderVm`-generic-over-`Vmm`-trait abstraction. The two VMM impls have meaningfully different shapes:
-
-- libkrun is an in-process C library — the host process *is* the VMM. Panic detection is the host's responsibility because `krun_start_enter` blocks indefinitely on a panicked guest.
-- Vz is an out-of-process Swift supervisor — the host spawns `mvm-vz-supervisor` and waits on the child. Vz exits cleanly on guest panic; no console-log scanner is needed.
-
-A generic seam would have to either erase that difference (forcing libkrun to fake out-of-process semantics or Vz to fake in-process semantics) or split into two trait paths with awkward shared parts. Parallel drivers keep each path readable on its own merits and let the shared orchestration live where it belongs — in helper functions, not in trait erasure.
-
-### State-dir isolation + coexistence
-
-Both backends' persistent builder state dirs live under the same parent — `~/.cache/mvm/builder-vm/vms/` — distinguished by name prefix:
-
-- `mvm-persistent-builder-vm-<session>` for libkrun.
-- `mvm-persistent-builder-vz-<session>` for Vz.
-
-The Stage 0 reaper (Plan 99 PR-1, `crates/mvm-cli/src/commands/env/apple_container.rs::clean_orphan_state_dirs`) walks the parent and is prefix-agnostic — it picks up both backends' dirs without code changes. `mvmctl cache prune` honours running PIDs across both prefixes (§2.C2).
-
-Cross-backend `mvmctl dev` coexistence (`up` refuses cleanly when the *other* backend's persistent dir has a live PID; `down` enumerates both prefixes; `status` reports per-backend state) is Slice 2B follow-up work — the prefix isolation in this ADR is the foundation it builds on.
-
-### Resource ceilings
-
-Vz defaults match libkrun's `LibkrunBuilderVm::default` constants (`VZ_BUILDER_DEFAULT_VCPUS`, `VZ_BUILDER_DEFAULT_MEMORY_MIB`, `VZ_BUILDER_DEFAULT_NIX_STORE_MIB` cross-reference the libkrun consts directly so a future bump on either side flows through). Plan 72 W5.D RAM cap (4 → 8 → 16 GiB defaults, with the stage0/init.sh `/nix` tmpfs `size=` cap bumped alongside) applies to both backends identically.
-
-### Image source (ADR-046 §"Source-checkout builds never depend on mvm-published artifacts")
-
-Both backends resolve the builder VM image (`vmlinux` + `rootfs.ext4` + `cmdline.txt`) through `mvm_build::libkrun_builder::ensure_builder_vm_image()` — the single shared entry point. There is no Vz-specific image resolver, no "Vz pulls a prebuilt from GitHub releases" backdoor. The source-checkout contributor invariant from this ADR's earlier sections applies to the Vz path verbatim. Plan 98 §2.11 ships hermetic source-grep tests (`crates/mvm-build/tests/vz_builder_flake_invariant.rs`) that fail any future regression that adds a download path to `vz_builder.rs`.
-
-### Security claim parity
-
-The builder VM is the dev tier per `feedback_dev_vm_vs_prod_security_tiers.md`, *but* its Install arm (ADR-047, Claim 9) is the prod-grade path that produces the sealed deps volumes the runtime supervisor verifies. So the ADR-001 security claims that apply to the builder VM hold across **both** backends, with the same evidence:
-
-- **Claim 1** (no host-fs access beyond explicit shares). Both backends construct `VirtioFsShare`s for `/work` `/out` `/job` `/nix-store` only. §2.S8 ships a hermetic test asserting set-equality of `(host_path, guest_path, read_only)` triples between the two drivers for the same input.
-- **Claim 5** (vsock framing + supervisor-config JSON fuzzed). libkrun's `crates/mvm-libkrun/fuzz/fuzz_supervisor_config.rs` covers the libkrun supervisor's parser. Vz's `crates/mvm-vz/fuzz/` adds a parallel target against `mvm_vz::SupervisorConfig` — Slice 2C §2.S6. The host-side Vz control-socket parser (Phase E pause/resume/balloon/snapshot) is host-process-local with `0700` parent dir; ADR-001's host-trust assumption covers the residual surface (justified in the Slice 2C ADR-001 sub-note).
-- **Claim 7** (cargo deps audited). `crates/mvm-vz` participates in `deny` + `audit` like every other workspace member; Slice 2C §2.S5 confirms `deny.toml` scope.
-- **Claim 8** (signed/audited `ExecutionPlan`). `mvmctl up --prod` admission emits `plan.admitted` / `plan.launched` / `plan.failed` from the same `AuditEmitter` regardless of which builder backend resolved the Install. Slice 2C §2.S3 runs `mvmctl audit verify` after a Vz-driven `mvmctl up --prod` to assert chain cleanliness.
-- **Claim 9** (sealed deps volumes hash-locked + attestation-checked + CVE-scanned + SBOM-enumerated + audit-bound). Cross-backend byte-equivalence of the sealed volume contents (`content/` tree, `sbom.cdx.json`, `fetch.log`, `cve.json`) is asserted by Slice 2C §2.S2. Builder VM kernel + rootfs parity (the Install-arm prod-grade path) is §2.S9 — if divergence is unavoidable, the volume-byte-level equivalence still holds because both backends produce the same Nix store closure. `meta.json` backend-neutrality (§2.S10) is asserted by decoding a libkrun-sealed and a Vz-sealed Install on the same input and comparing byte-for-byte.
-
-The other ADR-001 claims (2, 3, 4, 6, 10) are guest-side or end-user-runtime concerns — they don't depend on which host VMM booted the builder, so the existing libkrun-side evidence applies unchanged.
-
-Per `feedback_adr_out_of_scope_discipline.md` this Security-claim-parity subsection lists ONLY items in the same threat model as the parent ADR-001 claim. Adjacent surfaces (Sprint 56 Claim 10 in-guest volume encryption, Plan 101 gateway audit) belong in their own ADRs and are not in scope here.
-
-### Cross-reference summary
-
-- **Plan 97** — Vz runtime backend (Phase A/B/D/E shipped, C parked → continued by Plan 98).
-- **Plan 98** — this extension's implementation plan.
-- **Plan 99 PR-1** — Stage 0 cache contract the prefix-agnostic reaper depends on.
-- **ADR-001** — security posture; per-claim sub-notes in Claims 1, 5, 7, 8, 9 point back here.
-- **ADR-047** — Claim 9 evidence pipeline; gains a one-paragraph "Backend symmetry" sub-section citing §2.S2 + §2.S10.
-- **ADR-056** — Vz runtime backend ADR; gains a "Persistent builder variant" pointer to this section.
-- **ADR-057** — Sprint 56 symmetric trust boundary; bidirectional cross-link (Vz builder narrows the asymmetric-trust gap on macOS that ADR-057 fully closes).
+**Superseded — Plan 98 extended the builder VM to run on either libkrun or
+Vz, picked by host platform. Vz has since been removed entirely** (ADR-098's
+ratification, Plan 226 R1P1) **and the in-house HVF backend fills the
+non-libkrun builder role instead.** See ADR-007 §"Consolidated from
+ADR-056" and §"Consolidated from ADR-098" for the full history and the
+sunset decision.
 
 ## Amendment: kernel acquisition — compile or download
 
@@ -443,329 +380,39 @@ the dev tier) is unchanged and not re-litigated here.
 > than re-built per `dev up`. See ADR-065.
 
 
-## Consolidated from ADR-056 — Vz backend (Apple Virtualization.framework)
+## Consolidated from ADR-056 — Vz backend (Apple Virtualization.framework) — superseded, removed
 
-**Status:** accepted 2026-05-22, implements Plan 97. Vz is an opt-in
-macOS backend (`MVM_BACKEND=vz` / `--backend vz`); `auto_select`
-remains unchanged so libkrun is still the macOS default and
-Firecracker the Linux deploy default. **Amended 2026-06-10 by
-ADR-007 §"Consolidated from ADR-076":** Vz becomes the
-**macOS-26 auto-default** and **absorbs `AppleContainerBackend`** — the
-in-process `providers/apple_container` AVF path is deleted, leaving one
-honestly-named `vz` AVF backend on the per-VM supervisor model. The
-"opt-in only / libkrun stays the macOS default" stance above holds for
-macOS 13–25; macOS-26 now auto-selects `vz`. The per-claim table and the
-console/entitlement invariants below are unchanged.
+**Superseded — the Vz / Virtualization.framework backend was implemented
+(ADR-056, Plan 97) then removed entirely; HVF is the macOS backend.**
 
-## Context
+For historical record: ADR-056 (accepted 2026-05-22) added Vz as an opt-in
+macOS backend that ran a per-VM supervisor process (`crates/mvm-backend/src/vz.rs`
++ a subprocess) mirroring `LibkrunBackend`'s one-process-per-VM contract,
+initially via a Swift binary (`mvm-vz-supervisor`) and later rewritten to a
+Rust `objc2` supervisor (Plan 152 WS-B, 2026-06-07/08) once the Swift
+control socket was found to self-deadlock on async VZ ops. ADR-007
+§"Consolidated from ADR-076" (2026-06-10) promoted `vz` to the macOS-26
+auto-default and folded the in-process `apple_container` AVF path into it.
 
-Today on macOS, every workload microVM goes through **two** layers of
-virtualization:
-
-```
-macOS host  →  libkrun Linux VM  →  Firecracker microVM (/dev/kvm)
-```
-
-The nesting exists because Firecracker requires `/dev/kvm`, which
-only exists inside a Linux guest. libkrun (via
-`Hypervisor.framework`) hosts that Linux guest; Firecracker then runs
-the workload guest inside it. ADR-013 §"libkrun pivot" set up this
-architecture when Lima was retired.
-
-Apple's `Virtualization.framework` (Vz) — distinct from
-`Hypervisor.framework` even though the former is implemented on top
-of the latter — has supported Linux guests since macOS 11 and exposes
-the exact virtio surface our guests already drive (virtio-blk,
-virtio-net, virtio-vsock, virtio-console, virtio-rng, virtio-fs,
-virtio-balloon). That means a Vz-backed workload microVM can run
-directly on the macOS host without nesting Firecracker inside libkrun.
-
-ADR-055 §"Cross-platform backends" established that gvproxy is the
-canonical macOS network backend; Vz's `VZFileHandleNetworkDeviceAttachment`
-attaches gvproxy by file handle without changing the host-side plumbing.
-
-## Why now, why this shape
-
-Three forces lined up:
-
-1. **Coverage gap.** Apple Container (ADR / Plan 75) only works on
-   macOS 26+ Apple Silicon. macOS 11–25 and Intel hosts have only
-   the nested libkrun→Firecracker path even though Vz works on every
-   one of them.
-2. **Layer collapse.** Direct Vz hosting on macOS removes one VMM
-   from the workload path, cutting cold-boot wall time and idle
-   memory overhead.
-3. **Balloon + snapshot on the boring path.** Vz on macOS 11+ ships
-   a memory balloon. Vz on macOS 14+ ships save/restore via
-   `saveMachineStateTo` / `restoreMachineStateFrom`. Both lower the
-   bar for warm-pool / fast-restore features the libkrun path can't
-   give us today.
-
-The Vz backend lives in `crates/mvm-backend/src/vz.rs`. It implements
-`VmBackend` by spawning a per-VM `mvm-vz-supervisor` Swift subprocess
-(`crates/mvm-vz-supervisor/`) — same one-process-per-VM contract
-`LibkrunBackend` uses, swapped underneath. The Swift binary owns the
-Vz API surface (closed-source Swift framework, Apple-controlled); the
-Rust side owns the type-safe JSON config that flows over stdin, the
-PID-file lifecycle, and the integration with the rest of mvm
-(`admit_for_run`, audit chain, runtime metadata).
-
-`auto_select()` is unchanged — libkrun stays the macOS default,
-Firecracker the Linux default and the production deploy default. Vz
-is opt-in through `MVM_BACKEND=vz` / `--backend vz`.
-
-## Security tier — Tier 2
-
-Vz sits at the same isolation tier as libkrun. The reasoning:
-
-- Both use Apple's `Hypervisor.framework` as the underlying
-  hypervisor primitive. Vz is a closed-source Swift wrapper that
-  constrains the host's API surface; libkrun is an open-source C
-  library that exposes more knobs. From an isolation-property
-  standpoint they're equivalent.
-- Vz's vCPU isolation, memory isolation, and virtio device
-  emulation surface are all hardware-isolated through the same
-  `Hypervisor.framework` primitive.
-- Apple Container (Plan 75) is also classified Tier 3 today because
-  it adds a *containerization* abstraction on top of Vz. Vz used
-  directly skips that abstraction.
-
-ADR-001 claim coverage under Vz:
-
-| Claim | Status   | Why                                                  |
-|-------|----------|------------------------------------------------------|
-| 1     | Holds    | Supervisor refuses non-admitted virtio-fs shares; default workload config attaches zero shares. |
-| 2     | Holds    | Guest-side, hypervisor-independent.                  |
-| 3     | DoesNotHold | dm-verity artifact pipeline targets Firecracker today; Vz can boot a verity-prepared kernel but the artifact path hasn't been wired. Mirrors `LibkrunBackend`'s status. |
-| 4     | Holds    | Guest-side.                                          |
-| 5     | Holds    | Vsock framing is fuzzed (`crates/mvm-guest/fuzz/`); Rust↔Swift `SupervisorConfig` corpus equivalence test added in this Plan (claim 5 hardening — Plan 97 Phase A). |
-| 6     | Holds    | Host-side download path unchanged.                   |
-| 7     | Holds    | Cargo deps audited; Swift PM `Package.resolved` pinned (Plan 97 cross-cutting).         |
-
-Claim 7 *extends* the existing pipeline: the Swift package's
-`Package.resolved` is the SPM equivalent of `Cargo.lock` and is
-checked in alongside the Rust lockfile.
-
-Defense-in-depth additions on top of the trait-level requirements:
-
-- **Resource-cap parity (Plan 97 Security §8).** The Swift
-  supervisor validates `cpu_count` and `memory_mib` against
-  `VZVirtualMachineConfiguration.maximumAllowedCPUCount` /
-  `min/maxAllowedMemorySize` before constructing the VM config and
-  refuses over-allocated requests with exit code 3.
-- **Console mode lockdown (Plan 97 Security §9).** Workload
-  microVMs get capture-only console
-  (`VZVirtioConsoleDeviceSerialPortConfiguration` with
-  `fileHandleForReading: nil`); interactive console for dev mode
-  is PTY-over-vsock on ports 20000+, never on virtio-console.
-- **Supervisor binary entitlement (Plan 97 Security §2 / §11).**
-  `mvm-vz-supervisor` is ad-hoc codesigned with
-  `com.apple.security.virtualization` (the minimum Vz requires).
-  No JIT, no library validation override, no plugin loading.
-  `tools/build.sh` invokes `codesign --options runtime --entitlements
-  Entitlements.plist`; verified at install time via
-  `codesign -d --entitlements -`.
-- **Kernel-cmdline lockdown (Plan 97 Security §7).**
-  `VmStartConfig` has no user-supplied cmdline field; the backend
-  constructs from `DEFAULT_CMDLINE = "console=hvc0 root=/dev/vda rw
-  init=/init"`. Verity-token injection (`dm-mod.create=`,
-  `mvm.runtime_roothash=`) is gated on the verified-boot pipeline
-  targeting Vz (claim 3 follow-up).
-
-## Relationship to other ADRs
-
-- **ADR-001 (microvm security posture).** Adds a Vz row to the
-  per-backend claim table at `specs/adrs/001-microvm-security-posture.md`.
-  Tier 2; claim 3 partial (matches libkrun's posture).
-- **ADR-013 (libkrun pivot).** Vz *adds* a parallel macOS backend; it
-  does not retract ADR-013's decision to use libkrun as the macOS
-  default. libkrun remains the macOS auto-select pick.
-- **ADR-046 (two artifact layers).** Source-checkout builds never
-  download mvm-published artifacts. The build.rs at
-  `crates/mvm-vz/build.rs` invokes
-  `crates/mvm-vz-supervisor/tools/build.sh` to build the Swift
-  supervisor binary locally; no prebuilt path until a release is
-  explicitly cut.
-- **ADR-055 (passt + gvproxy networking).** Unchanged. The Vz
-  supervisor's `Network.swift` connects a SOCK_DGRAM unix socket to
-  gvproxy's `--listen-vfkit` endpoint and wraps it in
-  `VZFileHandleNetworkDeviceAttachment`. No new frame parser
-  introduced.
-
-## Alternatives considered
-
-- **Use Vz to replace libkrun entirely.** Rejected. The user
-  constraint was explicit: libkrun stays the macOS default. Vz is
-  additive. ADR-013's reasoning (cross-platform consistency,
-  Linux + macOS parity) still holds — libkrun runs on both Linux
-  KVM and macOS Hypervisor.framework, Vz is macOS-only.
-- **Use Vz on Linux too via `cloud-hypervisor`-style wrapping.**
-  Out of scope. ADR-055 + ADR-013 establish Firecracker as the
-  Linux deploy default; Vz literally doesn't exist on Linux. The
-  Plan 97 §"Out of scope" line is explicit.
-- **Wrap Vz inside libkrun instead of bypassing it.** Doesn't make
-  sense architecturally — libkrun is a C library; Vz is a Swift
-  framework. There's no in-process way to combine them, and the
-  whole point of using Vz directly is to skip libkrun.
-- **Use Apple's higher-level `Containerization` framework
-  (i.e. Apple Container) instead.** Already in the stack
-  (Plan 75 / `AppleContainerBackend`). Apple Container only ships
-  on macOS 26+ Apple Silicon; Vz fills the coverage gap and skips
-  the container abstraction.
-
-## Out of scope
-
-- Vz on Linux (Vz is macOS-only by Apple's design).
-- Live VM migration across hosts (Vz does not expose it).
-- HVF concurrent-VM cap probe (Vz lacks a direct API for the
-  ceiling; reactive classification needs structured supervisor exit
-  codes — follow-up).
-- Tenant-driven kernel cmdline (no field today; verity-token
-  injection lands when the dm-verity pipeline targets Vz).
-- mvmd backend-enum adoption (cross-repo follow-up after this
-  ADR lands).
-
-## Future work
-
-- **Verified-boot pipeline for Vz** — flips claim 3 from
-  DoesNotHold to Holds. Needs the rootfs build to emit verity
-  sidecars + roothash that `build_supervisor_config` threads into
-  the kernel cmdline (`dm-mod.create=`,
-  `mvm.runtime_roothash=`). Same artifact-pipeline pieces libkrun
-  needs.
-- **Performance baseline numbers** — Plan 97 §"Performance
-  baseline" commits to a CI lane comparing cold-boot wall time,
-  idle memory, and build wall time for Vz vs. libkrun-direct
-  vs. nested libkrun→Firecracker. The CI lane lands with the
-  macOS test matrix. GHA-hosted macOS does not expose
-  Hypervisor.framework to user processes, so this gates on a
-  self-hosted runner; the **`vz-macos-26`** lane in
-  `.github/workflows/ci.yml` is the placeholder, gated on
-  `vars.MACOS_26_AVAILABLE`.
-- **Snapshot RESTORE live-host acceptance smoke** — Phase E shipped
-  both SAVE and RESTORE end-to-end with `mvmctl snapshot save/restore
-  <vm> --path <p>`, machine-identifier sidecar persistence
-  (`<snapshot_path>.machine-id`), SHA-256 hash-pinning, and
-  audit-chain match labelling (`verified` / `mismatch` /
-  `not_in_chain`). The residual is a live macOS 14+ runner that
-  actually boots a dev-shell VM, saves it, kills it, restores it,
-  and asserts the guest's `/proc/sys/kernel/random/boot_id` /
-  `machine-id` survives the round-trip. Pairs with the
-  `vz-macos-26` self-hosted runner work.
-- **`VzBuilderVm` orchestration** — Phase C primitive
-  (`VzBackend::run_attached`) is in place. The full builder-VM
-  impl needs the seam refactor sketched in
-  `specs/plans/97-vz-backend.md` §"Phase C seam design": lift the
-  ~850 lines of hypervisor-agnostic orchestration from
-  `LibkrunBuilderVm` behind a new `VmBackendForBuilder` trait,
-  then `VzBuilderVm` reuses it with a Vz-side mount glue.
-  Estimate: ~400-line impl + ~200-line glue once the seam exists.
-
-  **Persistent builder variant (Plan 98 Slice 2A)** — ships
-  `VzPersistentBuilderVm` parallel to `LibkrunPersistentBuilderVm`,
-  reusing the same `mvm_vz::SupervisorConfig` surface this ADR
-  introduced. Full design — selection policy, state-dir prefix
-  isolation under `~/.cache/mvm/builder-vm/vms/`, and
-  security-claim parity across both backends — lives in ADR-046
-  §"Vz as a second builder backend (Plan 98)".
-- **mvmd `BackendKind::Vz` adoption.** Cross-repo. Tracked under
-  Plan 97 §"mvmd integration".
-- **Windows host support via WHP.** Cataloged as a separate
-  initiative — see [#428](https://github.com/tinylabscom/mvm/issues/428).
-
-## Addendum (2026-06-07): Rust-native supervisor — threading model (Plan 152 WS-B)
-
-Plan 152 reverses Plan 97's "keep the Swift supervisor" call: the VZ
-supervisor moves to a Rust `[[bin]]` in `mvm-vm-host`, still a separate
-per-VM codesigned process. The entitled-TCB invariant was always about
-process separation, not language — `mvmctl` stays unentitled, the supervisor
-carries `com.apple.security.virtualization` alone. `objc2`,
-`objc2-virtualization`, `block2`, and `dispatch2` are already workspace deps
-(the `apple_container` backend uses them), so the move adds no third-party
-dependency. This addendum records the one decision WS-B was gated on — the
-supervisor's threading model — from which the rest of WS-B follows.
-
-**Decision: a private serial `DispatchQueue` + `VZVirtualMachineDelegate`,
-not a main-thread `CFRunLoop`.** The shipping Swift supervisor already runs
-exactly this shape: one serial `DispatchQueue("mvm.vz.supervisor")` passed to
-`VZVirtualMachine(configuration:queue:)` services the VM, the control socket,
-the vsock proxy, and the SIGTERM/SIGINT sources; the delegate's `guestDidStop`
-/ `didStopWithError` fire on that queue; the start path blocks on a
-`DispatchSemaphore`. Porting it 1:1 — `dispatch2` serial queue,
-`declare_class!` delegate, `block2::RcBlock` completion handlers,
-`QueueBound<Send>` for the `!Send` `Retained` handles — makes the mandatory
-parity matrix a true apples-to-apples comparison of a known-good design,
-which is the risk posture re-implementing a security-sensitive component
-demands.
-
-A main-thread `CFRunLoop` (one reviewed reference's model, and roughly what
-`apple_container` does with NSRunLoop) was rejected. For a one-VM-per-process
-supervisor it pins VZ to the main thread, still needs worker threads for the
-control socket + vsock proxy, forces `main()` to be a runloop pump contending
-with the async I/O runtime for thread ownership, and diverges from the proven
-design for no payoff.
-
-**I/O layer: a tokio current-thread runtime, never blocking accept loops.**
-The control socket and vsock proxy run on a single-threaded tokio reactor
-(`tokio = { features = ["rt", …] }` — `rt`, deliberately not
-`rt-multi-thread`); the dup'd guest vsock fd is driven through `AsyncFd` and
-spliced with `copy_bidirectional`, which gives correct half-close and
-backpressure without a hand-written state machine. tokio is already in the
-workspace lock and `AsyncFd` needs its reactor regardless, so this buys async
-I/O at no new dependency cost. The supervisor then runs two single-purpose
-schedulers: the VZ serial dispatch queue (libdispatch) owns every VZ API
-call; the current-thread tokio reactor owns I/O. tokio tasks hop onto the VZ
-queue only for the VZ calls themselves (`connect(toPort:)`, `pause`/`resume`/
-`save`/`restore`), getting results back over a `oneshot`. `dispatch2`
-`DispatchSource` read sources — a zero-new-dep, even-more-1:1 port of the
-Swift sources — were considered and rejected: they would mean hand-rolling
-the bidirectional splice, the wrong place to economize.
-
-**`unsafe` surface.** Exactly one `unsafe impl Send for QueueBound<Retained<…>>`,
-under the invariant that the wrapped handle is dereferenced only inside a
-closure dispatched onto the VZ serial queue, never from a tokio worker. Each
-`unsafe` block cites that invariant.
-
-Security posture is unchanged from the per-claim table above. The rewrite
-keeps the signed/audited `ExecutionPlan` admission (claim 8), the
-capture-only console lockdown, the resource-cap parity check, and the
-codesigned separate-process entitlement boundary — `apple_container::
-ensure_signed()` is extended to sign the Rust binary with
-`com.apple.security.virtualization`. The Swift crate is deleted only after the
-WS-B parity matrix (boot, vsock round-trip, every control verb, save/restore)
-is green; the entitled-TCB / drop-Swift rationale is the deferred Plan 97
-note, now resolved.
-
-## Addendum (2026-06-08) — Swift supervisor removed; Rust is the sole VZ supervisor
-
-Plan 152 WS-B is complete. The Rust-native `objc2` supervisor (`mvm-vm-host`
-`[[bin]] mvm-vz-supervisor`, landed in #700, live-validated boot / vsock /
-control / save-restore) is now the **only** VZ supervisor. The Swift crate
-(`crates/mvm-vz-supervisor/`), its `tools/build.sh` / `Package.swift` /
-`Entitlements.plist`, and the `mvm-build/build.rs` auto-build hook are deleted;
-`resolve_supervisor_path` (in `mvm-backend::vz` and the doctor chain) resolves
-only the cargo-built Rust binary (override → adjacent-to-exe → release
-`~/.mvm/bin/`), mirroring `mvm-libkrun-supervisor`.
-
-**Motivating defect.** Running the WS-B parity gate live on macOS 26 revealed the
-Swift control socket **self-deadlocks** on async VZ ops: `synchronousVZCall`
-does `sema.wait()` on the VM's own serial `DispatchQueue` while
-`vm.pause/resume/save`'s completion handler is dispatched back to that same
-queue, wedging it after the first verb. The Rust supervisor's serial-queue→tokio
-bridge (the WS-B threading decision) avoids this. Because the Swift baseline was
-broken on PAUSE/RESUME/SAVE, byte-for-byte parity was unachievable and
-undesirable; the gate (`crates/mvm-build/tests/vz_supervisor_parity.rs`) now
-asserts **Rust correctness** directly rather than equivalence to a buggy
-baseline.
-
-**Follow-ups (tracked, not in this change):** dead-code sweep of the legacy
-`BridgeEndpoints::VzIngest` + `mvm-vz-drainer` NDJSON ingest path (superseded by
-the Rust supervisor's in-process `VzGvproxy` splice); the `workflow_dispatch` vz
-lanes in `ci-full.yml` also carried pre-existing `-p mvm-vz` staleness from the
-Plan 121 crate consolidation (repointed to `mvm-build`/`mvm-vm-host` here).
-
+Vz was ultimately retired by ADR-098's ratification (2026-07-08, Plan 226
+R1P1): the in-house HVF backend — binding `Hypervisor.framework` directly
+in Rust, with no Apple-controlled `Virtualization.framework` layer above it —
+met the sunset acceptance criteria (boot, vsock control, sealed security
+posture, representative workloads), so the Vz backend, its supervisor, its
+builder, and its selection branch were deleted. HVF is now the macOS 26+
+Apple Silicon default, with libkrun as the macOS 13-25 default / fallback.
+See ADR-007 §"Consolidated from ADR-098" below for the full sunset decision
+and criteria.
 
 ## Consolidated from ADR-072 — QEMU as the dev/builder backend; Firecracker stays the production runtime
+
+> **Update on `Vz` references below:** this section discusses macOS's
+> built-in dev/builder equivalent to Linux's QEMU. At the time this ADR was
+> written that equivalent was Vz (Apple Virtualization.framework); Vz has
+> since been removed entirely (ADR-098's ratification, Plan 226 R1P1) and
+> replaced by the in-house HVF backend, which now fills that role. The
+> QEMU-specific decisions below (Linux dev/builder, never a production
+> runtime) are unaffected and still current.
 
 **Status**: Proposed
 **Date**: 2026-06-05
@@ -841,6 +488,14 @@ Neither tier is ever promoted to production. The security claims (1–14) remain
 
 
 ## Consolidated from ADR-076 — Backend matrix consolidation (8 → 4) and AVF convergence
+
+> **Update (superseded in part):** the `docker` / `cloud_hypervisor` /
+> `microvm_nix` deletions below landed and still hold. The AVF-convergence
+> half — folding `apple_container` into `vz` and making `vz` the macOS-26
+> default — is now moot: Vz itself was later removed entirely (ADR-098's
+> ratification, Plan 226 R1P1), and HVF is the current macOS 26+ default.
+> The matrix today is **libkrun, firecracker, HVF, qemu** (+ mock), not
+> the `libkrun, firecracker, vz, qemu` this section lands on.
 
 **Status:** accepted 2026-06-10. Implemented by
 `specs/plans/177-backend-consolidation.md`. **Amends ADR-056** (Vz is no
@@ -979,8 +634,10 @@ matrix", [Plan 98 — builder backend selection](../plans/98-vz-builder-vm.md),
 ## Context
 
 The builder VM — the Linux guest that runs `nix build` for `mvmctl build` /
-`up` / `dev` / `machine run --image` — picks a host VMM. Plan-98 auto-detect:
-macOS 26+ Apple Silicon → Vz; **everywhere else → libkrun**.
+`up` / `dev` / `machine run --image` — picks a host VMM. Auto-detect (originally
+Plan-98, macOS 26+ Apple Silicon → Vz; Vz has since been removed and replaced
+by the in-house HVF backend): macOS 26+ Apple Silicon → HVF; **everywhere else
+→ libkrun**.
 
 On a bare-metal Linux box (Intel i7-7700, kernel 6.1, 62 GiB RAM, libkrun
 1.18.0) the libkrun builder **cannot create its VM**: libkrun's
@@ -1001,7 +658,7 @@ Two tensions:
 
 - The "Key Design Decisions" prose in `CLAUDE.md` says builds run "Firecracker
   on Linux KVM," but the dispatch (`resolve_stage0_backend` /
-  `resolve_builder_backend`) only implements **libkrun / vz / qemu** —
+  `resolve_builder_backend`) only implements **libkrun / hvf / qemu** —
   firecracker-as-*builder* is not wired. The real Linux default is libkrun.
 - The qemu builder is documented "`mvm`-only dev/test, never `mvmd`" — so it is
   available to the *local* dev/build path but must not become the fleet
@@ -1019,8 +676,9 @@ Before this work, a Linux user on an affected host hit an opaque
    explicitly forced) builder fails to **create its VM** — a VMM-level failure,
    distinguished from a genuine build error by the new
    `BuilderVmError::SupervisorExited` variant — the dispatch retries the next
-   backend. On Linux that order is libkrun → qemu; on macOS it preserves the
-   pre-existing auto-Vz → libkrun behaviour. A genuine `nix build` failure
+   backend. On Linux that order is libkrun → qemu; on macOS it is hvf →
+   libkrun (originally Vz → libkrun before Vz was removed and replaced by
+   HVF). A genuine `nix build` failure
    surfaces unchanged with no retry, and an explicit `--builder` /
    `MVM_BUILDER_BACKEND` opts out entirely.
 
@@ -1127,6 +785,15 @@ unaligned-kernel EINVAL as one of its triggers.
 
 
 ## Consolidated from ADR-094 — Fold the external-VMM bridge sidecars into one `mvm-bridge`; keep libkrun merged
+
+> **Update:** this section folded `mvm-firecracker-bridge` and the (since-removed)
+> `mvm-vz-drainer` into one shared `mvm-bridge` process. Vz and its drainer were
+> later deleted entirely (ADR-098's ratification, Plan 226 R1P1); `mvm-bridge`
+> now serves Firecracker only, as CLAUDE.md's crate map describes
+> ("`mvm-bridge` — the shared external-VMM gateway/audit sidecar for
+> Firecracker"). HVF does not use this sidecar model at all — it is vsock-only,
+> gated through a per-VM endpoint. The libkrun-stays-merged / one-process-per-VM
+> shape this section establishes is otherwise still accurate.
 
 **Status:** Accepted
 **Amends:** [ADR-001](001-microvm-security-posture.md) — its per-backend tier matrix (the external-VMM backends share one bridge-sidecar process) and its consolidated-in ADR-083 section (the shared egress/audit funnel gains a single, shared transport process for FC + vz instead of two near-identical ones).
@@ -1896,6 +1563,15 @@ the seam) wants an aarch64 KVM box, but the x86 backend stands on its own proof.
 
 ## Consolidated from ADR-102 — One VMM driver seam; backends collapse to two role runners
 
+> **Update:** this section (accepted 2026-06-30) was written while `VzBackend`
+> still existed and planned for it to *dissolve into* the new unified
+> `WorkloadRunner`/`BuilderRunner` seam alongside the other backends. Vz was
+> instead deleted outright (ADR-098's ratification, 2026-07-08, Plan 226
+> R1P1) before that fold happened, so there is no `VzBackend` left to
+> dissolve — the surviving backends behind the seam are libkrun, HVF, and
+> Firecracker. The seam design itself (one `VmmDriver` per VMM, vsock-only
+> I/O, no NIC in `VmmSpec`) is unaffected.
+
 **Status:** Accepted (2026-06-30)
 **Relates to:** [ADR-003](003-hypervisor-egress-policy.md) (vsock is the sole
 guest↔world channel — this ADR makes its "single host gateway" the only egress
@@ -1917,10 +1593,10 @@ VMM-driving code:
 | VMM | runtime (`mvm-backend`) | builder (`mvm-build`) |
 |---|---|---|
 | libkrun | `libkrun.rs` | `libkrun_builder.rs` (3.8k) |
-| vz | `vz.rs` (4.3k) | `vz_builder.rs` (3.5k) |
+| ~~vz~~ | ~~`vz.rs` (4.3k)~~ | ~~`vz_builder.rs` (3.5k)~~ — deleted (Vz removed, Plan 226 R1P1) |
 | qemu | `qemu.rs` | `qemu_builder.rs` |
 | firecracker | `firecracker.rs` + `microvm.rs` (4.3k) | *(builder is never FC)* |
-| HVF/KVM | `hvf_backend.rs` + `vmm/` | *(none — the gap)* |
+| HVF/KVM | `hvf_backend.rs` + `vmm/` | `builder_runner/hvf_builder.rs` — the gap this row noted is now filled |
 
 The word "backend" conflates two separable things: **VMM mechanics** (create a VM,
 load a kernel, attach disks, wire vsock, boot, wait, kill) and **role policy** (a
@@ -1929,7 +1605,7 @@ write-only console, versus a builder's job staging, broad-egress nix build, and
 artifact collection). Because the two are tangled in every file, each VMM is written
 twice, and the cross-cutting concerns are re-implemented per backend — egress and
 substitution are scattered across `substitution_spawn.rs`, `egress_redirect.rs`,
-`egress_shared.rs`, the vz endpoint, and `vmm/{egress_gate,egress_proxy,substitution_bridge}.rs`.
+`egress_shared.rs`, the (since-deleted) vz endpoint, and `vmm/{egress_gate,egress_proxy,substitution_bridge}.rs`.
 That scatter is a defect source in its own right: a launch path that forgets to wire
 the policy is the exact shape of past egress-enforcement gaps.
 
@@ -2030,7 +1706,7 @@ hypervisor (see Testing).
 behind `AnyBackend`; each slice swaps one VMM's constructor to the new path, proves
 parity, then deletes the old type. Order: **S0** define the seam + promote the bridge
 (no behavior change) · **S1** `InHouseDriver` + `WorkloadRunner` (HVF reference proof)
-· **S2** libkrun · **S3** vz · **S4** Firecracker (the careful one — egress
+· **S2** libkrun · **S3** vz (moot — Vz was deleted outright, Plan 226 R1P1, rather than migrated through this slice) · **S4** Firecracker (the careful one — egress
 nftables→vsock, old path retained until proven on live KVM) · **S5** delete the five
 old workload types + the transport enum · **S6** `BuilderRunner` + migrate the three
 builders (hvf builder falls out) · **S7** builder vsock-egress cutover; delete
@@ -2049,7 +1725,7 @@ the vsock-framing/supervisor-config fuzz targets), backend-independent. A per-sl
 parity harness drives the same input through old and new and asserts equivalence:
 byte-identical `BuilderArtifacts` (the existing equality-proof gate) for builders;
 same egress allow/deny verdict, audit entries (modulo timestamp/nonce), and exit
-status for workloads. Live boots stay environment-gated (HVF/Vz/libkrun on macOS,
+status for workloads. Live boots stay environment-gated (HVF/libkrun on macOS,
 FC/libkrun on KVM, the claim-10 probe per backend, the S7 cold vsock nixpkgs fetch),
 captured as runbook proofs; `xtask check-claim-catalog` keeps the witness→test mapping
 honest across every slice.

@@ -21,8 +21,9 @@ pool images mvmd will rebuild via plan 23 — inherits whatever the
 tampered image injects.
 
 Sprint 42's W5.1 closed part of this gap by SHA-256-verifying downloads
-against a per-arch checksum manifest (`apple_container.rs:918-1048`),
-with `MVM_SKIP_HASH_VERIFY=1` as the documented escape. The W5.1 code
+against a per-arch checksum manifest (originally `apple_container.rs:918-1048`,
+since moved to `env/dev_vz/stage0_cache.rs` when the apple-container backend
+was removed), with `MVM_SKIP_HASH_VERIFY=1` as the documented escape. The W5.1 code
 itself flags the remaining gap at line 952: *"who can swap the artifact
 can also swap the checksum file, so the checksum manifest is TLS-only
 trust today, on the checksum file itself in a future iteration."*
@@ -269,7 +270,7 @@ The new direction:
 
 ## Boot-time budget — busybox-as-PID-1, NOT NixOS+systemd
 
-The project's value prop includes "as fast as possible" boot — concretely **sub-200ms to userspace on Firecracker / libkrun**, sub-1s on Apple Virtualization framework. Neither NixOS+systemd nor Alpine+OpenRC reaches that:
+The project's value prop includes "as fast as possible" boot — concretely **sub-200ms to userspace on Firecracker / libkrun**, sub-1s on the in-house HVF backend. Neither NixOS+systemd nor Alpine+OpenRC reaches that:
 
 | init system | Firecracker p50 | Why |
 |---|---|---|
@@ -296,7 +297,7 @@ The previous iteration shipped this exact strategy and was approaching the upstr
 | **Cloud Hypervisor (Linux/KVM)** | ≤ 300 ms | ≤ 50 ms | Tier-1 peer of Firecracker; rust-vmm-based; passes the §"fork test." Picks up where FC stops: VFIO passthrough, virtio-gpu, virtio-fs, larger guests. Opt-in via `--hypervisor cloud-hypervisor`. |
 | libkrun / libkrun (Linux/KVM) | ≤ 300 ms | ≤ 30 ms | libkrunfw bundles kernel; matches Firecracker on Linux. |
 | libkrun / libkrun (macOS HVF) | ≤ 300 ms | ≤ 60 ms | HVF init overhead is real; reaching the floor needs the kernel + initramfs trim from §"Boot-time budget" to be tight. |
-| Apple Virtualization framework | ≤ 300 ms | ≤ 200 ms | Apple's hypervisor overhead. If we can't hit 300 ms here we drop the backend (see ADR-009 — macOS path is libkrun-direct anyway). |
+| HVF (in-house Hypervisor.framework backend) | ≤ 300 ms | ≤ 200 ms | Direct Hypervisor.framework binding, no Apple-controlled Virtualization.framework layer above it. Supersedes the Vz backend, which targeted this same floor and was later removed (Plan 226 R1P1); HVF now carries the macOS 26+ default (see ADR-009 for the macOS-path history). |
 
 CI perf gate: `xtask perf --backend <name> --p50-ms 300 --runs 100` (Phase 9). The smoke at `tests/smoke_e2e_boot.rs` (Phase 1 W6) runs a single boot and asserts the floor on every PR that touches the boot path.
 
@@ -691,20 +692,27 @@ The signing identity is established inside the builder VM on both hosts. The hos
 - Builder VM cold-start latency on Linux CI runners. Plan 100 W0 measures this against the current Firecracker-direct baseline.
 - Nested KVM availability on cloud Linux hosts. Some cloud hypervisors disable nested virt by default (or expose it via per-VM capabilities). Doctor probe + clear failure mode required.
 
-## Relationship to Plan 98 (Vz builder backend)
+## Relationship to Plan 98 (Vz builder backend, since superseded by HVF)
 
-Plan 98 ships a second builder-VMM impl (Apple Virtualization.framework / Vz) on macOS 26+ Apple Silicon, parallel to libkrun. That work is **complementary** to this ADR's symmetric-builder uplift:
+> **Update (superseded):** Plan 98 shipped the Vz (Apple Virtualization.framework)
+> builder backend described below. Vz was later removed entirely (Plan 226 R1P1)
+> and replaced by the in-house HVF backend, which is now the macOS 26+ Apple
+> Silicon default builder. The mechanism this section describes — a selector
+> choosing which host VMM runs the macOS builder VM — is unchanged in shape;
+> only the non-libkrun arm's identity changed from Vz to HVF.
 
-- **Plan 98** picks which host VMM runs the macOS builder VM (libkrun or Vz). It does not change which OSes have a builder VM at all.
+Plan 98 shipped a second builder-VMM impl (Apple Virtualization.framework / Vz) on macOS 26+ Apple Silicon, parallel to libkrun. That work was **complementary** to this ADR's symmetric-builder uplift:
+
+- **Plan 98** picked which host VMM ran the macOS builder VM (libkrun or Vz). It did not change which OSes have a builder VM at all.
 - **This ADR (Plan 100)** adds a builder VM to Linux too, so workload microVMs always run nested.
 
-Plan 98's macOS work narrows the asymmetric-trust gap *on macOS* (it stops requiring the third-party `slp/krun` Homebrew trio when Vz is the default), but Linux still runs Firecracker directly until Plan 100 W2 lands the nested libkrun-on-Linux path. The two efforts ship independently; their selection layers compose via `mvm_build::builder_backend_select::resolve_choice` (Plan 98 introduced) which already has a third arm reserved for future Linux-builder dispatch (Plan 100 W2 will populate it). Builder-backend parity discussion lives in **ADR-046 §"Vz as a second builder backend (Plan 98)"**.
+Plan 98's macOS work narrowed the asymmetric-trust gap *on macOS* (it stopped requiring the third-party `slp/krun` Homebrew trio when Vz was the default), but Linux still runs Firecracker directly until Plan 100 W2 lands the nested libkrun-on-Linux path. The two efforts shipped independently; their selection layers compose via `mvm_build::builder_backend_select::resolve_choice` (Plan 98 introduced), whose non-libkrun arm now dispatches to HVF instead of Vz.
 
 ## References
 
 - [ADR-001](001-firecracker-only.md) — Firecracker-only execution (needs update for nested model)
 - [ADR-001](001-microvm-security-posture.md) — microVM security posture (claim 1 reworded by Plan 100 W8)
-- [ADR-007](007-vmbackend-single-trait.md) — builder VM via libkrun + Plan 98 Vz extension
+- [ADR-007](007-vmbackend-single-trait.md) — builder VM via libkrun + the (now-superseded) Plan 98 Vz extension
 - [Plan 100](../plans/100-symmetric-builder-vm-rollout.md) — implementation rollout
 
 
@@ -944,7 +952,7 @@ today's shape.
 8. mvmctl extracts to `~/.cache/mvm/builder-vm/<system>/`, keyed on
    (workspace SHA, mvmctl host-bin content hash, flake SHA).
 9. mvmctl boots the dev VM via whichever backend the host selects
-   (libkrun / Vz / Apple Container per the existing
+   (libkrun / HVF per the existing
    `MVM_BUILDER_BACKEND` rules).
 10. mvmctl opens a PTY-over-vsock console into the running VM.
 
@@ -964,6 +972,11 @@ headless, no step 10.
   a no-op (target dir already exists).
 
 ## Component-level diff
+
+> **Note:** the diff below is contemporaneous with Plan 100 and predates the
+> Vz backend's removal (Plan 226 R1P1) — `apple_container.rs` and
+> `cmd_dev_vz` no longer exist under those names in current source; the
+> Vz-handling code paths they described were deleted along with the backend.
 
 ### New
 
@@ -1266,6 +1279,16 @@ change. Specifically:
 
 ## Consolidated from ADR-068 — Stage 0 dispatches through the `BuilderVm` trait (backend-agnostic bootstrap seam)
 
+> **Update (superseded in part):** the `VzBuilderVm` impl this section
+> describes never shipped under that name — the Vz backend was removed
+> (Plan 226 R1P1) before a Vz Stage 0 impl landed. The HVF backend that
+> replaced Vz has its own builder-runner impl
+> (`crates/mvm-backend/src/builder_runner/hvf_builder.rs`); whether it
+> implements `run_stage0` or still inherits the fail-closed default is
+> tracked in that backend's own plan history, not here. The trait-dispatch
+> shape this ADR establishes (`&dyn BuilderVm`, fail-closed default gap)
+> is unchanged and still current.
+
 **Status**: Accepted
 **Date**: 2026-06-01
 **Cross-refs**: ADR-013 (libkrun pivot — host never needs Nix), ADR-046 (builder VM via libkrun, the canonical builder-VM ADR), ADR-065 (single builder/dev image, embedded host binaries), ADR-022 §1 (name by role, front with a trait, hide impls), ADR-001 (security posture — dev-tier builder VM). Planning input: Plan 91 (Alpine-minirootfs Stage 0), Plan 97 (`VmBackendForBuilder` hypervisor-agnostic seam), Plan 98 (libkrun/Vz builder-backend selection).
@@ -1396,7 +1419,7 @@ error: mismatch in field 'narHash' of input
   '{… "narHash":"sha256-hOlf/RVFs9vVyapFtW6+/jp209mi+UAat/cqa2hrc+Y=" …}'
 ```
 
-Both builder backends fail it (vz first, then the ADR-093 libkrun fallback), so
+Both builder backends fail it (HVF first, then the ADR-093 libkrun fallback), so
 the log shows two failures. The command can still *appear* to succeed — see
 "Why it's masked".
 
@@ -1797,7 +1820,7 @@ Option B.** Concretely:
 2. **Prod refuses virtiofs-root.** A sealed / `--prod` workload continues to
    require Option B: in-process (or builder-VM) ext4 + dm-verity + roothash on
    the signed cmdline. The run path selects virtiofs-root **only** for the
-   dev/local tier on virtiofs-capable backends (HVF, libkrun, Vz);
+   dev/local tier on virtiofs-capable backends (HVF, libkrun);
    `--prod` and any sealed-image admission path fall back to Option B, on every
    backend. **Firecracker always uses Option B** (it has no virtiofs root
    device; ADR-106).

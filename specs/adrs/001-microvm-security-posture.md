@@ -165,7 +165,7 @@ catalog ledger rather than reused.
 | 7 | Cargo deps are audited on every PR | cross-cutting (supply chain) | W5.2 | `cargo-deny` + `cargo-audit` jobs; reproducibility double-build (W5.3) |
 | 8 | Every workload runs from a signed, audited `ExecutionPlan` | cross-cutting (policy + audit) | plan 64 W1–W4, ADR-014 | `synthesize_plan` / `host_signer::load_or_init_at` / `admit_for_run` / `AuditEmitter` round-trip + tamper rejection tests; `xtask check-no-display-on-secret-types` |
 | 9 | Every published bundle is content-addressed, key_id-pinned, and re-verified at fetch **and at admit time** | cross-cutting (supply chain + integrity) | Sprint 52 W2 + admit-time re-verify follow-on | `mvm_plan::bundle::read_and_verify_bundle` + `mvm_plan::bundle::verify_plan_bundle` rejection-ladder tests: unknown-key, tampered manifest, key_id mismatch, tampered artifact, missing artifact, unsafe path, schema bump, pin-archive sha256 drift, pin-signature drift; `mvmctl bundle fetch` round-trip + `admit_for_run` tests asserting refusal on pin-without-context and pin-archive mismatch |
-| 10 | No untrusted workload reaches the network unless explicitly admitted by policy | cross-cutting (data containment) | Sprint 52 W3 | `policy_default_is_deny_all` + `test_resolve_network_policy_default_is_deny_all`; `mvmctl up` emits an opt-in warning when the resolved policy is `unrestricted` (escape hatch is `MVM_ACK_UNRESTRICTED_NETWORK=1`); libkrun/Vz admitted `up` boots thread the signed plan by default so the gateway bridge enforces default-deny; non-deny CLI/template policies are lowered into a generated signed-policy bundle rather than an unsigned bare carrier |
+| 10 | No untrusted workload reaches the network unless explicitly admitted by policy | cross-cutting (data containment) | Sprint 52 W3 | `policy_default_is_deny_all` + `test_resolve_network_policy_default_is_deny_all`; `mvmctl up` emits an opt-in warning when the resolved policy is `unrestricted` (escape hatch is `MVM_ACK_UNRESTRICTED_NETWORK=1`); libkrun admitted `up` boots thread the signed plan by default so the gateway bridge enforces default-deny; non-deny CLI/template policies are lowered into a generated signed-policy bundle rather than an unsigned bare carrier |
 | 11 | Every application-dep volume is hash-locked, attestation-checked, CVE-scanned, SBOM-enumerated, and bound to the workload's audit chain | cross-cutting (supply chain — app-layer deps) | ADR-047, Plan 73 Followups A + B.1/B.2/B.3 + C + D | `mvm_sdk::compile::deps_audit::{seal_volume, verify_sealed_volume}` tamper-detection unit tests; `mvm_build::app_deps_gate::apply_install_gate` prod/dev rejection tests; `app-deps-audit` CI lane in `ci.yml` (Followup D) — drives `mvmctl compile` on `examples/python/hello-app-with-deps/`, seals a clean + a HIGH-CVE fixture via `mvm-app-deps-fixture-tool`, asserts `mvmctl deps inspect --json` produces a well-formed report, asserts the prod gate refuses the HIGH-CVE fixture and the dev gate admits it, asserts a byte-flip on `cve.json` makes inspect refuse |
 | 12 | Every host-side service the broker exposes is bound to a signed `ExecutionPlan.services` binding, enforced before handler dispatch, and audited via the chain-signed log | cross-cutting (policy + audit) | Plan 104 W2, ADR-020 | `service_call_denied_when_unbound` + `service_call_denied_outside_profile` + `audit_chain_contains_service_call_entries` + `audit_chain_carries_no_payload_bytes` rejection-ladder tests; `xtask check-handler-adr-coverage` + `xtask check-handler-policy-schema` + `xtask check-handler-composition` lints; `fuzz_service_call.rs` lane (Plan 104 W6) |
 | 13 | No raw secret value crosses the broker channel; `host.secrets.v1` returns destination-bound, time-bound signed credentials only; raw secret bytes never leave the supervisor's address space | cross-cutting (data containment) | Plan 104 W5, ADR-023, ADR-020 | `host_secrets_v1_denied_outside_allowed_destinations` + `zeroize_drop_zeros_secret_bytes` + `handler_inter_call_memory_hygiene` + `host_secrets_v1_signed_payload_jcs_roundtrip` + `secrets_subprocess_cannot_reach_supervisor_memory` + `placeholder_in_outbound_request_dropped_and_audited` (S25 backstop) tests; ADR-023 hostile-guest matrix in W7 |
@@ -176,8 +176,10 @@ by definition (see Threat model). L1 *enables* claim 3 (verified boot
 needs a hypervisor that respects the kernel cmdline). If the host is
 compromised, every layer falls; that case is explicitly out of scope.
 
-**Claim 10 on libkrun/Vz `up`.** As of 2026-06-17, admitted workload boots on
-libkrun and Vz thread the signed `ExecutionPlan` by default. `plan_json`
+**Claim 10 on libkrun `up`.** As of 2026-06-17, admitted workload boots on
+libkrun thread the signed `ExecutionPlan` by default (originally libkrun and
+Vz; Vz has since been removed — HVF's egress model is vsock-only, gated
+through a per-VM endpoint rather than this gateway-bridge path). `plan_json`
 presence selects the gateway-bridge supervisor, whose restart policy is
 hard-fail; if the bridge cannot start or panics, the VM launch fails closed
 rather than falling back to direct gvproxy. Explicit non-deny egress
@@ -215,21 +217,17 @@ and prod / sealed / `--prod` workloads (and Firecracker on every tier) stay
 on Option B, where claim 3 holds unchanged. See ADR-107 for the full
 virtiofs-root integrity posture and the deferred promotion path.
 
-### Backend symmetry (Plan 98)
+### Backend symmetry (Plan 98) — Vz builder removed; superseded by HVF
 
-Claims 1, 5, 7, 8, and 11 have **backend-symmetric evidence**: the
-gate holds under both the libkrun-backed builder VM and the
-Vz-backed builder VM (Plan 98). The libkrun-side evidence cited
-above is the canonical reference; the Vz-side parity claims hold
-with the same shape and are catalogued per-claim in **ADR-046 §"Vz
-as a second builder backend (Plan 98)" → "Security claim parity"**.
-Specifically:
-
-- **Claim 1** — VirtioFsShare set-equality test (Plan 98 §2.S8).
-- **Claim 5** — `crates/mvm-vz/fuzz/` parallels `crates/mvm-libkrun/fuzz/fuzz_supervisor_config.rs` (Plan 98 §2.S6).
-- **Claim 7** — `crates/mvm-vz` participates in `deny` + `audit` like every workspace member (Plan 98 §2.S5).
-- **Claim 8** — `mvmctl audit verify` after a Vz-driven `mvmctl up --prod` asserts chain cleanliness (Plan 98 §2.S3).
-- **Claim 11** — cross-backend byte-equivalence of sealed deps volume `(content/, sbom.cdx.json, fetch.log, cve.json)` (Plan 98 §2.S2) + `meta.json` backend-neutrality (Plan 98 §2.S10) + Install-arm kernel parity (Plan 98 §2.S9).
+**Superseded:** this sub-section recorded Vz-builder parity evidence for
+claims 1, 5, 7, 8, and 11 (Plan 98). The Vz backend, including its builder
+VM and its `crates/mvm-vz` fuzz/deny/audit coverage, has since been removed
+entirely (ADR-098's ratification, Plan 226 R1P1). The in-house HVF backend
+has its own builder impl (`crates/mvm-backend/src/builder_runner/hvf_builder.rs`)
+filling the non-libkrun builder role; whether an equivalent per-claim parity
+table exists for HVF is tracked in that backend's own plan history, not
+reproduced here. The libkrun-side evidence remains the canonical reference
+for claims 1, 5, 7, 8, and 11.
 
 Claims 2, 3, 4, 6, 9, 10 are guest-side or end-user-runtime concerns
 that don't depend on which host VMM booted the builder, so the
@@ -378,22 +376,24 @@ The following are decided and committed for v1 of this hardening:
 
 ## Per-backend tier matrix
 
-mvm ships four VM backends (+ a test-only mock) — Firecracker, libkrun,
-vz, and QEMU — each with different layer coverage. A given user run
+mvm ships four VM backends (+ a test-only mock) — Firecracker, HVF,
+libkrun, and QEMU — each with different layer coverage. A given user run
 carries the tier of its active backend, not the strongest tier the
 project supports. The following matrix is what `mvmctl doctor` reports
 and what the mvm-cli startup banner surfaces (loudly, when the active
 backend falls below Tier 1). Plan 177 consolidated the former
 8-backend set: Docker and Cloud Hypervisor were deleted in Phase 1,
 microvm.nix folded into the QEMU backend, and the in-process
-Apple-Container backend folded into the supervisor-model `vz` backend
-in Phase 2.
+Apple-Container backend folded into the supervisor-model `Vz`
+(Apple Virtualization.framework) backend in Phase 2. `Vz` was itself
+removed later (Plan 226 R1P1) once the in-house HVF backend reached
+parity — HVF is now the sole macOS backend, with libkrun as the
+macOS 13-25 default / fallback.
 
 | Backend | L1 | L2 | L3 | L4 | L5 | Notes |
 |---|---|---|---|---|---|---|
 | Firecracker (Linux + KVM) | ✅ | ✅ | ✅ | ✅ | ✅ | **Tier 1** — full ADR-001. All seven claims hold. |
-| HVF / Hypervisor.framework (macOS 26+ Apple Silicon) | ✅ HVF | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — the in-house Hypervisor.framework VMM (Plan 214). vsock-only guest I/O: claim-10 egress is enforced through a per-VM gating endpoint over vsock — no gvproxy/vmnet, no guest NIC. Same `Hypervisor.framework` primitive as libkrun/Vz. Claim 3 partial (dm-verity targets Firecracker today); claims 1, 2, 4, 5, 6, 7 hold. **The macOS 26+ Apple Silicon auto-default** (`auto_select` picks HVF). |
-| Vz / Virtualization.framework (macOS 13+) | ✅ HVF | ✅ Vz (Apple-controlled API surface on top of HVF) | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — the single AVF backend (the former in-process Apple-Container path folded in here, Plan 177 Phase 2). Same `Hypervisor.framework` primitive as libkrun, smaller Apple-controlled API surface, balloon + snapshots. Claim 3 partial — dm-verity pipeline targets Firecracker today; claims 1, 2, 4, 5, 6, 7 hold. Opt-in on macOS via `--builder vz` / `--hypervisor vz`, and **sunsetting** in favor of the HVF backend (above) — no longer the macOS-26 auto-default. |
+| HVF / Hypervisor.framework (macOS 26+ Apple Silicon) | ✅ HVF | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — the in-house Hypervisor.framework VMM (Plan 214). vsock-only guest I/O: claim-10 egress is enforced through a per-VM gating endpoint over vsock — no gvproxy/vmnet, no guest NIC. Claim 3 partial (dm-verity targets Firecracker today); claims 1, 2, 4, 5, 6, 7 hold. **The macOS backend** — the macOS 26+ Apple Silicon auto-default (`auto_select` picks HVF), with libkrun as the macOS 13-25 default / fallback. |
 | libkrun / libkrun (Linux KVM, macOS HVF) | ✅ | ✅ | ⚠️ no verified boot yet | ✅ | ✅ | Tier 2 — claim 3 partial; comparable VMM TCB to Firecracker; the macOS 13-25 default and the Linux-without-KVM fallback per ADR-013. |
 | QEMU (Linux KVM/TCG) | ✅ KVM | ⚠️ QEMU TCB much larger | ⚠️ partial verified boot | ✅ | ✅ | Tier 2 — claim 3 partial; QEMU's larger device model raises L2 audit cost. **Dev/test only** (Plan 166, was microvm.nix): selected by `mvm` for a Linux dev/test loop, never by `mvmd` — it carries no untrusted multi-tenant workload, so claim-10 egress enforcement is deliberately *not* wired into its start path (see the egress-enforcement note below). |
 | `wasm-sandbox` (browser / WASI) | ❌ | ❌ | ❌ | ❌ | ❌ | **Off the isolation scale** (ADR-024). A portable backend for browser/wasm demos and previews (real WASI execution is deferred — Plan 144) — no KVM, no real kernel, no TAP/virtio/vsock. Asserts **none** of the numbered claims, declares its own non-virtualization honestly (`hardware_virtualization=false`), and fails closed on any kernel/TAP/vsock request. Opt-in only (`--hypervisor wasm-sandbox` / `browser`); `auto_select()` never returns it. See the Tier-0 preview note below. |
@@ -558,7 +558,7 @@ workstream tracker at
 
 | Cardoso bullet | mvm status | Mechanism / claim | Evidence |
 |---|---|---|---|
-| Default-deny outbound, then allowlist (or policy proxy) | **pass** | **claim 10** | `policy_default_is_deny_all`; `test_resolve_network_policy_default_is_deny_all`; `mvmctl up` warns on `unrestricted` policy with explicit env opt-out; libkrun/Vz `up` defaults to the gateway bridge and generated signed-policy bundles for non-deny egress. DNS / broker / vsock carve-out audit tracked in Plan 111 Workstream A. |
+| Default-deny outbound, then allowlist (or policy proxy) | **pass** | **claim 10** | `policy_default_is_deny_all`; `test_resolve_network_policy_default_is_deny_all`; `mvmctl up` warns on `unrestricted` policy with explicit env opt-out; libkrun `up` defaults to the gateway bridge and generated signed-policy bundles for non-deny egress (HVF enforces default-deny through its own vsock-gated endpoint instead of the gateway bridge). DNS / broker / vsock carve-out audit tracked in Plan 111 Workstream A. |
 | No long-lived credentials; short-lived scoped tokens | **pass** | **claim 8** + **claim 13** | G4 validity window + nonce on signed `ExecutionPlan`; Plan 104 `host.secrets.v1` returns destination-bound, time-bound signed credentials; raw secret bytes never leave the supervisor's address space. |
 | Workspace-only filesystem; no host mounts beyond explicit shares | **pass** | **claim 1** | Per-service uid; seccomp `standard`; setpriv `--no-new-privs`; read-only bind-mounts on `/etc/{passwd,group,nsswitch.conf}`. |
 | Resource limits: CPU / memory / disk / timeouts / PIDs | **partial** | CPU + memory + disk wired; `ExecutionPlan.resources` scaffolded; `timeout_seconds` / `pid_limit` not populated | Plan 37 §3.3 to be extended; ADR-014 schema table to be amended (Plan 111 Workstream C). |
@@ -585,7 +585,7 @@ Listed here for the audit-cleanly reader.
 
 | Question | mvm answer |
 |---|---|
-| What is shared between this code and the host? | KVM `/dev/kvm` ioctls (Linux); Hypervisor.framework calls (macOS Vz / libkrun); vsock for control plane + brokered host services (binding-gated per claim 12); one explicit virtio-fs share per declared mount. Host filesystem is never ambient. |
+| What is shared between this code and the host? | KVM `/dev/kvm` ioctls (Linux); Hypervisor.framework calls (macOS HVF / libkrun); vsock for control plane + brokered host services (binding-gated per claim 12); one explicit virtio-fs share per declared mount. Host filesystem is never ambient. |
 | What can the code touch? | Whatever the signed `ExecutionPlan` admits: declared shares, declared egress allowlist (claim 10), declared volumes, declared `host.*` brokered services (claim 12 binding). No raw devices. No host process namespace. No host network namespace. |
 | What survives between runs? | Volumes the plan declares persistent (sealed deps volumes are RO and hash-locked per claim 11). Everything else is ephemeral by default. Snapshot/restore on workload microVMs not yet exposed — see Plan 111 Workstream B. SDK workload hooks (`before_build` / `before_start` / `after_start` / `before_stop` in `crates/mvm-sdk/src/compile/hooks.rs`) shape what runs at launch, not what survives across launches. |
 
@@ -1054,7 +1054,7 @@ This document is the STRIDE walk for the host services broker introduced by ADR-
 - Physical attacks on the host (cold-boot DRAM, DMA via Thunderbolt/PCIe, chip-off, side-channel power analysis, unauthorized firmware flashing).
 - Multi-tenant guests (one guest = one workload).
 - Hardware-backed key attestation by the workload itself.
-- Vulnerabilities in the hypervisor's vsock implementation (KVM `vhost-vsock`, Firecracker, libkrun, cloud-hypervisor, Apple `vz`) — these are dependency-CVE-managed per ADR-020 §"Dependency CVE surface".
+- Vulnerabilities in the hypervisor's vsock implementation (KVM `vhost-vsock`, Firecracker, libkrun, cloud-hypervisor) — these are dependency-CVE-managed per ADR-020 §"Dependency CVE surface". (HVF's vsock implementation is in-house code, not a third-party dependency, so it is in-scope for this ADR's own review rather than dependency-CVE-managed.)
 
 ## Adversary model
 
@@ -1389,9 +1389,10 @@ never on the read path that matters.
 
 The W3 implementation (`crates/mvm/src/vm/microvm.rs::configure_flake_microvm_with_drives_dir`)
 sets `boot_args = "root=/dev/dm-0 ro rootwait init=/init {dm_create} {base_args}"`
-when verity is on. The Apple Container path (`crates/mvm-apple-container/src/macos.rs`)
-does the analogous thing. Both share the same defect: Firecracker's
-auto-append (and presumably whatever the VZ code path does on macOS)
+when verity is on. The Apple Container path (`crates/mvm-apple-container/src/macos.rs`
+— this backend was later removed along with Vz; the crate no longer exists)
+did the analogous thing. Both shared the same defect: Firecracker's
+auto-append (and presumably whatever the Vz code path did on macOS)
 is not accounted for, so a verity-enabled production microVM still
 boots off raw `/dev/vda`. Verity is initialized but doesn't gate
 reads against the rootfs the running guest is actually using.
@@ -1608,9 +1609,9 @@ Any non-Rust boundary binary MUST be kept side-by-side with the existing Rust im
 
 Adoption is then a separate PR that flips the default. Removal of the Rust binary is a *third* PR, no earlier than one release cycle after the default flip. The transition is irreversible only at that point.
 
-### 6. Apple VZ ObjC/Swift shim — explicit carve-out
+### 6. Apple VZ ObjC/Swift shim — explicit carve-out (vacated)
 
-`mvm-vz-supervisor` (Plan 98 / ADR-056) uses Swift to bridge to Apple's closed-source Virtualization.framework. This is an existing exception that predates this ADR and is grandfathered. Any future Apple-framework integration MAY use Swift or ObjC under the same scoping discipline as §3 — narrow, framework-mandated, not part of the audit chain — but MUST still satisfy §4's deliverables.
+`mvm-vz-supervisor` (Plan 98 / ADR-056) originally used Swift to bridge to Apple's closed-source Virtualization.framework; this was an existing exception that predated this ADR and was grandfathered. That grandfather case no longer applies: the Swift supervisor was rewritten to a Rust `objc2` supervisor (Plan 152 WS-B, 2026-06-07/08), and the Vz backend was later removed entirely (ADR-098's ratification, Plan 226 R1P1). There is no non-Rust code at the boundary today. Any future Apple-framework integration MAY still use Swift or ObjC under the same scoping discipline as §3 — narrow, framework-mandated, not part of the audit chain — but MUST satisfy §4's deliverables; it would be a fresh proposal, not a continuation of this carve-out.
 
 ## Consequences
 
@@ -1628,12 +1629,12 @@ Adoption is then a separate PR that flips the default. Removal of the Rust binar
 
 **Neutral:**
 
-- Does not retroactively bless or revoke any existing non-Rust code. The Vz Swift shim is grandfathered (§6); there is no other non-Rust code at the boundary today.
+- Does not retroactively bless or revoke any existing non-Rust code. The Vz Swift shim's grandfather case (§6) is now vacated — the shim was rewritten to Rust, then Vz was removed entirely; there is no non-Rust code at the boundary today.
 - Does not commit the team to evaluating any particular non-Rust language. Plan 109's Zig prototype is the first evaluation; nothing here commits to a second.
 
 ## Alternatives considered
 
-**Alt 1: prohibit non-Rust at the boundary entirely.** Rejected because the Apple Vz Swift shim is load-bearing and the framework is closed-source. A blanket prohibition would either force re-implementation of Vz support in Rust (technically infeasible — Apple's framework requires Swift/ObjC) or block macOS Apple-Silicon support. A scoped policy is the workable middle.
+**Alt 1: prohibit non-Rust at the boundary entirely.** Rejected at the time because the Apple Vz Swift shim was load-bearing and the framework was closed-source. A blanket prohibition would have either forced re-implementation of Vz support in Rust (which happened anyway — Plan 152 WS-B — before Vz itself was removed entirely) or blocked macOS Apple-Silicon support. A scoped policy was the workable middle; whether it is still needed for any future non-Rust proposal is an open question now that the grandfather case (§6) is vacated.
 
 **Alt 2: allow non-Rust freely, gate only by code review.** Rejected because boundary code reaches every microVM and supply-chain hygiene compounds. Discretionary review provides no consistent floor; the six-deliverable bar gives one.
 
@@ -1661,7 +1662,7 @@ Adoption is then a separate PR that flips the default. Removal of the Rust binar
 
 A sibling browser-VM project runs full environments **in the browser**: a RISC-V RV64GC interpreter compiled to `wasm32`, booting an unmodified kernel, with a WebSocket relay for egress. The natural question for mvm was "should we grow an analogous browser capability?"
 
-The answer turns on one distinction that is easy to miss. That project **emulates** a CPU; mvm **virtualizes** on real hardware (Firecracker/libkrun/Vz over KVM/HVF). You can ship a CPU emulator as wasm and run it in a tab. You **cannot** run KVM in a tab. So the headline browser-emulator capability — "boot the workload in the browser, serverless" — has no path into mvm's runtime model, and a `wasm`/emulator `VmBackend` is the wrong shape for the `VmBackend` trait (kernel path, ext4 rootfs, TAP, pause/resume, vsock — nearly all N/A; ADR-007). That dead end should be recorded so it is not relitigated.
+The answer turns on one distinction that is easy to miss. That project **emulates** a CPU; mvm **virtualizes** on real hardware (Firecracker/libkrun over KVM, HVF over Hypervisor.framework). You can ship a CPU emulator as wasm and run it in a tab. You **cannot** run KVM in a tab. So the headline browser-emulator capability — "boot the workload in the browser, serverless" — has no path into mvm's runtime model, and a `wasm`/emulator `VmBackend` is the wrong shape for the `VmBackend` trait (kernel path, ext4 rootfs, TAP, pause/resume, vsock — nearly all N/A; ADR-007). That dead end should be recorded so it is not relitigated.
 
 What *does* transfer is the part underneath the emulator: **content-addressed, self-verifying artifacts that any peer can check by re-derivation, with no server to trust** (its Law L5 — `verify_kappa()`). mvm already produces exactly such artifacts — signed `ExecutionPlan`s, content-addressed bundles, and a chain-signed audit log (claims 8/9/14). Those are verifiable from bytes alone. That is the idea that maps cleanly onto mvm's strengths.
 
@@ -1773,7 +1774,8 @@ in a follow-on phase, so it cannot be omitted either.
   the hermetic test double — but it never carries a real workload.)
 - **Egress secret substitution on macOS becomes a required build.** When the
   substitution transport becomes a no-default `WorkloadBackend` method,
-  libkrun and vz will not compile without implementing it. This reclassifies
+  libkrun and HVF (originally libkrun and vz, before Vz was removed) will
+  not compile without implementing it. This reclassifies
   the macOS substitution port from an optional fast-follow to a compliance
   requirement. (The transparent :80/:443 terminator half entangles with the
   rvproxy migration — ADR-082 / Plan 193 — and is resolved by a design
@@ -2265,7 +2267,7 @@ therefore rolled out in two stages, each a distinct PR:
     `verb-grant.json` sidecar *existing* — so a corrupt sidecar still asserts
     enforcement and the guest fails closed rather than running grant-less),
     appended at the four mvm-backend cmdline builders
-    (`microvm`/`qemu`/`libkrun`/`vz`) — all of which mvmd bypasses.
+    (`microvm`/`qemu`/`libkrun`/`hvf`) — all of which mvmd bypasses.
   - The guest reads it (`launch_requires_grant()` over `/proc/cmdline`) and
     `trust_decision(policy, grant_present, launch_requires_grant)` fails closed
     when enforcement is **launch-asserted OR baked-policy-required OR

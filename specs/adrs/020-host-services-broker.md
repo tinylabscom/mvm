@@ -192,7 +192,7 @@ Plan 104 takes the strongest property of each: (B′) is the primary path; S25 a
 - **One new line of TCB code** (the `mvm-secrets-dispatcher` binary). Mitigated by minimal single-responsibility design and dedicated security review per the no-`do_exec` discipline.
 - **`SCHEMA_VERSION` bump 4→5.** Existing v4 plans hard-fail at verification; per the no-backcompat rule, no shim. Migration: re-synthesize + re-sign under v5.
 - **Cross-VM calls have higher latency than in-supervisor calls** (sub-100ms target with pre-warmed iroh + agent-local TTL cache). Acceptable for the cost / catalog / future config use cases; not a fit for hot-path queries.
-- **Per-backend listener work is non-trivial on vz.** The existing Swift `VsockProxy` is host-as-client only; vz needs a new `VZVirtioSocketListener` class. Substantial sub-task in Plan 104 W1.
+- **Per-backend listener work is non-trivial on a new VMM.** The existing Swift `VsockProxy` was host-as-client only; the (since-removed) Vz backend would have needed a new `VZVirtioSocketListener` class. Substantial sub-task in Plan 104 W1 — moot now that Vz has been replaced by the in-house HVF backend, which implements its own vsock listener directly against Hypervisor.framework.
 
 ## Migration
 
@@ -322,7 +322,7 @@ The broker's isolation rests on vsock + the underlying VMM + kernel paths. Each 
 | Firecracker `virtio-vsock` | Linux runtime path | Refuse admission on known-vulnerable Firecracker versions |
 | libkrun `virtio-vsock` | macOS runtime path | Refuse admission on known-vulnerable libkrun versions |
 | cloud-hypervisor `virtio-vsock` | Builder VM path on macOS | Refuse admission on known-vulnerable cloud-hypervisor versions |
-| Apple `vz` virtio sockets | macOS 26+ Apple Silicon runtime + builder | Refuse admission on macOS versions with known Apple-vz CVEs |
+| HVF (in-house) virtio sockets | macOS 26+ Apple Silicon runtime + builder | Refuse admission on macOS versions with known Hypervisor.framework CVEs |
 | gvproxy / passt | Userspace virtio-net gateway (egress secret backstop in Plan 104 §S25) | Refuse admission on known-affected gateway versions |
 | `ed25519-dalek`, `serde_json`, `serde_jcs`, `chacha20poly1305`, `tpm2-tss` | Crypto + parsing | `cargo deny` advisory + license gate on every PR |
 
@@ -366,7 +366,7 @@ On **non-enclave hosts** (no Apple SE, no Linux TPM), the host signer is **trust
 - Scope: roughly 3–4 sprints of work where the original ADR-020 / Plan 104 v1 was 1.
 - Operational surface: four new subprocess binaries per VM (was 1 under ADR-020); new doctor checks; new release-pipeline lanes (cosign per binary, Sigstore, in-toto, reproducibility-per-binary).
 - Single points of availability: `mvm-host-signer` and `mvm-audit-signer` are now load-bearing for admission and audit respectively; restart-with-backoff is the v1 mitigation, with m-of-n quorum deferred.
-- Cross-backend complexity: the vz (Apple Silicon) backend needs a new `VZVirtioSocketListener` Swift class — substantial sub-task.
+- Cross-backend complexity: the (since-removed) Vz backend would have needed a new `VZVirtioSocketListener` Swift class — substantial sub-task, superseded by the in-house HVF backend's own vsock listener.
 - Hardware-enclave dependency (W8): macOS SE + Linux TPM 2.0 integration is first-time work in `mvm`; software fallback retained but flagged as a downgrade.
 
 ## Non-goals

@@ -6,11 +6,11 @@
 
 ## Context
 
-mvm runs guest workloads across multiple hypervisor backends: **Firecracker** (Linux KVM, production tier 1), **libkrun** (Linux KVM + macOS HVF), **Apple Virtualization.framework / Vz** (macOS 26+ Apple Silicon, ADR-007), **Cloud Hypervisor** (Linux KVM alternative), **Apple Container** (macOS), **Docker** (tier 3 fallback), plus Mock for testing.
+mvm runs guest workloads across multiple hypervisor backends: **Firecracker** (Linux KVM, production tier 1), **libkrun** (Linux KVM + macOS 13-25), **HVF** (in-house Hypervisor.framework VMM, macOS 26+ Apple Silicon, ADR-007), **Cloud Hypervisor** (Linux KVM alternative), **Docker** (tier 3 fallback), plus Mock for testing.
 
 The guest-side init layer (pid 1 → `mvm-verity-init` → `switch_root` → minimal init → `mvm-guest-agent`) is structurally identical across backends today *by convention*, not by contract. ADR-019 introduced a guest protocol hello + readiness state machine, and Plan 64 / claim 8 wired a signed `ExecutionPlan` admission path. Neither names the broader **pid0 control surface** the agent must provide on every backend — i.e. what every backend's guest must satisfy for the host's control plane to work uniformly.
 
-Today the convention is implicit. It's documented across CLAUDE.md, scattered code comments in `crates/mvm-guest/`, the verity-init kernel cmdline contract, and the per-backend supervisor wiring. New backends (e.g. the Vz path in ADR-007 / Plan 98, or Cloud Hypervisor in Plan 54) have to re-derive what "this thing is a valid mvm guest" means by reading existing implementations. That's brittle and invites drift.
+Today the convention is implicit. It's documented across CLAUDE.md, scattered code comments in `crates/mvm-guest/`, the verity-init kernel cmdline contract, and the per-backend supervisor wiring. New backends (e.g. the HVF path in ADR-007, or Cloud Hypervisor in Plan 54) have to re-derive what "this thing is a valid mvm guest" means by reading existing implementations. That's brittle and invites drift.
 
 The motivating question (raised by Plan 109's exploration of Zig vs lean-Rust v2 alternatives at the boundary): **if pid0 is the portability boundary across hypervisors, what does any pid0 implementation — Rust today, lean-Rust v2 future, hypothetical Zig replacement — have to do to be a valid mvm guest?**
 
@@ -38,7 +38,7 @@ The pid0 control surface is **distinct from**:
 
 Every backend MUST provide:
 
-- **Virtio-vsock** with a stable CID assignment for the guest. The host uses CID 2 (loopback); the guest uses CID 3 by convention. Backends that abstract the CID space (libkrun's in-process VSOCK proxy, Vz's vsock API, Cloud Hypervisor's vsock device) MUST expose the guest end as a Unix-domain socket the host supervisor can bind for incoming connections.
+- **Virtio-vsock** with a stable CID assignment for the guest. The host uses CID 2 (loopback); the guest uses CID 3 by convention. Backends that abstract the CID space (libkrun's in-process VSOCK proxy, HVF's vsock API, Cloud Hypervisor's vsock device) MUST expose the guest end as a Unix-domain socket the host supervisor can bind for incoming connections.
 - **A length-prefixed JSON framing** carried inside vsock streams, with `AuthenticatedFrame` (Ed25519 + session id + monotonic sequence) wrapping every payload (ADR-001 §W4.1, claim 5, `crates/mvm-core/src/policy/security.rs`).
 - **No alternate control transport.** Backends MUST NOT route control-plane traffic over virtio-net, virtio-fs, block devices, or any side channel. The vsock-only invariant is load-bearing for claim 1 (no host-fs access beyond explicit shares) and ADR-014 (no virtio-net bypass).
 
@@ -118,7 +118,7 @@ Any language change at the boundary MUST preserve these *byte-identically*. See 
 
 **Negative:**
 
-- Codifies status quo before all of it is exercised across every backend. Vz (Plan 98) and Cloud Hypervisor (Plan 54) are still in flight; this ADR will need an amendment if their work surfaces a contract gap.
+- Codifies status quo before all of it is exercised across every backend. HVF (the Vz successor, Plan 214) and Cloud Hypervisor (Plan 54) were still in flight as of this ADR; this ADR will need an amendment if their work surfaces a contract gap.
 - The musl-static + no-glibc constraint excludes some library choices that would otherwise be natural in Rust (e.g. `mio` works under glibc but is unproven under all musl matrices). This is a known tradeoff per Plan 109 §"Honest uncertainties."
 
 **Neutral:**

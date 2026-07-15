@@ -107,11 +107,11 @@ catalog row and its witnesses land with the implementing plan.
 ### 4. Per-backend applicability
 
 The invariant lives in the **shared guest userspace** (the init shim, the
-privilege drop, the rootfs contents) — which is identical across libkrun, Vz,
-Firecracker, Apple Container, and cloud-hypervisor. The privilege drop is
-therefore enforced uniformly regardless of host VMM. Backend-specific boot
-differences (e.g. Vz's input-less console, per-backend PID 1 entrypoints) all
-sit *before* the drop inside the boot shim, so they do not weaken the property;
+privilege drop, the rootfs contents) — which is identical across libkrun, HVF,
+and Firecracker. The privilege drop is therefore enforced uniformly regardless
+of host VMM. Backend-specific boot differences (e.g. HVF's input-less console,
+per-backend PID 1 entrypoints) all sit *before* the drop inside the boot shim,
+so they do not weaken the property;
 any early privileged setup a backend needs is done in the shim, never by leaving
 the workload at uid 0. The WASM sandbox backend has no POSIX uid model and is out
 of scope for this claim — its isolation is provided by the WASM sandbox itself

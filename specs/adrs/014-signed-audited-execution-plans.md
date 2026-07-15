@@ -76,7 +76,7 @@ Each `Ref`-typed field of `ExecutionPlan` is a placeholder that resolves to a co
 | `plan_version` | always `1` | mvmd revisions get monotonic versions | mvmd |
 | `tenant` | `--tenant` flag, default `"local"` | mvmd-issued `TenantId` (cryptographic, not name) | mvmd |
 | `workload` | VM name (post-validation) | image-baked workload manifest | mvm-build |
-| `runtime_profile` | backend name (`firecracker` / `libkrun` / `apple-container`) | flake `passthru.mvm.profile` | mvm-build |
+| `runtime_profile` | backend name (`firecracker` / `libkrun` / `hvf`) | flake `passthru.mvm.profile` | mvm-build |
 | `image` | `{ name: vm_name, sha256: <rootfs-hash>, cosign_bundle: None }` | `mvm-security::image_verify` signed-manifest path with cosign bundle | mvm-security |
 | `admission_profile` | intent-bound binding of `intent`, selected seccomp tier, policy refs, secret-release posture, and audit taxonomy; direct `mvmctl up` defaults to `intent = "vm:boot"` | mvmd / SDK intent resolver picks named profiles such as `code:execute`, `agent:web-research`, `deploy:publish`, then refuses inconsistent requested powers | mvm-plan + mvmd policy resolver |
 | `network_policy` / `fs_policy` / `egress_policy` / `tool_policy` | `"local-default"` → Noops, OR `"<tenant>:<workload>"` → loads `~/.mvm/policies/<tenant>/<workload>.toml` (still returns Noops; no live consumer yet) | real `EgressProxy` / `ToolGate` / `KeystoreReleaser` / `ArtifactCollector` impls reading the parsed bundle | plan 60 Phase 3 (proxies) + mvm-hostd lift |
@@ -118,12 +118,12 @@ The chain seed (genesis `prev_hash`) is 32 zero bytes. `FileAuditSigner` restore
 Three event types today:
 
 - `plan.admitted` — fires right after `admit_for_run` returns Ok; labels carry `signer_id`.
-- `plan.launched` — fires after `backend.start()` Ok (or after `restore_from_template_snapshot` Ok on the snapshot path, or after `install_launchd_direct` Ok on the apple-container detach path); labels carry `backend`.
+- `plan.launched` — fires after `backend.start()` Ok (or after `restore_from_template_snapshot` Ok on the snapshot path, or after the now-removed apple-container backend's launchd-install detach path); labels carry `backend`.
 - `plan.failed` — fires on any error path between admission and successful boot; labels carry `error_class` (`backend-start` / `snapshot-restore` / `launchd-install`) and `error_message` (the rendered anyhow chain).
 
 Audit emission failures `tracing::warn` and continue — a flaky audit fs cannot block a VM that already booted. W6's follow-up tightens this to "audit failure fails the boot" once the chain is reliably reachable on every supported host.
 
-**Backend symmetry (Plan 98).** The `labels.backend` field accepts either `libkrun` or `vz` (and `firecracker` on Linux) — the chain itself is hypervisor-agnostic. `mvmctl up --prod` driven by `MVM_BUILDER_BACKEND=vz` emits the same `plan.admitted` / `plan.launched` / `plan.failed` sequence as the libkrun path, and `mvmctl audit verify` round-trips cleanly across both. Plan 98 §2.S3 ships the cross-backend audit-chain integrity test.
+**Backend symmetry.** The `labels.backend` field accepts `libkrun`, `hvf`, or `firecracker` (on Linux) — the chain itself is hypervisor-agnostic. `mvmctl up --prod` driven by `MVM_BUILDER_BACKEND=hvf` emits the same `plan.admitted` / `plan.launched` / `plan.failed` sequence as the libkrun path, and `mvmctl audit verify` round-trips cleanly across both. (Originally landed in Plan 98 for the since-removed Vz backend; the same symmetry now holds for HVF.)
 
 ### Operator-facing surface
 
@@ -423,20 +423,21 @@ critical findings.
 > the workload's audit chain. A tampered volume — content, SBOM,
 > fetch log, CVE result, or manifest — fails admission closed.
 
-### Backend symmetry (Plan 98)
+### Backend symmetry
 
 The Install pipeline above is backend-agnostic on the host side and
 entirely guest-side internal. The blanket `InstallDriver` impl over
 any `BuilderVm` (`crates/mvm-build/src/app_deps.rs:304-321`) means
 the same sealed volume — same `content/`, `sbom.cdx.json`,
 `fetch.log`, `cve.json`, hash-chained `meta.json` — flows out of
-both libkrun-driven and Vz-driven Install jobs. Cross-backend
-parity is enforced by Plan 98 §2.S2 (sealed volume content
+both libkrun-driven and HVF-driven Install jobs. Cross-backend
+parity was originally enforced by Plan 98 §2.S2 (sealed volume content
 byte-equivalence on the same Install input) + §2.S10 (`meta.json`
 hash-chain backend-neutrality — identical content yields identical
-volume_hash regardless of which VMM booted the builder). Full
-backend-parity discussion lives in **ADR-007 §"Vz as a second
-builder backend (Plan 98)" → "Security claim parity"**.
+volume_hash regardless of which VMM booted the builder) for the
+since-removed Vz backend; the same neutrality holds for HVF. Full
+backend-parity discussion lives in **ADR-007's `VmBackend` trait
+discussion → "Security claim parity"**.
 
 ## Status of the implementation
 
@@ -714,6 +715,16 @@ gvproxy (macOS) and passt (Linux) are wrapped with a control-socket listener tha
 No L7 inspection. No TLS termination. Only connection metadata and byte counts.
 
 #### W6.A amendment (2026-05-26 — [Plan 102](../plans/102-gateway-audit-substrate-impl.md) / [Plan 103](../plans/103-w6a-implementation-tracker.md))
+
+> **Update (superseded in part):** this amendment describes the
+> gvproxy/passt-based network-audit substrate as it existed when the Vz
+> backend was still current. Vz was later removed (Plan 226 R1P1) and
+> replaced by the in-house HVF backend, which does not attach a guest NIC
+> or route through gvproxy at all — HVF's workload egress is vsock-only,
+> gated through a per-VM endpoint rather than the gateway bridge described
+> below. The libkrun+passt / libkrun+gvproxy substrate this amendment
+> describes is still current for those backends; treat the `Vz+gvproxy`
+> references below as historical.
 
 **No-bypass invariant.** TSI mode is removed entirely
 (`NetworkingPreference::Tsi` deleted; `MVM_NETWORKING=tsi` rejected

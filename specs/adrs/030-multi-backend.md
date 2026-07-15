@@ -4,7 +4,7 @@
 
 Accepted (updated Sprint 38 -- expanded from Firecracker-only to multi-backend)
 
-> **Note (superseded in part):** the Docker and Cloud Hypervisor backends described below were later removed — mvm has no container fallback and no Tier 3 (see the [Matryoshka model](/security/matryoshka/)). The no-`/dev/kvm` Linux path is now the dev/test QEMU/TCG backend (`--hypervisor qemu`).
+> **Note (superseded in part):** the Docker and Cloud Hypervisor backends described below were later removed — mvm has no container fallback and no Tier 3 (see the [Matryoshka model](/security/matryoshka/)). The no-`/dev/kvm` Linux path is now the dev/test QEMU/TCG backend (`--hypervisor qemu`). The Apple Virtualization.framework (`Vz`) backend described below was also later removed (Plan 226 R1P1); the in-house HVF backend (Hypervisor.framework) is the current macOS 26+ Apple Silicon default, with libkrun as the macOS 13-25 backend / fallback.
 
 ## Context
 

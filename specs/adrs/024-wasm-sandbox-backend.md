@@ -48,7 +48,7 @@ not request claim-table promotion.
 
 ## Consequences
 
-- Differs from Firecracker/Vz/Cloud Hypervisor: no hardware boundary, no real
+- Differs from Firecracker/HVF/Cloud Hypervisor: no hardware boundary, no real
   kernel, proxy-only networking, logical (not memory) snapshots.
 - Intended uses: browser demos, docs playground, deterministic repros,
   lightweight plugin sandbox, offline-ish development.

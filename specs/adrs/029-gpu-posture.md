@@ -43,7 +43,7 @@ away from the sealed-prod claim set.
    - **never linked into the sealed-prod untrusted path** (a sealed prod agent
      has no GPU device, the same way it has no console — claims 1–15 unaffected);
    - **libkrun-path only.** Firecracker has no virtio-gpu (so GPU is not a
-     Firecracker prod-tier feature); the Vz Linux-guest Vulkan path is unverified
+     Firecracker prod-tier feature); the HVF Linux-guest Vulkan path is unverified
      and not assumed. "GPU ⇒ libkrun" is the routing rule.
 
 3. **(A) stays out of the default zero-dependency bundle.** venus needs a host

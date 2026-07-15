@@ -80,7 +80,7 @@ mode aliases exactly. No merge from memory.
 
 - The mvmd/provider CLI contract (ADR-006) — a different surface.
 - Adding new commands (e.g. cleanly surfaced `save`/`restore`) — that rides
-  with the DX-parity follow-on once ADR-007's `vz` convergence lands.
+  with the DX-parity follow-on once ADR-007's HVF backend convergence lands.
 
 
 ## Consolidated from ADR-091 — Unified `machine run` lifecycle (transient / persistent / interactive)

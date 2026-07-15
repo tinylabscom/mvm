@@ -7,6 +7,14 @@
 `xtask check-spec-numbers` (a Lint gate) hard-fails on a duplicate integer prefix —
 re-confirm 073 is free against open PRs before merge and renumber if taken.
 
+> **Update (superseded in part):** Decision #2 below ("mvm stays on
+> Virtualization.framework") did not hold — mvm subsequently dropped the Vz
+> (Apple Virtualization.framework) backend entirely and replaced it with an
+> in-house HVF backend that binds Hypervisor.framework directly (Plan 214 /
+> Plan 226 R1P1). The rest of this ADR's analysis (page-cache priming, refusal
+> of cross-workload guest reuse, refusal of TSI networking) is unaffected and
+> still holds.
+
 ## Context
 
 A wider prior-art sweep of the macOS fast-boot microVM space turned up a
@@ -173,7 +181,7 @@ them here:
 
 - [ADR-001](001-microvm-security-posture.md) — security posture; one-guest-one-workload, claim numbering
 - [ADR-014](014-signed-audited-execution-plans.md) — claim 8, signed/audited `ExecutionPlan` (per-run admission)
-- [ADR-007](007-vmbackend-single-trait.md) — Vz backend (why we stay on Virtualization.framework)
+- [ADR-007](007-vmbackend-single-trait.md) — `VmBackend` trait; the now-superseded Vz backend design and its replacement by HVF
 - [ADR-014](014-signed-audited-execution-plans.md) §W6.A — no-bypass invariant, TSI removed
 - [ADR-004](004-sealed-signed-builder-image.md) — bundled-kernel/embedded-init extraction shape
 - [Plan 140](../plans/140-snapshot-restore-productionization.md) — restore productionization (inherits page-cache warmth)
