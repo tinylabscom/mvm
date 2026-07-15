@@ -1311,7 +1311,7 @@ Implementation is sequenced in Plan 211
 **Date:** 2026-06-21
 **Relates to:** [ADR-002](002-microvm-security-posture.md),
 ADR-014 §"Consolidated from ADR-046",
-[ADR-055](055-passt-virtio-net.md)
+[ADR-004](004-hypervisor-egress-policy.md)
 
 ## Context
 
@@ -1897,14 +1897,14 @@ the seam) wants an aarch64 KVM box, but the x86 backend stands on its own proof.
 ## Consolidated from ADR-102 — One VMM driver seam; backends collapse to two role runners
 
 **Status:** Accepted (2026-06-30)
-**Relates to:** [ADR-100](100-vsock-sole-guest-world-channel.md) (vsock is the sole
+**Relates to:** [ADR-004](004-hypervisor-egress-policy.md) (vsock is the sole
 guest↔world channel — this ADR makes its "single host gateway" the only egress
-mechanism for *every* backend), [ADR-101](101-hvf-vmm-unified-egress-substitution-gateway.md)
+mechanism for *every* backend), [ADR-004](004-hypervisor-egress-policy.md)
 (the hvf VMM's unified vsock gateway — the reference shape this ADR generalizes
 outward), [ADR-002](002-microvm-security-posture.md) (`WorkloadBackend` permission, consolidated from ADR-083 —
 preserved unchanged), ADR-014 §"Consolidated from ADR-093" (builder auto-fallback —
 preserved), [ADR-002](002-microvm-security-posture.md) (claims 10/12/13 + per-backend
-tier matrix), [ADR-055](055-passt-virtio-net.md) (the gvproxy/passt gateway this
+tier matrix), [ADR-004](004-hypervisor-egress-policy.md) (the gvproxy/passt gateway this
 ADR removes), [Plan 214](../plans/214-clean-replacement-architecture.md) (implementation).
 
 ## Context

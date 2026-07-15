@@ -1,12 +1,12 @@
 # ADR-067 — Secrets subsystem: egress substitution, never in the guest
 
-**Status:** Accepted (2026-05-31). Supersedes ADR-049 (in-guest resolve-over-vsock). Fills the gap ADR-062 left when it dropped `host.secrets.v1` from the broker. Implemented by plan 129; the `SecretsNotImplemented` gate in `mvm-ir/src/validate.rs` lifts when 129 lands. Backs claims 12 + 13.
+**Status:** Accepted (2026-05-31). Supersedes ADR-049 (in-guest resolve-over-vsock). Fills the gap ADR-059 left when it dropped `host.secrets.v1` from the broker. Implemented by plan 129; the `SecretsNotImplemented` gate in `mvm-ir/src/validate.rs` lifts when 129 lands. Backs claims 12 + 13.
 
 ## Context
 
 The guest is the untrusted workload. A raw secret reaching it can be exfiltrated, logged, or baked into a snapshot. The requirement: **a raw secret value never enters guest RAM.** The workload still needs secrets to reach external services (an API key, a SigV4 signature, a webhook HMAC).
 
-The model already half-exists. `mvm-ir` carries `EnvValue::SecretRef` — a secret-store *key* plus a mount shape, never bytes ("No secret bytes ever live in this struct"). `mvm-sdk/src/runtime_substitution.rs` (ADR-049) resolved placeholders over vsock so the *guest* SDK could sign — but that brings the credential into the guest, which we now reject. ADR-062 dropped the broker's `host.secrets.v1` handler without a replacement, so the subsystem is gated (`SecretsNotImplemented`).
+The model already half-exists. `mvm-ir` carries `EnvValue::SecretRef` — a secret-store *key* plus a mount shape, never bytes ("No secret bytes ever live in this struct"). `mvm-sdk/src/runtime_substitution.rs` (ADR-049) resolved placeholders over vsock so the *guest* SDK could sign — but that brings the credential into the guest, which we now reject. ADR-059 dropped the broker's `host.secrets.v1` handler without a replacement, so the subsystem is gated (`SecretsNotImplemented`).
 
 Constraints that shaped the decision:
 
@@ -27,7 +27,7 @@ A secret is a reference. The host substitutes the real value into outbound traff
 > guest's outbound `:80`/`:443` to a per-VM terminator that recovers the
 > original destination (`SO_ORIGINAL_DST`), substitutes on bound hosts, and —
 > for `https` — terminates TLS under a **per-VM name-constrained intermediate**
-> the guest trusts (ADR-006), splicing unbound hosts through untouched. A
+> the guest trusts (ADR-004), splicing unbound hosts through untouched. A
 > generic `curl https://<bound-host> -H "Authorization: Bearer $PLACEHOLDER"`
 > with **no SDK** now gets the real credential substituted host-side. The SDK
 > forward-proxy (`HTTP_PROXY` + placeholder env) remains supported as an
@@ -45,7 +45,7 @@ The workload's HTTP client routes a secret-bearing request to a **host substitut
 
 The workload never makes its own TLS to the destination for a secret-bearing request and never holds the value. We do **not** MITM the guest's other TLS — only requests the workload explicitly routes for substitution are seen host-side.
 
-The egress proxy (claim-10 default-deny, ADR-064 `NetworkProvider`) is the catch-all underneath: **all** egress traverses it. Secret-bearing requests are routed for substitution; everything else is policy-checked and **leak-scanned** — a placeholder or a known secret value appearing in non-substitution egress is dropped and audited. This is the "detect" backstop for the case a workload tries to smuggle a placeholder out a side channel; it cannot smuggle a *value* because it never had one.
+The egress proxy (claim-10 default-deny, ADR-004 `NetworkProvider`) is the catch-all underneath: **all** egress traverses it. Secret-bearing requests are routed for substitution; everything else is policy-checked and **leak-scanned** — a placeholder or a known secret value appearing in non-substitution egress is dropped and audited. This is the "detect" backstop for the case a workload tries to smuggle a placeholder out a side channel; it cannot smuggle a *value* because it never had one.
 
 Coverage caveat, stated honestly: a workload that bypasses the SDK and emits a placeholder via a raw `curl` to an arbitrary host gets the placeholder dropped (the proxy never substitutes for an unbound destination), not a secret. That is the correct failure — you only get substitution on the bound path.
 
@@ -84,7 +84,7 @@ Honest framing for the docs and tests: *software default = encrypted at rest, de
 
 ## Alternatives considered
 
-- **TLS MITM of *all* guest egress** (the adjacent-SDK approach). Rejected: the host terminates every TLS session and sees all plaintext, the guest's end-to-end TLS is broken, and it requires the guest to trust a long-lived blanket-trust host CA. Maximum host visibility for a platform whose pitch is minimal blast radius. **Note (plan 129 Stage 2):** the scoped terminator we *did* build is not this — it terminates **only bound hosts** (the host already sees their plaintext via substitution → zero added visibility), splices everything else untouched, and trusts a **per-VM name-constrained** intermediate that cannot vouch for any host outside the plan's allow-list (ADR-006), not a blanket CA.
+- **TLS MITM of *all* guest egress** (the adjacent-SDK approach). Rejected: the host terminates every TLS session and sees all plaintext, the guest's end-to-end TLS is broken, and it requires the guest to trust a long-lived blanket-trust host CA. Maximum host visibility for a platform whose pitch is minimal blast radius. **Note (plan 129 Stage 2):** the scoped terminator we *did* build is not this — it terminates **only bound hosts** (the host already sees their plaintext via substitution → zero added visibility), splices everything else untouched, and trusts a **per-VM name-constrained** intermediate that cannot vouch for any host outside the plan's allow-list (ADR-004), not a blanket CA.
 - **Pure SDK-cooperative with no proxy detection.** Rejected: no backstop for a placeholder leaking via a non-cooperative side channel. The default-deny proxy + leak-scan is cheap and closes it.
 - **Hardware-sealed required.** Rejected: unacceptable DX; hardware is a transparent upgrade, not a gate.
 - **Resolve into the guest for signing** (ADR-049). Rejected and superseded: it brings the credential into guest RAM, which is the thing we are eliminating. Signing moves to the host keyholder.

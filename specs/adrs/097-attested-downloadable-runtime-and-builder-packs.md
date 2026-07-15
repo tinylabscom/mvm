@@ -3,12 +3,12 @@
 **Status:** Proposed
 **Date:** 2026-06-24 (amended 2026-07-07: §9 release signing custody)
 **Relates to:** [ADR-041](041-signed-audited-execution-plans.md),
-[ADR-046](046-builder-vm-via-libkrun.md),
-[ADR-071](071-stage0-bootstrap-trust-model.md),
+[ADR-014](014-vmbackend-single-trait.md),
+[ADR-005](005-sealed-signed-builder-image.md),
 [ADR-073](073-warm-snapshot-prior-art-adoption-boundary.md),
 [ADR-086](086-relocatable-dependency-free-host-bundle.md),
-[ADR-089](089-builder-vm-resident-control-plane.md),
-[ADR-095](095-slim-microvm-kernel.md)
+[ADR-059](059-host-services-broker.md),
+[ADR-014](014-vmbackend-single-trait.md)
 
 ## Context
 

@@ -46,7 +46,7 @@ Defining traits (by which the oblique reference is keyed):
   socket family; AF_NETLINK, raw sockets, multicast, TUN/TAP, and ICMP are
   unsupported.
 - Bundled guest kernel + init shim, extracted at build/runtime — the same shape as
-  mvm's libkrunfw `extract_bundled_kernel()` and embedded `stage0-init` (ADR-071).
+  mvm's libkrunfw `extract_bundled_kernel()` and embedded `stage0-init` (ADR-005).
 
 This ADR is clean-room: it records *design-level* learnings from public docs, not
 copied code. The runtime is Apache-2.0; nothing here vendors or links it
@@ -99,7 +99,7 @@ comes from. Record this as a reference data point for Plan 152's Rust-native VZ
 supervisor — **not** a direction change. mvm stays on Virtualization.framework: the
 entitled-TCB-as-a-tiny-separate-process invariant, the entitlement model, and the
 maintenance cost of an HVF-direct VMM all argue against dropping to raw HVF
-(ADR-056, Plan 152 Decision). The honest tradeoff — VZ.framework gives less control
+(ADR-014, Plan 152 Decision). The honest tradeoff — VZ.framework gives less control
 over guest memory, which is exactly the lever fast CoW restore wants — belongs in
 Plan 152/140's design notes, not in a backend rewrite.
 
@@ -173,9 +173,9 @@ them here:
 
 - [ADR-002](002-microvm-security-posture.md) — security posture; one-guest-one-workload, claim numbering
 - [ADR-041](041-signed-audited-execution-plans.md) — claim 8, signed/audited `ExecutionPlan` (per-run admission)
-- [ADR-056](056-vz-backend.md) — Vz backend (why we stay on Virtualization.framework)
+- [ADR-014](014-vmbackend-single-trait.md) — Vz backend (why we stay on Virtualization.framework)
 - [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) §W6.A — no-bypass invariant, TSI removed
-- [ADR-071](071-stage0-bootstrap-trust-model.md) — bundled-kernel/embedded-init extraction shape
+- [ADR-005](005-sealed-signed-builder-image.md) — bundled-kernel/embedded-init extraction shape
 - [Plan 140](../plans/140-snapshot-restore-productionization.md) — restore productionization (inherits page-cache warmth)
 - [Plan 148](../plans/148-microvm-fork-fanout-and-branch.md) — fork-fanout of fresh children from a paused base
 - [Plan 152](../plans/152-rust-native-vz-and-init-lifecycle-parity.md) — Rust-native VZ supervisor (HVF-direct data point)

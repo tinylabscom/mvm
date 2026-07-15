@@ -1,10 +1,10 @@
 # ADR-103: Plan-bound agent verb capabilities
 
 - Status: Proposed
-- Note: Landed in two stages — the signed-type + guest-enforcement core (Plan 215 Tasks 1–5a) first; the out-of-band host-signer-key provisioning + wire delivery (5b–5d) as a follow-on, since the key separation becomes an active boundary only under the ADR-090 decomposition.
+- Note: Landed in two stages — the signed-type + guest-enforcement core (Plan 215 Tasks 1–5a) first; the out-of-band host-signer-key provisioning + wire delivery (5b–5d) as a follow-on, since the key separation becomes an active boundary only under the ADR-059 decomposition.
 - Date: 2026-06-30
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture — claim 4 `do_exec`, claim 15 sealed interactivity), ADR-041 (signed audited execution plans — claim 8), ADR-049 (secret substitution — time/destination-bound signed credentials), ADR-059 / ADR-062 (host services broker — claim 12 binding-gated dispatch), ADR-090 (resident daemon trust gradient)
+- Related: ADR-002 (microVM security posture — claim 4 `do_exec`, claim 15 sealed interactivity), ADR-041 (signed audited execution plans — claim 8), ADR-049 (secret substitution — time/destination-bound signed credentials), ADR-059 / ADR-059 (host services broker — claim 12 binding-gated dispatch), ADR-059 (resident daemon trust gradient)
 - Sequenced by: [Plan 215](../plans/215-plan-bound-agent-verb-capabilities.md)
 
 ## Context
@@ -38,7 +38,7 @@ Two forces make that gap worth closing:
    `ExecutionPlan.services` → broker dispatch gate). The agent verb surface is the
    symmetric guest-side capability and is currently unbound.
 
-2. **The host is decomposing.** Under the ADR-090 trust gradient the plan is signed by
+2. **The host is decomposing.** Under the ADR-059 trust gradient the plan is signed by
    the host-signer moat at admission, but the component holding the 5252 client may be
    a less-trusted control process. A guest-side, plan-bound verb check is only
    meaningful when the *signing authority is separated from the calling authority* — so
@@ -123,7 +123,7 @@ out is the default and dev/interactive flows are unaffected.
 
 The guest already obtains a host `VerifyingKey` + `session_id` at `ProtocolHello`
 (`vsock.rs:2290`). The `VerbGrant` signature MUST chain to the **plan-admission
-(host-signer) authority**, which under ADR-090 is distinct from the 5252 caller. If the
+(host-signer) authority**, which under ADR-059 is distinct from the 5252 caller. If the
 grant were signed by (or forgeable by) the caller, a compromised caller would simply mint
 the verb it wants and the check would buy nothing. The Plan must therefore provision the
 guest with the host-signer verifying key (or a delegation chain to it) and verify the
@@ -172,7 +172,7 @@ denials.
 
 ## Threat model
 
-- **In scope:** a less-trusted host-side 5252 caller (ADR-090 gradient) invoking a
+- **In scope:** a less-trusted host-side 5252 caller (ADR-059 gradient) invoking a
   `ProdSafe` verb the workload's admitted plan did not authorize; replay of a broader
   grant captured from an earlier plan (defended by `plan_nonce` + `not_after` riding the
   claim-8 validity/replay machinery); a grant forged by the caller (defended by the

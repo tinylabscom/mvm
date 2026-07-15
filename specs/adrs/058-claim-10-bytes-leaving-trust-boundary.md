@@ -107,7 +107,7 @@ Every key fingerprint, key rotation, and key-unwrap-failure event lands in the a
 ### Added by W6.A amendment
 
 - **East-west microVM ↔ microVM lateral flows.** Different capture mechanism (`tc mirred` / eBPF / per-TAP libpcap), different policy surface. W11 candidate; named here so readers don't expect it from W6.
-- **L7 URL inspection (path-level allowlist).** Composes via `L7EgressProxy` Phase 2 (TLS MITM with workload-trusted host CA per [ADR-006](006-name-constrained-egress-ca.md)); substrate exists, not yet finalized. Separate plan from W6.
+- **L7 URL inspection (path-level allowlist).** Composes via `L7EgressProxy` Phase 2 (TLS MITM with workload-trusted host CA per [ADR-004](004-hypervisor-egress-policy.md)); substrate exists, not yet finalized. Separate plan from W6.
 - **DNS-over-HTTPS bypass mitigation.** Workloads using DoH (e.g., 1.1.1.1:443) hide queries inside encrypted HTTPS to a public resolver, evading admission-time DNS pinning. Separate Plan 74 follow-up: mandatory-deny well-known DoH endpoints.
 - **SNI hostname allowlist.** Cleartext SNI extraction from TLS ClientHello → `FlowPolicy::evaluate` with `sni_hostname` populated. Substrate seam exists in W6.A's `FlowDecisionCtx`; inspector implementation is a separate plan.
 - **Side-channel information leakage via flow timing.** Inherent to any flow audit; accepted.
@@ -127,5 +127,5 @@ Every key fingerprint, key rotation, and key-unwrap-failure event lands in the a
 - [ADR-002](002-microvm-security-posture.md) — microVM security posture (claim list extends to 10)
 - [ADR-041](041-signed-audited-execution-plans.md) — claim 8, signed ExecutionPlans (volume keys ride this signing path)
 - [ADR-047](047-app-deps-audit-pipeline.md) — claim 9, app-deps audit (analogous structure for the audit chain extension)
-- [ADR-055](055-cross-platform-backends.md) — gvproxy / passt gateway choice
+- [ADR-004](004-hypervisor-egress-policy.md) — gvproxy / passt gateway choice
 - [Plan 101](../plans/101-in-guest-volume-encryption-and-gateway-audit.md) — implementation rollout

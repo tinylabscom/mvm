@@ -2,7 +2,7 @@
 title: "ADR-035: Feature flag taxonomy"
 status: Proposed
 date: 2026-05-07
-related: ADR-013 (libkrun pivot), ADR-014 (VmBackend), ADR-031 (cross-platform), plan 60-mvm-libkrun-migration
+related: ADR-005 (libkrun pivot), ADR-014 (VmBackend), ADR-031 (cross-platform), plan 60-mvm-libkrun-migration
 ---
 
 ## Status

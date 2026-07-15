@@ -4,9 +4,9 @@
 [`specs/plans/181-app-builder-product-surface.md`](../plans/181-app-builder-product-surface.md).
 **Extends** [ADR-002](002-microvm-security-posture.md) (consolidated from ADR-070) (the
 mvm-primitive ↔ mvmd-transport boundary), and builds on
-[ADR-078](078-rvproxy-gateway-ownership.md) / Plan 179 (the first-party gateway
+[ADR-004](004-hypervisor-egress-policy.md) / Plan 179 (the first-party gateway
 seam preview ingress publishes through) and the network-provider seam in
-ADR-064. **Cross-refs:** ADR-002 (security posture — claims 1/2/10 are the lines
+ADR-004. **Cross-refs:** ADR-002 (security posture — claims 1/2/10 are the lines
 this ADR refuses to cross), ADR-041 (signed/audited execution plans — where
 published ports get signed), Plan 33 (hosted transport — mvmd owns it),
 Plan 170 (the same primitive↔product split applied to density), Plan 118 /
@@ -39,7 +39,7 @@ claims 1–15) behind a CLI-first surface that does not deliver the product loop
 The question this ADR settles is **which half of the sibling's design we take.**
 
 The ergonomics do not depend on the isolation. The preview loop rides the
-gateway seam we already own (ADR-078); wake-on-access rides warm-start
+gateway seam we already own (ADR-004); wake-on-access rides warm-start
 (Plan 123 C4 / Plan 175); the task/files surface rides agent-RPC + streamed
 exec (Plan 169 / Plan 172); the lifecycle verbs and install/uninstall are CLI
 plumbing on the `vm`/`env` groups. None of it requires relaxing a claim. The
@@ -62,7 +62,7 @@ the sibling had to hand.
    wake-on-access `VmBackend` hook, the task/files vsock protocol with an
    SSE-ready event shape, and the idle-TTL/keepalive contract. mvm does **not**
    grow a multi-tenant HTTP listener or tenant auth; that transport + auth +
-   wildcard-DNS/TLS surface is mvmd's (Plan 33 / ADR-002 §"Consolidated from ADR-070" §5). This is the same
+   wildcard-DNS/TLS surface is mvmd's (Plan 33 / ADR-002 §"Consolidated from ADR-002" §5). This is the same
    boundary Plan 170 drew for density.
 
 3. **One exception: a local, single-machine dev ingress lives in mvm.** So
@@ -108,7 +108,7 @@ the sibling had to hand.
 - [ ] Decide L4-only-now vs. a fuller local HTTP router (Plan 181 WS-A open
   decision); recommendation is L4 + loopback proxy first.
 - [ ] If/when a hosted (non-localhost) preview surface is wanted, it is an mvmd
-  effort (Plan 33), not mvm — same disposition as ADR-002 §"Consolidated from ADR-070"'s hosted console.
+  effort (Plan 33), not mvm — same disposition as ADR-002 §"Consolidated from ADR-002"'s hosted console.
 
 ## Alternatives considered
 

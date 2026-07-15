@@ -704,7 +704,7 @@ Plan 98's macOS work narrows the asymmetric-trust gap *on macOS* (it stops requi
 
 - [ADR-001](001-firecracker-only.md) — Firecracker-only execution (needs update for nested model)
 - [ADR-002](002-microvm-security-posture.md) — microVM security posture (claim 1 reworded by Plan 100 W8)
-- [ADR-046](046-builder-vm-via-libkrun.md) — builder VM via libkrun + Plan 98 Vz extension
+- [ADR-014](014-vmbackend-single-trait.md) — builder VM via libkrun + Plan 98 Vz extension
 - [Plan 100](../plans/100-symmetric-builder-vm-rollout.md) — implementation rollout
 
 

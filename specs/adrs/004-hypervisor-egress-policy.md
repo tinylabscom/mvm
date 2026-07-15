@@ -1621,7 +1621,7 @@ egress), [ADR-049](049-vsock-substitution-service.md) (vsock substitution),
 [ADR-059](059-host-services-broker.md) (host-services broker over vsock),
 ADR-004 §"Consolidated from ADR-082" (hvf egress gateway),
 [ADR-002](002-microvm-security-posture.md) (`WorkloadBackend`, consolidated from ADR-083),
-[ADR-099](099-multi-backend-hypervisor-abstraction.md) (the backend seam),
+[ADR-014](014-vmbackend-single-trait.md) (the backend seam),
 [Plan 214](../plans/214-clean-replacement-architecture.md).
 
 ## Context

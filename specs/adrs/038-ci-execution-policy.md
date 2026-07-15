@@ -18,7 +18,7 @@ The previous iteration's CI workflows triggered on `pull_request` against `main`
 
 The user already shipped a pre-commit hook (`.githooks/pre-commit`) from the previous repo. The hook is light by design (cargo fmt + nix fmt only) because Linux-specific deps don't compile cleanly on the macOS host. The intent is:
 
-- **Local**: pre-commit runs format + (planned) test set on the dev's machine. macOS contributors run heavier checks via a Linux builder configured under Nix (`nix-darwin`'s `linux-builder` is the documented path); Linux contributors run them natively. ADR-013 dropped Lima from mvm's dependency surface, so the local-test path is now host-Nix-direct rather than going through a Lima VM.
+- **Local**: pre-commit runs format + (planned) test set on the dev's machine. macOS contributors run heavier checks via a Linux builder configured under Nix (`nix-darwin`'s `linux-builder` is the documented path); Linux contributors run them natively. ADR-005 dropped Lima from mvm's dependency surface, so the local-test path is now host-Nix-direct rather than going through a Lima VM.
 - **Remote on push**: a single, focused CI workflow runs on every push to give feedback on feature branches.
 - **Remote on release**: heavier gates (security audit, full Windows lane, cross-platform matrix, reproducibility check, release artifact build) run when a tag is pushed.
 
@@ -50,7 +50,7 @@ Stays light at first: `cargo fmt --all` + `nix fmt` on staged files (current beh
 - Linux contributors: `cargo clippy --workspace --all-targets -- -D warnings` + `cargo nextest run --workspace` (native; everything just works).
 - macOS contributors: same commands, run through a configured Linux Nix builder (`nix-darwin`'s `linux-builder`, or a remote `nix-daemon`). The hook detects the builder via a `nix store ping` against the configured remote-store URL; if unavailable it prints a clear hint and skips the heavy checks.
 
-ADR-013 dropped Lima from mvm's dependency surface, so the heavy-check path is host-Nix-direct rather than `limactl shell …`. Contributors who prefer a local Linux VM are free to use one (Lima still works, OrbStack works, a remote Linux box works) — the hook just doesn't depend on a specific tool.
+ADR-005 dropped Lima from mvm's dependency surface, so the heavy-check path is host-Nix-direct rather than `limactl shell …`. Contributors who prefer a local Linux VM are free to use one (Lima still works, OrbStack works, a remote Linux box works) — the hook just doesn't depend on a specific tool.
 
 ### `just ci` recipe
 

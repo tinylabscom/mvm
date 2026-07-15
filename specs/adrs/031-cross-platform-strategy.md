@@ -2,7 +2,7 @@
 title: "ADR-031: Cross-platform strategy — Linux native, macOS native, Windows Tauri-only"
 status: Proposed
 date: 2026-05-07
-related: ADR-013 (libkrun pivot), plan 60-mvm-libkrun-migration, plan 53-cross-platform-roadmap
+related: ADR-005 (libkrun pivot), plan 60-mvm-libkrun-migration, plan 53-cross-platform-roadmap
 ---
 
 ## Status

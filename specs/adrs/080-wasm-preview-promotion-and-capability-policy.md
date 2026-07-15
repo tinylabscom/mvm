@@ -294,7 +294,7 @@ promote-time, not a silently-promoted leak.
 - **wasmtime/WASI** becomes a large parser of untrusted wasm bytes on the
   workload path. It gets the dependency treatment claims 5/7 prescribe: pinned
   version, `cargo deny`/`audit` coverage, upstream fuzzing relied upon and
-  tracked (ADR-055 precedent), and at runtime it is confined exactly as any
+  tracked (ADR-004 precedent), and at runtime it is confined exactly as any
   guest service — dedicated uid under setpriv, seccomp `standard`, no
   ambient fs (claims 1–2 narratives extend to it).
 - **The projection seam** (resolved policy → WasiCtx, resolved policy →

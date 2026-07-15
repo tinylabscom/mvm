@@ -2,7 +2,7 @@
 
 **Status:** Accepted
 **Relates to:** [ADR-002](002-microvm-security-posture.md) (tier matrix, out-of-scope discipline); [Plan 60](../plans/60-mvm-libkrun-migration.md) Phase 7b (`gpu-virgl` scaffold); [Plan 111](../plans/111-cardoso-gap-coordination.md) Workstream D (GPU deferral); [Plan 37](../plans/37-whitepaper-alignment.md) (`GpuRequirement` enum stub)
-**Does not gate:** [ADR-085](085-bundled-egress-gateway.md) / [ADR-086](086-relocatable-dependency-free-host-bundle.md) — the host bundle ships without GPU
+**Does not gate:** [ADR-004](004-hypervisor-egress-policy.md) / [ADR-086](086-relocatable-dependency-free-host-bundle.md) — the host bundle ships without GPU
 
 ## Context
 
@@ -34,7 +34,7 @@ away from the sealed-prod claim set.
 ## Decision
 
 1. **(A) is a deferred fast-follow, not a launch requirement.** The host bundle
-   (ADR-085/086) and the `machine`/pack UX ship first; the security substrate is
+   (ADR-004/086) and the `machine`/pack UX ship first; the security substrate is
    the moat and the GPU demo is a fast-follow. GPU does not gate launch.
 
 2. **When (A) lands, it is a dev / computer-use tier feature**, modelled exactly
@@ -79,7 +79,7 @@ away from the sealed-prod claim set.
 ## References
 
 - [ADR-002](002-microvm-security-posture.md) — security posture, tier matrix, out-of-scope discipline
-- [ADR-085](085-bundled-egress-gateway.md), [ADR-086](086-relocatable-dependency-free-host-bundle.md) — the bundle GPU does not gate
+- [ADR-004](004-hypervisor-egress-policy.md), [ADR-086](086-relocatable-dependency-free-host-bundle.md) — the bundle GPU does not gate
 - [Plan 60](../plans/60-mvm-libkrun-migration.md) — Phase 7b `gpu-virgl` scaffold
 - [Plan 111](../plans/111-cardoso-gap-coordination.md) — Workstream D GPU deferral
 - [Plan 37](../plans/37-whitepaper-alignment.md) — `GpuRequirement` enum

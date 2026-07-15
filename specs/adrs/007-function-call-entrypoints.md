@@ -245,7 +245,7 @@ See plan 41. Files touched:
 - Integration test: build a fake "echo function" rootfs, run
   `mvmctl invoke` with stdin, assert stdout. Runs on Linux/KVM CI
   via the Firecracker backend, and on macOS dev hosts via the
-  libkrun backend (ADR-013); both expose vsock natively.
+  libkrun backend (ADR-005); both expose vsock natively.
 - `mvmctl doctor` reports live posture: entrypoint contract, snapshot
   dir mode, network mode for any running VM.
 

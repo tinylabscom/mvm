@@ -2,7 +2,7 @@
 title: "ADR-027: Iroh-aware encryption layering"
 status: Proposed
 date: 2026-05-07
-related: ADR-002 (security posture), ADR-013 (libkrun pivot), plan 60-mvm-libkrun-migration
+related: ADR-002 (security posture), ADR-005 (libkrun pivot), plan 60-mvm-libkrun-migration
 ---
 
 ## Status

@@ -2,7 +2,7 @@
 title: "ADR-041: Signed, audited `ExecutionPlan` — the contract behind every `mvmctl up`"
 status: Accepted
 date: 2026-05-11
-related: ADR-002 (microVM security posture); ADR-013 (libkrun + libkrun pivot); plan 60 (libkrun migration); plan 64 (supervisor wiring)
+related: ADR-002 (microVM security posture); ADR-005 (libkrun + libkrun pivot); plan 60 (libkrun migration); plan 64 (supervisor wiring)
 ---
 
 ## Status

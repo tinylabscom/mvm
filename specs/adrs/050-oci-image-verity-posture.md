@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-05-14
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture, claim 3), ADR-013 (image acquisition), ADR-046 (builder VM via libkrun), ADR-048 (claim-safe sandbox parity), Plan 74 W1, Plan 74 §Risks R3, mvmd ADR-0020 (OCI images as microVM workloads)
+- Related: ADR-002 (microVM security posture, claim 3), ADR-005 (image acquisition), ADR-014 (builder VM via libkrun), ADR-048 (claim-safe sandbox parity), Plan 74 W1, Plan 74 §Risks R3, mvmd ADR-0020 (OCI images as microVM workloads)
 
 ## Context
 

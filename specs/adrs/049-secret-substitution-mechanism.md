@@ -1,9 +1,9 @@
 # ADR 049: TLS substitution mechanism for guest secret placeholders
 
-- **Status: SUPERSEDED 2026-05-28 by [ADR-062](062-host-services-broker-rescope-drop-secrets.md).** Runtime secret substitution is no longer an mvm responsibility in v1. The vsock-substitution-vs-TLS-proxy comparison below is kept as historical context; the design itself is not being implemented. `host.secrets.v1` and `mvm-secrets-dispatcher` are dropped from Plan 104.
+- **Status: SUPERSEDED 2026-05-28 by [ADR-059](059-host-services-broker.md).** Runtime secret substitution is no longer an mvm responsibility in v1. The vsock-substitution-vs-TLS-proxy comparison below is kept as historical context; the design itself is not being implemented. `host.secrets.v1` and `mvm-secrets-dispatcher` are dropped from Plan 104.
 - Date: 2026-05-14 (superseded 2026-05-28)
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture), ADR-004 (egress policy), ADR-041 (signed audited execution plans), ADR-048 (claim-safe sandbox parity), [ADR-062 (rescope — drop secrets)](062-host-services-broker-rescope-drop-secrets.md), Plan 74 W2 + W3, Plan 74 §Risks R9
+- Related: ADR-002 (microVM security posture), ADR-004 (egress policy), ADR-041 (signed audited execution plans), ADR-048 (claim-safe sandbox parity), [ADR-059 (rescope — drop secrets)](059-host-services-broker.md), Plan 74 W2 + W3, Plan 74 §Risks R9
 
 ## Context
 

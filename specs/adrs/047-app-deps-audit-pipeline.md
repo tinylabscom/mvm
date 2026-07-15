@@ -2,7 +2,7 @@
 
 **Status**: Accepted (Phase 9 primitives landed; full pipeline ships post-Plan-71)
 **Date**: 2026-05-13
-**Cross-refs**: ADR-002 (microvm security posture, claims 1–8), ADR-046 (builder VM via libkrun), SDK port plan §"Auditing the dep volume"
+**Cross-refs**: ADR-002 (microvm security posture, claims 1–8), ADR-014 (builder VM via libkrun), SDK port plan §"Auditing the dep volume"
 
 ## Context
 
@@ -134,7 +134,7 @@ parity is enforced by Plan 98 §2.S2 (sealed volume content
 byte-equivalence on the same Install input) + §2.S10 (`meta.json`
 hash-chain backend-neutrality — identical content yields identical
 volume_hash regardless of which VMM booted the builder). Full
-backend-parity discussion lives in **ADR-046 §"Vz as a second
+backend-parity discussion lives in **ADR-014 §"Vz as a second
 builder backend (Plan 98)" → "Security claim parity"**.
 
 ## Status of the implementation
@@ -200,7 +200,7 @@ roll in without breaking existing builds.
 
 - ADR-002 — `specs/adrs/002-microvm-security-posture.md` (claims
   1–8)
-- ADR-046 — `specs/adrs/046-builder-vm-via-libkrun.md` (the host
+- ADR-014 — `specs/adrs/046-builder-vm-via-libkrun.md` (the host
   for the install path)
 - Plan 72 (W4/W5) — `specs/plans/72-builder-vm-via-libkrun.md`
   (cutover that unblocks the install + admission wiring)

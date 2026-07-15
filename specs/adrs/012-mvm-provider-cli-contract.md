@@ -145,7 +145,7 @@ remote
 ```
 
 (`lima` was named here in an earlier draft as a candidate provider;
-removed per ADR-013, which drops Lima from mvm entirely.)
+removed per ADR-005, which drops Lima from mvm entirely.)
 
 ## Capability Model
 

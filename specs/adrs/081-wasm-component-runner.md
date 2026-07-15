@@ -8,7 +8,7 @@ regime; §6 wasmtime as a new untrusted-input surface). **Builds on**
 *preview* backend; this ADR is the *production microVM* path, not that backend).
 **Cross-refs:** ADR-002 (claims 1–3 isolation, 5 untrusted parsers, 8 signed
 plan, 10 egress, 11 sealed deps, 13 secrets), ADR-047 (app-deps audit — the
-builder already compiles untrusted inputs), ADR-057 (symmetric builder VM — the
+builder already compiles untrusted inputs), ADR-005 (symmetric builder VM — the
 sandbox the AOT compile runs in), Plan 188 (the capability projection/clamp seam
 this extends from network to fs/env).
 
@@ -125,7 +125,7 @@ The new surfaces beyond the existing claim set:
    the *execution* of precompiled code in the sealed guest with no JIT), version
    pinning + `cargo deny`/audit, and confining the in-guest wasmtime as the
    uid-901 setpriv service (claims 1–2). **We do not fuzz wasmtime ourselves —
-   we rely on its upstream OSS-Fuzz coverage** (the ADR-055 precedent for the
+   we rely on its upstream OSS-Fuzz coverage** (the ADR-004 precedent for the
    virtio parsers) and record that as the posture.
 2. **The WASI config generator is new security-critical code**, peer to the
    Plan 188 projection seam: it turns the resolved policy into the actual

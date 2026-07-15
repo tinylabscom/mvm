@@ -18,7 +18,7 @@ space present ~20 commands under a few noun groups and read as one cohesive
 product; the gap between mvm and them is cohesion, not capability.
 
 This is the CLI half of the feature-reduction effort (the backend half is
-ADR-076). The product's "no backwards compatibility — this is the first
+ADR-014). The product's "no backwards compatibility — this is the first
 version" stance means commands can be renamed and regrouped hard, with no
 alias layer.
 
@@ -63,7 +63,7 @@ mode aliases exactly. No merge from memory.
   under the no-backcompat stance, and the right time to pay it (first
   version). Docs (`public/.../cli-commands.md`, `CLAUDE.md` examples) update
   with the change.
-- Independent of the backend work (ADR-076); safe to land in parallel with
+- Independent of the backend work (ADR-014); safe to land in parallel with
   that plan's Phase 1.
 
 ## Alternatives considered
@@ -80,4 +80,4 @@ mode aliases exactly. No merge from memory.
 
 - The mvmd/provider CLI contract (ADR-012) — a different surface.
 - Adding new commands (e.g. cleanly surfaced `save`/`restore`) — that rides
-  with the DX-parity follow-on once ADR-076's `vz` convergence lands.
+  with the DX-parity follow-on once ADR-014's `vz` convergence lands.

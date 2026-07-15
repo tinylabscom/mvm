@@ -2,7 +2,7 @@
 
 **Status**: Proposed
 **Date**: 2026-05-14
-**Cross-refs**: ADR-002, ADR-007, ADR-046, ADR-047, plan 41, plan 52, plan 72, plan 74
+**Cross-refs**: ADR-002, ADR-007, ADR-014, ADR-047, plan 41, plan 52, plan 72, plan 74
 
 ## Context
 
@@ -21,7 +21,7 @@ is the product shape:
 mvm already has the right security substrate: signed execution plans,
 vsock-only host to guest control, `deny_unknown_fields` on protocol
 types, verified boot, audit chains, and a managed builder VM direction
-from ADR-046 / plan 72. What is missing is a single contract tying
+from ADR-014 / plan 72. What is missing is a single contract tying
 protocol versioning, readiness, progress, builder mode, receipts, and
 first-use DX together.
 
@@ -60,7 +60,7 @@ guest images that pre-date this contract must be rebuilt
 adopted the hello prelude must be upgraded. The rationale is in
 plan 74 W1 — soft compatibility windows accumulate shim code that has
 to be removed later anyway, and the parallel libkrun builder-VM
-transition (ADR-046 / plan 72) already requires contributors to
+transition (ADR-014 / plan 72) already requires contributors to
 rebuild their dev VM, so layering a separate hello-compat window on
 top of that buys nothing.
 
@@ -286,7 +286,7 @@ clear "rebuild your dev VM" hint when this fires.
 - Plan 74 - `specs/plans/84-banger-runtime-lessons.md`
 - ADR-002 - `specs/adrs/002-microvm-security-posture.md`
 - ADR-007 - `specs/adrs/007-function-call-entrypoints.md`
-- ADR-046 - `specs/adrs/046-builder-vm-via-libkrun.md`
+- ADR-014 - `specs/adrs/046-builder-vm-via-libkrun.md`
 - ADR-047 - `specs/adrs/047-app-deps-audit-pipeline.md`
 - Plan 41 - `specs/plans/81-function-entrypoints-design.md`
 - Plan 52 - `specs/plans/52-fd3-control-channel-and-session-attach.md`

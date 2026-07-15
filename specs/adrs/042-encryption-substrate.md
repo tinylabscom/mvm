@@ -2,7 +2,7 @@
 title: "ADR-042: Encryption substrate — where AES-GCM lives, what HKDF is for, and how key rotation works"
 status: Accepted
 date: 2026-05-11
-related: ADR-002 (microVM security posture); ADR-013 (libkrun + libkrun pivot); ADR-027 (iroh-aware encryption layering); plan 45 §D5 (filesystem volumes / Path C); plan 60 Phase 2; plan 63 (Phase 2 encryption everywhere)
+related: ADR-002 (microVM security posture); ADR-005 (libkrun + libkrun pivot); ADR-027 (iroh-aware encryption layering); plan 45 §D5 (filesystem volumes / Path C); plan 60 Phase 2; plan 63 (Phase 2 encryption everywhere)
 ---
 
 ## Status
