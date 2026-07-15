@@ -322,8 +322,8 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    use mvm_agentd::vsock::EGRESS_PORT;
     use mvm_core::plan::{SecretBinding, SecretSource};
-    use mvm_guest::vsock::EGRESS_PORT;
 
     use crate::driver::mock::MockDriver;
 
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn start_workload_with_dev_console_threads_128_console_ports_into_spec() {
-        use mvm_guest::vsock::CONSOLE_PORT_BASE;
+        use mvm_agentd::vsock::CONSOLE_PORT_BASE;
         let policy = NetworkPolicy::deny_all();
         let redaction = RedactionPolicy::default();
         let runner =

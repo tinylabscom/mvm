@@ -159,11 +159,11 @@ pub(crate) fn reap_proxy(vm_name: &str) {
 fn cleanup_proxy_files(vm_name: &str) {
     let _ = std::fs::remove_file(mvm_core::config::vm_vsock_port_socket(
         vm_name,
-        mvm_guest::vsock::SSH_AGENT_PORT,
+        mvm_agentd::vsock::SSH_AGENT_PORT,
     ));
     let _ = std::fs::remove_file(mvm_core::config::vm_vz_vsock_port_socket(
         vm_name,
-        mvm_guest::vsock::SSH_AGENT_PORT,
+        mvm_agentd::vsock::SSH_AGENT_PORT,
     ));
 }
 

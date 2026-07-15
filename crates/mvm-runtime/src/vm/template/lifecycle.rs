@@ -1098,7 +1098,7 @@ pub fn wait_for_healthy(vsock_uds_path: &str, timeout_secs: u64, interval_ms: u6
     let deadline = Instant::now() + Duration::from_secs(timeout_secs);
     let mut attempts = 0u32;
     loop {
-        if mvm_guest::vsock::ping_at(vsock_uds_path).unwrap_or(false) {
+        if mvm_agentd::vsock::ping_at(vsock_uds_path).unwrap_or(false) {
             ui::success(&format!(
                 "Guest agent healthy after {} attempts",
                 attempts + 1
@@ -1130,7 +1130,7 @@ pub fn wait_for_healthy(vsock_uds_path: &str, timeout_secs: u64, interval_ms: u6
 /// Integrations without a `health_cmd` (i.e., `health: None`) are skipped.
 /// If there are no integrations or none have health checks, returns `(true, [])`.
 fn check_integration_health(
-    integrations: &[mvm_guest::integrations::IntegrationStateReport],
+    integrations: &[mvm_agentd::integrations::IntegrationStateReport],
 ) -> (bool, Vec<String>) {
     let with_health: Vec<_> = integrations.iter().filter(|i| i.health.is_some()).collect();
 
@@ -1162,7 +1162,7 @@ pub fn wait_for_integrations_healthy(
     let mut attempts = 0u32;
 
     loop {
-        let integrations = match mvm_guest::vsock::query_integration_status_at(vsock_uds_path) {
+        let integrations = match mvm_agentd::vsock::query_integration_status_at(vsock_uds_path) {
             Ok(list) => list,
             Err(e) => {
                 attempts += 1;
@@ -1543,10 +1543,10 @@ pub use crate::base::snapshot_integrity::{seal_snapshot_artifacts, verify_snapsh
 mod tests {
     use super::*;
     use crate::base::cow::CloneStrategy;
-    use mvm_core::util::test_env::TestEnv;
-    use mvm_guest::integrations::{
+    use mvm_agentd::integrations::{
         IntegrationHealthResult, IntegrationStateReport, IntegrationStatus,
     };
+    use mvm_core::util::test_env::TestEnv;
 
     fn test_template_spec(template_id: &str) -> TemplateSpec {
         TemplateSpec {

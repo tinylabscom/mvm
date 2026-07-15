@@ -97,8 +97,8 @@ fn request_kind(request: &BuilderRequest) -> &'static str {
 /// [`BuilderResponse`] back, until the peer closes the connection (clean
 /// EOF).
 ///
-/// Framing reuses [`mvm_guest::vsock::read_frame`] /
-/// [`mvm_guest::vsock::write_frame`], inheriting the 256 KiB
+/// Framing reuses [`mvm_agentd::vsock::read_frame`] /
+/// [`mvm_agentd::vsock::write_frame`], inheriting the 256 KiB
 /// pre-deserialize cap. A clean EOF before a frame starts is the normal
 /// end-of-connection and returns `Ok(())`. A malformed/oversized frame
 /// or a write failure returns the underlying error so the caller can
@@ -109,10 +109,10 @@ fn serve_loop(
     mut dispatch_one: impl FnMut(&BuilderRequest) -> BuilderResponse,
 ) -> std::io::Result<()> {
     loop {
-        match mvm_guest::vsock::read_frame::<BuilderRequest>(stream) {
+        match mvm_agentd::vsock::read_frame::<BuilderRequest>(stream) {
             Ok(request) => {
                 let response = dispatch_one(&request);
-                mvm_guest::vsock::write_frame(stream, &response)
+                mvm_agentd::vsock::write_frame(stream, &response)
                     .map_err(|e| std::io::Error::other(e.to_string()))?;
             }
             Err(e) => {
@@ -667,7 +667,7 @@ pub fn builderd_control_socket_candidates(vm_state_dir: &Path) -> [PathBuf; 2] {
 /// `vsock-<BUILDERD_CONTROL_PORT>.sock` — the per-port socket filename
 /// both backends use; they differ only in which directory it lives in.
 fn builderd_control_socket_filename() -> String {
-    mvm_core::config::vsock_socket_filename(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT)
+    mvm_core::config::vsock_socket_filename(mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT)
 }
 
 /// Outcome of a host-side readiness probe against a builder daemon's
@@ -733,10 +733,10 @@ pub(crate) fn perform_handshake(stream: &mut UnixStream) -> HandshakeOutcome {
     let handshake = BuilderRequest::Handshake {
         protocol_version: PROTOCOL_VERSION,
     };
-    if let Err(e) = mvm_guest::vsock::write_frame(stream, &handshake) {
+    if let Err(e) = mvm_agentd::vsock::write_frame(stream, &handshake) {
         return HandshakeOutcome::Transport(format!("handshake write failed: {e}"));
     }
-    match mvm_guest::vsock::read_frame::<BuilderResponse>(stream) {
+    match mvm_agentd::vsock::read_frame::<BuilderResponse>(stream) {
         Ok(BuilderResponse::Accepted {
             protocol_version, ..
         }) => HandshakeOutcome::Agreed(protocol_version),
@@ -929,12 +929,12 @@ mod tests {
     /// the buffered response.
     fn roundtrip_one(request: &BuilderRequest) -> BuilderResponse {
         let (mut client, mut server) = UnixStream::pair().expect("socketpair");
-        mvm_guest::vsock::write_frame(&mut client, request).expect("write request");
+        mvm_agentd::vsock::write_frame(&mut client, request).expect("write request");
         client
             .shutdown(std::net::Shutdown::Write)
             .expect("half-close write");
         serve_connection(&mut server).expect("serve");
-        mvm_guest::vsock::read_frame::<BuilderResponse>(&mut client).expect("read response")
+        mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("read response")
     }
 
     #[test]
@@ -956,14 +956,14 @@ mod tests {
         // Two requests on one connection, then EOF. The loop must
         // answer both and return Ok on the clean close.
         let (mut client, mut server) = UnixStream::pair().expect("socketpair");
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut client,
             &BuilderRequest::Handshake {
                 protocol_version: PROTOCOL_VERSION,
             },
         )
         .expect("write handshake");
-        mvm_guest::vsock::write_frame(&mut client, &BuilderRequest::Probe { op: op() })
+        mvm_agentd::vsock::write_frame(&mut client, &BuilderRequest::Probe { op: op() })
             .expect("write probe");
         client
             .shutdown(std::net::Shutdown::Write)
@@ -971,8 +971,8 @@ mod tests {
 
         serve_connection(&mut server).expect("serve returns Ok on clean eof");
 
-        let first = mvm_guest::vsock::read_frame::<BuilderResponse>(&mut client).expect("first");
-        let second = mvm_guest::vsock::read_frame::<BuilderResponse>(&mut client).expect("second");
+        let first = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("first");
+        let second = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("second");
         assert!(matches!(first, BuilderResponse::Accepted { .. }));
         assert!(matches!(second, BuilderResponse::Accepted { op: got, .. } if got == op()));
     }
@@ -1462,7 +1462,7 @@ mod tests {
     #[test]
     fn serve_connection_with_executor_runs_a_build_over_the_wire() {
         let (mut client, mut server) = UnixStream::pair().expect("socketpair");
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut client,
             &BuilderRequest::BuildGuestImage {
                 op: op(),
@@ -1478,7 +1478,7 @@ mod tests {
             .expect("half-close");
         let exec = FakeExecutor::full(0, "/nix/store/gggg-img\n", "");
         serve_connection_with_executor(&mut server, &exec).expect("serve");
-        let resp = mvm_guest::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
+        let resp = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
         assert!(
             matches!(resp, BuilderResponse::ArtifactReady { op: got, store_path: Some(p), .. }
                 if got == op() && p == "/nix/store/gggg-img")
@@ -1488,7 +1488,7 @@ mod tests {
     #[test]
     fn serve_connection_with_executor_runs_flake_check_over_the_wire() {
         let (mut client, mut server) = UnixStream::pair().expect("socketpair");
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut client,
             &BuilderRequest::FlakeCheck {
                 op: op(),
@@ -1501,7 +1501,7 @@ mod tests {
             .expect("half-close");
         let exec = FakeExecutor::ok(0, "");
         serve_connection_with_executor(&mut server, &exec).expect("serve");
-        let resp = mvm_guest::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
+        let resp = mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut client).expect("read");
         assert!(matches!(resp, BuilderResponse::Completed { op: got } if got == op()));
     }
 
@@ -1509,7 +1509,7 @@ mod tests {
 
     #[test]
     fn control_socket_path_uses_builderd_port() {
-        let port = mvm_guest::builder_agent::BUILDERD_CONTROL_PORT;
+        let port = mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT;
         let dir = Path::new("/var/lib/mvm/vm-foo");
         // libkrun: directly in the state dir.
         assert_eq!(

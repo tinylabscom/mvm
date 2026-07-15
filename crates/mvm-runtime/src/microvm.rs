@@ -495,7 +495,7 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
         "/vsock",
         &format!(
             r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{vsock}"}}"#,
-            cid = mvm_guest::vsock::GUEST_CID,
+            cid = mvm_agentd::vsock::GUEST_CID,
             vsock = vsock,
         ),
     )?;
@@ -1214,7 +1214,7 @@ pub fn restore_from_template_snapshot(
         // Wait for guest agent to be reachable after resume (may take a moment).
         let mut agent_ready = false;
         for attempt in 0..30 {
-            if mvm_guest::vsock::ping_at(&vsock_path).unwrap_or(false) {
+            if mvm_agentd::vsock::ping_at(&vsock_path).unwrap_or(false) {
                 agent_ready = true;
                 break;
             }
@@ -1231,7 +1231,7 @@ pub fn restore_from_template_snapshot(
             // randomness. The token bytes are random; the content hash is
             // metadata only.
             let token = mvm_core::crypto::vmgenid::fresh_generation_token(&vsock_path).token;
-            match mvm_guest::vsock::post_restore_at(&vsock_path, token) {
+            match mvm_agentd::vsock::post_restore_at(&vsock_path, token) {
                 Ok(r) if r.acknowledged => ui::info("Post-restore complete."),
                 Ok(_) => ui::warn("Post-restore signal returned failure."),
                 Err(e) => ui::warn(&format!(
@@ -1281,7 +1281,7 @@ const WARM_AGENT_READY_POLL_ATTEMPTS: u32 = 120;
 /// remounts, so a failed remount still leaves a rotated VMGenID.
 fn classify_reseed(
     agent_ready: bool,
-    reply: Option<mvm_guest::vsock::PostRestoreReply>,
+    reply: Option<mvm_agentd::vsock::PostRestoreReply>,
 ) -> mvm_core::vm_backend::ReseedStatus {
     use mvm_core::vm_backend::ReseedStatus;
     match (agent_ready, reply) {
@@ -1393,7 +1393,7 @@ pub fn warm_restore_instance_from_path(
     let vsock = firecracker_vsock_uds_path(&vm_dir);
     let mut agent_ready = false;
     for _ in 0..WARM_AGENT_READY_POLL_ATTEMPTS {
-        if mvm_guest::vsock::ping_at(&vsock).unwrap_or(false) {
+        if mvm_agentd::vsock::ping_at(&vsock).unwrap_or(false) {
             agent_ready = true;
             break;
         }
@@ -1405,7 +1405,7 @@ pub fn warm_restore_instance_from_path(
         );
         return Ok(classify_reseed(false, None));
     }
-    let reply = match mvm_guest::vsock::post_restore_at(&vsock, token) {
+    let reply = match mvm_agentd::vsock::post_restore_at(&vsock, token) {
         Ok(r) => {
             if !r.reseeded {
                 warn!("warm-start of '{name}': guest did not reseed VMGenID (VM is resumed)");
@@ -1825,8 +1825,8 @@ pub struct DiagnoseResult {
     pub agent_error: Option<String>,
     pub worker_status: Option<String>,
     pub last_busy_at: Option<String>,
-    pub probe_results: Vec<mvm_guest::probes::ProbeResult>,
-    pub integration_results: Vec<mvm_guest::integrations::IntegrationStateReport>,
+    pub probe_results: Vec<mvm_agentd::probes::ProbeResult>,
+    pub integration_results: Vec<mvm_agentd::integrations::IntegrationStateReport>,
     pub suggestions: Vec<String>,
 }
 
@@ -1976,7 +1976,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
 
     // Layer 6: Guest agent reachable? (short timeout)
     if result.vsock_exists {
-        match mvm_guest::vsock::ping_at(&vsock_path) {
+        match mvm_agentd::vsock::ping_at(&vsock_path) {
             Ok(true) => {
                 result.agent_reachable = true;
             }
@@ -2003,18 +2003,18 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
 
     // Layer 7: If agent reachable, get detailed status
     if result.agent_reachable {
-        if let Ok(mvm_guest::vsock::GuestResponse::WorkerStatus {
+        if let Ok(mvm_agentd::vsock::GuestResponse::WorkerStatus {
             status,
             last_busy_at,
-        }) = mvm_guest::vsock::query_worker_status_at(&vsock_path)
+        }) = mvm_agentd::vsock::query_worker_status_at(&vsock_path)
         {
             result.worker_status = Some(status);
             result.last_busy_at = last_busy_at;
         }
         result.integration_results =
-            mvm_guest::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
+            mvm_agentd::vsock::query_integration_status_at(&vsock_path).unwrap_or_default();
         result.probe_results =
-            mvm_guest::vsock::query_probe_status_at(&vsock_path).unwrap_or_default();
+            mvm_agentd::vsock::query_probe_status_at(&vsock_path).unwrap_or_default();
 
         // Check for failing health checks
         let failing: Vec<&str> = result
@@ -2687,7 +2687,7 @@ pub fn configure_flake_microvm_with_drives_dir(
         "/vsock",
         &format!(
             r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{vsock}"}}"#,
-            cid = mvm_guest::vsock::GUEST_CID,
+            cid = mvm_agentd::vsock::GUEST_CID,
             vsock = vsock,
         ),
     )?;
@@ -3082,7 +3082,7 @@ fn spawn_egress_endpoint(config: &FlakeRunConfig) -> Result<EndpointGuard> {
         secrets: &secrets,
         redaction: &redaction,
         transport: crate::substitution_spawn::EndpointTransport::Vsock {
-            port: mvm_guest::vsock::EGRESS_PORT,
+            port: mvm_agentd::vsock::EGRESS_PORT,
         },
         terminator_listen: Some(listen),
         tls_intermediate,
@@ -3538,8 +3538,8 @@ mod tests {
 
     #[test]
     fn classify_reseed_is_honest_about_rotation() {
+        use mvm_agentd::vsock::PostRestoreReply;
         use mvm_core::vm_backend::ReseedStatus;
-        use mvm_guest::vsock::PostRestoreReply;
 
         // Agent never came back → token undelivered, reseed unknown.
         assert_eq!(classify_reseed(false, None), ReseedStatus::Undelivered);

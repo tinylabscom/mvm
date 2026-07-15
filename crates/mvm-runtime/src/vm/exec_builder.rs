@@ -11,7 +11,7 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use mvm_guest::vsock::{
+use mvm_agentd::vsock::{
     EntrypointEvent, ExecEvent, GUEST_AGENT_PORT, GuestRequest, GuestResponse, StageFile,
     call_streaming, call_unary,
 };
@@ -212,7 +212,7 @@ fn run_batch(
         // Surface a grant refusal as the typed RpcError so the host audits it as
         // `verb_denied` rather than losing the verb in a stringified error.
         GuestResponse::VerbNotAuthorized { verb } => {
-            Err(mvm_guest::vsock::RpcError::VerbNotAuthorized { verb }.into())
+            Err(mvm_agentd::vsock::RpcError::VerbNotAuthorized { verb }.into())
         }
         other => bail!("unexpected response to ExecBatch: {:?}", other.variant()),
     }
@@ -330,7 +330,7 @@ pub(crate) fn build_exec_request_for_test(argv: Vec<String>, stdin_bytes: Vec<u8
 mod tests {
     use super::*;
     use crate::mock_guest_agent::MockGuestAgent;
-    use mvm_guest::vsock::connect_to_port;
+    use mvm_agentd::vsock::connect_to_port;
 
     /// Start a mock agent and return a connected, handshaken stream to it.
     fn agent_stream() -> Option<(tempfile::TempDir, MockGuestAgent, UnixStream)> {
@@ -367,7 +367,7 @@ mod tests {
     fn exec_frame_carries_stdin_payload() {
         let req = build_exec_request_for_test(vec!["/bin/cat".into()], b"STDIN-RT-42".to_vec());
         match req {
-            mvm_guest::vsock::GuestRequest::Exec { stdin, .. } => {
+            mvm_agentd::vsock::GuestRequest::Exec { stdin, .. } => {
                 assert_eq!(stdin.as_deref(), Some("STDIN-RT-42"));
             }
             other => panic!("expected Exec, got {other:?}"),
@@ -378,7 +378,7 @@ mod tests {
     fn exec_frame_empty_stdin_is_none() {
         let req = build_exec_request_for_test(vec!["/bin/true".into()], Vec::new());
         match req {
-            mvm_guest::vsock::GuestRequest::Exec { stdin, .. } => assert_eq!(stdin, None),
+            mvm_agentd::vsock::GuestRequest::Exec { stdin, .. } => assert_eq!(stdin, None),
             other => panic!("expected Exec, got {other:?}"),
         }
     }

@@ -42,7 +42,7 @@ run() {
 run "fmt"                cargo fmt --all -- --check
 run "workspace clippy"   cargo clippy --workspace --all-targets -- -D warnings
 run "workspace test"     cargo test --workspace --no-fail-fast
-run "seccomp functional" cargo test -p mvm-guest --test seccomp_apply
+run "seccomp functional" cargo test -p mvm-agentd --test seccomp_apply
 run "cargo deny"         cargo deny check
 run "cargo audit"        cargo audit --ignore RUSTSEC-2025-0057 \
                                       --ignore RUSTSEC-2024-0384 \

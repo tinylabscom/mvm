@@ -14,7 +14,7 @@
 //! money on the wire — matching the broker's int-only time/cost contract.
 //!
 //! This module is the shared wire contract for the service: the in-guest
-//! typed client (`mvm_guest::host_cost`) and the host-side broker handler
+//! typed client (`mvm_agentd::host_cost`) and the host-side broker handler
 //! both deserialize against these types. The handler scaffold is not yet
 //! built, so these types are the sole definition today; when the handler
 //! lands it reuses them unchanged.

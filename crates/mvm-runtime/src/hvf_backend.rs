@@ -948,10 +948,10 @@ mod tests {
         let sockets = hvf_console_data_sockets(Path::new("/state/hvf"), true);
         assert_eq!(
             sockets.len(),
-            mvm_guest::vsock::DEV_CONSOLE_DATA_PORT_COUNT as usize
+            mvm_agentd::vsock::DEV_CONSOLE_DATA_PORT_COUNT as usize
         );
         let first = sockets.first().expect("first console socket");
-        assert_eq!(first.guest_port, mvm_guest::vsock::CONSOLE_PORT_BASE + 1);
+        assert_eq!(first.guest_port, mvm_agentd::vsock::CONSOLE_PORT_BASE + 1);
         assert_eq!(
             first.host_socket,
             PathBuf::from("/state/hvf/vsock/vsock-20001.sock")
@@ -1386,7 +1386,7 @@ mod tests {
         );
         // The guest ports are exactly the dev console data range.
         let got: Vec<u32> = socks.iter().map(|s| s.guest_port).collect();
-        let want: Vec<u32> = mvm_guest::vsock::dev_console_data_ports().collect();
+        let want: Vec<u32> = mvm_agentd::vsock::dev_console_data_ports().collect();
         assert_eq!(got, want);
         // Each host UDS is `<state_dir>/vsock/vsock-<port>.sock`, the exact path
         // `DevConsoleTransport` dials — a drift here silently breaks PTY attach.

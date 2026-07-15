@@ -121,11 +121,11 @@
       # asserts this match so the pin can't silently go stale.
       overlayVersion = "0.18.0";
 
-      # mvm-guest binaries — agent + seccomp shim + verity-init.
+      # mvm-agentd binaries — agent + seccomp shim + verity-init.
       # `mvm-verity-init` is the initrd PID 1; it lives in the
       # initramfs cpio.gz, *not* in this overlay. We still build
       # it here because the rustPlatform derivation produces all
-      # three binaries from one `--package mvm-guest` build (per
+      # three binaries from one `--package mvm-agentd` build (per
       # `nix/packages/mvm-guest-agent.nix`'s
       # `--bin mvm-guest-agent --bin mvm-seccomp-apply --bin mvm-verity-init`
       # flags); we just don't copy the verity-init binary into the
@@ -156,8 +156,8 @@
         };
 
       # mvm-runner — the function-workload entrypoint runner.
-      # Folded into mvm-guest as a [[bin]], so we select just that
-      # binary out of the mvm-guest package; workspace Cargo.lock
+      # Folded into mvm-agentd as a [[bin]], so we select just that
+      # binary out of the mvm-agentd package; workspace Cargo.lock
       # drives the closure.
       mvmRunnerFor = system:
         let
@@ -170,7 +170,7 @@
           cargoLock = {
             lockFile = workspace + "/Cargo.lock";
           };
-          cargoBuildFlags = [ "--package" "mvm-guest" "--bin" "mvm-runner" ];
+          cargoBuildFlags = [ "--package" "mvm-agentd" "--bin" "mvm-runner" ];
           doCheck = false;
           meta = {
             description = "mvm function-workload entrypoint runner (plan 60 Phase 5 Slice C)";

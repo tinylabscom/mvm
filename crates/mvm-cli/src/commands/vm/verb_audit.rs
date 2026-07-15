@@ -8,7 +8,7 @@
 //! surfaces to the caller as an error; the audit is an observability record, not
 //! load-bearing.
 
-use mvm_guest::vsock::RpcError;
+use mvm_agentd::vsock::RpcError;
 
 /// Extract the denied verb from an error chain that carries an
 /// [`RpcError::VerbNotAuthorized`]. Pure (no I/O) so it is unit-tested; returns

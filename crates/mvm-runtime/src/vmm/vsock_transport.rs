@@ -380,7 +380,7 @@ mod tests {
         let hdr = VsockHdr {
             src_cid: HOST_CID,
             dst_cid: GUEST_CID,
-            src_port: mvm_guest::vsock::EGRESS_PORT,
+            src_port: mvm_agentd::vsock::EGRESS_PORT,
             dst_port: 1500,
             len: 10,
             typ: TYPE_STREAM,

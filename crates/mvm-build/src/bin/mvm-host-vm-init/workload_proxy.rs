@@ -272,7 +272,7 @@ mod tests {
     fn workload_forward_port_literal_is_21472() {
         // The guest init deliberately doesn't depend on `mvm-guest`,
         // so this literal must stay in lock-step with the host side
-        // (`mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT`). If the
+        // (`mvm_agentd::builder_agent::WORKLOAD_FORWARD_PORT`). If the
         // host changes the port, this pin fails and points at the
         // resync — same tactic as the dispatch-port pin.
         assert_eq!(WORKLOAD_FORWARD_PORT, 21472);
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn handshake_byte_layout_matches_host_encoder() {
-        // The host side (`mvm_guest::builder_agent::
+        // The host side (`mvm_agentd::builder_agent::
         // encode_workload_forward_handshake`) pins the *same* literal
         // bytes for this input. Keeping both pinned to the identical
         // layout is how the two no-shared-dep encoders stay in sync.

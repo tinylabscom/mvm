@@ -132,7 +132,7 @@ fn main() -> ExitCode {
         .with_resources(args.vcpus, args.mem_mib)
         .with_cmdline(&args.cmdline)
         .with_vsock_socket_dir(&socket_dir)
-        .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+        .add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
     if let Some(dd) = args.data_disk {
         ctx = ctx.add_disk("data", dd, false);
     }

@@ -70,7 +70,8 @@ fn submit_round_trips_request_and_result_with_no_stderr_chunks() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let request: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let request: HostVmRequest =
+            mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         let job_id = match &request {
             HostVmRequest::Run { job_id, .. } => *job_id,
             other => panic!("expected Run, got {other:?}"),
@@ -86,7 +87,7 @@ fn submit_round_trips_request_and_result_with_no_stderr_chunks() {
                 teardown_ms: 5,
             },
         };
-        mvm_guest::vsock::write_frame(&mut conn, &response).expect("write response");
+        mvm_agentd::vsock::write_frame(&mut conn, &response).expect("write response");
     });
 
     let supervisor =
@@ -118,13 +119,14 @@ fn submit_streams_stderr_chunks_then_collects_terminating_result() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let request: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let request: HostVmRequest =
+            mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         let job_id = match &request {
             HostVmRequest::Run { job_id, .. } => *job_id,
             other => panic!("expected Run, got {other:?}"),
         };
         for line in ["building", "building 2/3", "building 3/3"] {
-            mvm_guest::vsock::write_frame(
+            mvm_agentd::vsock::write_frame(
                 &mut conn,
                 &HostVmResponse::StderrChunk {
                     job_id,
@@ -144,7 +146,7 @@ fn submit_streams_stderr_chunks_then_collects_terminating_result() {
                 teardown_ms: 0,
             },
         };
-        mvm_guest::vsock::write_frame(&mut conn, &result).expect("write result");
+        mvm_agentd::vsock::write_frame(&mut conn, &result).expect("write result");
     });
 
     let supervisor =
@@ -183,7 +185,7 @@ fn submit_returns_premature_eof_when_guest_closes_without_result() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let _: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let _: HostVmRequest = mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         // Drop conn -> EOF.
     });
 
@@ -216,7 +218,7 @@ fn submit_detects_job_id_mismatch_in_result() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let _: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let _: HostVmRequest = mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         let bogus = HostVmResponse::Result {
             job_id: JobId::new(),
             exit_code: 0,
@@ -224,7 +226,7 @@ fn submit_detects_job_id_mismatch_in_result() {
             boot_timings: None,
             job_timings: JobTimings::default(),
         };
-        mvm_guest::vsock::write_frame(&mut conn, &bogus).expect("write bogus");
+        mvm_agentd::vsock::write_frame(&mut conn, &bogus).expect("write bogus");
     });
 
     let supervisor =
@@ -253,9 +255,10 @@ fn shutdown_writes_shutdown_request_and_consumes_bye() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let request: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let request: HostVmRequest =
+            mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         assert!(matches!(request, HostVmRequest::Shutdown {}));
-        mvm_guest::vsock::write_frame(&mut conn, &HostVmResponse::Bye {}).expect("write bye");
+        mvm_agentd::vsock::write_frame(&mut conn, &HostVmResponse::Bye {}).expect("write bye");
     });
 
     let supervisor =
@@ -325,7 +328,8 @@ fn submit_with_audit_sink_emits_dispatched_then_completed_on_success() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let request: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let request: HostVmRequest =
+            mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         let job_id = match &request {
             HostVmRequest::Run { job_id, .. } => *job_id,
             other => panic!("expected Run, got {other:?}"),
@@ -341,7 +345,7 @@ fn submit_with_audit_sink_emits_dispatched_then_completed_on_success() {
                 teardown_ms: 3,
             },
         };
-        mvm_guest::vsock::write_frame(&mut conn, &response).expect("write response");
+        mvm_agentd::vsock::write_frame(&mut conn, &response).expect("write response");
     });
 
     let sink = std::sync::Arc::new(RecordingAuditSink::default());
@@ -388,7 +392,7 @@ fn submit_with_audit_sink_emits_dispatched_then_failed_on_premature_eof() {
     // PrematureEof, audit sink should see dispatched + failed.
     let guest = spawn_fake_guest(&socket, |mut conn| {
         let _request: HostVmRequest =
-            mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+            mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         drop(conn);
     });
 
@@ -430,12 +434,13 @@ fn submit_without_audit_sink_emits_nothing() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let request: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let request: HostVmRequest =
+            mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         let job_id = match &request {
             HostVmRequest::Run { job_id, .. } => *job_id,
             other => panic!("expected Run, got {other:?}"),
         };
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut conn,
             &HostVmResponse::Result {
                 job_id,
@@ -485,7 +490,8 @@ fn submit_workload_start_round_trips_started() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let request: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let request: HostVmRequest =
+            mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         let workload_id = match &request {
             HostVmRequest::WorkloadStart {
                 workload_id,
@@ -503,7 +509,7 @@ fn submit_workload_start_round_trips_started() {
             workload_id,
             pid: 4242,
         };
-        mvm_guest::vsock::write_frame(&mut conn, &response).expect("write response");
+        mvm_agentd::vsock::write_frame(&mut conn, &response).expect("write response");
     });
 
     let supervisor =
@@ -522,7 +528,8 @@ fn submit_workload_start_surfaces_workload_failed() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let request: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let request: HostVmRequest =
+            mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         let workload_id = match &request {
             HostVmRequest::WorkloadStart { workload_id, .. } => *workload_id,
             other => panic!("expected WorkloadStart, got {other:?}"),
@@ -531,7 +538,7 @@ fn submit_workload_start_surfaces_workload_failed() {
             workload_id,
             error: "spawn /usr/bin/firecracker: ENOENT".to_string(),
         };
-        mvm_guest::vsock::write_frame(&mut conn, &response).expect("write response");
+        mvm_agentd::vsock::write_frame(&mut conn, &response).expect("write response");
     });
 
     let supervisor =
@@ -555,9 +562,9 @@ fn submit_workload_start_rejects_unexpected_response() {
     let socket = dispatch_socket_path(scratch.path());
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
-        let _req: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let _req: HostVmRequest = mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         // Wrong kind for a WorkloadStart.
-        mvm_guest::vsock::write_frame(&mut conn, &HostVmResponse::Bye {}).expect("write response");
+        mvm_agentd::vsock::write_frame(&mut conn, &HostVmResponse::Bye {}).expect("write response");
     });
 
     let supervisor =
@@ -583,7 +590,7 @@ fn submit_workload_start_premature_eof_when_guest_closes() {
 
     let guest = spawn_fake_guest(&socket, |mut conn| {
         // Read the request, then close without replying (guest crash).
-        let _req: HostVmRequest = mvm_guest::vsock::read_frame(&mut conn).expect("read request");
+        let _req: HostVmRequest = mvm_agentd::vsock::read_frame(&mut conn).expect("read request");
         drop(conn);
     });
 
@@ -605,9 +612,9 @@ fn submit_workload_stop_and_status_round_trip() {
     let wid = WorkloadId::new();
     let guest =
         spawn_fake_guest(&socket, move |mut conn| {
-            match mvm_guest::vsock::read_frame::<HostVmRequest>(&mut conn).expect("read") {
+            match mvm_agentd::vsock::read_frame::<HostVmRequest>(&mut conn).expect("read") {
                 HostVmRequest::WorkloadStop { workload_id } => {
-                    mvm_guest::vsock::write_frame(
+                    mvm_agentd::vsock::write_frame(
                         &mut conn,
                         &HostVmResponse::WorkloadStopped { workload_id },
                     )
@@ -629,11 +636,11 @@ fn submit_workload_stop_and_status_round_trip() {
     let socket2 = dispatch_socket_path(scratch2.path());
     let guest2 = spawn_fake_guest(&socket2, |mut conn| {
         let workload_id =
-            match mvm_guest::vsock::read_frame::<HostVmRequest>(&mut conn).expect("read") {
+            match mvm_agentd::vsock::read_frame::<HostVmRequest>(&mut conn).expect("read") {
                 HostVmRequest::WorkloadStatus { workload_id } => workload_id,
                 other => panic!("expected WorkloadStatus, got {other:?}"),
             };
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut conn,
             &HostVmResponse::WorkloadStatusReport {
                 workload_id,

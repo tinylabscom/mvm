@@ -523,7 +523,7 @@ impl VmBackend for QemuBackend {
         let cid = read_cid(&id.0).unwrap_or(3);
         Ok(GuestChannelInfo::Vsock {
             cid,
-            port: mvm_guest::vsock::GUEST_AGENT_PORT,
+            port: mvm_agentd::vsock::GUEST_AGENT_PORT,
         })
     }
 
@@ -729,7 +729,7 @@ fn read_cid(name: &str) -> Option<u32> {
 /// outlives the `mvmctl up` invocation, exactly as qemu (`-daemonize`)
 /// does. `stop` reaps it via `BRIDGE_PID_FILE`.
 fn spawn_vsock_bridge(name: &str, cid: u32, state_dir: &Path) -> Result<()> {
-    let uds = mvm_core::config::vm_vsock_port_socket(name, mvm_guest::vsock::GUEST_AGENT_PORT);
+    let uds = mvm_core::config::vm_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT);
     let _ = std::fs::remove_file(&uds);
     let bridge_pid_file = state_dir.join(BRIDGE_PID_FILE);
 
@@ -742,7 +742,7 @@ fn spawn_vsock_bridge(name: &str, cid: u32, state_dir: &Path) -> Result<()> {
         .arg("--cid")
         .arg(cid.to_string())
         .arg("--port")
-        .arg(mvm_guest::vsock::GUEST_AGENT_PORT.to_string())
+        .arg(mvm_agentd::vsock::GUEST_AGENT_PORT.to_string())
         .arg("--watch-pid-file")
         .arg(state_dir.join(QEMU_PID_FILE))
         .stdin(std::process::Stdio::null())

@@ -1277,7 +1277,7 @@ mod tests {
             assert_eq!(got, hello());
         });
 
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let mut guest = mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
         let ack = guest.negotiate(hello(), 1).unwrap();
         assert_eq!(ack, expected().hello_ack());
         host_thread.join().unwrap();
@@ -1334,7 +1334,7 @@ mod tests {
             host.send_packet(0, 56, 3, vec![1, 2, 3]).unwrap();
         });
 
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let mut guest = mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
         guest.send_packet(0, 55, 2, vec![9, 8, 7]).unwrap();
         let frame = guest.recv_packet().unwrap();
         assert_eq!(frame.header.flow_id, 56);
@@ -1355,7 +1355,7 @@ mod tests {
             assert_eq!(got, hello());
         });
 
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let mut guest = mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
         let ack = guest.negotiate(hello(), 1).unwrap();
         assert_eq!(ack, expected().hello_ack());
         let got = guest.recv_network_config().unwrap();
@@ -1440,7 +1440,7 @@ mod tests {
             ));
         });
 
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let mut guest = mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
         let ack = guest.negotiate(hello(), 1).unwrap();
         assert_eq!(ack, expected().hello_ack());
         assert_eq!(guest.recv_network_config().unwrap(), network_config());
@@ -1488,7 +1488,7 @@ mod tests {
             assert_eq!(worker.stats().host_control_frames_sent, 3);
         });
 
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let mut guest = mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
         let _ack = guest.negotiate(hello(), 1).unwrap();
         let _config = guest.recv_network_config().unwrap();
         let _credit = guest.recv_control().unwrap();
@@ -1572,7 +1572,7 @@ mod tests {
             )));
         });
 
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let mut guest = mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
         let _ack = guest.negotiate(hello(), 1).unwrap();
         let _config = guest.recv_network_config().unwrap();
         let _credit = guest.recv_control().unwrap();
@@ -1628,7 +1628,7 @@ mod tests {
             )));
         });
 
-        let mut guest = mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
+        let mut guest = mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest);
         let _ack = guest.negotiate(hello(), 1).unwrap();
         let _config = guest.recv_network_config().unwrap();
         let _credit = guest.recv_control().unwrap();

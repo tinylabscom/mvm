@@ -1376,7 +1376,7 @@ fn run_in_guest(
     }
 
     let transport = vsock_transport::for_vm(vm_name)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     // Inbound vsock RPC audit. exec.rs is a top-level module that can't
     // reach the private `commands::shared` re-export, so inline the audit
     // emit here. The detail format matches
@@ -1397,13 +1397,13 @@ fn run_in_guest(
     } else {
         Some(String::from_utf8_lossy(&req.stdin).into_owned())
     };
-    let terminal = mvm_guest::vsock::send_exec_streaming(
+    let terminal = mvm_agentd::vsock::send_exec_streaming(
         &mut stream,
         &wrapper,
         stdin_str,
         req.timeout_secs,
         |event| match event {
-            mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+            mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
                 if capture {
                     out.extend_from_slice(chunk);
                 } else {
@@ -1412,7 +1412,7 @@ fn run_in_guest(
                     let _ = so.flush();
                 }
             }
-            mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+            mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
                 if capture {
                     err.extend_from_slice(chunk);
                 } else {
@@ -1425,8 +1425,8 @@ fn run_in_guest(
         },
     )?;
     let exit_code = match terminal {
-        mvm_guest::vsock::ExecEvent::Exit { code } => code,
-        mvm_guest::vsock::ExecEvent::TimedOut => {
+        mvm_agentd::vsock::ExecEvent::Exit { code } => code,
+        mvm_agentd::vsock::ExecEvent::TimedOut => {
             let msg = timeout_exit_message(req.timeout_secs);
             if capture {
                 err.extend_from_slice(format!("{msg}\n").as_bytes());
@@ -1700,7 +1700,7 @@ pub fn dispatch_in_session(
     };
     let wrapper = build_guest_wrapper(&req, &[]);
     let transport = vsock_transport::for_vm(&vm.vm_name)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     // Inbound vsock RPC audit. Mirrors run_in_guest's emit; was lost when
     // this function migrated from send_request to send_exec_streaming.
     let verb = "exec";
@@ -1713,20 +1713,20 @@ pub fn dispatch_in_session(
 
     let mut out = Vec::<u8>::new();
     let mut err = Vec::<u8>::new();
-    let terminal = mvm_guest::vsock::send_exec_streaming(
+    let terminal = mvm_agentd::vsock::send_exec_streaming(
         &mut stream,
         &wrapper,
         None,
         timeout_secs,
         |event| match event {
-            mvm_guest::vsock::ExecEvent::Stdout { chunk } => out.extend_from_slice(chunk),
-            mvm_guest::vsock::ExecEvent::Stderr { chunk } => err.extend_from_slice(chunk),
+            mvm_agentd::vsock::ExecEvent::Stdout { chunk } => out.extend_from_slice(chunk),
+            mvm_agentd::vsock::ExecEvent::Stderr { chunk } => err.extend_from_slice(chunk),
             _ => {}
         },
     )?;
     let exit_code = match terminal {
-        mvm_guest::vsock::ExecEvent::Exit { code } => code,
-        mvm_guest::vsock::ExecEvent::TimedOut => {
+        mvm_agentd::vsock::ExecEvent::Exit { code } => code,
+        mvm_agentd::vsock::ExecEvent::TimedOut => {
             err.extend_from_slice(format!("{}\n", timeout_exit_message(timeout_secs)).as_bytes());
             EXEC_TIMEOUT_EXIT_CODE
         }
@@ -1763,7 +1763,7 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
         // would only answer `ProtocolMismatch` to the next request and
         // that is *not* "reachable" from the caller's perspective.
         if let Ok(transport) = vsock_transport::for_vm(vm_name)
-            && let Ok(mut stream) = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            && let Ok(mut stream) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             && {
                 // Bound each probe: a transport whose socket is bound but whose
                 // guest agent hasn't replied yet (e.g. still booting, or an
@@ -1775,9 +1775,9 @@ pub fn wait_for_agent(vm_name: &str, timeout_secs: u64) -> bool {
                 // The stream is a throwaway probe (dropped below), so the timeout
                 // never touches a real agent-RPC data stream.
                 let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(3)));
-                mvm_guest::vsock::negotiate_protocol(
+                mvm_agentd::vsock::negotiate_protocol(
                     &mut stream,
-                    vec![mvm_guest::vsock::GuestCapability::Ping],
+                    vec![mvm_agentd::vsock::GuestCapability::Ping],
                 )
                 .is_ok()
             }

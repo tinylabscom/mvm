@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
+use mvm_agentd::vsock::{EGRESS_PORT, GUEST_AGENT_PORT};
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 

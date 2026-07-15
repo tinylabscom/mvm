@@ -2080,8 +2080,8 @@ name = "libkrun-sys"
 version = "0.18.0"
 dependencies = [
  "libc",
+ "mvm-agentd",
  "mvm-core",
- "mvm-guest",
  "mvm-runtime",
  "serde",
  "serde_json",
@@ -2216,6 +2216,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "mvm-agentd"
+version = "0.18.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "hickory-proto",
+ "ipnet",
+ "libc",
+ "mvm-core",
+ "rand 0.8.6",
+ "schemars",
+ "seccompiler",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "mvm-build"
 version = "0.18.0"
 dependencies = [
@@ -2230,10 +2254,9 @@ dependencies = [
  "libc",
  "libkrun-sys",
  "lzma-rs",
+ "mvm-agentd",
  "mvm-core",
  "mvm-fs",
- "mvm-guest",
- "mvm-guest-helpers",
  "mvm-net",
  "mvm-sdk",
  "nix",
@@ -2268,10 +2291,10 @@ dependencies = [
  "hex",
  "libc",
  "libkrun-sys",
+ "mvm-agentd",
  "mvm-build",
  "mvm-core",
  "mvm-fs",
- "mvm-guest",
  "mvm-hostd",
  "mvm-runtime",
  "mvm-sdk",
@@ -2384,47 +2407,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-guest"
-version = "0.18.0"
-dependencies = [
- "anyhow",
- "base64",
- "chrono",
- "ed25519-dalek",
- "ipnet",
- "libc",
- "mvm-core",
- "rand 0.8.6",
- "schemars",
- "seccompiler",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
-name = "mvm-guest-helpers"
-version = "0.18.0"
-dependencies = [
- "anyhow",
- "hickory-proto",
- "libc",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "mvm-host-services-ffi"
 version = "0.18.0"
 dependencies = [
+ "mvm-agentd",
  "mvm-core",
- "mvm-guest",
  "serde",
  "serde_json",
 ]
@@ -2448,9 +2435,9 @@ dependencies = [
  "landlock",
  "libc",
  "libkrun-sys",
+ "mvm-agentd",
  "mvm-build",
  "mvm-core",
- "mvm-guest",
  "mvm-net",
  "mvm-runtime",
  "mvm-sdk",
@@ -2505,9 +2492,9 @@ dependencies = [
  "libc",
  "libkrun-sys",
  "mio",
+ "mvm-agentd",
  "mvm-build",
  "mvm-core",
- "mvm-guest",
  "mvm-net",
  "mvm-sdk",
  "mvm-storage",
@@ -2535,8 +2522,8 @@ dependencies = [
  "flate2",
  "globset",
  "hex",
+ "mvm-agentd",
  "mvm-core",
- "mvm-guest",
  "schemars",
  "serde",
  "serde_json",
@@ -2593,11 +2580,11 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "libkrun-sys",
+ "mvm-agentd",
  "mvm-build",
  "mvm-cli",
  "mvm-core",
  "mvm-fs",
- "mvm-guest",
  "mvm-runtime",
  "objc2-foundation",
  "predicates",

@@ -32,7 +32,7 @@ static long sc(long n, long a, long b, long c, long d, long e) {
 #define SYS_MOUNT 40
 #define AT_FDCWD -100
 
-/* vsock guest ports — must match mvm_guest::vsock. */
+/* vsock guest ports — must match mvm_agentd::vsock. */
 #define EGRESS_PORT 5253
 #define WORKLOAD_EXIT_PORT 5251
 #define AF_VSOCK 40

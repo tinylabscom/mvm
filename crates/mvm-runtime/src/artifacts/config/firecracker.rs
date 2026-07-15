@@ -75,7 +75,7 @@ struct FcConfigFile {
 
 const DEFAULT_VCPU_COUNT: u32 = 1;
 const DEFAULT_MEM_SIZE_MIB: u64 = 512;
-// Guest CID for vsock — mirrors `mvm_guest::vsock::GUEST_CID` without pulling
+// Guest CID for vsock — mirrors `mvm_agentd::vsock::GUEST_CID` without pulling
 // in the dep. The value is fixed by the mvm vsock protocol.
 const DEFAULT_GUEST_CID: u32 = 3;
 

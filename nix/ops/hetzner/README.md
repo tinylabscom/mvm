@@ -69,14 +69,14 @@ The MOTD prints these paths on every login.
 1. `cargo fmt --all -- --check` — formatting.
 2. `cargo clippy --workspace --all-targets -- -D warnings` — full clippy under real x86\_64-linux (catches the aarch64-only `unnecessary_cast` warnings on the seccomp `syscall_nr` table that Lima/macOS misses).
 3. `cargo test --workspace --no-fail-fast` — every test, including the Linux-gated ones.
-4. `cargo test -p mvm-guest --test seccomp_apply` — the [seccomp functional probes](../../../crates/mvm-guest/tests/seccomp_apply.rs) (PR #75) that need `/dev/kvm`-class isolation to validate.
+4. `cargo test -p mvm-agentd --test seccomp_apply` — the [seccomp functional probes](../../../crates/mvm-agentd/tests/seccomp_apply.rs) (PR #75) that need `/dev/kvm`-class isolation to validate.
 5. `cargo deny check` — supply-chain audit (deny.toml).
 6. `cargo audit` — RUSTSEC scan, with the same allow-list as `.github/workflows/security.yml`.
 
 What it deliberately doesn't cover yet:
 
 - **Live-KVM Firecracker smoke** — `mvmctl run` against a real Nix-built rootfs. Requires per-PR setup (a built artifact). Add to `run-tests.sh` once the V2 trait extraction (PR #77) merges and we've decided on a fixture rootfs.
-- **`cargo fuzz`** — `fuzz_authed_path` etc. Run by hand: `cd crates/mvm-guest && RUSTUP_TOOLCHAIN=nightly cargo fuzz run fuzz_authed_path -- -max_total_time=600`.
+- **`cargo fuzz`** — `fuzz_authed_path` etc. Run by hand: `cd crates/mvm-agentd && RUSTUP_TOOLCHAIN=nightly cargo fuzz run fuzz_authed_path -- -max_total_time=600`.
 
 ## Tearing the box down
 

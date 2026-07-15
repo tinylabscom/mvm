@@ -23,9 +23,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
+use mvm_agentd::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::health::{HealthAction, HealthPolicy, HealthState, HealthTracker, ProbeResult, fold};
-use mvm_guest::vsock::{ExecEvent, GUEST_AGENT_PORT, send_exec_streaming};
 use mvm_runtime::machine::persist::load_machine_spec;
 use mvm_runtime::vm::name_registry::record_readiness;
 use mvm_sdk::ir::HealthCheck;

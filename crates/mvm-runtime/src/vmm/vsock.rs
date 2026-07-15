@@ -427,7 +427,7 @@ mod tests {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1500,
-            dst_port: mvm_guest::vsock::EGRESS_PORT,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
             len: raw.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
@@ -461,7 +461,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let (h, payload) = reply.expect("endpoint reply framed back to the guest");
-        assert_eq!(h.src_port, mvm_guest::vsock::EGRESS_PORT);
+        assert_eq!(h.src_port, mvm_agentd::vsock::EGRESS_PORT);
         assert!(payload.starts_with(b"OK:"));
     }
 
@@ -472,7 +472,7 @@ mod tests {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 2000,
-            dst_port: mvm_guest::vsock::EGRESS_PORT,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
             len: 16,
             op: OP_RW,
             typ: TYPE_STREAM,
@@ -510,7 +510,7 @@ mod tests {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1600,
-            dst_port: mvm_guest::vsock::BROKER_PORT,
+            dst_port: mvm_agentd::vsock::BROKER_PORT,
             len: raw.len() as u32,
             op: OP_RW,
             typ: TYPE_STREAM,
@@ -544,7 +544,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         let (h, payload) = reply.expect("broker reply framed back to the guest");
-        assert_eq!(h.src_port, mvm_guest::vsock::BROKER_PORT);
+        assert_eq!(h.src_port, mvm_agentd::vsock::BROKER_PORT);
         assert!(payload.starts_with(b"OK:"));
     }
 
@@ -555,7 +555,7 @@ mod tests {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 2100,
-            dst_port: mvm_guest::vsock::BROKER_PORT,
+            dst_port: mvm_agentd::vsock::BROKER_PORT,
             len: 8,
             op: OP_RW,
             typ: TYPE_STREAM,
@@ -589,11 +589,15 @@ mod tests {
         assert_eq!(credit.0.fwd_cnt, 5);
         d.transport.pending_rx.clear();
 
-        d.transport
-            .queue_host_packet(1 << 20, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
+        d.transport.queue_host_packet(
+            1 << 20,
+            mvm_agentd::vsock::GUEST_AGENT_PORT,
+            OP_REQUEST,
+            &[],
+        );
         let req = &d.transport.pending_rx[0].0;
         assert_eq!(req.op, OP_REQUEST);
-        assert_eq!(req.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
+        assert_eq!(req.dst_port, mvm_agentd::vsock::GUEST_AGENT_PORT);
         assert_eq!(req.fwd_cnt, 0);
         assert_eq!(req.buf_alloc, HOST_BUF_ALLOC);
     }
@@ -661,7 +665,7 @@ mod tests {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
             src_port: 1500,
-            dst_port: mvm_guest::vsock::EGRESS_PORT,
+            dst_port: mvm_agentd::vsock::EGRESS_PORT,
             len: 5,
             op: OP_RW,
             typ: TYPE_STREAM,
@@ -716,7 +720,7 @@ mod tests {
         }
         let hdr = hdr.expect("OP_REQUEST framed for the host connection");
         assert_eq!(hdr.op, OP_REQUEST);
-        assert_eq!(hdr.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
+        assert_eq!(hdr.dst_port, mvm_agentd::vsock::GUEST_AGENT_PORT);
         assert_eq!(hdr.src_cid, HOST_CID);
         assert_eq!(hdr.dst_cid, GUEST_CID);
         let conn_id = hdr.src_port;
@@ -725,7 +729,7 @@ mod tests {
         let reply = VsockHdr {
             src_cid: GUEST_CID,
             dst_cid: HOST_CID,
-            src_port: mvm_guest::vsock::GUEST_AGENT_PORT,
+            src_port: mvm_agentd::vsock::GUEST_AGENT_PORT,
             dst_port: conn_id,
             len: 5,
             op: OP_RW,
@@ -777,7 +781,7 @@ mod tests {
         let hdr = hdr.expect("OP_REQUEST framed for the host console connection");
         assert_eq!(hdr.op, OP_REQUEST);
         assert_eq!(hdr.dst_port, port);
-        assert_ne!(hdr.dst_port, mvm_guest::vsock::GUEST_AGENT_PORT);
+        assert_ne!(hdr.dst_port, mvm_agentd::vsock::GUEST_AGENT_PORT);
         assert_eq!(hdr.src_cid, HOST_CID);
         assert_eq!(hdr.dst_cid, GUEST_CID);
         let conn_id = hdr.src_port;

@@ -38,16 +38,16 @@ pub fn wait_for_guest_agent(vm_id: &str, timeout_secs: u64) -> bool {
     let mut attempt: u32 = 0;
     while std::time::Instant::now() < deadline {
         if let Ok(transport) = vsock_transport::for_vm(vm_id)
-            && let Ok(mut s) = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
-            && mvm_guest::vsock::negotiate_protocol(
+            && let Ok(mut s) = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+            && mvm_agentd::vsock::negotiate_protocol(
                 &mut s,
-                vec![mvm_guest::vsock::GuestCapability::Ping],
+                vec![mvm_agentd::vsock::GuestCapability::Ping],
             )
             .is_ok()
         {
             return true;
         }
-        std::thread::sleep(mvm_guest::vsock::adaptive_backoff(attempt));
+        std::thread::sleep(mvm_agentd::vsock::adaptive_backoff(attempt));
         attempt = attempt.saturating_add(1);
     }
     false
@@ -162,7 +162,7 @@ fn splice_unix_streams(left: UnixStream, right: UnixStream) {
 /// audit-spam (mostly while waiting for the agent to bind), so
 /// readiness probes get a separate `AgentReady` LocalAudit event
 /// in the `mvmctl up` flow already.
-pub fn emit_vsock_rpc_audit(vm_id: &str, request: &mvm_guest::vsock::GuestRequest) {
+pub fn emit_vsock_rpc_audit(vm_id: &str, request: &mvm_agentd::vsock::GuestRequest) {
     let verb = request.kind_name();
     mvm_core::audit_emit!(
         NetworkPolicyAllow,
@@ -185,11 +185,11 @@ mod tests {
     #[test]
     fn emit_vsock_rpc_audit_does_not_panic_on_common_verbs() {
         let cases = [
-            mvm_guest::vsock::GuestRequest::Ping,
-            mvm_guest::vsock::GuestRequest::ReadinessStatus,
-            mvm_guest::vsock::GuestRequest::EntrypointStatus,
-            mvm_guest::vsock::GuestRequest::FsDiff,
-            mvm_guest::vsock::GuestRequest::Exec {
+            mvm_agentd::vsock::GuestRequest::Ping,
+            mvm_agentd::vsock::GuestRequest::ReadinessStatus,
+            mvm_agentd::vsock::GuestRequest::EntrypointStatus,
+            mvm_agentd::vsock::GuestRequest::FsDiff,
+            mvm_agentd::vsock::GuestRequest::Exec {
                 command: "echo hello".to_string(),
                 stdin: None,
                 timeout_secs: Some(30),

@@ -172,7 +172,7 @@ impl DevVmEnv {
     /// when stdin is not a TTY *and* `MVM_AUTO_DEV` is not explicitly
     /// set (CI shouldn't silently boot a heavyweight VM).
     fn connect_with_auto_start(&self) -> Result<std::os::unix::net::UnixStream> {
-        let port = mvm_guest::vsock::GUEST_AGENT_PORT;
+        let port = mvm_agentd::vsock::GUEST_AGENT_PORT;
         match connect_dev_vsock(&self.vm_id, port) {
             Ok(stream) => Ok(stream),
             Err(initial_err) => {
@@ -206,21 +206,21 @@ impl DevVmEnv {
         let mut out_buf: Vec<u8> = Vec::new();
         let mut err_buf: Vec<u8> = Vec::new();
         // Accumulate streamed ExecEvent chunks.
-        let terminal = mvm_guest::vsock::send_exec_streaming(
+        let terminal = mvm_agentd::vsock::send_exec_streaming(
             &mut stream,
             &wrapped,
             None,
             Some(timeout_secs),
             |event| match event {
-                mvm_guest::vsock::ExecEvent::Stdout { chunk } => out_buf.extend_from_slice(chunk),
-                mvm_guest::vsock::ExecEvent::Stderr { chunk } => err_buf.extend_from_slice(chunk),
+                mvm_agentd::vsock::ExecEvent::Stdout { chunk } => out_buf.extend_from_slice(chunk),
+                mvm_agentd::vsock::ExecEvent::Stderr { chunk } => err_buf.extend_from_slice(chunk),
                 _ => {}
             },
         )
         .with_context(|| format!("Failed to execute command in dev VM '{}'", self.vm_id))?;
 
         match terminal {
-            mvm_guest::vsock::ExecEvent::Exit { code } => {
+            mvm_agentd::vsock::ExecEvent::Exit { code } => {
                 use std::os::unix::process::ExitStatusExt;
                 Ok(Output {
                     status: std::process::ExitStatus::from_raw(code << 8),
@@ -228,7 +228,7 @@ impl DevVmEnv {
                     stderr: err_buf,
                 })
             }
-            mvm_guest::vsock::ExecEvent::TimedOut => anyhow::bail!(
+            mvm_agentd::vsock::ExecEvent::TimedOut => anyhow::bail!(
                 "command timed out after {timeout_secs}s in dev VM '{}'",
                 self.vm_id
             ),
@@ -414,7 +414,7 @@ mod tests {
         // `<vm_state_dir>/vsock-<port>.sock` — the same path
         // `LibkrunTransport::for_vm` resolves, so the flake-build env and the
         // console can't drift onto different sockets.
-        let port = mvm_guest::vsock::GUEST_AGENT_PORT;
+        let port = mvm_agentd::vsock::GUEST_AGENT_PORT;
         let sock = mvm_core::config::vm_vsock_port_socket(DEV_VM_NAME, port);
         assert!(
             sock.ends_with(mvm_core::config::vsock_socket_filename(port)),

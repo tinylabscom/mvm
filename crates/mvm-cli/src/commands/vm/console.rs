@@ -32,7 +32,7 @@ use crate::ui;
 /// thread reuse the same dispatch.
 fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     let libkrun = LibkrunTransport::for_vm(name);
-    if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+    if libkrun.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Arc::new(libkrun));
     }
     // HVF runner (WorkloadRunner / HVF) exposes the agent at
@@ -44,7 +44,7 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
     // agent carries no Console capability regardless.
     if hvf_console_arm_enabled(name) {
         let hvf = DevConsoleTransport::for_vm(name);
-        if hvf.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+        if hvf.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
             return Ok(Arc::new(hvf));
         }
     }
@@ -114,11 +114,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
     if let Some(cmd) = command {
         let transport = pick_console_transport(name)?;
-        let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+        let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
         // Inbound vsock RPC audit (verb=exec).
         super::shared::emit_vsock_rpc_audit(
             name,
-            &mvm_guest::vsock::GuestRequest::Exec {
+            &mvm_agentd::vsock::GuestRequest::Exec {
                 command: cmd.to_string(),
                 stdin: None,
                 timeout_secs: None,
@@ -128,14 +128,14 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         use std::io::Write as _;
         let command = command_with_env(cmd, &args.env);
         let terminal =
-            mvm_guest::vsock::send_exec_streaming(&mut stream, &command, None, None, |event| {
+            mvm_agentd::vsock::send_exec_streaming(&mut stream, &command, None, None, |event| {
                 match event {
-                    mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+                    mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
                         let mut so = std::io::stdout();
                         let _ = so.write_all(chunk);
                         let _ = so.flush();
                     }
-                    mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+                    mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
                         let mut se = std::io::stderr();
                         let _ = se.write_all(chunk);
                         let _ = se.flush();
@@ -144,13 +144,13 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 }
             })?;
         match terminal {
-            mvm_guest::vsock::ExecEvent::Exit { code } => {
+            mvm_agentd::vsock::ExecEvent::Exit { code } => {
                 if code != 0 {
                     std::process::exit(code);
                 }
                 Ok(())
             }
-            mvm_guest::vsock::ExecEvent::TimedOut => {
+            mvm_agentd::vsock::ExecEvent::TimedOut => {
                 eprintln!("{}", crate::exec::timeout_exit_message(None));
                 std::process::exit(crate::exec::EXEC_TIMEOUT_EXIT_CODE);
             }
@@ -258,12 +258,12 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
 
     let transport = pick_console_transport(name)?;
 
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    mvm_guest::vsock::require_capabilities(
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::require_capabilities(
         &mut stream,
-        &[mvm_guest::vsock::GuestCapability::Console],
+        &[mvm_agentd::vsock::GuestCapability::Console],
     )?;
-    let req = mvm_guest::vsock::GuestRequest::ConsoleOpen {
+    let req = mvm_agentd::vsock::GuestRequest::ConsoleOpen {
         cols,
         rows,
         env,
@@ -271,8 +271,8 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
     };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(name, &req);
-    let (session_id, data_port) = match mvm_guest::vsock::call_unary(&mut stream, &req)? {
-        mvm_guest::vsock::GuestResponse::ConsoleOpened {
+    let (session_id, data_port) = match mvm_agentd::vsock::call_unary(&mut stream, &req)? {
+        mvm_agentd::vsock::GuestResponse::ConsoleOpened {
             session_id,
             data_port,
         } => (session_id, data_port),
@@ -318,15 +318,15 @@ fn console_pty_with_argv(name: &str, env: Vec<(String, String)>, argv: Vec<Strin
 }
 
 fn console_exit_code(transport: &Arc<dyn VsockTransport>, session_id: u32) -> Result<i32> {
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
-    mvm_guest::vsock::require_capabilities(
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
+    mvm_agentd::vsock::require_capabilities(
         &mut stream,
-        &[mvm_guest::vsock::GuestCapability::Console],
+        &[mvm_agentd::vsock::GuestCapability::Console],
     )?;
-    let req = mvm_guest::vsock::GuestRequest::ConsoleClose { session_id };
-    match mvm_guest::vsock::call_unary(&mut stream, &req)? {
-        mvm_guest::vsock::GuestResponse::ConsoleExited { exit_code, .. } => Ok(exit_code),
-        mvm_guest::vsock::GuestResponse::Error { message } => anyhow::bail!("{message}"),
+    let req = mvm_agentd::vsock::GuestRequest::ConsoleClose { session_id };
+    match mvm_agentd::vsock::call_unary(&mut stream, &req)? {
+        mvm_agentd::vsock::GuestResponse::ConsoleExited { exit_code, .. } => Ok(exit_code),
+        mvm_agentd::vsock::GuestResponse::Error { message } => anyhow::bail!("{message}"),
         other => anyhow::bail!("Unexpected response: {other:?}"),
     }
 }
@@ -375,17 +375,17 @@ fn setup_sigwinch_handler(
 
             // Send ConsoleResize via the control channel (best-effort).
             let _ = transport
-                .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
                 .ok()
                 .and_then(|mut stream| {
-                    mvm_guest::vsock::require_capabilities(
+                    mvm_agentd::vsock::require_capabilities(
                         &mut stream,
-                        &[mvm_guest::vsock::GuestCapability::Console],
+                        &[mvm_agentd::vsock::GuestCapability::Console],
                     )
                     .ok()?;
-                    mvm_guest::vsock::send_request(
+                    mvm_agentd::vsock::send_request(
                         &mut stream,
-                        &mvm_guest::vsock::GuestRequest::ConsoleResize {
+                        &mvm_agentd::vsock::GuestRequest::ConsoleResize {
                             session_id,
                             cols,
                             rows,
@@ -708,7 +708,7 @@ mod picker_hvf_tests {
 
         let transport = pick_console_transport(name).expect("picker must resolve hvf transport");
         transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect("selected transport must connect to hvf-agent.sock");
     }
 
@@ -754,7 +754,7 @@ mod picker_hvf_tests {
             Ok(transport) => {
                 assert!(
                     transport
-                        .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+                        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
                         .is_err(),
                     "a sealed workload must not route to the hvf agent socket"
                 );
@@ -789,7 +789,7 @@ mod picker_hvf_tests {
         let transport = pick_console_transport(name)
             .expect("accessible workload must resolve the hvf transport");
         transport
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect("selected transport must connect to the workload agent socket");
     }
 }

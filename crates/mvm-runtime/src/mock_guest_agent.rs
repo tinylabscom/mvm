@@ -4,7 +4,7 @@
 //! gets its own `MockGuestAgent` listening on `<vm_dir>/runtime/v.sock`,
 //! the same Unix-domain socket path Firecracker exposes for the
 //! vsock UDS multiplexer. The host-side fs/proc helpers in
-//! `mvm_guest::vsock` connect to that path, send the
+//! `mvm_agentd::vsock` connect to that path, send the
 //! `CONNECT <port>\n` line, then exchange length-prefixed JSON
 //! `GuestRequest` / `GuestResponse` frames. The mock implements that
 //! protocol faithfully enough for the audit-emit live tests in
@@ -45,7 +45,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use mvm_guest::vsock::{
+use mvm_agentd::vsock::{
     EntrypointEvent, ExecEvent, ExecOutcomeWire, FsErrorKind, FsResult, GuestRequest,
     GuestResponse, ProcResult, ProcWaitEvent, protocol_hello_response,
 };
@@ -407,7 +407,7 @@ fn dispatch(req: GuestRequest, next_token: &AtomicU64) -> GuestResponse {
 mod tests {
     use super::*;
     use crate::test_support::start_mock_guest_agent;
-    use mvm_guest::vsock::{
+    use mvm_agentd::vsock::{
         connect_to, query_fs_diff_on, send_fs_request, send_proc_request, send_proc_request_on,
         send_proc_wait_on, vsock_uds_path,
     };

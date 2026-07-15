@@ -559,19 +559,19 @@ pub(in crate::commands) fn dispatch_update_idle_timeout(
     let transport = mvm_runtime::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on {vm_name:?}"))?;
     let mut stream = transport
-        .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on {vm_name:?}"))?;
-    if let Err(err) = mvm_guest::vsock::require_capabilities(
+    if let Err(err) = mvm_agentd::vsock::require_capabilities(
         &mut stream,
-        &[mvm_guest::vsock::GuestCapability::UpdateIdleTimeout],
+        &[mvm_agentd::vsock::GuestCapability::UpdateIdleTimeout],
     ) {
         super::verb_audit::audit_verb_refusal(vm_name, &err);
         return Err(err);
     }
-    let req = mvm_guest::vsock::GuestRequest::UpdateIdleTimeout { secs };
+    let req = mvm_agentd::vsock::GuestRequest::UpdateIdleTimeout { secs };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    let response = match mvm_guest::vsock::call_unary(&mut stream, &req) {
+    let response = match mvm_agentd::vsock::call_unary(&mut stream, &req) {
         Ok(response) => response,
         Err(err) => {
             let err = anyhow::Error::from(err);
@@ -615,8 +615,8 @@ enum UpdateIdleOutcome {
 
 /// Map a guest response to an [`UpdateIdleOutcome`]. Pure (no I/O) so every arm
 /// is exercised in tests.
-fn classify_update_idle_response(resp: mvm_guest::vsock::GuestResponse) -> UpdateIdleOutcome {
-    use mvm_guest::vsock::GuestResponse;
+fn classify_update_idle_response(resp: mvm_agentd::vsock::GuestResponse) -> UpdateIdleOutcome {
+    use mvm_agentd::vsock::GuestResponse;
     match resp {
         GuestResponse::UpdateIdleTimeoutAck {
             previous_secs,
@@ -832,28 +832,28 @@ fn dispatch_run_code(
     let transport = mvm_runtime::vsock_transport::for_vm(&record.vm_name)
         .with_context(|| format!("Picking transport for guest agent on {:?}", record.vm_name))?;
     let mut stream = transport
-        .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on {:?}", record.vm_name))?;
     // Hard cutover requires hello before any operational request.
     // `RunCode` is a dev-shell request not
     // covered by the closed `GuestCapability` enum, so request no
     // specific capability — the hello alone unblocks dispatch.
-    let _ = mvm_guest::vsock::negotiate_protocol(&mut stream, Vec::new())
+    let _ = mvm_agentd::vsock::negotiate_protocol(&mut stream, Vec::new())
         .with_context(|| format!("Negotiating guest agent protocol on {:?}", record.vm_name))?;
-    let req = mvm_guest::vsock::GuestRequest::RunCode { code, timeout_secs };
+    let req = mvm_agentd::vsock::GuestRequest::RunCode { code, timeout_secs };
     // Inbound vsock RPC audit.
     super::shared::emit_vsock_rpc_audit(&record.vm_name, &req);
     // RunCode now streams ExecEvent frames. The hello + request write
     // above mirror the old send_request path; read_exec_stream takes
     // over from here.
-    mvm_guest::vsock::write_frame(&mut stream, &req)?;
-    let terminal = mvm_guest::vsock::read_exec_stream(&mut stream, |event| match event {
-        mvm_guest::vsock::ExecEvent::Stdout { chunk } => {
+    mvm_agentd::vsock::write_frame(&mut stream, &req)?;
+    let terminal = mvm_agentd::vsock::read_exec_stream(&mut stream, |event| match event {
+        mvm_agentd::vsock::ExecEvent::Stdout { chunk } => {
             let mut so = std::io::stdout();
             let _ = so.write_all(chunk);
             let _ = so.flush();
         }
-        mvm_guest::vsock::ExecEvent::Stderr { chunk } => {
+        mvm_agentd::vsock::ExecEvent::Stderr { chunk } => {
             let mut se = std::io::stderr();
             let _ = se.write_all(chunk);
             let _ = se.flush();
@@ -861,8 +861,8 @@ fn dispatch_run_code(
         _ => {}
     })?;
     let exit_code = match terminal {
-        mvm_guest::vsock::ExecEvent::Exit { code } => code,
-        mvm_guest::vsock::ExecEvent::TimedOut => {
+        mvm_agentd::vsock::ExecEvent::Exit { code } => code,
+        mvm_agentd::vsock::ExecEvent::TimedOut => {
             eprintln!("{}", crate::exec::timeout_exit_message(timeout_secs));
             crate::exec::EXEC_TIMEOUT_EXIT_CODE
         }
@@ -1185,7 +1185,7 @@ mod tests {
     #[test]
     fn classify_update_idle_applied_carries_prev_and_applied() {
         let out =
-            classify_update_idle_response(mvm_guest::vsock::GuestResponse::UpdateIdleTimeoutAck {
+            classify_update_idle_response(mvm_agentd::vsock::GuestResponse::UpdateIdleTimeoutAck {
                 previous_secs: 10,
                 applied_secs: 20,
             });
@@ -1201,7 +1201,7 @@ mod tests {
     #[test]
     fn classify_update_idle_verb_not_authorized_is_denied_with_verb() {
         let out =
-            classify_update_idle_response(mvm_guest::vsock::GuestResponse::VerbNotAuthorized {
+            classify_update_idle_response(mvm_agentd::vsock::GuestResponse::VerbNotAuthorized {
                 verb: "update-idle-timeout".into(),
             });
         match out {
@@ -1212,7 +1212,7 @@ mod tests {
 
     #[test]
     fn classify_update_idle_other_response_is_unexpected() {
-        let out = classify_update_idle_response(mvm_guest::vsock::GuestResponse::Pong);
+        let out = classify_update_idle_response(mvm_agentd::vsock::GuestResponse::Pong);
         match out {
             UpdateIdleOutcome::Unexpected { detail } => {
                 assert!(

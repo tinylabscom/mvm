@@ -217,7 +217,7 @@ pub enum PersistentBuilderError {
 ///
 /// `socket_path` is `<vm_state_dir>/vsock-<BUILDER_DISPATCH_PORT>.sock`
 /// — the libkrun-managed Unix socket that proxies to AF_VSOCK port
-/// [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`] inside the
+/// [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`] inside the
 /// guest. The owner of the persistent VM (`LibkrunPersistentHostVm`)
 /// constructs this supervisor once the VM is up, then hands the
 /// result to whatever submits jobs (`mvmctl build` from inside a dev
@@ -460,7 +460,7 @@ impl PersistentBuilderSupervisor {
         let mut stream = self.connect()?;
         let _ = stream.set_read_timeout(Some(self.frame_read_timeout));
         let _ = stream.set_write_timeout(Some(self.frame_read_timeout));
-        mvm_guest::vsock::write_frame(&mut stream, request)
+        mvm_agentd::vsock::write_frame(&mut stream, request)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         match read_next_response(&mut stream, self.frame_read_timeout)? {
             Some(resp) => Ok(resp),
@@ -480,7 +480,7 @@ impl PersistentBuilderSupervisor {
 
         let request = HostVmRequest::Shutdown {};
         let mut stream = self.connect()?;
-        mvm_guest::vsock::write_frame(&mut stream, &request)
+        mvm_agentd::vsock::write_frame(&mut stream, &request)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         // Expect Bye. Any other frame is a protocol violation but
         // we already asked for shutdown — log via the error chain
@@ -508,7 +508,7 @@ impl PersistentBuilderSupervisor {
         let _ = stream.set_read_timeout(Some(self.frame_read_timeout));
         let _ = stream.set_write_timeout(Some(self.frame_read_timeout));
 
-        mvm_guest::vsock::write_frame(&mut stream, request)
+        mvm_agentd::vsock::write_frame(&mut stream, request)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         let mut stderr_chunks = Vec::new();
@@ -605,7 +605,7 @@ fn read_next_response(
     stream: &mut UnixStream,
     _read_timeout: Duration,
 ) -> Result<Option<HostVmResponse>, PersistentBuilderError> {
-    match mvm_guest::vsock::read_frame::<HostVmResponse>(stream) {
+    match mvm_agentd::vsock::read_frame::<HostVmResponse>(stream) {
         Ok(resp) => Ok(Some(resp)),
         Err(e) => {
             let src = e.source();
@@ -627,7 +627,7 @@ fn read_next_response(
 /// `add_vsock_port(BUILDER_DISPATCH_PORT)` is configured.
 pub fn dispatch_socket_path(vm_state_dir: &Path) -> PathBuf {
     vm_state_dir.join(mvm_core::config::vsock_socket_filename(
-        mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+        mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
     ))
 }
 
@@ -1184,7 +1184,7 @@ mod tests {
         assert!(
             p.to_string_lossy().ends_with(&format!(
                 "vsock-{}.sock",
-                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT
+                mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT
             )),
             "got: {}",
             p.display()

@@ -6,6 +6,6 @@
 # independent of workspace boundaries). This local pin keeps the fuzz
 # lane on nightly without affecting the rest of the workspace.
 #
-# Mirrors `crates/mvm-guest/fuzz/rust-toolchain.toml` and
+# Mirrors `crates/mvm-agentd/fuzz/rust-toolchain.toml` and
 # `crates/mvm-oci/fuzz/rust-toolchain.toml` — keep them in sync.
 channel = "nightly"

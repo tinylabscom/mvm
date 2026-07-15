@@ -16,12 +16,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 
-use mvm_core::naming::validate_vm_name;
-use mvm_core::user_config::MvmConfig;
-use mvm_guest::vsock::{
+use mvm_agentd::vsock::{
     ComponentState, GUEST_AGENT_PORT, GuestCapability, GuestRequest, GuestResponse,
     ReadinessReport, call_unary, negotiate_protocol,
 };
+use mvm_core::naming::validate_vm_name;
+use mvm_core::user_config::MvmConfig;
 use mvm_runtime::vsock_transport::{self, VsockTransport};
 
 use super::Cli;
@@ -297,8 +297,8 @@ fn target_label(target: WaitTarget) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_agentd::vsock::BootTimingReport;
     use mvm_core::security::AgentProfile;
-    use mvm_guest::vsock::BootTimingReport;
 
     fn ready_report() -> ReadinessReport {
         ReadinessReport {

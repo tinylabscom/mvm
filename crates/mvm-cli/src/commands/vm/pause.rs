@@ -265,7 +265,7 @@ pub(in crate::commands) fn run_resume(
         let token = mvm_core::crypto::vmgenid::fresh_generation_token(&args.name).token;
         crate::commands::shared::emit_vsock_rpc_audit(
             &args.name,
-            &mvm_guest::vsock::GuestRequest::PostRestore {
+            &mvm_agentd::vsock::GuestRequest::PostRestore {
                 token,
                 grant_envelope: None,
             },

@@ -1818,7 +1818,7 @@ mod linux {
     // pattern mirrors `mvm-guest/src/bin/mvm-builder-agent.rs`.
 
     /// Must match
-    /// `mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`. Hardcoded
+    /// `mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`. Hardcoded
     /// for size-budget reasons; the
     /// `vsock_send_tests::builder_dispatch_port_literal_is_21471`
     /// pinning test below catches divergence.
@@ -1830,7 +1830,7 @@ mod linux {
     const VMADDR_CID_ANY: u32 = 0xFFFF_FFFF;
 
     /// Cap on a single inbound `HostVmRequest` body.
-    /// Matches `mvm_guest::vsock::MAX_FRAME_SIZE` (256 KiB) — the
+    /// Matches `mvm_agentd::vsock::MAX_FRAME_SIZE` (256 KiB) — the
     /// host's `read_frame` enforces the same bound on its side, so
     /// a body above this size couldn't have been written by a
     /// well-behaved supervisor anyway.
@@ -2012,7 +2012,7 @@ mod linux {
     }
 
     /// Write a length-prefixed (u32 BE) frame on an existing conn.
-    /// Mirrors `mvm_guest::vsock::write_frame`. Returns `true` on
+    /// Mirrors `mvm_agentd::vsock::write_frame`. Returns `true` on
     /// successful full-frame write. Doesn't close — caller owns
     /// the File and decides when to drop.
     fn write_frame(conn: &mut std::fs::File, body: &[u8]) -> bool {
@@ -2023,7 +2023,7 @@ mod linux {
     }
 
     /// Read one length-prefixed (u32 BE) frame body from an
-    /// existing conn. Mirrors `mvm_guest::vsock::read_frame`'s
+    /// existing conn. Mirrors `mvm_agentd::vsock::read_frame`'s
     /// wire format. Returns `None` on any I/O / over-cap failure.
     /// Body > `MAX_DISPATCH_BODY_BYTES` fails closed before
     /// allocation. Doesn't close — caller owns the File.
@@ -2130,7 +2130,7 @@ mod linux {
             // One File owns the conn fd for both the read (request)
             // and write (response). Dropped at iteration end which
             // closes the socket — the host sees EOF and unblocks
-            // its mvm_guest::vsock::read_frame.
+            // its mvm_agentd::vsock::read_frame.
             let mut conn = adopt_conn_fd(conn_fd);
             let Some(body) = read_frame(&mut conn) else {
                 eprintln!("mvm-host-vm-init: dispatch loop: read failed on conn (ignoring)");
@@ -2510,7 +2510,7 @@ mod linux {
     mod vsock_send_tests {
         // The in-binary BUILDER_DISPATCH_PORT
         // const above must stay in sync with
-        // mvm_guest::builder_agent::BUILDER_DISPATCH_PORT (the
+        // mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT (the
         // canonical definition the host side uses). We can't `use`
         // the function-local const from outside, so duplicate the
         // assertion against the literal value and the mvm-guest
@@ -3136,7 +3136,7 @@ mod linux {
         // with EADDRNOTAVAIL. Bring it up first, independent of eth0/DHCP:
         // a network:None builder VM has no eth0 at all yet still needs
         // working loopback. Non-fatal, mirroring the eth0 bring-up below.
-        if let Err(e) = mvm_guest::guest_net::bring_iface_up("lo") {
+        if let Err(e) = mvm_agentd::guest_net::bring_iface_up("lo") {
             eprintln!(
                 "mvm-host-vm-init: bring_iface_up lo failed: {e} \
                  (continuing — guest-internal loopback services \
@@ -3148,7 +3148,7 @@ mod linux {
         // helper — the same path the workload guest netinit uses. This only
         // exists for the lanes that still present an `eth0` at all; the
         // overlay/runtime rollout itself stays on the explicit vsock seams.
-        mvm_guest::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.3")
+        mvm_agentd::guest_net::configure_guest_network("eth0", &cmdline, "192.168.127.3")
     }
 
     fn run_job(cmd_sh: &str) -> (i32, String) {

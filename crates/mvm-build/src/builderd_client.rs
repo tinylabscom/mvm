@@ -185,7 +185,7 @@ impl BuilderdClient {
                 detail: "run_operation requires an operation request, not a handshake".to_string(),
             });
         };
-        mvm_guest::vsock::write_frame(&mut self.stream, request).map_err(|e| {
+        mvm_agentd::vsock::write_frame(&mut self.stream, request).map_err(|e| {
             BuilderdClientError::Transport {
                 detail: format!("request write failed: {e}"),
             }
@@ -252,7 +252,7 @@ impl BuilderdClient {
     /// cancel frame, so a caller can drive it from a separate handle to
     /// the same session (a signal handler, a deadline watcher).
     pub fn request_cancel(&mut self, target: OperationId) -> Result<(), BuilderdClientError> {
-        mvm_guest::vsock::write_frame(&mut self.stream, &BuilderRequest::CancelJob { target })
+        mvm_agentd::vsock::write_frame(&mut self.stream, &BuilderRequest::CancelJob { target })
             .map_err(|e| BuilderdClientError::Transport {
                 detail: format!("cancel write failed: {e}"),
             })
@@ -262,7 +262,7 @@ impl BuilderdClient {
     /// [`BuilderdClientError::Timeout`] and any other read failure to
     /// [`BuilderdClientError::Transport`].
     fn read_frame_classifying_timeout(&mut self) -> Result<BuilderResponse, BuilderdClientError> {
-        mvm_guest::vsock::read_frame::<BuilderResponse>(&mut self.stream).map_err(|e| {
+        mvm_agentd::vsock::read_frame::<BuilderResponse>(&mut self.stream).map_err(|e| {
             let io_kind = e
                 .source()
                 .and_then(|s| s.downcast_ref::<std::io::Error>())
@@ -364,7 +364,7 @@ mod tests {
                 store_path: Some("/nix/store/aaaa-img".to_string()),
             },
         ] {
-            mvm_guest::vsock::write_frame(&mut server, &frame).expect("stage frame");
+            mvm_agentd::vsock::write_frame(&mut server, &frame).expect("stage frame");
         }
         let (outcome, events) = run_collecting(
             client_stream,
@@ -401,7 +401,7 @@ mod tests {
     #[test]
     fn store_path_terminal_is_returned() {
         let (client_stream, mut server) = UnixStream::pair().expect("pair");
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut server,
             &BuilderResponse::StorePathReady {
                 op: op(),
@@ -431,7 +431,7 @@ mod tests {
     #[test]
     fn failed_terminal_carries_category() {
         let (client_stream, mut server) = UnixStream::pair().expect("pair");
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut server,
             &BuilderResponse::Failed {
                 op: op(),
@@ -462,7 +462,7 @@ mod tests {
     #[test]
     fn completed_terminal_is_returned() {
         let (client_stream, mut server) = UnixStream::pair().expect("pair");
-        mvm_guest::vsock::write_frame(&mut server, &BuilderResponse::Completed { op: op() })
+        mvm_agentd::vsock::write_frame(&mut server, &BuilderResponse::Completed { op: op() })
             .expect("stage");
         let (outcome, _events) = run_collecting(
             client_stream,
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn cancelled_terminal_is_returned() {
         let (client_stream, mut server) = UnixStream::pair().expect("pair");
-        mvm_guest::vsock::write_frame(&mut server, &BuilderResponse::Cancelled { op: op() })
+        mvm_agentd::vsock::write_frame(&mut server, &BuilderResponse::Cancelled { op: op() })
             .expect("stage");
         let (outcome, _events) = run_collecting(
             client_stream,
@@ -495,7 +495,7 @@ mod tests {
     fn mismatched_operation_id_is_a_protocol_error() {
         let (client_stream, mut server) = UnixStream::pair().expect("pair");
         // A terminal for a *different* operation id than the request.
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut server,
             &BuilderResponse::ArtifactReady {
                 op: OperationId(Uuid::from_u128(7)),
@@ -523,7 +523,7 @@ mod tests {
     #[test]
     fn unexpected_accepted_mid_operation_is_a_protocol_error() {
         let (client_stream, mut server) = UnixStream::pair().expect("pair");
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut server,
             &BuilderResponse::Accepted {
                 op: op(),
@@ -581,7 +581,7 @@ mod tests {
         let (client_stream, mut server) = UnixStream::pair().expect("pair");
         let mut client = BuilderdClient::from_stream(client_stream);
         client.request_cancel(op()).expect("write cancel");
-        let frame = mvm_guest::vsock::read_frame::<BuilderRequest>(&mut server).expect("read");
+        let frame = mvm_agentd::vsock::read_frame::<BuilderRequest>(&mut server).expect("read");
         assert_eq!(frame, BuilderRequest::CancelJob { target: op() });
     }
 

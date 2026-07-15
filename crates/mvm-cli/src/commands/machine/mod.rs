@@ -1281,17 +1281,17 @@ fn ssh_agent_proxy_listen_for_backend(vm_name: &str, backend: &str) -> SshAgentP
     match backend {
         "firecracker" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
             vm_name,
-            mvm_guest::vsock::SSH_AGENT_PORT,
+            mvm_agentd::vsock::SSH_AGENT_PORT,
         )),
         "vz" => SshAgentProxyListen::Uds(mvm_core::config::vm_vz_vsock_port_socket(
             vm_name,
-            mvm_guest::vsock::SSH_AGENT_PORT,
+            mvm_agentd::vsock::SSH_AGENT_PORT,
         )),
         "libkrun" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
             vm_name,
-            mvm_guest::vsock::SSH_AGENT_PORT,
+            mvm_agentd::vsock::SSH_AGENT_PORT,
         )),
-        _ => SshAgentProxyListen::Vsock(mvm_guest::vsock::SSH_AGENT_PORT),
+        _ => SshAgentProxyListen::Vsock(mvm_agentd::vsock::SSH_AGENT_PORT),
     }
 }
 
@@ -1310,7 +1310,7 @@ fn configure_machine_ssh_agent_forwarding(
         bail!("guest agent for {vm_name:?} not reachable while configuring ssh-agent forwarding");
     }
     let transport = mvm_runtime::vsock_transport::for_vm(vm_name)?;
-    let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+    let mut stream = transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
     start_guest_ssh_agent_socket_forwarding(vm_name, &mut stream)?;
     Ok(())
 }
@@ -1319,19 +1319,19 @@ fn start_guest_ssh_agent_socket_forwarding(
     vm_name: &str,
     stream: &mut std::os::unix::net::UnixStream,
 ) -> Result<()> {
-    mvm_guest::vsock::require_capabilities(
+    mvm_agentd::vsock::require_capabilities(
         stream,
-        &[mvm_guest::vsock::GuestCapability::UnixSocketForward],
+        &[mvm_agentd::vsock::GuestCapability::UnixSocketForward],
     )
     .context("guest agent does not support ssh-agent socket forwarding")?;
-    let req = mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
+    let req = mvm_agentd::vsock::GuestRequest::StartUnixSocketForward {
         guest_path: SSH_AGENT_GUEST_SOCKET.to_string(),
-        host_vsock_port: mvm_guest::vsock::SSH_AGENT_PORT,
+        host_vsock_port: mvm_agentd::vsock::SSH_AGENT_PORT,
         socket_mode: 0o600,
     };
     super::shared::emit_vsock_rpc_audit(vm_name, &req);
-    match mvm_guest::vsock::call_unary(&mut *stream, &req)? {
-        mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted { .. } => {
+    match mvm_agentd::vsock::call_unary(&mut *stream, &req)? {
+        mvm_agentd::vsock::GuestResponse::UnixSocketForwardStarted { .. } => {
             mvm_core::audit_emit!(
                 NetworkPolicyAllow,
                 vm: vm_name,
@@ -1339,7 +1339,7 @@ fn start_guest_ssh_agent_socket_forwarding(
             );
             Ok(())
         }
-        mvm_guest::vsock::GuestResponse::Error { message } => {
+        mvm_agentd::vsock::GuestResponse::Error { message } => {
             reap_proxy(vm_name);
             bail!("guest refused ssh-agent forwarding: {message}")
         }

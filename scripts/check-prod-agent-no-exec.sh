@@ -27,7 +27,7 @@ set -euo pipefail
 # on purpose: a bare `do_exec` also matches std::process::Command::do_exec,
 # the libstd internal that exists in any binary that spawns a subprocess.
 
-PKG=mvm-guest
+PKG=mvm-agentd
 BIN=mvm-guest-agent
 
 echo "::group::Build production agent (release, no dev-shell)"

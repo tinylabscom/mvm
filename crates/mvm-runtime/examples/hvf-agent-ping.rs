@@ -49,7 +49,7 @@ fn main() {
         let mut ok = false;
         for i in 0..120 {
             if let Ok(mut s) = std::os::unix::net::UnixStream::connect(&sock) {
-                match mvm_guest::vsock::negotiate_protocol(&mut s, Vec::new()) {
+                match mvm_agentd::vsock::negotiate_protocol(&mut s, Vec::new()) {
                     Ok(n) => {
                         println!(
                             "agent handshake OK after ~{}ms (agent v{}, proto {})",

@@ -59,10 +59,10 @@ fn main() {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use mvm_agentd::vsock::EGRESS_PORT;
     use mvm_core::config::vm_state_dir;
     use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
     use mvm_core::vm_backend::VmStatus;
-    use mvm_guest::vsock::EGRESS_PORT;
     use mvm_runtime::driver::{
         ConsoleCapture, HvfDriver, KernelImage, VmmDriver, VmmSpec, VsockDirection, VsockPort,
     };

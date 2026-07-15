@@ -131,7 +131,7 @@ mod linux {
     }
 
     pub fn run() -> ExitCode {
-        let port = mvm_guest::builder_agent::BUILDERD_CONTROL_PORT;
+        let port = mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT;
         let Some(listen_fd) = open_vsock_listener(port) else {
             return ExitCode::FAILURE;
         };

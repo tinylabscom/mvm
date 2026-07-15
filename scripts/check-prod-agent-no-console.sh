@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Plan 165 WS-C (claim 15) — sealed-production interactivity contract.
 #
-# The agent-served PTY-over-vsock console (crates/mvm-guest/src/console.rs) is
+# The agent-served PTY-over-vsock console (crates/mvm-agentd/src/console.rs) is
 # the SINGLE dev-only interactive path into a guest. On the `mvm-guest-agent`
 # binary built in its PRODUCTION configuration (no `dev-shell` feature), assert:
 #
@@ -10,7 +10,7 @@
 #      survives optimization. This also serves as a CANARY: if it's missing,
 #      the symbol table was stripped and the absence check below would be
 #      meaningless (vacuously true), so we fail instead of trusting it.
-#   2. The console relay is ABSENT — `mvm_guest::console` is gated behind
+#   2. The console relay is ABSENT — `mvm_agentd::console` is gated behind
 #      `dev-shell`, so a sealed prod agent must not link `open_session` /
 #      `run_console_relay` / `resize_active_session`. No interactive path can
 #      reach a sealed workload (claim 15), mirroring the `do_exec` no-exec gate.
@@ -25,18 +25,18 @@
 # — real release codegen, readable symbols.
 set -euo pipefail
 
-# Symbol greps are scoped to the console module path (mvm_guest::console::<name>)
+# Symbol greps are scoped to the console module path (mvm_agentd::console::<name>)
 # so an unrelated `open_session` in a dependency can't mask a leak. NB: the
-# console fns live in the mvm-guest *library*, so the mangled prefix is
-# `mvm_guest..console..` — NOT `mvm_guest_agent..` (the binary crate) as in the
+# console fns live in the mvm-agentd *library*, so the mangled prefix is
+# `mvm_agentd..console..` — NOT `mvm_guest_agent..` (the binary crate) as in the
 # sibling no-exec gate. Match ALL THREE relay entry points, not just one: gating
 # the whole module keeps them absent together today, but the alternation means a
 # future partial de-gating (e.g. moving `open_session` out while leaving the
 # relay) still trips the absence assertion.
 
-PKG=mvm-guest
+PKG=mvm-agentd
 BIN=mvm-guest-agent
-CONSOLE_SYM='mvm_guest.*console.*(open_session|run_console_relay|resize_active_session)'
+CONSOLE_SYM='mvm_agentd.*console.*(open_session|run_console_relay|resize_active_session)'
 
 echo "::group::Build production agent (release, no dev-shell)"
 CARGO_PROFILE_RELEASE_STRIP=false \

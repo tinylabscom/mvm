@@ -122,14 +122,14 @@ attestation-sev-snp = []
 attestation-tdx = []
 # Derive `schemars::JsonSchema` on the protocol types the
 # host↔guest RPC surface embeds (`AgentProfile`, `BackpressureReason`), so
-# `mvm-guest`'s `emit_protocol_schema` bin can emit the protocol schema.
+# `mvm-agentd`'s `emit_protocol_schema` bin can emit the protocol schema.
 # Off by default: the schema is a build-time codegen input, never linked
 # into the runtime. Keeps the default closure schemars-free.
 schema = ["dep:schemars"]
 
 # Emit the host-services broker JSON Schema (the in-guest SDK type-codegen
 # input). `required-features` keeps `schemars` out of any default build — the
-# bin only exists under `--features schema`, mirroring `mvm-guest`'s
+# bin only exists under `--features schema`, mirroring `mvm-agentd`'s
 # `emit_protocol_schema`.
 [[bin]]
 name = "emit_broker_schema"

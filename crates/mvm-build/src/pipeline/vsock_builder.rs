@@ -3,13 +3,13 @@ use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow};
-use mvm_guest::builder_agent::{HostVmRequest, HostVmResponse};
+use mvm_agentd::builder_agent::{HostVmRequest, HostVmResponse};
 
 fn builder_agent_port() -> u32 {
     std::env::var("MVM_BUILDER_AGENT_PORT")
         .ok()
         .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(mvm_guest::builder_agent::BUILDER_AGENT_PORT)
+        .unwrap_or(mvm_agentd::builder_agent::BUILDER_AGENT_PORT)
 }
 
 pub fn build_via_vsock(

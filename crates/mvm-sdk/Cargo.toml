@@ -56,9 +56,9 @@ path = "src/bin/emit_schema.rs"
 
 [dev-dependencies]
 # IR↔guest-parser contract test (runtime_json_contract): asserts the
-# IR's emitted runtime.json shapes match mvm-guest's runtime_config
+# IR's emitted runtime.json shapes match mvm-agentd's runtime_config
 # parser.
-mvm-guest = { workspace = true }
+mvm-agentd = { workspace = true }
 # Async tests for the subprocess MvmClient impl.
 tokio = { workspace = true, features = ["macros", "rt"] }
 

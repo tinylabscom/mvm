@@ -46,7 +46,7 @@ pub fn firecracker_transport_supported(platform: Platform) -> bool {
 /// Connects through a Firecracker vsock UDS multiplexer.
 ///
 /// The `instance_dir` is the runtime-state directory where Firecracker
-/// places `runtime/v.sock`; see [`mvm_guest::vsock::vsock_uds_path`].
+/// places `runtime/v.sock`; see [`mvm_agentd::vsock::vsock_uds_path`].
 pub struct FirecrackerTransport {
     instance_dir: String,
     timeout_secs: u64,
@@ -61,20 +61,20 @@ impl FirecrackerTransport {
     }
 
     /// Resolve the running VM's instance directory and build a
-    /// transport with [`mvm_guest::vsock::DEFAULT_TIMEOUT_SECS`].
+    /// transport with [`mvm_agentd::vsock::DEFAULT_TIMEOUT_SECS`].
     pub fn for_vm(vm_name: &str) -> Result<Self> {
         let instance_dir = microvm::resolve_running_vm_dir(vm_name)?;
         Ok(Self::new(
             instance_dir,
-            mvm_guest::vsock::DEFAULT_TIMEOUT_SECS,
+            mvm_agentd::vsock::DEFAULT_TIMEOUT_SECS,
         ))
     }
 }
 
 impl VsockTransport for FirecrackerTransport {
     fn connect(&self, port: u32) -> Result<UnixStream> {
-        let uds = mvm_guest::vsock::vsock_uds_path(&self.instance_dir);
-        mvm_guest::vsock::connect_to_port(&uds, port, self.timeout_secs)
+        let uds = mvm_agentd::vsock::vsock_uds_path(&self.instance_dir);
+        mvm_agentd::vsock::connect_to_port(&uds, port, self.timeout_secs)
     }
 }
 
@@ -203,7 +203,7 @@ impl DevConsoleTransport {
     /// - Any other port → `<socket-dir>/vsock/vsock-<port>.sock` (the
     ///   pre-opened console data socket, same convention as Vz).
     pub(crate) fn socket_path(&self, port: u32) -> PathBuf {
-        if port == mvm_guest::vsock::GUEST_AGENT_PORT {
+        if port == mvm_agentd::vsock::GUEST_AGENT_PORT {
             self.agent_socket.clone()
         } else {
             self.vsock_dir
@@ -223,7 +223,7 @@ impl VsockTransport for DevConsoleTransport {
 /// Connects through the nesting hop: the outer host
 /// reaches a workload microVM's vsock *via* the long-lived libkrun
 /// host VM. The hop socket is the host VM's libkrun UDS for
-/// [`mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT`]
+/// [`mvm_agentd::builder_agent::WORKLOAD_FORWARD_PORT`]
 /// (`<vm_state_dir>/vsock-21472.sock`). On connect, the host writes a
 /// `<workload_id> <port>` handshake and the in-host-VM forwarder
 /// (`mvm_host_vm_init::workload_proxy`) multiplexes the stream to that
@@ -250,7 +250,7 @@ impl NestingHopTransport {
         let dir: PathBuf = vm_state_dir.into();
         let hop = dir.join(format!(
             "vsock-{}.sock",
-            mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT
+            mvm_agentd::builder_agent::WORKLOAD_FORWARD_PORT
         ));
         Self::new(hop, workload_id)
     }
@@ -265,7 +265,7 @@ impl VsockTransport for NestingHopTransport {
             )
         })?;
         let handshake =
-            mvm_guest::builder_agent::encode_workload_forward_handshake(&self.workload_id, port);
+            mvm_agentd::builder_agent::encode_workload_forward_handshake(&self.workload_id, port);
         stream
             .write_all(&handshake)
             .with_context(|| "Failed to write nesting-hop handshake")?;
@@ -293,15 +293,15 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
     // non-interactive `machine run -- <cmd>`, `machine exec`, `invoke`) could
     // never reach an hvf guest and timed out after 30s.
     let hvf = DevConsoleTransport::for_vm(vm_name);
-    if hvf.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+    if hvf.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(hvf));
     }
     let libkrun = LibkrunTransport::for_vm(vm_name);
-    if libkrun.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+    if libkrun.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(libkrun));
     }
     let vz = VzTransport::for_vm(vm_name);
-    if vz.connect(mvm_guest::vsock::GUEST_AGENT_PORT).is_ok() {
+    if vz.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(vz));
     }
     if firecracker_transport_supported(mvm_core::platform::current()) {
@@ -343,7 +343,7 @@ mod tests {
         // No real socket → error mentions the UDS path so callers
         // can tell which backend is being attempted.
         let err = t
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect_err("should fail to connect");
         let msg = err.to_string();
         assert!(
@@ -356,7 +356,7 @@ mod tests {
     fn libkrun_transport_constructs_with_socket_dir() {
         let t = LibkrunTransport::new("/tmp/no-such-libkrun-vm");
         let err = t
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect_err("should fail to connect");
         let msg = err.to_string();
         assert!(
@@ -387,7 +387,7 @@ mod tests {
         // backend so console failures are diagnosable.
         let t = VzTransport::for_vm("no-such-vz-vm");
         let err = t
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect_err("should fail to connect")
             .to_string();
         assert!(
@@ -410,14 +410,14 @@ mod tests {
         env.set("MVM_DATA_DIR", dir.path());
         let name = "vz-picker-probe";
         let sock =
-            mvm_core::config::vm_vz_vsock_port_socket(name, mvm_guest::vsock::GUEST_AGENT_PORT);
+            mvm_core::config::vm_vz_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT);
         let Some(_listener) = bind_unix_listener(&sock) else {
             unsafe { std::env::remove_var("MVM_DATA_DIR") };
             return;
         };
 
         let t = for_vm(name).expect("picker should find the vz transport");
-        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        t.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the vz socket");
     }
 
@@ -443,7 +443,7 @@ mod tests {
         };
 
         let t = for_vm(name).expect("picker should find the hvf transport");
-        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        t.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the hvf-agent socket");
     }
 
@@ -465,7 +465,7 @@ mod tests {
         };
 
         let t = for_vm(name).expect("picker should find the hvf transport");
-        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        t.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect("selected transport should connect to the short hvf-agent socket");
     }
 
@@ -502,7 +502,7 @@ mod tests {
     fn nesting_hop_connect_error_mentions_hop_path() {
         let t = NestingHopTransport::new("/tmp/no-such-hop-21472.sock", "wl-1");
         let err = t
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect_err("should fail to connect");
         let msg = err.to_string();
         assert!(
@@ -538,7 +538,7 @@ mod tests {
         // host-side encoder produces (which the guest forwarder
         // parses) — pins the hop wire shape end-to-end.
         let mut expected =
-            mvm_guest::builder_agent::encode_workload_forward_handshake("wl-abc", 5252);
+            mvm_agentd::builder_agent::encode_workload_forward_handshake("wl-abc", 5252);
         let expected_body = expected.split_off(4);
         assert_eq!(len, expected, "length prefix mismatch");
         assert_eq!(body, expected_body, "handshake body mismatch");
@@ -554,7 +554,7 @@ mod tests {
         // `agent.sock` name never matched the backend, so the host agent-RPC
         // path could not reach an hvf guest.
         let t = DevConsoleTransport::new("/tmp/no-such-hvf-vm");
-        let path = t.socket_path(mvm_guest::vsock::GUEST_AGENT_PORT);
+        let path = t.socket_path(mvm_agentd::vsock::GUEST_AGENT_PORT);
         assert_eq!(
             path,
             PathBuf::from("/tmp/no-such-hvf-vm/hvf-agent.sock"),
@@ -566,7 +566,7 @@ mod tests {
     fn dev_console_transport_console_port_resolves_to_vsock_subdir() {
         // Console data ports → `<state_dir>/vsock/vsock-<port>.sock`.
         let t = DevConsoleTransport::new("/tmp/no-such-hvf-vm");
-        let port = *mvm_guest::vsock::dev_console_data_ports()
+        let port = *mvm_agentd::vsock::dev_console_data_ports()
             .collect::<Vec<_>>()
             .first()
             .expect("at least one console data port");
@@ -583,7 +583,7 @@ mod tests {
         // Error text must identify the backend so console failures are diagnosable.
         let t = DevConsoleTransport::for_vm("no-such-hvf-vm");
         let err = t
-            .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+            .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect_err("should fail — no real socket")
             .to_string();
         assert!(
@@ -600,7 +600,7 @@ mod tests {
             return;
         };
         let t = DevConsoleTransport::new(dir.path());
-        t.connect(mvm_guest::vsock::GUEST_AGENT_PORT)
+        t.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect("should connect to hvf-agent.sock");
     }
 
@@ -609,7 +609,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let vsock_dir = dir.path().join("vsock");
         std::fs::create_dir_all(&vsock_dir).unwrap();
-        let port = *mvm_guest::vsock::dev_console_data_ports()
+        let port = *mvm_agentd::vsock::dev_console_data_ports()
             .collect::<Vec<_>>()
             .first()
             .expect("at least one console data port");

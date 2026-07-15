@@ -70,8 +70,8 @@ run_locked_tests() {
   fi
 }
 
-run_locked_tests mvm-guest "${EXPECTED_GUEST_COUNT}" "${GUEST_TESTS[@]}"
-run_locked_tests mvm-core  "${EXPECTED_CORE_COUNT}"  "${CORE_TESTS[@]}"
+run_locked_tests mvm-agentd "${EXPECTED_GUEST_COUNT}" "${GUEST_TESTS[@]}"
+run_locked_tests mvm-core   "${EXPECTED_CORE_COUNT}"  "${CORE_TESTS[@]}"
 
 echo
-echo "✅ Sealed-prod vsock allowlist locked: ${EXPECTED_GUEST_COUNT} mvm-guest + ${EXPECTED_CORE_COUNT} mvm-core tests pass."
+echo "✅ Sealed-prod vsock allowlist locked: ${EXPECTED_GUEST_COUNT} mvm-agentd + ${EXPECTED_CORE_COUNT} mvm-core tests pass."

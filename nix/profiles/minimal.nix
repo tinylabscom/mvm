@@ -62,7 +62,7 @@
   i18n.defaultLocale = "C.UTF-8";
 
   # Bare-bones package set: a shell + coreutils. The guest agent
-  # (`mvm-guest-agent`, from `../mvm/crates/mvm-guest`) lands as the
+  # (`mvm-guest-agent`, from `../mvm/crates/mvm-agentd`) lands as the
   # next wave; it brings its own systemd service unit when it ships.
   environment.systemPackages = with pkgs; [
     coreutils

@@ -1583,7 +1583,7 @@ mod tests {
         // Guest: negotiate the tunnel, then run a smoltcp client that connects
         // to the pinned destination and speaks over the tunnel.
         let mut session =
-            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+            mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
         session.negotiate(hello(), 1).unwrap();
         session.recv_network_config().unwrap();
         session.recv_control().unwrap(); // initial credit
@@ -1741,7 +1741,7 @@ mod tests {
         });
 
         let mut session =
-            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+            mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
         session.negotiate(hello(), 1).unwrap();
         session.recv_network_config().unwrap();
         session.recv_control().unwrap();
@@ -1833,7 +1833,7 @@ mod tests {
         // Guest: negotiate, then a smoltcp UDP socket that speaks to the pinned
         // destination over the tunnel.
         let mut session =
-            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+            mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
         session.negotiate(hello(), 1).unwrap();
         session.recv_network_config().unwrap();
         session.recv_control().unwrap();
@@ -1975,7 +1975,7 @@ mod tests {
         });
 
         let mut session =
-            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+            mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
         session.negotiate(hello(), 1).unwrap();
         session.recv_network_config().unwrap();
         session.recv_control().unwrap();
@@ -2100,7 +2100,7 @@ mod tests {
         });
 
         let mut session =
-            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+            mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
         session.negotiate(hello(), 1).unwrap();
         session.recv_network_config().unwrap();
         session.recv_control().unwrap();
@@ -2210,7 +2210,7 @@ mod tests {
         });
 
         let mut session =
-            mvm_guest::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
+            mvm_agentd::network_tunnel::GuestNetworkTunnelSession::from_stream(guest_raw);
         session.negotiate(hello(), 1).unwrap();
         session.recv_network_config().unwrap();
         session.recv_control().unwrap();

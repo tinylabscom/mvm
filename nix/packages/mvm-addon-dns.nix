@@ -1,6 +1,6 @@
 # `mvm-addon-dns` — production in-guest addon DNS resolver binary.
 #
-# Built from `crates/mvm-addon-dns` in the workspace. Baked into the
+# Built from `crates/mvm-agentd` in the workspace. Baked into the
 # rootfs alongside `mvm-guest-agent` so every guest carries the binary;
 # `/init` only activates it when a zone file is present (see
 # `nix/lib/mk-guest.nix::initScript`).
@@ -26,12 +26,12 @@ pkgs.rustPlatform.buildRustPackage {
   # heavier members (mvm-libkrun, mvm-providers, etc.) are not in the
   # closure of this crate, so the produced artifact stays small.
   cargoBuildFlags = [
-    "--package" "mvm-guest-helpers"
+    "--package" "mvm-agentd"
     "--bin" "mvm-addon-dns"
   ];
 
   cargoTestFlags = [
-    "--package" "mvm-guest-helpers"
+    "--package" "mvm-agentd"
   ];
 
   # Tests run in the workspace's host-side `cargo test` lane; the Nix

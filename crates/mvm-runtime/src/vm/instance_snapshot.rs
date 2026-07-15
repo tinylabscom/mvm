@@ -301,7 +301,7 @@ impl VsockPrimedSignalSource {
     /// primed yet" (best-effort) so a transient blip doesn't abort the
     /// barrier; the deadline in [`wait_for_primed_polling`] bounds the wait.
     fn probe_once(&self) -> bool {
-        use mvm_guest::vsock::{
+        use mvm_agentd::vsock::{
             GUEST_AGENT_PORT, GuestRequest, call_unary, interpret_primed_status,
         };
         let Ok(transport) = crate::vsock_transport::for_vm(&self.vm_name) else {
@@ -392,7 +392,7 @@ pub struct VsockPostRestoreSignal {
 
 impl PostRestoreSignal for VsockPostRestoreSignal {
     fn post_restore(&self, vm_name: &str) -> Result<PostRestoreOutcome> {
-        use mvm_guest::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_unary};
+        use mvm_agentd::vsock::{GUEST_AGENT_PORT, GuestRequest, GuestResponse, call_unary};
         let transport = crate::vsock_transport::for_vm(vm_name)
             .with_context(|| format!("resolving vsock transport for {vm_name}"))?;
         let mut stream = transport

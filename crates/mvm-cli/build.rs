@@ -108,8 +108,7 @@ fn main() {
     // stale on an incremental build — `machine run --image` would then inject an
     // out-of-date agent. Emitting one `rerun-if-changed` per file guarantees the
     // cross-compile re-runs on any edit.
-    emit_rerun_for_tree(&workspace_root.join("crates/mvm-guest/src"));
-    emit_rerun_for_tree(&workspace_root.join("crates/mvm-guest-helpers/src"));
+    emit_rerun_for_tree(&workspace_root.join("crates/mvm-agentd/src"));
 
     build_native_aux_helpers(&workspace_root, &out_dir);
 
@@ -371,10 +370,10 @@ fn run_cargo_zigbuild(
 /// handling as `run_cargo_zigbuild`.
 fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
     eprintln!(
-        "[build.rs] cargo zigbuild --release --target {target} -p mvm-guest \
+        "[build.rs] cargo zigbuild --release --target {target} -p mvm-agentd \
          --bin mvm-guest-agent --bin mvm-guest-netinit --bin mvm-guest-netd \
          --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-verity-init \
-         -p mvm-guest-helpers --bin mvm-egress-client --features mvm-guest/dev-shell"
+         --bin mvm-egress-client --features mvm-agentd/dev-shell"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
     let mut cmd = Command::new(&cargo);
@@ -384,7 +383,7 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "--target",
         target,
         "-p",
-        "mvm-guest",
+        "mvm-agentd",
         "--bin",
         "mvm-guest-agent",
         "--bin",
@@ -397,12 +396,10 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "mvm-oci-entrypoint",
         "--bin",
         "mvm-verity-init",
-        "-p",
-        "mvm-guest-helpers",
         "--bin",
         "mvm-egress-client",
         "--features",
-        "mvm-guest/dev-shell",
+        "mvm-agentd/dev-shell",
     ])
     .env("RUSTC", &rustc)
     .env("CARGO_TARGET_DIR", target_dir)
@@ -585,7 +582,7 @@ pub const HOST_BINARIES: &[HostBinary] = &[
 ];
 pub const SEED_BINARIES: &[&str] = &["stage0-init"];
 pub const BOOTSTRAP_SUPPORT_BINARIES: &[SourceBuiltBinary] = &[SourceBuiltBinary {
-    package: "mvm-guest-helpers",
+    package: "mvm-agentd",
     name: "mvm-egress-client",
 }];
 "#;

@@ -29,7 +29,7 @@
 
 use std::path::Path;
 
-use mvm_guest::netinit::{Report, parse_report_from_console};
+use mvm_agentd::netinit::{Report, parse_report_from_console};
 
 /// Read a console log file and emit netinit audit events.
 ///
@@ -138,7 +138,7 @@ pub fn emit_netinit_audit(report: &Report, vm_name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_guest::netinit::{REPORT_MARKER, Report, RouteFailed, RouteInstalled};
+    use mvm_agentd::netinit::{REPORT_MARKER, Report, RouteFailed, RouteInstalled};
 
     fn report_with_one_installed() -> Report {
         Report {

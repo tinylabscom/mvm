@@ -92,7 +92,7 @@ fn spawn_libkrun_egress_endpoint_if_needed(
         secrets,
         redaction,
         transport: EndpointTransport::Uds {
-            path: mvm_core::config::vm_vsock_port_socket(vm_name, mvm_guest::vsock::EGRESS_PORT),
+            path: mvm_core::config::vm_vsock_port_socket(vm_name, mvm_agentd::vsock::EGRESS_PORT),
         },
         terminator_listen: None,
         tls_intermediate: None,
@@ -202,22 +202,22 @@ fn krun_context_base(
         .with_resources(vcpus, mem_mib)
         .with_cmdline(cmdline)
         .with_vsock_socket_dir(state_dir.to_string_lossy().into_owned())
-        .add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT)
+        .add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT)
         // Workload exit-code capture (listen=false → host binds).
-        .add_host_listen_port(mvm_guest::vsock::WORKLOAD_EXIT_PORT)
+        .add_host_listen_port(mvm_agentd::vsock::WORKLOAD_EXIT_PORT)
         // Egress substitution channel (listen=false → host binds). Registered
         // unconditionally; fail-closed: when the plan carries no secrets nothing
         // binds the UDS, so a stray guest dial gets ECONNREFUSED.
-        .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT)
+        .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
         // Host-services broker channel (listen=false → host binds). Registered
         // unconditionally so libkrun proxies the guest's connect; fail-closed:
         // nothing binds the UDS until the per-VM broker subprocess is spawned,
         // so a stray guest dial gets ECONNREFUSED.
-        .add_host_listen_port(mvm_guest::vsock::BROKER_PORT)
+        .add_host_listen_port(mvm_agentd::vsock::BROKER_PORT)
         // Dev-tier SSH-agent forwarding. The guest receives only a Unix socket
         // path; this host-listen port is inert unless `machine start` spawned
         // the per-machine proxy that connects to SSH_AUTH_SOCK.
-        .add_host_listen_port(mvm_guest::vsock::SSH_AGENT_PORT);
+        .add_host_listen_port(mvm_agentd::vsock::SSH_AGENT_PORT);
     krun.rootfs_path = None;
     // The active libkrun transport is direct-vsock only; keep the workload
     // base aligned with the builder path so no guest-NIC helper can be
@@ -508,7 +508,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // declared here. Left out of `krun_context_base` so the warm-standby base
     // (no `VmStartConfig` yet) stays unchanged.
     if config.dev_console {
-        for port in mvm_guest::vsock::dev_console_data_ports() {
+        for port in mvm_agentd::vsock::dev_console_data_ports() {
             krun = krun.add_vsock_port(port);
         }
     }
@@ -956,7 +956,7 @@ impl VmBackend for LibkrunBackend {
         // a not-yet-bound socket and report the VM "not running".
         let agent_sock = mvm_core::config::vm_vsock_port_socket(
             &config.name,
-            mvm_guest::vsock::GUEST_AGENT_PORT,
+            mvm_agentd::vsock::GUEST_AGENT_PORT,
         );
         let sock_deadline = Instant::now() + VSOCK_SOCKET_TIMEOUT;
         while !agent_sock.exists() {
@@ -994,7 +994,7 @@ impl VmBackend for LibkrunBackend {
         // socket — bound by the per-VM broker fork, or by the per-tenant daemon
         // (the default; opt out with MVM_HOST_AGENT_DAEMON=0).
         let broker_listen_socket =
-            mvm_core::config::vm_vsock_port_socket(&config.name, mvm_guest::vsock::BROKER_PORT);
+            mvm_core::config::vm_vsock_port_socket(&config.name, mvm_agentd::vsock::BROKER_PORT);
         let mut broker_guard = if crate::host_agent_spawn::host_agent_daemon_enabled() {
             match crate::host_agent_spawn::register_host_agent_services_if_admitted(
                 crate::host_agent_spawn::HostAgentServicesParams {
@@ -1366,7 +1366,7 @@ impl VmBackend for LibkrunBackend {
         // share the same vsock client implementation across backends.
         Ok(GuestChannelInfo::Vsock {
             cid: 3, // standard guest CID
-            port: mvm_guest::vsock::GUEST_AGENT_PORT,
+            port: mvm_agentd::vsock::GUEST_AGENT_PORT,
         })
     }
 
@@ -1861,18 +1861,18 @@ mod tests {
         assert!(
             cfg.krun
                 .vsock_ports
-                .contains(&mvm_guest::vsock::GUEST_AGENT_PORT)
+                .contains(&mvm_agentd::vsock::GUEST_AGENT_PORT)
         );
         assert!(
             cfg.krun
                 .vsock_ports
-                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + 1)),
+                .contains(&(mvm_agentd::vsock::CONSOLE_PORT_BASE + 1)),
             "first console data port must be registered when dev_console is set"
         );
         assert!(
             cfg.krun.vsock_ports.contains(
-                &(mvm_guest::vsock::CONSOLE_PORT_BASE
-                    + mvm_guest::vsock::DEV_CONSOLE_DATA_PORT_COUNT)
+                &(mvm_agentd::vsock::CONSOLE_PORT_BASE
+                    + mvm_agentd::vsock::DEV_CONSOLE_DATA_PORT_COUNT)
             ),
             "last console data port must be registered when dev_console is set"
         );
@@ -1891,7 +1891,7 @@ mod tests {
             !cfg_plain
                 .krun
                 .vsock_ports
-                .contains(&(mvm_guest::vsock::CONSOLE_PORT_BASE + 1)),
+                .contains(&(mvm_agentd::vsock::CONSOLE_PORT_BASE + 1)),
             "console range must NOT be registered when dev_console is unset"
         );
     }
@@ -2046,14 +2046,14 @@ mod tests {
         assert!(
             cfg.krun
                 .host_listen_ports
-                .contains(&mvm_guest::vsock::WORKLOAD_EXIT_PORT),
+                .contains(&mvm_agentd::vsock::WORKLOAD_EXIT_PORT),
             "WORKLOAD_EXIT_PORT must be in host_listen_ports"
         );
         // Must not be double-registered as a guest-facing vsock port.
         assert!(
             !cfg.krun
                 .vsock_ports
-                .contains(&mvm_guest::vsock::WORKLOAD_EXIT_PORT),
+                .contains(&mvm_agentd::vsock::WORKLOAD_EXIT_PORT),
             "WORKLOAD_EXIT_PORT must not appear in vsock_ports"
         );
     }
@@ -2077,13 +2077,13 @@ mod tests {
         assert!(
             cfg.krun
                 .host_listen_ports
-                .contains(&mvm_guest::vsock::EGRESS_PORT),
+                .contains(&mvm_agentd::vsock::EGRESS_PORT),
             "EGRESS_PORT must be in host_listen_ports"
         );
         assert!(
             !cfg.krun
                 .vsock_ports
-                .contains(&mvm_guest::vsock::EGRESS_PORT),
+                .contains(&mvm_agentd::vsock::EGRESS_PORT),
             "EGRESS_PORT must not appear in vsock_ports"
         );
     }
@@ -2108,13 +2108,13 @@ mod tests {
         assert!(
             cfg.krun
                 .host_listen_ports
-                .contains(&mvm_guest::vsock::BROKER_PORT),
+                .contains(&mvm_agentd::vsock::BROKER_PORT),
             "BROKER_PORT must be in host_listen_ports"
         );
         assert!(
             !cfg.krun
                 .vsock_ports
-                .contains(&mvm_guest::vsock::BROKER_PORT),
+                .contains(&mvm_agentd::vsock::BROKER_PORT),
             "BROKER_PORT must not appear in vsock_ports"
         );
     }
@@ -2134,13 +2134,13 @@ mod tests {
         assert!(
             cfg.krun
                 .host_listen_ports
-                .contains(&mvm_guest::vsock::SSH_AGENT_PORT),
+                .contains(&mvm_agentd::vsock::SSH_AGENT_PORT),
             "SSH_AGENT_PORT must be in host_listen_ports"
         );
         assert!(
             !cfg.krun
                 .vsock_ports
-                .contains(&mvm_guest::vsock::SSH_AGENT_PORT),
+                .contains(&mvm_agentd::vsock::SSH_AGENT_PORT),
             "SSH_AGENT_PORT must not appear in vsock_ports"
         );
     }

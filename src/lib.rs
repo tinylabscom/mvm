@@ -13,7 +13,7 @@
 //! | [`security`] | mvm-core::crypto | Command gating, threat classification, rate limiting |
 //! | [`runtime`] | mvm-runtime | Shell execution, VM lifecycle, template management |
 //! | [`build`] | mvm-build | Nix builder pipeline |
-//! | [`guest`] | mvm-guest | Vsock protocol, integration manifest, guest agent |
+//! | [`guest`] | mvm-agentd | Vsock protocol, integration manifest, guest agent |
 //!
 //! ## Usage
 //!
@@ -75,8 +75,8 @@ pub use mvm_build as build;
 
 /// Guest-side vsock protocol, integrations, and probes.
 ///
-/// See [`mvm_guest`] for full documentation.
-pub use mvm_guest as guest;
+/// See [`mvm_agentd`] for full documentation.
+pub use mvm_agentd as guest;
 
 // ============================================================================
 // Prelude

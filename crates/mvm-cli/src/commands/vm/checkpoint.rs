@@ -992,7 +992,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
                 const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
                 let mut agent_ready = false;
                 for _ in 0..POLL_ATTEMPTS {
-                    if mvm_guest::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
+                    if mvm_agentd::vsock::ping_at(&vsock_path_str).unwrap_or(false) {
                         agent_ready = true;
                         break;
                     }
@@ -1001,7 +1001,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
                 if agent_ready {
                     let token =
                         mvm_core::crypto::vmgenid::fresh_generation_token(&p.child_vm_name).token;
-                    match mvm_guest::vsock::post_restore_with_grant_at(
+                    match mvm_agentd::vsock::post_restore_with_grant_at(
                         &vsock_path_str,
                         token,
                         Some(grant_env),

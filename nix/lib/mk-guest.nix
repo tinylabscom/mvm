@@ -340,7 +340,7 @@ let
     /bin/busybox mount -t devtmpfs devtmpfs /dev
 
     # devpts is required for openpty(3): the guest agent allocates a PTY per
-    # interactive `dev` console session (mvm-guest::console). devtmpfs gives
+    # interactive `dev` console session (mvm-agentd::console). devtmpfs gives
     # /dev/ptmx the node but not the /dev/pts slave fs, so without this
     # openpty() fails ("openpty() failed") and the interactive dev shell
     # can't open even from a real terminal. Harmless for sealed
@@ -825,7 +825,7 @@ let
       # The dev VM is long-lived, so PID 1 idles here instead of
       # running the /etc/mvm/entrypoint `/bin/sh` on /dev/console. The guest
       # agent (forked above) serves the interactive shell over vsock — it
-      # openpty()s and forks its OWN `/bin/sh -i` (mvm-guest::console),
+      # openpty()s and forks its OWN `/bin/sh -i` (mvm-agentd::console),
       # independent of PID 1 — so PID 1 doesn't need to be a shell at all.
       # Running `/bin/sh` on /dev/console here is fatal on Vz: its serial
       # console is input-less, the read hits EOF, the shell exits, PID 1

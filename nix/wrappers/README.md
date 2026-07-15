@@ -23,7 +23,7 @@ upstream by mvm's worker pool.
 Per call, the framed protocol exchanges one `WorkerCallRequest` →
 one `WorkerCallResponse`. Each frame is a 4-byte big-endian length
 prefix followed by a JSON body. Schema mirrors
-`mvm_guest::worker_protocol`:
+`mvm_agentd::worker_protocol`:
 
 ```json
 // Request

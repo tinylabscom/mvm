@@ -1,7 +1,7 @@
 # `mvm-guest-agent` — the production guest agent binary.
 #
 # The real Rust binary defined at
-# `crates/mvm-guest/src/bin/mvm-guest-agent.rs` (~2400 LOC of vsock
+# `crates/mvm-agentd/src/bin/mvm-guest-agent.rs` (~2400 LOC of vsock
 # RPC + worker-pool dispatch + integration manifest + system
 # metrics). Side-bins `mvm-seccomp-apply` (the per-service seccomp
 # shim) and `mvm-verity-init` (the verity-initrd PID 1) ride the
@@ -10,7 +10,7 @@
 # ## Build environment
 #
 # `rustPlatform.buildRustPackage` against the workspace at
-# `mvmSrc`. The crate is built with `--package mvm-guest --bins`
+# `mvmSrc`. The crate is built with `--package mvm-agentd --bins`
 # so the workspace's heavier consumers (mvm-runtime,
 # libkrun, etc.) don't enter the closure. Cargo still
 # resolves and vendors the full workspace lockfile, but only the
@@ -48,14 +48,14 @@ pkgs.rustPlatform.buildRustPackage {
 
   # Workspace's Cargo.lock is the source of truth for every crate
   # we vendor. `buildRustPackage` vendors the closure even though
-  # we only build mvm-guest; the unused deps compile zero code.
+  # we only build mvm-agentd; the unused deps compile zero code.
   cargoLock.lockFile = mvmSrc + "/Cargo.lock";
 
-  # Restrict the build to the mvm-guest binaries. The workspace
+  # Restrict the build to the mvm-agentd binaries. The workspace
   # has heavier members (libkrun via mvm-build, libkrun via
   # mvm-providers, etc.) that aren't in the guest closure.
   cargoBuildFlags = [
-    "--package" "mvm-guest"
+    "--package" "mvm-agentd"
     "--bin" "mvm-guest-agent"
     "--bin" "mvm-seccomp-apply"
     "--bin" "mvm-verity-init"
@@ -68,15 +68,15 @@ pkgs.rustPlatform.buildRustPackage {
     # `mvm.network_tunnel=` cmdline token is present; inert otherwise.
     "--bin" "mvm-guest-netd"
   ] ++ lib.optionals withDevShell [
-    "--features" "mvm-guest/dev-shell"
+    "--features" "mvm-agentd/dev-shell"
   ];
 
   # Same selection for the `nix flake check`-equivalent test run.
-  # mvm-guest's tests are pure (vsock framing, integration manifest
+  # mvm-agentd's tests are pure (vsock framing, integration manifest
   # parsing, seccomp filter golden tests) so they run inside the
   # sandbox without privilege.
   cargoTestFlags = [
-    "--package" "mvm-guest"
+    "--package" "mvm-agentd"
   ];
 
   # Skip tests by default — they need a Linux build host and the

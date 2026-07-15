@@ -206,7 +206,7 @@ pub fn boot_hold_once(vm_name: &str) -> Result<HeldProbeVm> {
 /// 30 s — the PID file is written almost immediately after spawn.
 #[cfg(feature = "libkrun-live")]
 fn wait_for_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
-    use mvm_guest::vsock::adaptive_backoff;
+    use mvm_agentd::vsock::adaptive_backoff;
 
     let pid_path = probe_state_dir(vm_name).join("libkrun.pid");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -239,7 +239,7 @@ fn wait_for_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
 /// 90 s.
 #[cfg(feature = "libkrun-live")]
 fn wait_for_ready(vm_name: &str) -> Result<(std::time::Instant, std::time::Instant)> {
-    use mvm_guest::vsock::{adaptive_backoff, ping};
+    use mvm_agentd::vsock::{adaptive_backoff, ping};
 
     let dir = probe_state_dir(vm_name);
     let dir_str = dir.to_string_lossy().into_owned();

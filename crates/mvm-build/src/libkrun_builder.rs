@@ -265,7 +265,7 @@ fn builder_vsock_egress_cmdline(base_cmdline: &str) -> String {
 fn apply_builder_vsock_egress(krun: KrunContext) -> KrunContext {
     krun.with_cmdline(BUILDER_VSOCK_EGRESS_TOKEN)
         .with_vsock_direct()
-        .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT)
+        .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT)
 }
 
 fn builder_boot_contract_cmdline(base_cmdline: &str) -> String {
@@ -329,7 +329,7 @@ pub(crate) struct BuilderVsockEgressEndpoint {
 impl BuilderVsockEgressEndpoint {
     fn spawn(state_dir: &Path) -> Result<Self, BuilderVmError> {
         let transport_path = state_dir.join(mvm_core::config::vsock_socket_filename(
-            mvm_guest::vsock::EGRESS_PORT,
+            mvm_agentd::vsock::EGRESS_PORT,
         ));
         Self::spawn_with_transport(
             state_dir,
@@ -1075,9 +1075,9 @@ impl LibkrunBuilderVm {
             )
             .add_disk("input", path_to_str(&input_disk, "input_disk")?, true)
             .add_disk("output", path_to_str(&output_disk, "output_disk")?, false)
-            .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
+            .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT);
         if guest_agent_vsock {
-            krun = krun.add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+            krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
             builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
@@ -1114,7 +1114,7 @@ impl LibkrunBuilderVm {
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
             krun = apply_networking_mode(krun);
@@ -1152,7 +1152,7 @@ impl LibkrunBuilderVm {
         let guest_agent_rx = if guest_agent_vsock {
             Some(spawn_vsock_socket_observer(
                 &vm_state_dir,
-                mvm_guest::vsock::GUEST_AGENT_PORT,
+                mvm_agentd::vsock::GUEST_AGENT_PORT,
                 Duration::from_secs(60),
             ))
         } else {
@@ -1195,7 +1195,7 @@ impl LibkrunBuilderVm {
             Ok(result) => {
                 if let Some(rx) = guest_agent_rx {
                     tracing::info!(
-                        summary = %describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT),
+                        summary = %describe_vsock_socket_observation(rx, mvm_agentd::vsock::GUEST_AGENT_PORT),
                         "builder guest-agent socket observation"
                     );
                 }
@@ -1204,7 +1204,7 @@ impl LibkrunBuilderVm {
             }
             Err(BuilderVmError::NixBuildFailed(message)) => {
                 let guest_agent_summary = guest_agent_rx.map(|rx| {
-                    describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT)
+                    describe_vsock_socket_observation(rx, mvm_agentd::vsock::GUEST_AGENT_PORT)
                 });
                 return Err(BuilderVmError::NixBuildFailed(format!(
                     "{message}\n{}\n{}",
@@ -1421,7 +1421,7 @@ fn builder_shell_krun_context(
         .add_virtio_fs("work", path_to_str(params.work_dir, "work_dir")?)
         .add_virtio_fs("out", path_to_str(params.artifact_out, "artifact_out")?)
         .add_virtio_fs("job", path_to_str(params.job_dir, "job_dir")?)
-        .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
+        .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT);
 
     for disk in params.extra_disks {
         krun = krun.add_disk(
@@ -1588,9 +1588,9 @@ impl BuilderVm for LibkrunBuilderVm {
             )
             .add_disk("input", path_to_str(&input_disk, "input_disk")?, true)
             .add_disk("output", path_to_str(&output_disk, "output_disk")?, false)
-            .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT);
+            .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT);
         if guest_agent_vsock {
-            krun = krun.add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+            krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
             builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
@@ -1619,7 +1619,7 @@ impl BuilderVm for LibkrunBuilderVm {
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
             krun = apply_networking_mode(krun);
@@ -1662,7 +1662,7 @@ impl BuilderVm for LibkrunBuilderVm {
         let guest_agent_rx = if guest_agent_vsock {
             Some(spawn_vsock_socket_observer(
                 &vm_state_dir,
-                mvm_guest::vsock::GUEST_AGENT_PORT,
+                mvm_agentd::vsock::GUEST_AGENT_PORT,
                 Duration::from_secs(60),
             ))
         } else {
@@ -1859,7 +1859,7 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             krun = krun
                 .with_cmdline(builder_vsock_egress_cmdline(cmdline))
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
         }
         let egress_endpoint = if builder_uses_vsock_egress(&self.image) {
             BuilderVsockEgressEndpoint::spawn(&config.vm_state_dir).map(Some)?
@@ -3537,7 +3537,7 @@ fn drain_builder_observations(
 ) {
     if let Some(rx) = guest_agent_rx {
         tracing::info!(
-            summary = %describe_vsock_socket_observation(rx, mvm_guest::vsock::GUEST_AGENT_PORT),
+            summary = %describe_vsock_socket_observation(rx, mvm_agentd::vsock::GUEST_AGENT_PORT),
             "builder guest-agent socket observation"
         );
     }
@@ -3546,7 +3546,7 @@ fn drain_builder_observations(
 
 /// Spawn a background thread that reads the
 /// `HostVmResponse::Result` frame `mvm-host-vm-init` sends over
-/// AF_VSOCK port [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`]
+/// AF_VSOCK port [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`]
 /// right before reboot. Returns a `Receiver` the caller drains
 /// after the supervisor exits via [`log_vsock_response_outcome`].
 ///
@@ -3575,7 +3575,7 @@ pub fn spawn_vsock_response_listener(
 
     let (tx, rx) = mpsc::channel();
     let socket_path = vm_state_dir.join(mvm_core::config::vsock_socket_filename(
-        mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+        mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
     ));
 
     std::thread::Builder::new()
@@ -4143,7 +4143,7 @@ pub const DISPATCH_SOCK_MARKER: &str = "dispatch.sock.marker";
 /// single cmd.sh / install_spec and powering off, the guest
 /// detects `<job_dir>/<DISPATCH_SOCK_MARKER>` and enters the
 /// dispatch loop that reads `HostVmRequest` frames over
-/// AF_VSOCK port [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`].
+/// AF_VSOCK port [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`].
 ///
 /// The caller pairs this with a `PersistentBuilderSupervisor`
 /// constructed against [`PersistentVmHandle::dispatch_socket_path`].
@@ -4276,19 +4276,19 @@ impl LibkrunPersistentHostVm {
             .add_virtio_fs("work", path_to_str(&self.workspace_root, "workspace_root")?)
             .add_virtio_fs("out", path_to_str(&job_dir, "job_dir")?)
             .add_virtio_fs("job", path_to_str(&job_dir, "job_dir")?)
-            .add_vsock_port(mvm_guest::builder_agent::BUILDER_DISPATCH_PORT)
+            .add_vsock_port(mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT)
             // The workload-vsock nesting hop. The in-host-VM forwarder
             // listens here; the outer host reaches a workload's
             // Firecracker vsock via `<vm_state_dir>/vsock-21472.sock`.
             // libkrun registers vsock ports at launch, so this must be
             // added up front even though workloads start later.
-            .add_vsock_port(mvm_guest::builder_agent::WORKLOAD_FORWARD_PORT)
+            .add_vsock_port(mvm_agentd::builder_agent::WORKLOAD_FORWARD_PORT)
             // The resident builder control daemon's typed control plane
             // mvm-host-vm-init launches `mvm-builderd` at boot;
             // the host reaches it via `<vm_state_dir>/vsock-21473.sock`.
-            .add_vsock_port(mvm_guest::builder_agent::BUILDERD_CONTROL_PORT);
+            .add_vsock_port(mvm_agentd::builder_agent::BUILDERD_CONTROL_PORT);
         if guest_agent_vsock {
-            krun = krun.add_vsock_port(mvm_guest::vsock::GUEST_AGENT_PORT);
+            krun = krun.add_vsock_port(mvm_agentd::vsock::GUEST_AGENT_PORT);
         }
         if let Some(attachment) =
             builder_runtime_overlay_attachment(&image, runtime_overlay.as_deref())
@@ -4307,7 +4307,7 @@ impl LibkrunPersistentHostVm {
         let egress_endpoint = if builder_uses_vsock_egress(&image) {
             krun = krun
                 .with_vsock_direct()
-                .add_host_listen_port(mvm_guest::vsock::EGRESS_PORT);
+                .add_host_listen_port(mvm_agentd::vsock::EGRESS_PORT);
             BuilderVsockEgressEndpoint::spawn(&vm_state_dir).map(Some)?
         } else {
             krun = apply_networking_mode(krun);
@@ -4342,7 +4342,7 @@ impl LibkrunPersistentHostVm {
             wait_for_vsock_socket(
                 &mut child,
                 &vm_state_dir,
-                mvm_guest::vsock::GUEST_AGENT_PORT,
+                mvm_agentd::vsock::GUEST_AGENT_PORT,
                 Duration::from_secs(30),
                 "builder guest agent",
             )?;
@@ -4416,13 +4416,13 @@ impl PersistentVmHandle {
     }
 
     /// Host-side path of the libkrun-managed Unix socket that
-    /// proxies to AF_VSOCK [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`]
+    /// proxies to AF_VSOCK [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`]
     /// inside the guest. `PersistentBuilderSupervisor::new` takes
     /// this directly.
     pub fn dispatch_socket_path(&self) -> PathBuf {
         self.vm_state_dir
             .join(mvm_core::config::vsock_socket_filename(
-                mvm_guest::builder_agent::BUILDER_DISPATCH_PORT,
+                mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT,
             ))
     }
 
@@ -4651,7 +4651,7 @@ mod tests {
             matches!(ctx.networking, libkrun_sys::NetworkingMode::VsockDirect),
             "Stage 0 builder boots must use the explicit vsock device, not TSI"
         );
-        assert_eq!(ctx.host_listen_ports, vec![mvm_guest::vsock::EGRESS_PORT]);
+        assert_eq!(ctx.host_listen_ports, vec![mvm_agentd::vsock::EGRESS_PORT]);
     }
 
     fn ok_mounts(scratch: &TempDir) -> BuilderMounts {

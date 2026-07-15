@@ -196,7 +196,7 @@ mod linux {
     }
 
     fn best_effort_raise_loopback() {
-        match mvm_guest::guest_net::bring_iface_up("lo") {
+        match mvm_agentd::guest_net::bring_iface_up("lo") {
             Ok(()) => eprintln!("stage0-init: brought loopback interface up"),
             Err(e) => eprintln!("stage0-init: bring_iface_up lo failed: {e}"),
         }

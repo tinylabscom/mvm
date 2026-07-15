@@ -439,11 +439,11 @@ security-gate-prod-agent:
 # Run the GuestRequest deserializer fuzzer (ADR-001 §W4.2). Default 5min.
 # Override with: just fuzz-guest-request 3600
 fuzz-guest-request SECONDS="300":
-    cd crates/mvm-guest && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{SECONDS}}
+    cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_guest_request -- -max_total_time={{SECONDS}}
 
 # Run the AuthenticatedFrame envelope fuzzer (ADR-001 §W4.2). Default 5min.
 fuzz-authenticated-frame SECONDS="300":
-    cd crates/mvm-guest && cargo +nightly fuzz run fuzz_authenticated_frame -- -max_total_time={{SECONDS}}
+    cd crates/mvm-agentd && cargo +nightly fuzz run fuzz_authenticated_frame -- -max_total_time={{SECONDS}}
 
 # Check for outdated dependencies
 outdated:

@@ -130,7 +130,7 @@ pub fn should_serve_vsock_egress(
     opt_in: bool,
     has_bound_secrets: bool,
 ) -> bool {
-    opt_in && !has_bound_secrets && host_listen_ports.contains(&mvm_guest::vsock::EGRESS_PORT)
+    opt_in && !has_bound_secrets && host_listen_ports.contains(&mvm_agentd::vsock::EGRESS_PORT)
 }
 
 /// Accept egress connections on `listener` (the host-bound UDS libkrun forwards the
@@ -308,7 +308,7 @@ mod tests {
 
     #[test]
     fn serves_only_when_opted_in_no_secrets_and_port_present() {
-        let egress = mvm_guest::vsock::EGRESS_PORT;
+        let egress = mvm_agentd::vsock::EGRESS_PORT;
         // Happy path: opted in, no secrets, port listed.
         assert!(should_serve_vsock_egress(&[egress], true, false));
         // Any single disqualifier fails closed.

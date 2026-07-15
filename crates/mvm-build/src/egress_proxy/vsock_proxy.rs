@@ -157,7 +157,7 @@ fn read_request_head(client: &mut TcpStream) -> io::Result<String> {
 }
 
 fn dial_host_egress(host: &str, port: u16) -> io::Result<UnixStream> {
-    let mut stream = mvm_guest::vsock::connect_host_vsock(mvm_guest::vsock::EGRESS_PORT, 10)
+    let mut stream = mvm_agentd::vsock::connect_host_vsock(mvm_agentd::vsock::EGRESS_PORT, 10)
         .map_err(|e| io::Error::other(format!("connect host egress vsock: {e}")))?;
     writeln!(stream, "{host}:{port}")?;
     stream.flush()?;

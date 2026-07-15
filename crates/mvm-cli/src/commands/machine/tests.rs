@@ -1751,43 +1751,43 @@ fn ssh_agent_socket_forwarding_negotiates_capability_before_request() {
     let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
 
     let guest_thread = std::thread::spawn(move || {
-        let hello: mvm_guest::vsock::GuestRequest =
-            mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
+        let hello: mvm_agentd::vsock::GuestRequest =
+            mvm_agentd::vsock::read_frame(&mut guest).expect("read hello");
         match hello {
-            mvm_guest::vsock::GuestRequest::ProtocolHello {
+            mvm_agentd::vsock::GuestRequest::ProtocolHello {
                 requested_capabilities,
                 ..
             } => assert_eq!(
                 requested_capabilities,
-                vec![mvm_guest::vsock::GuestCapability::UnixSocketForward]
+                vec![mvm_agentd::vsock::GuestCapability::UnixSocketForward]
             ),
             other => panic!("expected ProtocolHello before forwarding request, got {other:?}"),
         }
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut guest,
-            &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
-                agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
-                min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+            &mvm_agentd::vsock::GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: mvm_agentd::vsock::PROTOCOL_VERSION,
+                min_supported_version: mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
                 agent_version: "test".to_string(),
-                capabilities: vec![mvm_guest::vsock::GuestCapability::UnixSocketForward],
+                capabilities: vec![mvm_agentd::vsock::GuestCapability::UnixSocketForward],
             },
         )
         .expect("write hello ack");
 
-        let req: mvm_guest::vsock::GuestRequest =
-            mvm_guest::vsock::read_frame(&mut guest).expect("read forward request");
+        let req: mvm_agentd::vsock::GuestRequest =
+            mvm_agentd::vsock::read_frame(&mut guest).expect("read forward request");
         match req {
-            mvm_guest::vsock::GuestRequest::StartUnixSocketForward {
+            mvm_agentd::vsock::GuestRequest::StartUnixSocketForward {
                 guest_path,
                 host_vsock_port,
                 socket_mode,
             } => {
                 assert_eq!(guest_path, SSH_AGENT_GUEST_SOCKET);
-                assert_eq!(host_vsock_port, mvm_guest::vsock::SSH_AGENT_PORT);
+                assert_eq!(host_vsock_port, mvm_agentd::vsock::SSH_AGENT_PORT);
                 assert_eq!(socket_mode, 0o600);
-                mvm_guest::vsock::write_frame(
+                mvm_agentd::vsock::write_frame(
                     &mut guest,
-                    &mvm_guest::vsock::GuestResponse::UnixSocketForwardStarted {
+                    &mvm_agentd::vsock::GuestResponse::UnixSocketForwardStarted {
                         guest_path,
                         host_vsock_port,
                     },
@@ -1808,17 +1808,17 @@ fn ssh_agent_socket_forwarding_refuses_guest_without_capability() {
     let (mut host, mut guest) = std::os::unix::net::UnixStream::pair().expect("stream pair");
 
     let guest_thread = std::thread::spawn(move || {
-        let hello: mvm_guest::vsock::GuestRequest =
-            mvm_guest::vsock::read_frame(&mut guest).expect("read hello");
+        let hello: mvm_agentd::vsock::GuestRequest =
+            mvm_agentd::vsock::read_frame(&mut guest).expect("read hello");
         assert!(
-            matches!(hello, mvm_guest::vsock::GuestRequest::ProtocolHello { .. }),
+            matches!(hello, mvm_agentd::vsock::GuestRequest::ProtocolHello { .. }),
             "expected ProtocolHello, got {hello:?}"
         );
-        mvm_guest::vsock::write_frame(
+        mvm_agentd::vsock::write_frame(
             &mut guest,
-            &mvm_guest::vsock::GuestResponse::ProtocolHelloAck {
-                agent_protocol_version: mvm_guest::vsock::PROTOCOL_VERSION,
-                min_supported_version: mvm_guest::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
+            &mvm_agentd::vsock::GuestResponse::ProtocolHelloAck {
+                agent_protocol_version: mvm_agentd::vsock::PROTOCOL_VERSION,
+                min_supported_version: mvm_agentd::vsock::MIN_SUPPORTED_PROTOCOL_VERSION,
                 agent_version: "test".to_string(),
                 capabilities: Vec::new(),
             },
@@ -1841,15 +1841,15 @@ fn ssh_agent_proxy_uses_backend_socket_transport_for_firecracker_and_in_process_
     let cases = [
         (
             "firecracker",
-            mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            mvm_core::config::vm_vsock_port_socket("devbox", mvm_agentd::vsock::SSH_AGENT_PORT),
         ),
         (
             "libkrun",
-            mvm_core::config::vm_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            mvm_core::config::vm_vsock_port_socket("devbox", mvm_agentd::vsock::SSH_AGENT_PORT),
         ),
         (
             "vz",
-            mvm_core::config::vm_vz_vsock_port_socket("devbox", mvm_guest::vsock::SSH_AGENT_PORT),
+            mvm_core::config::vm_vz_vsock_port_socket("devbox", mvm_agentd::vsock::SSH_AGENT_PORT),
         ),
     ];
 
@@ -1867,7 +1867,7 @@ fn ssh_agent_proxy_uses_backend_socket_transport_for_firecracker_and_in_process_
 fn ssh_agent_proxy_keeps_qemu_on_raw_vsock_transport() {
     match ssh_agent_proxy_listen_for_backend("devbox", "qemu") {
         SshAgentProxyListen::Vsock(port) => {
-            assert_eq!(port, mvm_guest::vsock::SSH_AGENT_PORT);
+            assert_eq!(port, mvm_agentd::vsock::SSH_AGENT_PORT);
         }
         SshAgentProxyListen::Uds(path) => {
             panic!("qemu unexpectedly selected UDS {}", path.display())

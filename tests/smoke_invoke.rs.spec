@@ -180,7 +180,7 @@ fn invoke_echo_fixture_zero_stdin_exits_zero() {
 /// `MVMFORGE_ENVELOPE: {...}` marker to stderr must NOT be
 /// misinterpreted as a structured envelope by the host. Live-KVM
 /// validation of the unit/integration coverage already in place at
-/// `crates/mvm-guest/src/entrypoint.rs::test_execute_captures_fd3_control_record`
+/// `crates/mvm-agentd/src/entrypoint.rs::test_execute_captures_fd3_control_record`
 /// and `tests/worker_pool_warm.rs::warm_process_emits_control_records_through_pool`.
 ///
 /// Builds the `nix/images/examples/spoof-stderr-fn/` fixture, boots

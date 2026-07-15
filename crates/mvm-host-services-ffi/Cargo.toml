@@ -16,7 +16,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 mvm-core.workspace = true
-mvm-guest.workspace = true
+mvm-agentd.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

@@ -10,10 +10,9 @@ members = [
     "crates/deps/libkrun-sys",
     "crates/mvm-runtime",
     "crates/mvm-build",
-    "crates/mvm-guest",
+    "crates/mvm-agentd",
     "crates/mvm-cli",
     "crates/mvm-hostd",
-    "crates/mvm-guest-helpers",
     # C-ABI veneer over the in-guest host-services broker clients. One
     # JSON-in/JSON-out cdylib every language SDK loads through a thin FFI
     # shim, so adding a language carries no new Rust binding code.
@@ -92,14 +91,14 @@ members = [
 # Plain `cargo build --workspace` would otherwise fail with linker
 # errors. ADR-001 §W4.2.
 exclude = [
-    "crates/mvm-guest/fuzz",
+    "crates/mvm-agentd/fuzz",
     # Plan 214 Phase 8 — hardened snapshot-frame parser fuzz harness
     # (`parse_header` / `parse_sections`, the cap-before-alloc /
     # bounds-checked path). Same libfuzzer-sys linker-flag constraints as
     # the other fuzz crates.
     "crates/mvm-core/fuzz",
     # Plan 85 §R1 / Phase A.2 — layer-unpack fuzz harness. Same
-    # libfuzzer-sys linker-flag constraints as the mvm-guest fuzz
+    # libfuzzer-sys linker-flag constraints as the mvm-agentd fuzz
     # crate; CI gate at `.github/workflows/security.yml::fuzz` (the
     # `Fuzz OCI unpack_layer` step). Release-tag + nightly + manual
     # dispatch only; not run on per-PR pushes.
@@ -338,8 +337,7 @@ tree-sitter-typescript = "0.23.2"
 # opts back into user-facing defaults through its own `[features]` block.
 mvm-core = { path = "crates/mvm-core", version = "0.18.0" }
 mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
-mvm-guest = { path = "crates/mvm-guest", version = "0.18.0" }
-mvm-guest-helpers = { path = "crates/mvm-guest-helpers", version = "0.18.0" }
+mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
 mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
@@ -400,7 +398,7 @@ path = "src/main.rs"
 mvm-core.workspace = true
 mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
-mvm-guest.workspace = true
+mvm-agentd.workspace = true
 mvm-cli = { workspace = true, default-features = false }
 anyhow.workspace = true
 

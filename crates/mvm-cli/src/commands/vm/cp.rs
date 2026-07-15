@@ -6,9 +6,9 @@ use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use mvm_agentd::vsock::{FsResult, GuestRequest};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
-use mvm_guest::vsock::{FsResult, GuestRequest};
 
 use super::Cli;
 
@@ -154,7 +154,7 @@ fn copy_host_to_guest(host: &Path, vm: &str, guest_path: &str, args: &Args) -> R
 
 fn copy_guest_to_host(vm: &str, guest_path: &str, host: &Path, args: &Args) -> Result<CopySummary> {
     let stat = guest_stat(vm, guest_path)?;
-    if !matches!(stat.kind, mvm_guest::vsock::FsEntryKind::File) {
+    if !matches!(stat.kind, mvm_agentd::vsock::FsEntryKind::File) {
         bail!("Guest source {vm}:{guest_path} is not a regular file");
     }
     if stat.size > args.max_bytes {
@@ -273,7 +273,7 @@ fn guest_exists(vm: &str, path: &str) -> Result<bool> {
     match super::fs::fs_request(vm, req)? {
         FsResult::Stat(_) => Ok(true),
         FsResult::Error {
-            kind: mvm_guest::vsock::FsErrorKind::NotFound,
+            kind: mvm_agentd::vsock::FsErrorKind::NotFound,
             ..
         } => Ok(false),
         FsResult::Error { kind, message } => bail!("Guest FS error ({:?}): {}", kind, message),
@@ -281,7 +281,7 @@ fn guest_exists(vm: &str, path: &str) -> Result<bool> {
     }
 }
 
-fn guest_stat(vm: &str, path: &str) -> Result<mvm_guest::vsock::FsStat> {
+fn guest_stat(vm: &str, path: &str) -> Result<mvm_agentd::vsock::FsStat> {
     let req = GuestRequest::FsStat {
         path: path.to_string(),
         follow_symlinks: true,

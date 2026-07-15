@@ -13,8 +13,8 @@
 //!
 //! ## Frame size cap
 //!
-//! Framing reuses [`mvm_guest::vsock::read_frame`] /
-//! [`mvm_guest::vsock::write_frame`], which enforce a pre-deserialize
+//! Framing reuses [`mvm_agentd::vsock::read_frame`] /
+//! [`mvm_agentd::vsock::write_frame`], which enforce a pre-deserialize
 //! `MAX_FRAME_SIZE` of 256 KiB (`crates/mvm-guest/src/vsock.rs:65`).
 //! That bound is amply sufficient for `HostVmRequest` — its
 //! largest variant (`HostVmRequest::Run`) carries a
@@ -360,10 +360,10 @@ pub enum HostVmResponseRead {
 }
 
 /// Connect to the libkrun-managed Unix socket for
-/// [`mvm_guest::builder_agent::BUILDER_DISPATCH_PORT`] and read
+/// [`mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`] and read
 /// one framed [`HostVmResponse`] within `timeout`.
 ///
-/// The framing reader reuses [`mvm_guest::vsock::read_frame`],
+/// The framing reader reuses [`mvm_agentd::vsock::read_frame`],
 /// which enforces the same 256 KiB pre-deserialize cap
 /// [`HostVmResponse`] inherits — see this module's header docs.
 ///
@@ -394,7 +394,7 @@ pub fn read_host_vm_response_from_socket(
 /// going through libkrun. The two layers compose: the
 /// `from_socket` variant is `connect` + this.
 pub fn read_host_vm_response(stream: &mut std::os::unix::net::UnixStream) -> HostVmResponseRead {
-    match mvm_guest::vsock::read_frame::<HostVmResponse>(stream) {
+    match mvm_agentd::vsock::read_frame::<HostVmResponse>(stream) {
         Ok(resp) => HostVmResponseRead::Frame(resp),
         Err(e) => {
             // anyhow::Error chains the io::Error underneath when
@@ -430,7 +430,7 @@ pub fn write_host_vm_response(
     stream: &mut std::os::unix::net::UnixStream,
     response: &HostVmResponse,
 ) -> std::io::Result<()> {
-    mvm_guest::vsock::write_frame(stream, response)
+    mvm_agentd::vsock::write_frame(stream, response)
         .map_err(|e| std::io::Error::other(e.to_string()))
 }
 
@@ -907,7 +907,7 @@ mod tests {
         // A malicious or corrupted client setting
         // `length_prefix = u32::MAX` must
         // be rejected BEFORE the host allocates that many bytes.
-        // The framing reader in `mvm_guest::vsock::read_frame`
+        // The framing reader in `mvm_agentd::vsock::read_frame`
         // enforces this for every caller that uses the existing
         // length-prefix wire, which this protocol does. We
         // exercise it here to keep the regression visible from
@@ -926,7 +926,7 @@ mod tests {
         a.write_all(&[0u8; 16]).expect("write tail");
         a.shutdown(std::net::Shutdown::Write).expect("close");
 
-        let res = mvm_guest::vsock::read_frame::<serde_json::Value>(&mut b);
+        let res = mvm_agentd::vsock::read_frame::<serde_json::Value>(&mut b);
         assert!(
             res.is_err(),
             "oversized frame must be rejected before allocation"

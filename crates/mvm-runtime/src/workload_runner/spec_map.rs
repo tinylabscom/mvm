@@ -4,9 +4,11 @@
 
 use std::path::{Path, PathBuf};
 
+use mvm_agentd::vsock::{
+    EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports,
+};
 use mvm_core::config::{vm_vsock_port_socket_at, vm_vz_vsock_port_socket_at};
 use mvm_core::vm_backend::VmStartConfig;
-use mvm_guest::vsock::{EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports};
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
 
@@ -427,7 +429,7 @@ mod tests {
 
     #[test]
     fn console_data_sockets_paths_follow_vz_convention() {
-        use mvm_guest::vsock::CONSOLE_PORT_BASE;
+        use mvm_agentd::vsock::CONSOLE_PORT_BASE;
         let state_dir = Path::new("/state/myvm");
         let sockets = console_data_sockets(state_dir, true);
 
@@ -451,7 +453,7 @@ mod tests {
 
     #[test]
     fn workload_vsock_ports_with_dev_console_carries_128_console_ports() {
-        use mvm_guest::vsock::CONSOLE_PORT_BASE;
+        use mvm_agentd::vsock::CONSOLE_PORT_BASE;
         let state_dir = Path::new("/state/w");
         let console_data = console_data_sockets(state_dir, true);
         let socks = WorkloadSockets {

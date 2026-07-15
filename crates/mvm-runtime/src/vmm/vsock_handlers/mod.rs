@@ -118,16 +118,16 @@ impl VsockHandlerRegistry {
     pub(crate) fn new() -> Self {
         let mut guest_ports: BTreeMap<u32, Box<dyn GuestPortHandler>> = BTreeMap::new();
         guest_ports.insert(
-            mvm_guest::vsock::WORKLOAD_EXIT_PORT,
+            mvm_agentd::vsock::WORKLOAD_EXIT_PORT,
             Box::new(WorkloadExitHandler::new()),
         );
         guest_ports.insert(
-            mvm_guest::vsock::EGRESS_PORT,
-            Box::new(StreamRelayHandler::new(mvm_guest::vsock::EGRESS_PORT)),
+            mvm_agentd::vsock::EGRESS_PORT,
+            Box::new(StreamRelayHandler::new(mvm_agentd::vsock::EGRESS_PORT)),
         );
         guest_ports.insert(
-            mvm_guest::vsock::BROKER_PORT,
-            Box::new(StreamRelayHandler::new(mvm_guest::vsock::BROKER_PORT)),
+            mvm_agentd::vsock::BROKER_PORT,
+            Box::new(StreamRelayHandler::new(mvm_agentd::vsock::BROKER_PORT)),
         );
         guest_ports.insert(
             mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT,
@@ -162,7 +162,7 @@ impl VsockHandlerRegistry {
     }
 
     pub(crate) fn set_substitution_endpoint(&mut self, path: &Path) {
-        self.guest_handler_mut::<StreamRelayHandler>(mvm_guest::vsock::EGRESS_PORT)
+        self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::EGRESS_PORT)
             .expect("egress handler present")
             .bridge
             .set_endpoint(path);
@@ -172,21 +172,21 @@ impl VsockHandlerRegistry {
         &mut self,
         counter: Arc<std::sync::atomic::AtomicUsize>,
     ) {
-        self.guest_handler_mut::<StreamRelayHandler>(mvm_guest::vsock::EGRESS_PORT)
+        self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::EGRESS_PORT)
             .expect("egress handler present")
             .bridge
             .set_activity(counter);
     }
 
     pub(crate) fn set_broker_endpoint(&mut self, path: &Path) {
-        self.guest_handler_mut::<StreamRelayHandler>(mvm_guest::vsock::BROKER_PORT)
+        self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::BROKER_PORT)
             .expect("broker handler present")
             .bridge
             .set_endpoint(path);
     }
 
     pub(crate) fn set_broker_activity(&mut self, counter: Arc<std::sync::atomic::AtomicUsize>) {
-        self.guest_handler_mut::<StreamRelayHandler>(mvm_guest::vsock::BROKER_PORT)
+        self.guest_handler_mut::<StreamRelayHandler>(mvm_agentd::vsock::BROKER_PORT)
             .expect("broker handler present")
             .bridge
             .set_activity(counter);
@@ -457,22 +457,27 @@ impl HostInitiatedHandler for AgentVsockHandler {
             agent_dbg(&format!(
                 "accepted {} host conn(s) → OP_REQUEST to:{}",
                 opened.len(),
-                mvm_guest::vsock::GUEST_AGENT_PORT
+                mvm_agentd::vsock::GUEST_AGENT_PORT
             ));
         }
         for conn_id in opened {
-            ctx.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_REQUEST, &[]);
+            ctx.queue_host_packet(
+                conn_id,
+                mvm_agentd::vsock::GUEST_AGENT_PORT,
+                OP_REQUEST,
+                &[],
+            );
         }
         for (conn_id, bytes) in self.bridge.drain_host() {
             agent_dbg(&format!(
                 "host→guest {} bytes on stream {conn_id}",
                 bytes.len()
             ));
-            ctx.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RW, &bytes);
+            ctx.queue_host_packet(conn_id, mvm_agentd::vsock::GUEST_AGENT_PORT, OP_RW, &bytes);
         }
         for conn_id in self.bridge.take_host_closed() {
             agent_dbg(&format!("host closed stream {conn_id} → OP_RST to guest"));
-            ctx.queue_host_packet(conn_id, mvm_guest::vsock::GUEST_AGENT_PORT, OP_RST, &[]);
+            ctx.queue_host_packet(conn_id, mvm_agentd::vsock::GUEST_AGENT_PORT, OP_RST, &[]);
         }
         if ctx.flush_rx() { Some(0) } else { None }
     }

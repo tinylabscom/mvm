@@ -653,7 +653,7 @@ mod tests {
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
         // The broker binds the per-VM BROKER_PORT socket the VMM forwards to.
-        let uds = mvm_core::config::vm_vsock_port_socket("vm-1", mvm_guest::vsock::BROKER_PORT);
+        let uds = mvm_core::config::vm_vsock_port_socket("vm-1", mvm_agentd::vsock::BROKER_PORT);
         std::fs::create_dir_all(uds.parent().unwrap()).unwrap();
         let _ = std::fs::remove_file(&uds);
         let captured = dir.join("captured-broker-config.json");
@@ -763,7 +763,7 @@ mod tests {
         std::fs::create_dir_all(&state_dir).unwrap();
         let audit_uds = state_dir.join(AUDIT_SIGNER_SOCK);
         let broker_uds =
-            mvm_core::config::vm_vsock_port_socket("vm-1", mvm_guest::vsock::BROKER_PORT);
+            mvm_core::config::vm_vsock_port_socket("vm-1", mvm_agentd::vsock::BROKER_PORT);
         std::fs::create_dir_all(broker_uds.parent().unwrap()).unwrap();
         let _ = std::fs::remove_file(&broker_uds);
 

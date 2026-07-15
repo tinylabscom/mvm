@@ -3,7 +3,7 @@
 # ///
 # /// Counterpart to ./oneshot.py: same dispatch + envelope semantics, but
 # /// stays alive across many calls and speaks the framed multi-call
-# /// protocol on its own stdin/stdout (matching mvm_guest::worker_protocol::
+# /// protocol on its own stdin/stdout (matching mvm_agentd::worker_protocol::
 # /// {WorkerCallRequest, WorkerCallResponse}).
 # ///
 # /// Wire format (per call, both directions):
@@ -52,7 +52,7 @@ WRAPPER_CONFIG_PATH = os.environ.get(
 )
 MAX_NESTING_DEPTH = 64
 DEFAULT_MAX_INPUT_BYTES = 16 * 1024 * 1024  # 16 MiB
-MAX_FRAME_BYTES = 256 * 1024  # mvm_guest::worker_protocol cap
+MAX_FRAME_BYTES = 256 * 1024  # mvm_agentd::worker_protocol cap
 ENVELOPE_MARKER = "MVM_ENVELOPE: "
 
 

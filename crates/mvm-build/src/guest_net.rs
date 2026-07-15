@@ -1,12 +1,12 @@
 //! Host-side classification of a builder VM's network-bootstrap outcome.
 //!
 //! The guest-side network bring-up (ioctls, udhcpc, static config) now lives in
-//! [`mvm_guest::guest_net`] — shared by the builder init and the workload
+//! [`mvm_agentd::guest_net`] — shared by the builder init and the workload
 //! netinit. What remains here is host-only: parsing the builder VM's
 //! `console.log` to report how its network came up (DHCP lease vs static
 //! fallback vs failure), surfaced by `mvmctl doctor`.
 
-use mvm_guest::guest_net::parse_ipv4;
+use mvm_agentd::guest_net::parse_ipv4;
 
 /// The persistent builder VM's last network-bootstrap outcome, as
 /// recovered from its host-readable `console.log`.

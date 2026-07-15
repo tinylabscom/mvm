@@ -40,7 +40,7 @@ pub const VMINITD_VSOCK_PORT: u32 = 1024;
 
 /// Port that the mvm guest agent listens on (same as Firecracker).
 ///
-/// Must stay in lockstep with `mvm_guest::vsock::GUEST_AGENT_PORT`.
+/// Must stay in lockstep with `mvm_agentd::vsock::GUEST_AGENT_PORT`.
 /// Duplicated here to avoid pulling `mvm-guest` into this client's
 /// dependency surface. See the canonical doc comment for why this
 /// lives at 5252 (>1023, so the agent can bind it under its

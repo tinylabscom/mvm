@@ -24,8 +24,8 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+use mvm_agentd::vsock::{GuestRequest, GuestResponse};
 use mvm_core::vm_backend::VmStartConfig;
-use mvm_guest::vsock::{GuestRequest, GuestResponse};
 use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
@@ -299,21 +299,21 @@ fn wait_for_vz_guest_agent(name: &str) -> Result<()> {
     let mut last_err = None;
 
     while Instant::now() < deadline {
-        match transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT) {
+        match transport.connect(mvm_agentd::vsock::GUEST_AGENT_PORT) {
             Ok(mut stream) => {
                 // ADR-019 / plan 74 W1: hard cutover requires hello
                 // before any operational request, so a raw `Ping`
                 // probe no longer works. Treat a successful hello
                 // negotiation (with the `Ping` capability acknowledged)
                 // as the readiness signal.
-                match mvm_guest::vsock::negotiate_protocol(
+                match mvm_agentd::vsock::negotiate_protocol(
                     &mut stream,
-                    vec![mvm_guest::vsock::GuestCapability::Ping],
+                    vec![mvm_agentd::vsock::GuestCapability::Ping],
                 ) {
                     Ok(negotiated)
                         if negotiated
                             .capabilities
-                            .contains(&mvm_guest::vsock::GuestCapability::Ping) =>
+                            .contains(&mvm_agentd::vsock::GuestCapability::Ping) =>
                     {
                         return Ok(());
                     }
@@ -349,7 +349,10 @@ fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
         "libkrun" | "krun" => Ok(Path::new(&mvm_core::config::mvm_data_dir())
             .join("vms")
             .join(name)
-            .join(format!("vsock-{}.sock", mvm_guest::vsock::GUEST_AGENT_PORT))),
+            .join(format!(
+                "vsock-{}.sock",
+                mvm_agentd::vsock::GUEST_AGENT_PORT
+            ))),
         other => bail!(
             "{READY_VAR}=guest-agent is not wired for backend {other:?}; use {READY_VAR}=start-return"
         ),
@@ -357,18 +360,18 @@ fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
 }
 
 fn ping_guest_agent(uds_path: &Path) -> Result<()> {
-    let mut stream = mvm_guest::vsock::connect_to(&uds_path.to_string_lossy(), 1)?;
-    let negotiated = mvm_guest::vsock::negotiate_protocol(
+    let mut stream = mvm_agentd::vsock::connect_to(&uds_path.to_string_lossy(), 1)?;
+    let negotiated = mvm_agentd::vsock::negotiate_protocol(
         &mut stream,
-        vec![mvm_guest::vsock::GuestCapability::Ping],
+        vec![mvm_agentd::vsock::GuestCapability::Ping],
     )?;
     if !negotiated
         .capabilities
-        .contains(&mvm_guest::vsock::GuestCapability::Ping)
+        .contains(&mvm_agentd::vsock::GuestCapability::Ping)
     {
         bail!("guest agent did not advertise the Ping capability");
     }
-    let response = mvm_guest::vsock::send_request(&mut stream, &GuestRequest::Ping)?;
+    let response = mvm_agentd::vsock::send_request(&mut stream, &GuestRequest::Ping)?;
     match response {
         GuestResponse::Pong => Ok(()),
         other => bail!("unexpected ping response: {other:?}"),

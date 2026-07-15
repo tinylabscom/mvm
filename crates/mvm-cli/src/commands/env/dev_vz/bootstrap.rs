@@ -22,7 +22,7 @@ use std::collections::HashMap;
 
 #[cfg(test)]
 pub(super) fn first_nameserver_from_resolv_conf(body: &str) -> Option<String> {
-    mvm_guest::guest_net::first_nameserver_from_resolv_conf(body)
+    mvm_agentd::guest_net::first_nameserver_from_resolv_conf(body)
 }
 
 #[cfg(test)]

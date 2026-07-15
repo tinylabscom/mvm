@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use mvm_agentd::vsock::EGRESS_PORT;
 use mvm_build::builder_disk_transport::{
     InputTree, create_output_disk, pack_input_disk, read_output_disk,
 };
@@ -14,7 +15,6 @@ use mvm_core::config::{vm_state_dir, vm_vsock_port_socket_at};
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::VmStatus;
-use mvm_guest::vsock::EGRESS_PORT;
 
 use super::spec::{BuilderSpecInputs, builder_spec};
 use crate::driver::VmmDriver;

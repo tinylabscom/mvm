@@ -87,7 +87,7 @@ mvm-sdk.workspace = true
 mvm-runtime.workspace = true
 # guest vsock exec protocol (`send_exec_streaming`, `GUEST_AGENT_PORT`) —
 # the healthcheck probe's host->guest exec leg.
-mvm-guest.workspace = true
+mvm-agentd.workspace = true
 # builder-vm: pulls libkrun_network_provider::vsock_egress_opt_in (Phase A egress
 # server wiring in mvm-libkrun-supervisor); gated here so it only activates in the
 # per-VM supervisor process, not in library users.

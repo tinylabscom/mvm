@@ -10,7 +10,7 @@ authors.workspace = true
 
 [dependencies]
 mvm-core.workspace = true
-mvm-guest.workspace = true
+mvm-agentd.workspace = true
 mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true

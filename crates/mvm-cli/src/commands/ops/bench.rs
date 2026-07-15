@@ -757,7 +757,7 @@ pub fn read_process_footprint_bytes(_pid: u32) -> Result<u64> {
 #[cfg(any(feature = "libkrun-live", target_os = "macos"))]
 pub(in crate::commands::ops) fn write_boot_timing_sidecar(
     vm_name: &str,
-    boot_millis: &mvm_guest::vsock::BootTimingReport,
+    boot_millis: &mvm_agentd::vsock::BootTimingReport,
 ) -> Result<()> {
     let path = PathBuf::from(mvm_core::config::mvm_state_dir())
         .join("bench")
@@ -986,7 +986,7 @@ fn boot_vz_hold_once(vm_name: &str) -> Result<HeldVzVm> {
 
 #[cfg(target_os = "macos")]
 fn wait_for_vz_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
-    use mvm_guest::vsock::adaptive_backoff;
+    use mvm_agentd::vsock::adaptive_backoff;
 
     let pid_path = mvm_core::config::vm_state_dir(vm_name).join("vz.pid");
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -1012,7 +1012,7 @@ fn wait_for_vz_pid_file(vm_name: &str) -> Result<(u32, std::time::Instant)> {
 fn wait_for_guest_readiness_and_record(
     vm_name: &str,
 ) -> Result<(std::time::Instant, std::time::Instant)> {
-    use mvm_guest::vsock::adaptive_backoff;
+    use mvm_agentd::vsock::adaptive_backoff;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     let mut attempt = 0u32;
@@ -1201,7 +1201,7 @@ fn assert_firecracker_bench_cleanup(vm_name: &str) -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn wait_for_firecracker_pid(abs_dir: &str) -> Result<(u32, std::time::Instant)> {
-    use mvm_guest::vsock::adaptive_backoff;
+    use mvm_agentd::vsock::adaptive_backoff;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut attempt = 0u32;
