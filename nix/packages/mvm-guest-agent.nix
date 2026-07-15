@@ -11,7 +11,7 @@
 #
 # `rustPlatform.buildRustPackage` against the workspace at
 # `mvmSrc`. The crate is built with `--package mvm-guest --bins`
-# so the workspace's heavier consumers (mvm, mvm-backend,
+# so the workspace's heavier consumers (mvm-runtime,
 # libkrun, etc.) don't enter the closure. Cargo still
 # resolves and vendors the full workspace lockfile, but only the
 # selected crate's deps compile.

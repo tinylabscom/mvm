@@ -1,13 +1,13 @@
 //! Internal `mvmctl __qemu-vsock-bridge` subcommand.
 //!
 //! Hidden helper spawned (detached) by the QEMU workload backend
-//! (`mvm_backend::qemu`). QEMU's virtio-vsock speaks real AF_VSOCK, but
+//! (`mvm_runtime::qemu`). QEMU's virtio-vsock speaks real AF_VSOCK, but
 //! the shared agent client connects to the per-port UNIX socket that
 //! libkrun/Firecracker expose. This process bridges the two: it listens
 //! on the UNIX socket and splices each connection to the guest's
 //! `AF_VSOCK(cid, port)`, exiting when the watched qemu process dies.
 //!
-//! The AF_VSOCK + splice logic lives in `mvm_backend::qemu` (beside the
+//! The AF_VSOCK + splice logic lives in `mvm_runtime::qemu` (beside the
 //! backend that needs it); this is just the argument surface + forward.
 
 use anyhow::Result;
@@ -31,5 +31,5 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(args: &Args) -> Result<()> {
-    mvm_backend::qemu::run_vsock_bridge(&args.uds, args.cid, args.port, &args.watch_pid_file)
+    mvm_runtime::qemu::run_vsock_bridge(&args.uds, args.cid, args.port, &args.watch_pid_file)
 }

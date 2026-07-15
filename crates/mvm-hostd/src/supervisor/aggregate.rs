@@ -1032,7 +1032,7 @@ mod tests {
         prepare_calls: Mutex<Vec<PlanId>>,
         launch_calls: Mutex<Vec<PlanId>>,
         stop_calls: Mutex<Vec<PlanId>>,
-        slot: mvm_backend::base::config::VmSlot,
+        slot: mvm_runtime::base::config::VmSlot,
         prepare_should_fail: bool,
         launch_should_fail: bool,
         stop_should_fail: bool,
@@ -1044,7 +1044,7 @@ mod tests {
                 prepare_calls: Mutex::new(Vec::new()),
                 launch_calls: Mutex::new(Vec::new()),
                 stop_calls: Mutex::new(Vec::new()),
-                slot: mvm_backend::base::config::VmSlot::new("vm1", 0),
+                slot: mvm_runtime::base::config::VmSlot::new("vm1", 0),
                 prepare_should_fail: false,
                 launch_should_fail: false,
                 stop_should_fail: false,
@@ -1142,7 +1142,7 @@ mod tests {
     }
 
     fn sample_firewall_spec() -> FirewallSpec {
-        FirewallSpec::from_vm_slot(&mvm_backend::base::config::VmSlot::new("vm1", 0), "mvmtun0")
+        FirewallSpec::from_vm_slot(&mvm_runtime::base::config::VmSlot::new("vm1", 0), "mvmtun0")
             .expect("valid sample firewall spec")
     }
 
@@ -1499,7 +1499,7 @@ mod tests {
         let plan = sample_plan();
         let (signed, _sk, vk) = sign_sample(&plan);
         let mut backend = MockBackend::new();
-        backend.slot = mvm_backend::base::config::VmSlot::new("vm/1", 0);
+        backend.slot = mvm_runtime::base::config::VmSlot::new("vm/1", 0);
         let backend = Arc::new(backend);
         let firewall = Arc::new(MockFirewall::new());
         let mut s = make_supervisor_with_firewall(backend.clone(), firewall.clone());

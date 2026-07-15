@@ -3,10 +3,10 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
-use mvm_backend::backend::AnyBackend;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::VmId;
+use mvm_runtime::backend::AnyBackend;
 
 use super::Cli;
 use super::readiness::record_vm_readiness;
@@ -50,10 +50,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // Deregister from the name registry on success
             // (best-effort); on failure the entry plus its `Stopping`
             // readiness stay so the user can see what happened.
-            let registry_path = mvm::vm::name_registry::registry_path();
+            let registry_path = mvm_runtime::vm::name_registry::registry_path();
             if result.is_ok()
                 && let Ok(mut registry) =
-                    mvm::vm::name_registry::VmNameRegistry::load(&registry_path)
+                    mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
             {
                 registry.deregister(n);
                 let _ = registry.save(&registry_path);
@@ -72,7 +72,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // `mvmctl down` (no args) just stops every running VM — across
             // every backend, each dispatched to its owning VMM so QEMU /
             // libkrun VMs are stopped too (not just the platform default).
-            let registry_path = mvm::vm::name_registry::registry_path();
+            let registry_path = mvm_runtime::vm::name_registry::registry_path();
             let mut last_err = None;
             for vm in AnyBackend::list_all() {
                 let backend = AnyBackend::for_started_vm(&vm.name).unwrap_or_else(platform_default);
@@ -81,7 +81,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                 match backend.stop(&VmId::from(vm.name.as_str())) {
                     Ok(()) => {
                         if let Ok(mut registry) =
-                            mvm::vm::name_registry::VmNameRegistry::load(&registry_path)
+                            mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
                         {
                             registry.deregister(&vm.name);
                             let _ = registry.save(&registry_path);

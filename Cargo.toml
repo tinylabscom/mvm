@@ -3,21 +3,12 @@ members = [
     "crates/mvm-core",
     "crates/mvm-storage",
     # plan 123 Phase A — NetworkProvider trait + provisioning/policy seam.
-    # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-backend
+    # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-runtime
     # (where the in-VM shell lives) and the WireGuard/Tailscale mesh impl is
     # mvmd's; both register against this trait.
     "crates/mvm-net",
     "crates/deps/libkrun-sys",
-    # Plan 102 W6.A.5 — leaf bin crate that links mvm-libkrun + mvm-
-    # supervisor without closing the
-    # `mvm-supervisor → mvm-backend → mvm-libkrun` cycle. Produces the
-    # `mvm-libkrun-supervisor` binary that mvm-backend's spawner
-    # resolves at runtime.
-    # Plan 97 Phase B — type-safe `SupervisorConfig` + path resolution
-    # for the Rust-native `mvm-vz-supervisor` bin. Pure data; no FFI.
-    # Parallel role to `mvm-libkrun` for the Vz backend.
-    "crates/mvm-backend",
-    "crates/mvm",
+    "crates/mvm-runtime",
     "crates/mvm-build",
     "crates/mvm-guest",
     "crates/mvm-cli",
@@ -115,7 +106,7 @@ exclude = [
     "crates/mvm-fs/fuzz-oci",
     # virtio-fs FUSE-server request-parser fuzz harness. Same libfuzzer-sys
     # linker constraints; CI gate at `.github/workflows/security.yml::fuzz`.
-    "crates/mvm-backend/fuzz",
+    "crates/mvm-runtime/fuzz-backend",
     # Plan 88 W6 / ADR-003 §"New untrusted-input surfaces" —
     # supervisor-config JSON fuzz harness. CI gate at
     # `.github/workflows/security.yml::fuzz`.
@@ -350,7 +341,7 @@ mvm-client = { path = "crates/mvm-client", version = "0.18.0" }
 mvm-guest = { path = "crates/mvm-guest", version = "0.18.0" }
 mvm-guest-helpers = { path = "crates/mvm-guest-helpers", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
-mvm = { path = "crates/mvm", version = "0.18.0", default-features = false }
+mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
 mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.18.0" }
 mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
@@ -367,7 +358,6 @@ mvm-sdk = { path = "crates/mvm-sdk", version = "0.18.0" }
 # stack. Default feature set is empty; consumers wanting real FFI
 # enable `libkrun-sys` on a host with libkrun installed.
 libkrun-sys = { path = "crates/deps/libkrun-sys", version = "0.18.0" }
-mvm-backend = { path = "crates/mvm-backend", version = "0.18.0", default-features = false }
 
 # Plan 113 / ADR-003 §Decision 5 — A2 confinement helper (seccompiler +
 # landlock). Consumed by the per-VM `mvm-bridge` sidecar.
@@ -408,8 +398,7 @@ path = "src/main.rs"
 
 [dependencies]
 mvm-core.workspace = true
-mvm = { workspace = true, default-features = false }
-mvm-backend = { workspace = true, default-features = false }
+mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 mvm-guest.workspace = true
 mvm-cli = { workspace = true, default-features = false }
@@ -503,7 +492,7 @@ host = [
 # `user` — everything a user runs to create/drive sandboxes: cosign manifest
 # verification for `--prod`, and `build --watch`.
 user = [
-    "mvm/manifest-verify",
+    "mvm-runtime/manifest-verify",
     "mvm-cli/manifest-verify",
     "mvm-core/manifest-verify",
     "mvm-cli/dev-watch",
@@ -518,8 +507,7 @@ user = [
 dev = [
     "host",
     "user",
-    "mvm/contributor-bootstrap",
-    "mvm-backend/contributor-bootstrap",
+    "mvm-runtime/contributor-bootstrap",
     "mvm-build/contributor-bootstrap",
     "mvm-cli/contributor-bootstrap",
 ]
@@ -543,7 +531,7 @@ release-artifact-bootstrap = ["mvm-cli/release-artifact-bootstrap"]
 # Optional S3 storage backend for the template registry — a heavy cloud dep kept
 # opt-in (not part of the local host runtime; fleet/deployment use only).
 template-registry-s3 = [
-    "mvm/template-registry-s3",
+    "mvm-runtime/template-registry-s3",
     "mvm-cli/template-registry-s3",
 ]
 

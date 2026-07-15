@@ -16,11 +16,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use mvm::{AcquireSpec, WarmLease};
-use mvm_backend::MockBackend;
-use mvm_backend::standby_pool::SupervisorStandbyPool;
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{StandbyClaim, StandbyCompat, VmBackend, VmStartConfig};
+use mvm_runtime::MockBackend;
+use mvm_runtime::standby_pool::SupervisorStandbyPool;
+use mvm_runtime::{AcquireSpec, WarmLease};
 
 fn main() -> Result<()> {
     // --- setup: a backend + a standby pool + the admitted workload to attach.

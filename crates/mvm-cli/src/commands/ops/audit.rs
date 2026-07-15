@@ -181,7 +181,7 @@ fn verify_cert(
     json: bool,
 ) -> Result<()> {
     use base64::Engine;
-    use mvm::vm::overlay::{
+    use mvm_runtime::vm::overlay::{
         SignedDestructionReceipt, cert_fingerprint, verify_destruction_receipt,
     };
 
@@ -233,7 +233,8 @@ fn verify_cert(
 
     // 4. Verify each. Fail fast on the first refusal so the
     //    operator sees a clear error per cert.
-    let mut verified: Vec<&mvm::vm::overlay::DestructionReceipt> = Vec::with_capacity(certs.len());
+    let mut verified: Vec<&mvm_runtime::vm::overlay::DestructionReceipt> =
+        Vec::with_capacity(certs.len());
     for (i, signed) in certs.iter().enumerate() {
         let receipt =
             verify_destruction_receipt(signed, expected_pubkey.as_ref()).with_context(|| {
@@ -631,7 +632,7 @@ mod verify_cert_tests {
     use super::*;
     use base64::Engine;
     use ed25519_dalek::SigningKey;
-    use mvm::vm::overlay::{
+    use mvm_runtime::vm::overlay::{
         DestructionReceipt, SignedDestructionReceipt, sign_destruction_receipt,
     };
     use tempfile::tempdir;
@@ -796,9 +797,9 @@ mod verify_cert_tests {
     // shape matches the overlay erasure chain-anchor format.
     // ──────────────────────────────────────────────────────────────
 
-    use mvm::vm::overlay::cert_fingerprint;
     use mvm_core::plan::{PlanId, TenantId};
     use mvm_hostd::supervisor::{AuditEntry, AuditSigner, FileAuditSigner};
+    use mvm_runtime::vm::overlay::cert_fingerprint;
     use std::collections::BTreeMap;
 
     fn write_chain_with_entries(

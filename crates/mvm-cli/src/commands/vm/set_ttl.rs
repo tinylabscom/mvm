@@ -28,9 +28,9 @@ pub(in crate::commands) struct Args {
 }
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
-    let registry_path = mvm::vm::name_registry::registry_path();
-    let mut registry =
-        mvm::vm::name_registry::VmNameRegistry::load(&registry_path).with_context(|| {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    let mut registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
+        .with_context(|| {
             format!(
                 "Failed to load VM name registry at {}",
                 registry_path.display()

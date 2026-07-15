@@ -1015,7 +1015,7 @@ fn cleanup_emits_slot_prune_audit_entry_even_with_no_builds() {
 /// Pass-through env: `MVM_DIRECT_BOOT=1` + stub kernel/rootfs
 /// files skip the build + template-lookup pre-flight that needs
 /// real Nix; `--hypervisor mock` routes backend dispatch to
-/// [`mvm_backend::MockBackend`]; `-d` detaches; `--no-supervisor`
+/// [`mvm_runtime::MockBackend`]; `-d` detaches; `--no-supervisor`
 /// skips plan-64 admission.
 fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
     let stub_dir = sandbox.home_path().join("stub");
@@ -1064,11 +1064,11 @@ fn bring_up_mock_vm(sandbox: &AuditSandbox, name: &str) {
 /// Hosting the agent in the test process keeps it alive across every
 /// subprocess invocation for the duration of the test.
 struct MockVmAgentFixture {
-    _agent: mvm_backend::mock_guest_agent::MockGuestAgent,
+    _agent: mvm_runtime::mock_guest_agent::MockGuestAgent,
 }
 
 /// Create the mock-vms VM directory under the sandbox's HOME and
-/// spawn a [`MockGuestAgent`](mvm_backend::mock_guest_agent::MockGuestAgent)
+/// spawn a [`MockGuestAgent`](mvm_runtime::mock_guest_agent::MockGuestAgent)
 /// listening at `<vm_dir>/runtime/v.sock`. Returns when the listener
 /// is ready to accept connections.
 fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture {
@@ -1077,7 +1077,7 @@ fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture
     // the same path; we compute it here from the same root.
     let vm_dir = sandbox.home_path().join(".mvm").join("mock-vms").join(name);
     std::fs::create_dir_all(&vm_dir).expect("mkdir mock vm_dir");
-    let agent = mvm_backend::mock_guest_agent::MockGuestAgent::start(&vm_dir)
+    let agent = mvm_runtime::mock_guest_agent::MockGuestAgent::start(&vm_dir)
         .expect("start mock guest agent");
     MockVmAgentFixture { _agent: agent }
 }

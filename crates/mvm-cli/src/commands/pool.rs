@@ -14,13 +14,13 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use clap::{Args as ClapArgs, Subcommand};
-use mvm_backend::backend::AnyBackend;
-use mvm_backend::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{
     StandbyClaim, StandbyCompat, StandbyHandle, StandbySpec, StandbyState, VmBackend, VmId,
     VmStartConfig,
 };
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::standby_pool::{STANDBY_POOL_TTL, SupervisorStandbyPool, now_unix_secs};
 use sha2::{Digest, Sha256};
 
 use super::Cli;
@@ -334,7 +334,7 @@ pub fn try_warm_claim(
     let decision = claim_or_cold(&pool, backend.as_vm_backend(), &want, |handle| {
         // The audit substrate (`gateway-<vm>.sock`) is name-keyed; the claimed VM runs
         // under the standby-id, so compute it for `handle.id`.
-        let sub = mvm_backend::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
+        let sub = mvm_runtime::audit_substrate::compute_audit_substrate(&handle.id, Some(&tenant))?;
         let mut start_config = claim_start_config.clone();
         start_config.name = handle.id.clone();
         start_config.rootfs_path = rootfs.clone();

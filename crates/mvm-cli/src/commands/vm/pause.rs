@@ -18,14 +18,14 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use std::path::PathBuf;
 
-use mvm::vm::instance_snapshot::{
-    CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, VsockPrimedSignalSource,
-    await_primed_barrier, pause_and_seal, signal_post_restore, verify_and_resume,
-};
-use mvm_backend::backend::AnyBackend;
 use mvm_core::config::vm_state_dir;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::vm::instance_snapshot::{
+    CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, VsockPrimedSignalSource,
+    await_primed_barrier, pause_and_seal, signal_post_restore, verify_and_resume,
+};
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -82,7 +82,7 @@ fn snapshot_io_for(hypervisor: &str, vm_name: &str) -> Result<Box<dyn SnapshotIO
         // `MockBackend::start_with_mode`. Nothing to validate here
         // beyond its existence — `pause_and_seal` writes the
         // snapshot files into a sibling `snapshot/` directory.
-        let dir = mvm_backend::MockBackend::vm_dir(vm_name);
+        let dir = mvm_runtime::MockBackend::vm_dir(vm_name);
         if !dir.exists() {
             bail!(
                 "mock VM {vm_name:?} is not running (no directory at {})",
@@ -94,7 +94,7 @@ fn snapshot_io_for(hypervisor: &str, vm_name: &str) -> Result<Box<dyn SnapshotIO
             mem_bytes: b"mock-mem".to_vec(),
         }));
     }
-    let vm_dir = mvm_backend::microvm::resolve_running_vm_dir(vm_name)
+    let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(vm_name)
         .with_context(|| format!("VM {vm_name:?} is not running"))?;
     let socket = firecracker_socket(&vm_dir);
     Ok(Box::new(FirecrackerIO::new(socket)))
@@ -135,15 +135,15 @@ pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConf
     // the VM is quiesced. FC's snapshot-seal leaves the fc process alive, so
     // pid-liveness alone cannot distinguish paused from running.
     // Guard on fc.pid existing so only Firecracker VMs get this marker.
-    if let Some(fc_pid_path) = mvm_backend::microvm::fc_pid_path(&args.name)
+    if let Some(fc_pid_path) = mvm_runtime::microvm::fc_pid_path(&args.name)
         && let Ok(pid) = std::fs::read_to_string(&fc_pid_path)
         && let Err(e) = std::fs::write(vm_state_dir(&args.name).join("fc.paused"), pid.trim())
     {
         tracing::warn!(error = %e, vm = %args.name, "could not write fc.paused marker (pause succeeded)");
     }
 
-    let registry_path = mvm::vm::name_registry::registry_path();
-    if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path) {
         let _ = registry.set_paused(&args.name, true);
         let _ = registry.save(&registry_path);
     }
@@ -186,8 +186,10 @@ fn run_warm_start(name: &str, hypervisor: &str) -> Result<()> {
             // rationale as the plain resume path: FC keeps its pid alive
             // across pause/resume, so the marker must be cleared explicitly.
             let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
-            let registry_path = mvm::vm::name_registry::registry_path();
-            if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+            let registry_path = mvm_runtime::vm::name_registry::registry_path();
+            if let Ok(mut registry) =
+                mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
+            {
                 let _ = registry.set_paused(name, false);
                 let _ = registry.touch_last_active(name, mvm_core::time::utc_now());
                 let _ = registry.save(&registry_path);
@@ -242,8 +244,8 @@ pub(in crate::commands) fn run_resume(
     // The VM is now running at the hypervisor level — mark it resumed before
     // signaling the guest, so a post-restore failure below leaves the registry
     // consistent (the VM *is* up) and the operator can simply re-run resume.
-    let registry_path = mvm::vm::name_registry::registry_path();
-    if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path) {
         let _ = registry.set_paused(&args.name, false);
         // A resume is activity — refresh idle tracking so the freshly woken
         // VM isn't immediately re-slept by the idle reaper.
@@ -332,7 +334,7 @@ pub(in crate::commands) fn run_snapshot(
 }
 
 fn snap_ls(json: bool) -> Result<()> {
-    let entries = mvm::vm::instance_snapshot::list_instance_snapshots()?;
+    let entries = mvm_runtime::vm::instance_snapshot::list_instance_snapshots()?;
     if json {
         #[derive(serde::Serialize)]
         struct Row<'a> {
@@ -386,12 +388,12 @@ struct SnapshotRemoveJson<'a> {
 
 fn snap_rm(name: &str, json: bool) -> Result<()> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let removed = mvm::vm::instance_snapshot::delete_instance_snapshot(name)?;
+    let removed = mvm_runtime::vm::instance_snapshot::delete_instance_snapshot(name)?;
     if !removed {
         bail!("no snapshot found for VM {:?}", name);
     }
-    let registry_path = mvm::vm::name_registry::registry_path();
-    if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path) {
         let _ = registry.set_paused(name, false);
         let _ = registry.save(&registry_path);
     }

@@ -973,7 +973,7 @@ fn shell_quote(input: &str) -> String {
 /// Best-effort sidecar emission: query `passthru.mvm` against the
 /// already-built flake/attr and write it to
 /// `<build_dir>/mvm-meta.json` so the consumer in
-/// `mvm::vm::runtime_meta::from_sidecar` can populate
+/// `mvm_runtime::vm::runtime_meta::from_sidecar` can populate
 /// `accessible` for the console gate.
 ///
 /// Failure modes (all log+continue, never fail the build):

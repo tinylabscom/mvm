@@ -9,7 +9,7 @@
 //! **Artifact-model operations**:
 //!   `model-inspect` / `model-validate` / `model-config` / `model-build` —
 //!   operate on `ArtifactManifest` directories under `~/.mvm/artifacts/<id>/`,
-//!   using the typed model from `mvm_backend::artifacts`. Named with a
+//!   using the typed model from `mvm_runtime::artifacts`. Named with a
 //!   `model-` prefix to avoid shadowing the packed-artifact `inspect`.
 
 use std::path::{Path, PathBuf};
@@ -17,9 +17,6 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand, ValueEnum};
 
-use mvm_backend::artifacts::manifest::ArtifactManifest;
-use mvm_backend::artifacts::traits::{ArtifactError, ArtifactValidator, BackendConfigWriter};
-use mvm_backend::artifacts::{FirecrackerConfigWriter, StaticValidator};
 use mvm_build::packed_artifact::{
     ArtifactProfile, PackInputs, SecurityPosture, extract as extract_artifact, inspect_unverified,
     pack as pack_artifact, verify as verify_artifact,
@@ -27,6 +24,9 @@ use mvm_build::packed_artifact::{
 use mvm_core::arch::GuestArch;
 use mvm_core::config::mvm_data_dir;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::artifacts::manifest::ArtifactManifest;
+use mvm_runtime::artifacts::traits::{ArtifactError, ArtifactValidator, BackendConfigWriter};
+use mvm_runtime::artifacts::{FirecrackerConfigWriter, StaticValidator};
 
 use super::Cli;
 use super::host_signer;
@@ -568,15 +568,15 @@ fn run_model_build(_args: ModelBuildArgs) -> Result<()> {
     Ok(())
 }
 
-/// Reconstruct a [`mvm_backend::artifacts::artifact::MicrovmArtifact`] from an
+/// Reconstruct a [`mvm_runtime::artifacts::artifact::MicrovmArtifact`] from an
 /// `ArtifactManifest` for validation and config-writing.
 ///
 /// Paths stored in the manifest are relative to the artifact directory.
 fn manifest_to_artifact(
     m: &ArtifactManifest,
     dir: &Path,
-) -> mvm_backend::artifacts::artifact::MicrovmArtifact {
-    use mvm_backend::artifacts::artifact::{KernelArtifact, MicrovmArtifact, RootfsArtifact};
+) -> mvm_runtime::artifacts::artifact::MicrovmArtifact {
+    use mvm_runtime::artifacts::artifact::{KernelArtifact, MicrovmArtifact, RootfsArtifact};
 
     MicrovmArtifact {
         id: m.artifact_id,
@@ -610,7 +610,7 @@ fn manifest_to_artifact(
         // Check 6 becomes meaningful only when boot_args is recorded in the
         // manifest from the real cmdline at build time (the compat-seeded
         // path is then absent and the manifest carries the actual args used).
-        boot_args: mvm_backend::compat::compat(m.backend)
+        boot_args: mvm_runtime::compat::compat(m.backend)
             .required_boot_args
             .iter()
             .map(|s| s.to_string())

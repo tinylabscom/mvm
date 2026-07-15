@@ -702,8 +702,8 @@ jobs:
           filters: |
             libkrun:
               - 'crates/deps/libkrun-sys/**'
-              - 'crates/mvm-backend/src/libkrun.rs'
-              - 'crates/mvm-backend/Cargo.toml'
+              - 'crates/mvm-runtime/src/libkrun.rs'
+              - 'crates/mvm-runtime/Cargo.toml'
               - 'crates/mvm-providers/src/apple_container/**'
               - '.github/workflows/ci.yml'
 
@@ -740,7 +740,7 @@ jobs:
         # Sanity: the fallback path (no libkrun-sys) keeps compiling.
         # Mirrors how every other workspace consumer that touches
         # libkrun-sys builds.
-        run: cargo build -p libkrun-sys -p mvm-backend
+        run: cargo build -p libkrun-sys -p mvm-runtime
 
       - name: Build libkrun-sys with libkrun-sys (lib + bin + examples)
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
@@ -750,9 +750,9 @@ jobs:
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
         run: cargo test -p libkrun-sys --features libkrun-sys
 
-      - name: Test mvm-backend (libkrun module)
+      - name: Test mvm-runtime (libkrun module)
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
-        run: cargo test -p mvm-backend libkrun
+        run: cargo test -p mvm-runtime libkrun
 
       - name: Clippy libkrun-sys --features libkrun-sys --all-targets
         if: steps.filter.outputs.libkrun == 'true' || github.ref == 'refs/heads/main'
@@ -834,7 +834,7 @@ jobs:
       - name: Fetch Firecracker CI kernel + build rootfs
         if: steps.filter.outputs.spawn == 'true' || github.ref == 'refs/heads/main'
         # The mvm Firecracker path uses the upstream Firecracker-CI
-        # kernel (`crates/mvm-backend/src/firecracker.rs` downloads
+        # kernel (`crates/mvm-runtime/src/firecracker.rs` downloads
         # `firecracker-ci/<ver>/x86_64/vmlinux-5.10.*` from S3), NOT the
         # Nix `vmlinux` outputs — on x86_64 those are bzImage (for
         # libkrun/Vz, which accept bzImage), and

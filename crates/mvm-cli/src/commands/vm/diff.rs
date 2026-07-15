@@ -61,11 +61,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// VMM (Firecracker's `v.sock`, or the per-port UNIX socket libkrun/QEMU
 /// expose) but is unaware of the in-memory mock backend.
 fn fs_diff(name: &str) -> Result<Vec<FsChange>> {
-    let mock_dir = mvm_backend::MockBackend::vm_dir(name);
+    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
     if mock_dir.join("runtime").join("v.sock").exists() {
         return mvm_guest::vsock::query_fs_diff(&mock_dir.to_string_lossy());
     }
     let mut stream =
-        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
     mvm_guest::vsock::query_fs_diff_on(&mut stream)
 }

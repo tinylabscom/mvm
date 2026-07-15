@@ -19,7 +19,6 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
-use mvm_backend::AnyBackend;
 use mvm_core::protocol::vm_backend::{VmId, VmInfo, VmStatus};
 use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
@@ -27,6 +26,7 @@ use mvm_fs::oci::{
 };
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
+use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
@@ -210,9 +210,9 @@ fn unpack_one_layer(layer: &LayerDescriptor, bytes: &[u8], dest: &Path) -> Resul
 /// (`rootfs.verity` + `rootfs.roothash`) from the host filesystem. Returns
 /// `(verity_path, roothash)` when both are present and the hash is well-formed
 /// (64-hex); `(None, None)` for an unverified image. A `&Path` adapter over
-/// `mvm_backend::microvm::probe_verity_sidecar`, which does the host-side read.
+/// `mvm_runtime::microvm::probe_verity_sidecar`, which does the host-side read.
 fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<String>) {
-    mvm_backend::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
+    mvm_runtime::microvm::probe_verity_sidecar(&rootfs.to_string_lossy())
 }
 
 #[async_trait]
@@ -367,7 +367,7 @@ impl MvmClient for LocalBackend {
         id: &MachineId,
         cfg: mvm_core::client::dto::ReconfigureRequest,
     ) -> Result<MachineState> {
-        use mvm::machine::persist as mp;
+        use mvm_runtime::machine::persist as mp;
 
         // Claim-10: this backend's in-process boot does not enforce network
         // policy, so a net/allow_host change would persist-but-not-enforce.
@@ -644,7 +644,7 @@ mod tests {
     /// Persist a minimal image-backed spec named `name` into the current
     /// `MVM_DATA_DIR`-derived machine state dir.
     fn persist_test_spec(name: &str) {
-        use mvm::machine::persist::{
+        use mvm_runtime::machine::persist::{
             MACHINE_SPEC_SCHEMA_VERSION, MachineSpec as PersistSpec, save_machine_spec,
         };
         let spec = PersistSpec {
@@ -756,7 +756,8 @@ mod tests {
         assert_eq!(state.status, MachineStatus::Stopped);
 
         // The spec was actually persisted: load it back and confirm cpus updated.
-        let loaded = mvm::machine::persist::load_machine_spec("myapp").expect("load patched spec");
+        let loaded =
+            mvm_runtime::machine::persist::load_machine_spec("myapp").expect("load patched spec");
         assert_eq!(loaded.cpus, 4, "persisted cpus should be 4");
         assert_eq!(loaded.memory, "512M", "memory should be unchanged");
     }
@@ -783,8 +784,8 @@ mod tests {
         );
 
         // The spec must not have been overwritten.
-        let loaded =
-            mvm::machine::persist::load_machine_spec("zero-cpu-machine").expect("load spec");
+        let loaded = mvm_runtime::machine::persist::load_machine_spec("zero-cpu-machine")
+            .expect("load spec");
         assert_eq!(loaded.cpus, 2, "cpus must remain unchanged after refusal");
     }
 

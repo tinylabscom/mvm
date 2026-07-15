@@ -39,17 +39,17 @@ fn default_forward_timeout_secs() -> u64 {
 /// serve paths gate on byte-identical decisions.
 pub fn build_egress_gate(
     policy: &mvm_core::policy::network_policy::NetworkPolicy,
-) -> mvm_backend::vmm::egress_gate::EgressGate {
+) -> mvm_runtime::vmm::egress_gate::EgressGate {
     let pins = mvm_core::policy::dns_pin::resolve_network_policy_pins(policy);
     let now = chrono::Utc::now().to_rfc3339();
-    mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now)
+    mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(policy, &pins, &now)
 }
 
 /// How the guest reaches this endpoint. Defined in `mvm-backend` (next to the
 /// `spawn_substitution_endpoint` writer) and re-exported here so the bin, its
 /// tests, and `EndpointConfig` share one wire definition without a dependency
 /// cycle (mvm-hostd → mvm-backend, never the reverse).
-pub use mvm_backend::EndpointTransport;
+pub use mvm_runtime::EndpointTransport;
 
 /// Which egress protocol the guest speaks on the relayed EGRESS_PORT stream.
 /// A VM uses exactly one, fixed at admission (secrets ⇒ WireRequest, else raw),

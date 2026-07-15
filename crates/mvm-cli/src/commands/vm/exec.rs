@@ -1187,7 +1187,7 @@ impl ReceiptInput {
             }
         };
 
-        let selected_backend = mvm_backend::backend::AnyBackend::from_hypervisor(backend);
+        let selected_backend = mvm_runtime::backend::AnyBackend::from_hypervisor(backend);
         crate::exec::validate_image_egress_backend(
             &selected_backend,
             args.image.is_some(),
@@ -1296,7 +1296,7 @@ fn oci_vsock_proxy_env_for_capabilities(
 }
 
 fn oci_vsock_proxy_env_for_backend(
-    backend: &mvm_backend::backend::AnyBackend,
+    backend: &mvm_runtime::backend::AnyBackend,
     image_requested: bool,
     network_policy: &mvm_core::network_policy::NetworkPolicy,
 ) -> Vec<(String, String)> {

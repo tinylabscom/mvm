@@ -9,7 +9,7 @@ license.workspace = true
 # `async-trait`, no async runtime — so the foundation stays runtime-free); this
 # crate re-exports them and adds the in-process `LocalBackend`, which links the
 # runtime backend. `LocalBackend` stays here, above the runtime, so `mvm-core`
-# never gains an `mvm-backend` edge — that is what lets `mvm-sdk` enable
+# never gains an `mvm-runtime` edge — that is what lets `mvm-sdk` enable
 # `mvm-core/client` for the trait without dragging the backend into a cycle.
 
 [features]
@@ -20,10 +20,10 @@ remote = ["mvm-core/client-remote"]
 
 [dependencies]
 mvm-core = { workspace = true, features = ["client"] }
-mvm-backend = { workspace = true, default-features = false }
-# Persistent machine spec engine (`machine::persist::{load,overwrite,apply_patch,…}`).
-# mvm does NOT depend on this crate, so this edge is acyclic.
-mvm = { workspace = true }
+# Persistent machine spec engine (`machine::persist::{load,overwrite,apply_patch,…}`)
+# + the VmBackend implementations. mvm-runtime does NOT depend on this crate, so
+# this edge is acyclic.
+mvm-runtime = { workspace = true, default-features = false }
 # The in-process admitted-boot seam (`run::admit_and_boot_local`). mvm-hostd is
 # already in the mvmctl closure (the CLI links it), so this edge adds no crates
 # to the default build; it does not form a cycle because mvm-sdk — which

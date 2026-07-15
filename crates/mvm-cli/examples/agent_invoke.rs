@@ -20,7 +20,7 @@ fn main() -> anyhow::Result<()> {
     // string into valid JSON for ordinary names.
     let payload = format!("[[{name:?}], {{}}]").into_bytes();
 
-    let transport = mvm::vsock_transport::for_vm(&vm)?;
+    let transport = mvm_runtime::vsock_transport::for_vm(&vm)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
 
     let stdout = RefCell::new(Vec::<u8>::new());

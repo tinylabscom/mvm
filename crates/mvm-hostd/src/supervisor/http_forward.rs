@@ -9,7 +9,7 @@
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-use mvm_backend::vmm::egress_gate::{EgressGate, EgressVerdict};
+use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 use reqwest::header::{HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 

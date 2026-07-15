@@ -458,7 +458,7 @@ jobs:
         run: cargo fuzz run fuzz_build_image -- -max_total_time="$DURATION"
 
       - name: Fuzz FUSE dispatch (virtio-fs request parser)
-        working-directory: crates/mvm-backend
+        working-directory: crates/mvm-runtime
         env:
           DURATION: ${{ steps.duration.outputs.secs }}
           RUSTUP_TOOLCHAIN: nightly-2026-06-11
@@ -468,7 +468,7 @@ jobs:
         # dispatch never panics on any input and always emits a well-formed
         # fuse_out_header. Path-confinement is a separate structural property
         # pinned by a unit test.
-        run: cargo fuzz run fuse_dispatch -- -max_total_time="$DURATION"
+        run: cargo fuzz run --fuzz-dir fuzz-backend fuse_dispatch -- -max_total_time="$DURATION"
 
       - name: Upload corpus on failure
         if: failure()

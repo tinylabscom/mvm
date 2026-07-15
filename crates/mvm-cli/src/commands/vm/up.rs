@@ -12,11 +12,11 @@ use crate::ui;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_backend::backend::AnyBackend;
-use mvm_backend::image;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::image;
 
 use super::super::env::dev_vz::{ensure_workload_kernel, ensure_workload_verity_initrd};
 use super::audit_chain::{AuditEmitter, default_audit_dir};
@@ -1268,7 +1268,7 @@ fn persistent_oci_rootfs_requires_overlay_policy(rootfs_path: &std::path::Path) 
         .map(|sidecar| sidecar.runtime_lean)
         .unwrap_or(false);
     let (verity_path, roothash) =
-        mvm_backend::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
+        mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
     runtime_lean && verity_path.is_some() && roothash.is_some()
 }
 
@@ -1297,10 +1297,10 @@ pub(crate) fn persistent_oci_effective_initrd(
 }
 
 fn register_vm_name(vm_name: &str, network_name: &str) {
-    let registry_path = mvm::vm::name_registry::registry_path();
-    if let Ok(mut registry) = mvm::vm::name_registry::VmNameRegistry::load(&registry_path) {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path) {
         registry.deregister(vm_name);
-        let _ = registry.register_with_metadata(mvm::vm::name_registry::RegisterParams {
+        let _ = registry.register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams {
             name: vm_name,
             vm_dir: "",
             network: network_name,
@@ -1340,7 +1340,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     let image_sealed = super::agent_verbs::image_is_sealed(rootfs_path);
     let overlay_required_oci = persistent_oci_rootfs_requires_overlay_policy(rootfs_path);
     let (verity_path, roothash) =
-        mvm_backend::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
+        mvm_runtime::microvm::probe_verity_sidecar(&rootfs_path.to_string_lossy());
     let runtime_source_policy = mvm_core::vm_backend::select_runtime_source_policy(
         mvm_core::vm_backend::RuntimeSourcePolicySelection {
             backend_name: Some(backend_name),
@@ -1446,7 +1446,7 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         }
     }
     enforce_shares_if(&admission, &start_config.volumes)?;
-    if let Err(err) = mvm_backend::workload_backend::require_workload_backend(&backend) {
+    if let Err(err) = mvm_runtime::workload_backend::require_workload_backend(&backend) {
         emit_failed_if(&admission, "backend-start", &err);
         return Err(err);
     }

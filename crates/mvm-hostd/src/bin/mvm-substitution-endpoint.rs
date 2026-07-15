@@ -135,10 +135,10 @@ fn main() -> Result<()> {
 /// Build the raw-egress claim-10 gate for a config: use the threaded network
 /// policy when present, else fail closed with default-deny. Raw mode carries no
 /// secrets, so this gate is the entire egress admission decision.
-fn raw_egress_gate(cfg: &EndpointConfig) -> mvm_backend::vmm::egress_gate::EgressGate {
+fn raw_egress_gate(cfg: &EndpointConfig) -> mvm_runtime::vmm::egress_gate::EgressGate {
     match &cfg.network_policy {
         Some(policy) => build_egress_gate(policy),
-        None => mvm_backend::vmm::egress_gate::EgressGate::default_deny(),
+        None => mvm_runtime::vmm::egress_gate::EgressGate::default_deny(),
     }
 }
 

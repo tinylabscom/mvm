@@ -1,5 +1,5 @@
 //! Backend-neutral kernel artifact format. Backends accept a subset
-//! (see `mvm_backend::BackendCompat`); libkrun maps the ones it can
+//! (see `mvm_runtime::BackendCompat`); libkrun maps the ones it can
 //! load to its FFI constants; unsupported variants return an error at
 //! the call site rather than failing silently.
 use serde::{Deserialize, Serialize};

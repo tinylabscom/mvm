@@ -106,7 +106,7 @@ grep -q "/usr/local/bin/mvm-guest-agent" "${CLI_STDOUT}" || {
 
 if [[ "${SKIP_RELAY_PROOF}" != "1" ]]; then
   echo "==> relay admit/deny proof guest"
-  OUT="${GUEST_OUT}" bash crates/mvm-backend/examples/hvf-egress-guest/build.sh
+  OUT="${GUEST_OUT}" bash crates/mvm-runtime/examples/hvf-egress-guest/build.sh
 
   KERNEL="${MVM_HVF_KERNEL:-${HOME}/.cache/mvm/builder-vm/aarch64/vmlinux}"
   INITRD="${MVM_HVF_INITRD:-${GUEST_OUT}/initramfs.cpio}"
@@ -122,7 +122,7 @@ if [[ "${SKIP_RELAY_PROOF}" != "1" ]]; then
   "${run_env[@]}" \
     "MVM_HVF_KERNEL=${KERNEL}" \
     "MVM_HVF_INITRD=${INITRD}" \
-    cargo run -p mvm-backend --example hvf-relay-egress \
+    cargo run -p mvm-runtime --example hvf-relay-egress \
     >"${RELAY_STDOUT}" 2>"${RELAY_STDERR}"
 
   grep -q "admitted destination reachable: true" "${RELAY_STDOUT}" || {

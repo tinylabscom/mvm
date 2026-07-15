@@ -5,8 +5,8 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
-use mvm::shell;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::shell;
 
 use crate::ui;
 
@@ -116,7 +116,7 @@ fn render_typed_verdict(
 /// tier yet. Fails closed with an actionable error instead of letting
 /// `run_in_vm` fail deep inside a doomed vsock call.
 fn ensure_guest_exec_available() -> Result<()> {
-    mvm::linux_env::require_guest_exec_available("running 'nix flake check'")
+    mvm_runtime::linux_env::require_guest_exec_available("running 'nix flake check'")
 }
 
 #[cfg(test)]

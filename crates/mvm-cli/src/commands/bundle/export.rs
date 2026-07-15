@@ -16,8 +16,8 @@ use mvm_core::plan::bundle::{
     VerityInfo, sha256_hex, write_bundle,
 };
 
-use mvm::vm::template::lifecycle as tmpl;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::super::Cli;
 use super::super::vm::host_signer;
@@ -49,7 +49,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
     // Verity sidecar lives next to the rootfs by convention; the
     // backend's probe is the source of truth.
-    let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
+    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
 
     // ---- 2. Load every artifact byte blob ----
     //

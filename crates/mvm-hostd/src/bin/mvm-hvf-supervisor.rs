@@ -1,8 +1,8 @@
 //! `mvm-hvf-supervisor` — one process per raw-HVF guest.
 //!
 //! Reads an [`mvm_build::hvf_supervisor::HvfSupervisorConfig`] JSON document on
-//! stdin (written by `mvm_backend::hvf`), self-signs the `hypervisor`
-//! entitlement, boots the guest via `mvm_backend::hvf::boot_kernel` (which drives
+//! stdin (written by `mvm_runtime::hvf`), self-signs the `hypervisor`
+//! entitlement, boots the guest via `mvm_runtime::hvf::boot_kernel` (which drives
 //! the unified `vmm::run` loop), captures its console to the configured log, and
 //! writes/removes a PID file so the backend can confirm launch and stop/status
 //! the VM. macOS / Apple-silicon only; a stub elsewhere so the workspace links.
@@ -188,14 +188,14 @@ fn main() -> anyhow::Result<()> {
     let mut disks = Vec::with_capacity(cfg.disks.len());
     for d in &cfg.disks {
         let img = if d.read_only {
-            mvm_backend::hvf::DiskImage::open(&d.path, true)
+            mvm_runtime::hvf::DiskImage::open(&d.path, true)
                 .with_context(|| format!("open read-only disk {}", d.path.display()))?
         } else if d.ephemeral {
             let bytes = std::fs::read(&d.path)
                 .with_context(|| format!("read ephemeral disk {}", d.path.display()))?;
-            mvm_backend::hvf::DiskImage::mem(bytes)
+            mvm_runtime::hvf::DiskImage::mem(bytes)
         } else {
-            mvm_backend::hvf::DiskImage::open(&d.path, false)
+            mvm_runtime::hvf::DiskImage::open(&d.path, false)
                 .with_context(|| format!("open read-write disk {}", d.path.display()))?
         };
         disks.push(img);
@@ -211,14 +211,14 @@ fn main() -> anyhow::Result<()> {
     // Egress over vsock is a pure relay to the per-VM endpoint, which owns the
     // whole egress decision (claim-10 default-deny + secret substitution). The
     // supervisor only wires the relay socket paths through.
-    let result = mvm_backend::hvf::boot_kernel_until(
-        mvm_backend::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
+    let result = mvm_runtime::hvf::boot_kernel_until(
+        mvm_runtime::hvf::KernelBootUntilParams::builder_file(&cfg.kernel, timeout)
             .initramfs(initramfs.as_deref())
             .disks(disks)
             .vsock(cfg.vsock)
             .stop(&STOP)
             .paused(&PAUSED)
-            .channels(mvm_backend::hvf::HostChannels {
+            .channels(mvm_runtime::hvf::HostChannels {
                 agent_socket: cfg.agent_socket.clone(),
                 substitution_socket: cfg.substitution_socket.clone(),
                 egress_relay: cfg.egress_relay_socket.clone(),

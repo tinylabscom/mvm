@@ -14,14 +14,14 @@ use anyhow::{Context, Result, bail};
 use clap::Args as ClapArgs;
 use serde::Serialize;
 
-use mvm_backend::checkpoint::{
-    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, capture_fs_quick,
-    capture_vm_full, checkpoint_is_vz, fork_checkpoint, fork_vm_full_fc,
-};
 use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::SnapshotCapability;
 use mvm_hostd::audit::bind::class_str;
+use mvm_runtime::checkpoint::{
+    CaptureFsQuickParams, CaptureVmFullParams, CheckpointStore, ForkParams, capture_fs_quick,
+    capture_vm_full, checkpoint_is_vz, fork_checkpoint, fork_vm_full_fc,
+};
 
 use super::Cli;
 use super::shared::clap_vm_name;
@@ -289,7 +289,7 @@ fn rootfs_from_mode_json(state_dir: &std::path::Path) -> Result<Option<PathBuf>>
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
     };
-    let meta: mvm_backend::base::runtime_meta::VmRuntimeMeta =
+    let meta: mvm_runtime::base::runtime_meta::VmRuntimeMeta =
         serde_json::from_str(&body).with_context(|| format!("parsing {}", path.display()))?;
     Ok(meta.rootfs_path.map(PathBuf::from))
 }
@@ -318,7 +318,7 @@ fn vm_is_running(name: &str) -> bool {
 
     // fc.pid lives under ~/microvm/vms/<name>/fc.pid (the VMS_DIR FC workspace),
     // not under vm_state_dir. Probe that separately so a live FC VM is detected.
-    if let Some(fc_pid_path) = mvm_backend::microvm::fc_pid_path(name)
+    if let Some(fc_pid_path) = mvm_runtime::microvm::fc_pid_path(name)
         && let Ok(s) = std::fs::read_to_string(&fc_pid_path)
         && let Ok(pid) = s.trim().parse::<libc::pid_t>()
     {
@@ -352,7 +352,7 @@ fn vm_is_quiesced(name: &str) -> bool {
 fn fc_pause_marker_matches_live_pid(name: &str) -> bool {
     let marker = std::fs::read_to_string(vm_state_dir(name).join("fc.paused")).ok();
     let live =
-        mvm_backend::microvm::fc_pid_path(name).and_then(|p| std::fs::read_to_string(p).ok());
+        mvm_runtime::microvm::fc_pid_path(name).and_then(|p| std::fs::read_to_string(p).ok());
     matches!((marker, live), (Some(m), Some(l)) if !m.trim().is_empty() && m.trim() == l.trim())
 }
 
@@ -370,7 +370,7 @@ fn runtime_contract_for_checkpoint(
     Option<mvm_core::vm_backend::RuntimeSourcePolicy>,
     Option<String>,
 )> {
-    Ok(mvm_backend::base::runtime_meta::read(name)?
+    Ok(mvm_runtime::base::runtime_meta::read(name)?
         .map(|meta| {
             (
                 Some(meta.runtime_source_policy),
@@ -381,7 +381,7 @@ fn runtime_contract_for_checkpoint(
 }
 
 fn ensure_save_restore_supported(action: &str) -> Result<()> {
-    let backend = mvm_backend::backend::AnyBackend::auto_select();
+    let backend = mvm_runtime::backend::AnyBackend::auto_select();
     let available = backend.snapshot_capability();
     if !available.satisfies(SnapshotCapability::SaveRestore) {
         bail!(
@@ -461,7 +461,7 @@ fn capture_vm_full_for_running_vm(
         tag,
         created_unix,
     };
-    let control = mvm_backend::firecracker::FcVmFullControl::new(name);
+    let control = mvm_runtime::firecracker::FcVmFullControl::new(name);
     capture_vm_full(store, params, &control)
 }
 
@@ -561,14 +561,14 @@ fn diff(a: &str, b: &str, json: bool) -> Result<()> {
     let meta_b = store
         .read_meta(&id_b)
         .with_context(|| format!("reading checkpoint {b:?}"))?;
-    let d = mvm_backend::checkpoint::diff_checkpoints(&meta_a, &meta_b);
+    let d = mvm_runtime::checkpoint::diff_checkpoints(&meta_a, &meta_b);
 
     if json {
         crate::json_out::emit_json(&d)?;
         return Ok(());
     }
 
-    use mvm_backend::checkpoint::{BlobStatus, LineageRelation};
+    use mvm_runtime::checkpoint::{BlobStatus, LineageRelation};
     ui::info(&format!("checkpoint diff: {a} -> {b}"));
     if d.class_a != d.class_b {
         ui::info(&format!(
@@ -950,7 +950,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         mvm_hostd::plan_admission::stash_plan_for_bridge(&mint_cfg)?;
     }
 
-    let restorer = mvm_backend::firecracker::FcForkRestorer;
+    let restorer = mvm_runtime::firecracker::FcForkRestorer;
     let fork_result = fork_vm_full_fc(
         p.store,
         ForkParams {
@@ -986,9 +986,9 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
             grant_env.predecessor_session_id = Some(session_id);
             grant_env.predecessor_plan_nonce_hex = Some(plan_nonce.as_hex().to_string());
         }
-        match mvm_backend::microvm::resolve_running_vm_dir(&p.child_vm_name) {
+        match mvm_runtime::microvm::resolve_running_vm_dir(&p.child_vm_name) {
             Ok(vm_dir) => {
-                let vsock_path_str = mvm_backend::microvm::firecracker_vsock_uds_path(&vm_dir);
+                let vsock_path_str = mvm_runtime::microvm::firecracker_vsock_uds_path(&vm_dir);
                 const POLL_ATTEMPTS: u32 = 40; // 20 seconds max
                 let mut agent_ready = false;
                 for _ in 0..POLL_ATTEMPTS {
@@ -1077,8 +1077,8 @@ struct BootForkedChildParams<'a> {
 /// The rootfs is the already-materialized instance file (`prepare_instance_rootfs`
 /// returns early when source == instance, so nothing gets clobbered).
 fn boot_forked_child(p: BootForkedChildParams<'_>) -> Result<()> {
-    use mvm_backend::backend::AnyBackend;
     use mvm_core::util::parse_human_size;
+    use mvm_runtime::backend::AnyBackend;
 
     let effective_hypervisor = super::super::shared::resolve_effective_hypervisor(p.hypervisor);
     let parent_meta = p.store.read_meta(p.parent_checkpoint)?;
@@ -1477,8 +1477,8 @@ mod tests {
         std::fs::write(&rootfs_file, b"fake rootfs").unwrap();
 
         // Write mode.json carrying the rootfs_path (as record_from_rootfs would).
-        let meta = mvm_backend::base::runtime_meta::VmRuntimeMeta {
-            mode: mvm_backend::base::runtime_meta::StartModeKind::Detached,
+        let meta = mvm_runtime::base::runtime_meta::VmRuntimeMeta {
+            mode: mvm_runtime::base::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: Some(rootfs_file.to_string_lossy().into_owned()),
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
@@ -1507,8 +1507,8 @@ mod tests {
 
         // Write mode.json pointing at a rootfs that does NOT exist.
         let gone_path = tmp.path().join("gone").join("rootfs.ext4");
-        let meta = mvm_backend::base::runtime_meta::VmRuntimeMeta {
-            mode: mvm_backend::base::runtime_meta::StartModeKind::Detached,
+        let meta = mvm_runtime::base::runtime_meta::VmRuntimeMeta {
+            mode: mvm_runtime::base::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: Some(gone_path.to_string_lossy().into_owned()),
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,
@@ -1625,7 +1625,7 @@ mod tests {
 
         // Confirm the no-clobber seam fires: prepare_instance_rootfs_inner
         // returns the same path without touching the file when src == instance.
-        let out = mvm_backend::base::cow::prepare_instance_rootfs_inner(
+        let out = mvm_runtime::base::cow::prepare_instance_rootfs_inner(
             &instance,
             instance.to_str().unwrap(),
         )

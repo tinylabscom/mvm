@@ -155,8 +155,8 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
         })?;
 
         let work_dir = partial.join("work");
-        mvm_backend::builder_runner::inject::inject_host_binaries(
-            &mvm_backend::builder_runner::inject::InjectRequest {
+        mvm_runtime::builder_runner::inject::inject_host_binaries(
+            &mvm_runtime::builder_runner::inject::InjectRequest {
                 kernel: &partial_kernel,
                 base_rootfs: &base_rootfs,
                 out_rootfs: &partial_rootfs,
@@ -211,8 +211,8 @@ pub fn resolve_hvf_builder_image() -> Result<(PathBuf, PathBuf, Option<PathBuf>)
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_backend::builder_runner::hvf_builder::HvfBuilderVm;
     use mvm_build::libkrun_builder::BuilderShellJob;
+    use mvm_runtime::builder_runner::hvf_builder::HvfBuilderVm;
 
     #[test]
     fn cache_key_is_stable_and_input_sensitive() {

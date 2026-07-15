@@ -392,7 +392,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                         "(dry-run) Would scan for orphaned builds — see `mvmctl manifest prune --orphans --dry-run` for details.",
                     );
                 } else {
-                    match mvm::vm::template::lifecycle::template_prune_orphan_slots() {
+                    match mvm_runtime::vm::template::lifecycle::template_prune_orphan_slots() {
                         Ok((count, _)) => {
                             mvm_core::audit_emit!(SlotPrune, "source=cache_prune count={count}");
                             if count > 0 {
@@ -472,9 +472,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // live-expired standby's entitled supervisor is SIGTERM'd before its dir is
             // dropped, so idle entitled processes never accumulate. Shares
             // `STANDBY_POOL_TTL` with the launch-path reaper so both agree on "stale".
-            use mvm_backend::standby_pool::STANDBY_POOL_TTL;
+            use mvm_runtime::standby_pool::STANDBY_POOL_TTL;
             if dry_run {
-                if let Ok(pool) = mvm_backend::standby_pool::SupervisorStandbyPool::open()
+                if let Ok(pool) = mvm_runtime::standby_pool::SupervisorStandbyPool::open()
                     && let Ok(n) = pool.list().map(|v| v.len())
                     && n > 0
                 {
@@ -483,8 +483,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
                     ));
                 }
             } else {
-                match mvm_backend::standby_pool::SupervisorStandbyPool::open().and_then(|pool| {
-                    pool.reap_stale(STANDBY_POOL_TTL, mvm_backend::standby_pool::now_unix_secs())
+                match mvm_runtime::standby_pool::SupervisorStandbyPool::open().and_then(|pool| {
+                    pool.reap_stale(STANDBY_POOL_TTL, mvm_runtime::standby_pool::now_unix_secs())
                 }) {
                     Ok(reaped) if !reaped.is_empty() => {
                         removed += reaped.len() as u64;
@@ -499,7 +499,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             // ones follow cache retention. One corrupt meta.json makes list() fail,
             // which logs a warning and skips the sweep — acceptable for a prune pass.
             const CHECKPOINT_MAX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
-            let ckpt_store = mvm_backend::checkpoint::CheckpointStore::open();
+            let ckpt_store = mvm_runtime::checkpoint::CheckpointStore::open();
             if dry_run {
                 if !ckpt_store.list().unwrap_or_default().is_empty() {
                     ui::info("(dry-run) Would sweep expired untagged checkpoints.");
@@ -836,7 +836,7 @@ fn reclaim_entries(entries: &[CacheEntry], kind: &str, dry_run: bool) -> (u64, u
 /// Remove untagged checkpoints older than `max_age_secs`. Tagged checkpoints
 /// are user-pinned and never swept. Returns the count removed.
 pub(super) fn sweep_untagged_checkpoints(
-    store: &mvm_backend::checkpoint::CheckpointStore,
+    store: &mvm_runtime::checkpoint::CheckpointStore,
     now_unix: u64,
     max_age_secs: u64,
 ) -> anyhow::Result<usize> {
@@ -1108,8 +1108,8 @@ mod tests {
 
     #[test]
     fn prune_removes_untagged_keeps_tagged() {
-        use mvm_backend::checkpoint::CheckpointStore;
         use mvm_core::checkpoint::{CheckpointClass, CheckpointId, CheckpointMeta};
+        use mvm_runtime::checkpoint::CheckpointStore;
 
         let tmp = tempfile::tempdir().unwrap();
         let store = CheckpointStore::at(tmp.path());

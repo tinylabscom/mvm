@@ -21,5 +21,5 @@ use mvm_core::domain::instance::InstanceReadiness;
 /// Callers must never rely on this function to gate launch/teardown
 /// — readiness is a downstream display signal, not a control flow.
 pub(super) fn record_vm_readiness(vm_name: &str, readiness: InstanceReadiness) {
-    mvm::vm::name_registry::record_readiness(vm_name, readiness);
+    mvm_runtime::vm::name_registry::record_readiness(vm_name, readiness);
 }

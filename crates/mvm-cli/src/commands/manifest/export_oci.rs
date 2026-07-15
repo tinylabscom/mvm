@@ -24,12 +24,12 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm::vm::template::lifecycle as tmpl;
 use mvm_core::manifest::{
     canonical_key_for_path, is_slot_hash_dirname, resolve_manifest_config_path, slot_dir,
 };
 use mvm_core::naming::validate_template_name;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::vm::template::lifecycle as tmpl;
 
 use super::super::Cli;
 

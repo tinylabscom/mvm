@@ -5,12 +5,12 @@ use clap::ValueEnum;
 use serde::Serialize;
 
 use crate::ui;
-use mvm::config::VM_NAME;
-use mvm::shell;
-use mvm_backend::backend::AnyBackend;
 use mvm_core::config::fc_version;
 use mvm_core::platform::{self, Platform};
 use mvm_core::vm_backend::ClaimStatus;
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::config::VM_NAME;
+use mvm_runtime::shell;
 
 /// Audience-scoped filter for `mvmctl doctor`.
 ///
@@ -375,7 +375,7 @@ fn builder_egress_check() -> Check {
 
 /// One-line summary of a dry-run convergence report for `doctor`.
 /// Pure so it's testable without touching the registry.
-fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String {
+fn registry_drift_summary(report: &mvm_runtime::vm::reconcile::ConvergeReport) -> String {
     let n = report.reconciled_count();
     if n == 0 {
         "clean".to_string()
@@ -389,7 +389,9 @@ fn registry_drift_summary(report: &mvm::vm::reconcile::ConvergeReport) -> String
 /// count. Informational — drift self-heals at the next state-touching
 /// command, so `ok` is always true.
 fn registry_drift_check() -> Check {
-    let report = mvm::vm::reconcile::converge(&mvm::vm::reconcile::ConvergeOpts { dry_run: true });
+    let report = mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts {
+        dry_run: true,
+    });
     Check {
         name: "registry drift",
         category: "platform",
@@ -576,8 +578,8 @@ fn network_tunnel_worker_summary(vms_root: &std::path::Path) -> String {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        let pid_file = dir.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE);
-        let audit_file = dir.join(mvm_backend::NETWORK_TUNNEL_AUDIT_JSONL);
+        let pid_file = dir.join(mvm_runtime::NETWORK_TUNNEL_WORKER_PID_FILE);
+        let audit_file = dir.join(mvm_runtime::NETWORK_TUNNEL_AUDIT_JSONL);
         let pid_file_exists = pid_file.exists();
         let pid = std::fs::read_to_string(&pid_file)
             .ok()
@@ -835,7 +837,7 @@ fn issue_summary_lines(missing: &[&Check]) -> Vec<String> {
 /// gets a stable BTreeMap ordering. Names match `VmBackend::name`.
 fn collect_balloon_support() -> BTreeMap<String, bool> {
     let mut out = BTreeMap::new();
-    for descriptor in mvm_backend::catalog::balloon_support_descriptors() {
+    for descriptor in mvm_runtime::catalog::balloon_support_descriptors() {
         let backend = descriptor.instantiate_dyn();
         out.insert(backend.name().to_string(), backend.capabilities().balloon);
     }
@@ -890,7 +892,7 @@ struct BackendCapabilityRow {
 /// a hand-maintained copy. Sorted by name for deterministic output.
 fn collect_capability_table() -> Vec<BackendCapabilityRow> {
     let mut rows: Vec<BackendCapabilityRow> =
-        mvm_backend::catalog::warm_start_support_descriptors()
+        mvm_runtime::catalog::warm_start_support_descriptors()
             .map(|descriptor| {
                 let b = descriptor.instantiate_dyn();
                 let caps = b.capabilities();
@@ -939,13 +941,13 @@ fn render_capability_table(rows: &[BackendCapabilityRow]) {
 fn collect_warm_start_support() -> WarmStartReport {
     let mut backends = BTreeMap::new();
     let mut standby_pool = BTreeMap::new();
-    for descriptor in mvm_backend::catalog::warm_start_support_descriptors() {
+    for descriptor in mvm_runtime::catalog::warm_start_support_descriptors() {
         let b = descriptor.instantiate_dyn();
         backends.insert(b.name().to_string(), b.snapshot_capability().label());
         standby_pool.insert(b.name().to_string(), b.supports_standby_pool());
     }
     // Best-effort live idle count. A missing pool dir reads as 0.
-    let standby_pool_idle = mvm_backend::standby_pool::SupervisorStandbyPool::open()
+    let standby_pool_idle = mvm_runtime::standby_pool::SupervisorStandbyPool::open()
         .and_then(|p| p.list())
         .ok()
         .map(|v| {
@@ -2470,7 +2472,7 @@ fn security_snapshot_dirs_check() -> Check {
 /// `collect_sign_targets` so an unsigned supervisor is not left unreported.
 /// Off macOS the check is n/a (returns the early-exit n/a `Check`).
 fn security_signing_check() -> Check {
-    use mvm_backend::codesign::{collect_sign_targets, entitlements_present};
+    use mvm_runtime::codesign::{collect_sign_targets, entitlements_present};
     let targets = collect_sign_targets();
     // `entitlements_present` returns `None` off macOS for every path, so if
     // the first target gives `None` the whole check is n/a.
@@ -3068,7 +3070,7 @@ mod tests {
 
     #[test]
     fn registry_drift_summary_reports_clean_and_counts() {
-        use mvm::vm::reconcile::ConvergeReport;
+        use mvm_runtime::vm::reconcile::ConvergeReport;
         let clean = ConvergeReport::default();
         assert_eq!(registry_drift_summary(&clean), "clean");
 
@@ -4026,7 +4028,7 @@ mod tests {
             let dir = root.path().join(name);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
-                dir.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
+                dir.join(mvm_runtime::NETWORK_TUNNEL_WORKER_PID_FILE),
                 format!("{}\n", std::process::id()),
             )
             .unwrap();
@@ -4044,11 +4046,11 @@ mod tests {
         let stale = root.path().join("vm-stale");
         std::fs::create_dir_all(&stale).unwrap();
         std::fs::write(
-            stale.join(mvm_backend::NETWORK_TUNNEL_WORKER_PID_FILE),
+            stale.join(mvm_runtime::NETWORK_TUNNEL_WORKER_PID_FILE),
             "2147483646\n",
         )
         .unwrap();
-        std::fs::write(stale.join(mvm_backend::NETWORK_TUNNEL_AUDIT_JSONL), "").unwrap();
+        std::fs::write(stale.join(mvm_runtime::NETWORK_TUNNEL_AUDIT_JSONL), "").unwrap();
 
         let s = network_tunnel_worker_summary(root.path());
         assert!(s.contains("stale: vm-stale"), "got {s:?}");

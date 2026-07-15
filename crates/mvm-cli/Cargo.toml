@@ -11,10 +11,9 @@ authors.workspace = true
 [dependencies]
 mvm-core.workspace = true
 mvm-guest.workspace = true
-mvm = { workspace = true, default-features = false }
+mvm-runtime = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
-mvm-backend = { workspace = true, default-features = false }
 mvm-fs.workspace = true
 mvm-hostd.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_sdk::ir) and routes it
@@ -75,9 +74,8 @@ libc.workspace = true
 # isn't installed on the host.
 default = ["builder-vm", "pure-mkfs"]
 contributor-bootstrap = [
-    "mvm/contributor-bootstrap",
+    "mvm-runtime/contributor-bootstrap",
     "mvm-build/contributor-bootstrap",
-    "mvm-backend/contributor-bootstrap",
 ]
 # The MCP server (crate::mcp — dispatcher/protocol/server/session/tools)
 # needs no deps beyond what mvm-cli already carries unconditionally
@@ -117,10 +115,10 @@ release-artifact-bootstrap = []
 custom-dns = ["mvm-hostd/custom-dns"]
 dev-watch = ["dep:notify", "dep:notify-debouncer-mini"]
 manifest-verify = [
-    "mvm/manifest-verify",
+    "mvm-runtime/manifest-verify",
     "mvm-core/manifest-verify",
 ]
-template-registry-s3 = ["mvm/template-registry-s3"]
+template-registry-s3 = ["mvm-runtime/template-registry-s3"]
 
 [lints]
 workspace = true

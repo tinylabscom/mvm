@@ -109,9 +109,10 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
     } else {
         let (label, rootfs, digest) = if let Some(slot_hash) = &spec.manifest {
             let (_, _vmlinux, _initrd, rootfs, rev) =
-                mvm::vm::template::lifecycle::template_artifacts_for_slot(slot_hash).with_context(
-                    || format!("loading manifest slot {slot_hash:?} for machine start"),
-                )?;
+                mvm_runtime::vm::template::lifecycle::template_artifacts_for_slot(slot_hash)
+                    .with_context(|| {
+                        format!("loading manifest slot {slot_hash:?} for machine start")
+                    })?;
             (
                 format!("manifest:{slot_hash}"),
                 std::path::PathBuf::from(rootfs),

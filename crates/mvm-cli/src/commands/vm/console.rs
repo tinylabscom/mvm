@@ -6,12 +6,12 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm::vsock_transport::{
+use mvm_core::naming::validate_vm_name;
+use mvm_core::user_config::MvmConfig;
+use mvm_runtime::vsock_transport::{
     DevConsoleTransport, FirecrackerTransport, LibkrunTransport, VsockTransport,
     firecracker_transport_supported,
 };
-use mvm_core::naming::validate_vm_name;
-use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::shared::{IN_CONSOLE_MODE, clap_vm_name};
@@ -61,7 +61,7 @@ fn pick_console_transport(name: &str) -> Result<Arc<dyn VsockTransport>> {
 /// links no Console capability). Missing/legacy metadata reads as accessible —
 /// the same backward-compat default `enforce_accessible_gate` uses.
 fn hvf_console_arm_enabled(name: &str) -> bool {
-    !matches!(mvm::vm::runtime_meta::read(name), Ok(Some(meta)) if !meta.accessible)
+    !matches!(mvm_runtime::vm::runtime_meta::read(name), Ok(Some(meta)) if !meta.accessible)
 }
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -92,7 +92,7 @@ pub(in crate::commands) struct Args {
 /// production microVM).
 pub(in crate::commands) fn enforce_accessible_gate(name: &str, force: bool) -> Result<()> {
     let _ = force;
-    match mvm::vm::runtime_meta::read(name) {
+    match mvm_runtime::vm::runtime_meta::read(name) {
         Ok(Some(meta)) if !meta.accessible => anyhow::bail!(
             "console refused: VM {name:?} was built from a sealed image (passthru.mvm.accessible = false). \
              Sealed images don't ship the dev agent surface. \
@@ -178,8 +178,8 @@ fn command_with_env(cmd: &str, env: &[(String, String)]) -> String {
 /// Best-effort: only rewrites the registry when the name is registered;
 /// any load/save hiccup is swallowed so console attach never blocks.
 fn touch_activity(name: &str) {
-    let path = mvm::vm::name_registry::registry_path();
-    if let Ok(mut reg) = mvm::vm::name_registry::VmNameRegistry::load(&path)
+    let path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut reg) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path)
         && reg
             .touch_last_active(name, mvm_core::time::utc_now())
             .unwrap_or(false)
@@ -532,10 +532,10 @@ fn run_console_relay(data_stream: std::os::unix::net::UnixStream) -> Result<()> 
 #[cfg(test)]
 mod accessible_gate_tests {
     use super::*;
-    use mvm::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
+    use mvm_runtime::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
 
     fn with_home<F: FnOnce(&std::path::Path)>(f: F) {
-        let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let mut env = mvm_core::util::test_env::TestEnv::new();
@@ -577,14 +577,14 @@ mod accessible_gate_tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         env.set("MVM_SHARE_DIR", tmp.path());
 
-        let path = mvm::vm::name_registry::registry_path();
-        let mut reg = mvm::vm::name_registry::VmNameRegistry::default();
+        let path = mvm_runtime::vm::name_registry::registry_path();
+        let mut reg = mvm_runtime::vm::name_registry::VmNameRegistry::default();
         reg.register("vm1", "/tmp/vm1", "default", None, 0).unwrap();
         reg.save(&path).unwrap();
         assert!(reg.lookup("vm1").unwrap().last_active.is_none());
 
         touch_activity("vm1");
-        let reloaded = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        let reloaded = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path).unwrap();
         assert!(
             reloaded.lookup("vm1").unwrap().last_active.is_some(),
             "console attach must refresh last_active"
@@ -592,7 +592,7 @@ mod accessible_gate_tests {
 
         // Unknown name is a clean no-op — no panic, registry untouched.
         touch_activity("ghost");
-        let reloaded = mvm::vm::name_registry::VmNameRegistry::load(&path).unwrap();
+        let reloaded = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path).unwrap();
         assert!(reloaded.lookup("ghost").is_none());
     }
 
@@ -735,10 +735,10 @@ mod picker_hvf_tests {
         };
 
         // Mark the image sealed.
-        mvm::vm::runtime_meta::write(
+        mvm_runtime::vm::runtime_meta::write(
             name,
-            &mvm::vm::runtime_meta::VmRuntimeMeta {
-                mode: mvm::vm::runtime_meta::StartModeKind::Attached,
+            &mvm_runtime::vm::runtime_meta::VmRuntimeMeta {
+                mode: mvm_runtime::vm::runtime_meta::StartModeKind::Attached,
                 accessible: false,
                 rootfs_path: None,
                 runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,

@@ -1,13 +1,13 @@
 //! Vsock helpers for talking to the in-guest agent.
 //!
-//! Routes through the canonical `mvm::vsock_transport::for_vm`
+//! Routes through the canonical `mvm_runtime::vsock_transport::for_vm`
 //! dispatcher — the same selector `invoke`/`exec`/`readiness` use. It
 //! probes the live backend (libkrun → vz → firecracker) per VM, so a
 //! VM started under any backend reaches its agent on the right transport.
 
 use anyhow::{Context, Result};
 
-use mvm::vsock_transport;
+use mvm_runtime::vsock_transport;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};

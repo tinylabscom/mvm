@@ -4,7 +4,7 @@
 //! Both commands share a `fetch_readiness` helper that drives the
 //! protocol-hello prelude with
 //! `GuestCapability::Readiness` and dispatches a single
-//! `ReadinessStatus` request through `mvm::vsock_transport` (so
+//! `ReadinessStatus` request through `mvm_runtime::vsock_transport` (so
 //! Firecracker, libkrun, Apple Container, and Docker backends all
 //! work without per-backend code in the CLI).
 //!
@@ -16,13 +16,13 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, ValueEnum};
 
-use mvm::vsock_transport::{self, VsockTransport};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
 use mvm_guest::vsock::{
     ComponentState, GUEST_AGENT_PORT, GuestCapability, GuestRequest, GuestResponse,
     ReadinessReport, call_unary, negotiate_protocol,
 };
+use mvm_runtime::vsock_transport::{self, VsockTransport};
 
 use super::Cli;
 use super::shared::clap_vm_name;

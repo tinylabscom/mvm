@@ -160,9 +160,9 @@ fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
     let dur = mvm_core::crypto::policy::parse_ttl(dur_str)
         .with_context(|| format!("Invalid --ttl value {dur_str:?}"))?;
     let expires_at = mvm_core::util::time::utc_plus_duration(dur);
-    let registry_path = mvm::vm::name_registry::registry_path();
-    let mut registry =
-        mvm::vm::name_registry::VmNameRegistry::load(&registry_path).with_context(|| {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    let mut registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
+        .with_context(|| {
             format!(
                 "Failed to load VM name registry at {}",
                 registry_path.display()
@@ -187,7 +187,7 @@ fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'stati
             .next_back()
             .unwrap_or(manifest);
         if let Ok(Some(revision)) =
-            mvm::vm::template::lifecycle::template_load_current_revision(slot_name)
+            mvm_runtime::vm::template::lifecycle::template_load_current_revision(slot_name)
         {
             return match revision.build_mode.as_deref() {
                 Some("dev") => "dev",
@@ -195,7 +195,7 @@ fn resolve_build_mode_for_envelope(args: &MachineRunArgs, name: &str) -> &'stati
             };
         }
     }
-    match mvm::vm::runtime_meta::read(name) {
+    match mvm_runtime::vm::runtime_meta::read(name) {
         Ok(Some(meta)) if meta.accessible => "dev",
         _ => "prod",
     }

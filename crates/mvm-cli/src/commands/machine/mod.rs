@@ -26,7 +26,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use ed25519_dalek::Signer;
 #[cfg(test)]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use mvm_backend::backend::AnyBackend;
+use mvm_runtime::backend::AnyBackend;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -37,7 +37,7 @@ use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::{VmId, VmStatus};
 use mvm_core::{config, naming};
 
-use mvm::machine::persist::{
+use mvm_runtime::machine::persist::{
     MACHINE_SPEC_SCHEMA_VERSION, MachineSpec, ReconfigurePatch, SpecReconcile, apply_patch,
     list_machine_specs, load_machine_spec, machine_config_diff, overwrite_machine_spec,
     reconcile_machine_spec, save_machine_spec, validate_machine_memory,
@@ -1309,7 +1309,7 @@ fn configure_machine_ssh_agent_forwarding(
         reap_proxy(vm_name);
         bail!("guest agent for {vm_name:?} not reachable while configuring ssh-agent forwarding");
     }
-    let transport = mvm::vsock_transport::for_vm(vm_name)?;
+    let transport = mvm_runtime::vsock_transport::for_vm(vm_name)?;
     let mut stream = transport.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
     start_guest_ssh_agent_socket_forwarding(vm_name, &mut stream)?;
     Ok(())
@@ -1371,7 +1371,7 @@ fn machine_exec_command(argv: &[String]) -> String {
 
 fn build_machine_volume_cfg(
     volume_specs: &[String],
-) -> Result<Vec<mvm_backend::image::RuntimeVolume>> {
+) -> Result<Vec<mvm_runtime::image::RuntimeVolume>> {
     let mut volume_cfg = Vec::with_capacity(volume_specs.len());
     for volume in volume_specs {
         let spec = super::shared::parse_volume_spec(volume)?;
@@ -1379,7 +1379,7 @@ fn build_machine_volume_cfg(
             .with_context(|| format!("volume {volume:?}"))?;
         super::shared::materialize_disk_volume(&vmv)
             .with_context(|| format!("volume {volume:?}"))?;
-        volume_cfg.push(mvm_backend::image::RuntimeVolume::from(&vmv));
+        volume_cfg.push(mvm_runtime::image::RuntimeVolume::from(&vmv));
     }
     Ok(volume_cfg)
 }

@@ -18,9 +18,9 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_backend::AnyBackend;
 use mvm_core::plan::{AuthPolicy, PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 use mvm_core::vm_backend::VmStartConfig;
+use mvm_runtime::AnyBackend;
 
 use crate::plan_admission::{
     AdmitAndStartParams, Clock, InMemoryNonceLedger, StartedMachine, admit_and_start,

@@ -431,7 +431,7 @@ const AUDIT_POSTURE: &[(&str, AuditPosture)] = &[
     ("persistent-builder", AuditPosture::InteractiveOrControl),
     // Plan 166 Phase 2 — hidden internal helper: a long-running host-side
     // AF_VSOCK<->UNIX bridge for the QEMU workload backend. Pure transport
-    // plumbing spawned by `mvm_backend::qemu`; never emits audit events.
+    // plumbing spawned by `mvm_runtime::qemu`; never emits audit events.
     ("__qemu-vsock-bridge", AuditPosture::InteractiveOrControl),
     ("__ssh-agent-proxy", AuditPosture::InteractiveOrControl),
     ("catalog", AuditPosture::ReadOnly),

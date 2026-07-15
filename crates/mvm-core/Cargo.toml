@@ -87,7 +87,7 @@ reqwest = { workspace = true, optional = true }
 default = []
 # The per-VM name-constrained egress CA
 # (`crypto::egress_ca`). Pulls `rcgen` (sync — ring/yasna, no tokio), so the
-# runtime-free default build is unaffected. Enabled by mvm-backend (cert
+# runtime-free default build is unaffected. Enabled by mvm-runtime (cert
 # delivery) and mvm-hostd (the TLS terminator).
 egress-ca = ["dep:rcgen"]
 # The `client` module (`MvmClient` trait + DTOs + `MockBackend`). Pulls

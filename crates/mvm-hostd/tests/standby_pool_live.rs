@@ -58,7 +58,7 @@ fn pid_alive(pid: u32) -> bool {
 #[test]
 fn spawn_standby_binds_control_socket() {
     let dir = tempfile::tempdir().unwrap();
-    let backend = mvm_backend::libkrun::LibkrunBackend;
+    let backend = mvm_runtime::libkrun::LibkrunBackend;
     assert!(backend.supports_standby_pool());
 
     let handle = backend

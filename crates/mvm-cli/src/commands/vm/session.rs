@@ -556,7 +556,7 @@ pub(in crate::commands) fn dispatch_update_idle_timeout(
     vm_name: &str,
     secs: u64,
 ) -> Result<(u64, u64)> {
-    let transport = mvm::vsock_transport::for_vm(vm_name)
+    let transport = mvm_runtime::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on {vm_name:?}"))?;
     let mut stream = transport
         .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
@@ -829,7 +829,7 @@ fn dispatch_run_code(
         bail!("guest agent did not become reachable within 30s");
     }
 
-    let transport = mvm::vsock_transport::for_vm(&record.vm_name)
+    let transport = mvm_runtime::vsock_transport::for_vm(&record.vm_name)
         .with_context(|| format!("Picking transport for guest agent on {:?}", record.vm_name))?;
     let mut stream = transport
         .connect(mvm_guest::vsock::GUEST_AGENT_PORT)
@@ -998,7 +998,7 @@ fn cmd_start(args: StartArgs) -> Result<()> {
     } else {
         SessionMode::Prod
     };
-    let backend_name = mvm_backend::backend::AnyBackend::auto_select()
+    let backend_name = mvm_runtime::backend::AnyBackend::auto_select()
         .name()
         .to_string();
     let admit_backend = backend_name.clone();

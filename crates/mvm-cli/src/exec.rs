@@ -12,9 +12,9 @@
 //! "exec not available" regardless of any runtime configuration.
 
 use anyhow::{Context, Result, anyhow};
-use mvm::vsock_transport;
-use mvm_backend::backend::AnyBackend;
 use mvm_core::vm_backend::{RequiredCapabilities, VmId, VmStartConfig, VmVolume};
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::vsock_transport;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -774,7 +774,7 @@ fn clean_add_dir_staging(add_dirs: &[AddDir], staging_dir: &str) {
     if add_dirs.is_empty() {
         return;
     }
-    let _ = mvm::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
+    let _ = mvm_runtime::shell::run_in_vm(&format!("rm -rf {staging_dir}"));
 }
 
 /// Decide whether snapshot restore is safe for this request.
@@ -921,11 +921,12 @@ fn run_inner(
         match &req.image {
             ImageSource::Template(name) => {
                 let (spec, vmlinux, initrd, rootfs, rev) =
-                    mvm::vm::template::lifecycle::template_artifacts_dispatched(name)
+                    mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(name)
                         .with_context(|| format!("Loading template '{name}'"))?;
-                let snap = mvm::vm::template::lifecycle::template_snapshot_info_dispatched(name)
-                    .ok()
-                    .flatten();
+                let snap =
+                    mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(name)
+                        .ok()
+                        .flatten();
                 (
                     vmlinux,
                     initrd,
@@ -960,13 +961,13 @@ fn run_inner(
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
     let mut vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
-    let staging_dir = format!("{}/{}/extras", mvm::config::VMS_DIR, vm_name);
-    let mut volumes: Vec<mvm_backend::image::RuntimeVolume> = Vec::new();
+    let staging_dir = format!("{}/{}/extras", mvm_runtime::config::VMS_DIR, vm_name);
+    let mut volumes: Vec<mvm_runtime::image::RuntimeVolume> = Vec::new();
     let mut add_dir_labels: Vec<String> = Vec::new();
     for (idx, dir) in req.add_dirs.iter().enumerate() {
         let label = format!("mvm-extra-{idx}");
         let image_path = format!("{staging_dir}/extra-{idx}.ext4");
-        mvm_backend::image::build_dir_image_ro(&dir.host_path, &label, &image_path).with_context(
+        mvm_runtime::image::build_dir_image_ro(&dir.host_path, &label, &image_path).with_context(
             || {
                 format!(
                     "preparing --add-dir image for '{}' -> '{}'",
@@ -974,7 +975,7 @@ fn run_inner(
                 )
             },
         )?;
-        volumes.push(mvm_backend::image::RuntimeVolume {
+        volumes.push(mvm_runtime::image::RuntimeVolume {
             host: image_path,
             guest: dir.guest_path.clone(),
             size: String::new(),
@@ -997,7 +998,7 @@ fn run_inner(
     // ship `rootfs.verity` + `rootfs.roothash` next to `rootfs.ext4`. Their
     // absence is the dev-VM exemption. This is host-local and side-effect-free;
     // foreground OCI launches must never boot the builder/dev VM just to probe.
-    let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
+    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
 
     // Run-path tier gate: a virtiofs-capable backend + a non-prod, non-sealed OCI
     // dev run boots from the unpacked tree over virtio-fs (no ext4 materialize);
@@ -1088,9 +1089,9 @@ fn run_inner(
         // unrestricted return None (no forwarding tunnel). The identity is
         // minted here so the guest cmdline token and the host worker's
         // expected-session validate against identical values.
-        network_tunnel: mvm_backend::network_tunnel_for_launch(
+        network_tunnel: mvm_runtime::network_tunnel_for_launch(
             &req.network_policy,
-            mvm_backend::TunnelLaunchIdentity {
+            mvm_runtime::TunnelLaunchIdentity {
                 tenant_id: "local".to_string(),
                 vm_id: vm_name.clone(),
                 boot_id: uuid::Uuid::new_v4().to_string(),
@@ -1228,7 +1229,7 @@ fn run_inner(
             continue;
         }
         let image_path = format!("{staging_dir}/extra-{idx}.ext4");
-        if let Err(e) = mvm_backend::image::rsync_image_to_host(&image_path, &dir.host_path) {
+        if let Err(e) = mvm_runtime::image::rsync_image_to_host(&image_path, &dir.host_path) {
             ui::warn(&format!(
                 "writable --add-dir sync-back failed for '{}' -> '{}': {e:#}",
                 dir.host_path, dir.guest_path,
@@ -1292,8 +1293,8 @@ fn restore_via_snapshot(
     snap_info: &mvm_core::template::SnapshotInfo,
     start_config: &VmStartConfig,
 ) -> Result<()> {
-    let slot = mvm_backend::microvm::allocate_slot(vm_name)?;
-    let run_config = mvm_backend::microvm::FlakeRunConfig {
+    let slot = mvm_runtime::microvm::allocate_slot(vm_name)?;
+    let run_config = mvm_runtime::microvm::FlakeRunConfig {
         name: vm_name.to_string(),
         slot,
         vmlinux_path: start_config.kernel_path.clone().unwrap_or_default(),
@@ -1329,16 +1330,16 @@ fn restore_via_snapshot(
         network_tunnel: start_config.network_tunnel.clone(),
     };
     let rev = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
-        mvm::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
+        mvm_runtime::vm::template::lifecycle::current_revision_id_for_slot(template_id)?
     } else {
-        mvm::vm::template::lifecycle::current_revision_id(template_id)?
+        mvm_runtime::vm::template::lifecycle::current_revision_id(template_id)?
     };
     let snap_dir = if mvm_core::manifest::is_slot_hash_dirname(template_id) {
         mvm_core::manifest::slot_snapshot_dir(template_id, &rev)
     } else {
         mvm_core::template::template_snapshot_dir(template_id, &rev)
     };
-    mvm_backend::microvm::restore_from_template_snapshot(
+    mvm_runtime::microvm::restore_from_template_snapshot(
         template_id,
         &run_config,
         &snap_dir,
@@ -1539,9 +1540,9 @@ pub fn boot_session_vm(
     admit: Option<&SessionAdmit<'_>>,
 ) -> Result<SessionVm> {
     let (spec, vmlinux, initrd, rootfs, rev) =
-        mvm::vm::template::lifecycle::template_artifacts_dispatched(env)
+        mvm_runtime::vm::template::lifecycle::template_artifacts_dispatched(env)
             .with_context(|| format!("Loading template '{env}'"))?;
-    let snap_info = mvm::vm::template::lifecycle::template_snapshot_info_dispatched(env)
+    let snap_info = mvm_runtime::vm::template::lifecycle::template_snapshot_info_dispatched(env)
         .ok()
         .flatten();
 
@@ -1550,7 +1551,7 @@ pub fn boot_session_vm(
     // concurrent boots in the same session don't collide.
     let vm_name = format!("{}-{}", vm_name_prefix, transient_vm_name());
 
-    let (verity_path, roothash) = mvm_backend::microvm::probe_verity_sidecar(&rootfs);
+    let (verity_path, roothash) = mvm_runtime::microvm::probe_verity_sidecar(&rootfs);
 
     // Session VMs default to the legacy no-admission path. When `admit`
     // returns a substrate, the plan-bearing fields below and any config-drive
@@ -1582,9 +1583,9 @@ pub fn boot_session_vm(
         // None (no forwarding tunnel), so plain session/MCP boots are unaffected.
         // The identity is minted here so the guest cmdline token and the host
         // worker's expected-session validate against identical values.
-        network_tunnel: mvm_backend::network_tunnel_for_launch(
+        network_tunnel: mvm_runtime::network_tunnel_for_launch(
             network_policy,
-            mvm_backend::TunnelLaunchIdentity {
+            mvm_runtime::TunnelLaunchIdentity {
                 tenant_id: "local".to_string(),
                 vm_id: vm_name.clone(),
                 boot_id: uuid::Uuid::new_v4().to_string(),
@@ -1810,7 +1811,7 @@ mod tests {
 
     #[test]
     fn validate_backend_for_egress_refuses_unavailable_hvf_before_boot_work() {
-        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let policy = mvm_core::network_policy::NetworkPolicy::allow_list(vec![
@@ -1841,7 +1842,7 @@ mod tests {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     #[test]
     fn select_backend_name_for_egress_picks_hvf_when_proxy_support_is_available() {
-        let _guard = mvm_backend::base::runtime_meta::HOME_TEST_LOCK
+        let _guard = mvm_runtime::base::runtime_meta::HOME_TEST_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2710,9 +2711,9 @@ mod tests {
     fn staging_cleanup_skipped_without_add_dirs() {
         let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let calls_for_handler = calls.clone();
-        let _handler = mvm::shell_mock::install_handler(move |_script: &str| {
+        let _handler = mvm_runtime::shell_mock::install_handler(move |_script: &str| {
             calls_for_handler.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            mvm::shell_mock::MockResponse {
+            mvm_runtime::shell_mock::MockResponse {
                 exit_code: 0,
                 stdout: String::new(),
             }
@@ -2731,12 +2732,12 @@ mod tests {
     fn staging_cleanup_enabled_with_add_dirs() {
         let scripts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let scripts_for_handler = scripts.clone();
-        let _handler = mvm::shell_mock::install_handler(move |script: &str| {
+        let _handler = mvm_runtime::shell_mock::install_handler(move |script: &str| {
             scripts_for_handler
                 .lock()
                 .expect("mutex must not be poisoned")
                 .push(script.to_string());
-            mvm::shell_mock::MockResponse {
+            mvm_runtime::shell_mock::MockResponse {
                 exit_code: 0,
                 stdout: String::new(),
             }

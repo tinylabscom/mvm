@@ -29,7 +29,7 @@
 
 #![cfg(unix)]
 
-use mvm_backend::backend::AnyBackend;
+use mvm_runtime::backend::AnyBackend;
 #[cfg(target_os = "macos")]
 use std::io::Write;
 use std::path::Path;

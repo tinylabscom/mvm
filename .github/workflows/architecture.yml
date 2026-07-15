@@ -71,7 +71,7 @@ jobs:
   #      the caller (here, gvproxy's mandatory ssh-forward listener)
   #      can claim it. Not a daemon.
   #   6. Test-only mock guest-agent
-  #      (`crates/mvm-backend/src/mock_guest_agent.rs`). Mirrors the
+  #      (`crates/mvm-runtime/src/mock_guest_agent.rs`). Mirrors the
   #      in-guest vsock agent on the host side via Unix-domain socket
   #      so `mvmctl fs *` / `proc *` are hermetically testable against
   #      `MockBackend`. Tier-3 / test-only; never selected by
@@ -91,7 +91,7 @@ jobs:
   #      broker/signer helpers spawned by the supervisor for a single
   #      workload, not multi-tenant control-plane servers.
   #   9. QEMU workload host-side vsock bridge
-  #      (`crates/mvm-backend/src/qemu.rs`). QEMU's virtio-vsock speaks
+  #      (`crates/mvm-runtime/src/qemu.rs`). QEMU's virtio-vsock speaks
   #      real AF_VSOCK, but the shared agent client connects to the
   #      per-port Unix-domain socket libkrun/Firecracker expose; the
   #      QEMU backend binds that UDS and splices each connection to the
@@ -205,9 +205,9 @@ jobs:
               --glob '!crates/mvm-cli/src/metrics_server.rs' \
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
               --glob '!crates/deps/libkrun-sys/src/native_gateway.rs' \
-              --glob '!crates/mvm-backend/src/mock_guest_agent.rs' \
+              --glob '!crates/mvm-runtime/src/mock_guest_agent.rs' \
               --glob '!crates/mvm-guest-helpers/src/addon_vsock_bridge.rs' \
-              --glob '!crates/mvm-backend/src/qemu.rs' \
+              --glob '!crates/mvm-runtime/src/qemu.rs' \
               -e "$PATTERNS" \
               crates/ src/ \
               || true)

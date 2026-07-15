@@ -637,7 +637,7 @@ pub struct SubstitutionService {
     /// against the VM's resolved network policy before any forward — an
     /// unadmitted `host:port` is refused here. `None` ⇒ this endpoint does not
     /// gate (the run loop's gate is still active); a `Some` gate fails closed.
-    egress_gate: Option<mvm_backend::vmm::egress_gate::EgressGate>,
+    egress_gate: Option<mvm_runtime::vmm::egress_gate::EgressGate>,
 }
 
 impl SubstitutionService {
@@ -719,7 +719,7 @@ impl SubstitutionService {
 
     /// Attach the claim-10 egress gate. Once attached, `process` refuses any
     /// destination the VM's network policy doesn't admit before forwarding.
-    pub fn with_egress_gate(mut self, gate: mvm_backend::vmm::egress_gate::EgressGate) -> Self {
+    pub fn with_egress_gate(mut self, gate: mvm_runtime::vmm::egress_gate::EgressGate) -> Self {
         self.egress_gate = Some(gate);
         self
     }
@@ -1143,7 +1143,7 @@ impl SubstitutionService {
             let admitted = url_host_port(&req.url).as_deref().is_some_and(|hp| {
                 matches!(
                     gate.decide_request(hp),
-                    mvm_backend::vmm::egress_gate::EgressVerdict::Allow { .. }
+                    mvm_runtime::vmm::egress_gate::EgressVerdict::Allow { .. }
                 )
             });
             if !admitted {
@@ -2416,7 +2416,7 @@ mod server_tests {
     /// Build a claim-10 gate over an allow-list of literal `host:port` rules,
     /// each self-pinned so a literal-IP destination projects. `from_network_policy`
     /// fails closed on any projection error.
-    fn gate_admitting(hosts: &[(&str, u16)]) -> mvm_backend::vmm::egress_gate::EgressGate {
+    fn gate_admitting(hosts: &[(&str, u16)]) -> mvm_runtime::vmm::egress_gate::EgressGate {
         use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
         use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
         let mut pins = DnsPinRegistry::new();
@@ -2430,7 +2430,7 @@ mod server_tests {
             })
             .collect();
         let policy = NetworkPolicy::allow_list(rules);
-        mvm_backend::vmm::egress_gate::EgressGate::from_network_policy(
+        mvm_runtime::vmm::egress_gate::EgressGate::from_network_policy(
             &policy,
             &pins,
             "2026-01-01T00:00:00Z",
@@ -2506,7 +2506,7 @@ mod server_tests {
     #[tokio::test]
     async fn gate_deny_all_refuses_before_forward() {
         let (service, ph, forwarder, _dir) = service_with("sk-live-zzz", &["127.0.0.1"]);
-        let deny = mvm_backend::vmm::egress_gate::EgressGate::default_deny();
+        let deny = mvm_runtime::vmm::egress_gate::EgressGate::default_deny();
         let service = Arc::new(
             Arc::try_unwrap(service)
                 .ok()

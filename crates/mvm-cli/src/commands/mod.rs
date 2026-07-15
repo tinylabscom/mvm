@@ -178,7 +178,7 @@ pub(in crate::commands) enum Commands {
     #[command(name = "persistent-builder", hide = true)]
     PersistentBuilder(build::persistent_builder::Args),
     /// Internal: host-side AF_VSOCK↔UNIX bridge for the QEMU workload
-    /// backend. Spawned detached by `mvm_backend::qemu`; not a
+    /// backend. Spawned detached by `mvm_runtime::qemu`; not a
     /// user-facing command.
     #[command(name = "__qemu-vsock-bridge", hide = true)]
     QemuVsockBridge(qemu_bridge::Args),
@@ -211,7 +211,7 @@ pub fn run() -> Result<()> {
     }
 
     if cli.command.emits_machine_readable_stdout() {
-        mvm::ui::set_chrome_to_stderr(true);
+        mvm_runtime::ui::set_chrome_to_stderr(true);
     }
 
     install_signal_handler();
@@ -270,7 +270,7 @@ fn register_inhouse_builder() {
         let (kernel, rootfs, closure_nar) =
             crate::commands::build::hvf_builder_image::resolve_hvf_builder_image()?;
         Ok(Box::new(
-            mvm_backend::builder_runner::hvf_builder::HvfBuilderVm::new(kernel, rootfs)
+            mvm_runtime::builder_runner::hvf_builder::HvfBuilderVm::new(kernel, rootfs)
                 .with_closure_nar(closure_nar),
         ) as Box<dyn mvm_build::builder_vm::BuilderVm>)
     }));
@@ -278,7 +278,7 @@ fn register_inhouse_builder() {
 
 fn configure_runtime_logging(cli: &Cli) {
     let verbose = cli.verbose > 0 || std::env::var_os("RUST_LOG").is_some();
-    mvm::ui::set_verbose(verbose);
+    mvm_runtime::ui::set_verbose(verbose);
     if cli.verbose > 0 && std::env::var_os("RUST_LOG").is_none() {
         unsafe {
             std::env::set_var("RUST_LOG", logging::filter_for_verbosity(cli.verbose));
@@ -309,7 +309,7 @@ fn install_signal_handler() {
             return;
         }
         eprintln!("\nInterrupted, cleaning up...");
-        let _ = mvm_backend::handle_registry::stop_all_attached();
+        let _ = mvm_runtime::handle_registry::stop_all_attached();
         if let Ok(pids) = pids.lock() {
             for &pid in pids.iter() {
                 unsafe {
@@ -334,7 +334,8 @@ fn maybe_converge_on_entry(command: &Commands) {
     if std::env::var("MVM_SKIP_RECONCILE").as_deref() == Ok("1") {
         return;
     }
-    let _ = mvm::vm::reconcile::converge(&mvm::vm::reconcile::ConvergeOpts::default());
+    let _ =
+        mvm_runtime::vm::reconcile::converge(&mvm_runtime::vm::reconcile::ConvergeOpts::default());
 }
 
 #[cfg(test)]

@@ -33,9 +33,9 @@ pub(super) fn list_machines(args: MachineListArgs) -> Result<()> {
         println!("no machines");
     } else {
         let now = chrono::Utc::now();
-        let registry_path = mvm::vm::name_registry::registry_path();
-        let registry =
-            mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
+        let registry_path = mvm_runtime::vm::name_registry::registry_path();
+        let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
+            .unwrap_or_default();
         let rows: Vec<MachineLsRow> = specs
             .iter()
             .map(|spec| MachineLsRow {
@@ -75,9 +75,9 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
         if let Some(resolved_digest) = spec.resolved_digest.as_deref() {
             println!("resolved-digest: {resolved_digest}");
         }
-        let registry_path = mvm::vm::name_registry::registry_path();
-        let registry =
-            mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
+        let registry_path = mvm_runtime::vm::name_registry::registry_path();
+        let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
+            .unwrap_or_default();
         let readiness = registry
             .lookup(&spec.name)
             .and_then(|reg| reg.readiness.as_ref());

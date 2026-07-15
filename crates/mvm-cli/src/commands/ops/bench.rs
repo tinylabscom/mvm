@@ -935,7 +935,7 @@ impl Drop for HeldVzVm {
     fn drop(&mut self) {
         use mvm_core::vm_backend::VmId;
 
-        let backend = mvm_backend::backend::AnyBackend::from_hypervisor("vz");
+        let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("vz");
         let _ = backend.stop(&VmId(self.vm_name.clone()));
     }
 }
@@ -965,7 +965,7 @@ fn boot_vz_hold_once(vm_name: &str) -> Result<HeldVzVm> {
     };
     populate_audit_substrate(&mut cfg, &admitted, None)?;
 
-    let backend = mvm_backend::backend::AnyBackend::from_hypervisor("vz");
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("vz");
     let start = Instant::now();
     backend.start(&cfg).context("probe vz backend.start")?;
 
@@ -1032,7 +1032,7 @@ fn wait_for_guest_readiness_and_record(
 
 #[cfg(target_os = "macos")]
 fn assert_vz_bench_cleanup(vm_name: &str) -> Result<()> {
-    let backend = mvm_backend::backend::AnyBackend::from_hypervisor("vz");
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("vz");
     let list = backend
         .list()
         .with_context(|| format!("listing Vz VMs after bench cleanup for {vm_name}"))?;
@@ -1128,7 +1128,7 @@ impl Drop for HeldFirecrackerVm {
     fn drop(&mut self) {
         use mvm_core::vm_backend::VmId;
 
-        let backend = mvm_backend::backend::AnyBackend::from_hypervisor("firecracker");
+        let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("firecracker");
         let _ = backend.stop(&VmId(self.vm_name.clone()));
     }
 }
@@ -1159,13 +1159,13 @@ fn boot_firecracker_hold_once(vm_name: &str, warm_pool_size: u32) -> Result<Held
     };
     populate_audit_substrate(&mut cfg, &admitted, None)?;
 
-    let backend = mvm_backend::backend::AnyBackend::from_hypervisor("firecracker");
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("firecracker");
     let start = Instant::now();
     backend
         .start(&cfg)
         .context("probe firecracker backend.start")?;
 
-    let abs_dir = mvm_backend::microvm::resolve_running_vm_dir(vm_name)?;
+    let abs_dir = mvm_runtime::microvm::resolve_running_vm_dir(vm_name)?;
     let (pid, pid_seen) = wait_for_firecracker_pid(&abs_dir)?;
     // The current Linux proof image used by the Firecracker host boots
     // successfully but does not expose the mvm guest-agent ping endpoint.
@@ -1189,7 +1189,7 @@ fn boot_firecracker_hold_once(vm_name: &str, warm_pool_size: u32) -> Result<Held
 
 #[cfg(target_os = "linux")]
 fn assert_firecracker_bench_cleanup(vm_name: &str) -> Result<()> {
-    let backend = mvm_backend::backend::AnyBackend::from_hypervisor("firecracker");
+    let backend = mvm_runtime::backend::AnyBackend::from_hypervisor("firecracker");
     let list = backend
         .list()
         .with_context(|| format!("listing VMs after bench cleanup for {vm_name}"))?;
@@ -1206,7 +1206,7 @@ fn wait_for_firecracker_pid(abs_dir: &str) -> Result<(u32, std::time::Instant)> 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut attempt = 0u32;
     loop {
-        if let Ok(pid) = mvm_backend::microvm::read_firecracker_pid(abs_dir) {
+        if let Ok(pid) = mvm_runtime::microvm::read_firecracker_pid(abs_dir) {
             return Ok((pid, std::time::Instant::now()));
         }
         if std::time::Instant::now() >= deadline {

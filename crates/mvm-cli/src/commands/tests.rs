@@ -4182,9 +4182,9 @@ fn console_removed() {
 
 #[test]
 fn machine_console_refused_on_sealed_image() {
-    use mvm::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
+    use mvm_runtime::vm::runtime_meta::{StartModeKind, VmRuntimeMeta, write as write_meta};
 
-    let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+    let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut env = mvm_core::util::test_env::TestEnv::new();

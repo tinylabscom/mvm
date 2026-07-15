@@ -5,9 +5,9 @@ use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
-use mvm_backend::backend::AnyBackend;
 use mvm_core::user_config::MvmConfig;
 use mvm_core::vm_backend::VmStatus;
+use mvm_runtime::backend::AnyBackend;
 
 use super::Cli;
 
@@ -75,9 +75,9 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 }
 
 fn run_gc(_cli: &Cli, args: GcArgs, _cfg: &MvmConfig) -> Result<()> {
-    let registry_path = mvm::vm::name_registry::registry_path();
-    let mut registry =
-        mvm::vm::name_registry::VmNameRegistry::load(&registry_path).with_context(|| {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    let mut registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
+        .with_context(|| {
             format!(
                 "Failed to load VM name registry at {}",
                 registry_path.display()
@@ -192,7 +192,7 @@ fn collect_live_vm_names() -> BTreeSet<String> {
 }
 
 fn gc_candidates(
-    registry: &mvm::vm::name_registry::VmNameRegistry,
+    registry: &mvm_runtime::vm::name_registry::VmNameRegistry,
     live_names: &BTreeSet<String>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<GcCandidate> {
@@ -227,7 +227,7 @@ fn gc_candidates(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm::vm::name_registry::{RegisterParams, VmNameRegistry};
+    use mvm_runtime::vm::name_registry::{RegisterParams, VmNameRegistry};
 
     fn registry_with(name: &str, expires_at: Option<&str>) -> VmNameRegistry {
         let mut registry = VmNameRegistry::default();

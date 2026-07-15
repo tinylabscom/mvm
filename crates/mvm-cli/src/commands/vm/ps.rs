@@ -3,8 +3,8 @@
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
-use mvm_backend::backend::AnyBackend;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::backend::AnyBackend;
 
 use super::Cli;
 
@@ -56,8 +56,9 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // ls` without changing the `VmInfo` shape every backend produces.
     // If the registry can't be loaded we fall through to "no metadata"
     // and only the backend listing is shown.
-    let registry_path = mvm::vm::name_registry::registry_path();
-    let registry = mvm::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    let registry =
+        mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
 
     let mut all_vms: Vec<VmInfo> = AnyBackend::list_all();
     merge_registry_only_stopped_rows(&mut all_vms, &registry, args.all);
@@ -66,7 +67,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 
     let now = chrono::Utc::now();
-    let is_expired = |reg: &mvm::vm::name_registry::VmRegistration| -> bool {
+    let is_expired = |reg: &mvm_runtime::vm::name_registry::VmRegistration| -> bool {
         reg.expires_at
             .as_deref()
             .and_then(mvm_core::util::time::parse_iso8601)
@@ -200,7 +201,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 fn merge_registry_only_stopped_rows(
     all_vms: &mut Vec<mvm_core::vm_backend::VmInfo>,
-    registry: &mvm::vm::name_registry::VmNameRegistry,
+    registry: &mvm_runtime::vm::name_registry::VmNameRegistry,
     include_stopped: bool,
 ) {
     if !include_stopped {
@@ -232,10 +233,10 @@ fn merge_registry_only_stopped_rows(
 mod tests {
     use super::*;
 
-    fn registered(name: &str) -> mvm::vm::name_registry::VmNameRegistry {
-        let mut registry = mvm::vm::name_registry::VmNameRegistry::default();
+    fn registered(name: &str) -> mvm_runtime::vm::name_registry::VmNameRegistry {
+        let mut registry = mvm_runtime::vm::name_registry::VmNameRegistry::default();
         registry
-            .register_with_metadata(mvm::vm::name_registry::RegisterParams::minimal(
+            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams::minimal(
                 name,
                 "/tmp/mvm-test-vm",
                 "default",

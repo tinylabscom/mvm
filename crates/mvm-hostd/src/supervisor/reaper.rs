@@ -29,7 +29,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use mvm::vm::name_registry::{VmNameRegistry, VmRegistration};
+use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 use rand::Rng;
 
 /// Default tick interval — ticks fire every `INTERVAL ± JITTER`.
@@ -290,8 +290,8 @@ pub fn deregister_only_teardown() -> TeardownFn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm::vm::name_registry::RegisterParams;
     use mvm_core::util::test_env::TestEnv;
+    use mvm_runtime::vm::name_registry::RegisterParams;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
     use std::sync::Arc;

@@ -3,9 +3,9 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_backend::microvm;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::microvm;
 
 use super::Cli;
 use super::shared::clap_vm_name;

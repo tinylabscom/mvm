@@ -739,7 +739,7 @@ fn interactive_requires_a_host_tty() {
 
 #[test]
 fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
-    let _guard = mvm::vm::runtime_meta::HOME_TEST_LOCK
+    let _guard = mvm_runtime::vm::runtime_meta::HOME_TEST_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut env = TestEnv::new();
@@ -747,10 +747,10 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
     env.set("HOME", tmp.path());
     env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
     let name = "sealed-machine";
-    mvm::vm::runtime_meta::write(
+    mvm_runtime::vm::runtime_meta::write(
         name,
-        &mvm::vm::runtime_meta::VmRuntimeMeta {
-            mode: mvm::vm::runtime_meta::StartModeKind::Detached,
+        &mvm_runtime::vm::runtime_meta::VmRuntimeMeta {
+            mode: mvm_runtime::vm::runtime_meta::StartModeKind::Detached,
             accessible: false,
             rootfs_path: None,
             runtime_source_policy: mvm_core::vm_backend::RuntimeSourcePolicy::RootfsOnly,

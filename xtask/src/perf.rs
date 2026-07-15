@@ -317,7 +317,7 @@ fn boot_subcommand(args: &[String]) -> Result<()> {
         rootfs.display()
     );
     // The actual N-run benchmark loop is deferred — it links against
-    // `mvm_backend` to invoke `start_with_mode` + measure. Substrate
+    // `mvm_runtime` to invoke `start_with_mode` + measure. Substrate
     // today: arg parsing + threshold lookup + the budget assertion
     // shape so consumers can scaffold.
     bail!(

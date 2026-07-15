@@ -1,0 +1,92 @@
+[package]
+name = "mvm-runtime"
+version.workspace = true
+edition.workspace = true
+description = "VM lifecycle orchestration + VmBackend implementations for mvm"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+autobins = false
+
+[package.metadata.mvm.architecture]
+substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + backend-local vsock listeners)"
+
+[dependencies]
+# `egress-ca`: `substitution_spawn::build_egress_tls_delivery`
+# mints the per-VM name-constrained intermediate (`crypto::egress_ca`) so the
+# guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
+mvm-core = { workspace = true, features = ["egress-ca"] }
+# The NetworkProvider seam this crate implements (BridgeTapNetworkProvider).
+# Acyclic: mvm-net deps only mvm-core + mvm-sdk.
+mvm-net.workspace = true
+# `SnapshotUpper` materializes the disk snapshot the libkrun disk-only
+# warm-start boots from. Acyclic: mvm-storage deps only mvm-core +
+# mvm-sdk (both already in this crate's graph).
+mvm-storage.workspace = true
+mvm-guest.workspace = true
+mvm-sdk.workspace = true
+# `builder-vm`/`pure-mkfs` for the overlay-aware admission gate
+# (`builder_vm::admit_overlay_aware`) called from every backend's
+# `start` impl.
+mvm-build = { workspace = true, default-features = false, features = [
+    "builder-vm",
+    "pure-mkfs",
+] }
+libkrun-sys.workspace = true
+mio.workspace = true
+anyhow.workspace = true
+# `OverlayManager` is an async trait carrying chrono timestamps +
+# thiserror'd typed errors.
+async-trait = "0.1"
+thiserror.workspace = true
+base64.workspace = true
+chrono.workspace = true
+ed25519-dalek.workspace = true
+rand.workspace = true
+# Folded in with the former mvm-base crate: the base substrate's ui
+# (ANSI output, in-house spinners + prompts) and secret handling (secrecy).
+# Crypto helpers come from mvm_core::crypto, already available via the
+# mvm-core dep above.
+secrecy.workspace = true
+# The lean S3 client (consolidated with mvm-storage; replaced the
+# heavier `opendal` whose ~70-crate closure the dep budget rejects). `aws` gives
+# the S3 builder + its reqwest/rustls path; only `template-registry-s3` pulls it.
+object_store = { version = "0.11", optional = true, default-features = false, features = [
+    "aws",
+] }
+serde.workspace = true
+serde_json.workspace = true
+hex.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+# `libc` for `kill(pid, 0)` liveness probes + SIGTERM/SIGKILL signaling
+# in `LibkrunBackend::{stop, status, list}`. `which` for the
+# supervisor-binary path resolver fallback (after env override + adjacent
+# to current exe, fall back to PATH lookup).
+libc.workspace = true
+which.workspace = true
+ext4-view.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+fs2.workspace = true
+
+[dev-dependencies]
+mvm-core = { workspace = true, features = ["test-support"] }
+
+# KVM backend. Pre-generated bindings + safe ioctl wrappers;
+# the in-repo kvm::x86_boot logic is pure and platform-independent.
+[target.'cfg(target_os = "linux")'.dependencies]
+kvm-ioctls = "0.21"
+kvm-bindings = "0.11"
+
+[features]
+default = []
+contributor-bootstrap = ["mvm-build/contributor-bootstrap"]
+manifest-verify = ["mvm-core/manifest-verify"]
+template-registry-s3 = ["dep:object_store"]
+
+[lints]
+workspace = true

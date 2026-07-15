@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use crate::ui;
 
-use mvm_backend::microvm;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::microvm;
 
 use super::Cli;
 

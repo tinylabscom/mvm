@@ -320,7 +320,7 @@ pub(in crate::commands) fn run_entrypoint(call: EntrypointCall) -> Result<()> {
         .map(|w| super::managed_secrets::lower_workload_secrets(&w))
         .filter(|lowered| !lowered.secrets.is_empty())
         .unwrap_or_default();
-    let backend_name = mvm_backend::backend::AnyBackend::auto_select()
+    let backend_name = mvm_runtime::backend::AnyBackend::auto_select()
         .name()
         .to_string();
     let admit_backend = backend_name.clone();
@@ -602,7 +602,7 @@ pub(in crate::commands) fn dispatch(
 }
 
 fn dispatch_inner(vm_name: &str, stdin: Vec<u8>, timeout_secs: u64) -> Result<i32> {
-    let transport = mvm::vsock_transport::for_vm(vm_name)
+    let transport = mvm_runtime::vsock_transport::for_vm(vm_name)
         .with_context(|| format!("Picking transport for guest agent on '{vm_name}'"))?;
     let mut stream = transport
         .connect(mvm_guest::vsock::GUEST_AGENT_PORT)

@@ -171,12 +171,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// the in-memory mock backend.
 pub(super) fn fs_request(name: &str, req: GuestRequest) -> Result<FsResult> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let mock_dir = mvm_backend::MockBackend::vm_dir(name);
+    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
     if mock_dir.join("runtime").join("v.sock").exists() {
         return mvm_guest::vsock::send_fs_request(&mock_dir.to_string_lossy(), req);
     }
     let mut stream =
-        mvm::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
+        mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_guest::vsock::GUEST_AGENT_PORT)?;
     mvm_guest::vsock::send_fs_request_on(&mut stream, req)
 }
 

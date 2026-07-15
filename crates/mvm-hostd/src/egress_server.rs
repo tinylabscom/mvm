@@ -21,7 +21,7 @@
 use std::future::Future;
 use std::net::SocketAddr;
 
-use mvm_backend::vmm::egress_gate::{EgressGate, EgressVerdict};
+use mvm_runtime::vmm::egress_gate::{EgressGate, EgressVerdict};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, BufReader};
 use tokio::net::{TcpStream, UnixListener};
 

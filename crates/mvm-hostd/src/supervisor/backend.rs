@@ -5,15 +5,15 @@
 //! `Supervisor::launch(plan)` is testable without a real Firecracker. It is
 //! deliberately separate from the runtime backend stack: runtime behavior is
 //! `mvm_core::vm_backend::VmBackend`, backend discovery is the compile-time
-//! descriptor registry in `mvm_backend::catalog`, and
-//! `mvm_backend::backend::AnyBackend` is the closed enum for backend-specific
+//! descriptor registry in `mvm_runtime::catalog`, and
+//! `mvm_runtime::backend::AnyBackend` is the closed enum for backend-specific
 //! dispatch. There is no dynamic backend registry — the descriptor table is
 //! static.
 
 use async_trait::async_trait;
-use mvm_backend::base::config::VmSlot;
-use mvm_backend::microvm::FlakeRunConfig;
 use mvm_core::plan::{ExecutionPlan, PlanId};
+use mvm_runtime::base::config::VmSlot;
+use mvm_runtime::microvm::FlakeRunConfig;
 use std::collections::BTreeMap;
 use std::sync::Mutex;
 use thiserror::Error;
@@ -141,7 +141,7 @@ impl BackendLauncher for FirecrackerRunConfigLauncher {
     }
 
     async fn launch(&self, plan: &ExecutionPlan) -> Result<(), BackendError> {
-        mvm_backend::microvm::run_from_build(&self.config)
+        mvm_runtime::microvm::run_from_build(&self.config)
             .map_err(|e| BackendError::LaunchFailed(e.to_string()))?;
         self.launched
             .lock()
@@ -160,7 +160,7 @@ impl BackendLauncher for FirecrackerRunConfigLauncher {
             .ok_or_else(|| BackendError::UnknownPlan {
                 plan_id: plan_id.clone(),
             })?;
-        mvm_backend::microvm::stop_vm(&vm_name)
+        mvm_runtime::microvm::stop_vm(&vm_name)
             .map_err(|e| BackendError::StopFailed(e.to_string()))?;
         self.launched
             .lock()

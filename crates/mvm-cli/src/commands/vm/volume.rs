@@ -31,16 +31,16 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use clap::{Args as ClapArgs, Subcommand};
 
-use mvm::vm::volume_registry::{
-    LocalVolumeCatalog, LocalVolumeEncryption, LocalVolumeEntry, LocalVolumeState,
-    MvmManagedVolumeEncryption, VolumeMountEntry, VolumeMountRegistry,
-};
 use mvm_core::crypto::key_rotation;
 use mvm_core::crypto::policy::validate_mount_path;
 use mvm_core::crypto::rotation_policy;
 use mvm_core::domain::volume::{MasterKeyState, OrgId, WrapAlgorithm, WrappedKey};
 use mvm_core::naming::validate_vm_name;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::vm::volume_registry::{
+    LocalVolumeCatalog, LocalVolumeEncryption, LocalVolumeEntry, LocalVolumeState,
+    MvmManagedVolumeEncryption, VolumeMountEntry, VolumeMountRegistry,
+};
 use rand::RngCore;
 use secrecy::ExposeSecret;
 

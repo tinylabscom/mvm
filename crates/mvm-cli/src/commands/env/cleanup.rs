@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 
 use crate::ui;
 
-use mvm::shell;
 use mvm_core::user_config::MvmConfig;
+use mvm_runtime::shell;
 
 use super::Cli;
 

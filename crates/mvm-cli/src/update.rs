@@ -4,7 +4,7 @@ use std::path::Path;
 
 use crate::http;
 use crate::ui;
-use mvm::shell::run_host;
+use mvm_runtime::shell::run_host;
 
 const GITHUB_REPO: &str = "tinylabscom/mvm";
 const RELEASE_HOST_BINS: &[&str] = &[

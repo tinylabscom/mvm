@@ -24,10 +24,10 @@ use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
-use mvm::vsock_transport::VsockTransport as _;
-use mvm_backend::backend::AnyBackend;
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_guest::vsock::{GuestRequest, GuestResponse};
+use mvm_runtime::backend::AnyBackend;
+use mvm_runtime::vsock_transport::VsockTransport as _;
 use serde::Deserialize;
 
 const ENABLE_VAR: &str = "MVM_RUNTIME_BOOT_BENCH";
@@ -294,7 +294,7 @@ fn wait_for_guest_agent(backend: &str, name: &str) -> Result<()> {
 }
 
 fn wait_for_vz_guest_agent(name: &str) -> Result<()> {
-    let transport = mvm::vsock_transport::VzTransport::for_vm(name);
+    let transport = mvm_runtime::vsock_transport::VzTransport::for_vm(name);
     let deadline = Instant::now() + READY_TIMEOUT;
     let mut last_err = None;
 

@@ -76,15 +76,15 @@ path = "src/bin/mvm-hvf-supervisor.rs"
 # `egress-ca`: the https terminator mints per-SNI leaves
 # under the per-VM intermediate (`mvm_core::crypto::egress_ca`).
 mvm-core = { workspace = true, features = ["egress-ca"] }
-mvm-backend.workspace = true
 # The EgressEnforcer seam this crate's SupervisorEgressEnforcer
 # implements. Acyclic HIGH->LOW: mvm-net deps only mvm-core + mvm-sdk.
 mvm-net.workspace = true
 # `mvm_sdk::compile::deps_audit::verify_sealed_volume` — supervisor
 # admission gate (security claim 9).
 mvm-sdk.workspace = true
-# `mvm` provides the `VmNameRegistry` the TTL reaper walks.
-mvm.workspace = true
+# `mvm-runtime` provides the `VmNameRegistry` the TTL reaper walks, plus the
+# `VmBackend` implementations dispatched from `AnyBackend`.
+mvm-runtime.workspace = true
 # guest vsock exec protocol (`send_exec_streaming`, `GUEST_AGENT_PORT`) —
 # the healthcheck probe's host->guest exec leg.
 mvm-guest.workspace = true

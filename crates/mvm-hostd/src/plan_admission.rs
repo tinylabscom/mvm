@@ -55,9 +55,9 @@ use mvm_core::policy::PolicyBundle;
 use std::sync::Mutex;
 
 use crate::audit::host_keypair::host_signer_id;
-use mvm_backend::AnyBackend;
 use mvm_core::plan::{SynthesisInput, synthesize_plan};
 use mvm_core::vm_backend::{VmId, VmStartConfig};
+use mvm_runtime::AnyBackend;
 
 pub use mvm_core::time::{Clock, SystemClock};
 
@@ -1406,7 +1406,7 @@ mod tests {
     #[test]
     fn admit_and_start_admits_then_boots_on_mock() {
         let dir = tempfile::tempdir().unwrap();
-        let backend = mvm_backend::AnyBackend::from_hypervisor("mock");
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
         let config = mvm_core::vm_backend::VmStartConfig {
             name: "vm-boot".into(),
@@ -1442,7 +1442,7 @@ mod tests {
     fn admit_and_start_refuses_unadmitted_volume_before_boot() {
         use mvm_core::vm_backend::{VmVolume, VmVolumeKind};
         let dir = tempfile::tempdir().unwrap();
-        let backend = mvm_backend::AnyBackend::from_hypervisor("mock");
+        let backend = mvm_runtime::AnyBackend::from_hypervisor("mock");
         let ledger = InMemoryNonceLedger::new();
         // The synthesized plan admits no shares, but the launch config carries a
         // volume — claim 1 must refuse before the backend ever starts.

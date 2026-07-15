@@ -1,6 +1,6 @@
 //! Config contract for `mvm-hvf-supervisor` — the per-VM host process for the
 //! raw HVF macOS backend. Lives here (below both `mvm-backend` and
-//! `mvm-vm-host`) so the writer (`mvm_backend::hvf::HvfBackend`) and the reader
+//! `mvm-vm-host`) so the writer (`mvm_runtime::hvf::HvfBackend`) and the reader
 //! (the `mvm-hvf-supervisor` bin) share one definition — the same way the vz
 //! `SupervisorConfig` does. The backend writes this as JSON on the supervisor's
 //! stdin; the supervisor boots the guest and captures its console.

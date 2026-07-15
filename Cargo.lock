@@ -2080,9 +2080,9 @@ name = "libkrun-sys"
 version = "0.18.0"
 dependencies = [
  "libc",
- "mvm-backend",
  "mvm-core",
  "mvm-guest",
+ "mvm-runtime",
  "serde",
  "serde_json",
  "tempfile",
@@ -2216,65 +2216,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm"
-version = "0.18.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "chrono",
- "ed25519-dalek",
- "fs2",
- "hex",
- "libc",
- "mvm-backend",
- "mvm-build",
- "mvm-core",
- "mvm-guest",
- "mvm-sdk",
- "object_store",
- "rand 0.8.6",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
- "tracing",
-]
-
-[[package]]
-name = "mvm-backend"
-version = "0.18.0"
-dependencies = [
- "anyhow",
- "ext4-view",
- "hex",
- "kvm-bindings",
- "kvm-ioctls",
- "libc",
- "libkrun-sys",
- "mio",
- "mvm-build",
- "mvm-core",
- "mvm-guest",
- "mvm-net",
- "mvm-storage",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "thiserror 1.0.69",
- "toml",
- "tracing",
- "uuid",
- "which",
-]
-
-[[package]]
 name = "mvm-build"
 version = "0.18.0"
 dependencies = [
@@ -2327,13 +2268,12 @@ dependencies = [
  "hex",
  "libc",
  "libkrun-sys",
- "mvm",
- "mvm-backend",
  "mvm-build",
  "mvm-core",
  "mvm-fs",
  "mvm-guest",
  "mvm-hostd",
+ "mvm-runtime",
  "mvm-sdk",
  "notify",
  "notify-debouncer-mini",
@@ -2360,12 +2300,11 @@ version = "0.18.0"
 dependencies = [
  "async-trait",
  "flate2",
- "mvm",
- "mvm-backend",
  "mvm-build",
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
+ "mvm-runtime",
  "tempfile",
  "tokio",
 ]
@@ -2509,12 +2448,11 @@ dependencies = [
  "landlock",
  "libc",
  "libkrun-sys",
- "mvm",
- "mvm-backend",
  "mvm-build",
  "mvm-core",
  "mvm-guest",
  "mvm-net",
+ "mvm-runtime",
  "mvm-sdk",
  "mvm-verify",
  "rand 0.8.6",
@@ -2548,6 +2486,44 @@ dependencies = [
  "mvm-core",
  "mvm-sdk",
  "serde_json",
+]
+
+[[package]]
+name = "mvm-runtime"
+version = "0.18.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "chrono",
+ "ed25519-dalek",
+ "ext4-view",
+ "fs2",
+ "hex",
+ "kvm-bindings",
+ "kvm-ioctls",
+ "libc",
+ "libkrun-sys",
+ "mio",
+ "mvm-build",
+ "mvm-core",
+ "mvm-guest",
+ "mvm-net",
+ "mvm-sdk",
+ "mvm-storage",
+ "object_store",
+ "rand 0.8.6",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+ "which",
 ]
 
 [[package]]
@@ -2617,13 +2593,12 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "libkrun-sys",
- "mvm",
- "mvm-backend",
  "mvm-build",
  "mvm-cli",
  "mvm-core",
  "mvm-fs",
  "mvm-guest",
+ "mvm-runtime",
  "objc2-foundation",
  "predicates",
  "rand 0.8.6",
