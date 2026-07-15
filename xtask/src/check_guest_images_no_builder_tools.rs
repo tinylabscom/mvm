@@ -45,7 +45,7 @@ pub fn run(workspace: &Path) -> Result<()> {
             "check-guest-images-no-builder-tools: `{MK_GUEST}` installs host/builder \
              tooling into workload guest images: {}\n\
              Workload guests are sealed headless payloads — `mvmctl` and `mvm-builderd` \
-             are host / builder-VM tools and must never be baked in (ADR-089 / Plan 204 \
+             are host / builder-VM tools and must never be baked in (ADR-059 / Plan 204 \
              §5). If this is a comment, the comment stripper missed it; if it is code, \
              remove the install.",
             found.join(", ")

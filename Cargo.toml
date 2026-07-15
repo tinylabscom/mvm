@@ -57,10 +57,10 @@ members = [
     "crates/mvm-sdk",
     # Plan 104 W1a — host services broker subprocess (one of three
     # per-VM subprocesses: mvm-broker, mvm-host-signer,
-    # mvm-audit-signer; ADR-062 dropped mvm-secrets-dispatcher). W1a
+    # mvm-audit-signer; ADR-059 dropped mvm-secrets-dispatcher). W1a
     # ships the dispatch-loop skeleton + UDS listener + config
-    # envelope for the general broker subprocess only. ADR-061 /
-    # ADR-062 / Plan 104 §"Host-side: three-subprocess architecture".
+    # envelope for the general broker subprocess only. ADR-059 /
+    # Plan 104 §"Host-side: three-subprocess architecture".
     # Plan 104 W1b.1 — the remaining two key subprocesses, each as
     # its own crate. The supervisor lifecycle + cosign-verify +
     # cgroup + seccomp + binary hardening land in W1b.2.

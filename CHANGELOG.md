@@ -578,7 +578,7 @@ All notable changes to mvm are documented in this file.
 - **dev**: Close out builder VM fingerprint narrowing
 - Propose builder VM resident control plane
 - **plan-200**: Draft the Vz up --wait verdict-capture slice
-- Plan 205 / ADR-090 — resident builder control plane + residency model (umbrella)
+- Plan 205 / ADR-059 — resident builder control plane + residency model (umbrella)
 - **plan-205**: Workstream F — what-runs-where, residency config, threat-model delta
 - **plan-205**: Make the "instant" bar a CI-gated latency budget
 - **troubleshooting**: Stage 0 BadActivate on a fresh isolated cache
