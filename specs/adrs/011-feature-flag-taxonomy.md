@@ -1,130 +1,86 @@
----
-title: "ADR-011: Feature flag taxonomy"
-status: Proposed
-date: 2026-05-07
-related: ADR-004 (libkrun pivot), ADR-007 (VmBackend), ADR-009 (cross-platform), plan 60-mvm-libkrun-migration
----
+# ADR-011: Exactly two root feature surfaces — `host` and `user`
 
 ## Status
 
-Proposed. Feature flags are declared in Phase 0 (root `Cargo.toml`); each is exercised by at least one CI build configuration by Phase 9.
+Accepted.
 
 ## Context
 
-The feature-flag namespace can sprawl quickly in a workspace this size. Without a taxonomy, every contributor invents new feature names ad-hoc, and we end up with `enable-foo` next to `with-bar` next to `bar-disabled`. Worse, dev-only features can slip into production builds if the gating is sloppy.
-
-This ADR establishes:
-1. The categories of flags
-2. The naming conventions
-3. The CI matrix that exercises them
-4. The hard rule that **`dev` must never be enabled in production builds**.
+A workspace this size risks feature-namespace sprawl: every contributor
+inventing a new per-capability flag ad hoc, with no mechanical way to
+tell a dev-only capability apart from a shipped one, or a platform knob
+apart from product behavior.
 
 ## Decision
 
-### Categories
+### Two, and only two, consumer-facing product surfaces
 
 ```toml
-# Backends (at least one must be enabled — CI checks)
-firecracker     = ["dep:vmm-firecracker-client"]   # Linux-only
-libkrun    = ["dep:libkrun"]             # cross-platform
-backend-cloud-hypervisor = []                      # post-Phase-10
-
-# Front-ends
-mcp             = ["dep:rmcp", "mvm-mcp/server"]
-sdk             = ["dep:mvm-sdk"]
-
-# Observability
-metrics-prometheus = ["dep:metrics-exporter-prometheus"]
-metrics-otel       = ["dep:opentelemetry-otlp"]
-audit-remote-sink  = ["dep:reqwest"]
-
-# Encryption tiers
-luks            = []                               # Linux-only volume encryption
-apfs-encrypt    = []                               # macOS-only fallback
-bitlocker       = []                               # Windows-only fallback
-
-# Network paths
-egress-l4-proxy = ["dep:smoltcp", "dep:tun"]
-egress-l7-proxy = ["egress-l4-proxy", "dep:hyper", "dep:rustls"]
-egress-firewall-nft = ["dep:nftables"]             # Linux nftables only
-
-# Computer-use & GPU
-computer-use    = ["dep:image", "egress-l4-proxy"]
-gpu-virgl       = []                               # virtio-gpu via virgl/Venus (libkrun)
-gpu-passthrough = ["backend-cloud-hypervisor"]
-
-# Attestation
-attestation-tpm2     = ["dep:tss-esapi"]
-attestation-sev-snp  = ["sev-snp"]
-attestation-tdx      = ["tdx"]
-
-# Confidential compute (API stubs reserved)
-sev-snp         = []
-tdx             = []
-
-# Add-on system
-addons-registry = []
-
-# Dev mode (NEVER enabled in production)
-dev             = []
+[features]
+host = [ ... ]  # everything the host machine runs to provision/build/secure/run sandboxes
+user = [ ... ]  # everything a user runs to drive them
 ```
 
-### Naming conventions
+Every capability folds into one of these two. There is no third
+consumer-facing product surface, ever.
 
-- Lowercase, kebab-case, terse but descriptive.
-- Backends: bare name (`firecracker`, `libkrun`).
-- Categories prefixed: `metrics-*`, `egress-*`, `attestation-*`, `gpu-*`.
-- Stub features for future work end with `-deferred` or are simply empty (`sev-snp = []`).
-- The `dev` flag has no prefix to make it unmissable.
+- **`host`** — platform-neutral; backends auto-detect at runtime through
+  the `VmBackend` trait. Forwards to the sub-crate features that give it
+  builder-VM dispatch, in-process rootfs materialization, custom DNS, and
+  the gated hostd IPC transport.
+- **`user`** — forwards to cosign manifest verification for `--prod` and
+  `build --watch`.
+- **`default`** — the lean host-runtime core the shipped `mvmctl` binary
+  gets with no opt-in: a strict subset of `host`.
+- **`dev`** — the local-development meta-feature: the `host` + `user`
+  union plus a contributor-bootstrap forward, so a contributor's laptop
+  builds one `mvmctl` that runs every documented example.
 
-### Default feature set
+### A short, fixed internal allowlist
 
-```toml
-default = ["firecracker", "libkrun", "mcp", "metrics-prometheus", "luks"]
-```
+The only other root features are knobs that cannot be unconditional and
+are not product behavior:
 
-(`luks` is in default because Linux is the primary deploy target; on macOS/Windows the `luks` feature compiles to a no-op runtime stub.)
+- `libkrun-sys` / `libkrun-live` — link the libkrun C VMM. Absent on a
+  macOS-26 HVF host, where there is no libkrun to link against.
+- `template-registry-s3` — an optional, heavy S3 storage backend for the
+  template registry (fleet-only, not part of the local host runtime).
+- `hostd-transport` — a lean library knob: `mvm-core`'s gated hostd IPC
+  transport, exposed standalone so a downstream host-side daemon can
+  flip just the transport without pulling in the rest of `host`.
+- `release-artifact-bootstrap` — release-only: lets an installed binary
+  download mvm-published prebuilt images on a cache miss. Off for source
+  checkouts, which always build locally.
 
-### Production build incantation
+### Mechanical enforcement
 
-```bash
-cargo build --release --no-default-features \
-  --features "firecracker,libkrun,mcp,metrics-prometheus,luks,egress-l7-proxy,egress-firewall-nft,attestation-tpm2"
-```
+`xtask check-two-surfaces` parses the root `Cargo.toml` `[features]`
+table and fails CI if `host` or `user` is missing, if `dev` stops
+aggregating both, or if any root feature exists that is neither `host`,
+`user`, nor on the internal allowlist above. Adding a new root feature
+therefore forces an explicit decision in the same PR: fold it into
+`host` or `user` because it is product behavior, or justify its addition
+to the allowlist in `xtask/src/check_two_surfaces.rs` because it
+genuinely cannot be unconditional.
 
-**`dev` is omitted, explicitly.** Production builds with `dev` enabled fail compile via a `#[cfg(all(feature = "dev", not(debug_assertions), not(test)))] compile_error!(...)` guard (Phase 0).
-
-### CI matrix
-
-At minimum, three feature combinations are built per PR:
-1. **Minimal**: `--no-default-features --features "libkrun"` (cross-platform sanity)
-2. **Default**: `cargo build` (the developer's typical path)
-3. **Full prod**: the production incantation above (the deployer's path)
-
-Failing any of the three blocks the PR.
+Individual per-crate feature names (the sub-crate features `host`/`user`
+forward to) are not independently selectable at the root — a contributor
+building `mvmctl` directly reasons about two names, not the sub-crate
+graph behind them.
 
 ## Consequences
 
-**Positive**:
-- New flags inherit a clear naming + scoping convention.
-- Production builds are mechanically verified to exclude `dev`.
-- Feature drift (a flag that nothing uses; a flag that doesn't compile) is caught by the CI matrix.
+The feature namespace cannot sprawl: "exactly two surfaces" is a
+structural fact enforced by `check-two-surfaces`, not a style guideline
+a reviewer has to remember to apply. A PR that adds a third
+consumer-facing knob fails a named CI step.
 
-**Negative**:
-- The matrix grows the CI runtime. Mitigated by sharding on the runner pool.
-- Some feature combinations may have subtle interaction bugs that only surface in specific matrix entries. Acceptable — fast feedback is the point.
+A genuinely platform-specific or build-only knob that isn't clearly
+`host`, `user`, or already on the allowlist needs a real design decision
+and an `xtask` code change before it can land — there is no "just add a
+flag" escape hatch.
 
-## Alternatives considered
-
-- **One mega-feature**: rejected. Loses the ability to ship a slim `libkrun`-only build.
-- **Per-crate features only**: rejected. Workspace-level features with `workspace.dependencies` propagation is the idiomatic Cargo pattern.
-- **Runtime config flags instead of compile-time**: rejected for `dev`. Compile-time exclusion is the only way to ensure dev paths can't be invoked in production.
-
-## Threat model impact
-
-The `dev` compile-time exclusion is a load-bearing security property. A subverted release pipeline cannot ship a `dev`-flagged binary because `compile_error!` makes that combination unbuildable.
-
-## Compliance impact
-
-- SOC 2: positive — separation of dev and prod is a documented control.
-- All others: neutral.
+`mvm-core`'s own feature gates (`hostd-transport`, `manifest-verify`) are
+unaffected by this taxonomy beyond being forward targets — this ADR
+governs the root facade crate's `[features]` table, not what any
+individual library crate chooses to gate internally.
