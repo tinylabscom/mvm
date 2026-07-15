@@ -15,7 +15,6 @@ mvm = { workspace = true, default-features = false }
 mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-backend = { workspace = true, default-features = false }
-mvm-mcp = { workspace = true, optional = true }
 mvm-fs.workspace = true
 mvm-hostd.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_sdk::ir) and routes it
@@ -80,7 +79,10 @@ contributor-bootstrap = [
     "mvm-build/contributor-bootstrap",
     "mvm-backend/contributor-bootstrap",
 ]
-mcp = ["dep:mvm-mcp"]
+# The MCP server (crate::mcp — dispatcher/protocol/server/session/tools)
+# needs no deps beyond what mvm-cli already carries unconditionally
+# (serde, serde_json, anyhow, tracing, tracing-subscriber).
+mcp = []
 builder-vm = ["mvm-build/builder-vm"]
 # In-process, pure-Rust rootfs materialization (no builder VM / mkfs) for the
 # `run --image` path. Default: the run path builds the ext4 image with the

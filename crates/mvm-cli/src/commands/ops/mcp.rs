@@ -23,11 +23,12 @@ use clap::{Args as ClapArgs, Subcommand};
 use mvm_core::user_config::MvmConfig;
 use mvm_hostd::supervisor::ToolRegistry;
 use mvm_hostd::supervisor::tools::{download, staging, upload, web_fetch, web_search};
-use mvm_mcp::{
+use secrecy::SecretBox;
+
+use crate::mcp::{
     ContentBlock, Dispatcher, ReapReason, Reaper, RunParams, SessionConfig, SessionLookup,
     SessionMap, SessionState, ToolResult,
 };
-use secrecy::SecretBox;
 
 use super::Cli;
 
@@ -54,7 +55,7 @@ pub(in crate::commands) enum McpTransport {
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     match args.transport {
         McpTransport::Stdio => {
-            mvm_mcp::init_stderr_tracing();
+            crate::mcp::init_stderr_tracing();
             let dispatcher = ExecDispatcher::default();
             // Spawn the session reaper. Drops out when the process exits;
             // sessions still in the map at shutdown get drained by the
@@ -63,7 +64,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             dispatcher.spawn_reaper();
             let stdin = std::io::stdin();
             let stdout = std::io::stdout();
-            mvm_mcp::run_with_dispatcher(stdin.lock(), &mut stdout.lock(), &dispatcher)
+            crate::mcp::run_with_dispatcher(stdin.lock(), &mut stdout.lock(), &dispatcher)
         }
     }
 }
@@ -567,7 +568,7 @@ impl Drop for ExecDispatcher {
 }
 
 /// Reaper impl that audit-logs the close *and* tears down the warm
-/// VM (A.2 v2). The trait-based design (per `mvm_mcp::session`) means
+/// VM. The trait-based design (per `crate::mcp::session`) means
 /// mvmd's hosted variant can plug in its own reaper that uses its
 /// per-tenant orchestrator without changing the map contract.
 struct DispatcherReaper {

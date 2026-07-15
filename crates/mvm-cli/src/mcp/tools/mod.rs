@@ -1,8 +1,8 @@
 //! Tool definitions exposed via MCP.
 //!
-//! The schema (this module) is `protocol-only`; the dispatcher impl
-//! that actually runs code in a microVM lives in
-//! `mvm-cli::commands::ops::mcp`.
+//! This module carries only the schema; the dispatcher impl that
+//! actually runs code in a microVM lives in
+//! `crate::commands::ops::mcp`.
 //!
 //! Single-tool design ("borrow nix-sandbox-mcp's insight"): we expose
 //! one parameterized tool (`run`) so the LLM context-window cost

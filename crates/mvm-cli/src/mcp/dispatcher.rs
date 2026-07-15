@@ -1,9 +1,9 @@
 //! Transport-agnostic `Dispatcher` trait.
 //!
-//! Available under `protocol-only` so the mvmd hosted variant
-//! can plug in its own dispatcher (HTTP-fronted, tenant-aware) without
-//! depending on this crate's stdio loop. The mvm stdio binary
-//! provides one impl in `mvm-cli::commands::ops::mcp`.
+//! Kept independent of the stdio loop so the mvmd hosted variant
+//! can plug in its own dispatcher (HTTP-fronted, tenant-aware). The
+//! mvmctl stdio binary provides one impl in
+//! `crate::commands::ops::mcp`.
 //!
 //! ## Two method surfaces
 //!
@@ -19,8 +19,8 @@
 //!   returns an `is_error: true` ToolResult so a dispatcher that
 //!   doesn't opt in still answers MCP `tools/call` without trapping.
 
-use crate::protocol::{ContentBlock, ToolResult};
-use crate::tools::RunParams;
+use crate::mcp::protocol::{ContentBlock, ToolResult};
+use crate::mcp::tools::RunParams;
 
 /// One method per MCP tool surface we expose.
 pub trait Dispatcher {

@@ -11,11 +11,11 @@ use std::io::{BufRead, Write};
 use anyhow::Result;
 use serde_json::Value;
 
-use crate::dispatcher::Dispatcher;
-use crate::protocol::{
+use crate::mcp::dispatcher::Dispatcher;
+use crate::mcp::protocol::{
     JsonRpcError, JsonRpcRequest, JsonRpcResponse, PROTOCOL_VERSION, SERVER_NAME, SERVER_VERSION,
 };
-use crate::tools::{RunParams, all_tools};
+use crate::mcp::tools::{RunParams, all_tools};
 
 /// Initialize a stderr-only tracing subscriber. MUST be called before
 /// the dispatch loop, since `tracing` defaults to stdout — and a
@@ -159,7 +159,7 @@ fn tools_call_response<D: Dispatcher>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{ContentBlock, ToolResult};
+    use crate::mcp::protocol::{ContentBlock, ToolResult};
 
     /// Mock dispatcher that records the params it saw and returns a
     /// canned ToolResult.

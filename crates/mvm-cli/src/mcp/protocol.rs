@@ -6,8 +6,8 @@
 //! ~200 LoC; the operational risk of writing it ourselves is lower
 //! than the supply-chain cost of importing it.
 //!
-//! Available under `protocol-only` so mvmd can consume these types
-//! without dragging in stdio I/O.
+//! These types carry no I/O of their own, so mvmd can consume them
+//! for its hosted transport without depending on the stdio loop.
 
 use serde::{Deserialize, Serialize};
 

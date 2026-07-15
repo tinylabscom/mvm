@@ -3,7 +3,7 @@
 //! v1 ships the bookkeeping layer:
 //!
 //! - [`SessionMap`] tracks `(session_id → SessionState)` with idle and
-//!   max-lifetime expiry — *protocol-only safe*, no I/O.
+//!   max-lifetime expiry — pure, no I/O.
 //! - [`SessionConfig`] reads `MVM_MCP_SESSION_IDLE` / `MVM_MCP_SESSION_MAX`
 //!   from the environment with documented defaults.
 //! - The [`Reaper`] trait is the bridge between the pure map and the
