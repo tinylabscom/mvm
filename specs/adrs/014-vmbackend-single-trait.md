@@ -1526,7 +1526,7 @@ note.
 **Date:** 2026-06-27
 **Relates to:** [ADR-002](002-microvm-security-posture.md),
 [ADR-073](073-warm-snapshot-prior-art-adoption-boundary.md),
-[ADR-097](097-attested-downloadable-runtime-and-builder-packs.md),
+[ADR-050](050-oci-image-verity-posture.md),
 [Plan 212](../plans/212-subsecond-machine-run.md),
 [Plan 214](../plans/214-clean-replacement-architecture.md),
 [Research note](../research/clean-replacement-architecture-review.md)
