@@ -215,7 +215,7 @@ No backwards-compatibility path is shipped. v4 `ExecutionPlan` instances hard-fa
 - **Status:** Proposed — supersedes ADR-059 (this document) §Architecture and §Security model
 - **Date:** 2026-05-27
 - **Owner:** MVM Project
-- **Related:** [ADR-002 microvm security posture](002-microvm-security-posture.md), [ADR-041 signed audited execution plans](041-signed-audited-execution-plans.md), [ADR-047 app deps audit pipeline](047-app-deps-audit-pipeline.md), [ADR-048 claim-safe sandbox parity](048-claim-safe-sandbox-parity.md), [ADR-049 secret substitution mechanism](049-secret-substitution-mechanism.md), [ADR-053 guest protocol versioning and readiness](053-guest-protocol-versioning-and-readiness.md), [ADR-058 claim-10 bytes leaving trust boundary](058-claim-10-bytes-leaving-trust-boundary.md), ADR-059 (this document, original text), [Plan 104 host services broker](../plans/104-host-services-broker.md), mvmd [ADR-0023 mvmd host services delegation](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md)
+- **Related:** [ADR-002 microvm security posture](002-microvm-security-posture.md), [ADR-041 signed audited execution plans](041-signed-audited-execution-plans.md), [ADR-041 app deps audit pipeline](041-signed-audited-execution-plans.md), [ADR-041 claim-safe sandbox parity](041-signed-audited-execution-plans.md), [ADR-049 secret substitution mechanism](049-secret-substitution-mechanism.md), [ADR-053 guest protocol versioning and readiness](053-guest-protocol-versioning-and-readiness.md), [ADR-041 claim-10 bytes leaving trust boundary](041-signed-audited-execution-plans.md), ADR-059 (this document, original text), [Plan 104 host services broker](../plans/104-host-services-broker.md), mvmd [ADR-0023 mvmd host services delegation](../../../mvmd/specs/adrs/0023-mvmd-host-services-delegation.md)
 
 ## Context
 
@@ -683,7 +683,7 @@ Phased in [Plan 202](../plans/202-host-services-daemon.md). The wire protocol on
 [ADR-014](014-vmbackend-single-trait.md),
 [ADR-005](005-sealed-signed-builder-image.md),
 [ADR-005](005-sealed-signed-builder-image.md),
-[ADR-079](079-app-builder-product-surface.md),
+[ADR-041](041-signed-audited-execution-plans.md),
 [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md),
 [Plan 200](../plans/200-machine-ux-dx-layer.md),
 [Plan 204](../plans/204-builder-vm-resident-control-plane.md), and

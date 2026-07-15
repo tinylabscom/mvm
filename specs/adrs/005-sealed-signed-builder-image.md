@@ -640,7 +640,7 @@ trust root as the dev image. The release CI must produce the
 - Plan 72 — `specs/plans/72-builder-vm-via-libkrun.md` (libkrun
   builder VM, W5.D fix list — the catalog of "what breaks at each
   layer" that informed the ur-seed contents)
-- ADR-046 — `specs/adrs/046-builder-vm-via-libkrun.md` (the
+- ADR-014 — `specs/adrs/014-vmbackend-single-trait.md` (the
   two-artifact-layers invariant)
 - ADR-002 — `specs/adrs/002-microvm-security-posture.md` (Claim 6)
 - Memory `feedback_no_prebuilt_builder_vm_artifact.md` — the

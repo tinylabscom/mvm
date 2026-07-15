@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Plan 73 Followup D — `app-deps-audit` CI gate.
 #
-# ADR-047 §"CI gate" calls for a workflow lane that exercises the
+# ADR-041 §"CI gate" calls for a workflow lane that exercises the
 # application-dep install pipeline end-to-end on every PR. The full
 # end-to-end shape (real `nix build` driving the libkrun/cloud-hypervisor
 # builder VM, real `uv pip install` + `pip-audit`) requires a working
@@ -39,7 +39,7 @@
 #      carries a high-severity finding, then assert the prod gate
 #      (`apply_install_gate(..., Prod)`) refuses it. Drives the
 #      `mvm-app-deps-fixture-tool` example bin which is the same
-#      seal/verify path the orchestrator uses; exercises ADR-047
+#      seal/verify path the orchestrator uses; exercises ADR-041
 #      §"Gate semantics" prod-rejection end-to-end.
 #
 # What this script DOES NOT cover (named so future readers know):
@@ -231,7 +231,7 @@ if "$FIXTURE_BIN" gate-check --cache-root "$MVM_DEPS_VOLUMES_DIR" \
     echo "    ok: dev gate admitted high-CVE volume (warn-and-continue)"
     PASS=$((PASS + 1))
 else
-    echo "    FAIL: dev gate refused — ADR-047 says --dev warn-and-continues" >&2
+    echo "    FAIL: dev gate refused — ADR-041 says --dev warn-and-continues" >&2
     FAIL=$((FAIL + 1))
 fi
 

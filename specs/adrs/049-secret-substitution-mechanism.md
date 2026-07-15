@@ -3,7 +3,7 @@
 - **Status: SUPERSEDED 2026-05-28 by [ADR-059](059-host-services-broker.md).** Runtime secret substitution is no longer an mvm responsibility in v1. The vsock-substitution-vs-TLS-proxy comparison below is kept as historical context; the design itself is not being implemented. `host.secrets.v1` and `mvm-secrets-dispatcher` are dropped from Plan 104.
 - Date: 2026-05-14 (superseded 2026-05-28)
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture), ADR-004 (egress policy), ADR-041 (signed audited execution plans), ADR-048 (claim-safe sandbox parity), [ADR-059 (rescope — drop secrets)](059-host-services-broker.md), Plan 74 W2 + W3, Plan 74 §Risks R9
+- Related: ADR-002 (microVM security posture), ADR-004 (egress policy), ADR-041 (signed audited execution plans), ADR-041 (claim-safe sandbox parity), [ADR-059 (rescope — drop secrets)](059-host-services-broker.md), Plan 74 W2 + W3, Plan 74 §Risks R9
 
 ## Context
 
@@ -12,7 +12,7 @@ receive an opaque `mvm-secret://<grant-id>` placeholder instead of
 the real secret value, and the host swaps the placeholder for the
 real value at egress time, only when destination policy passes.
 
-ADR-048 §"Secret non-leakage" gates the claim on
+ADR-041 §"Secret non-leakage" gates the claim on
 "substitution is bound to destination policy and transport
 identity." Plan 74 W3 says "integrate substitution with the L7
 egress proxy after destination policy passes." Both are consistent
@@ -132,7 +132,7 @@ Two paths offered:
   egress closed. Workloads that need DB or SSH egress declare a
   destination policy explicitly; secrets for those destinations
   flow via in-image config bound by `unsafe_guest_secret_materialization`
-  (ADR-048 documents this as "not a non-leakage claim").
+  (ADR-041 documents this as "not a non-leakage claim").
 - **Future ADR.** Non-HTTP substitution can land later via a
   per-protocol hook contract; the vsock service is protocol-agnostic.
 
@@ -212,7 +212,7 @@ complexity of just shipping (b) for everything.
   content scanning). The substitution service is bound to grant
   semantics; broader inspection requires (a) and a separate ADR.
 - Claiming non-leakage for the legacy `unsafe_guest_secret_materialization`
-  env/file flow. ADR-048 §"Non-goals" already forbids this.
+  env/file flow. ADR-041 §"Non-goals" already forbids this.
 
 ## Open questions
 

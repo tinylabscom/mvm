@@ -3,7 +3,7 @@
 - Status: Proposed
 - Date: 2026-05-14
 - Owner: MVM Project
-- Related: ADR-002 (microVM security posture, claim 3), ADR-005 (image acquisition), ADR-014 (builder VM via libkrun), ADR-048 (claim-safe sandbox parity), Plan 74 W1, Plan 74 §Risks R3, mvmd ADR-0020 (OCI images as microVM workloads)
+- Related: ADR-002 (microVM security posture, claim 3), ADR-005 (image acquisition), ADR-014 (builder VM via libkrun), ADR-041 (claim-safe sandbox parity), Plan 74 W1, Plan 74 §Risks R3, mvmd ADR-0020 (OCI images as microVM workloads)
 
 ## Context
 
@@ -123,7 +123,7 @@ yesterday. These cover different threats:
 Option B leaves four of the five rows uncovered. Conflating
 "audit covers it" with "verity covers it" produces a two-tier
 trust story that's hard to message and easy for users to misread.
-ADR-048 §"Non-goals" already forbids
+ADR-041 §"Non-goals" already forbids
 "bypassing verified artifact checks for developer ergonomics" —
 Option B is on the spectrum of that.
 

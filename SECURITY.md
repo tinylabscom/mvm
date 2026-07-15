@@ -47,7 +47,7 @@ Security-relevant code:
 - Audit chain integrity / verifier (`mvmctl audit verify`).
 - The signed-`ExecutionPlan` admission ceremony (per [ADR-041](specs/adrs/041-signed-audited-execution-plans.md)).
 - The OCI image runner (per [claim 10](specs/claims/claim-10-oci-image-provenance.md)).
-- The app-deps audit pipeline (per [ADR-047](specs/adrs/047-app-deps-audit-pipeline.md)).
+- The app-deps audit pipeline (per [ADR-041](specs/adrs/041-signed-audited-execution-plans.md)).
 
 ## What's out of scope
 

@@ -2,7 +2,7 @@
 title: "ADR-052: User-defined base image registry — cosign-signed templates beyond v1's closed list"
 status: Proposed
 date: 2026-05-14
-related: ADR-002 (microVM security posture); ADR-041 (signed audited ExecutionPlan); ADR-047 (app-deps audit pipeline); plan 73 Followup G
+related: ADR-002 (microVM security posture); ADR-041 (signed audited ExecutionPlan); ADR-041 (app-deps audit pipeline); plan 73 Followup G
 ---
 
 ## Status
@@ -81,7 +81,7 @@ inventing a parallel signing format for the same job.
 
 ### Registry layout
 
-Mirrors the sealed-volume layout from ADR-047 §"Sealed artifact
+Mirrors the sealed-volume layout from ADR-041 §"Sealed artifact
 layout" so the supervisor can treat both as the same shape of
 admission input:
 
@@ -124,7 +124,7 @@ cve_scan_at = "2026-05-14T12:00:00Z"
 sbom_sha256 = "fedc...0987"
 attestation = "sigstore-bundle.json"
 
-# forward-compat with ADR-047 (claim 9): a base template can declare
+# forward-compat with ADR-041 (claim 9): a base template can declare
 # its own dependency volumes that the supervisor verifies as part of
 # admitting the workload.
 [[dependencies]]
@@ -200,7 +200,7 @@ already dispatched on attacker-controlled JSON.
 
 ### Lifecycle gates
 
-Mirroring ADR-047 §"Lifecycle gates":
+Mirroring ADR-041 §"Lifecycle gates":
 
 **Publish-time (inside `mvmctl image push`):**
 
@@ -211,7 +211,7 @@ Mirroring ADR-047 §"Lifecycle gates":
    `manifest.rootfs_sha256`.
 3. **CVE scan (--prod)** — if `--prod`, the rootfs is mounted
    read-only in the builder VM and scanned via the same pipeline
-   ADR-047 uses for app-deps volumes. High/critical findings fail
+   ADR-041 uses for app-deps volumes. High/critical findings fail
    closed. Under `--dev`, the scan runs but only warns.
 4. **SBOM emission (--prod)** — `cyclonedx-cli` over the rootfs's
    `/var/lib/dpkg` or `/nix/store` index produces
@@ -250,10 +250,10 @@ closed-list entry — the fast path runs before the registry lookup.
 This prevents a malicious publisher from shadowing a trusted name
 even if the user has granted trust to that publisher.
 
-### Forward-compat with claim 9 (ADR-047)
+### Forward-compat with claim 9 (ADR-041)
 
 A base template's `[[dependencies]]` entries are sealed volumes in
-the ADR-047 shape. The supervisor's admission verifier (Followup A)
+the ADR-041 shape. The supervisor's admission verifier (Followup A)
 already calls `verify_sealed_volume` for workload-level deps; it
 calls the same code for template-level deps. The audit-chain entry
 records both the template fingerprint *and* every dependency
@@ -277,7 +277,7 @@ posture extends to it without new code.
 | Manifest forward-incompat field smuggling | `#[serde(deny_unknown_fields)]` on `TemplateManifest`; same posture as ADR-002 claim 5. |
 | Rootfs tampered after signing | `rootfs_sha256` recompute at admission. |
 | Name shadowing of closed-list entries | Closed-list fast path runs before registry lookup. |
-| Dependency-volume tampering | Routed through ADR-047 `verify_sealed_volume`; the supervisor cannot tell a template-declared volume from a workload-declared volume, so the existing claim-9 enforcement applies uniformly. |
+| Dependency-volume tampering | Routed through ADR-041 `verify_sealed_volume`; the supervisor cannot tell a template-declared volume from a workload-declared volume, so the existing claim-9 enforcement applies uniformly. |
 
 ### Non-goals
 
@@ -330,7 +330,7 @@ follow-up `list` flip back to `[untrusted: bad sig]`.
 
 **Scope:** the publish path — manifest validation, rootfs hash
 compute, optional CVE scan + SBOM emission in the builder VM
-(reusing ADR-047 plumbing), cosign sign, write to the registry
+(reusing ADR-041 plumbing), cosign sign, write to the registry
 dir. Optional `--registry <url>` pushes the sealed bundle
 externally.
 
@@ -365,7 +365,7 @@ marked done.
 - The trust model reuses cosign + Sigstore — no novel signing
   scheme to audit. The mvm-side code is "verify a signature in a
   trust store and parse a manifest."
-- Forward-compat with ADR-047 falls out for free: template-level
+- Forward-compat with ADR-041 falls out for free: template-level
   deps are workload-level deps from the supervisor's perspective.
 - Phasing is incremental — G.1 is shippable in a day; each
   subsequent phase is additive and reverts cleanly.
@@ -379,7 +379,7 @@ marked done.
   create a worse failure mode — a publisher trusted for one
   scope automatically trusted for the other.
 - Custom templates can pin to specific CVE-scan timestamps but
-  cannot pin to "freshest CVE feed." That's the same trade ADR-047
+  cannot pin to "freshest CVE feed." That's the same trade ADR-041
   makes for app-deps volumes; the `mvmctl deps audit` re-audit
   mechanism (Plan 73 Followup C) will extend to templates in a
   later followup once base templates exist in production.
@@ -404,7 +404,7 @@ marked done.
 - ADR-041 — `specs/adrs/041-signed-audited-execution-plans.md` —
   the audit-chain consumer that records template resolutions in
   G.4.
-- ADR-047 — `specs/adrs/047-app-deps-audit-pipeline.md` — the
+- ADR-041 — `specs/adrs/041-signed-audited-execution-plans.md` — the
   sealed-artifact layout this ADR mirrors, and the
   `verify_sealed_volume` primitive G.4 reuses for template-level
   deps.

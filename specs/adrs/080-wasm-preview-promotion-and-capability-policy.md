@@ -4,10 +4,10 @@
 revision folds in those findings.
 **Extends** [ADR-069](069-wasm-sandbox-backend.md) (the `wasm-sandbox` backend —
 the Tier-0 substrate this ADR promotes *from*) and
-[ADR-079](079-app-builder-product-surface.md) (the product loop this preview
+[ADR-041](041-signed-audited-execution-plans.md) (the product loop this preview
 tier feeds). **Cross-refs:** ADR-002 (security posture — the claims the ship
 side must keep), ADR-041 (signed/audited execution plans — the admission path
-every promotion lands on), ADR-047 (app-deps audit — what re-validation means),
+every promotion lands on), ADR-041 (app-deps audit — what re-validation means),
 ADR-049/ADR-067 (secret substitution — why Tier 0 never holds a raw secret),
 ADR-002 (mvm-primitive ↔ mvmd-product boundary, consolidated from ADR-070), Plan 129 (secrets), Plan 169
 (agent-RPC transport, the vsock leg of the relay).
@@ -19,7 +19,7 @@ workload live, in the browser or against a streamed host sandbox, with zero
 infrastructure — then ships, and what they shipped is a real microVM carrying
 every ADR-002 claim. ADR-069 gave us the honest substrate: a `wasm-sandbox`
 `VmBackend` that declares `browser_compatible=true` and provides **none** of
-the numbered claims. ADR-079 gave us the product loop around real microVMs.
+the numbered claims. ADR-041 gave us the product loop around real microVMs.
 What neither decides is the bridge: **how does work done in a no-claims tier
 become a claims-bearing microVM without laundering anything past the claims?**
 
@@ -67,7 +67,7 @@ has its own (claim-free, but real) posture:
   (§5) — the input path runs the same detector the ship gate uses.
 
 **Session binding on the relay.** The host-side relay's WebSocket leg is an
-untrusted-client surface on a multi-tab machine: ADR-079's local ingress is
+untrusted-client surface on a multi-tab machine: ADR-041's local ingress is
 deliberately loopback-only/no-auth, so *any page in the developer's browser*
 can attempt a WebSocket to it. "Single-session" is therefore an enforced
 property, not a naming convention: the relay mints a short-lived random
@@ -167,7 +167,7 @@ backdoors. A trace requesting `numpy-malware-fork` by name builds "clean."
 The residual malicious-package risk is real and stated; what bounds it is
 exact-name+version pinning of trace-sourced deps into the IR (the user
 reviews the pinned list, not a fuzzy request), with registry allowlisting and
-provenance checks as the existing ADR-047 trajectory hardens. Claim 11 is not
+provenance checks as the existing ADR-041 trajectory hardens. Claim 11 is not
 represented as malware protection.
 
 ### 3. One capability policy, two enforcement fidelities

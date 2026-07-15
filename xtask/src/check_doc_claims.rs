@@ -2,7 +2,7 @@
 //!
 //! Plan 74 W0 — claims hygiene lint. Reject marketing phrases that
 //! over-claim mvm's runtime posture in public docs. Each gated phrase
-//! maps to a claim id from ADR-048 §"The seven target claims"
+//! maps to a claim id from ADR-041 §"The seven target claims"
 //! (`specs/adrs/048-claim-safe-sandbox-parity.md`). A phrase is only
 //! allowed in a file that either (a) marks the corresponding claim
 //! `Shipped` via a machine marker, (b) carries an inline opt-out

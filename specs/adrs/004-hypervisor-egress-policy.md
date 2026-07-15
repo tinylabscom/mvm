@@ -538,7 +538,7 @@ short-lived leaves), so the reversal cost is bounded.
 
 ## Consolidated from ADR-055 — libkrun networking via passt + virtio-net
 
-**Status:** accepted 2026-05-19, implements Plan 87. Default flipped from TSI → Passt by Plan 87 W5 / PR3. **Amended 2026-05-19 by Plan 88** to add gvproxy as the macOS backend (passt is Linux-only — see §"Cross-platform backends" below). **Amended 2026-05-26 by [Plan 102 W6.A](../plans/102-gateway-audit-substrate-impl.md) / [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md):** TSI removed entirely — it bypassed virtio-net (no host fd to splice), which violates the claim-10 no-bypass invariant. `MVM_NETWORKING=tsi` is no longer accepted; only `passt` and `gvproxy` resolve. The historical TSI context below is retained for archaeology.
+**Status:** accepted 2026-05-19, implements Plan 87. Default flipped from TSI → Passt by Plan 87 W5 / PR3. **Amended 2026-05-19 by Plan 88** to add gvproxy as the macOS backend (passt is Linux-only — see §"Cross-platform backends" below). **Amended 2026-05-26 by [Plan 102 W6.A](../plans/102-gateway-audit-substrate-impl.md) / [ADR-041](041-signed-audited-execution-plans.md):** TSI removed entirely — it bypassed virtio-net (no host fd to splice), which violates the claim-10 no-bypass invariant. `MVM_NETWORKING=tsi` is no longer accepted; only `passt` and `gvproxy` resolve. The historical TSI context below is retained for archaeology.
 
 ## Context
 
@@ -1371,7 +1371,7 @@ guest-NIC model: the target architecture gives the guest **no NIC** and brokers
 all egress over host vsock. The rvproxy implementation, its `native` networking
 mode, and the parity CI gate are removed. Historical context retained below.
 **Amends:** ADR-004 §"Consolidated from ADR-055" (libkrun/Vz networking via gvproxy + passt)
-**Preserves:** [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) no-bypass invariant; claim 10 (default-deny egress); Plan 141 flow observation; Plan 129 egress secret substitution
+**Preserves:** [ADR-041](041-signed-audited-execution-plans.md) no-bypass invariant; claim 10 (default-deny egress); Plan 141 flow observation; Plan 129 egress secret substitution
 
 ## Context
 
@@ -1518,7 +1518,7 @@ this ADR is the userspace-gateway substrate only).
 **Status:** Proposed
 **Extends:** ADR-004 §"Consolidated from ADR-082" — from "adopt the Rust-native gateway" to "ship it in the box"
 **Depends on:** [Plan 193](../plans/193-rvproxy-network-substrate.md) (substrate cutover), [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) (host packaging)
-**Preserves:** [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) no-bypass invariant; claim 10 (default-deny egress); [Plan 129](../plans/129-secrets-subsystem.md) substitution; [Plan 141](../plans/141-vz-payload-tap-and-rust-owned-shuffle.md) flow observation
+**Preserves:** [ADR-041](041-signed-audited-execution-plans.md) no-bypass invariant; claim 10 (default-deny egress); [Plan 129](../plans/129-secrets-subsystem.md) substitution; [Plan 141](../plans/141-vz-payload-tap-and-rust-owned-shuffle.md) flow observation
 
 ## Context
 
@@ -1606,7 +1606,7 @@ regression here is a claim-10 regression.
 ## References
 
 - ADR-004 §"Consolidated from ADR-082" — adopt the Rust-native gateway
-- [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) — no-bypass invariant, claim 10
+- [ADR-041](041-signed-audited-execution-plans.md) — no-bypass invariant, claim 10
 - ADR-004 §"Consolidated from ADR-055" — gvproxy / passt gateway choice
 - [Plan 193](../plans/193-rvproxy-network-substrate.md) — substrate cutover
 - [Plan 199](../plans/199-host-runtime-packaging-and-crate-boundaries.md) — host packaging

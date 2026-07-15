@@ -499,7 +499,7 @@ All notable changes to mvm are documented in this file.
 - Feature-surface reduction — ADRs + plans (backend + CLI consolidation)
 - **refactor-status**: Plan 178 ✅ DONE (run-family merged in #768)
 - **refactor-status**: WS-2 complete  — flip restored after the Plan 178 merge dropped it
-- **plan-181**: App-builder product surface — ADR-079 + plan + rollups
+- **plan-181**: App-builder product surface — ADR-041 + plan + rollups
 - **refactor-status**: Add top-level 'Plans at a glance' checklist above the details
 - **refactor-status**: Sync glance with details (Plan 180 done, 129 reachability fixed, 177 P2 in progress)
 - Plan 183 — builder-VM egress posture + guest network bootstrap
@@ -620,7 +620,7 @@ All notable changes to mvm are documented in this file.
 - **plan-211**: Task 5 cleanup — repoint bridge fuzz labels + stale-ref sweep
 - **release**: Record why Linux intentionally doesn't ship mvm-libkrun-supervisor
 - Plan 214 clean-replacement architecture + ADR-014
-- ADR-103 + Plan 215 plan-bound agent verb capabilities
+- ADR-041 + Plan 215 plan-bound agent verb capabilities
 - Plan 216 — mvm-client local/remote facade implementation plan
 - Mvm-client facade design + mvmd cloud-readiness assessment (research)
 - ADR-105 + Plan 218 — converge SDK/facade machine-driving on MvmClient

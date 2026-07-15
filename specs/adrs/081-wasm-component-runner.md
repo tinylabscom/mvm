@@ -7,7 +7,7 @@ regime; §6 wasmtime as a new untrusted-input surface). **Builds on**
 [ADR-069](069-wasm-sandbox-backend.md) (the off-isolation-scale wasm-sandbox
 *preview* backend; this ADR is the *production microVM* path, not that backend).
 **Cross-refs:** ADR-002 (claims 1–3 isolation, 5 untrusted parsers, 8 signed
-plan, 10 egress, 11 sealed deps, 13 secrets), ADR-047 (app-deps audit — the
+plan, 10 egress, 11 sealed deps, 13 secrets), ADR-041 (app-deps audit — the
 builder already compiles untrusted inputs), ADR-005 (symmetric builder VM — the
 sandbox the AOT compile runs in), Plan 188 (the capability projection/clamp seam
 this extends from network to fs/env).
@@ -94,7 +94,7 @@ artifact. Consequences:
   workload-bearing tier (the whole point of running in a locked-down microVM).
 - The compiler runs on attacker bytes in the **builder**, which already
   executes attacker-influenced build logic (`nix build`, `uv pip install`) in
-  its own sandbox (ADR-047/057) — no *new* privileged trust boundary, one more
+  its own sandbox (ADR-041/057) — no *new* privileged trust boundary, one more
   build step in a place designed for it.
 - **Deterministic** (claim 7 double-build) given a pinned wasmtime version,
   which is recorded in provenance; the `.cwasm` is same-arch as the guest by

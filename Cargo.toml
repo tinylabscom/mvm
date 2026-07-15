@@ -35,7 +35,7 @@ members = [
     # verity generation land in subsequent W1 PRs). Anonymous-only at
     # W1.1; private auth lands later behind the credential redaction
     # contract from ADR-049. mvmd consumes this crate as a library per
-    # ADR-048 §"Runtime Ownership" — keep its dep closure small.
+    # ADR-041 §"Runtime Ownership" — keep its dep closure small.
     "crates/mvm-oci",
     "crates/mvm-ext4",
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at

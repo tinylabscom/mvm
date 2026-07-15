@@ -182,7 +182,7 @@ fn handle_connection(mut client: TcpStream, allowlist: &Allowlist) -> io::Result
     if !allowlist.is_allowed(&host, port) {
         eprintln!("mvm-egress-proxy: DENY {host}:{port}");
         let body =
-            format!("denied by mvm-egress-proxy: {host}:{port} not on the ADR-047 allowlist");
+            format!("denied by mvm-egress-proxy: {host}:{port} not on the ADR-041 allowlist");
         let response = format!(
             "HTTP/1.1 403 Forbidden\r\nContent-Length: {len}\r\nConnection: close\r\nContent-Type: text/plain\r\n\r\n{body}",
             len = body.len(),

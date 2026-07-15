@@ -1809,7 +1809,7 @@ Implementation is sequenced in Plan 197.
 **Status:** Accepted
 **Relates to:** [ADR-002](002-microvm-security-posture.md) (prod vs dev posture),
 [ADR-005](005-sealed-signed-builder-image.md) (declared-input trust model),
-[ADR-079](079-app-builder-product-surface.md) (product ergonomics without
+[ADR-041](041-signed-audited-execution-plans.md) (product ergonomics without
 weakening the engine), [Plan 200](../plans/200-machine-ux-dx-layer.md) (machine
 UX/DX), and [Plan 36](../plans/36-sealed-signed-builder-image.md) (dev vs prod
 image posture)
@@ -1919,7 +1919,7 @@ acceptable only on an explicitly local/dev tier, never on the sealed/prod path.
 - [Plan 200](../plans/200-machine-ux-dx-layer.md)
 - [ADR-002](002-microvm-security-posture.md)
 - [ADR-005](005-sealed-signed-builder-image.md)
-- [ADR-079](079-app-builder-product-surface.md)
+- [ADR-041](041-signed-audited-execution-plans.md)
 - [Plan 36](../plans/36-sealed-signed-builder-image.md)
 
 

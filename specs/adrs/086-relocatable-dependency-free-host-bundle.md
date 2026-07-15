@@ -130,7 +130,7 @@ pain is worst there and gateway interop is proven (ADR-004 / ADR-004
 ## Out of scope
 
 - GPU passthrough — a separate strategic decision, not a packaging one.
-- Inbound TLS (mvmd's edge, per ADR-058).
+- Inbound TLS (mvmd's edge, per ADR-041).
 - The `machine` / pack UX surface ([Plan 200](../plans/200-machine-ux-dx-layer.md), [Plan 155](../plans/155-portable-runnable-artifacts.md)) — this ADR ships the substrate that surface runs on, not the surface.
 - Bring-up performance (kernel prebuilt / store persistence own it — ADR-004
   §"not a performance decision").

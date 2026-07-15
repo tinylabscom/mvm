@@ -2,7 +2,7 @@
 
 **Status**: Accepted
 **Date**: 2026-05-31
-**Cross-refs**: ADR-002 (security posture, the 14 claims), ADR-014 (VmBackend single trait), ADR-027 (encryption layering) + ADR-042 (encryption substrate), ADR-031 (cross-platform), ADR-040 (metering), ADR-041 (signed/audited ExecutionPlan, claim 8), ADR-043 + ADR-053 (protocol versioning / readiness), ADR-014 (builder VM via libkrun — the canonical builder-VM ADR post-consolidation), ADR-047 (sealed app-deps, claim 11), ADR-051 (runtime overlay disk), ADR-059 (host services broker — the canonical broker ADR post-consolidation), ADR-002 (boundary language: lean Rust, consolidated from ADR-063), ADR-004 (NetworkProvider trait), ADR-005 (single builder/dev image, embedded host binaries). Planning input: Plan 117 (cleanup & rearchitecture brief).
+**Cross-refs**: ADR-002 (security posture, the 14 claims), ADR-014 (VmBackend single trait), ADR-027 (encryption layering) + ADR-042 (encryption substrate), ADR-031 (cross-platform), ADR-040 (metering), ADR-041 (signed/audited ExecutionPlan, claim 8), ADR-043 + ADR-053 (protocol versioning / readiness), ADR-014 (builder VM via libkrun — the canonical builder-VM ADR post-consolidation), ADR-041 (sealed app-deps, claim 11), ADR-051 (runtime overlay disk), ADR-059 (host services broker — the canonical broker ADR post-consolidation), ADR-002 (boundary language: lean Rust, consolidated from ADR-063), ADR-004 (NetworkProvider trait), ADR-005 (single builder/dev image, embedded host binaries). Planning input: Plan 117 (cleanup & rearchitecture brief).
 
 ## Context
 

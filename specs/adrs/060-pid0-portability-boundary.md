@@ -40,7 +40,7 @@ Every backend MUST provide:
 
 - **Virtio-vsock** with a stable CID assignment for the guest. The host uses CID 2 (loopback); the guest uses CID 3 by convention. Backends that abstract the CID space (libkrun's in-process VSOCK proxy, Vz's vsock API, Cloud Hypervisor's vsock device) MUST expose the guest end as a Unix-domain socket the host supervisor can bind for incoming connections.
 - **A length-prefixed JSON framing** carried inside vsock streams, with `AuthenticatedFrame` (Ed25519 + session id + monotonic sequence) wrapping every payload (ADR-002 §W4.1, claim 5, `crates/mvm-core/src/policy/security.rs`).
-- **No alternate control transport.** Backends MUST NOT route control-plane traffic over virtio-net, virtio-fs, block devices, or any side channel. The vsock-only invariant is load-bearing for claim 1 (no host-fs access beyond explicit shares) and ADR-058 (no virtio-net bypass).
+- **No alternate control transport.** Backends MUST NOT route control-plane traffic over virtio-net, virtio-fs, block devices, or any side channel. The vsock-only invariant is load-bearing for claim 1 (no host-fs access beyond explicit shares) and ADR-041 (no virtio-net bypass).
 
 If a backend cannot satisfy vsock with this framing, it is not a valid mvm backend and must defer to the Mock or Docker tier until it can.
 
@@ -136,7 +136,7 @@ Any language change at the boundary MUST preserve these *byte-identically*. See 
 - ADR-002 (microVM security posture, claims 1-10)
 - ADR-053 (guest protocol hello + readiness)
 - ADR-004 (passt virtio-net / gvproxy)
-- ADR-058 (no virtio-net bypass, claim 10)
+- ADR-041 (no virtio-net bypass, claim 10)
 - ADR-059 (host services broker over vsock — adjacent, not part of pid0)
 - Plan 25 (microVM hardening workstreams)
 - Plan 64 (signed execution plans, claim 8 wiring)

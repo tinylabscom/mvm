@@ -2,7 +2,7 @@
 title: "ADR-074: VM name-registry is the source of truth; converge at CLI entry, not a resident daemon"
 status: Proposed
 date: 2026-06-07
-related: Plan 170 (host-lifecycle convergence + density); ADR-045 (hermetic VM-lifecycle testing); ADR-044 (audit_emit! macro); Plan 140 (snapshot/restore productionization); Plan 99 (Stage 0 reaper / cache prune)
+related: Plan 170 (host-lifecycle convergence + density); ADR-045 (hermetic VM-lifecycle testing); ADR-041 (audit_emit! macro); Plan 140 (snapshot/restore productionization); Plan 99 (Stage 0 reaper / cache prune)
 ---
 
 ## Status
@@ -75,7 +75,7 @@ implementation; the difference between local and fleet is only *who ticks it*
   `mvmctl down` would be worse than the drift it fixes.
 - **Observability:** convergence actions and idle/pressure lifecycle
   transitions emit to the shared local audit log via `audit_emit!`
-  (consistent with ADR-044 / the Stage 0 audit contract), so density and
+  (consistent with ADR-041 / the Stage 0 audit contract), so density and
   self-heal behavior are auditable and `audit verify` still chains.
 - **Boundary preserved:** this is host-side lifecycle bookkeeping only. It
   never touches the guest trust boundary or any of claims 1–15.

@@ -132,7 +132,7 @@ threat-model note. It is **never** available to workload microVMs.
 ### 4. Refuse — TSI networking (already decided; cited as supporting evidence)
 
 The runtime routes guest network I/O through the host TSI socket family. mvm removed
-TSI entirely (ADR-058 §W6.A amendment / Plan 102 W6.A / Plan 142): TSI bypasses
+TSI entirely (ADR-041 §W6.A amendment / Plan 102 W6.A / Plan 142): TSI bypasses
 virtio-net, violating the claim-10 no-bypass invariant — every byte leaving a guest
 must traverse the auditable gvproxy/passt bridge. This ADR does **not** reopen that;
 it cites the runtime's own documented TSI limitation list (AF_NETLINK, raw sockets,
@@ -174,7 +174,7 @@ them here:
 - [ADR-002](002-microvm-security-posture.md) — security posture; one-guest-one-workload, claim numbering
 - [ADR-041](041-signed-audited-execution-plans.md) — claim 8, signed/audited `ExecutionPlan` (per-run admission)
 - [ADR-014](014-vmbackend-single-trait.md) — Vz backend (why we stay on Virtualization.framework)
-- [ADR-058](058-claim-10-bytes-leaving-trust-boundary.md) §W6.A — no-bypass invariant, TSI removed
+- [ADR-041](041-signed-audited-execution-plans.md) §W6.A — no-bypass invariant, TSI removed
 - [ADR-005](005-sealed-signed-builder-image.md) — bundled-kernel/embedded-init extraction shape
 - [Plan 140](../plans/140-snapshot-restore-productionization.md) — restore productionization (inherits page-cache warmth)
 - [Plan 148](../plans/148-microvm-fork-fanout-and-branch.md) — fork-fanout of fresh children from a paused base

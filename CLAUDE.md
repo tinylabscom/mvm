@@ -23,7 +23,7 @@ brew install slp/krun/libkrun slp/krun/libkrunfw slp/krun/gvproxy
 
 - `libkrun` — the in-process VMM. `mvm-libkrun-supervisor` links against it.
 - `libkrunfw` — bundles the TSI-patched Linux kernel libkrun's guests boot. Plan 86 / Plan 72 W5.D bullet 10 — `mvm-libkrun::extract_bundled_kernel()` pulls the kernel out of the dylib's `.rodata` at runtime.
-- `gvproxy` — userspace virtio-net gateway. Plan 88 / ADR-004 §"Cross-platform backends" — passt is Linux-only, so macOS dispatches to gvproxy via libkrun's `krun_add_net_unixgram` path. `MVM_NETWORKING` unset → per-OS default (macOS=gvproxy, Linux=passt); `passt`, `gvproxy`, and the opt-in `native` are accepted. `native` (ADR-004 — the hvf Rust gateway) requires `MVM_GATEWAY_BIN` to name the gateway binary and falls back to the per-OS default without it; it is parity-gated and not yet validated end-to-end, so the default never selects it. Plan 102 W6.A removed the `tsi` mode (TSI bypassed virtio-net entirely, violating the claim-10 no-bypass invariant — see ADR-058).
+- `gvproxy` — userspace virtio-net gateway. Plan 88 / ADR-004 §"Cross-platform backends" — passt is Linux-only, so macOS dispatches to gvproxy via libkrun's `krun_add_net_unixgram` path. `MVM_NETWORKING` unset → per-OS default (macOS=gvproxy, Linux=passt); `passt`, `gvproxy`, and the opt-in `native` are accepted. `native` (ADR-004 — the hvf Rust gateway) requires `MVM_GATEWAY_BIN` to name the gateway binary and falls back to the per-OS default without it; it is parity-gated and not yet validated end-to-end, so the default never selects it. Plan 102 W6.A removed the `tsi` mode (TSI bypassed virtio-net entirely, violating the claim-10 no-bypass invariant — see ADR-041).
 
 On Linux contributor hosts swap `gvproxy` for `passt` from the distro
 package manager (or build passt from source — see ADR-004 references).
@@ -181,7 +181,7 @@ Claim lineage:
   — see ADR-041 (`specs/adrs/041-signed-audited-execution-plans.md`).
 - Claim 9 (signed bundles content-addressed) is Sprint 52 W2.
 - Claim 10 (default-deny egress) is Sprint 52 W3.
-- Claim 11 (app-dep volume sealed) was added by ADR-047 / Plan 73
+- Claim 11 (app-dep volume sealed) was added by ADR-041 / Plan 73
   Followups A + B.1/B.2/B.3 + C + D
   (`specs/adrs/047-app-deps-audit-pipeline.md`).
 - Claims 12 + 13 (host services broker — binding-gated dispatch and
@@ -275,7 +275,7 @@ the source gap analysis is at
     channels as covert egress is tracked in Plan 111 Workstream A.
 11. **Every application-dep volume is hash-locked, attestation-checked,
    CVE-scanned, SBOM-enumerated, and bound to the workload's audit
-   chain.** ADR-047 / Plan 73 Followups A + B.1/B.2/B.3 + C + D wire
+   chain.** ADR-041 / Plan 73 Followups A + B.1/B.2/B.3 + C + D wire
    this end-to-end: the builder VM (`mvm-host-vm-init` +
    `LibkrunBuilderVm::run_build` Install arm) installs deps into a
    sealed volume at `~/.mvm/volumes/deps/<volume_hash>/` carrying
