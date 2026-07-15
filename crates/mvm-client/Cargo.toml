@@ -30,14 +30,14 @@ mvm = { workspace = true }
 # mvm-hostd pulls in — carries no dependency back on this crate.
 mvm-hostd = { workspace = true }
 # Shared run-path orchestration (`run_image::inject_and_materialize`) — the same
-# pure-Rust materialize the CLI's `run --image` uses. `pure-mkfs` pulls mvm-ext4,
-# already in the mvmctl closure via the CLI, so this adds no default crates.
+# pure-Rust materialize the CLI's `run --image` uses. `pure-mkfs` pulls mvm-fs's
+# ext4 writer, already in the mvmctl closure via the CLI, so this adds no default crates.
 mvm-build = { workspace = true, default-features = false, features = ["pure-mkfs"] }
 # OCI pull + hardened unpack for registry-ref resolution. Already in the mvmctl
-# closure (the CLI links it); mvm-oci carries no back-edge to this crate.
-mvm-oci = { workspace = true }
-# gzip layer decode at this crate's boundary (mvm-oci stays decompressor-free by
-# design; the CLI decodes at its boundary the same way).
+# closure (the CLI links it); mvm-fs carries no back-edge to this crate.
+mvm-fs = { workspace = true }
+# gzip layer decode at this crate's boundary (mvm-fs's oci module stays
+# decompressor-free by design; the CLI decodes at its boundary the same way).
 flate2 = { workspace = true }
 # `Vec<u8>` implements tokio's `AsyncWrite`, the sink for `fetch_layer`.
 tokio = { workspace = true, features = ["rt"] }

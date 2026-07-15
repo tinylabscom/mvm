@@ -2640,7 +2640,7 @@ fn prepopulate_stage0_nix_store_image(
 #[cfg(feature = "pure-mkfs")]
 fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), BuilderVmError> {
     let blocks_4k = host_file_4k_blocks_for_ext4(store_image)?;
-    let size_bytes = blocks_4k * mvm_ext4::BLOCK_SIZE as u64;
+    let size_bytes = blocks_4k * mvm_fs::ext4::BLOCK_SIZE as u64;
     let mut file = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -2648,7 +2648,7 @@ fn format_stage0_store_empty_in_process(store_image: &Path) -> Result<(), Builde
         .map_err(|e| {
             BuilderVmError::ExtractionFailed(format!("open {}: {e}", store_image.display()))
         })?;
-    let summary = mvm_ext4::mkfs::format_empty_ext4(&mut file, size_bytes).map_err(|e| {
+    let summary = mvm_fs::ext4::mkfs::format_empty_ext4(&mut file, size_bytes).map_err(|e| {
         BuilderVmError::ExtractionFailed(format!(
             "pure-Rust ext4 format of {}: {e}",
             store_image.display()

@@ -23,7 +23,7 @@ use mvm_backend::AnyBackend;
 use mvm_core::protocol::vm_backend::{VmId, VmInfo, VmStatus};
 use mvm_hostd::plan_admission::{InMemoryNonceLedger, SystemClock};
 use mvm_hostd::run::{LocalRunContext, LocalRunRequest, admit_and_boot_local};
-use mvm_oci::{
+use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
     OciManifestFetcher, UnpackOptions, unpack_layer,
 };

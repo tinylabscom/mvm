@@ -1358,13 +1358,13 @@ mod linux {
             // byte layout assumption) so a future change to the on-disk
             // superblock format fails this test instead of silently
             // desynchronizing the host writer and the guest reader.
-            let nodes = vec![mvm_ext4::Node::Dir {
+            let nodes = vec![mvm_fs::ext4::Node::Dir {
                 path: "/a".to_string(),
                 mode: 0o755,
                 xattrs: vec![],
             }];
-            let options = mvm_ext4::BuildOptions::default().with_volume_name(b"mvm-work");
-            let image = mvm_ext4::build_image_with_options(&nodes, &options).expect("build image");
+            let options = mvm_fs::ext4::BuildOptions::default().with_volume_name(b"mvm-work");
+            let image = mvm_fs::ext4::build_image_with_options(&nodes, &options).expect("build image");
             assert_eq!(
                 ext4_volume_label_from_superblock(&image),
                 Some("mvm-work".to_string())

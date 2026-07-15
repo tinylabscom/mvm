@@ -1,0 +1,37 @@
+[package]
+name = "mvm-fs-oci-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+# Detach from the parent workspace — `crates/mvm-fs/fuzz-oci` is listed
+# under `workspace.exclude` in the repo root Cargo.toml because
+# `libfuzzer-sys` only links cleanly under cargo-fuzz's wrapper
+# (which injects sanitizer + linker flags). An empty `[workspace]`
+# table self-identifies this manifest as standalone so cargo doesn't
+# complain about a hierarchy mismatch when invoked through
+# `cargo fuzz`.
+[workspace]
+
+# cargo-fuzz keys off this metadata flag.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+
+[dependencies.mvm-fs]
+path = ".."
+
+# Layer-unpack fuzz target. Feeds arbitrary bytes to
+# `mvm_oci::unpack::unpack_layer` against a fresh tempdir and asserts
+# no panic, no escape past the tempdir root. CI gate is wired in
+# `.github/workflows/ci.yml::oci-unpack-fuzz` with a 30-min budget
+# on PRs that touch `crates/mvm-oci/**`.
+[[bin]]
+name = "unpack_layer"
+path = "fuzz_targets/unpack_layer.rs"
+test = false
+doc = false
+bench = false

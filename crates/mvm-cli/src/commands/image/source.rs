@@ -3,7 +3,7 @@
 //! source (OCI-layout archive file, stdin stream, or unpacked rootfs
 //! directory).
 //!
-//! Registry refs flow to the existing `mvm_oci::ImageReference` + pull path
+//! Registry refs flow to the existing `mvm_fs::oci::ImageReference` + pull path
 //! (the only source that touches the network); local sources route to the
 //! same hardened unpack / provenance / ext4 materialization without a fetch.
 //!
@@ -26,7 +26,7 @@ const ROOTFS_DIR: &str = "rootfs-dir:";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(in crate::commands) enum ImageSource {
     /// A registry reference (`alpine:3.20`, `ghcr.io/x/y@sha256:…`). Parsed
-    /// downstream by `mvm_oci::ImageReference`; the only network-fetching
+    /// downstream by `mvm_fs::oci::ImageReference`; the only network-fetching
     /// source.
     Registry(String),
     /// A local OCI-layout archive file (`oci-archive:PATH`).

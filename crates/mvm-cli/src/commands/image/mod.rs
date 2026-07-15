@@ -10,7 +10,7 @@ use clap::{Args as ClapArgs, Subcommand};
 use flate2::read::GzDecoder;
 use mvm_build::oci_runtime_inject::OciEntrypointConfig;
 use mvm_build::rootfs::MaterializeExt4Input;
-use mvm_oci::{
+use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
     OciManifestFetcher, RegistryAuthConfig, UnpackOptions, read_oci_archive, unpack_layer,
     verify_sha256_digest,

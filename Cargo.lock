@@ -2290,7 +2290,7 @@ dependencies = [
  "libkrun-sys",
  "lzma-rs",
  "mvm-core",
- "mvm-ext4",
+ "mvm-fs",
  "mvm-guest",
  "mvm-guest-helpers",
  "mvm-net",
@@ -2331,11 +2331,10 @@ dependencies = [
  "mvm-backend",
  "mvm-build",
  "mvm-core",
- "mvm-ext4",
+ "mvm-fs",
  "mvm-guest",
  "mvm-hostd",
  "mvm-mcp",
- "mvm-oci",
  "mvm-sdk",
  "notify",
  "notify-debouncer-mini",
@@ -2366,8 +2365,8 @@ dependencies = [
  "mvm-backend",
  "mvm-build",
  "mvm-core",
+ "mvm-fs",
  "mvm-hostd",
- "mvm-oci",
  "tempfile",
  "tokio",
 ]
@@ -2424,11 +2423,26 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-ext4"
+name = "mvm-fs"
 version = "0.18.0"
 dependencies = [
  "am-fs-ext4",
+ "async-trait",
+ "base64",
+ "hex",
+ "libc",
+ "reqwest 0.13.4",
+ "rustix",
+ "rustls",
+ "secrecy",
+ "serde",
+ "serde_json",
  "sha2 0.11.0",
+ "tar",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "xattr",
 ]
 
 [[package]]
@@ -2547,28 +2561,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-oci"
-version = "0.18.0"
-dependencies = [
- "async-trait",
- "base64",
- "hex",
- "libc",
- "reqwest 0.13.4",
- "rustix",
- "rustls",
- "secrecy",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "tar",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "xattr",
-]
-
-[[package]]
 name = "mvm-sdk"
 version = "0.18.0"
 dependencies = [
@@ -2665,8 +2657,8 @@ dependencies = [
  "mvm-build",
  "mvm-cli",
  "mvm-core",
+ "mvm-fs",
  "mvm-guest",
- "mvm-oci",
  "objc2-foundation",
  "predicates",
  "rand 0.8.6",

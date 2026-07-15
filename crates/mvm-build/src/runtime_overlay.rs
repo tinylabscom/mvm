@@ -311,18 +311,18 @@ pub fn build_runtime_overlay_from_guest_binaries(
     stage_runtime_overlay_binary(&bins.exit_report, &root.join("exit-report"))?;
     std::fs::write(root.join("VERSION"), format!("{version}\n"))?;
 
-    let image = mvm_ext4::build_image(&collect_overlay_nodes(&root)?).map_err(|e| {
+    let image = mvm_fs::ext4::build_image(&collect_overlay_nodes(&root)?).map_err(|e| {
         RuntimeOverlayError::DirectBuildFailed {
             reason: format!("build ext4 image: {e}"),
         }
     })?;
-    let verity = mvm_ext4::verity::format(
+    let verity = mvm_fs::ext4::verity::format(
         &image,
         &DIRECT_OVERLAY_VERITY_SALT,
         DIRECT_OVERLAY_DATA_BLOCK_SIZE as usize,
         DIRECT_OVERLAY_HASH_BLOCK_SIZE as usize,
     );
-    let roothash = mvm_ext4::verity::to_hex(&verity.root_hash);
+    let roothash = mvm_fs::ext4::verity::to_hex(&verity.root_hash);
 
     let artifact_dir = staging.path().join("artifact");
     std::fs::create_dir_all(&artifact_dir)?;
@@ -359,7 +359,7 @@ fn stage_runtime_overlay_binary(src: &Path, dst: &Path) -> Result<(), RuntimeOve
 }
 
 #[cfg(feature = "pure-mkfs")]
-fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_ext4::Node>, RuntimeOverlayError> {
+fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, RuntimeOverlayError> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -369,19 +369,19 @@ fn collect_overlay_nodes(root: &Path) -> Result<Vec<mvm_ext4::Node>, RuntimeOver
             let file_type = entry.file_type()?;
             if file_type.is_symlink() {
                 let target = std::fs::read_link(&path)?;
-                out.push(mvm_ext4::Node::Symlink {
+                out.push(mvm_fs::ext4::Node::Symlink {
                     path: overlay_guest_path(root, &path),
                     target: target.to_string_lossy().into_owned(),
                 });
             } else if file_type.is_dir() {
-                out.push(mvm_ext4::Node::Dir {
+                out.push(mvm_fs::ext4::Node::Dir {
                     path: overlay_guest_path(root, &path),
                     mode: overlay_mode_of(&path, 0o755),
                     xattrs: Vec::new(),
                 });
                 stack.push(path);
             } else if file_type.is_file() {
-                out.push(mvm_ext4::Node::File {
+                out.push(mvm_fs::ext4::Node::File {
                     path: overlay_guest_path(root, &path),
                     mode: overlay_mode_of(&path, 0o644),
                     data: std::fs::read(&path)?,
@@ -1599,7 +1599,7 @@ fn validate_roothash_shape(s: &str) -> Result<(), RuntimeOverlayError> {
 mod tests {
     use super::*;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_ext4::Node;
+    use mvm_fs::ext4::Node;
     use tempfile::TempDir;
 
     const FAKE_ROOTHASH: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -1721,7 +1721,7 @@ mod tests {
                 xattrs: Vec::new(),
             });
         }
-        mvm_ext4::build_image(&nodes).expect("build valid overlay ext4 fixture")
+        mvm_fs::ext4::build_image(&nodes).expect("build valid overlay ext4 fixture")
     }
 
     #[test]

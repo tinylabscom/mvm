@@ -36,8 +36,7 @@ members = [
     # W1.1; private auth lands later behind the credential redaction
     # contract from ADR-023. mvmd consumes this crate as a library per
     # ADR-014 §"Runtime Ownership" — keep its dep closure small.
-    "crates/mvm-oci",
-    "crates/mvm-ext4",
+    "crates/mvm-fs",
     # Plan 72 W3 — PID-1 for the libkrun builder VM. Linux-only at
     # runtime; the crate compiles on macOS / Windows as an inert
     # binary so workspace builds stay green for non-Linux contributors.
@@ -115,7 +114,7 @@ exclude = [
     # crate; CI gate at `.github/workflows/security.yml::fuzz` (the
     # `Fuzz OCI unpack_layer` step). Release-tag + nightly + manual
     # dispatch only; not run on per-PR pushes.
-    "crates/mvm-oci/fuzz",
+    "crates/mvm-fs/fuzz-oci",
     # virtio-fs FUSE-server request-parser fuzz harness. Same libfuzzer-sys
     # linker constraints; CI gate at `.github/workflows/security.yml::fuzz`.
     "crates/mvm-backend/fuzz",
@@ -146,7 +145,7 @@ exclude = [
     # structural invariants on the emitted image). Same libfuzzer-sys
     # linker-flag constraints; CI gate at
     # `.github/workflows/security.yml::fuzz`.
-    "crates/mvm-ext4/fuzz",
+    "crates/mvm-fs/fuzz-ext4",
     # ADR-001 — browser audit-log verifier. Excluded so wasm-bindgen +
     # the wasm32 target stay out of `cargo build --workspace` and CI;
     # it depends on the in-workspace `mvm-verify` crate by path and is
@@ -354,8 +353,7 @@ mvm-guest = { path = "crates/mvm-guest", version = "0.18.0" }
 mvm-guest-helpers = { path = "crates/mvm-guest-helpers", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm = { path = "crates/mvm", version = "0.18.0", default-features = false }
-mvm-oci = { path = "crates/mvm-oci", version = "0.18.0" }
-mvm-ext4 = { path = "crates/mvm-ext4", version = "0.18.0" }
+mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.18.0" }
 mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
@@ -447,7 +445,7 @@ flate2.workspace = true
 sha2.workspace = true
 tar.workspace = true
 libkrun-sys.workspace = true
-mvm-oci.workspace = true
+mvm-fs.workspace = true
 # Plan 60 Phase 4 — `tests/audit_total_coverage.rs` walks the
 # `clap::Command` tree returned by `mvm_cli::commands::cli_command()`
 # to enforce that every subcommand has a declared audit posture.

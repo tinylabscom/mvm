@@ -16,7 +16,7 @@ mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-backend = { workspace = true, default-features = false }
 mvm-mcp = { workspace = true, optional = true }
-mvm-oci.workspace = true
+mvm-fs.workspace = true
 mvm-hostd.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_sdk::ir) and routes it
 # through the compile pipeline.
@@ -59,7 +59,6 @@ sha2.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
-mvm-ext4.workspace = true
 assert_cmd.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
@@ -85,7 +84,7 @@ mcp = ["dep:mvm-mcp"]
 builder-vm = ["mvm-build/builder-vm"]
 # In-process, pure-Rust rootfs materialization (no builder VM / mkfs) for the
 # `run --image` path. Default: the run path builds the ext4 image with the
-# memory-safe `mvm-ext4` writer instead of shelling out to a builder VM. The
+# memory-safe `mvm-fs` writer instead of shelling out to a builder VM. The
 # `builder-vm` feature stays default for `dev up`, and `MVM_MATERIALIZE_BUILDER_VM`
 # routes the run path back through the builder VM when set.
 pure-mkfs = ["mvm-build/pure-mkfs"]

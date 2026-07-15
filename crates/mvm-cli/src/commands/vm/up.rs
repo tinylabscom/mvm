@@ -1795,7 +1795,7 @@ mod runtime_overlay_attach_tests {
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
-    use mvm_ext4::Node;
+    use mvm_fs::ext4::Node;
     use sha2::{Digest, Sha256};
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1865,7 +1865,7 @@ mod runtime_overlay_attach_tests {
                 xattrs: Vec::new(),
             });
         }
-        mvm_ext4::build_image(&nodes).expect("build valid overlay ext4 fixture")
+        mvm_fs::ext4::build_image(&nodes).expect("build valid overlay ext4 fixture")
     }
 
     /// Stage a complete overlay cache entry (the four files the resolver

@@ -157,7 +157,7 @@ pub enum RootfsError {
 
     #[cfg(feature = "pure-mkfs")]
     #[error("building ext4 image in-process: {0}")]
-    PureBuild(#[from] mvm_ext4::Ext4Error),
+    PureBuild(#[from] mvm_fs::ext4::Ext4Error),
 
     #[cfg(feature = "pure-mkfs")]
     #[error("reading rootfs image {path}: {source}")]
@@ -428,8 +428,8 @@ pub fn materialize_ext4_pure(
     // Stage-0 /work is mounted by label; every other caller leaves
     // volume_label None and gets the unchanged default-options image.
     let build_options = match &input.volume_label {
-        Some(label) => mvm_ext4::BuildOptions::default().with_volume_name(label.as_bytes()),
-        None => mvm_ext4::BuildOptions::default(),
+        Some(label) => mvm_fs::ext4::BuildOptions::default().with_volume_name(label.as_bytes()),
+        None => mvm_fs::ext4::BuildOptions::default(),
     };
     let size_bytes = stream_pure_ext4_output(&nodes, &input.output, &build_options)?;
     let verity_root_hash = maybe_emit_verity_sidecars(input)?;
@@ -453,7 +453,7 @@ pub fn materialize_ext4_pure(
 /// rootfs tree), and there is no size estimate or verity sidecar: both are
 /// boot-rootfs concerns this kind of image doesn't have.
 pub fn materialize_ext4_pure_labeled(
-    nodes: &[mvm_ext4::Node],
+    nodes: &[mvm_fs::ext4::Node],
     output: &std::path::Path,
     volume_name: &[u8],
 ) -> Result<MaterializedExt4, RootfsError> {
@@ -463,7 +463,7 @@ pub fn materialize_ext4_pure_labeled(
             source,
         })?;
     }
-    let options = mvm_ext4::BuildOptions::default().with_volume_name(volume_name);
+    let options = mvm_fs::ext4::BuildOptions::default().with_volume_name(volume_name);
     let size_bytes = stream_pure_ext4_output(nodes, output, &options)?;
     Ok(MaterializedExt4 {
         path: output.to_path_buf(),
@@ -474,21 +474,21 @@ pub fn materialize_ext4_pure_labeled(
 
 #[cfg(feature = "pure-mkfs")]
 fn stream_pure_ext4_output(
-    nodes: &[mvm_ext4::Node],
+    nodes: &[mvm_fs::ext4::Node],
     output: &std::path::Path,
-    options: &mvm_ext4::BuildOptions,
+    options: &mvm_fs::ext4::BuildOptions,
 ) -> Result<u64, RootfsError> {
     let mut file = std::fs::File::create(output).map_err(|source| RootfsError::WriteOutput {
         path: output.to_path_buf(),
         source,
     })?;
-    let size_bytes = match mvm_ext4::emit_image_with_options(nodes, options, |offset, bytes| {
+    let size_bytes = match mvm_fs::ext4::emit_image_with_options(nodes, options, |offset, bytes| {
         file.seek(SeekFrom::Start(offset))
             .and_then(|_| file.write_all(bytes))
     }) {
         Ok(size_bytes) => size_bytes,
-        Err(mvm_ext4::EmitImageError::Build(err)) => return Err(RootfsError::PureBuild(err)),
-        Err(mvm_ext4::EmitImageError::Emit(source)) => {
+        Err(mvm_fs::ext4::EmitImageError::Build(err)) => return Err(RootfsError::PureBuild(err)),
+        Err(mvm_fs::ext4::EmitImageError::Emit(source)) => {
             return Err(RootfsError::WriteOutput {
                 path: output.to_path_buf(),
                 source,
@@ -541,7 +541,7 @@ fn emit_verity_sidecars_for_image(
     // salt must match the pinned `mvm-verity-init` / `veritysetup` contract or
     // the guest will panic at boot with a mismatched hash-tree geometry.
     let salt = [0u8; 32];
-    let verity = mvm_ext4::verity::format(
+    let verity = mvm_fs::ext4::verity::format(
         image,
         &salt,
         crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
@@ -551,7 +551,7 @@ fn emit_verity_sidecars_for_image(
         .parent()
         .map(std::path::Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let root_hex = mvm_ext4::verity::to_hex(&verity.root_hash);
+    let root_hex = mvm_fs::ext4::verity::to_hex(&verity.root_hash);
     write_sidecar(&dir.join("rootfs.verity"), &verity.hash_tree)?;
     write_sidecar(
         &dir.join("rootfs.roothash"),
@@ -561,7 +561,7 @@ fn emit_verity_sidecars_for_image(
 }
 
 #[cfg(feature = "pure-mkfs")]
-/// How [`collect_nodes`] handles a host inode kind the ext4 [`mvm_ext4::Node`]
+/// How [`collect_nodes`] handles a host inode kind the ext4 [`mvm_fs::ext4::Node`]
 /// enum has no variant for (device, FIFO, socket).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnsupportedNodePolicy {
@@ -585,7 +585,7 @@ pub enum UnsupportedNodePolicy {
 pub fn collect_nodes(
     root: &std::path::Path,
     on_unsupported: UnsupportedNodePolicy,
-) -> Result<Vec<mvm_ext4::Node>, RootfsError> {
+) -> Result<Vec<mvm_fs::ext4::Node>, RootfsError> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -614,13 +614,13 @@ pub fn collect_nodes(
                     path: path.clone(),
                     source,
                 })?;
-                out.push(mvm_ext4::Node::Symlink {
+                out.push(mvm_fs::ext4::Node::Symlink {
                     path: guest_path,
                     target: target.to_string_lossy().into_owned(),
                 });
             } else if ft.is_dir() {
                 let xattrs = collect_guest_xattrs(&path);
-                out.push(mvm_ext4::Node::Dir {
+                out.push(mvm_fs::ext4::Node::Dir {
                     path: guest_path,
                     mode: mode_of(&path, 0o755),
                     xattrs,
@@ -633,7 +633,7 @@ pub fn collect_nodes(
                         source,
                     })?;
                 let xattrs = collect_guest_xattrs(&path);
-                out.push(mvm_ext4::Node::File {
+                out.push(mvm_fs::ext4::Node::File {
                     path: guest_path,
                     mode: mode_of(&path, 0o644),
                     data,
@@ -693,7 +693,7 @@ fn read_file_for_guest_image(path: &std::path::Path) -> std::io::Result<Vec<u8>>
 /// represent and the guest actually needs, or `None`. Ignores host-managed
 /// labels (SELinux/IMA/EVM, macOS `com.apple.*`) so the guest re-derives them.
 #[cfg(feature = "pure-mkfs")]
-fn collect_guest_xattrs(path: &std::path::Path) -> Vec<mvm_ext4::Xattr> {
+fn collect_guest_xattrs(path: &std::path::Path) -> Vec<mvm_fs::ext4::Xattr> {
     // A read failure means the FS doesn't support xattrs (or we lack access):
     // nothing to preserve.
     let Ok(names) = xattr::list(path) else {
@@ -705,7 +705,7 @@ fn collect_guest_xattrs(path: &std::path::Path) -> Vec<mvm_ext4::Xattr> {
         if xattr_matters_for_guest(&name)
             && let Ok(Some(value)) = xattr::get(path, &name)
         {
-            out.push(mvm_ext4::Xattr { name, value });
+            out.push(mvm_fs::ext4::Xattr { name, value });
         }
     }
     // Deterministic order (the writer also sorts, but keep the node stable).
@@ -766,7 +766,7 @@ mod tests {
     #[cfg(feature = "pure-mkfs")]
     #[test]
     fn pure_capacity_limit_is_retryable_but_malformed_is_not() {
-        let capacity = RootfsError::PureBuild(mvm_ext4::Ext4Error::FileTooFragmented {
+        let capacity = RootfsError::PureBuild(mvm_fs::ext4::Ext4Error::FileTooFragmented {
             ino: 12,
             extents: 9,
         });
@@ -774,7 +774,7 @@ mod tests {
             capacity.is_pure_capacity_limit(),
             "a capacity limit must be retryable via the builder VM"
         );
-        let malformed = RootfsError::PureBuild(mvm_ext4::Ext4Error::BadPath("//a".into()));
+        let malformed = RootfsError::PureBuild(mvm_fs::ext4::Ext4Error::BadPath("//a".into()));
         assert!(
             !malformed.is_pure_capacity_limit(),
             "a malformed-tree error must surface, not fall back"
@@ -818,7 +818,7 @@ mod tests {
         }
         assert_eq!(
             collect_guest_xattrs(&bin),
-            vec![mvm_ext4::Xattr {
+            vec![mvm_fs::ext4::Xattr {
                 name: "user.mvm.test_cap".into(),
                 value: b"cap".to_vec(),
             }],
@@ -935,7 +935,7 @@ mod tests {
         std::fs::write(src.path().join("hello"), b"hi\n").unwrap();
 
         let nodes = collect_nodes(src.path(), UnsupportedNodePolicy::Skip).expect("collect nodes");
-        let dense = mvm_ext4::build_image(&nodes).expect("dense ext4 image");
+        let dense = mvm_fs::ext4::build_image(&nodes).expect("dense ext4 image");
 
         let out = tempfile::tempdir().unwrap();
         let out_path = out.path().join("rootfs.ext4");
@@ -961,7 +961,7 @@ mod tests {
         let node = nodes
             .into_iter()
             .find_map(|node| match node {
-                mvm_ext4::Node::File {
+                mvm_fs::ext4::Node::File {
                     path, mode, data, ..
                 } if path == "/etc/shadow" => Some((mode, data)),
                 _ => None,
@@ -1009,7 +1009,7 @@ mod tests {
     fn materialize_ext4_pure_labeled_stamps_the_volume_name() {
         let out = tempfile::tempdir().unwrap();
         let out_path = out.path().join("extra.ext4");
-        let nodes = vec![mvm_ext4::Node::File {
+        let nodes = vec![mvm_fs::ext4::Node::File {
             path: "/hello".into(),
             mode: 0o644,
             data: b"hi\n".to_vec(),
@@ -1098,16 +1098,16 @@ mod tests {
         let image = std::fs::read(&out_path).unwrap();
         let root_hex = emit_verity_sidecars_for_image(&out_path, &image).expect("emit sidecars");
         let actual_sidecar = std::fs::read(out.path().join("rootfs.verity")).unwrap();
-        let expected = mvm_ext4::verity::format(
+        let expected = mvm_fs::ext4::verity::format(
             &image,
             &[0u8; 32],
             crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
             crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
         );
-        let wrong_contract = mvm_ext4::verity::format(&image, &[0u8; 32], 1024, 4096);
+        let wrong_contract = mvm_fs::ext4::verity::format(&image, &[0u8; 32], 1024, 4096);
 
         assert_eq!(actual_sidecar, expected.hash_tree);
-        assert_eq!(root_hex, mvm_ext4::verity::to_hex(&expected.root_hash));
+        assert_eq!(root_hex, mvm_fs::ext4::verity::to_hex(&expected.root_hash));
         assert_ne!(
             actual_sidecar, wrong_contract.hash_tree,
             "the pure path must not drift to the older 1K/4K verity geometry"
