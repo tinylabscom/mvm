@@ -114,4 +114,4 @@ If a microvm.nix per-bump audit (`xtask audit-flake`) surfaces a security regres
 - [Plan 60: mvm-libkrun migration](https://github.com/tinylabscom/mvm/blob/main/specs/plans/60-mvm-libkrun-migration.md) — full implementation roadmap
 - [ADR-002: microVM security posture](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/002-microvm-security-posture.md) — per-backend tier matrix
 - [ADR-014: VmBackend single trait](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/014-vmbackend-single-trait.md) — the trait surface libkrun implements
-- [ADR-031: Cross-platform strategy](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/031-cross-platform-strategy.md) — Linux native, macOS native, Windows Tauri-only
+- [ADR-031: Cross-platform strategy](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/009-cross-platform-strategy.md) — Linux native, macOS native, Windows Tauri-only

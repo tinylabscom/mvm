@@ -10,6 +10,10 @@
 > removed (Plan 226 R1P1) and replaced by an in-house HVF backend written in
 > Rust — there is no Swift crate and no `vz-sys` in the current workspace. The
 > rest of the plan-121 crate-graph snapshot is otherwise historically accurate.
+> Every further `mvm-vz` / `Vz` / `vz-sys` / `VzBackend` mention below (crate
+> tables, the claim → CI-gate map, fuzz targets, Consequences) belongs to that
+> same superseded snapshot — read it as historical record, not current
+> architecture; HVF is the macOS backend today.
 
 ## Context
 

@@ -961,7 +961,8 @@ as `min` warm instances plus an idle timeout — not two implementations.
 
 - `min ≥ 1` keeps a builder warm: zero per-command boot latency. This is the
   "instant" path — no VM boot, only a control round-trip to the resident daemon.
-- `min = 0` parks the builder as a snapshot (Plan 159 for Vz, Plan 175 for Firecracker)
+- `min = 0` parks the builder as a snapshot (Plan 159, for the since-removed Vz backend;
+  Plan 175 for Firecracker; not yet ported to the HVF backend that replaced Vz)
   and resumes it on demand. The resume is a full guest-memory restore, so it costs about
   what a cold boot of the same closure does — single-digit seconds (~2.3 s measured for a
   512 MiB builder, 2026-06-13). `min = 0` trades resume latency for zero idle RAM; it is

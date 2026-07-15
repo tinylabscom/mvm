@@ -101,6 +101,11 @@ rootfs.
 
 ### 2. Adopt (as a data point, no direction change) — HVF-direct as a reference for the Rust-native VZ path
 
+> Superseded — the Vz/Virtualization.framework backend was removed; HVF is the macOS
+> backend. The "mvm stays on Virtualization.framework" call below did not hold (see the
+> top-of-doc update note); the design record is kept for its HVF-direct analysis, not as
+> a live decision.
+
 The runtime's HVF-direct design demonstrates that driving the hypervisor a layer
 below Virtualization.framework is viable and is where its snapshot/restore speed
 comes from. Record this as a reference data point for Plan 152's Rust-native VZ
