@@ -1,7 +1,4 @@
----
-title: "ADR-001: Multi-Backend VM Execution"
-description: Architecture Decision Record for supporting multiple VM backends with Firecracker as primary.
----
+# ADR-030: Multi-Backend VM Execution
 
 ## Status
 

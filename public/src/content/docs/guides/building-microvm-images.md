@@ -5,7 +5,7 @@ description: How to build mvm microVM images from your own project — the mvm r
 
 mvm is a **library**, not a project to fork. You keep your code, your `flake.nix`, and your `mvm.toml` in your own repository, and `mvmctl` builds your microVM image by running `nix build` against your flake. **You should never need to edit anything inside the mvm repository.**
 
-Under the hood, mvm wraps [microvm.nix](https://github.com/microvm-nix/microvm.nix) (MIT) — that's the NixOS module that abstracts Firecracker, Cloud Hypervisor, QEMU, crosvm, kvmtool, and stratovirt. The choice is recorded in [ADR-013](/contributing/adr/013-libkrun-pivot/).
+Under the hood, mvm wraps [microvm.nix](https://github.com/microvm-nix/microvm.nix) (MIT) — that's the NixOS module that abstracts Firecracker, Cloud Hypervisor, QEMU, crosvm, kvmtool, and stratovirt. The choice is recorded in [ADR-031](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/031-libkrun-pivot.md).
 
 ## The two files in your project
 
@@ -177,7 +177,7 @@ The `mkGuest` library produces a **busybox-as-PID-1** rootfs (no NixOS, no syste
 
 The numbers are surfaced on every `mkGuest` derivation as `passthru.mvm.expectedBootMs` so you can `nix eval .#default.passthru.mvm.expectedBootMs` to confirm. Phase 9 enforces with `xtask perf --backend <name> --p50-ms 300 --runs 100`. See [ADR-013 §"Boot-time budget"](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/013-libkrun-libkrun-microvm-nix-pivot.md) for rationale.
 
-The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-013](/contributing/adr/013-libkrun-pivot/) for why this matters and the implementation breadcrumb.
+The floor is achievable because the rootfs uses **busybox-as-PID-1** with a custom `/init` (no NixOS, no systemd, no OpenRC). See [ADR-031](https://github.com/tinylabscom/mvm/blob/main/specs/adrs/031-libkrun-pivot.md) for why this matters and the implementation breadcrumb.
 
 ## What's inside the mvm repository (and why you don't touch it)
 

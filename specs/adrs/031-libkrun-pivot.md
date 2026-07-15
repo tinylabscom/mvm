@@ -1,7 +1,4 @@
----
-title: "ADR-013: Pivot to libkrun + libkrun + microvm.nix"
-description: Architecture Decision Record for the cross-platform microVM pivot — libkrun as the macOS/Windows execution path, Firecracker preferred on Linux, microvm.nix as the Nix foundation.
----
+# ADR-031: Pivot to libkrun + libkrun + microvm.nix
 
 ## Status
 
