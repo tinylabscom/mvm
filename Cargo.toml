@@ -6,7 +6,7 @@ members = [
     # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-backend
     # (where the in-VM shell lives) and the WireGuard/Tailscale mesh impl is
     # mvmd's; both register against this trait.
-    "crates/mvm-network",
+    "crates/mvm-net",
     "crates/deps/libkrun-sys",
     # Plan 102 W6.A.5 — leaf bin crate that links mvm-libkrun + mvm-
     # supervisor without closing the
@@ -357,7 +357,7 @@ mvm = { path = "crates/mvm", version = "0.18.0", default-features = false }
 mvm-oci = { path = "crates/mvm-oci", version = "0.18.0" }
 mvm-ext4 = { path = "crates/mvm-ext4", version = "0.18.0" }
 mvm-storage = { path = "crates/mvm-storage", version = "0.18.0" }
-mvm-network = { path = "crates/mvm-network", version = "0.18.0" }
+mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
 # default-features = false drops `packet-forwarder` (the smoltcp egress stack) for
 # library consumers — only the mvm-network-tunnel-worker bin (mvm-hostd's own

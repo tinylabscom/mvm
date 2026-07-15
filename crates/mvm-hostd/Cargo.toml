@@ -52,8 +52,8 @@ path = "src/bin/mvm-substitution-endpoint.rs"
 mvm-core = { workspace = true, features = ["egress-ca"] }
 mvm-backend.workspace = true
 # The EgressEnforcer seam this crate's SupervisorEgressEnforcer
-# implements. Acyclic HIGH->LOW: mvm-network deps only mvm-core + mvm-sdk.
-mvm-network.workspace = true
+# implements. Acyclic HIGH->LOW: mvm-net deps only mvm-core + mvm-sdk.
+mvm-net.workspace = true
 # `mvm_sdk::compile::deps_audit::verify_sealed_volume` — supervisor
 # admission gate (security claim 9).
 mvm-sdk.workspace = true

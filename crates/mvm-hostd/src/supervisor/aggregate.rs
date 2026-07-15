@@ -28,7 +28,7 @@ use tracing::warn;
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::plan::Variant;
 use mvm_core::policy::{DEFAULT_BODY_CAP_BYTES, EgressPolicy, ToolPolicy};
-use mvm_network::{EgressEnforcer, EgressWiring, EnforcementError};
+use mvm_net::{EgressEnforcer, EgressWiring, EnforcementError};
 
 use crate::supervisor::artifact::{ArtifactCollector, NoopArtifactCollector};
 use crate::supervisor::audit::{AuditSigner, NoopAuditSigner};

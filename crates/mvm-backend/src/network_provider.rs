@@ -1,5 +1,5 @@
 //! `BridgeTapNetworkProvider` — the mvm-backend impl of
-//! [`mvm_network::NetworkProvider`] for the Linux bridge + TAP path
+//! [`mvm_net::NetworkProvider`] for the Linux bridge + TAP path
 //! (Firecracker / Linux-KVM).
 //!
 //! It puts the existing [`crate::network`] provisioning (`bridge_ensure` +
@@ -16,7 +16,7 @@
 
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;
-use mvm_network::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
+use mvm_net::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 
 use crate::base::config::VmSlot;
 use crate::network;

@@ -22,7 +22,7 @@ use thiserror::Error;
 
 #[cfg(any(target_os = "linux", test))]
 pub mod linux_nft;
-/// Adapts `FirewallEnforcer` to `mvm_network::EgressEnforcer`.
+/// Adapts `FirewallEnforcer` to `mvm_net::EgressEnforcer`.
 pub mod seam;
 
 /// Runtime VM firewall wiring. The TAP interface is the VM-facing

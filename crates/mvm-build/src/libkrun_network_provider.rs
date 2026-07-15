@@ -1,5 +1,5 @@
 //! `LibkrunNetworkProvider` — the mvm-build impl of
-//! [`mvm_network::NetworkProvider`] for the libkrun direct-vsock path.
+//! [`mvm_net::NetworkProvider`] for the libkrun direct-vsock path.
 //!
 //! Unlike the Firecracker `BridgeTapNetworkProvider`, which owns a host bridge
 //! + TAP, this provider owns **no host resource**. A libkrun guest's runtime
@@ -17,7 +17,7 @@
 
 use mvm_core::network_policy::NetworkPolicy;
 use mvm_core::protocol::vm_backend::VmId;
-use mvm_network::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
+use mvm_net::{NetHandle, NetworkError, NetworkProvider, NetworkSpec};
 
 use crate::libkrun_builder::{NetworkingPreference, resolve_networking_mode};
 
@@ -79,7 +79,7 @@ mod tests {
     use super::*;
     use mvm_core::network_policy::NetworkPolicy;
     use mvm_core::protocol::vm_backend::VmId;
-    use mvm_network::{NetworkProvider, NetworkSpec};
+    use mvm_net::{NetworkProvider, NetworkSpec};
 
     #[test]
     fn provision_tags_handle_with_vsock_direct() {

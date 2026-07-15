@@ -2260,7 +2260,7 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-guest",
- "mvm-network",
+ "mvm-net",
  "mvm-storage",
  "secrecy",
  "serde",
@@ -2293,7 +2293,7 @@ dependencies = [
  "mvm-ext4",
  "mvm-guest",
  "mvm-guest-helpers",
- "mvm-network",
+ "mvm-net",
  "mvm-sdk",
  "nix",
  "rand 0.8.6",
@@ -2499,7 +2499,7 @@ dependencies = [
  "mvm-backend",
  "mvm-core",
  "mvm-guest",
- "mvm-network",
+ "mvm-net",
  "mvm-sdk",
  "mvm-verify",
  "rand 0.8.6",
@@ -2538,7 +2538,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mvm-network"
+name = "mvm-net"
 version = "0.18.0"
 dependencies = [
  "mvm-core",

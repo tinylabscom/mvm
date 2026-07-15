@@ -11,7 +11,7 @@ use crate::network_tunnel_spawn::{
     spawn_network_tunnel_worker_if_configured,
 };
 use crate::{firecracker, network};
-use mvm_network::{NetHandle, NetworkProvider, NetworkSpec};
+use mvm_net::{NetHandle, NetworkProvider, NetworkSpec};
 
 // ============================================================================
 // RAII resource guards — prevent leaks when VM launch fails partway through

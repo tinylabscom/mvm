@@ -101,7 +101,7 @@ The workspace is organized by responsibility rather than by platform:
 | Build pipeline | `mvm-build` | Builder VM flow, artifact production, builder backend seams |
 | Host policy / supervision | `mvm-hostd` | Admission, audit, policy enforcement, launch preparation |
 | Guest / protocol surfaces | `mvm-guest`, `mvm-guest-helpers`, `mvm-mcp` | Guest agent and protocol-facing tooling |
-| Domain-specific subsystems | `mvm-storage`, `mvm-network`, `mvm-oci`, `mvm-verify` | Storage, networking, OCI, audit verification |
+| Domain-specific subsystems | `mvm-storage`, `mvm-net`, `mvm-oci`, `mvm-verify` | Storage, networking, OCI, audit verification |
 | CLI / SDK surface | `mvm-cli`, `mvm-sdk`, `mvm-sdk-macros` | User interface and workload authoring APIs |
 
 The root crate (`mvm`) is the facade/runtime integration crate. `mvm-cli` is the binary-facing
@@ -114,7 +114,7 @@ At a high level:
 ```text
 mvm-core
 ├── mvm-storage
-├── mvm-network
+├── mvm-net
 ├── mvm-build
 ├── mvm-backend
 ├── mvm-hostd
@@ -146,7 +146,7 @@ These are the main behavior seams in the current codebase:
 | `BuilderVm` | `mvm-build` | High-level builder VM driver |
 | `VmBackendForBuilder` | `mvm-build` | Low-level builder backend seam |
 | `BackendLauncher` | `mvm-hostd` | Host-side backend launch preparation/execution |
-| `NetworkProvider` | `mvm-network` | Network provisioning / policy seam |
+| `NetworkProvider` | `mvm-net` | Network provisioning / policy seam |
 | `VolumeBackend` | `mvm-storage` | Storage backend seam |
 
 ### Ownership rule
@@ -161,7 +161,7 @@ Backend- or subsystem-specific seams stay in the owning crate:
 
 - `VmBackendForBuilder` belongs in `mvm-build`.
 - `BackendLauncher` belongs in `mvm-hostd`.
-- `NetworkProvider` belongs in `mvm-network`.
+- `NetworkProvider` belongs in `mvm-net`.
 - `VolumeBackend` belongs in `mvm-storage`.
 
 This keeps `mvm-core` small while still giving the rest of the workspace stable contracts.

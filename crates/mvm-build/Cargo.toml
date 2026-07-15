@@ -73,10 +73,10 @@ mvm-guest-helpers.workspace = true
 xattr = { workspace = true, optional = true }
 mvm-guest.workspace = true
 # `LibkrunNetworkProvider` impls the `NetworkProvider`
-# seam. mvm-network deps only mvm-core + mvm-sdk, so this edge is acyclic.
+# seam. mvm-net deps only mvm-core + mvm-sdk, so this edge is acyclic.
 # Optional + folded into `builder-vm`: the provider is gated with
 # `libkrun_builder`, so a default build pulls neither.
-mvm-network = { workspace = true, optional = true }
+mvm-net = { workspace = true, optional = true }
 # `install_app_deps` reuses
 # `mvm_sdk::compile::deps_audit::{verify_sealed_volume, VolumeError}`
 # for cache-hit verification. The orchestrator owns the cache
@@ -178,7 +178,7 @@ dev-shell = []
 # writer too — including an isolated `-p` build that never asks for
 # `pure-mkfs` on its own (e.g. the per-VM supervisor crate).
 contributor-bootstrap = []
-builder-vm = ["dep:libkrun-sys", "dep:mvm-network", "pure-mkfs"]
+builder-vm = ["dep:libkrun-sys", "dep:mvm-net", "pure-mkfs"]
 
 [lints]
 workspace = true
