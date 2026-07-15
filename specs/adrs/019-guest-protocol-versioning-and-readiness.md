@@ -1,293 +1,119 @@
-# ADR 053 - Guest Protocol Versioning, Runtime Readiness, and First-Use DX
+# ADR-019: Guest protocol versioning, runtime readiness, and receipts
 
-**Status**: Proposed
-**Date**: 2026-05-14
-**Cross-refs**: ADR-001, ADR-005, ADR-007, ADR-014, plan 41, plan 52, plan 72, plan 74
+## Status
+
+Accepted.
 
 ## Context
 
-Plan 74 records a set of runtime and developer-experience lessons from
-the `banger` project. The useful pattern is not the media domain. It
-is the product shape:
+A host talking to a guest agent over vsock can fail in ways that look
+identical from the outside but mean very different things: the backend
+accepted launch but the agent isn't reachable yet; the agent is reachable
+but too old for the requested verb; the agent is up but a service is
+still warming; a streaming operation is backpressured rather than hung.
+Without an explicit contract, every one of these collapses into the same
+undifferentiated timeout or hang from the caller's point of view.
 
-- a thin local control process wraps a mature runtime;
-- small typed messages carry control state;
-- large bytes move over a separate streaming path;
-- version mismatch is detected early;
-- the user sees the current wait reason instead of a silent hang;
-- the first-use path starts from the user's workflow, not from
-  architecture.
-
-mvm already has the right security substrate: signed execution plans,
-vsock-only host to guest control, `deny_unknown_fields` on protocol
-types, verified boot, audit chains, and a managed builder VM direction
-from ADR-007 / plan 72. What is missing is a single contract tying
-protocol versioning, readiness, progress, builder mode, receipts, and
-first-use DX together.
-
-Without that contract, the same command can fail in ways that look the
-same to users but mean very different things:
-
-- the backend accepted launch but the guest agent is not reachable;
-- the agent is reachable but too old for the requested verb;
-- the agent is ready but services are still warming;
-- the builder VM is fetching a cold Nix closure;
-- the command used host Nix instead of the managed builder VM;
-- a streaming operation is backpressured rather than hung.
+mvm already has the security substrate this needs to build on: signed
+execution plans, vsock-only host-to-guest control, `deny_unknown_fields`
+on every protocol type, and verified boot. What was missing was a single
+contract tying protocol versioning, capability negotiation, readiness,
+and backpressure together so a caller can always distinguish these
+failure modes instead of reading raw logs.
 
 ## Decision
 
-mvm will treat guest protocol compatibility, runtime readiness, builder
-mode, progress events, and receipts as explicit product contracts.
+### Protocol hello, every session
 
-### 1. Guest protocol hello
+Every guest-agent session — including a pure reachability probe — begins
+with a `ProtocolHello`: the host sends its protocol version, minimum
+supported version, host binary version, and requested capabilities; the
+guest replies with the same shape. A version mismatch returns a typed
+`ProtocolMismatch` naming the required remediation (`upgrade_host`,
+`rebuild_guest`, or `downgrade_host`) before any operational request
+dispatches. There is no untyped compatibility shim: a non-hello first
+request in a session, or an incompatible version, is rejected and the
+connection closed rather than silently degraded. Protocol types stay
+closed Rust enums with `#[serde(deny_unknown_fields)]`.
 
-Every new guest-agent session begins with a protocol negotiation
-request. The host sends its protocol version, minimum supported
-version, host binary version, and requested capabilities. The guest
-replies with its protocol version, minimum supported version, agent
-binary version, and supported capabilities.
+### Capability negotiation
 
-Mismatch returns a typed error before dispatching the operational
-request. The error must indicate the required action when known:
-upgrade host, rebuild guest image, or downgrade host.
+Capabilities are a closed enum, never ad hoc strings: `Ping`,
+`IntegrationStatus`, `EntrypointStatus`, `RunEntrypoint`, `FilesystemRpc`,
+`ProcessRpc`, `Console`, `UnixSocketForward`, `VolumeMount`,
+`UpdateIdleTimeout`, `Readiness`. A caller that needs a capability the
+guest doesn't advertise fails closed before the command runs, with the
+missing capability named in the error.
 
-Hard cutover: there is no `Ping` compatibility shim. A non-hello first
-request in a session is rejected with `ProtocolMismatch`
-(`required_action = upgrade_host`) and the connection is closed. Old
-guest images that pre-date this contract must be rebuilt
-(`mvmctl dev down && mvmctl dev up`); old host binaries that have not
-adopted the hello prelude must be upgraded. The rationale is in
-plan 74 W1 — soft compatibility windows accumulate shim code that has
-to be removed later anyway, and the parallel libkrun builder-VM
-transition (ADR-007 / plan 72) already requires contributors to
-rebuild their dev VM, so layering a separate hello-compat window on
-top of that buys nothing.
+### Runtime readiness is separate from lifecycle
 
-Protocol types remain closed Rust enums with
-`#[serde(deny_unknown_fields)]`.
+The coarse VM lifecycle (created, running, stopped, ...) answers whether
+the backend accepted and is running the VM. A separate readiness report
+answers whether it's actually *usable*, tracked per component:
+`control_plane` (the vsock listener itself — always ready if the agent
+answered at all), `entrypoint` (workload validation), `warm_pool`
+(warm-process pool state), `integrations` (drop-in integration health),
+`probes` (drop-in readiness probes), and `volumes` (mount state). Each
+component reports one of `Disabled` (not configured for this image —
+distinct from `Ready`, never conflated with it), `Starting`, `Ready`, or
+`Failed { message }`. Readiness never invents a new lifecycle state; it's
+a status detail layered on top of the existing one.
 
-### 2. Capability negotiation
+### Control plane and data plane stay separate
 
-Capabilities are closed enum values, not ad hoc strings. Initial
-capabilities cover existing surfaces:
+Small control requests and responses ride the guest protocol described
+above. Large data — command output, transferred artifacts — moves over
+streaming or chunked paths with their own frame caps. Payload bytes are
+never copied into audit entries, readiness reports, or receipts; where a
+receipt needs to reference output, it stores a hash, not the bytes.
 
-- `Ping`
-- `IntegrationStatus`
-- `EntrypointStatus`
-- `RunEntrypoint`
-- `FilesystemRpc`
-- `ProcessRpc`
-- `Console`
-- `VolumeMount`
-- `UpdateIdleTimeout`
+### Backpressure is typed, non-terminal product state
 
-Mandatory unsupported capabilities fail closed before the command runs.
-Optional capabilities may be ignored only when the caller explicitly
-marks them optional.
+A backpressured operation (today: `ProcWait`) reports one of a closed set
+of reasons rather than simply hanging: the guest agent is unreachable
+within its grace period, one or more service-health probes are still
+pending (naming which services), the host isn't draining output fast
+enough, an input buffer is full, an artifact transfer is paused, or the
+shared builder VM is occupied by another build. Backpressure is
+non-terminal — the caller keeps waiting, now with a reason instead of
+silence.
 
-### 3. Runtime readiness is separate from lifecycle
+### The managed builder VM is the only builder mode
 
-`InstanceStatus` remains the coarse lifecycle state: created, ready,
-running, warm, sleeping, stopped, destroyed. A new readiness field
-explains whether a running instance is usable:
+`mvmctl` always drives Nix builds through its own managed builder VM.
+There is no host-Nix path: `mvmctl` never shells out to a host `nix`
+binary, never consults a host Nix installation, and never falls back to
+one implicitly or explicitly. A host happening to have Nix installed
+produces identical behavior to a host that doesn't. This is stricter than
+merely defaulting to the managed builder VM — the alternative doesn't
+exist as a selectable mode.
 
-- backend launch accepted;
-- guest agent connecting;
-- guest agent ready;
-- services starting;
-- services ready;
-- degraded;
-- backpressured;
-- stopping.
+### Receipts are default-safe
 
-Readiness changes must not require invalid lifecycle transitions. They
-are status details, not replacement lifecycle states.
-
-### 4. Control plane and data plane stay separate
-
-Small requests and responses remain on the guest control protocol.
-Large data paths use streaming, chunking, or dedicated transfer
-surfaces. At minimum, docs classify each protocol surface as control
-plane or data plane and name its frame cap, chunk size, terminal event,
-backpressure behavior, and redaction rule.
-
-Payload bytes are never copied into audit entries, readiness messages,
-progress events, or receipts. Receipts may store hashes.
-
-### 5. Backpressure is product state
-
-Backpressure has typed reasons, including:
-
-- guest agent unavailable;
-- service health pending;
-- output consumer slow;
-- input buffer full;
-- artifact transfer blocked;
-- builder busy.
-
-The first implementation slice wires one high-volume operation,
-preferably `ProcWait`, before broadening the model.
-
-### 6. Managed builder VM is the default builder mode
-
-`mvmctl` defaults to the managed builder VM for Nix builds. Host Nix is
-not selected implicitly, even if present.
-
-Supported builder modes:
-
-- `managed-builder-vm` - default; mvm-owned Linux builder VM, mvm-owned
-  store disk, controlled mounts, controlled egress, auditable behavior.
-- `host-nix` - explicit opt-in only; uses the host's Nix daemon,
-  substituters, sandbox settings, and store state.
-- `remote-builder` - reserved future mode.
-
-`mvmctl doctor` may detect host Nix, but it reports it as optional
-acceleration or debugging tooling unless the user selected `host-nix`.
-
-When `host-nix` is selected, the CLI prints and records a
-reproducibility and security note. The receipt records
-`builder_mode = "host-nix"` so later audit and support work can see
-that the host trust boundary was expanded intentionally.
-
-### 7. Progress events are structured
-
-Long-running commands emit structured progress events and render human
-text from those events. CLI text, JSON output, Studio, MCP tools, logs,
-and receipts should not each invent separate status vocabularies.
-
-Initial events include:
-
-- builder mode selected;
-- builder image ready;
-- Nix eval started;
-- Nix build started;
-- cache state observed;
-- backend launch accepted;
-- guest agent connecting;
-- guest agent ready;
-- services starting;
-- services ready;
-- backpressure observed;
-- receipt written.
-
-### 8. Receipts are default-safe
-
-Successful `run`, `up`, and `build` commands can write a small receipt
-with:
-
-- command id;
-- plan id or signed-plan hash when present;
-- image hash or bundle hash;
-- backend;
-- builder mode;
-- protocol version;
-- capability set;
-- phase durations;
-- cache state summary;
-- audit-chain pointer;
-- output hashes.
-
-Receipts must not store raw argv values, environment values, stdin,
-stdout, stderr, secrets, tokens, or user data unless another accepted
-ADR creates a more specific receipt contract.
-
-### 9. Explainability is a first-class command surface
-
-Reserve `mvmctl explain <receipt-path-or-error-id>` for mapping common
-failures to causes and next actions:
-
-- protocol mismatch;
-- missing required capability;
-- missing builder image;
-- backend unavailable;
-- egress denied;
-- service health timeout;
-- cache miss or cold store;
-- host-Nix cross-system failure.
-
-### 10. Docs start with first use
-
-Getting-started docs should lead with "run your first thing" and then
-link to architecture, security model, and backend details. Protocol and
-builder internals belong in reference docs, not at the top of the
-first-use path.
+A successful `run`/`up`/`build` invocation can record a small receipt:
+what was invoked (hashed, not the raw argv or env values), the outcome
+(exit code, success, and hashes of stdout/stderr rather than their raw
+bytes), and enough metadata (backend, network posture, egress
+enforcement fidelity) for later review. A receipt never stores raw argv
+values, environment values, stdin, stdout, stderr, secrets, or tokens —
+only their hashes and metadata survive.
 
 ## Consequences
 
-**Positive.**
+**Positive.** Callers can distinguish "booting," "agent unavailable,"
+"service not ready," "protocol mismatch," and "backpressured" without
+reading raw logs. The managed-builder-only posture removes an entire
+class of "worked on my machine because I have Nix installed" bug.
+Receipts and readiness share one vocabulary across the CLI and any other
+consumer of the same guest protocol.
 
-- Users can distinguish "booting", "agent unavailable", "services not
-  ready", "protocol mismatch", and "backpressured" without reading raw
-  logs.
-- Host Nix remains available to power users without silently weakening
-  the default security and reproducibility story.
-- Receipts and structured progress make CLI, Studio, MCP, and support
-  workflows share one vocabulary.
-- The protocol compatibility window is explicit rather than accidental.
+**Negative.** Every guest-agent caller that depends on a capability
+beyond the unconditional baseline has to negotiate before dispatch.
+Receipt redaction needs its own tests to keep proving raw payloads never
+land in a receipt, since a regression there is a silent leak, not a
+loud failure.
 
-**Costs.**
-
-- Every guest-agent caller that depends on a non-legacy capability must
-  negotiate before dispatch.
-- Existing CLI progress output needs to be routed through structured
-  events rather than one-off strings.
-- Receipts require careful redaction tests.
-- Host-Nix opt-in needs support and docs even though it is not the
-  default path.
-
-**Risks.**
-
-- Protocol hello strands any pre-hello guest image at first contact.
-  Mitigation: clear `ProtocolMismatch` payload (`required_action =
-  upgrade_host`), a documented `mvmctl dev down && mvmctl dev up`
-  rebuild path, and a release note when the contract lands. There is
-  no compat shim — see §1.
-- Readiness can duplicate lifecycle state. Mitigation: lifecycle stays
-  coarse; readiness explains usability.
-- Progress events can become too detailed. Mitigation: closed enums and
-  workflow-level renderers.
-- Receipts can leak sensitive data. Mitigation: hashes and metadata
-  only, with tests that assert payload absence.
-
-## Test expectations
-
-- Serde roundtrip tests for protocol hello, mismatch, capabilities,
-  readiness, progress events, and receipts.
-- Unknown-field rejection tests for every new wire type.
-- Backward compatibility tests for older `InstanceState` JSON.
-- CLI golden tests for protocol mismatch, missing capability, missing
-  builder image, backend unavailable, and service health timeout.
-- Receipt redaction tests proving stdin/stdout/stderr/env payloads are
-  not stored.
-- Builder-mode tests proving host Nix is not selected implicitly.
-
-## Migration
-
-Implementation is sequenced in plan 74:
-
-1. Land this ADR.
-2. Add protocol hello and capability negotiation behind helpers.
-3. Add readiness fields with serde defaults.
-4. Inventory and document control-plane/data-plane boundaries.
-5. Add one backpressure event path.
-6. Add first-use DX and builder-mode policy.
-7. Add structured progress, receipts, and `explain`.
-8. Document builder egress and cache explainability.
-
-Every guest-agent session — including a pure `Ping` reachability
-probe — begins with a `ProtocolHello`. Pre-hello guest images receive
-`ProtocolMismatch { required_action: upgrade_host }` on their first
-incoming request and must be rebuilt; the host CLI surfaces a single
-clear "rebuild your dev VM" hint when this fires.
-
-## References
-
-- Plan 74 - `specs/plans/84-banger-runtime-lessons.md`
-- ADR-001 - `specs/adrs/001-microvm-security-posture.md`
-- ADR-005 - `specs/adrs/005-function-call-entrypoints.md`
-- ADR-007 - `specs/adrs/007-vmbackend-single-trait.md`
-- ADR-014 - `specs/adrs/014-signed-audited-execution-plans.md`
-- Plan 41 - `specs/plans/81-function-entrypoints-design.md`
-- Plan 52 - `specs/plans/52-fd3-control-channel-and-session-attach.md`
-- Plan 72 - `specs/plans/72-builder-vm-via-libkrun.md`
+**Non-goals.** This ADR does not commit to a structured progress-event
+system across CLI text, JSON output, and other consumers, or to a
+dedicated `explain`-style command mapping failures to remediations —
+neither exists today; either is a future ADR's decision if built.
