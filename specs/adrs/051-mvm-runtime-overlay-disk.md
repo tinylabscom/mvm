@@ -5,7 +5,7 @@
 - Owner: MVM Project
 - Related: ADR-002 (microVM security posture, claims 2 + 3 + 4), ADR-014 (builder VM via libkrun), ADR-041 (claim-safe sandbox parity), ADR-067 (TLS substitution mechanism), ADR-050 (verity posture for pulled OCI images), Plan 74 W1 + W3 + W4
 
-> **Consolidation (2026-05-31 — see [ADR-066](066-target-architecture.md) §"ADR consolidation"):** ADR-051 is the **canonical** image & runtime-overlay ADR. It **consolidates** ADR-039 (runtime-overlay composition) and ADR-050 (OCI image verity posture); those are **superseded** and physically archived to `archive/adrs/` in Stage E. The universal verity-sealed runtime overlay (this ADR's "Option B") is the one-agent-everywhere path.
+> **Consolidation note:** an earlier draft of this ADR proposed itself as the canonical image & runtime-overlay ADR, consolidating the runtime-overlay-composition ADR and ADR-050 (OCI image verity posture) — that merge was never carried out (both remained standalone documents). The ADR-wide consolidation pass instead folded the runtime-overlay-composition decision into ADR-007 (the function-entrypoints canonical, its original topical home) and left ADR-050 and this document (ADR-051) as independent, un-merged ADRs — ADR-051 is not in the current consolidation's cluster list and stands as-is. The universal verity-sealed runtime overlay (this ADR's "Option B") is the one-agent-everywhere path.
 
 ## Context
 

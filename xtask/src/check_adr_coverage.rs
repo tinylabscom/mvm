@@ -242,7 +242,7 @@ const KNOWN_MISSING_ADRS: &[(u32, &str)] = &[
     ),
     (
         20,
-        "legacy refs to a runtime-overlay precursor — successor is ADR-039 (runtime-overlay-composition)",
+        "legacy refs to a runtime-overlay precursor — successor is ADR-007 (runtime-overlay-composition, folded into the function-call-entrypoints canonical)",
     ),
     (
         26,

@@ -2,7 +2,7 @@
 title: "ADR-040: Usage-based billing model — sandbox-runtime metering dimensions and event schema"
 status: Proposed
 date: 2026-05-08
-related: ADR-039 (overlay composition), plan 61-runtime-overlay-composition-and-billing, plan 45-filesystem-volumes
+related: ADR-007 (overlay composition), plan 61-runtime-overlay-composition-and-billing, plan 45-filesystem-volumes
 ---
 
 ## Status
