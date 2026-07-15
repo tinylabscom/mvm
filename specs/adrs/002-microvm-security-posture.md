@@ -459,7 +459,7 @@ flows normally. This is pinned by
 **Tier-0 preview substrate (a naming bridge).** The `wasm-sandbox` backend
 above asserts none of the numbered claims by design, so it sits *outside* the
 Tier 1/2 isolation scale rather than below it — there is no "Tier 3" to demote
-it to (Docker held that slot and was deleted). ADR-080 (proposed) builds a
+it to (Docker held that slot and was deleted). ADR-069 (proposed) builds a
 dev-preview workflow on this backend and refers to it as the **Tier 0**
 preview tier — "Tier 0" there meaning *zero production claims asserted*, not a
 rung on the ascending-is-weaker scale used here. The two names describe the
@@ -475,7 +475,7 @@ claim 11 sealed deps, and claim 3 verified boot where the target backend
 supports it), so nothing produced in a no-claims tier carries authority into a
 claim-bearing one. The moment a `wasm-sandbox` host serves *more than one*
 principal, this single-principal justification lapses and it would need to run
-inside a real microVM — a requirement ADR-080 (proposed) would impose, not a
+inside a real microVM — a requirement ADR-069 (proposed) would impose, not a
 property enforced by this backend today.
 
 ## Consequences

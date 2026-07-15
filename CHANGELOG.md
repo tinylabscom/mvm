@@ -180,7 +180,7 @@ All notable changes to mvm are documented in this file.
 - **guest**: Machine-readable host↔guest RPC request→response contract (plan 124 D1.2 step 2a)
 - MacOS egress secret substitution — vsock-5253 channel on libkrun + vz (Plan 197 Phase 2a)
 - **guest**: Contract-checked host-side RPC client over the response contract (plan 124 D1.2 step 2b)
-- **core**: WASI fs/env capability projection (ADR-081 A1 / Plan 192)
+- **core**: WASI fs/env capability projection (ADR-069 A1 / Plan 192)
 - **up**: `--console` boots straight into an interactive shell
 - **sdk**: Sandbox copy_in/copy_out in both Python + TS SDKs (plan 125 B1a)
 - **sdk**: Sandbox forward/ports in both Python + TS SDKs (plan 125 B1b)
@@ -507,9 +507,9 @@ All notable changes to mvm are documented in this file.
 - **plan-177**: Record Phase 2 landing  — prune ADR-002 tier matrix; sync rollup
 - **plan-177**: Mark Phase 2 DONE; spin DX-parity into Plan 189
 - **adr-002**: Record the wasm-sandbox Tier-0 preview substrate in the tier matrix
-- **specs**: ADR-080 program rollup (REFACTOR-STATUS + SPRINT 62) + Plan 190 kernel-wiring spec
+- **specs**: ADR-069 program rollup (REFACTOR-STATUS + SPRINT 62) + Plan 190 kernel-wiring spec
 - **sprint**: Refresh stale Current Status header (v0.13.0 → v0.16.1)
-- ADR-081 wasm-component runner + Plan 192 (A1 capability projection fs/env)
+- ADR-069 wasm-component runner + Plan 192 (A1 capability projection fs/env)
 - **plan-192**: Propose rvproxy network substrate (replace gvproxy/passt) + record gvproxy/build-perf findings
 - **rollup+sprint**: Record Vz warm-pool self-replenish
 - **plan-189**: WS-2 who-calls audit — vz boot surface is already fast-boot-default
