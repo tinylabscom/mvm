@@ -30,7 +30,7 @@
 //!
 //! This protocol reuses [`mvm_agentd::vsock::read_frame`] /
 //! [`mvm_agentd::vsock::write_frame`], inheriting their 256 KiB
-//! pre-deserialize `MAX_FRAME_SIZE` (`crates/mvm-guest/src/vsock.rs`).
+//! pre-deserialize `MAX_FRAME_SIZE` (`crates/mvm-agentd/src/vsock.rs`).
 //! That bound rejects an adversarial length prefix before allocation,
 //! and is amply sufficient for these messages — the inputs are paths,
 //! flake references, and small fingerprints, never bulk artifact bytes

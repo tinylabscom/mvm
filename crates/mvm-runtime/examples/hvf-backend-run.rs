@@ -2,7 +2,7 @@
 //! `mvm-hvf-supervisor`), `status`, `list`, `logs`, `stop`. macOS / Apple-silicon.
 //!
 //! ```sh
-//! cargo build -p mvm-backend --bin mvm-hvf-supervisor --example hvf-backend-run
+//! cargo build -p mvm-runtime --bin mvm-hvf-supervisor --example hvf-backend-run
 //! MVM_HVF_SUPERVISOR_PATH=target/debug/mvm-hvf-supervisor MVM_HVF_TIMEOUT=5 \
 //!   MVM_HVF_KERNEL=/tmp/mvm-hvf-kernel/Image-builder \
 //!   MVM_HVF_INITRD=/tmp/hvf-init/initramfs.cpio \

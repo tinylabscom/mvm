@@ -2,7 +2,7 @@
 //! `mvm-bridge` sidecar (folded from the former `mvm-firecracker-bridge`).
 //!
 //! This module exposes the parser types and the `verify_passt_hash` helper so
-//! the cargo-fuzz harness under `crates/mvm-vm-host/fuzz/` can drive
+//! the cargo-fuzz harness under `crates/mvm-hostd/fuzz-vmhost/` can drive
 //! adversarial input through the same code the sidecar executes. See `parse`
 //! for the shapes and behaviour contract.
 //!

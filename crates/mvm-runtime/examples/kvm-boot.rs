@@ -5,8 +5,8 @@
 //! Linux / x86_64 + `/dev/kvm` only.
 //!
 //! ```sh
-//! cargo run -p mvm-backend --example kvm-boot -- /boot/vmlinuz-x.y.z
-//! MVM_KVM_INITRD=initramfs.cpio cargo run -p mvm-backend --example kvm-boot
+//! cargo run -p mvm-runtime --example kvm-boot -- /boot/vmlinuz-x.y.z
+//! MVM_KVM_INITRD=initramfs.cpio cargo run -p mvm-runtime --example kvm-boot
 //! ```
 //! Kernel path: argv[1], else $MVM_KVM_KERNEL, else /boot/vmlinuz.
 

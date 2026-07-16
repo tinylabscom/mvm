@@ -663,7 +663,7 @@ impl AnyBackend {
     /// `mvmctl doctor` to surface what's actually running on the host.
     ///
     /// Classification mirrors each backend's existing
-    /// `BackendSecurityProfile.tier` (`crates/mvm-backend/src/*.rs::security_profile`),
+    /// `BackendSecurityProfile.tier` (`crates/mvm-runtime/src/*.rs::security_profile`),
     /// the long-standing per-backend declaration consulted by
     /// `mvmctl doctor --json::security_posture.tier`. A test below
     /// asserts the two stay in sync; bumping one without the other

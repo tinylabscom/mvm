@@ -52,5 +52,5 @@ Multi-VM mode uses bridge `br-mvm` at `172.16.0.1/24` with per-VM TAP devices.
 ## Dependencies
 
 - `mvm-core` (types, traits, config)
-- `mvm-guest` (vsock protocol for VM communication)
+- `mvm-agentd` (vsock protocol for VM communication)
 - `mvm-build` (build pipeline)

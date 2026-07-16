@@ -29,7 +29,7 @@
 //! cargo build -p mvm-libkrun --bin mvm-libkrun-supervisor --features libkrun-sys
 //! MVM_LIBKRUN_E2E=1 \
 //!   MVM_LIBKRUN_SUPERVISOR_PATH=$(pwd)/target/debug/mvm-libkrun-supervisor \
-//!   cargo test -p mvm-backend --test libkrun_lifecycle_e2e -- --ignored --nocapture
+//!   cargo test -p mvm-runtime --test libkrun_lifecycle_e2e -- --ignored --nocapture
 //! ```
 //!
 //! Self-skips unless `MVM_LIBKRUN_E2E=1` is set and

@@ -26,8 +26,8 @@ const GUARDED_PATHS: &[&str] = &[
     "crates/mvm-runtime/src/libkrun.rs",
     "crates/mvm-runtime/src/vsock_egress_bridge",
     "crates/mvm-runtime/src/network_tunnel_spawn.rs",
-    "crates/mvm-guest/src/network_tunnel.rs",
-    "crates/mvm-guest/src/guest_tun.rs",
+    "crates/mvm-agentd/src/network_tunnel.rs",
+    "crates/mvm-agentd/src/guest_tun.rs",
     "crates/mvm-hostd/src/network_tunnel.rs",
 ];
 

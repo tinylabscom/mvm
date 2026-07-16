@@ -15,7 +15,7 @@
 //!
 //! Framing reuses [`mvm_agentd::vsock::read_frame`] /
 //! [`mvm_agentd::vsock::write_frame`], which enforce a pre-deserialize
-//! `MAX_FRAME_SIZE` of 256 KiB (`crates/mvm-guest/src/vsock.rs:65`).
+//! `MAX_FRAME_SIZE` of 256 KiB (`crates/mvm-agentd/src/vsock.rs:65`).
 //! That bound is amply sufficient for `HostVmRequest` — its
 //! largest variant (`HostVmRequest::Run`) carries a
 //! [`crate::builder_vm::BuilderJob`] whose variants are tiny
@@ -25,7 +25,7 @@
 //! (reject `length_prefix > cap` before allocating), so this channel
 //! inherits it rather than introduce a looser per-channel cap. The
 //! wire-cap regression is exercised explicitly by the fuzz seed in
-//! `crates/mvm-guest/fuzz/fuzz_targets/fuzz_builder_request.rs`.
+//! `crates/mvm-agentd/fuzz/fuzz_targets/fuzz_builder_request.rs`.
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

@@ -266,7 +266,7 @@ impl GuestAgentBuildSpec {
             "--target".to_string(),
             self.target_triple().to_string(),
             "-p".to_string(),
-            "mvm-guest".to_string(),
+            "mvm-agentd".to_string(),
             "--bin".to_string(),
             "mvm-guest-agent".to_string(),
             "--bin".to_string(),
@@ -279,12 +279,10 @@ impl GuestAgentBuildSpec {
             "mvm-oci-entrypoint".to_string(),
             "--bin".to_string(),
             "mvm-verity-init".to_string(),
-            "-p".to_string(),
-            "mvm-guest-helpers".to_string(),
             "--bin".to_string(),
             "mvm-egress-client".to_string(),
             "--features".to_string(),
-            "mvm-guest/dev-shell".to_string(),
+            "mvm-agentd/dev-shell".to_string(),
         ]
     }
 
@@ -305,10 +303,10 @@ pub fn guest_build_target_dir(cache_root: &Path) -> PathBuf {
 }
 
 /// True when `dir` is the root of an mvm source checkout: it carries a top-level
-/// `Cargo.toml` and the `crates/mvm-guest/` crate. That pair uniquely names the
+/// `Cargo.toml` and the `crates/mvm-agentd/` crate. That pair uniquely names the
 /// workspace root — the guest crate exists nowhere else in the tree.
 pub fn is_source_workspace_root(dir: &Path) -> bool {
-    dir.join("Cargo.toml").is_file() && dir.join("crates/mvm-guest").is_dir()
+    dir.join("Cargo.toml").is_file() && dir.join("crates/mvm-agentd").is_dir()
 }
 
 /// Walk up from `start`, returning the first ancestor that is a source
@@ -347,21 +345,19 @@ pub fn source_cache_key(workspace_root: &Path) -> Result<String, GuestAgentBuild
 }
 
 /// A stable content fingerprint over the guest crate sources compiled into the
-/// runtime binaries (`mvm-guest` + `mvm-guest-helpers`): each crate's
+/// runtime binaries (`mvm-agentd`): each crate's
 /// `Cargo.toml` plus every file under its `src/`. Hashes workspace-relative
 /// paths and bytes in sorted order so the digest is deterministic.
 pub fn guest_source_fingerprint(workspace_root: &Path) -> Result<String, GuestAgentBuildError> {
     use sha2::{Digest, Sha256};
 
     let mut files: Vec<PathBuf> = Vec::new();
-    for crate_rel in ["crates/mvm-guest", "crates/mvm-guest-helpers"] {
-        let crate_dir = workspace_root.join(crate_rel);
-        let manifest = crate_dir.join("Cargo.toml");
-        if manifest.is_file() {
-            files.push(manifest);
-        }
-        collect_source_files(&crate_dir.join("src"), &mut files)?;
+    let crate_dir = workspace_root.join("crates/mvm-agentd");
+    let manifest = crate_dir.join("Cargo.toml");
+    if manifest.is_file() {
+        files.push(manifest);
     }
+    collect_source_files(&crate_dir.join("src"), &mut files)?;
     files.sort();
 
     let mut h = Sha256::new();
@@ -507,10 +503,8 @@ pub fn runtime_overlay_source_checkout_fingerprint(
         "Cargo.toml",
         "crates/mvm-core/Cargo.toml",
         "crates/mvm-core/src",
-        "crates/mvm-guest/Cargo.toml",
-        "crates/mvm-guest/src",
-        "crates/mvm-guest-helpers/Cargo.toml",
-        "crates/mvm-guest-helpers/src",
+        "crates/mvm-agentd/Cargo.toml",
+        "crates/mvm-agentd/src",
         "crates/mvm-build/src/guest_agent_build.rs",
     ] {
         let path = workspace_root.join(rel);
@@ -567,7 +561,7 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--target".to_string(),
         triple.to_string(),
         "-p".to_string(),
-        "mvm-guest".to_string(),
+        "mvm-agentd".to_string(),
         "--bin".to_string(),
         "mvm-guest-agent".to_string(),
         "--bin".to_string(),
@@ -580,8 +574,6 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "mvm-verity-init".to_string(),
         "--bin".to_string(),
         "mvm-runner".to_string(),
-        "-p".to_string(),
-        "mvm-guest-helpers".to_string(),
         "--bin".to_string(),
         "mvm-egress-client".to_string(),
         "--bin".to_string(),
@@ -607,11 +599,11 @@ fn build_runtime_overlay_guest_binaries_into_cache(
         "--target".to_string(),
         triple.to_string(),
         "-p".to_string(),
-        "mvm-guest".to_string(),
+        "mvm-agentd".to_string(),
         "--bin".to_string(),
         "mvm-guest-agent".to_string(),
         "--features".to_string(),
-        "mvm-guest/dev-shell".to_string(),
+        "mvm-agentd/dev-shell".to_string(),
     ];
     run_zigbuild(&spec, cargo.as_os_str(), &dev_agent_args)?;
     install_one(&output_dir.join("mvm-guest-agent"), &layout.agent_dev_shell)?;
@@ -961,8 +953,8 @@ mod tests {
         assert!(argv.contains(&"mvm-oci-entrypoint".to_string()));
         assert!(argv.contains(&"mvm-verity-init".to_string()));
         assert!(argv.contains(&"mvm-egress-client".to_string()));
-        assert!(argv.contains(&"mvm-guest-helpers".to_string()));
-        assert!(argv.contains(&"mvm-guest/dev-shell".to_string()));
+        assert!(argv.contains(&"mvm-agentd".to_string()));
+        assert!(argv.contains(&"mvm-agentd/dev-shell".to_string()));
     }
 
     #[test]
@@ -1119,19 +1111,12 @@ mod tests {
     }
 
     /// Build a minimal fake source checkout under `root`: a workspace `Cargo.toml`
-    /// plus a `crates/mvm-guest/{Cargo.toml,src/main.rs}` carrying `agent_body`.
+    /// plus a `crates/mvm-agentd/{Cargo.toml,src/main.rs}` carrying `agent_body`.
     fn make_fake_checkout(root: &Path, agent_body: &str) {
-        std::fs::create_dir_all(root.join("crates/mvm-guest/src")).unwrap();
-        std::fs::create_dir_all(root.join("crates/mvm-guest-helpers/src")).unwrap();
+        std::fs::create_dir_all(root.join("crates/mvm-agentd/src")).unwrap();
         std::fs::write(root.join("Cargo.toml"), b"[workspace]\n").unwrap();
-        std::fs::write(root.join("crates/mvm-guest/Cargo.toml"), b"[package]\n").unwrap();
-        std::fs::write(root.join("crates/mvm-guest/src/main.rs"), agent_body).unwrap();
-        std::fs::write(
-            root.join("crates/mvm-guest-helpers/Cargo.toml"),
-            b"[package]\n",
-        )
-        .unwrap();
-        std::fs::write(root.join("crates/mvm-guest-helpers/src/lib.rs"), b"").unwrap();
+        std::fs::write(root.join("crates/mvm-agentd/Cargo.toml"), b"[package]\n").unwrap();
+        std::fs::write(root.join("crates/mvm-agentd/src/main.rs"), agent_body).unwrap();
     }
 
     #[test]
@@ -1150,7 +1135,7 @@ mod tests {
         // Canonicalize: tempdir on macOS is under a `/var → /private/var` symlink.
         let root = std::fs::canonicalize(tmp.path()).unwrap();
         // From a nested subdir the walk finds the root.
-        let nested = root.join("crates/mvm-guest/src");
+        let nested = root.join("crates/mvm-agentd/src");
         assert_eq!(source_workspace_from(&nested), Some(root.clone()));
         // From the root itself, the root.
         assert_eq!(source_workspace_from(&root), Some(root));
@@ -1167,7 +1152,7 @@ mod tests {
         // Running under nextest, cwd is `crates/mvm-build`; the walk up finds the
         // real workspace root, and it carries the guest crate.
         let ws = detect_source_workspace().expect("this is a source checkout");
-        assert!(ws.join("crates/mvm-guest").is_dir());
+        assert!(ws.join("crates/mvm-agentd").is_dir());
         assert!(ws.join("Cargo.toml").is_file());
     }
 
@@ -1273,9 +1258,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let root = tmp.path();
         std::fs::create_dir_all(root.join("crates/mvm-core/src")).expect("mkdir mvm-core src");
-        std::fs::create_dir_all(root.join("crates/mvm-guest/src")).expect("mkdir mvm-guest src");
-        std::fs::create_dir_all(root.join("crates/mvm-guest-helpers/src"))
-            .expect("mkdir mvm-guest-helpers src");
+        std::fs::create_dir_all(root.join("crates/mvm-agentd/src")).expect("mkdir mvm-agentd src");
         std::fs::create_dir_all(root.join("crates/mvm-build/src")).expect("mkdir mvm-build src");
         std::fs::create_dir_all(root.join("crates/mvm-cli/src")).expect("mkdir mvm-cli src");
         std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write workspace cargo");
@@ -1291,25 +1274,15 @@ mod tests {
         )
         .expect("write mvm-core src");
         std::fs::write(
-            root.join("crates/mvm-guest/Cargo.toml"),
-            "[package]\nname = \"mvm-guest\"\nversion = \"0.1.0\"\n",
+            root.join("crates/mvm-agentd/Cargo.toml"),
+            "[package]\nname = \"mvm-agentd\"\nversion = \"0.1.0\"\n",
         )
-        .expect("write mvm-guest cargo");
+        .expect("write mvm-agentd cargo");
         std::fs::write(
-            root.join("crates/mvm-guest/src/lib.rs"),
+            root.join("crates/mvm-agentd/src/lib.rs"),
             "pub fn guest() {}\n",
         )
-        .expect("write mvm-guest src");
-        std::fs::write(
-            root.join("crates/mvm-guest-helpers/Cargo.toml"),
-            "[package]\nname = \"mvm-guest-helpers\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("write mvm-guest-helpers cargo");
-        std::fs::write(
-            root.join("crates/mvm-guest-helpers/src/lib.rs"),
-            "pub fn helper() {}\n",
-        )
-        .expect("write mvm-guest-helpers src");
+        .expect("write mvm-agentd src");
         std::fs::write(
             root.join("crates/mvm-build/src/guest_agent_build.rs"),
             "pub fn build_spec() {}\n",
@@ -1323,10 +1296,10 @@ mod tests {
 
         let before = runtime_overlay_source_checkout_fingerprint(root).expect("fingerprint before");
         std::fs::write(
-            root.join("crates/mvm-guest/src/lib.rs"),
+            root.join("crates/mvm-agentd/src/lib.rs"),
             "pub fn guest() { println!(\"changed\"); }\n",
         )
-        .expect("rewrite mvm-guest src");
+        .expect("rewrite mvm-agentd src");
         let after = runtime_overlay_source_checkout_fingerprint(root).expect("fingerprint after");
 
         assert_ne!(before, after);
@@ -1337,9 +1310,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let root = tmp.path();
         std::fs::create_dir_all(root.join("crates/mvm-core/src")).expect("mkdir mvm-core src");
-        std::fs::create_dir_all(root.join("crates/mvm-guest/src")).expect("mkdir mvm-guest src");
-        std::fs::create_dir_all(root.join("crates/mvm-guest-helpers/src"))
-            .expect("mkdir mvm-guest-helpers src");
+        std::fs::create_dir_all(root.join("crates/mvm-agentd/src")).expect("mkdir mvm-agentd src");
         std::fs::create_dir_all(root.join("crates/mvm-build/src")).expect("mkdir mvm-build src");
         std::fs::create_dir_all(root.join("crates/mvm-cli/src")).expect("mkdir mvm-cli src");
         std::fs::write(root.join("Cargo.toml"), "[workspace]\n").expect("write workspace cargo");
@@ -1355,25 +1326,15 @@ mod tests {
         )
         .expect("write mvm-core src");
         std::fs::write(
-            root.join("crates/mvm-guest/Cargo.toml"),
-            "[package]\nname = \"mvm-guest\"\nversion = \"0.1.0\"\n",
+            root.join("crates/mvm-agentd/Cargo.toml"),
+            "[package]\nname = \"mvm-agentd\"\nversion = \"0.1.0\"\n",
         )
-        .expect("write mvm-guest cargo");
+        .expect("write mvm-agentd cargo");
         std::fs::write(
-            root.join("crates/mvm-guest/src/lib.rs"),
+            root.join("crates/mvm-agentd/src/lib.rs"),
             "pub fn guest() {}\n",
         )
-        .expect("write mvm-guest src");
-        std::fs::write(
-            root.join("crates/mvm-guest-helpers/Cargo.toml"),
-            "[package]\nname = \"mvm-guest-helpers\"\nversion = \"0.1.0\"\n",
-        )
-        .expect("write mvm-guest-helpers cargo");
-        std::fs::write(
-            root.join("crates/mvm-guest-helpers/src/lib.rs"),
-            "pub fn helper() {}\n",
-        )
-        .expect("write mvm-guest-helpers src");
+        .expect("write mvm-agentd src");
         std::fs::write(
             root.join("crates/mvm-build/src/guest_agent_build.rs"),
             "pub fn build_spec() {}\n",

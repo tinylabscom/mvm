@@ -6,9 +6,9 @@
 //!
 //! ## Sources used for each row
 //!
-//! - **Firecracker**: FC API docs + `crates/mvm-backend/src/backend.rs` cmdline.
+//! - **Firecracker**: FC API docs + `crates/mvm-runtime/src/backend.rs` cmdline.
 //! - **Libkrun**: `crates/mvm-libkrun/src/sys.rs` FFI mapping;
-//!   `crates/mvm-backend/src/libkrun.rs` `DEFAULT_CMDLINE`; macOS-only so
+//!   `crates/mvm-runtime/src/libkrun.rs` `DEFAULT_CMDLINE`; macOS-only so
 //!   `console=hvc0`; no jailer or snapshots (host process == supervisor).
 //! - (Vz removed)
 //!   macOS-only, aarch64-only in practice (Apple Silicon + HVF),
@@ -90,7 +90,7 @@ use RootfsFormat as R;
 
 // ── static rows ──────────────────────────────────────────────────────────────
 
-// Firecracker: source — FC API docs + crates/mvm-backend/src/backend.rs.
+// Firecracker: source — FC API docs + crates/mvm-runtime/src/backend.rs.
 // x86_64 boots ELF vmlinux; aarch64 boots uncompressed arm64 Image.
 // ext4 rootfs + initramfs-cpio-gz initrd. Jailer available. TAP networking.
 static FIRECRACKER: BackendCompat = BackendCompat {
@@ -105,7 +105,7 @@ static FIRECRACKER: BackendCompat = BackendCompat {
 };
 
 // Libkrun: source — crates/mvm-libkrun/src/sys.rs to_krun_format() +
-// crates/mvm-backend/src/libkrun.rs DEFAULT_CMDLINE.
+// crates/mvm-runtime/src/libkrun.rs DEFAULT_CMDLINE.
 // Both arches; libkrun bundles its own kernel so ELF/ImageGz/ImageBz2/ImageZstd/PeGz
 // work (each maps to a KRUN_KERNEL_FORMAT_* FFI constant in to_krun_format()).
 // Raw also has a constant but is undocumented for the builder path and intentionally

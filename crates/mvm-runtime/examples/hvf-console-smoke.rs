@@ -2,7 +2,7 @@
 //!
 //! Build, codesign with the hypervisor entitlement, then run:
 //! ```sh
-//! cargo build -p mvm-backend --example hvf-console-smoke
+//! cargo build -p mvm-runtime --example hvf-console-smoke
 //! codesign --sign - --force \
 //!   --entitlements <(printf '%s' \
 //!     '<plist><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>') \

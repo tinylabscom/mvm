@@ -1,7 +1,7 @@
 //! Boot a real arm64 Linux kernel under HVF and print its earlycon output.
 //!
 //! ```sh
-//! cargo build -p mvm-backend --example hvf-kernel-boot
+//! cargo build -p mvm-runtime --example hvf-kernel-boot
 //! codesign --sign - --force \
 //!   --entitlements <(printf '%s' \
 //!     '<plist><dict><key>com.apple.security.hypervisor</key><true/></dict></plist>') \

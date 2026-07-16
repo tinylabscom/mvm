@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn workload_forward_port_literal_is_21472() {
-        // The guest init deliberately doesn't depend on `mvm-guest`,
+        // The guest init deliberately doesn't depend on `mvm-agentd`,
         // so this literal must stay in lock-step with the host side
         // (`mvm_agentd::builder_agent::WORKLOAD_FORWARD_PORT`). If the
         // host changes the port, this pin fails and points at the

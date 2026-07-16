@@ -29,8 +29,8 @@ fn default_sdk_does_not_link_client_surface_or_backend() {
         "default mvm-sdk must not link mvm-client:\n{tree}"
     );
     assert!(
-        !tree_contains_crate(&tree, "mvm-backend"),
-        "default mvm-sdk must not link mvm-backend:\n{tree}"
+        !tree_contains_crate(&tree, "mvm-runtime"),
+        "default mvm-sdk must not link mvm-runtime:\n{tree}"
     );
     // The client surface (`mvm-core/client`) is off, so its `async-trait` glue
     // stays out of the default build.
@@ -60,8 +60,8 @@ fn client_facade_enables_the_trait_without_the_backend() {
     );
     // ...but the runtime backend must NOT — that is the cycle guard.
     assert!(
-        !tree_contains_crate(&tree, "mvm-backend"),
-        "mvm-sdk client-facade must not link mvm-backend (dependency cycle):\n{tree}"
+        !tree_contains_crate(&tree, "mvm-runtime"),
+        "mvm-sdk client-facade must not link mvm-runtime (dependency cycle):\n{tree}"
     );
     // And it must not drag in the heavy `mvm-client` crate (LocalBackend) either.
     assert!(

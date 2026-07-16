@@ -1,4 +1,4 @@
-# mvm-guest
+# mvm-agentd
 
 Vsock protocol definitions and integration management for guest-side agents running inside Firecracker microVMs. Defines the wire protocol between host and guest — no SSH, ever.
 

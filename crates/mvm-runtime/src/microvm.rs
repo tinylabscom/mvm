@@ -919,7 +919,7 @@ fn run_configured_firecracker(
     // via `fc.pid`, hard-fail policy).
     //
     // No-op on non-Linux hosts (this Firecracker spawn path is Linux-only; the
-    // shared sidecar binary lives at `crates/mvm-vm-host/src/bin/mvm-bridge.rs`).
+    // shared sidecar binary lives at `crates/mvm-hostd/src/bin/mvm-bridge.rs`).
     //
     // Opt-in via MVM_GATEWAY_BRIDGE=1, the same gate the libkrun/Vz
     // gateway-bridge factory sits behind: the FC bridge lane is not yet
@@ -2909,7 +2909,7 @@ pub fn read_run_info() -> Option<RunInfo> {
 // mvm-bridge spawn + watchdog (Linux only)
 //
 // Mirrors Vz's `AttachedDrainerGuard` shape
-// (`crates/mvm-backend/src/vz.rs`) — Drop kills+waits the child on
+// (`crates/mvm-runtime/src/vz.rs`) — Drop kills+waits the child on
 // early return, `detach()` hands ownership to the caller which
 // records the PID in
 // `<state_dir>/fc-bridge.pid` and lets the watchdog thread inherit it.
@@ -3009,7 +3009,7 @@ fn resolve_fc_bridge_path_inner(
             return Ok(candidate);
         }
     }
-    // Workspace target dir — `crates/mvm-backend` → workspace root is
+    // Workspace target dir — `crates/mvm-runtime` → workspace root is
     // two `..` up; the target dir is rooted there.
     if let Some(workspace_root) = manifest_dir.parent().and_then(std::path::Path::parent) {
         for variant in ["release", "debug"] {

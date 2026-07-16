@@ -7,5 +7,5 @@
 # lane on nightly without affecting the rest of the workspace.
 #
 # Mirrors `crates/mvm-agentd/fuzz/rust-toolchain.toml` and
-# `crates/mvm-oci/fuzz/rust-toolchain.toml` — keep them in sync.
+# `crates/mvm-fs/fuzz-oci/rust-toolchain.toml` — keep them in sync.
 channel = "nightly"

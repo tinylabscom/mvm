@@ -9,12 +9,12 @@
 // before the parent's watchdog has a sentinel to react to.
 //
 // Analog of `crates/mvm-libkrun/fuzz/fuzz_targets/fuzz_supervisor_config.rs`
-// and `crates/mvm-guest/fuzz/fuzz_targets/fuzz_guest_request.rs`. The
+// and `crates/mvm-agentd/fuzz/fuzz_targets/fuzz_guest_request.rs`. The
 // harness goal is "never panic on any input"; `serde_json::Error` is
 // the expected outcome for malformed bytes.
 //
 // `BridgeConfigJson` carries `#[serde(deny_unknown_fields)]` (see
-// `crates/mvm-vm-host/src/bridge/parse.rs`) so unknown /
+// `crates/mvm-hostd/src/bridge/parse.rs`) so unknown /
 // attacker-controlled keys fail-closed during deserialization.
 
 #![no_main]

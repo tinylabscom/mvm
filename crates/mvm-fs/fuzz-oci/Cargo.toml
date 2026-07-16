@@ -28,7 +28,7 @@ path = ".."
 # `mvm_oci::unpack::unpack_layer` against a fresh tempdir and asserts
 # no panic, no escape past the tempdir root. CI gate is wired in
 # `.github/workflows/ci.yml::oci-unpack-fuzz` with a 30-min budget
-# on PRs that touch `crates/mvm-oci/**`.
+# on PRs that touch `crates/mvm-fs/**`.
 [[bin]]
 name = "unpack_layer"
 path = "fuzz_targets/unpack_layer.rs"

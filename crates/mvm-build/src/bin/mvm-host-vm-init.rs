@@ -1807,7 +1807,7 @@ mod linux {
     // `nix` because the size-budget comment in this crate's
     // Cargo.toml (≤ 1.5 MiB) discourages new dep
     // features. The pattern mirrors
-    // `crates/mvm-guest/src/bin/mvm-builder-agent.rs` exactly.
+    // `crates/mvm-agentd/src/bin/mvm-builder-agent.rs` exactly.
     // -----------------------------------------------------------
     // AF_VSOCK helpers
     // -----------------------------------------------------------
@@ -1815,7 +1815,7 @@ mod linux {
     // Shared between the single-shot send and the
     // dispatch loop. Inlined FFI rather than `nix` because the
     // 1.5 MiB size budget discourages new dep features; the
-    // pattern mirrors `mvm-guest/src/bin/mvm-builder-agent.rs`.
+    // pattern mirrors `mvm-agentd/src/bin/mvm-builder-agent.rs`.
 
     /// Must match
     /// `mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT`. Hardcoded
@@ -2513,8 +2513,8 @@ mod linux {
         // mvm_agentd::builder_agent::BUILDER_DISPATCH_PORT (the
         // canonical definition the host side uses). We can't `use`
         // the function-local const from outside, so duplicate the
-        // assertion against the literal value and the mvm-guest
-        // constant. Adding mvm-guest as a dev-dep just for this
+        // assertion against the literal value and the mvm-agentd
+        // constant. Adding mvm-agentd as a dev-dep just for this
         // check is overkill; keep it inline.
         #[test]
         fn builder_dispatch_port_literal_is_21471() {
@@ -2525,7 +2525,7 @@ mod linux {
             assert_eq!(
                 FROM_BUILDER_INIT, 21471,
                 "Plan 89 BUILDER_DISPATCH_PORT changed — update both \
-                 builder-init's send and mvm-guest::builder_agent::BUILDER_DISPATCH_PORT"
+                 builder-init's send and mvm-agentd::builder_agent::BUILDER_DISPATCH_PORT"
             );
         }
     }

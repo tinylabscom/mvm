@@ -4,8 +4,8 @@
 //! `AgentBridge` exposes (`MVM_HVF_AGENT_SOCKET`). Exit 0 iff the agent answered.
 //!
 //! ```sh
-//! cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
-//! cargo build -p mvm-backend --example hvf-agent-ping
+//! cargo build -p mvm-hostd --bin mvm-hvf-supervisor
+//! cargo build -p mvm-runtime --example hvf-agent-ping
 //! MVM_HVF_SUPERVISOR_PATH=target/debug/mvm-hvf-supervisor \
 //!   MVM_HVF_KERNEL=/tmp/hvf-real/Image MVM_HVF_DISK=/tmp/hvf-real/rootfs.ext4 \
 //!   MVM_HVF_TIMEOUT=60 MVM_HVF_AGENT_SOCKET=/tmp/hvf-agent.sock \

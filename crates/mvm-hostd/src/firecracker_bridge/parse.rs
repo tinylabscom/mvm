@@ -1,7 +1,7 @@
 //! Parser surface for the `mvm-bridge` sidecar.
 //!
 //! Kept in the library (not the bin) so the cargo-fuzz harness under
-//! `crates/mvm-vm-host/fuzz/` can call the same serde deserializers and the
+//! `crates/mvm-hostd/fuzz-vmhost/` can call the same serde deserializers and the
 //! same hash-verify helper the sidecar uses at startup. `mvm-bridge`'s
 //! `main()` reuses [`BridgeConfigJson`], [`PasstHashesFile`], and
 //! [`verify_passt_hash`] from this module verbatim — there is no parser

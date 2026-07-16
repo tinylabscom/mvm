@@ -15,7 +15,7 @@
 // dominate the unpack cost itself.
 //
 // CI gate: `.github/workflows/ci.yml::oci-unpack-fuzz`, gated by
-// dorny/paths-filter on `crates/mvm-oci/**`. 30-min budget.
+// dorny/paths-filter on `crates/mvm-fs/**`. 30-min budget.
 
 #![no_main]
 

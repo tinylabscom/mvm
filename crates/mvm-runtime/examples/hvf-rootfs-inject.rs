@@ -10,7 +10,7 @@
 //!   cargo zigbuild -p mvm-build --bin mvm-rootfs-patcher --bin mvm-host-vm-init \
 //!   --target aarch64-unknown-linux-musl --release
 //! MVM_HVF_SUPERVISOR_PATH=target/debug/mvm-hvf-supervisor \
-//!   cargo run -p mvm-backend --example hvf-rootfs-inject
+//!   cargo run -p mvm-runtime --example hvf-rootfs-inject
 //! ```
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

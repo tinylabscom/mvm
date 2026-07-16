@@ -42,4 +42,4 @@ Clap-based CLI commands, bootstrap workflow, diagnostics, update mechanism, and 
 
 ## Dependencies
 
-- `mvm-core`, `mvm`, `mvm-build`, `mvm-guest`
+- `mvm-core`, `mvm`, `mvm-build`, `mvm-agentd`

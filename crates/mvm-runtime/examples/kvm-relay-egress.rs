@@ -13,7 +13,7 @@
 //! MVM_KVM_KERNEL=/root/bzImage-thin MVM_KVM_INITRD=/root/guest/initramfs.cpio \
 //! MVM_KVM_EGRESS_TARGET=88.99.197.234:9099 \
 //! MVM_SUBSTITUTION_ENDPOINT_PATH=target/debug/mvm-substitution-endpoint \
-//! cargo run -p mvm-backend --example kvm-relay-egress
+//! cargo run -p mvm-runtime --example kvm-relay-egress
 //! ```
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]

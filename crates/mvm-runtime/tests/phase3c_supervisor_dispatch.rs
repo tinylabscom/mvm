@@ -26,7 +26,7 @@
 //!
 //! ```sh
 //! cargo build --release -p mvm-libkrun-supervisor --features libkrun-sys
-//! cargo test -p mvm-backend --test phase3c_supervisor_dispatch \
+//! cargo test -p mvm-runtime --test phase3c_supervisor_dispatch \
 //!     -- --ignored --nocapture
 //! ```
 //!
@@ -46,7 +46,7 @@ fn supervisor_path() -> std::path::PathBuf {
     if let Ok(p) = std::env::var("MVM_LIBKRUN_SUPERVISOR_PATH") {
         return std::path::PathBuf::from(p);
     }
-    // From `crates/mvm-backend/`, the workspace root is two levels up
+    // From `crates/mvm-runtime/`, the workspace root is two levels up
     // and the supervisor binary lives at `target/release/`. Same
     // resolution shape libkrun_lifecycle_e2e.rs uses.
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))

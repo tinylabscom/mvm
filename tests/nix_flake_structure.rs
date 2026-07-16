@@ -196,7 +196,7 @@ fn host_mvmctl_package_keeps_native_vmm_linkage_explicit() {
     );
     assert!(
         content.contains("\"mvm-cli/libkrun-sys\"")
-            && content.contains("\"mvm-vm-host/libkrun-sys\""),
+            && content.contains("\"mvm-hostd/libkrun-sys\""),
         "the native libkrun feature must enable both CLI probing and the supervisor binary"
     );
     assert!(

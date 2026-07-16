@@ -17,7 +17,7 @@ const ALLOWLIST: &[&str] = &[
     "crates/mvm-runtime/src/microvm.rs",
     "crates/mvm-runtime/src/qemu.rs",
     "crates/mvm-runtime/src/libkrun.rs",
-    "crates/mvm-guest/src/vsock.rs",
+    "crates/mvm-agentd/src/vsock.rs",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
@@ -48,7 +48,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     if !hits.is_empty() {
         bail!(
             "check-require-grant-token-allowlist: `{TOKEN}` found outside the allowlist \
-             (only mvm-runtime cmdline builders and mvm-guest/vsock.rs may emit/match it):\n{}",
+             (only mvm-runtime cmdline builders and mvm-agentd/vsock.rs may emit/match it):\n{}",
             hits.join("\n")
         );
     }

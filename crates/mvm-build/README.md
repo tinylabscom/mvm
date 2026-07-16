@@ -41,4 +41,4 @@ Cache hits are near-instant. The cache key is the Nix store hash, so identical i
 ## Dependencies
 
 - `mvm-core` (`ShellEnvironment` trait)
-- `mvm-guest` (builder agent protocol)
+- `mvm-agentd` (builder agent protocol)

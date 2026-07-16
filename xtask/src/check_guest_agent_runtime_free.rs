@@ -1,6 +1,6 @@
 //! `xtask check-guest-agent-runtime-free`
 //!
-//! Assert that `mvm-guest`'s non-dev closure pulls no
+//! Assert that `mvm-agentd`'s non-dev closure pulls no
 //! async runtime — `tokio` — nor the async glue that drags it in
 //! (`async-trait`, and the async `rtnetlink`/`netlink-packet-route`
 //! netlink stack). The agent's request-serving path is synchronous
@@ -56,7 +56,7 @@ pub fn run(workspace: &Path) -> Result<()> {
         .args([
             "tree",
             "-p",
-            "mvm-guest",
+            "mvm-agentd",
             "-e",
             "no-dev",
             "--prefix",
@@ -66,7 +66,7 @@ pub fn run(workspace: &Path) -> Result<()> {
             GUEST_TARGET,
         ])
         .output()
-        .context("running `cargo tree -p mvm-guest -e no-dev --target <guest>`")?;
+        .context("running `cargo tree -p mvm-agentd -e no-dev --target <guest>`")?;
 
     if !output.status.success() {
         bail!(
@@ -80,7 +80,7 @@ pub fn run(workspace: &Path) -> Result<()> {
 
     if !found.is_empty() {
         bail!(
-            "check-guest-agent-runtime-free: mvm-guest's non-dev closure pulls the async \
+            "check-guest-agent-runtime-free: mvm-agentd's non-dev closure pulls the async \
              networking stack ({}) on {GUEST_TARGET}. Plan 124 A3 replaces netinit's \
              rtnetlink installer with synchronous raw netlink (linux-raw-sys), which drops \
              tokio + async-trait. If you're seeing this after A3, the async stack crept back \
@@ -90,7 +90,7 @@ pub fn run(workspace: &Path) -> Result<()> {
     }
 
     eprintln!(
-        "check-guest-agent-runtime-free: clean (mvm-guest non-dev closure on {GUEST_TARGET} \
+        "check-guest-agent-runtime-free: clean (mvm-agentd non-dev closure on {GUEST_TARGET} \
          pulls no tokio/async-trait/rtnetlink)"
     );
     Ok(())
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn clean_tree_has_no_async_stack() {
-        let tree = "mvm-guest v0.15.2\nanyhow v1.0.99\nlibc v0.2.0\nserde v1.0.0\n";
+        let tree = "mvm-agentd v0.15.2\nanyhow v1.0.99\nlibc v0.2.0\nserde v1.0.0\n";
         assert!(forbidden_hits(tree, FORBIDDEN).is_empty());
     }
 
@@ -125,7 +125,7 @@ mod tests {
     fn tree_with_async_stack_is_flagged() {
         // What the guest's Linux tree looks like before the
         // synchronous-netlink migration.
-        let tree = "mvm-guest v0.15.2\nasync-trait v0.1.89 (proc-macro)\nrtnetlink v0.14.1\n\
+        let tree = "mvm-agentd v0.15.2\nasync-trait v0.1.89 (proc-macro)\nrtnetlink v0.14.1\n\
                     netlink-packet-route v0.19.0\ntokio v1.49.0\ntokio v1.49.0 (*)\n";
         assert_eq!(
             forbidden_hits(tree, FORBIDDEN),
@@ -137,14 +137,14 @@ mod tests {
     fn dedups_repeated_tokio_lines() {
         // `cargo tree` prints `(*)` dedup markers for repeated subtrees;
         // the parser must collapse them to one hit.
-        let tree = "mvm-guest v0.15.2\ntokio v1.49.0\ntokio v1.49.0 (*)\n";
+        let tree = "mvm-agentd v0.15.2\ntokio v1.49.0\ntokio v1.49.0 (*)\n";
         assert_eq!(forbidden_hits(tree, FORBIDDEN), vec!["tokio"]);
     }
 
     #[test]
     fn substring_match_does_not_false_positive() {
         // `tokio-util`/`tokio-macros` are not `tokio`; key on exact name.
-        let tree = "mvm-guest v0.15.2\ntokio-util v0.7.0\ntokio-macros v2.0.0\n";
+        let tree = "mvm-agentd v0.15.2\ntokio-util v0.7.0\ntokio-macros v2.0.0\n";
         assert!(forbidden_hits(tree, FORBIDDEN).is_empty());
     }
 }

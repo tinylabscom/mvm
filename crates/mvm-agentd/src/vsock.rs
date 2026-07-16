@@ -36,7 +36,7 @@ pub const GUEST_CID: u32 = 3;
 /// callback to the historical port for grep-ability.
 ///
 /// **Single source of truth.** `mvm_runtime::vm::vminitd_client` re-declares
-/// this value because it cannot depend on `mvm-guest`. If you change
+/// this value because it cannot depend on `mvm-agentd`. If you change
 /// this, update that duplicate in the same commit; the workspace tests
 /// catch drift.
 pub const GUEST_AGENT_PORT: u32 = 5252;
@@ -439,7 +439,7 @@ pub enum GuestRequest {
     // exist for development and agent-driven workflows where the
     // user wants to launch arbitrary processes interactively.
     //
-    // The wire types are compiled into every `mvm-guest` build so a
+    // The wire types are compiled into every `mvm-agentd` build so a
     // host caller against a prod agent gets a typed
     // `ProcErrorKind::UnsupportedInProduction` rather than a
     // transport error. The agent-side **handler** lives in
@@ -2485,7 +2485,7 @@ pub fn read_authenticated_frame<T: serde::de::DeserializeOwned>(
 /// reached only after the signature check passes, which is the
 /// load-bearing property the fuzz harness exercises.
 ///
-/// Public so `crates/mvm-guest/fuzz/fuzz_targets/fuzz_authed_path.rs`
+/// Public so `crates/mvm-agentd/fuzz/fuzz_targets/fuzz_authed_path.rs`
 /// can drive the verification path without a real `UnixStream`.
 pub fn verify_authenticated_frame<T: serde::de::DeserializeOwned>(
     frame: &AuthenticatedFrame,

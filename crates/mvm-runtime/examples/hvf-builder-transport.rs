@@ -8,7 +8,7 @@
 //!
 //! ```sh
 //! MVM_HVF_SUPERVISOR_PATH=target/debug/mvm-hvf-supervisor \
-//!   cargo run -p mvm-backend --example hvf-builder-transport
+//!   cargo run -p mvm-runtime --example hvf-builder-transport
 //! ```
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

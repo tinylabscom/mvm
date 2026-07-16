@@ -175,10 +175,6 @@ fn build_native_aux_helpers(workspace_root: &Path, out_dir: &Path) {
     println!("cargo:rustc-env=MVM_AUX_BIN_DIR={}", bin_dir.display());
     println!(
         "cargo:rerun-if-changed={}",
-        workspace_root.join("crates/mvm-vm-host/src").display()
-    );
-    println!(
-        "cargo:rerun-if-changed={}",
         workspace_root.join("crates/mvm-hostd/src").display()
     );
     println!(

@@ -11,14 +11,14 @@
 //!
 //! macOS / Apple silicon. The per-VM aux bins must be built first:
 //! ```sh
-//! cargo build -p mvm-vm-host --bin mvm-hvf-supervisor
+//! cargo build -p mvm-hostd --bin mvm-hvf-supervisor
 //! cargo build -p mvm-hostd --bin mvm-substitution-endpoint
-//! OUT=/tmp/hvf-egress-guest bash crates/mvm-backend/examples/hvf-egress-guest/build.sh
+//! OUT=/tmp/hvf-egress-guest bash crates/mvm-runtime/examples/hvf-egress-guest/build.sh
 //! MVM_HVF_SUPERVISOR_PATH=target/debug/mvm-hvf-supervisor \
 //!   MVM_SUBSTITUTION_ENDPOINT_PATH=target/debug/mvm-substitution-endpoint \
 //!   MVM_HVF_KERNEL=/tmp/mvm-hvf-kernel/Image-builder \
 //!   MVM_HVF_INITRD=/tmp/hvf-egress-guest/initramfs.cpio \
-//!   cargo run -p mvm-backend --example hvf-relay-egress
+//!   cargo run -p mvm-runtime --example hvf-relay-egress
 //! ```
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

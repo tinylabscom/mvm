@@ -7,7 +7,7 @@
 //!
 //! * The **workload IR** — `mvm-sdk`'s `ir::Workload` →
 //!   `schema/workload-ir-v0.json` → `crates/mvm-sdk/.../_ir`.
-//! * The **host↔guest protocol** — `mvm-guest`'s `GuestRequest` /
+//! * The **host↔guest protocol** — `mvm-agentd`'s `GuestRequest` /
 //!   `GuestResponse` → `schema/protocol-v0.json` → `crates/mvm-sdk/.../_protocol`.
 //!
 //! The xtask packages every step into one command so a dev who edits
@@ -93,7 +93,7 @@ fn artifacts() -> &'static [StubArtifact] {
                 "run",
                 "-q",
                 "-p",
-                "mvm-guest",
+                "mvm-agentd",
                 "--features",
                 "schema",
                 "--bin",

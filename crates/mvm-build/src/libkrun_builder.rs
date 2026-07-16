@@ -47,7 +47,7 @@
 //!
 //! ## Not the runtime backend
 //!
-//! `LibkrunBackend` (`crates/mvm-backend/src/libkrun.rs`) is for
+//! `LibkrunBackend` (`crates/mvm-runtime/src/libkrun.rs`) is for
 //! running user microVMs; this module is for building them. The
 //! two share `mvm-libkrun`'s FFI but compose differently — the
 //! builder mounts a workspace + persistent `/nix`-store disk and
@@ -2794,22 +2794,20 @@ pub(crate) fn unique_job_id() -> String {
 // them.
 
 const LIBKRUN_SUPERVISOR_BIN: &str = "mvm-libkrun-supervisor";
-const LIBKRUN_SUPERVISOR_PACKAGE: &str = "mvm-vm-host";
+const LIBKRUN_SUPERVISOR_PACKAGE: &str = "mvm-hostd";
 const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
     "Cargo.toml",
     "Cargo.lock",
-    "crates/mvm-vm-host/Cargo.toml",
-    "crates/mvm-vm-host/src",
     "crates/deps/libkrun-sys/Cargo.toml",
     "crates/deps/libkrun-sys/src",
-    "crates/mvm-backend/Cargo.toml",
-    "crates/mvm-backend/src",
+    "crates/mvm-runtime/Cargo.toml",
+    "crates/mvm-runtime/src",
     "crates/mvm-build/Cargo.toml",
     "crates/mvm-build/src",
     "crates/mvm-core/Cargo.toml",
     "crates/mvm-core/src",
-    "crates/mvm-guest/Cargo.toml",
-    "crates/mvm-guest/src",
+    "crates/mvm-agentd/Cargo.toml",
+    "crates/mvm-agentd/src",
     "crates/mvm-hostd/Cargo.toml",
     "crates/mvm-hostd/src",
 ];
@@ -2820,7 +2818,7 @@ const LIBKRUN_SUPERVISOR_INPUT_ROOTS: &[&str] = &[
 const SUPERVISOR_BUILD_LOG_FILENAME: &str = "mvm-supervisor-build.log";
 
 /// Locate the `mvm-libkrun-supervisor` binary. Mirrors the resolver in
-/// `mvm-backend::libkrun::resolve_supervisor_path` (kept local rather than
+/// `mvm-runtime::libkrun::resolve_supervisor_path` (kept local rather than
 /// re-exported to keep the dep graph flat). Order: env override → next to
 /// current_exe → current source checkout build → PATH.
 /// Where [`resolve_supervisor_path`] found the supervisor binary. The source
@@ -3212,7 +3210,7 @@ fn auto_build_supervisor_from_source_checkout() -> Result<Option<PathBuf>, Build
             "build",
             "-q",
             "-p",
-            "mvm-vm-host",
+            "mvm-hostd",
             "--bin",
             "mvm-libkrun-supervisor",
             "--features",
@@ -3226,7 +3224,7 @@ fn auto_build_supervisor_from_source_checkout() -> Result<Option<PathBuf>, Build
         })?;
     if !status.success() {
         return Err(BuilderVmError::ExtractionFailed(format!(
-            "cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys exited with {} while preparing the libkrun builder supervisor",
+            "cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys exited with {} while preparing the libkrun builder supervisor",
             status.code().unwrap_or(-1),
         )));
     }
@@ -3287,7 +3285,7 @@ fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
                 "using mvm-libkrun-supervisor from $PATH — a source checkout's `cargo build` \
                  does not refresh this installed copy, so it can lag the driver and reintroduce \
                  stale-supervisor failures. Rebuild a fresh one next to the exe with \
-                 `cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys`."
+                 `cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys`."
             );
             Ok(path)
         }
@@ -3299,7 +3297,7 @@ fn resolve_supervisor_path() -> Result<PathBuf, BuilderVmError> {
             Err(BuilderVmError::LibkrunUnavailable(
                 "mvm-libkrun-supervisor binary not found. \
                  Looked for: $MVM_LIBKRUN_SUPERVISOR_PATH, alongside the current exe, and on $PATH. \
-                 Build it with `cargo build -p mvm-vm-host --bin mvm-libkrun-supervisor --features libkrun-sys` \
+                 Build it with `cargo build -p mvm-hostd --bin mvm-libkrun-supervisor --features libkrun-sys` \
                  or set MVM_LIBKRUN_SUPERVISOR_PATH=/abs/path/to/the/binary."
                     .to_string(),
             ))
@@ -3423,7 +3421,7 @@ fn wait_for_vsock_socket(
     Ok(())
 }
 
-/// Distinct from `mvm-backend::LibkrunBackend::start` which
+/// Distinct from `mvm-runtime::LibkrunBackend::start` which
 /// only waits for the PID file to appear and then returns —
 /// that consumer wants a long-lived background VM. The
 /// builder VM is a one-shot; the caller can't make progress
@@ -5056,14 +5054,14 @@ mod tests {
         // non-allowlisted top-level dir that must be pruned from the
         // staged snapshot.
         let workspace = scratch.path().join("mvm-ws");
-        std::fs::create_dir_all(workspace.join("crates/mvm-guest/src")).unwrap();
-        std::fs::create_dir_all(workspace.join("crates/mvm-guest/target/debug")).unwrap();
+        std::fs::create_dir_all(workspace.join("crates/mvm-agentd/src")).unwrap();
+        std::fs::create_dir_all(workspace.join("crates/mvm-agentd/target/debug")).unwrap();
         std::fs::create_dir_all(workspace.join("public")).unwrap();
         std::fs::write(workspace.join("Cargo.toml"), "[workspace]").unwrap();
         std::fs::write(workspace.join("Cargo.lock"), "").unwrap();
-        std::fs::write(workspace.join("crates/mvm-guest/Cargo.toml"), "x").unwrap();
-        std::fs::write(workspace.join("crates/mvm-guest/src/lib.rs"), "x").unwrap();
-        std::fs::write(workspace.join("crates/mvm-guest/target/debug/junk"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-agentd/Cargo.toml"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-agentd/src/lib.rs"), "x").unwrap();
+        std::fs::write(workspace.join("crates/mvm-agentd/target/debug/junk"), "x").unwrap();
         std::fs::write(workspace.join("public/index.html"), "x").unwrap();
 
         let job = BuilderJob::Flake {
@@ -5085,9 +5083,13 @@ mod tests {
         // Filtered mvm-workspace snapshot: members copied, build artifacts
         // and non-allowlisted top-level dirs pruned.
         assert!(job_dir.join("mvm-src/Cargo.lock").exists());
-        assert!(job_dir.join("mvm-src/crates/mvm-guest/src/lib.rs").exists());
         assert!(
-            !job_dir.join("mvm-src/crates/mvm-guest/target").exists(),
+            job_dir
+                .join("mvm-src/crates/mvm-agentd/src/lib.rs")
+                .exists()
+        );
+        assert!(
+            !job_dir.join("mvm-src/crates/mvm-agentd/target").exists(),
             "target/ must be pruned from the staged snapshot"
         );
         assert!(

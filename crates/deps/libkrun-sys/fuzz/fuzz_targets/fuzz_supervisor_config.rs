@@ -7,7 +7,7 @@
 // and any panic here turns into a hard process death before the
 // state directory or PID file are written.
 //
-// Analog of `crates/mvm-guest/fuzz/fuzz_targets/fuzz_guest_request.rs`
+// Analog of `crates/mvm-agentd/fuzz/fuzz_targets/fuzz_guest_request.rs`
 // for the host side. The harness goal is "never panic on any input";
 // `serde_json::Error` is the expected outcome for malformed bytes.
 //

@@ -42,7 +42,7 @@ Security-relevant code:
 
 - All four broker subprocesses (`mvm-broker`, `mvm-secrets-dispatcher`, `mvm-host-signer`, `mvm-audit-signer`) — see [Plan 104 §Hardening posture](specs/plans/104-host-services-broker.md#hardening-posture-layers-111).
 - The per-VM supervisor (`crates/mvm-supervisor/`).
-- The guest agent (`crates/mvm-guest/`).
+- The guest agent (`crates/mvm-agentd/`).
 - The CLI surface (`mvmctl`) including `mvmctl up`, `mvmctl run`, `mvmctl image pull`, `mvmctl deps`, `mvmctl audit`, `mvmctl host-key`, `mvmctl services`, `mvmctl doctor`.
 - Audit chain integrity / verifier (`mvmctl audit verify`).
 - The signed-`ExecutionPlan` admission ceremony (per [ADR-014](specs/adrs/014-signed-audited-execution-plans.md)).

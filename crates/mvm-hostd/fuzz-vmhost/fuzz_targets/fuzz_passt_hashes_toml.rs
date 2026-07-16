@@ -1,6 +1,6 @@
 // Fuzz the operator-curated `~/.mvm/passt-hashes.toml` parser.
 //
-// `verify_passt_hash` (`crates/mvm-vm-host/src/bridge/parse.rs`)
+// `verify_passt_hash` (`crates/mvm-hostd/src/bridge/parse.rs`)
 // reads this file BEFORE installing jailer confinement so
 // the bridge can emit a clean remediation hint on a missing or
 // malformed allowlist (Cardoso minimum-viable-policy — the operator-
