@@ -216,9 +216,9 @@ Checkbox legend: `- [ ]` todo. Each WS lists its acceptance gate. Execution is s
 - Gate: `xtask check-two-surfaces`; feature-powerset shrinks to the two surfaces.
 
 **WS6 — trait dispatch + zero hardcoding**
-- [ ] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete dead `"vz"` arms.
+- [x] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete dead `"vz"` arms. `VmBackend::kind()` is now a required trait method (every backend implements it); `xtask check-no-string-backend-dispatch` guards the regression.
 - [ ] Remove baked network literals (`172.16.x`, `127.0.0.1:1080`, `/tmp/firecracker.socket`); inject via config; name `DEFAULT_MEM_MIB`/`DEFAULT_CPUS`; add a CI lint for hardcoded IPs/ports.
-- Gate: hardcoding lint green; no string-typed backend dispatch remains.
+- Gate: hardcoding lint green (pending); no string-typed backend dispatch remains (done).
 
 ### Phase 2 — Binaries, egress invariant, lifecycle
 
@@ -329,6 +329,7 @@ WS4/WS5/WS6 can proceed in parallel with WS1 sub-steps. WS3 depends on `mvm-net`
 ## 5. Definition of done
 
 - Both surfaces build; `cargo nextest run --workspace` + `cargo test --workspace --doc` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo fmt --all --check` green.
+- **Binding Rust coding standard** (gist `c3161f55…`), enforced per-change, not just at the end: traits/enums over stringly dispatch (`name() == "…"` is banned — use a typed discriminant); **exhaustive matches, no wildcard `_ =>` on owned enums**; builder pattern for any type/fn with more than a couple of (esp. optional) fields; **functions ≤ ~500 lines**; borrowed params (`&str`/`&[T]`/`impl AsRef<Path>`); `with_capacity`/no needless `.clone()`; `thiserror` in libs; **clippy is fixed, never `#[allow]`-suppressed** (each surviving `#[allow]` scoped to the smallest item + justified).
 - ~11 crates, 2 features, 1 host + 1 guest + 1 CLI binary, 1 base dir, 0 non-test files > 1500 lines, no `Command` outside the allow-list, no hardcoded IPs/ports, vsock-only egress on every workload backend with the data-governance witness passing.
 - All security claims still witnessed; live egress + boot smoke on Mac (HVF) and Linux (libkrun + FC); **sub-second launch** proven by the timed e2e; guest RAM demand-faulted for density.
 - **Wasm-container capable (core goal):** `mvm-protocol` builds + tests on `wasm32-unknown-unknown` in CI with a CI-enforced `no_std` boundary; a `WasmBackend` runs a workload end-to-end through the same `VmBackend` + egress/audit/secret-substitution seam (POC-gated — the v1 bar is the seam proven, not full production parity).
