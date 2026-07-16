@@ -249,8 +249,7 @@ pub fn write_state() -> Result<()> {
         cat > .mvm-state <<STATEEOF
 {{
     "kernel": "$(ls vmlinux-* 2>/dev/null | tail -1)",
-    "rootfs": "$(ls *.ext4 2>/dev/null | tail -1)",
-    "ssh_key": "$(ls *.id_rsa 2>/dev/null | tail -1)"
+    "rootfs": "$(ls *.ext4 2>/dev/null | tail -1)"
 }}
 STATEEOF
         "#,

@@ -267,7 +267,7 @@ fn generate_service_unit(svc: &ServiceSection) -> String {
     format!(
         r#"[Unit]
 Description={name}
-After={after} ssh.service
+After={after}
 Wants={wants}
 
 [Service]
@@ -613,30 +613,11 @@ echo "[mvm] Installing packages..."
 sudo chroot "$BUILD_DIR" env DEBIAN_FRONTEND=noninteractive apt-get update -qq
 {packages}
 
-# Configure SSH
-echo "[mvm] Configuring SSH..."
-sudo chroot "$BUILD_DIR" env DEBIAN_FRONTEND=noninteractive bash -c '
-    apt-get install -y -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" openssh-server 2>/dev/null || true
-    mkdir -p /run/sshd /root/.ssh
-    chmod 700 /root/.ssh
-    sed -i "s/#PermitRootLogin.*/PermitRootLogin yes/" /etc/ssh/sshd_config
-    sed -i "s/#PubkeyAuthentication.*/PubkeyAuthentication yes/" /etc/ssh/sshd_config
-'
-
 # Run custom commands
 {run_commands}
 
 # Inject systemd services
 {service_injection}
-
-# Generate SSH keypair
-echo "[mvm] Generating SSH keys..."
-rm -f "$IMAGES_DIR/{name}.id_rsa" "$IMAGES_DIR/{name}.id_rsa.pub"
-ssh-keygen -f "$IMAGES_DIR/{name}.id_rsa" -N '' -q
-sudo mkdir -p "$BUILD_DIR/root/.ssh"
-sudo cp "$IMAGES_DIR/{name}.id_rsa.pub" "$BUILD_DIR/root/.ssh/authorized_keys"
-sudo chown -R root:root "$BUILD_DIR/root/.ssh"
-rm -f "$IMAGES_DIR/{name}.id_rsa.pub"
 
 # Clean up chroot mounts
 cleanup

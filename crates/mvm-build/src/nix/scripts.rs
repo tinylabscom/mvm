@@ -135,11 +135,9 @@ mod tests {
     }
 
     #[test]
-    fn test_refresh_builder_rootfs_renders_awk_uid_gid() {
+    fn test_refresh_builder_rootfs_renders_agent_service() {
         let mut ctx = BTreeMap::new();
         ctx.insert("builder_dir", "/var/lib/mvm/builder".to_string());
-        ctx.insert("inject_ssh", "yes".to_string());
-        ctx.insert("auth_keys", "ssh-ed25519 AAAA test".to_string());
         ctx.insert("agent_src", "/tmp/mvm-builder-agent".to_string());
         ctx.insert("agent_dst", "/usr/local/bin/mvm-builder-agent".to_string());
         ctx.insert(
@@ -149,6 +147,7 @@ mod tests {
 
         let rendered =
             render_script("refresh_builder_rootfs", &ctx).expect("render should succeed");
-        assert!(rendered.contains(r#"awk -F: '/^ubuntu:/{print $3 ":" $4}'"#));
+        assert!(rendered.contains("/etc/systemd/system/mvm-builder-agent.service"));
+        assert!(!rendered.to_ascii_lowercase().contains("ssh"));
     }
 }

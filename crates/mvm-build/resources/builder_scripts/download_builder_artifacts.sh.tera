@@ -5,7 +5,6 @@ ASSET_BASE="${MVM_FC_ASSET_BASE:-https://s3.amazonaws.com/spec.ccfc.min}"
 FC_SHORT="{{fc_short}}"
 FC_FULL="{{fc_full}}"
 ARCH="{{arch}}"
-BUILDER_PUB="{{builder_pub}}"
 
 head_ok() {
     local url="$1"
@@ -103,12 +102,6 @@ if [ ! -f rootfs.ext4 ]; then
         sudo apt-get install -y -qq debootstrap squashfs-tools
         sudo rm -rf /tmp/mvm-local-rootfs
         sudo debootstrap --arch="${ARCH}" --variant=minbase jammy /tmp/mvm-local-rootfs http://ports.ubuntu.com
-        if [ "{{inject_ssh}}" = "yes" ]; then
-            sudo mkdir -p /tmp/mvm-local-rootfs/root/.ssh
-            sudo cp "$BUILDER_PUB" /tmp/mvm-local-rootfs/root/.ssh/authorized_keys
-            sudo chmod 700 /tmp/mvm-local-rootfs/root/.ssh
-            sudo chmod 600 /tmp/mvm-local-rootfs/root/.ssh/authorized_keys
-        fi
         sudo mksquashfs /tmp/mvm-local-rootfs rootfs.squashfs -noappend >/dev/null
         sudo rm -rf /tmp/mvm-local-rootfs
         chosen_rootfs="local:rootfs.squashfs"
@@ -138,12 +131,6 @@ if [ ! -f rootfs.ext4 ]; then
             sudo apt-get install -y -qq debootstrap squashfs-tools
             sudo rm -rf /tmp/mvm-local-rootfs
             sudo debootstrap --arch="${ARCH}" --variant=minbase jammy /tmp/mvm-local-rootfs http://ports.ubuntu.com
-            if [ "{{inject_ssh}}" = "yes" ]; then
-                sudo mkdir -p /tmp/mvm-local-rootfs/root/.ssh
-                printf '%s\n' '{{auth_keys}}' | sudo tee /tmp/mvm-local-rootfs/root/.ssh/authorized_keys >/dev/null
-                sudo chmod 700 /tmp/mvm-local-rootfs/root/.ssh
-                sudo chmod 600 /tmp/mvm-local-rootfs/root/.ssh/authorized_keys
-            fi
             sudo mksquashfs /tmp/mvm-local-rootfs rootfs.squashfs -noappend >/dev/null
             sudo rm -rf /tmp/mvm-local-rootfs
         else
@@ -158,21 +145,6 @@ if [ ! -f rootfs.ext4 ]; then
             echo '[mvm] ERROR: Unsquashfs failed after re-download'
             exit 1
         fi
-    fi
-
-    if [ "{{inject_ssh}}" = "yes" ]; then
-        mkdir -p squashfs-root/root/.ssh
-        printf '%s\n' '{{auth_keys}}' > squashfs-root/root/.ssh/authorized_keys
-        sudo chmod 700 squashfs-root/root/.ssh
-        sudo chmod 600 squashfs-root/root/.ssh/authorized_keys
-        sudo chown -R 0:0 squashfs-root/root/.ssh || true
-
-        mkdir -p squashfs-root/etc/ssh/sshd_config.d
-        cat > squashfs-root/etc/ssh/sshd_config.d/mvm.conf <<'SSHD'
-PermitRootLogin yes
-PubkeyAuthentication yes
-PasswordAuthentication no
-SSHD
     fi
 
     mkdir -p "$(dirname {{agent_dst}})"

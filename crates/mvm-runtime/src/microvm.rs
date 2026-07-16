@@ -633,7 +633,6 @@ fn read_state_or_discover() -> Result<MvmState> {
     if let Ok(state) = serde_json::from_str::<MvmState>(&json)
         && !state.kernel.is_empty()
         && !state.rootfs.is_empty()
-        && !state.ssh_key.is_empty()
     {
         return Ok(state);
     }
@@ -647,25 +646,19 @@ fn read_state_or_discover() -> Result<MvmState> {
         "cd {} && ls *.ext4 2>/dev/null | tail -1",
         MICROVM_DIR
     ))?;
-    let ssh_key = run_in_vm_stdout(&format!(
-        "cd {} && ls *.id_rsa 2>/dev/null | tail -1",
-        MICROVM_DIR
-    ))?;
 
-    if kernel.is_empty() || rootfs.is_empty() || ssh_key.is_empty() {
+    if kernel.is_empty() || rootfs.is_empty() {
         anyhow::bail!(
-            "Missing microVM assets in {}. Run 'mvmctl setup' first.\n  kernel={:?} rootfs={:?} ssh_key={:?}",
+            "Missing microVM assets in {}. Run 'mvmctl setup' first.\n  kernel={:?} rootfs={:?}",
             MICROVM_DIR,
             kernel,
             rootfs,
-            ssh_key,
         );
     }
 
     Ok(MvmState {
         kernel,
         rootfs,
-        ssh_key,
         fc_pid: None,
     })
 }

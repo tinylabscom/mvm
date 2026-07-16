@@ -86,10 +86,6 @@ pub fn tenant_audit_log_path(id: &str) -> String {
     format!("{}/audit.log", tenant_dir(id))
 }
 
-pub fn tenant_ssh_key_path(id: &str) -> String {
-    format!("{}/ssh_key", tenant_dir(id))
-}
-
 pub fn tenant_pools_dir(id: &str) -> String {
     format!("{}/pools", tenant_dir(id))
 }

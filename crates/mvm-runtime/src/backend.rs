@@ -1488,11 +1488,18 @@ mod tests {
     fn no_backend_advertises_production_ssh() {
         // The capability layer encodes the SSH ban: no backend may advertise an
         // in-guest SSH server. A future backend that flips this trips here.
-        let backends: [(&str, AnyBackend); 4] = [
+        // Covers every `AnyBackend` variant, including both hvf entry points
+        // (the raw backend and the WorkloadRunner-driven role-runner path).
+        let backends: [(&str, AnyBackend); 6] = [
             ("firecracker", AnyBackend::Firecracker(FirecrackerBackend)),
             ("libkrun", AnyBackend::Libkrun(LibkrunBackend)),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
             ("mock", AnyBackend::Mock(MockBackend::new())),
+            ("hvf", AnyBackend::Hvf(HvfBackend)),
+            (
+                "hvf_runner",
+                AnyBackend::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner)),
+            ),
         ];
         for (name, backend) in backends {
             assert!(

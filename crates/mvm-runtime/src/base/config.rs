@@ -62,7 +62,6 @@ impl VmSlot {
 pub struct MvmState {
     pub kernel: String,
     pub rootfs: String,
-    pub ssh_key: String,
     #[serde(default)]
     pub fc_pid: Option<u32>,
 }
@@ -173,7 +172,6 @@ mod tests {
         let state = MvmState {
             kernel: "vmlinux-5.10.217".to_string(),
             rootfs: "ubuntu-24.04.ext4".to_string(),
-            ssh_key: "ubuntu-24.04.id_rsa".to_string(),
             fc_pid: Some(12345),
         };
 
@@ -182,15 +180,25 @@ mod tests {
 
         assert_eq!(parsed.kernel, "vmlinux-5.10.217");
         assert_eq!(parsed.rootfs, "ubuntu-24.04.ext4");
-        assert_eq!(parsed.ssh_key, "ubuntu-24.04.id_rsa");
         assert_eq!(parsed.fc_pid, Some(12345));
     }
 
     #[test]
     fn test_mvm_state_json_without_pid() {
-        let json = r#"{"kernel":"k","rootfs":"r","ssh_key":"s"}"#;
+        let json = r#"{"kernel":"k","rootfs":"r"}"#;
         let state: MvmState = serde_json::from_str(json).unwrap();
         assert_eq!(state.fc_pid, None);
+    }
+
+    #[test]
+    fn test_mvm_state_json_ignores_legacy_ssh_key_field() {
+        // Old on-disk state files may still carry the retired ssh_key field;
+        // parsing must not fail-closed on it.
+        let json = r#"{"kernel":"k","rootfs":"r","ssh_key":"stale","fc_pid":7}"#;
+        let state: MvmState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.kernel, "k");
+        assert_eq!(state.rootfs, "r");
+        assert_eq!(state.fc_pid, Some(7));
     }
 
     #[test]
@@ -198,7 +206,6 @@ mod tests {
         let state = MvmState::default();
         assert!(state.kernel.is_empty());
         assert!(state.rootfs.is_empty());
-        assert!(state.ssh_key.is_empty());
         assert_eq!(state.fc_pid, None);
     }
 

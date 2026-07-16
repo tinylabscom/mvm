@@ -162,7 +162,7 @@ pub fn shell_quote(arg: &str) -> String {
     out
 }
 
-/// Replace the current process with an interactive command (for SSH/TTY).
+/// Replace the current process with an interactive TTY-attached command.
 /// Uses Unix's process replacement — the Rust process is fully replaced, no return on success.
 /// Note: This is safe because all arguments are passed as an array, not via shell interpolation.
 #[cfg(unix)]
