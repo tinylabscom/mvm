@@ -356,14 +356,13 @@ pub struct SecretBinding {
 }
 
 /// Where a secret comes from. Pluggable providers (Vault, AWS SM,
-/// GCP SM) plus per-run attestation-gated release. The `Static`
-/// variant is a compile-time literal for tests only — `mvmctl plan
-/// validate --prod` rejects plans that contain it.
+/// GCP SM) plus per-run attestation-gated release. A secret's raw
+/// value never appears in a plan — only a reference the supervisor's
+/// `KeystoreReleaser` resolves at admission; the plan (persisted to
+/// `plan.json`) carries no plaintext.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum SecretSource {
-    /// Test-only literal. Refused by `--prod` validation.
-    Static { value: String },
     /// Per-run release from the supervisor's keystore. The address
     /// resolves to a SecretId at the supervisor.
     Keystore { address: String },

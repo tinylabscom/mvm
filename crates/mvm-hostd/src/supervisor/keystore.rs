@@ -21,16 +21,18 @@
 
 use async_trait::async_trait;
 use mvm_core::plan::SecretBinding;
+use secrecy::SecretString;
 use thiserror::Error;
 
 /// A live secret grant — name (workload-visible) + opaque value the
 /// supervisor surfaces via the secrets-mount filesystem
-/// (`/run/mvm-secrets/<name>`). The `value` will be wrapped in a
-/// zeroize-on-drop type; today it's a plain String stub for shape only.
+/// (`/run/mvm-secrets/<name>`). `value` is a zeroize-on-drop
+/// [`SecretString`] with a redacted `Debug`; readers must call
+/// `.expose_secret()` (from `secrecy::ExposeSecret`) to reach the bytes.
 #[derive(Debug, Clone)]
 pub struct SecretGrant {
     pub name: String,
-    pub value: String,
+    pub value: SecretString,
 }
 
 #[derive(Debug, Error)]

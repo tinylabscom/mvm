@@ -1025,8 +1025,8 @@ mod tests {
             secret_release: SecretReleasePolicy::PlanBound,
             secrets: vec![SecretBinding {
                 name: "API_KEY".into(),
-                source: SecretSource::Static {
-                    value: "s3cr3t".into(),
+                source: SecretSource::Keystore {
+                    address: "test-key".into(),
                 },
             }],
             audit_event_prefix: None,

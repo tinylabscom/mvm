@@ -378,11 +378,11 @@ mod tests {
         }
     }
 
-    fn static_secret() -> SecretBinding {
+    fn keystore_secret() -> SecretBinding {
         SecretBinding {
             name: "API_KEY".into(),
-            source: SecretSource::Static {
-                value: "s3cr3t".into(),
+            source: SecretSource::Keystore {
+                address: "test-key".into(),
             },
         }
     }
@@ -463,7 +463,7 @@ mod tests {
         let wire_runner =
             WorkloadRunner::new(MockDriver::default(), RecordingSpawner::new("/run/ep.sock"));
         let cfg = config("w-wire");
-        let secrets = [static_secret()];
+        let secrets = [keystore_secret()];
         wire_runner
             .start_workload(&WorkloadLaunchInputs {
                 config: &cfg,

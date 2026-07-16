@@ -49,9 +49,9 @@ pub enum AssembleError {
 
 /// Build the substitution registry from `plan_secrets`, reconstructing each
 /// egress secret's binding from `bindings`. Only [`SecretSource::Keystore`]
-/// secrets participate — `Static` (test-only) and `External` (Vault/AWS SM)
-/// take other paths and are skipped. Returns the registry and the
-/// `(guest name, placeholder)` pairs to hand to the guest.
+/// secrets participate — `External` (Vault/AWS SM) takes another path and
+/// is skipped. Returns the registry and the `(guest name, placeholder)`
+/// pairs to hand to the guest.
 pub fn assemble_registry(
     plan_secrets: &[SecretBinding],
     tenant: &str,
@@ -63,7 +63,7 @@ pub fn assemble_registry(
         let address = match &b.source {
             SecretSource::Keystore { address } => address,
             // Non-keystore sources don't go through local egress substitution.
-            SecretSource::Static { .. } | SecretSource::External { .. } => continue,
+            SecretSource::External { .. } => continue,
         };
         let meta = bindings
             .get(tenant, address)?
@@ -190,22 +190,16 @@ mod tests {
     }
 
     #[test]
-    fn skips_static_and_external_sources() {
+    fn skips_external_sources() {
         let dir = tempdir().unwrap();
         let store = FileBindingStore::with_dir(dir.path());
-        let plan = [
-            SecretBinding {
-                name: "T".into(),
-                source: SecretSource::Static { value: "x".into() },
+        let plan = [SecretBinding {
+            name: "E".into(),
+            source: SecretSource::External {
+                provider: "vault".into(),
+                path: "kv/x".into(),
             },
-            SecretBinding {
-                name: "E".into(),
-                source: SecretSource::External {
-                    provider: "vault".into(),
-                    path: "kv/x".into(),
-                },
-            },
-        ];
+        }];
         let (registry, handed) = assemble_registry(&plan, "local", &store).unwrap();
         assert!(handed.is_empty());
         // Nothing minted: a probe token resolves to nothing.
