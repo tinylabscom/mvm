@@ -16,7 +16,7 @@ mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-fs.workspace = true
 mvm-hostd.workspace = true
-# `mvmctl compile` reads the Workload IR (mvm_sdk::ir, re-exported from
+# `mvmctl compile` reads the Workload IR (mvm_protocol::ir, re-exported from
 # mvm_protocol::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true
 # Direct IR access (`mvm_protocol::ir::…`) for the command surfaces that
