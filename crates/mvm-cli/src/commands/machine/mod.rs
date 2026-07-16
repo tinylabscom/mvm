@@ -34,7 +34,7 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::{VmId, VmStatus};
+use mvm_core::vm_backend::{BackendKind, VmId, VmStatus};
 use mvm_core::{config, naming};
 
 use mvm_runtime::machine::persist::{
@@ -1278,20 +1278,20 @@ fn machine_start_audit_detail(input: &MachineStartReceiptInput) -> String {
 }
 
 fn ssh_agent_proxy_listen_for_backend(vm_name: &str, backend: &str) -> SshAgentProxyListen {
-    match backend {
-        "firecracker" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
-            vm_name,
-            mvm_agentd::vsock::SSH_AGENT_PORT,
-        )),
-        "vz" => SshAgentProxyListen::Uds(mvm_core::config::vm_vz_vsock_port_socket(
-            vm_name,
-            mvm_agentd::vsock::SSH_AGENT_PORT,
-        )),
-        "libkrun" => SshAgentProxyListen::Uds(mvm_core::config::vm_vsock_port_socket(
-            vm_name,
-            mvm_agentd::vsock::SSH_AGENT_PORT,
-        )),
-        _ => SshAgentProxyListen::Vsock(mvm_agentd::vsock::SSH_AGENT_PORT),
+    // Resolve the raw CLI/config selector to the typed kind first so the
+    // dispatch below is an exhaustive `BackendKind` match, not a string
+    // comparison; an unrecognised selector (including the removed `vz`)
+    // falls through to the same vsock default every non-UDS backend gets.
+    let Some(descriptor) = mvm_runtime::catalog::descriptor_for_selector(backend) else {
+        return SshAgentProxyListen::Vsock(mvm_agentd::vsock::SSH_AGENT_PORT);
+    };
+    match descriptor.kind {
+        BackendKind::Firecracker | BackendKind::Libkrun => SshAgentProxyListen::Uds(
+            mvm_core::config::vm_vsock_port_socket(vm_name, mvm_agentd::vsock::SSH_AGENT_PORT),
+        ),
+        BackendKind::Qemu | BackendKind::Mock | BackendKind::Hvf => {
+            SshAgentProxyListen::Vsock(mvm_agentd::vsock::SSH_AGENT_PORT)
+        }
     }
 }
 

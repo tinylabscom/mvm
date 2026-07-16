@@ -1623,7 +1623,7 @@ pub fn boot_session_vm(
         start_config.bundle_json = sub.bundle_json;
         start_config.config_files.extend(sub.config_files);
         admitted_workload = true;
-        if matches!(backend.name(), "firecracker" | "vz" | "libkrun" | "hvf") {
+        if mvm_runtime::catalog::descriptor(backend.kind()).is_workload {
             mvm_hostd::plan_admission::stash_plan_for_bridge(&start_config)
                 .context("persisting admitted session plan before backend start")?;
         }

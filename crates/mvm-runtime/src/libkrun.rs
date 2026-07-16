@@ -27,9 +27,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_core::config::{mvm_data_dir, vm_console_log, vm_libkrun_pid, vm_state_dir};
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
-    StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState, StartMode, VmBackend,
-    VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError, WarmStartOutcome,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
+    SnapshotCapability, StandbyClaim, StandbyError, StandbyHandle, StandbySpec, StandbyState,
+    StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus, WarmStartError,
+    WarmStartOutcome,
 };
 use mvm_storage::snapshot::SnapshotUpper;
 
@@ -784,6 +785,10 @@ fn libkrun_startup_diagnostics(state_dir: &Path) -> String {
 impl VmBackend for LibkrunBackend {
     fn name(&self) -> &str {
         "libkrun"
+    }
+
+    fn kind(&self) -> BackendKind {
+        BackendKind::Libkrun
     }
 
     fn capabilities(&self) -> VmCapabilities {

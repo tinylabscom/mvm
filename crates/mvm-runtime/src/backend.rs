@@ -202,6 +202,10 @@ impl VmBackend for FirecrackerBackend {
         "firecracker"
     }
 
+    fn kind(&self) -> catalog::BackendKind {
+        catalog::BackendKind::Firecracker
+    }
+
     fn capabilities(&self) -> VmCapabilities {
         // Firecracker ships a virtio-balloon device with PATCH-able
         // target via `/balloon`; the start path attaches it whenever
@@ -618,16 +622,12 @@ impl AnyBackend {
     }
 
     /// The typed discriminant for this backend. Lets callers branch on
-    /// `BackendKind::Hvf` etc. instead of string-matching `name()`. The runner-role
-    /// variant reports the same hvf VMM kind as the raw `Hvf` variant.
+    /// `BackendKind::Hvf` etc. instead of string-matching `name()`. Delegates
+    /// to the wrapped backend's own `VmBackend::kind()` — the runner-role
+    /// variant reports the same hvf VMM kind as the raw `Hvf` variant because
+    /// `WorkloadRunner<HvfDriver, _>` reports `BackendKind::Hvf` too.
     pub fn kind(&self) -> catalog::BackendKind {
-        match self {
-            Self::Firecracker(_) => catalog::BackendKind::Firecracker,
-            Self::Libkrun(_) => catalog::BackendKind::Libkrun,
-            Self::Qemu(_) => catalog::BackendKind::Qemu,
-            Self::Mock(_) => catalog::BackendKind::Mock,
-            Self::Hvf(_) | Self::HvfRunner(_) => catalog::BackendKind::Hvf,
-        }
+        self.inner().kind()
     }
 
     pub(crate) fn inner(&self) -> &dyn VmBackend {

@@ -69,9 +69,9 @@ Full narrative on this progress, including why `mvm-protocol` needs to be a desi
 - Gate: `xtask check-two-surfaces`; feature-powerset shrinks to the two surfaces.
 
 **WS6 — trait dispatch + zero hardcoding**
-- [ ] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete dead `"vz"` arms.
+- [x] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete dead `"vz"` arms. `VmBackend::kind() -> BackendKind` is now a required trait method; per-backend behaviors moved to descriptor capability flags (`bundled_kernel`, `needs_plan_json`, `is_workload`) or exhaustive `kind()` matches. `xtask check-no-string-backend-dispatch` guards the regression (wired into CI).
 - [ ] Remove baked network literals (`172.16.x`, `127.0.0.1:1080`, `/tmp/firecracker.socket`); inject via config; name `DEFAULT_MEM_MIB`/`DEFAULT_CPUS`; add a CI lint for hardcoded IPs/ports.
-- Gate: hardcoding lint green; no string-typed backend dispatch remains.
+- Gate: hardcoding lint green (pending); no string-typed backend dispatch remains (done).
 
 ## Phase 2 — Binaries, egress invariant, lifecycle
 

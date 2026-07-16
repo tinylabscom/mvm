@@ -109,6 +109,9 @@ jobs:
       - name: No spec refs in source comments
         run: cargo run -p xtask -- check-no-spec-refs-in-comments
 
+      - name: No stringly backend-name dispatch
+        run: cargo run -p xtask -- check-no-string-backend-dispatch
+
       - name: Conformance claim catalog
         run: cargo run -p xtask -- check-claim-catalog
 

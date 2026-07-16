@@ -36,8 +36,9 @@
 use anyhow::{Result, anyhow, bail};
 use mvm_core::config::{mvm_data_dir, vm_console_log, vm_state_dir};
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage, SnapshotCapability,
-    StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
+    SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig,
+    VmStatus,
 };
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -223,6 +224,10 @@ fn qemu_drive_args(config: &VmStartConfig) -> Vec<String> {
 impl VmBackend for QemuBackend {
     fn name(&self) -> &str {
         "qemu"
+    }
+
+    fn kind(&self) -> BackendKind {
+        BackendKind::Qemu
     }
 
     fn capabilities(&self) -> VmCapabilities {

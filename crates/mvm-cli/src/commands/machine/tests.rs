@@ -1847,10 +1847,6 @@ fn ssh_agent_proxy_uses_backend_socket_transport_for_firecracker_and_in_process_
             "libkrun",
             mvm_core::config::vm_vsock_port_socket("devbox", mvm_agentd::vsock::SSH_AGENT_PORT),
         ),
-        (
-            "vz",
-            mvm_core::config::vm_vz_vsock_port_socket("devbox", mvm_agentd::vsock::SSH_AGENT_PORT),
-        ),
     ];
 
     for (backend, expected) in cases {
@@ -1859,6 +1855,25 @@ fn ssh_agent_proxy_uses_backend_socket_transport_for_firecracker_and_in_process_
             SshAgentProxyListen::Vsock(port) => {
                 panic!("{backend} unexpectedly selected AF_VSOCK port {port}")
             }
+        }
+    }
+}
+
+#[test]
+fn ssh_agent_proxy_falls_back_to_vsock_for_an_unrecognised_backend_selector() {
+    // "vz" is not a registered `BackendKind` selector (the Vz backend is
+    // deleted) — an unrecognised selector must fall through to the same
+    // plain-vsock default every non-UDS backend gets, not resolve to a
+    // phantom per-port UDS socket.
+    match ssh_agent_proxy_listen_for_backend("devbox", "vz") {
+        SshAgentProxyListen::Vsock(port) => {
+            assert_eq!(port, mvm_agentd::vsock::SSH_AGENT_PORT);
+        }
+        SshAgentProxyListen::Uds(path) => {
+            panic!(
+                "unrecognised backend unexpectedly selected UDS {}",
+                path.display()
+            )
         }
     }
 }

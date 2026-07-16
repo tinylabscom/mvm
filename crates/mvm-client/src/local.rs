@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use flate2::read::GzDecoder;
-use mvm_core::protocol::vm_backend::{VmId, VmInfo, VmStatus};
+use mvm_core::protocol::vm_backend::{BackendKind, VmId, VmInfo, VmStatus};
 use mvm_fs::oci::{
     ImageReference, LayerDescriptor, LayerFetchOptions, LinuxPlatform, OciLayerFetcher,
     OciManifestFetcher, UnpackOptions, unpack_layer,
@@ -250,11 +250,11 @@ impl MvmClient for LocalBackend {
         let rootfs = resolve_local_rootfs(&spec.image, &spec.name).await?;
         let (verity_path, roothash) = host_verity_sidecars(&rootfs);
 
-        // libkrun/Vz/mock carry their own kernel; HVF boots an explicit
+        // libkrun/mock carry their own kernel; HVF boots an explicit
         // arm64 kernel Image. Resolve it from the per-arch workload-kernel
         // cache the CLI's run path populates — the facade stays
         // cache-hit-or-error; the heavier build/fetch flows are CLI concerns.
-        let kernel_path = if self.backend.name() == "hvf" {
+        let kernel_path = if self.backend.kind() == BackendKind::Hvf {
             let cache = PathBuf::from(mvm_core::config::mvm_cache_dir());
             let arch = mvm_core::arch::GuestArch::host().to_string();
             let path = mvm_build::kernel_fetch::cached_kernel_path(&cache, &arch, "workload");

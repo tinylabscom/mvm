@@ -23,8 +23,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
 use mvm_core::config::{mvm_data_dir, vm_state_dir};
 use mvm_core::vm_backend::{
-    BackendSecurityProfile, ClaimStatus, LayerCoverage, VmBackend, VmCapabilities, VmExitStatus,
-    VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, VmBackend, VmCapabilities,
+    VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::base::ui;
@@ -438,6 +438,10 @@ fn hvf_workload_support_available() -> bool {
 impl VmBackend for HvfBackend {
     fn name(&self) -> &str {
         "hvf"
+    }
+
+    fn kind(&self) -> BackendKind {
+        BackendKind::Hvf
     }
 
     fn capabilities(&self) -> VmCapabilities {

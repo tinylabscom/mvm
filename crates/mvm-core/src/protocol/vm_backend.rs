@@ -1304,6 +1304,28 @@ pub struct VmInfo {
     pub ports: Vec<VmPortMapping>,
 }
 
+/// The typed discriminant of a [`VmBackend`] implementation.
+///
+/// Callers branch on `BackendKind::Hvf` etc. instead of string-matching
+/// [`VmBackend::name`] — a `match` on this enum is exhaustive, so a removed
+/// or added backend is a compile error at every dispatch site instead of a
+/// silent gap. Prefer a descriptor capability flag or a `VmBackend` trait
+/// method for anything that varies *behaviorally* per backend; reserve
+/// `kind() == BackendKind::X` for a genuine single-backend identity check.
+///
+/// Lives here, beside the trait, rather than in the higher-level backend
+/// registry that knows how to *construct* each variant, so `&dyn VmBackend`
+/// callers in `mvm-core` can call `.kind()` without an upward dependency on
+/// that registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BackendKind {
+    Firecracker,
+    Libkrun,
+    Qemu,
+    Mock,
+    Hvf,
+}
+
 /// Backend-agnostic VM lifecycle trait.
 ///
 /// Defines the minimal interface for starting, stopping, inspecting, and
@@ -1327,8 +1349,11 @@ pub struct VmInfo {
 /// }
 /// ```
 pub trait VmBackend: Send + Sync {
-    /// Human-readable backend name (e.g., "firecracker", "vz", "libkrun").
+    /// Human-readable backend name (e.g., "firecracker", "hvf", "libkrun").
     fn name(&self) -> &str;
+
+    /// The typed discriminant; branch on this, never on `name()`.
+    fn kind(&self) -> BackendKind;
 
     /// Capabilities supported by this backend.
     fn capabilities(&self) -> VmCapabilities;
@@ -1830,6 +1855,9 @@ mod tests {
         fn name(&self) -> &str {
             "tier-only"
         }
+        fn kind(&self) -> BackendKind {
+            BackendKind::Mock
+        }
         fn capabilities(&self) -> VmCapabilities {
             VmCapabilities::default()
         }
@@ -1871,6 +1899,9 @@ mod tests {
     impl VmBackend for RecordingStopBackend {
         fn name(&self) -> &str {
             "recording-stop"
+        }
+        fn kind(&self) -> BackendKind {
+            BackendKind::Mock
         }
         fn capabilities(&self) -> VmCapabilities {
             VmCapabilities::default()

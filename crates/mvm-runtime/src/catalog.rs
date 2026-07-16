@@ -18,6 +18,12 @@ use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
 use mvm_core::vm_backend::VmBackend;
 
+// `BackendKind` is defined in `mvm-core` alongside the `VmBackend` trait
+// (`VmBackend::kind()` needs it in scope, and `mvm-core` has no `mvm-*`
+// deps to reach up into this registry for it). Re-exported here so existing
+// `catalog::BackendKind` call sites keep resolving.
+pub use mvm_core::vm_backend::BackendKind;
+
 /// A first-class, declarative description of one backend: its discovery
 /// metadata and the surfaces it participates in. Behavioral policy lives in
 /// `VmBackend`/`AnyBackend`, not here.
@@ -32,6 +38,18 @@ pub struct BackendDescriptor {
     pub include_in_list_all: bool,
     pub include_in_balloon_support: bool,
     pub include_in_warm_start_support: bool,
+    /// This backend boots a kernel it bundles itself (no on-disk kernel
+    /// path to hash for a compat key). True only for libkrun today.
+    pub bundled_kernel: bool,
+    /// This backend needs the admitted plan JSON stashed to disk for its
+    /// external-VMM bridge to read at spawn time, rather than taking it
+    /// in-process. True only for Firecracker today.
+    pub needs_plan_json: bool,
+    /// This backend runs real (non-mock, non-dev-substrate) workloads —
+    /// the admitted plan is stashed for its gateway/bridge audit path.
+    /// True for Firecracker, libkrun, and hvf; false for qemu (dev/test
+    /// substrate, no bridge) and mock.
+    pub is_workload: bool,
 }
 
 impl BackendDescriptor {
@@ -43,14 +61,14 @@ impl BackendDescriptor {
 
     /// Construct the `AnyBackend` enum variant this descriptor names.
     pub fn instantiate(self) -> AnyBackend {
-        self.kind.instantiate()
+        instantiate_kind(self.kind)
     }
 
     /// Construct a shared `VmBackend` trait object directly from the
     /// descriptor, for consumers that only need the behavior surface and not
     /// enum-specific branching.
     pub fn instantiate_dyn(self) -> std::sync::Arc<dyn VmBackend> {
-        self.kind.instantiate().into_dyn()
+        instantiate_kind(self.kind).into_dyn()
     }
 }
 
@@ -66,14 +84,12 @@ macro_rules! backend_catalog {
             started_vm_probe_order: $started_vm_probe_order:expr,
             list_all: $list_all:expr,
             balloon_support: $balloon_support:expr,
-            warm_start_support: $warm_start_support:expr
+            warm_start_support: $warm_start_support:expr,
+            bundled_kernel: $bundled_kernel:expr,
+            needs_plan_json: $needs_plan_json:expr,
+            is_workload: $is_workload:expr
         }
     ),* $(,)?) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        pub enum BackendKind {
-            $($kind),*
-        }
-
         pub const BACKEND_DESCRIPTORS: &[BackendDescriptor] = &[
             $(
                 BackendDescriptor {
@@ -86,15 +102,20 @@ macro_rules! backend_catalog {
                     include_in_list_all: $list_all,
                     include_in_balloon_support: $balloon_support,
                     include_in_warm_start_support: $warm_start_support,
+                    bundled_kernel: $bundled_kernel,
+                    needs_plan_json: $needs_plan_json,
+                    is_workload: $is_workload,
                 },
             )*
         ];
 
-        impl BackendKind {
-            pub(crate) fn instantiate(self) -> AnyBackend {
-                match self {
-                    $(Self::$kind => $constructor),*
-                }
+        // `BackendKind` is a foreign type here (owned by `mvm-core`), so this
+        // can't be an inherent `impl BackendKind` (orphan rule) — a free
+        // function keeps the kind->constructor pairing generated from the
+        // same per-entry `constructor` expression as the descriptor table.
+        fn instantiate_kind(kind: BackendKind) -> AnyBackend {
+            match kind {
+                $(BackendKind::$kind => $constructor),*
             }
         }
     };
@@ -111,7 +132,10 @@ backend_catalog![
         started_vm_probe_order: Some(3),
         list_all: true,
         balloon_support: true,
-        warm_start_support: true
+        warm_start_support: true,
+        bundled_kernel: false,
+        needs_plan_json: true,
+        is_workload: true
     },
     {
         kind: Libkrun,
@@ -123,7 +147,10 @@ backend_catalog![
         started_vm_probe_order: Some(2),
         list_all: true,
         balloon_support: true,
-        warm_start_support: true
+        warm_start_support: true,
+        bundled_kernel: true,
+        needs_plan_json: false,
+        is_workload: true
     },
     {
         kind: Qemu,
@@ -135,7 +162,10 @@ backend_catalog![
         started_vm_probe_order: Some(1),
         list_all: true,
         balloon_support: true,
-        warm_start_support: true
+        warm_start_support: true,
+        bundled_kernel: false,
+        needs_plan_json: false,
+        is_workload: false
     },
     {
         kind: Mock,
@@ -147,7 +177,10 @@ backend_catalog![
         started_vm_probe_order: None,
         list_all: false,
         balloon_support: false,
-        warm_start_support: false
+        warm_start_support: false,
+        bundled_kernel: false,
+        needs_plan_json: false,
+        is_workload: false
     },
     {
         kind: Hvf,
@@ -159,7 +192,10 @@ backend_catalog![
         started_vm_probe_order: Some(5),
         list_all: true,
         balloon_support: false,
-        warm_start_support: false
+        warm_start_support: false,
+        bundled_kernel: false,
+        needs_plan_json: false,
+        is_workload: true
     }
 ];
 

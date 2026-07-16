@@ -14,7 +14,7 @@ use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
 use mvm_core::vm_backend::{
-    VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
+    BackendKind, VmBackend, VmCapabilities, VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
 };
 
 use crate::driver::{RunningVm, VmmDriver};
@@ -184,6 +184,13 @@ impl<D: VmmDriver, S: EndpointSpawner> WorkloadRunner<D, S> {
 impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for WorkloadRunner<D, S> {
     fn name(&self) -> &str {
         self.driver.name()
+    }
+
+    // The runner is driver-generic, but the only `VmmDriver` wired up today is
+    // `HvfDriver` — mirror `AnyBackend::kind()`'s `HvfRunner -> Hvf` mapping. A
+    // future second driver would need this to become driver-dispatched too.
+    fn kind(&self) -> BackendKind {
+        BackendKind::Hvf
     }
 
     fn capabilities(&self) -> VmCapabilities {
