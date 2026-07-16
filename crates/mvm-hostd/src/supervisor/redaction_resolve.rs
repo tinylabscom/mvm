@@ -1,9 +1,9 @@
 //! Resolve a destination host to its `RedactionAction`. Lives here, not in
-//! mvm-core, because host matching is `mvm_sdk::ir::host_matches` and mvm-sdk
+//! mvm-core, because host matching is `mvm_protocol::ir::host_matches` and mvm-sdk
 //! sits above mvm-core in the dependency graph.
 
 use mvm_core::policy::{RedactionAction, RedactionPolicy};
-use mvm_sdk::ir::host_matches;
+use mvm_protocol::ir::host_matches;
 
 /// First profile whose `host` pattern matches `dest` wins; else the policy
 /// default. First-match-wins gives operators precedence control by ordering.

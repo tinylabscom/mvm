@@ -25,7 +25,12 @@
 //! addition under the same `skip_serializing_if = "Vec::is_empty"`
 //! discipline used here.
 
-use schemars::JsonSchema;
+// Only pulled in by the `#[cfg_attr(feature = "schema", derive(...))]`
+// derives below (schemars-generated code calls `.to_owned()`).
+#[cfg(feature = "schema")]
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 /// Per-phase lifecycle command lists for an `App` or an `AddonUse`.
@@ -35,7 +40,8 @@ use serde::{Deserialize, Serialize};
 /// attribute on every phase keeps IR documents that don't use hooks
 /// byte-identical to v0 fixtures: the JSON object simply omits the
 /// `hooks` key when every phase is empty.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Hooks {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -65,7 +71,8 @@ impl Hooks {
 /// Two variants, internally tagged on `kind` — matches the rest of the
 /// IR's enum conventions (`Source`, `Image`, `MountSource`, …) so the
 /// JSON Schema and SDK generators handle the discriminant uniformly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HookCmd {
     /// Single shell line, executed via `/bin/sh -c <line>`. Use for
@@ -81,6 +88,8 @@ pub enum HookCmd {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
 
     #[test]
     fn default_hooks_is_empty() {

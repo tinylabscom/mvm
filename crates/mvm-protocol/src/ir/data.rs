@@ -7,6 +7,8 @@
 //! list by editing its `.txt` file and rebuilding — no validator
 //! code change needed.
 
+use alloc::vec::Vec;
+
 pub(crate) fn parse_lines(text: &'static str) -> Vec<&'static str> {
     text.lines()
         .map(str::trim)

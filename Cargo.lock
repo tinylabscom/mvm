@@ -2227,6 +2227,7 @@ dependencies = [
  "ipnet",
  "libc",
  "mvm-core",
+ "mvm-protocol",
  "rand 0.8.6",
  "schemars",
  "seccompiler",
@@ -2296,6 +2297,7 @@ dependencies = [
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",
+ "mvm-protocol",
  "mvm-runtime",
  "mvm-sdk",
  "notify",
@@ -2471,7 +2473,7 @@ name = "mvm-net"
 version = "0.18.0"
 dependencies = [
  "mvm-core",
- "mvm-sdk",
+ "mvm-protocol",
  "serde_json",
 ]
 
@@ -2481,6 +2483,7 @@ version = "0.18.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -2507,7 +2510,7 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-net",
- "mvm-sdk",
+ "mvm-protocol",
  "mvm-storage",
  "object_store",
  "rand 0.8.6",
@@ -2535,6 +2538,7 @@ dependencies = [
  "hex",
  "mvm-agentd",
  "mvm-core",
+ "mvm-protocol",
  "schemars",
  "serde",
  "serde_json",
@@ -2560,7 +2564,7 @@ dependencies = [
  "chrono",
  "futures",
  "mvm-core",
- "mvm-sdk",
+ "mvm-protocol",
  "object_store",
  "serde_json",
  "sha2 0.11.0",

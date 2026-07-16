@@ -43,7 +43,7 @@ use mvm_core::crypto::secret_store::{self, SecretStore};
 use mvm_core::plan::TenantId;
 use mvm_hostd::keyholder::{BindingStore, FileBindingStore, SecretBindingMeta};
 use mvm_hostd::supervisor::{EventCategory, FileAuditSigner, Recorder};
-use mvm_sdk::ir::{AuthType, Sigv4Params};
+use mvm_protocol::ir::{AuthType, Sigv4Params};
 use secrecy::SecretBox;
 
 use mvm_core::user_config::MvmConfig;
@@ -146,7 +146,7 @@ pub(in crate::commands) enum SecretAction {
     },
 }
 
-/// Clap mirror of [`mvm_sdk::ir::AuthType`] — kept local so the CLI owns
+/// Clap mirror of [`mvm_protocol::ir::AuthType`] — kept local so the CLI owns
 /// the clap dependency and `mvm-sdk` (a build-time crate) does not.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
 pub(in crate::commands) enum AuthTypeArg {

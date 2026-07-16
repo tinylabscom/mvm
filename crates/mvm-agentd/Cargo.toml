@@ -155,6 +155,10 @@ schema = ["dep:schemars", "mvm-core/schema"]
 
 [dependencies]
 mvm-core.workspace = true
+# `mvm_protocol::entrypoint::detect_shell_shebang` — the shell-launcher
+# detector the no-shell-entrypoint validator uses. `no_std` + alloc, so
+# it adds nothing to the lean-agent closure beyond what it already pulls.
+mvm-protocol.workspace = true
 # Only under `schema` (protocol-schema codegen) — see the feature above.
 schemars = { version = "0.8", optional = true }
 anyhow.workspace = true

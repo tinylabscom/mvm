@@ -36,11 +36,12 @@ members = [
     # and loopback TCP to host-vsock bridge. Distributed service mesh,
     # tenant policy, and cryptographic routing belong in mvmd.
     # plan 60 Phase 5 — build-time SDK port from ../mvmforge.
-    # mvm-sdk is the builder surface (it now also carries the
-    # canonical Workload IR as `mvm_sdk::ir`, folded from the former
-    # mvm-ir crate in plan 121 A3). The mvm-sdk-macros proc-macro crate
-    # was removed (Plan 199 C) as an orphaned empty placeholder — re-add
-    # it when the `#[mvm::function]`/`#[mvm::image]`/… bodies actually land.
+    # mvm-sdk is the builder surface; the canonical Workload IR now
+    # lives in the no_std foundation crate `mvm-protocol` and is
+    # re-exported here unchanged as `mvm_sdk::ir`. The mvm-sdk-macros
+    # proc-macro crate was removed (Plan 199 C) as an orphaned empty
+    # placeholder — re-add it when the
+    # `#[mvm::function]`/`#[mvm::image]`/… bodies actually land.
     "crates/mvm-sdk",
     # Plan 104 W1a — host services broker subprocess (one of three
     # per-VM subprocesses: mvm-broker, mvm-host-signer,

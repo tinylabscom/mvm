@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use mvm_core::config::mvm_data_dir_strict;
 use mvm_core::crypto::keystore::validate_shell_id;
-use mvm_sdk::ir::{AuthType, Sigv4Params};
+use mvm_protocol::ir::{AuthType, Sigv4Params};
 use serde::{Deserialize, Serialize};
 
 /// Per-(tenant, name) binding metadata. No secret bytes — safe to print.
@@ -28,7 +28,7 @@ pub struct SecretBindingMeta {
     /// How the keyholder uses the secret on egress (signer vs injector).
     pub auth_type: AuthType,
     /// Destinations the substituted credential may reach (claim 12).
-    /// `*.` subdomain wildcards per [`mvm_sdk::ir::host_matches`].
+    /// `*.` subdomain wildcards per [`mvm_protocol::ir::host_matches`].
     pub allowed_hosts: Vec<String>,
     /// Non-secret SigV4 params (access-key id + credential scope), set only for
     /// `auth_type = Sigv4`. The secret-access-key (the signing key) stays in the

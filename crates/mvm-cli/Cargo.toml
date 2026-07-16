@@ -16,9 +16,12 @@ mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-fs.workspace = true
 mvm-hostd.workspace = true
-# `mvmctl compile` reads the Workload IR (mvm_sdk::ir) and routes it
-# through the compile pipeline.
+# `mvmctl compile` reads the Workload IR (mvm_sdk::ir, re-exported from
+# mvm_protocol::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true
+# Direct IR access (`mvm_protocol::ir::…`) for the command surfaces that
+# only need the DTOs, not the rest of the SDK's build-time tooling.
+mvm-protocol.workspace = true
 anyhow.workspace = true
 # Real ext4 inode lookup for the Stage 0 post-build check (replaces the
 # old raw-byte substring scan over rootfs.ext4).

@@ -5,6 +5,9 @@
 //! (ECMA-262 number serialization). If floats are ever admitted to the IR,
 //! this module must be extended to perform JCS number canonicalization.
 
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use serde::Serialize;
 use serde_json::Value;
 

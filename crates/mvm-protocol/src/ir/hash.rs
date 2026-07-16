@@ -1,4 +1,5 @@
 use crate::ir::canonicalize::canonicalize;
+use alloc::string::String;
 use sha2::{Digest, Sha256};
 
 /// SHA-256 of the RFC 8785 canonical form of `value`, returned as a lowercase hex string.

@@ -269,7 +269,7 @@ mod tests {
     use crate::keyholder::{BindingStore, SecretBindingMeta};
     use mvm_core::plan::SecretSource;
     use mvm_core::util::test_env::TestEnv;
-    use mvm_sdk::ir::AuthType;
+    use mvm_protocol::ir::AuthType;
     use secrecy::SecretBox;
     use tempfile::tempdir;
 

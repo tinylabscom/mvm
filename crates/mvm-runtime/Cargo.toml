@@ -18,14 +18,16 @@ substrate_server_category = "per-VM provider plumbing (host agent UDS bridge + b
 # guest can trust host-terminated bound-host TLS. Sync (rcgen/ring), no tokio.
 mvm-core = { workspace = true, features = ["egress-ca"] }
 # The NetworkProvider seam this crate implements (BridgeTapNetworkProvider).
-# Acyclic: mvm-net deps only mvm-core + mvm-sdk.
+# Acyclic: mvm-net deps only mvm-core + mvm-protocol.
 mvm-net.workspace = true
 # `SnapshotUpper` materializes the disk snapshot the libkrun disk-only
 # warm-start boots from. Acyclic: mvm-storage deps only mvm-core +
-# mvm-sdk (both already in this crate's graph).
+# mvm-protocol (both already in this crate's graph).
 mvm-storage.workspace = true
 mvm-agentd.workspace = true
-mvm-sdk.workspace = true
+# IR `HealthCheck` that `machine::persist` (de)serializes. Direct dep
+# on the no_std foundation crate now that the IR lives there.
+mvm-protocol.workspace = true
 # `builder-vm`/`pure-mkfs` for the overlay-aware admission gate
 # (`builder_vm::admit_overlay_aware`) called from every backend's
 # `start` impl.

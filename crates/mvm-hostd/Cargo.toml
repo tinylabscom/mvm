@@ -77,11 +77,16 @@ path = "src/bin/mvm-hvf-supervisor.rs"
 # under the per-VM intermediate (`mvm_core::crypto::egress_ca`).
 mvm-core = { workspace = true, features = ["egress-ca"] }
 # The EgressEnforcer seam this crate's SupervisorEgressEnforcer
-# implements. Acyclic HIGH->LOW: mvm-net deps only mvm-core + mvm-sdk.
+# implements. Acyclic HIGH->LOW: mvm-net deps only mvm-core + mvm-protocol.
 mvm-net.workspace = true
 # `mvm_sdk::compile::deps_audit::verify_sealed_volume` — supervisor
 # admission gate (security claim 9).
 mvm-sdk.workspace = true
+# The Workload IR (`SecretRef`, `AuthType`, `HealthCheck`, `host_matches`,
+# …) the keyholder + supervisor + healthcheck modules resolve against,
+# plus the audit-chain verifier. Direct dep on the no_std foundation
+# crate the IR lives in.
+mvm-protocol.workspace = true
 # `mvm-runtime` provides the `VmNameRegistry` the TTL reaper walks, plus the
 # `VmBackend` implementations dispatched from `AnyBackend`.
 mvm-runtime.workspace = true
@@ -156,8 +161,6 @@ hex.workspace = true
 # `TestEnv` env-var guard for env-mutating tests (reaper / substitution_endpoint).
 mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }
-# audit-chain drift tripwire (supervisor tests).
-mvm-protocol.workspace = true
 # jailer property tests re-spawn under SECCOMP_PROBE=1 before main.
 ctor = "0.2"
 

@@ -4,8 +4,12 @@
 //! interactivity is handled through the console/exec surfaces; declared
 //! production entrypoints should be typed workload runners or direct argv
 //! programs, never `/bin/sh`, `bash -lc`, `/usr/bin/env sh`, or `busybox sh`.
+//!
+//! Pure string analysis — no filesystem, no OS path types — so it lives
+//! in the `no_std` + `alloc` protocol crate alongside the IR it validates.
 
-use std::path::Path;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
 /// Shell launch detected in an entrypoint argv or wrapper shebang.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,7 +107,7 @@ fn first_line(bytes: &[u8]) -> Option<&str> {
         .iter()
         .position(|b| *b == b'\n')
         .unwrap_or(bytes.len());
-    std::str::from_utf8(&bytes[..len]).ok()
+    core::str::from_utf8(&bytes[..len]).ok()
 }
 
 fn split_shebang_words(line: &str) -> Vec<String> {
@@ -112,11 +116,12 @@ fn split_shebang_words(line: &str) -> Vec<String> {
         .collect()
 }
 
+/// Last path segment of `program`, splitting on either `/` or `\`. A
+/// manual stand-in for `std::path::Path::file_name()` — this crate has
+/// no OS path type, and an entrypoint argv is wire data (a string), not
+/// a host filesystem path.
 fn program_basename(program: &str) -> &str {
-    Path::new(program)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(program)
+    program.rsplit(['/', '\\']).next().unwrap_or(program)
 }
 
 fn is_env_name(name: &str) -> bool {
@@ -192,5 +197,14 @@ mod tests {
     fn allows_non_shell_shebang() {
         assert!(detect_shell_shebang(b"#!/usr/bin/env python3\n").is_none());
         assert!(detect_shell_shebang(b"\x7fELF....").is_none());
+    }
+
+    #[test]
+    fn backslash_path_basename_is_handled() {
+        // Not a real production case (guest argv is POSIX), but the
+        // hand-rolled basename should still strip a Windows-style
+        // separator rather than treating it as part of the name.
+        let found = detect_shell_entrypoint_argv(&[r"C:\tools\sh"]).expect("must detect");
+        assert_eq!(found.shell, "sh");
     }
 }

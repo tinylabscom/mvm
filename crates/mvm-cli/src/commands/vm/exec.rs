@@ -86,7 +86,7 @@ pub(in crate::commands) struct Args {
     /// Internal (not a CLI flag): the resolved healthcheck declaration,
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
-    pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
+    pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -230,7 +230,7 @@ pub(in crate::commands) struct RunArgs {
     /// Internal (not a CLI flag): the resolved healthcheck declaration,
     /// forwarded from `machine run`'s `--healthcheck` + tuning flags.
     #[arg(skip)]
-    pub healthcheck: Option<mvm_sdk::ir::HealthCheck>,
+    pub healthcheck: Option<mvm_protocol::ir::HealthCheck>,
 }
 
 /// SDK transport modes for `mvmctl run`. Mirrors the `Mode` enum on

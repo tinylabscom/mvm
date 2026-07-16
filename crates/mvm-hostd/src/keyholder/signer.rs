@@ -12,7 +12,7 @@
 //! never sees the key" through the *same* interface — no DX change.
 
 use hmac::{Hmac, KeyInit, Mac};
-use mvm_sdk::ir::{AuthType, SecretRef};
+use mvm_protocol::ir::{AuthType, SecretRef};
 use secrecy::ExposeSecret;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -158,7 +158,7 @@ mod tests {
     use super::*;
     use crate::keyholder::LocalResolver;
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_sdk::ir::SecretMount;
+    use mvm_protocol::ir::SecretMount;
     use secrecy::SecretBox;
     use std::sync::Arc;
     use tempfile::tempdir;

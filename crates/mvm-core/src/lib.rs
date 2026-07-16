@@ -21,7 +21,6 @@ pub mod egress_handler;
 /// Secrets are substituted into outbound requests host-side and never enter the
 /// guest.
 pub mod egress_substitution;
-pub mod entrypoint_policy;
 pub mod exit_capture;
 /// Guest `mvm-netd` helpers (proxy env-var injection for cooperative apps).
 pub mod guest_netd;

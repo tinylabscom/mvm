@@ -1,4 +1,5 @@
-use std::fmt;
+use alloc::string::{String, ToString};
+use core::fmt;
 
 pub const IR_MAJOR: u32 = 0;
 pub const IR_MINOR: u32 = 2;
@@ -25,7 +26,7 @@ impl fmt::Display for VersionError {
     }
 }
 
-impl std::error::Error for VersionError {}
+impl core::error::Error for VersionError {}
 
 pub fn validate_schema_version(s: &str) -> Result<(), VersionError> {
     let mut parts = s.split('.');

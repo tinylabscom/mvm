@@ -1016,13 +1016,13 @@ pub(crate) fn persists_plan_before_start(hypervisor: &str) -> bool {
 
 pub(super) fn load_workload_ir(
     workload_ir_path: Option<&std::path::Path>,
-) -> Result<Option<mvm_sdk::ir::Workload>> {
+) -> Result<Option<mvm_protocol::ir::Workload>> {
     let Some(ir_path) = workload_ir_path else {
         return Ok(None);
     };
     let bytes = std::fs::read(ir_path)
         .with_context(|| format!("reading workload IR at {}", ir_path.display()))?;
-    let workload: mvm_sdk::ir::Workload = serde_json::from_slice(&bytes)
+    let workload: mvm_protocol::ir::Workload = serde_json::from_slice(&bytes)
         .with_context(|| format!("parsing workload IR at {}", ir_path.display()))?;
     Ok(Some(workload))
 }

@@ -1,5 +1,5 @@
+use core::fmt;
 use serde::{Serialize, Serializer};
-use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {

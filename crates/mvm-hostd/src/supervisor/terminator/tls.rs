@@ -29,7 +29,7 @@ use mvm_core::crypto::egress_ca::VmIntermediate;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
-use mvm_sdk::ir::AuthType;
+use mvm_protocol::ir::AuthType;
 
 use super::error::TerminatorError;
 use super::read::read_http_request;
@@ -524,7 +524,7 @@ mod tests {
     use crate::keyholder::{LocalResolver, SubstitutionRegistry};
     use mvm_core::crypto::egress_ca::{EgressCa, VmIntermediate};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
+    use mvm_protocol::ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::net::{TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};

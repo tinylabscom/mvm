@@ -60,7 +60,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 use crate::commands::build::trace_secret_scan::SecretFinding;
-use mvm_sdk::ir::{App, Workload};
+use mvm_protocol::ir::{App, Workload};
 
 use super::managed_secrets::lower_app_secrets;
 use crate::commands::build::sandbox_record::{

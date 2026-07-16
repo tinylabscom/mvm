@@ -61,7 +61,7 @@ mod tests {
     use super::*;
     use crate::keyholder::{LocalResolver, SubstitutionRegistry};
     use mvm_core::crypto::secret_store::{FileSecretStore, SecretStore};
-    use mvm_sdk::ir::{AuthType, SecretMount, SecretRef};
+    use mvm_protocol::ir::{AuthType, SecretMount, SecretRef};
     use secrecy::SecretBox;
     use std::net::{Ipv4Addr, SocketAddrV4};
     use std::sync::{Arc, Mutex};

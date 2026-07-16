@@ -1,14 +1,25 @@
 use crate::ir::addon::{AddonUse, ThreatTier};
 use crate::ir::hooks::Hooks;
-use schemars::JsonSchema;
+// Only pulled in by the `#[cfg(feature = "schema")]` `JsonSchemaShape`
+// impl and the `#[cfg_attr(feature = "schema", derive(...))]` derives
+// below (schemars-generated code calls `.to_owned()`).
+#[cfg(feature = "schema")]
+use alloc::borrow::ToOwned;
+#[cfg(feature = "schema")]
+use alloc::boxed::Box;
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec;
+use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// A file materialized into the workload's rootfs at build time.
 /// Replaces the legacy "write a file via a before_start shell hook"
 /// path — content and destination are carried as data and baked
 /// directly, so neither ever reaches a shell line.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct MaterializedFile {
     /// Absolute destination path in the guest rootfs.
@@ -22,7 +33,8 @@ pub struct MaterializedFile {
     pub mode: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Workload {
     pub schema_version: String,
@@ -34,7 +46,8 @@ pub struct Workload {
     pub extensions: BTreeMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct App {
     pub name: String,
@@ -143,7 +156,8 @@ impl App {
 /// install step can verify). The actual install runs at image
 /// build time inside the upstream-mvm Nix factory; this IR field
 /// is the *declaration* shape, not the install machinery.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Dependencies {
     /// Python dependency lockfile.
@@ -163,7 +177,8 @@ pub enum Dependencies {
     None,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PythonTool {
     /// `uv.lock` (TOML, hash-pinned).
@@ -173,7 +188,8 @@ pub enum PythonTool {
     PipTools,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum NodeTool {
     /// `pnpm-lock.yaml` (every dep carries `integrity:`).
@@ -185,7 +201,8 @@ pub enum NodeTool {
     Yarn,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Source {
     LocalPath {
@@ -208,7 +225,8 @@ fn default_include() -> Vec<String> {
     vec!["**".to_string()]
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Image {
     NixPackages { packages: Vec<String> },
@@ -222,7 +240,8 @@ pub enum Image {
 /// language wrapper baked into the image dispatches a
 /// named function whose return value is encoded back to the caller per
 /// the declared serialization format.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Entrypoint {
     /// Command-style entrypoint: the wrapper exec's `command` once at
@@ -323,7 +342,8 @@ pub enum Entrypoint {
 /// form because the guest is vsock-only. The timing fields are recorded for the
 /// active-probing follow-up and are not consulted while a workload only uses the
 /// presence signal.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HealthCheck {
     pub command: Vec<String>,
@@ -356,7 +376,8 @@ fn default_health_start_period_secs() -> u32 {
 /// `Pool`, …) can be added without breaking existing IR. Today the
 /// only variant is `WarmProcess` — a long-running wrapper handling
 /// many sequential calls per worker, with bounded recycling.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Concurrency {
     /// Warm-process tier: wrapper stays alive across calls, recycled
@@ -370,7 +391,8 @@ pub enum Concurrency {
 /// Validated mvm-side: `pool_size ∈ [1,64]`,
 /// `max_calls_per_worker >= 100`, `max_rss_mb <= app.resources.memory_mb`,
 /// `in_process != Concurrent` (deferred to a follow-up ADR).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct WarmProcessConfig {
     /// Recycle a worker after this many dispatches. Bounds memory
@@ -396,7 +418,8 @@ pub struct WarmProcessConfig {
 /// In-worker dispatch model. Only `Serial` is implemented in v0.2;
 /// `Concurrent` (multiple in-flight calls per worker via async) is
 /// rejected at parse time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum InProcessMode {
     /// One call at a time per worker.
@@ -414,6 +437,7 @@ pub enum InProcessMode {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonSchemaShape(pub serde_json::Map<String, serde_json::Value>);
 
+#[cfg(feature = "schema")]
 impl schemars::JsonSchema for JsonSchemaShape {
     fn schema_name() -> String {
         "JsonSchemaShape".to_string()
@@ -434,7 +458,8 @@ impl schemars::JsonSchema for JsonSchemaShape {
 /// Serialization format for function-entrypoint stdin / stdout.
 /// Closed enum — adding a variant is a wire change reviewed against
 /// the no-code-execution rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
     /// JSON over UTF-8. Default for v1 — debugs cleanly with `cat`.
@@ -447,7 +472,8 @@ fn default_working_dir() -> String {
     "/app".to_string()
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum EnvValue {
     Literal {
@@ -463,7 +489,8 @@ pub enum EnvValue {
 // secret value), `mount` is a delivery shape (env-var name or file path), and
 // `auth_type`/`allowed_hosts` say how + where the secret is used on egress. No
 // secret bytes ever live in this struct.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SecretRef {
     pub name: String,
@@ -486,7 +513,8 @@ pub struct SecretRef {
 /// credential scope (`region`/`service`). The signing key (the AWS
 /// secret-access-key) is **not** here — it lives in the secret store and never
 /// leaves the signer. Identifying but not secret, so Debug is safe.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Sigv4Params {
     /// The AWS access-key id (e.g. `AKIA…`). Public; pairs with the
@@ -501,7 +529,8 @@ pub struct Sigv4Params {
 /// How a secret authenticates an outbound request, so the keyholder picks the
 /// right path: `Sigv4`/`Hmac` are *signed* (the key never leaves the signer);
 /// `Bearer`/`Basic` are *injected* credentials.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AuthType {
     Sigv4,
@@ -526,14 +555,16 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
 // allow(secret-debug): metadata-only — variants carry the env-var name
 // or filesystem path the secret will be delivered at, not the secret
 // itself. The actual material is resolved at admission time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SecretMount {
     Env { var: String },
     File { path: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Mount {
     pub target: String,
@@ -541,7 +572,8 @@ pub struct Mount {
     pub mode: MountMode,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MountSource {
     Volume {
@@ -565,14 +597,16 @@ pub enum MountSource {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum MountMode {
     Ro,
     Rw,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Network {
     pub mode: NetworkMode,
@@ -598,7 +632,8 @@ pub struct Network {
     pub dns: Option<NetworkDns>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct NetworkEgress {
     /// Allowed `host:port` destinations. Hosts may be IP literals or
@@ -607,14 +642,16 @@ pub struct NetworkEgress {
     pub allowlist: Vec<HostPort>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct HostPort {
     pub host: String,
     pub port: u16,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NetworkDns {
     /// No DNS resolver — name resolution will fail. Use when the
@@ -631,7 +668,8 @@ pub enum NetworkDns {
 // `Copy`/`Eq` dropped when the open `Custom` variant arrived: its owned
 // `String` + `serde_json::Value` (Value isn't `Eq`) can't be either. Same
 // shape as `MountSource`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum NetworkMode {
     None,
@@ -649,7 +687,8 @@ pub enum NetworkMode {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PortForward {
     pub guest: u16,
@@ -657,14 +696,16 @@ pub struct PortForward {
     pub proto: PortProto,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum PortProto {
     Tcp,
     Udp,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
     pub cpu_cores: u16,
@@ -672,7 +713,8 @@ pub struct Resources {
     pub rootfs_size_mb: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Volume {
     pub name: String,

@@ -17,9 +17,24 @@ description = "no_std + alloc core for mvm: audit-log verifier (and, incremental
 # copy of each.
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
 ed25519-dalek = { version = "3", default-features = false }
+# Only under the `schema` feature (IR JSON-Schema codegen for
+# `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins). schemars 0.8's
+# derive macro emits `std::`-rooted paths unconditionally, so it can't
+# build under `no_std` at all — optional + off by default keeps the
+# wasm32 build (which uses only this crate's own default features)
+# schemars-free. Mirrors `mvm-core`/`mvm-agentd`'s `schema` feature.
+schemars = { version = "0.8", default-features = false, features = ["derive"], optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.11", default-features = false }
+
+[features]
+default = []
+# Derive `schemars::JsonSchema` on the Workload IR types so
+# `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins can emit the IR's
+# JSON Schema. Off by default: the schema is a build-time codegen
+# input, never linked into the wasm-clean verifier build.
+schema = ["dep:schemars"]
 
 [lints]
 workspace = true

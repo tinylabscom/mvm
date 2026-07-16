@@ -6,17 +6,25 @@ use crate::ir::workload::{
     Concurrency, Entrypoint, EnvValue, InProcessMode, JsonSchemaShape, NetworkMode, Resources,
     Source, WarmProcessConfig, Workload,
 };
+use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::fmt;
 use serde::Serialize;
-use std::collections::BTreeMap;
-use std::fmt;
-use std::sync::LazyLock;
 
 /// Field-name pattern for secret-shaped declarations.
 /// Curated list lives in `data/secret_field_tokens.txt`; see that file
 /// for the two tiers (auth credentials, financial/government
 /// identifiers) and the rationale for what is and isn't included.
-static SECRET_FIELD_TOKENS: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| parse_lines(include_str!("../../data/secret_field_tokens.txt")));
+///
+/// Parsed fresh on every call rather than cached behind a lazy static —
+/// this crate is `no_std` and has no synchronization primitive to guard
+/// a one-time init safely without `unsafe`. The list is tiny and
+/// validation is not a hot path, so the reparse cost is immaterial.
+fn secret_field_tokens() -> Vec<&'static str> {
+    parse_lines(include_str!("../../data/secret_field_tokens.txt"))
+}
 
 /// Languages mvm currently has Nix factory dispatch for. The IR
 /// field is an open string but the host validator rejects values
@@ -24,9 +32,11 @@ static SECRET_FIELD_TOKENS: LazyLock<Vec<&'static str>> =
 /// `E_UNSUPPORTED_LANGUAGE`. Curated list lives in
 /// `data/supported_languages.txt`; adding a language is append-here,
 /// plus a per-language Nix factory in `nix/factories/`, dispatch
-/// from `flake.rs`, and a corpus entry.
-pub static SUPPORTED_LANGUAGES: LazyLock<Vec<&'static str>> =
-    LazyLock::new(|| parse_lines(include_str!("../../data/supported_languages.txt")));
+/// from `flake.rs`, and a corpus entry. Parsed fresh on every call — see
+/// [`secret_field_tokens`] for why this isn't a lazy static.
+pub fn supported_languages() -> Vec<&'static str> {
+    parse_lines(include_str!("../../data/supported_languages.txt"))
+}
 
 /// Recognize wildcard / "any" host strings in an egress allowlist.
 /// Callers must enumerate concrete hosts.
@@ -39,7 +49,7 @@ fn is_wildcard_host(host: &str) -> bool {
 
 fn is_secret_field_name(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
-    SECRET_FIELD_TOKENS.iter().any(|tok| {
+    secret_field_tokens().iter().any(|tok| {
         lower == *tok || lower.ends_with(&format!("_{tok}")) || lower.ends_with(&format!("-{tok}"))
     })
 }
@@ -151,8 +161,7 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
         let is_function_entrypoint = !function_entries.is_empty();
         // Multi-function uniqueness + primary-flag invariants.
         if function_entries.len() > 1 {
-            let mut seen: std::collections::HashSet<(&str, &str)> =
-                std::collections::HashSet::new();
+            let mut seen: BTreeSet<(&str, &str)> = BTreeSet::new();
             for ep in &function_entries {
                 if let Entrypoint::Function {
                     module, function, ..
@@ -212,8 +221,7 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                 Entrypoint::Function { env, .. } => env,
             };
             if let Entrypoint::Command { command, .. } = ep
-                && let Some(shell) =
-                    mvm_core::entrypoint_policy::detect_shell_entrypoint_argv(command)
+                && let Some(shell) = crate::entrypoint::detect_shell_entrypoint_argv(command)
             {
                 errors.push(ValidationError {
                     code: ErrorCode::ShellEntrypointForbidden,
@@ -234,7 +242,8 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                 ..
             } = ep
             {
-                if !SUPPORTED_LANGUAGES.contains(&language.as_str()) {
+                let supported_languages = supported_languages();
+                if !supported_languages.contains(&language.as_str()) {
                     errors.push(ValidationError {
                         code: ErrorCode::UnsupportedLanguage,
                         path: format!("{ep_path}.language"),
@@ -245,7 +254,7 @@ pub fn validate(workload: &Workload) -> Result<(), Vec<ValidationError>> {
                              to `entrypoint_function(...)`, or add a per-language \
                              factory at `nix/factories/mk<Lang>FunctionService.nix` \
                              and append to `SUPPORTED_LANGUAGES` per ADR-0010 §4.",
-                            &*SUPPORTED_LANGUAGES
+                            supported_languages
                         ),
                     });
                 }
@@ -472,8 +481,7 @@ fn validate_concurrency(
 /// signature validation) live in `mvm::addon::resolve_and_validate`,
 /// which has the lockfile + cached artifact bytes available.
 fn validate_addons(addons: &[AddonUse], base: &str, errors: &mut Vec<ValidationError>) {
-    use std::collections::HashSet;
-    let mut seen: HashSet<(&str, Option<&str>)> = HashSet::new();
+    let mut seen: BTreeSet<(&str, Option<&str>)> = BTreeSet::new();
     for (i, addon) in addons.iter().enumerate() {
         let path = format!("{base}.addons[{i}]");
         if !is_valid_id(&addon.name) {

@@ -1,7 +1,8 @@
 //! Per-destination egress redaction policy. Pure data; the destination
-//! resolver lives in mvm-hostd (it needs `mvm_sdk::ir::host_matches`, which
-//! sits above mvm-core). Default is today's curated-only baseline: structured
-//! PII per the workload `PiiPolicy`, curated secrets block, entropy + names off.
+//! resolver lives in mvm-hostd (it needs `mvm_protocol::ir::host_matches`,
+//! which sits above mvm-core). Default is today's curated-only baseline:
+//! structured PII per the workload `PiiPolicy`, curated secrets block,
+//! entropy + names off.
 
 use serde::{Deserialize, Serialize};
 

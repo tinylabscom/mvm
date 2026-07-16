@@ -171,7 +171,7 @@ fn check_no_shell_shebang(file: &mut File, path: &Path) -> Result<(), Validation
         path: path.to_path_buf(),
         source: e.to_string(),
     })?;
-    if let Some(shell) = mvm_core::entrypoint_policy::detect_shell_shebang(&prefix[..len]) {
+    if let Some(shell) = mvm_protocol::entrypoint::detect_shell_shebang(&prefix[..len]) {
         return Err(ValidationError::ShellEntrypoint {
             path: path.to_path_buf(),
             shell: shell.shell,

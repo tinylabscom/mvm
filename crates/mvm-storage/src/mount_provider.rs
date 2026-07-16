@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use mvm_core::volume::{VolumeError, VolumeName};
-use mvm_sdk::ir::MountSource;
+use mvm_protocol::ir::MountSource;
 
 use crate::provider::{StorageProvider, VolumeSpec};
 

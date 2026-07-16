@@ -10,9 +10,13 @@
 //! `crates/mvm-sdk-addon`.
 
 use crate::ir::hooks::Hooks;
-use schemars::JsonSchema;
+// Only pulled in by the `#[cfg_attr(feature = "schema", derive(...))]`
+// derives below (schemars-generated code calls `.to_owned()`).
+#[cfg(feature = "schema")]
+use alloc::borrow::ToOwned;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// One use of an addon by the consuming app.
 ///
@@ -20,7 +24,8 @@ use std::collections::BTreeMap;
 /// artifact; `alias` disambiguates env-var prefixes when the same addon
 /// is used multiple times. `params` are validated against the manifest's
 /// `[[addon.params]]` table at compile time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AddonUse {
     /// Bare addon name (matches the manifest's `[addon].name`). Pattern
@@ -74,7 +79,8 @@ pub struct AddonUse {
 /// future in-VM addon tier where small Nix fragments compose directly
 /// into the consumer's `mkGuest` flake; it is rejected by the
 /// validator with `E_ADDON_TIER_NOT_IMPLEMENTED` until that lands.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum AddonTier {
     Separate,
@@ -82,7 +88,8 @@ pub enum AddonTier {
 }
 
 /// Resolution kind for an addon — registry-published or local-path.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AddonRef {
     /// Registry-resolved addon. `url` is the canonical registry URL
@@ -101,7 +108,8 @@ pub enum AddonRef {
 ///
 /// Defaults to `Untrusted` (most protective). Workloads that run only
 /// first-party reviewed code can opt into `Trusted` for finer packing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum ThreatTier {
     /// Runs user-provided / sandboxed code. Default. Forces strictest
