@@ -103,7 +103,7 @@ flowchart TB
     User["CLI / SDK / tool caller"]
     Runtime["mvm runtime"]
     Admission["Admission<br/>signs + verifies the plan"]
-    Backend["MicroVM backend<br/>Firecracker / libkrun / Apple VZ / Apple Container"]
+    Backend["MicroVM backend<br/>Firecracker / libkrun / HVF"]
     Audit["Audit log + receipts"]
   end
 

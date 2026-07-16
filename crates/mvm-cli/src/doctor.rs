@@ -159,7 +159,7 @@ struct DoctorReport {
     /// output is deterministic.
     balloon_support: BTreeMap<String, bool>,
     /// Per-backend warm-start tier + the Linux fast-resume substrate probe.
-    /// Surfaces the honest capability matrix — Firecracker live-memory, Vz
+    /// Surfaces the honest capability matrix — Firecracker live-memory, HVF
     /// save/restore, libkrun disk-only — so a user can predict which backend
     /// resumes from RAM vs. reboots from disk.
     warm_start: WarmStartReport,
@@ -480,7 +480,7 @@ fn builderd_daemon_summary(vms_root: &std::path::Path) -> String {
         if !dir.is_dir() {
             continue;
         }
-        // A builder VM may be libkrun (`<dir>/vsock-<port>.sock`) or Vz
+        // A builder VM may be libkrun (`<dir>/vsock-<port>.sock`) or HVF
         // (`<dir>/vsock/vsock-<port>.sock`); probe whichever socket the
         // backend actually created.
         let Some(sock) = mvm_build::builderd::builderd_control_socket_candidates(&dir)
@@ -936,7 +936,7 @@ fn render_capability_table(rows: &[BackendCapabilityRow]) {
 
 /// Enumerate every backend's `snapshot_capability()` tier and, on Linux,
 /// probe the fast-resume substrate. Surfaced so a user knows which backend
-/// resumes from RAM (Firecracker live-memory, Vz save/restore) vs. reboots
+/// resumes from RAM (Firecracker live-memory, HVF save/restore) vs. reboots
 /// from a disk snapshot (libkrun) before relying on a warm start.
 fn collect_warm_start_support() -> WarmStartReport {
     let mut backends = BTreeMap::new();
@@ -1230,7 +1230,7 @@ fn nested_kvm_check(plat: Platform) -> Check {
             name: "nested-kvm",
             category: "platform",
             ok: true,
-            info: "n/a (Linux-only — macOS hosts use libkrun/Vz; Plan 100 W6 affects Linux only)"
+            info: "n/a (Linux-only — macOS hosts use libkrun/HVF; Plan 100 W6 affects Linux only)"
                 .to_string(),
         };
     }
@@ -1284,7 +1284,8 @@ fn linux_builder_vm_requested_for_doctor() -> bool {
 }
 
 fn kvm_check(plat: Platform, in_vm: bool) -> Check {
-    // Inside Lima VM or native Linux: check /dev/kvm locally
+    // Inside the Linux execution environment (builder VM) or native Linux:
+    // check /dev/kvm locally
     if in_vm
         || plat == Platform::LinuxNative
         || plat == Platform::LinuxNoKvm
@@ -1295,7 +1296,7 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
         return match shell::run_host("bash", &["-c", "test -c /dev/kvm && echo ok"]) {
             Ok(out) if out.status.success() => {
                 let context = if in_vm {
-                    "available (inside Lima VM)"
+                    "available (inside the Linux execution environment)"
                 } else {
                     "available"
                 };
@@ -1311,7 +1312,7 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
                 category: "platform",
                 ok: false,
                 info: if in_vm {
-                    "/dev/kvm not accessible inside Lima VM".to_string()
+                    "/dev/kvm not accessible inside the Linux execution environment".to_string()
                 } else {
                     "not available. Enable virtualization in BIOS or check permissions on /dev/kvm."
                         .to_string()
@@ -1321,14 +1322,14 @@ fn kvm_check(plat: Platform, in_vm: bool) -> Check {
     }
 
     // macOS host: /dev/kvm doesn't exist anywhere in the stack — the
-    // backend is Apple Container / libkrun driven by
-    // Hypervisor.framework. Lima is gone; reporting KVM as missing on
-    // macOS would be a stale artifact from that era.
+    // backend is libkrun or HVF driven by Hypervisor.framework. Lima is
+    // gone; reporting KVM as missing on macOS would be a stale artifact
+    // from that era.
     Check {
         name: "kvm",
         category: "platform",
         ok: true,
-        info: "n/a on macOS (Hypervisor.framework via libkrun / Apple Container)".to_string(),
+        info: "n/a on macOS (Hypervisor.framework via libkrun / HVF)".to_string(),
     }
 }
 
@@ -3603,7 +3604,7 @@ mod tests {
     // The selection layer's `auto_detect_default()` queries the real
     // host platform (not the `Platform` enum passed to the check). On
     // Linux CI runners it always returns Qemu. macOS contributor
-    // hosts get covered by the existing `vz_check_macos_reports_*`
+    // hosts get covered by the existing `runtime_backend_check_macos_reports_*`
     // tests above; this Linux-only test pins the format of the new
     // `builder backend` line so the doctor report stays readable for
     // operators on the supported Linux path.
@@ -3923,17 +3924,17 @@ mod tests {
     }
 
     #[test]
-    fn builderd_daemon_summary_finds_a_vz_shaped_socket() {
+    fn builderd_daemon_summary_finds_an_hvf_shaped_socket() {
         use std::os::unix::net::UnixListener;
-        // Regression for the live Vz boot: the Vz supervisor nests the
+        // Regression for the live HVF boot: the HVF supervisor nests the
         // control socket under `<vm_state_dir>/vsock/`. The scan must find
         // it there, not only at the libkrun `<vm_state_dir>/vsock-*.sock`.
         let root = tempfile::Builder::new()
             .prefix("mvmbd")
             .tempdir_in("/tmp")
             .unwrap();
-        let vm_dir = root.path().join("bvz");
-        let sock = mvm_build::builderd::builderd_vz_control_socket_path(&vm_dir);
+        let vm_dir = root.path().join("bhvf");
+        let sock = mvm_build::builderd::builderd_hvf_control_socket_path(&vm_dir);
         std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
         let listener = match UnixListener::bind(&sock) {
             Ok(listener) => listener,
@@ -3949,7 +3950,7 @@ mod tests {
         });
 
         let s = builderd_daemon_summary(root.path());
-        assert!(s.contains("bvz: ready"), "got {s:?}");
+        assert!(s.contains("bhvf: ready"), "got {s:?}");
         handle.join().expect("server thread");
     }
 

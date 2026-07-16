@@ -339,7 +339,7 @@ pub(in crate::commands) fn run_secure(cli: &Cli, args: RunArgs, cfg: &MvmConfig)
 
     // Every transient run is admitted as a locally-signed workload (uniform
     // with `up`): a signed `ExecutionPlan` sets `tenant_id`, which makes the
-    // libkrun/Vz supervisor spawn the enforcing gateway bridge (so the egress
+    // libkrun/HVF supervisor spawn the enforcing gateway bridge (so the egress
     // policy is enforced and the run is chain-audited) instead of the legacy
     // unfiltered path. The closure runs inside the boot path with the resolved
     // rootfs + generated vm_name. cpus/mem are captured here because `args` is
@@ -905,7 +905,7 @@ struct ReceiptInput {
     /// How faithfully the resolved backend actually enforces that posture
     /// (`flow-drop`, `open`, `<backend>:l4-host-port`). Recorded so the signed
     /// receipt cannot overstate enforcement fidelity — a host:port allow-list is
-    /// now port-gated on every backend (Firecracker nftables; libkrun/Vz via the
+    /// now port-gated on every backend (Firecracker nftables; libkrun/HVF via the
     /// admission-time DNS pin → L4 scan). See `shared::egress_enforcement_label`.
     egress_enforcement: String,
     command: ReceiptCommand,
@@ -1552,7 +1552,7 @@ mod tests {
 
         // deny-all is uniform across backends.
         let deny = run_args(RunProfile::Standard);
-        let r = ReceiptInput::from_run_args(&deny, "vz").expect("receipt input");
+        let r = ReceiptInput::from_run_args(&deny, "hvf").expect("receipt input");
         assert_eq!(r.network_posture, "deny-all");
         assert_eq!(r.egress_enforcement, "flow-drop");
     }

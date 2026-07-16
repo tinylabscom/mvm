@@ -3,7 +3,7 @@
 //! Runs from a tiny initramfs baked by `mkGuest` when
 //! `verifiedBoot = true`. The kernel-cmdline `dm-mod.create=` path
 //! doesn't work for our microVM hypervisors because Firecracker
-//! (and Apple VZ) auto-append `root=/dev/vda ro` to the cmdline on
+//! (and HVF) auto-append `root=/dev/vda ro` to the cmdline on
 //! aarch64; the kernel uses last-wins for `root=`, so a verity
 //! `root=/dev/dm-0` we set ourselves is silently overridden. We
 //! solve that by owning the boot pivot in userspace: this binary

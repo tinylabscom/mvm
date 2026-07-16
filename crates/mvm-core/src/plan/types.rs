@@ -101,7 +101,7 @@ pub struct TenantId(pub String);
 #[serde(transparent)]
 pub struct WorkloadId(pub String);
 
-/// Reference to a runtime profile (Firecracker / libkrun / Vz / QEMU).
+/// Reference to a runtime profile (Firecracker / libkrun / HVF / QEMU).
 /// The open `BackendRegistry` resolves the name to a backend factory.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -610,8 +610,8 @@ pub enum ShareKind {
 ///
 /// Claim 1 ("no host-fs access from a guest beyond explicit shares") +
 /// claim 8. Today user volumes attach as a host-side launch detail; this
-/// binding makes each an *admitted, signed, audited* grant so the Vz
-/// supervisor's future "refuse a share the admitted plan didn't name"
+/// binding makes each an *admitted, signed, audited* grant so a future
+/// supervisor-side "refuse a share the admitted plan didn't name"
 /// gate can allow them, and every admission emits the list to the
 /// chain-signed audit log. `deny_unknown_fields` + the
 /// absolute-path check keep a forged plan from smuggling a grant past
@@ -795,7 +795,7 @@ mod build_provenance_tests {
             input_kind: InputKind::Oci,
             input_ref: "docker.io/library/alpine@sha256:abc".to_string(),
             lock_digest: Some("sha256:manifest".to_string()),
-            builder_id: Some("builder-vz-01".to_string()),
+            builder_id: Some("builder-hvf-01".to_string()),
             artifacts: ArtifactDigests {
                 kernel: Some("k".repeat(64)),
                 rootfs: Some("r".repeat(64)),

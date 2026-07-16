@@ -299,7 +299,8 @@ pub fn fork_vm_full_fc(
 }
 
 /// Liveness probe for a VM by name: a non-stale `vz.pid` whose process still
-/// exists. Mirrors the host-side pid-file convention the Vz backend writes.
+/// exists. Mirrors the host-side pid-file convention the now-removed Vz
+/// backend wrote; unreachable while [`FORK_ALLOW_PARENT_RUNNING`] is `true`.
 fn vm_is_running(vm_name: &str) -> bool {
     let pid_file = mvm_core::config::vm_state_dir(vm_name).join("vz.pid");
     let Ok(s) = std::fs::read_to_string(&pid_file) else {

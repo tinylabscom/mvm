@@ -1338,7 +1338,7 @@ fn install_shutdown_handler(_krun: &sys::Context) -> Result<(), Error> {
 /// "unknown variant" error.
 ///
 /// Scope: this reservation is `mvm-libkrun::SupervisorConfig`-only.
-/// The shared `mvm-bridge` sidecar binary (Firecracker + vz)
+/// The shared `mvm-bridge` sidecar binary (Firecracker)
 /// doesn't need an equivalent field because its crash policy is
 /// enforced by the parent `mvm-backend` process via the watchdog
 /// thread — the bridge dies, the parent observes the exit, the
@@ -1402,9 +1402,10 @@ pub struct SupervisorConfig {
     #[serde(default)]
     pub gateway_audit_socket: Option<std::path::PathBuf>,
     /// `~/.mvm/audit/gateway-events-<vm>.sock` — per-VM ingest
-    /// socket the Vz Swift bridge connects to (one writer only).
-    /// Required for Vz backend; ignored on libkrun (which spawns
-    /// its bridge in-process).
+    /// socket an out-of-process gateway bridge connects to (one writer
+    /// only). Ignored on libkrun (which spawns its bridge in-process); the
+    /// out-of-process backend that needed it (the removed Vz backend's
+    /// Swift bridge) is gone, so no current backend sets this.
     #[serde(default)]
     pub gateway_events_socket: Option<std::path::PathBuf>,
     /// `~/.mvm/keys/host-signer.ed25519` — host signing key for
@@ -1494,8 +1495,8 @@ impl SupervisorConfig {
     ///   `~/.mvm/keys/` (path-traversal defense — the signing key
     ///   is host-trust-boundary state per claim 8).
     ///
-    /// `gateway_events_socket` is validated only when the backend
-    /// requires it (Vz only); libkrun's in-process bridge ignores it.
+    /// `gateway_events_socket` is not validated here — no current backend
+    /// requires it; libkrun's in-process bridge ignores it.
     pub fn validate_audit_substrate(&self) -> Result<(), AuditSubstrateError> {
         let tenant = self
             .tenant_id
@@ -1602,7 +1603,8 @@ pub struct SupervisorAttachConfig {
     pub audit_dir: std::path::PathBuf,
     /// `~/.mvm/audit/gateway-<vm>.sock` — per-VM subscriber socket.
     pub gateway_audit_socket: std::path::PathBuf,
-    /// Vz-only ingest socket; ignored on libkrun (in-process bridge).
+    /// Out-of-process gateway-bridge ingest socket; ignored on libkrun
+    /// (in-process bridge). No current backend sets this.
     #[serde(default)]
     pub gateway_events_socket: Option<std::path::PathBuf>,
     /// JSON-encoded `SignedExecutionPlan` envelope — same carrier shape as

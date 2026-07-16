@@ -176,7 +176,7 @@ pub fn resolver_override_from_cmdline(cmdline: &str) -> Option<&str> {
 
 /// The gateway-local resolver line for the active VMM's virtual network.
 ///
-/// QEMU user-mode networking serves DNS at 10.0.2.3. The libkrun/Vz path
+/// QEMU user-mode networking serves DNS at 10.0.2.3. The libkrun/HVF path
 /// defaults to the shared virtual gateway at 192.168.127.1, but a host-supplied
 /// `mvm.resolver=` token can override that when the active gateway only answers
 /// DNS for a forwarded upstream address. Host-side resolution through the
@@ -661,7 +661,7 @@ nameserver 10.0.0.3
     fn gateway_static_fallback_only_on_gateway_backend_failure() {
         // success → never fall back
         assert!(!gateway_static_fallback_applies("anything", true));
-        // gateway-backed libkrun/Vz failure → fall back
+        // gateway-backed libkrun/HVF failure → fall back
         assert!(gateway_static_fallback_applies("console=hvc0", false));
         // QEMU failure → do NOT apply the shared-gateway static (QEMU uses ip= autoconfig)
         assert!(!gateway_static_fallback_applies("mvm.backend=qemu", false));

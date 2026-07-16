@@ -162,7 +162,6 @@ impl From<&mvm_core::vm_backend::VmVolume> for RuntimeVolume {
 // ---------------------------------------------------------------------------
 
 /// Find the built-in images directory (e.g., images/openclaw/).
-/// Same lookup pattern as config::find_lima_template().
 fn find_images_dir() -> Result<PathBuf> {
     let exe_dir = std::env::current_exe()?
         .parent()
@@ -387,7 +386,7 @@ exec "$BAKE_EXE" --cpus "$CPUS" --memory "$MEMORY" "${{BAKE_ARGS[@]}}"
 // Build
 // ---------------------------------------------------------------------------
 
-/// Repair /dev/null inside the Lima VM if it has wrong permissions or was
+/// Repair /dev/null in the Linux execution environment if it has wrong permissions or was
 /// deleted.  This can happen when a previous `mvm build` was Ctrl-C'd while
 /// bind mounts were active, causing `rm -rf` to destroy device nodes through
 /// the mount.
@@ -433,7 +432,7 @@ fn ensure_base_assets() -> Result<()> {
     Ok(())
 }
 
-/// Ensure squashfs-tools is available in the Lima VM.
+/// Ensure squashfs-tools is available in the Linux execution environment.
 fn ensure_squashfs_tools() -> Result<()> {
     let has_it = run_in_vm("command -v mksquashfs >/dev/null 2>&1")?;
     if !has_it.status.success() {
@@ -443,7 +442,7 @@ fn ensure_squashfs_tools() -> Result<()> {
     Ok(())
 }
 
-/// Ensure the bake binary is available in the Lima VM.
+/// Ensure the bake binary is available in the Linux execution environment.
 fn ensure_bake() -> Result<()> {
     let has_it = run_in_vm(&format!("test -x {dir}/tools/bake", dir = MICROVM_DIR))?;
     if has_it.status.success() {
@@ -668,7 +667,7 @@ echo "[mvm] Phase 2 complete: squashfs created."
 
     // Generate host_init.sh
     let host_init = generate_host_init(&config);
-    // Write it into the Lima VM
+    // Write it into the Linux execution environment
     run_in_vm(&format!(
         r#"cat > $HOME/microvm/images/{name}.host_init.sh << 'HOSTINITEOF'
 {host_init}
@@ -711,32 +710,27 @@ ls -lh "$IMAGES_DIR/{name}.$(uname -m).elf"
         name = name,
     ))?;
 
-    // Get the default path inside the Lima VM
+    // Get the default path inside the Linux execution environment
+    // (native Linux host, or the libkrun/HVF builder VM on macOS).
     let vm_elf_path = run_in_vm_stdout(&format!(
         "echo $HOME/microvm/images/{name}.$(uname -m).elf",
         name = name,
     ))?;
 
-    // If --output was given, copy the ELF to the requested host path
-    let final_path = if let Some(out) = output {
-        use std::process::Command;
-        let status = Command::new("limactl")
-            .args([
-                "copy",
-                &format!("{}:{}", crate::base::config::VM_NAME, vm_elf_path.trim()),
-                out,
-            ])
-            .status()
-            .context("Failed to copy ELF from Lima VM")?;
-        if !status.success() {
-            anyhow::bail!("Failed to copy ELF to {}", out);
-        }
-        out.to_string()
-    } else {
-        vm_elf_path
-    };
+    // If --output was given, copy the ELF to the requested host path. The
+    // legacy Mvmfile build path has no supported host-copy mechanism since
+    // the Lima host-VM layer was retired; fail closed with an actionable
+    // message rather than leaving the ELF stranded in the Linux environment.
+    if output.is_some() {
+        anyhow::bail!(
+            "--output is not supported on the legacy Mvmfile build path (the ELF was \
+             built at {} inside the Linux execution environment, but there is no \
+             supported host-copy mechanism); use `mvmctl build image --flake` instead",
+            vm_elf_path.trim()
+        );
+    }
 
-    Ok(final_path)
+    Ok(vm_elf_path)
 }
 
 // ---------------------------------------------------------------------------
@@ -953,8 +947,8 @@ mod tests {
     /// Host-conditioned: only asserts on the tier it actually applies to.
     #[cfg(target_os = "macos")]
     #[test]
-    fn rsync_image_to_host_fails_closed_on_vz_default_tier() {
-        if !mvm_core::platform::current().is_vz_default_tier() {
+    fn rsync_image_to_host_fails_closed_on_hvf_default_tier() {
+        if !mvm_core::platform::current().is_hvf_default_tier() {
             return;
         }
         let err = rsync_image_to_host("/nonexistent.ext4", "/nonexistent-host-dir")

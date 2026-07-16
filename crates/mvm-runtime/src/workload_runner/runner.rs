@@ -581,7 +581,7 @@ mod tests {
             "console ports must be HostDials"
         );
 
-        // Paths live under <state_dir>/vsock/ — same shape as the Vz convention.
+        // Paths live under <state_dir>/vsock/ — the shared HVF vsock convention.
         let first = &console[0];
         assert!(
             first.host_uds.to_string_lossy().contains("/vsock/vsock-"),

@@ -1034,8 +1034,8 @@ fn run_stage0_root_dir(
 
     // Dispatch Stage 0 through the `BuilderVm` trait. QEMU when explicitly
     // chosen (`MVM_BUILDER_BACKEND=qemu`) and **libkrun otherwise** — including
-    // the Vz auto-detect default on macOS-26+, since Vz Stage 0 is still a gap.
-    // That preserves the "Stage 0 is libkrun even on Vz-default hosts"
+    // the HVF auto-detect default on macOS-26+, since HVF Stage 0 is still a gap.
+    // That preserves the "Stage 0 is libkrun even on HVF-default hosts"
     // invariant. `verbose` forwards the in-guest nix `--print-build-logs`
     // output to host stderr.
     //

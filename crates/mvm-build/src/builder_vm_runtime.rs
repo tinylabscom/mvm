@@ -1,7 +1,7 @@
 //! Hypervisor-agnostic builder-VM orchestration helper.
 //!
 //! `BuilderVmRuntime` is the shared orchestration body that both
-//! the libkrun and Vz builder paths route through. It owns the
+//! the libkrun and HVF builder paths route through. It owns the
 //! pieces that aren't tied to a specific VMM:
 //!
 //! - `cmd.sh` emission (Flake jobs) and `install_spec.json` staging
@@ -10,7 +10,7 @@
 //! - Per-variant artifact finalisation (rootfs path resolution,
 //!   revision hash extraction, install-volume sidecar discovery)
 //! - Nix store image lock acquisition (libkrun-only concern in
-//!   today's runtime; abstracted here for future Vz reuse)
+//!   today's runtime; abstracted here for future HVF reuse)
 //! - stderr-tail capture for build-failure diagnostics
 //! - Wall-clock timeout handling
 //!
@@ -18,11 +18,11 @@
 //!
 //! - Supervisor process lifecycle (lives in the
 //!   `VmBackendForBuilder` impl — libkrun's
-//!   `spawn_supervisor_in_background` / Vz's `run_attached`)
+//!   `spawn_supervisor_in_background` / HVF's `run_attached`)
 //! - Console-log watching for kernel-panic detection (also lives
 //!   in the impl; surfaces through `BuilderVmExitInfo.panic_line`)
 //! - Hypervisor-specific config translation (KrunContext vs.
-//!   Vz's `SupervisorConfig`)
+//!   HVF's `SupervisorConfig`)
 //!
 //! Today the helper is a skeleton. Subsequent commits migrate the
 //! concerns above out of `LibkrunBuilderVm.run_build` into here,
@@ -85,7 +85,7 @@ pub fn builder_store_gc_cap_kib() -> u64 {
 /// Per-job dir filename mvm-host-vm-init detects to dispatch
 /// through the application-dependency install pipeline. Migrated
 /// from `libkrun_builder.rs` because the install spec staging is a
-/// hypervisor-agnostic concern that both the libkrun and Vz builder
+/// hypervisor-agnostic concern that both the libkrun and HVF builder
 /// paths need.
 pub const INSTALL_SPEC_FILENAME: &str = "install_spec.json";
 
@@ -173,7 +173,7 @@ impl<'a> BuilderVmRuntime<'a> {
 ///   instead of `cmd.sh`.
 ///
 /// Hypervisor-agnostic — the staging produces files in a virtio-fs
-/// share; libkrun and Vz both bind-mount the same host dir, so the
+/// share; libkrun and HVF both bind-mount the same host dir, so the
 /// helper doesn't need to know which VMM is on the other end.
 /// Migrated from `libkrun_builder.rs`.
 pub fn stage_job_dir(
@@ -629,7 +629,7 @@ pub fn shell_single_quote_escape(s: &str) -> String {
 /// exit code and the cmd.sh stderr-tail ringbuffer for diagnostics.
 ///
 /// Hypervisor-agnostic: the file lives in the `/job` virtio-fs share,
-/// which both libkrun and Vz attach identically. Migrated from
+/// which both libkrun and HVF attach identically. Migrated from
 /// `libkrun_builder.rs`.
 #[derive(Debug, Deserialize)]
 pub struct JobResult {
@@ -989,7 +989,7 @@ fn tail_forward(
 /// Finalize a flake build: read `<job_dir>/result`, validate the
 /// `rootfs.ext4` (and optional `vmlinux`) landed in `artifact_out`,
 /// return a [`BuilderArtifacts::Image`]. Hypervisor-agnostic — the
-/// inputs are all host paths into virtio-fs shares libkrun and Vz
+/// inputs are all host paths into virtio-fs shares libkrun and HVF
 /// both attach identically.
 pub fn finalize_flake_job(
     job_dir: &Path,
@@ -1159,13 +1159,14 @@ pub fn finalize_install_job(artifact_out: &Path) -> Result<BuilderArtifacts, Bui
 /// the full VM lifetime.
 ///
 /// The lock lives on a **sidecar** `<image>.lock` file, NOT on the
-/// image fd itself. Apple `Virtualization.framework` takes its own
-/// exclusive lock on a read-write `VZDiskImageStorageDeviceAttachment`
-/// at `vm.start()`; if the host also held an `flock` on the image it
-/// would collide ("The storage device attachment is invalid"). libkrun
-/// doesn't lock the image, so it was unaffected — the sidecar split
-/// keeps the cross-process serialisation while letting the hypervisor
-/// open the image exclusively. The host holds no fd on the image.
+/// image fd itself. The macOS hypervisor (formerly Apple
+/// `Virtualization.framework`'s `VZDiskImageStorageDeviceAttachment`, now
+/// HVF) takes its own exclusive lock on the disk image at `vm.start()`;
+/// if the host also held an `flock` on the image it would collide
+/// ("The storage device attachment is invalid"). libkrun doesn't lock
+/// the image, so it was unaffected — the sidecar split keeps the
+/// cross-process serialisation while letting the hypervisor open the
+/// image exclusively. The host holds no fd on the image.
 ///
 /// `_file: std::fs::File` is **load-bearing** — it's the sidecar lock
 /// handle; dropping the guard releases the lock. Callers must keep the
@@ -1173,7 +1174,7 @@ pub fn finalize_install_job(artifact_out: &Path) -> Result<BuilderArtifacts, Bui
 /// done. Called out explicitly because an underscore-prefixed field
 /// reads as inert; it isn't.
 ///
-/// Hypervisor-agnostic: both libkrun and Vz attach the same image
+/// Hypervisor-agnostic: both libkrun and HVF attach the same image
 /// path as a virtio-blk device. Migrated from `libkrun_builder.rs`.
 #[derive(Debug)]
 pub struct NixStoreImageLock {
@@ -1194,7 +1195,7 @@ impl NixStoreImageLock {
 ///
 /// Same discipline as [`NixStoreImageLock`]: a read-write volume holds
 /// a sidecar `<image>.lock` flock so two VMs can't RW-attach (and
-/// corrupt) the same ext4 image — and so Apple Vz can take its own
+/// corrupt) the same ext4 image — and so HVF can take its own
 /// exclusive open. Read-only volumes hold no lock (multiple readers are
 /// safe). Either way the host keeps no fd on the image itself.
 #[derive(Debug)]
@@ -1229,7 +1230,7 @@ fn sidecar_lock_path(image: &Path) -> PathBuf {
 /// is left untouched so a warm store / volume survives across runs.
 ///
 /// The fd is dropped before returning — deliberately. The host must
-/// hold no open handle on the image so the hypervisor (Apple Vz) can
+/// hold no open handle on the image so the hypervisor (HVF) can
 /// open it exclusively; serialisation lives on the sidecar lock.
 fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmError> {
     let existed_before_open = path.exists();
@@ -1278,8 +1279,8 @@ fn sparse_create_image(path: &Path, size_bytes: u64) -> Result<(), BuilderVmErro
 /// Open (creating if needed) the sidecar lock file at `lock_path` and
 /// take an exclusive `flock`. The lock — never the image — is what
 /// serialises concurrent writers, so the image carries no host-side
-/// lock and the hypervisor can open it exclusively (required for Apple
-/// Vz; harmless for libkrun). Returns the locked handle; dropping it
+/// lock and the hypervisor can open it exclusively (required for
+/// HVF; harmless for libkrun). Returns the locked handle; dropping it
 /// releases the lock.
 fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, BuilderVmError> {
     use fs2::FileExt;
@@ -1313,7 +1314,7 @@ fn acquire_sidecar_lock(lock_path: &Path) -> Result<std::fs::File, BuilderVmErro
 /// (an existing volume is preserved so data survives across runs). A
 /// read-write volume takes a sidecar `<host_path>.lock` exclusive
 /// `flock` — two VMs RW-attaching the same image corrupt its ext4, and
-/// Apple Vz refuses it outright. Read-only volumes take no lock
+/// HVF refuses it outright. Read-only volumes take no lock
 /// (multiple readers are safe). In both cases the host holds no fd on
 /// the image, mirroring the nix-store discipline so the hypervisor can
 /// open it. Shared with the nix-store path via `sparse_create_image` /
@@ -1409,7 +1410,7 @@ pub fn acquire_nix_store_image_lock_named(
 
     // Take the sidecar lock first so a losing concurrent writer fails
     // before touching the image. The lock is on `<image>.lock`, never
-    // the image fd — Apple Vz needs to open the image exclusively at
+    // the image fd — HVF needs to open the image exclusively at
     // start (see [`NixStoreImageLock`] docs).
     let lock = acquire_sidecar_lock(&sidecar_lock_path(&path))?;
     sparse_create_image(&path, size_bytes)?;
@@ -1423,7 +1424,7 @@ pub fn acquire_nix_store_image_lock_named(
 /// (`<vm_state_dir>/console.log`) for the guest's pre-shutdown stderr.
 ///
 /// Hypervisor-agnostic: the message references the per-VM state
-/// directory, which both libkrun and Vz expose under the same name.
+/// directory, which both libkrun and HVF expose under the same name.
 /// Migrated from `libkrun_builder.rs`. The libkrun path produced this
 /// exact error from two call sites; lifting it removes the drift risk
 /// if one site changes wording but not the other.
@@ -1456,7 +1457,7 @@ pub fn shell_job_exit_error(exit_code: i32, stderr_tail: &str) -> BuilderVmError
 /// Reads [`MVM_BUILDER_VM_TIMEOUT_SECS_ENV`] from the host env;
 /// returns [`DEFAULT_BUILDER_VM_TIMEOUT`] when unset.
 ///
-/// Both backends (libkrun + Vz) thread the returned [`Duration`] into
+/// Both backends (libkrun + HVF) thread the returned [`Duration`] into
 /// their per-VM-run timer so a stuck guest doesn't pin a Cargo job
 /// indefinitely. Migrated from `libkrun_builder.rs`. The env var name
 /// is intentionally hypervisor-agnostic; the policy is the same on
@@ -2112,7 +2113,7 @@ mod tests {
 
     /// The load-bearing property of the sidecar-lock fix: while the
     /// guard is held, the host holds NO lock on the image file itself,
-    /// so a hypervisor (Apple Vz) can open it exclusively at start. We
+    /// so a hypervisor (HVF) can open it exclusively at start. We
     /// prove it by opening the image from a second fd in-process and
     /// taking our own exclusive `flock` — which would fail if the guard
     /// still locked the image. The lock lives on `<image>.lock` instead.

@@ -1,13 +1,12 @@
 //! Backend-agnostic vsock connect dispatch.
 //!
 //! Hides the choice between Firecracker's UDS multiplexer, libkrun's
-//! per-port Unix sockets, and Apple Container's `VZVirtioSocketDevice`
-//! (or its mode-0700 proxy socket) behind one trait, so callers that
-//! just need "give me a connected stream to vsock port `P` on VM `V`"
-//! don't have to know which backend the VM is running under. Before
-//! this trait, every caller open-coded the same per-backend
-//! `vsock_connect(...)` if-ladder; new backends or backend changes had
-//! to chase down every occurrence.
+//! per-port Unix sockets, and HVF's agent bridge / per-port vsock listener
+//! sockets behind one trait, so callers that just need "give me a connected
+//! stream to vsock port `P` on VM `V`" don't have to know which backend the
+//! VM is running under. Before this trait, every caller open-coded the same
+//! per-backend `vsock_connect(...)` if-ladder; new backends or backend
+//! changes had to chase down every occurrence.
 //!
 //! Each impl is stateless apart from configuration captured at
 //! construction time. `connect()` always returns a fresh stream —
@@ -37,7 +36,7 @@ pub trait VsockTransport: Send + Sync {
 
 /// Whether unresolved socket probes may fall back to Firecracker's in-Linux
 /// runtime directory lookup. On macOS that lookup shells through the dev Linux
-/// environment, so it must not run while probing a normal host-side HVF/Vz
+/// environment, so it must not run while probing a normal host-side HVF
 /// workload.
 pub fn firecracker_transport_supported(platform: Platform) -> bool {
     platform.supports_native_runner()
@@ -116,18 +115,18 @@ impl VsockTransport for LibkrunTransport {
     }
 }
 
-/// Connects through a per-VM supervisor's per-port vsock listener.
+/// Connects through the HVF supervisor's per-port vsock listener.
 ///
 /// The supervisor listens under `<vm_state_dir>/vsock/` and forwards each
 /// connection to the guest's vsock port, so a host client connects directly
 /// with no
 /// port handshake — the libkrun shape, one subdir deeper. The path is the
-/// single-source-of-truth [`mvm_core::config::vm_vz_vsock_port_socket`].
-pub struct VzTransport {
+/// single-source-of-truth [`mvm_core::config::vm_hvf_vsock_port_socket`].
+pub struct HvfVsockTransport {
     socket_dir: PathBuf,
 }
 
-impl VzTransport {
+impl HvfVsockTransport {
     pub fn new(socket_dir: impl Into<PathBuf>) -> Self {
         Self {
             socket_dir: socket_dir.into(),
@@ -135,7 +134,7 @@ impl VzTransport {
     }
 
     pub fn for_vm(vm_name: &str) -> Self {
-        Self::new(mvm_core::config::vm_vz_vsock_dir(vm_name))
+        Self::new(mvm_core::config::vm_hvf_vsock_dir(vm_name))
     }
 
     fn socket_path(&self, port: u32) -> PathBuf {
@@ -144,11 +143,11 @@ impl VzTransport {
     }
 }
 
-impl VsockTransport for VzTransport {
+impl VsockTransport for HvfVsockTransport {
     fn connect(&self, port: u32) -> Result<UnixStream> {
         let path = self.socket_path(port);
         UnixStream::connect(&path)
-            .with_context(|| format!("Failed to connect to Vz vsock at {}", path.display()))
+            .with_context(|| format!("Failed to connect to HVF vsock at {}", path.display()))
     }
 }
 
@@ -160,7 +159,7 @@ impl VsockTransport for VzTransport {
 ///   standing agent bridge the device binds at boot (see
 ///   [`mvm_core::config::vm_hvf_agent_socket`]).
 /// - Console data (ports in `dev_console_data_ports()`): `<socket-dir>/vsock/vsock-<port>.sock`
-///   — same `vsock/` subdir convention the Vz supervisor uses, populated
+///   — same `vsock/` subdir convention [`HvfVsockTransport`] uses, populated
 ///   only when `VmStartConfig.dev_console` is true.
 ///
 /// The **agent-RPC** use (via [`for_vm`]) is not gated — every
@@ -179,7 +178,7 @@ impl DevConsoleTransport {
         let state_dir = state_dir.into();
         let socket_dir = mvm_core::config::vm_socket_dir_at(&state_dir);
         let agent_socket = socket_dir.join("hvf-agent.sock");
-        let vsock_dir = mvm_core::config::vm_vz_vsock_dir_at(&state_dir);
+        let vsock_dir = mvm_core::config::vm_hvf_vsock_dir_at(&state_dir);
         Self {
             agent_socket,
             vsock_dir,
@@ -188,7 +187,7 @@ impl DevConsoleTransport {
 
     pub fn for_vm(vm_name: &str) -> Self {
         let agent_socket = mvm_core::config::vm_hvf_agent_socket(vm_name);
-        let vsock_dir = mvm_core::config::vm_vz_vsock_dir(vm_name);
+        let vsock_dir = mvm_core::config::vm_hvf_vsock_dir(vm_name);
         Self {
             agent_socket,
             vsock_dir,
@@ -201,7 +200,7 @@ impl DevConsoleTransport {
     ///   bridge the hvf device binds — see
     ///   [`mvm_core::config::vm_hvf_agent_socket`]).
     /// - Any other port → `<socket-dir>/vsock/vsock-<port>.sock` (the
-    ///   pre-opened console data socket, same convention as Vz).
+    ///   pre-opened console data socket, same convention as [`HvfVsockTransport`]).
     pub(crate) fn socket_path(&self, port: u32) -> PathBuf {
         if port == mvm_agentd::vsock::GUEST_AGENT_PORT {
             self.agent_socket.clone()
@@ -279,7 +278,7 @@ impl VsockTransport for NestingHopTransport {
 /// its runtime directory lookup is local and side-effect-free. macOS must not
 /// fall back to Firecracker here: that path shells through the dev Linux
 /// environment and can auto-start the builder/dev VM while waiting for a normal
-/// HVF/Vz workload socket to appear.
+/// HVF workload socket to appear.
 ///
 /// Note: the probe consumes one stream and immediately drops it;
 /// callers get a *fresh* stream from the returned transport's
@@ -288,10 +287,10 @@ impl VsockTransport for NestingHopTransport {
 pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
     // (HVF / WorkloadRunner) VMs bind the agent bridge at
     // `<state_dir>/hvf-agent.sock`. Probe it first — it's the macOS-26 default
-    // backend, and the socket name is distinct from the libkrun/vz layouts so a
-    // hit here is unambiguous. Without this branch the agent-RPC path (every
-    // non-interactive `machine run -- <cmd>`, `machine exec`, `invoke`) could
-    // never reach an hvf guest and timed out after 30s.
+    // backend, and the socket name is distinct from the libkrun/hvf-vsock
+    // layouts so a hit here is unambiguous. Without this branch the agent-RPC
+    // path (every non-interactive `machine run -- <cmd>`, `machine exec`,
+    // `invoke`) could never reach an hvf guest and timed out after 30s.
     let hvf = DevConsoleTransport::for_vm(vm_name);
     if hvf.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(hvf));
@@ -300,9 +299,12 @@ pub fn for_vm(vm_name: &str) -> Result<Box<dyn VsockTransport>> {
     if libkrun.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
         return Ok(Box::new(libkrun));
     }
-    let vz = VzTransport::for_vm(vm_name);
-    if vz.connect(mvm_agentd::vsock::GUEST_AGENT_PORT).is_ok() {
-        return Ok(Box::new(vz));
+    let hvf_vsock = HvfVsockTransport::for_vm(vm_name);
+    if hvf_vsock
+        .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
+        .is_ok()
+    {
+        return Ok(Box::new(hvf_vsock));
     }
     if firecracker_transport_supported(mvm_core::platform::current()) {
         let fc = FirecrackerTransport::for_vm(vm_name)
@@ -366,8 +368,8 @@ mod tests {
     }
 
     #[test]
-    fn vz_transport_connects_to_socket_in_its_dir() {
-        // Vz's supervisor listens on `<vsock_dir>/vsock-<port>.sock`; a host
+    fn hvf_vsock_transport_connects_to_socket_in_its_dir() {
+        // The HVF supervisor listens on `<vsock_dir>/vsock-<port>.sock`; a host
         // client connects directly (no port handshake), same shape as libkrun.
         let dir = tempfile::tempdir().unwrap();
         let sock = dir
@@ -376,49 +378,49 @@ mod tests {
         let Some(_listener) = bind_unix_listener(&sock) else {
             return;
         };
-        let t = VzTransport::new(dir.path());
-        t.connect(5252).expect("vz transport should connect");
+        let t = HvfVsockTransport::new(dir.path());
+        t.connect(5252).expect("hvf vsock transport should connect");
     }
 
     #[test]
-    fn vz_transport_for_vm_targets_vsock_subdir() {
-        // for_vm must point at `<vm_state_dir>/vsock/` (Vz nests one subdir
+    fn hvf_vsock_transport_for_vm_targets_vsock_subdir() {
+        // for_vm must point at `<vm_state_dir>/vsock/` (HVF nests one subdir
         // deeper than libkrun's `<vm_state_dir>/`), and the error names the
         // backend so console failures are diagnosable.
-        let t = VzTransport::for_vm("no-such-vz-vm");
+        let t = HvfVsockTransport::for_vm("no-such-hvf-vm");
         let err = t
             .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
             .expect_err("should fail to connect")
             .to_string();
         assert!(
-            err.contains("Vz vsock") && err.contains("/vsock/vsock-5252.sock"),
-            "error didn't show the vz vsock-subdir path: {err}"
+            err.contains("HVF vsock") && err.contains("/vsock/vsock-5252.sock"),
+            "error didn't show the hvf vsock-subdir path: {err}"
         );
     }
 
     #[test]
-    fn for_vm_selects_vz_when_only_vz_socket_present() {
-        // With a Vz workload's socket present (and no libkrun/firecracker
-        // surface), the picker must select the Vz transport rather
-        // than falling through to the firecracker error. Regression for the
-        // "console can't reach a Vz workload" gap.
+    fn for_vm_selects_hvf_vsock_when_only_hvf_vsock_socket_present() {
+        // With an HVF workload's per-port vsock socket present (and no
+        // libkrun/firecracker surface), the picker must select the HVF vsock
+        // transport rather than falling through to the firecracker error.
+        // Regression for the "console can't reach an HVF workload" gap.
         let _lock = crate::vm::DATA_DIR_TEST_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
         env.set("MVM_DATA_DIR", dir.path());
-        let name = "vz-picker-probe";
+        let name = "hvf-vsock-picker-probe";
         let sock =
-            mvm_core::config::vm_vz_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT);
+            mvm_core::config::vm_hvf_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT);
         let Some(_listener) = bind_unix_listener(&sock) else {
             unsafe { std::env::remove_var("MVM_DATA_DIR") };
             return;
         };
 
-        let t = for_vm(name).expect("picker should find the vz transport");
+        let t = for_vm(name).expect("picker should find the hvf vsock transport");
         t.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
-            .expect("selected transport should connect to the vz socket");
+            .expect("selected transport should connect to the hvf vsock socket");
     }
 
     #[test]
@@ -427,7 +429,7 @@ mod tests {
         // `<state_dir>/hvf-agent.sock`. With only that socket present the picker
         // must select the hvf transport — the regression for the
         // non-interactive `machine run` reachability gap (the picker previously
-        // knew only libkrun/vz/firecracker, so it fell through to the
+        // knew only libkrun/hvf-vsock/firecracker, so it fell through to the
         // firecracker error and the agent-RPC path timed out after 30s).
         let _lock = crate::vm::DATA_DIR_TEST_LOCK
             .lock()

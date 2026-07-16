@@ -713,8 +713,9 @@ mod picker_hvf_tests {
     }
 
     // A sealed workload must not route to the hvf console even with
-    // `hvf-agent.sock` present. It falls through to Vz/Firecracker, so a sealed
-    // prod runner never receives an interactive attach.
+    // `hvf-agent.sock` present. It falls through to the HVF per-port vsock
+    // transport / Firecracker, so a sealed prod runner never receives an
+    // interactive attach.
     #[test]
     fn pick_console_transport_skips_hvf_for_sealed_workload() {
         let mut env = mvm_core::util::test_env::TestEnv::new();

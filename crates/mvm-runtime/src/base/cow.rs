@@ -6,8 +6,8 @@
 //! new metadata and shares the underlying blocks until either side writes.
 //! The same shape works on Linux via the `FICLONE` ioctl on btrfs/xfs/
 //! overlayfs — those filesystems also have block-level CoW. ext4 returns
-//! `EOPNOTSUPP` (the Linux-on-Lima default), so the caller falls back to
-//! a regular byte copy.
+//! `EOPNOTSUPP` (the default on the Linux host / builder VM), so the caller
+//! falls back to a regular byte copy.
 //!
 //! The cloned ext4 is the L3 rootfs; per-instance writes diverge into
 //! the clone's blocks and never touch the template.
@@ -24,13 +24,13 @@ use anyhow::{Context, Result};
 /// pointing the hypervisor at the source directly. The
 /// clone shares blocks with the source until either side writes, so
 /// on APFS / btrfs / xfs the operation is O(1) wall-clock regardless
-/// of rootfs size. On filesystems without reflink support (ext4 in
-/// the default Lima VM, NTFS, etc.) it falls back to a byte copy.
+/// of rootfs size. On filesystems without reflink support (ext4 on the
+/// Linux host / builder VM, NTFS, etc.) it falls back to a byte copy.
 ///
 /// `src` must exist; `dst` must not. The destination's parent
 /// directory is created if it doesn't already exist.
 ///
-/// Apple VZ and Firecracker each expect a running VM to own its disk
+/// HVF and Firecracker each expect a running VM to own its disk
 /// image — sharing a rootfs path between two concurrent VMs makes
 /// the second start fail. This helper is the seam where that
 /// per-instance ownership is created.

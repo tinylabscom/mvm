@@ -126,7 +126,7 @@ pub fn select_runtime_source_policy(
 /// Callers build a `VmStartConfig` from CLI arguments and build output.
 /// Each backend converts this into its own internal config type, filling
 /// in backend-specific details (Firecracker: kernel path, TAP slot;
-/// Apple Container: VZ block attachment; Docker: container image).
+/// libkrun: bundled kernel extraction; HVF: per-port vsock listeners).
 ///
 /// # Examples
 ///
@@ -225,7 +225,7 @@ pub struct VmStartConfig {
     /// Directory containing microvm.nix-lineage runner scripts (QEMU backend only).
     pub runner_dir: Option<String>,
     /// Tenant identifier from the admitted `ExecutionPlan`
-    /// (`AdmittedPlan.plan.tenant.0`). When `Some`, the libkrun/Vz
+    /// (`AdmittedPlan.plan.tenant.0`). When `Some`, the libkrun/HVF
     /// backends activate the gateway audit substrate (bridge factory +
     /// chain-signed audit emit). `None` keeps the legacy
     /// `run_supervisor` path for callers
@@ -252,7 +252,7 @@ pub struct VmStartConfig {
     /// backend-agnostic config, not a libkrun-specific knob).
     pub warm_pool_size: u32,
     /// Effective egress policy for this VM, enforced identically across
-    /// every workload backend (Firecracker nftables, libkrun/Vz gateway
+    /// every workload backend (Firecracker nftables, libkrun/HVF gateway
     /// bridge). The mechanism is the per-backend enforcer; the policy and
     /// its observable deny/allow effect are the same value here.
     ///
@@ -264,7 +264,7 @@ pub struct VmStartConfig {
     pub network_policy: crate::network_policy::NetworkPolicy,
     /// Pre-open the host-side interactive-console data-port range so a PTY can
     /// attach (`machine run -t`, `machine shell`, `up --console`). The
-    /// per-port-UDS backends (libkrun, Vz) bind a static vsock port list at
+    /// per-port-UDS backends (libkrun, HVF) bind a static vsock port list at
     /// start and otherwise can't reach the agent's dynamic
     /// `CONSOLE_PORT_BASE + session_id` data port; Firecracker multiplexes
     /// every port over one UDS and ignores this. Off by default — set only
@@ -853,7 +853,7 @@ impl VmCapabilities {
 pub enum SnapshotCapability {
     /// Full live-memory snapshot + fast resume (Firecracker: UFFD/NBD/hugepages).
     LiveMemory,
-    /// Coarse save/restore of machine state (Vz `saveMachineState`, macOS 26+).
+    /// Coarse save/restore of machine state (HVF `saveMachineState`, macOS 26+).
     SaveRestore,
     /// No memory snapshot — warm-start is a fast reboot from a disk/overlay
     /// snapshot (libkrun).
@@ -984,7 +984,7 @@ pub struct WarmStartOutcome {
 
 /// How a prelaunched standby is to be set up. Backend-agnostic:
 /// the caller (the launch path) fills this in; the backend's [`VmBackend::spawn_standby`]
-/// translates it to its own wire config (libkrun → `SupervisorBaseConfig`; Vz → boots a
+/// translates it to its own wire config (libkrun → `SupervisorBaseConfig`; HVF → boots a
 /// seed VM, captures its memory state, and stops the supervisor).
 #[derive(Debug, Clone)]
 pub struct StandbySpec {
@@ -1009,7 +1009,7 @@ pub struct StandbySpec {
     pub control_socket: std::path::PathBuf,
     /// Per-VM state dir the standby writes its pid into.
     pub vm_state_dir: String,
-    /// Source rootfs image path for Vz saved-standbys. `None` for libkrun (no rootfs
+    /// Source rootfs image path for HVF saved-standbys. `None` for libkrun (no rootfs
     /// is baked in at spawn; any workload rootfs attaches at claim time).
     pub image_path: Option<String>,
     /// Sha256 hex of `image_path` for the compat key. `None` for libkrun.
@@ -1020,7 +1020,7 @@ pub struct StandbySpec {
 /// workload exactly, else the launch cold-boots.
 ///
 /// `image_sha256` is `None` for libkrun (any image attaches; libkrun standbys carry no
-/// rootfs) and `Some(sha)` for Vz saved-standbys (which are image-specific; a Vz standby
+/// rootfs) and `Some(sha)` for HVF saved-standbys (which are image-specific; an HVF standby
 /// is a frozen {rootfs, memory, machine-id} triple captured from one particular image).
 /// Two standbys are compatible only when both image fields are identical — `None == None`
 /// (libkrun) and `Some(a) == Some(b)` iff `a == b`.
@@ -1029,13 +1029,13 @@ pub struct StandbyCompat {
     pub kernel_sha256: String,
     pub vcpus: u8,
     pub mem_mib: u32,
-    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for Vz (image-bound).
+    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for HVF (image-bound).
     pub image_sha256: Option<String>,
 }
 
 /// A recorded standby (persisted as `~/.mvm/pool/<id>/standby.json`).
 ///
-/// `pid` is 0 for saved-state standbys (Vz): the supervisor that booted the seed VM was
+/// `pid` is 0 for saved-state standbys (HVF): the supervisor that booted the seed VM was
 /// stopped at capture time; no process is running. `reap_stale` and the liveness checks
 /// treat pid=0 as "TTL-only" — the standby is never pruned for a dead process, only for
 /// expiry. No real process has pid 0.
@@ -1050,7 +1050,7 @@ pub struct StandbyHandle {
     pub binding_nonce: String,
     pub spawned_unix_secs: u64,
     pub state: StandbyState,
-    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for Vz saved-standbys.
+    /// `None` for libkrun (image-agnostic); `Some(sha256-hex)` for HVF saved-standbys.
     #[serde(default)]
     pub image_sha256: Option<String>,
 }
@@ -1185,7 +1185,7 @@ pub enum ClaimStatus {
 /// shares the host kernel with the workload).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct LayerCoverage {
-    /// L1 — Host + hypervisor (KVM, VZ, HVF).
+    /// L1 — Host + hypervisor (KVM, HVF).
     pub l1_host_hypervisor: bool,
     /// L2 — VMM (Firecracker, Containerization, libkrun).
     pub l2_vmm: bool,
@@ -1233,7 +1233,7 @@ impl LayerCoverage {
 ///
 /// `notes` provides per-backend rationale shown in doctor output and is
 /// where backends explain partial claims (e.g. "claim 3 partial — verified
-/// boot for VZ-backed rootfs not yet wired up").
+/// boot for HVF-backed rootfs not yet wired up").
 ///
 /// This profile is **advisory** — it describes posture for `doctor` output.
 /// The load-bearing guarantee that a non-workload backend cannot carry an
@@ -1359,7 +1359,7 @@ pub trait VmBackend: Send + Sync {
     fn capabilities(&self) -> VmCapabilities;
 
     /// Warm-start snapshot tier — `LiveMemory` (Firecracker), `SaveRestore`
-    /// (Vz, macOS 26+), `DiskOnly` (libkrun), or `Unsupported`. Defaults to
+    /// (HVF, macOS 26+), `DiskOnly` (libkrun), or `Unsupported`. Defaults to
     /// `Unsupported` so a backend opts in explicitly; consumers check this
     /// before requesting a snapshot rather than discovering a silent
     /// degrade.
@@ -1376,7 +1376,7 @@ pub trait VmBackend: Send + Sync {
     /// admits the request but the backend wires no warm-start path, the
     /// default returns [`WarmStartError::Failed`] rather than fabricating a
     /// VM; backends that implement warm-start (libkrun disk-only,
-    /// Firecracker live-memory, Vz save/restore) override this.
+    /// Firecracker live-memory, HVF save/restore) override this.
     fn warm_start(
         &self,
         _config: &VmStartConfig,
@@ -1657,18 +1657,18 @@ mod tests {
             mem_mib: 2048,
             ..want.clone()
         }));
-        // Vz image sha must match exactly: Some(a) ≠ None, Some(a) ≠ Some(b).
-        let vz_handle = StandbyHandle {
+        // HVF image sha must match exactly: Some(a) ≠ None, Some(a) ≠ Some(b).
+        let hvf_handle = StandbyHandle {
             image_sha256: Some("c".repeat(64)),
             ..h.clone()
         };
-        let vz_want = StandbyCompat {
+        let hvf_want = StandbyCompat {
             image_sha256: Some("c".repeat(64)),
             ..want.clone()
         };
-        assert!(vz_handle.is_compatible(&vz_want));
-        assert!(!vz_handle.is_compatible(&want)); // None ≠ Some
-        assert!(!vz_handle.is_compatible(&StandbyCompat {
+        assert!(hvf_handle.is_compatible(&hvf_want));
+        assert!(!hvf_handle.is_compatible(&want)); // None ≠ Some
+        assert!(!hvf_handle.is_compatible(&StandbyCompat {
             image_sha256: Some("d".repeat(64)),
             ..want
         }));
@@ -1790,13 +1790,13 @@ mod tests {
         assert!(h.is_compatible(&want));
     }
 
-    /// A Vz saved-standby uses pid=0 (no running supervisor) and must be treated
+    /// An HVF saved-standby uses pid=0 (no running supervisor) and must be treated
     /// as TTL-only by the liveness path (is_saved_state()).
     #[test]
     fn standby_handle_saved_state_pid_zero_flag() {
         let saved = StandbyHandle {
-            id: "standby-vz".into(),
-            control_socket: "/p/standby-vz/control.sock".into(),
+            id: "standby-hvf".into(),
+            control_socket: "/p/standby-hvf/control.sock".into(),
             pid: 0,
             kernel_sha256: "cc".repeat(32),
             vcpus: 2,
@@ -2147,7 +2147,7 @@ mod tests {
     fn select_runtime_source_policy_prefers_overlay_for_non_required_backends() {
         assert_eq!(
             select_runtime_source_policy(RuntimeSourcePolicySelection {
-                backend_name: Some("vz"),
+                backend_name: Some("mock"),
                 sealed: true,
                 root_strategy: Some(RuntimeSourceRootStrategy::BlockExt4),
                 launch_kind: RuntimeSourceLaunchKind::WorkloadImage,

@@ -268,7 +268,7 @@ impl VmBackend for FirecrackerBackend {
         // is the production runtime and *requires* `/dev/kvm`; a no-KVM
         // host should use `--hypervisor qemu` for local dev/test
         // (Tier-3 TCG), never a silent Firecracker fallback. On macOS
-        // the runtime path nests through libkrun/Vz, so this probe is
+        // the runtime path nests through libkrun/HVF, so this probe is
         // Linux-only.
         #[cfg(target_os = "linux")]
         if !crate::qemu::kvm_available() {
@@ -451,8 +451,6 @@ impl VmBackend for FirecrackerBackend {
 /// Prod selection must require explicit operator acknowledgement.
 ///
 /// **Tier 3** — Mock, test-only.
-/// Apple Container sits at Tier 3 today as well: while VZ provides
-/// real virtualization, the security claims have not been audited.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BackendTier {
     Tier1,
@@ -496,13 +494,13 @@ pub enum AnyBackend {
     /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
     /// driven by the unified `vmm::run` loop via the detached
     /// `mvm-hvf-supervisor`. Selectable via `--hypervisor hvf` / `MVM_BACKEND=hvf`,
-    /// and the macOS-26 auto-detect default (Vz is sunset, opt-in only). Its
-    /// `start()` spawns the per-VM gating endpoint that is the sole claim-10 egress
-    /// gate over vsock — no legacy userspace gateway sidecar. The destination macOS backend.
+    /// and the macOS-26 auto-detect default. Its `start()` spawns the per-VM
+    /// gating endpoint that is the sole claim-10 egress gate over vsock — no
+    /// legacy userspace gateway sidecar. The destination macOS backend.
     Hvf(HvfBackend),
     /// The hvf VMM driven through the unified `WorkloadRunner` over the
     /// driver seam — the role-runner that will replace the per-backend
-    /// Hvf/Libkrun/Vz/FC `start()` copies. Opt-in via `--hypervisor hvf`.
+    /// Hvf/Libkrun/FC `start()` copies. Opt-in via `--hypervisor hvf`.
     /// Same hvf VMM, tier, and security profile as `Hvf` — just reached via
     /// the runner role. `auto_select` picks the raw [`Self::Hvf`] variant on the
     /// macOS-26 tier today, not this one.
@@ -567,11 +565,11 @@ impl AnyBackend {
             return Self::Firecracker(FirecrackerBackend);
         }
 
-        // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`). Vz is sunset
-        //    (opt-in only via `--hypervisor vz`); the hvf path routes egress to
-        //    its per-VM gating endpoint over vsock, where claim-10 and claims
-        //    12/13 are enforced — no guest-NIC helper sidecar.
-        if plat.is_vz_default_tier() {
+        // 2. macOS 26+ Apple Silicon → the HVF VMM (`hvf`); the hvf path
+        //    routes egress to its per-VM gating endpoint over vsock, where
+        //    claim-10 and claims 12/13 are enforced — no guest-NIC helper
+        //    sidecar.
+        if plat.is_hvf_default_tier() {
             return Self::Hvf(HvfBackend);
         }
 
@@ -782,8 +780,8 @@ impl AnyBackend {
     }
 
     /// Fast teardown for an ephemeral transient run. See
-    /// [`VmBackend::stop_transient`]. Vz overrides it to skip the graceful
-    /// grace; other backends fall through to the default (== `stop`).
+    /// [`VmBackend::stop_transient`]. No backend currently overrides it —
+    /// every backend falls through to the default (== `stop`).
     pub fn stop_transient(&self, id: &VmId) -> Result<()> {
         self.inner().stop_transient(id)
     }

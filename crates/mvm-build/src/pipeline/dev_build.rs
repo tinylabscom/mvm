@@ -154,7 +154,7 @@ fn run_gc_if_requested(env: &dyn ShellEnvironment) {
     }
 }
 
-/// Result of a dev build via `nix build` in the Lima VM.
+/// Result of a dev build via `nix build` in the builder VM.
 #[derive(Debug, Clone)]
 pub struct DevBuildResult {
     /// Directory containing artifacts: `~/.mvm/dev/builds/<hash>/`

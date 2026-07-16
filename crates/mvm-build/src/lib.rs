@@ -15,7 +15,7 @@ pub mod builder_protocol;
 pub mod builder_route;
 pub mod builder_vm;
 /// Hypervisor-agnostic builder-VM orchestration helper that wraps a
-/// `VmBackendForBuilder` implementation (libkrun and Vz).
+/// `VmBackendForBuilder` implementation (libkrun and HVF).
 pub mod builder_vm_runtime;
 /// Request-handling core of the resident `mvm-builderd` builder-VM
 /// daemon: stateless request dispatch + the framed connection serve

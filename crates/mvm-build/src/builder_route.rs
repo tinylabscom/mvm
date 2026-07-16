@@ -566,7 +566,7 @@ mod io_tests {
         // No socket yet.
         assert!(resolve_running_builder_socket(vms).is_none());
         // Bind the libkrun-style control socket directly under the vm dir
-        // (a real candidate; the Vz candidate nests one dir deeper).
+        // (a real candidate; the HVF candidate nests one dir deeper).
         let sock = builderd_control_socket_path(&vmdir);
         let Some(_listener) = bind_unix_listener(&sock) else {
             return;

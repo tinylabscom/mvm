@@ -176,8 +176,8 @@ const VERITY_CMDLINE: &str = "console=hvc0";
 
 /// Build the supervisor config for one VM, lifting
 /// the audit-substrate resolution into the shared `audit_substrate`
-/// module so libkrun and Vz share one source of truth (and the future
-/// `NetworkProvider` trait extraction is mechanical).
+/// module so any adopting backend shares one source of truth (and the
+/// future `NetworkProvider` trait extraction is mechanical).
 ///
 /// **Do not log** `config.plan_json` or `config.bundle_json` — they
 /// may carry secret bindings, env vars, or policy refs that resolve
@@ -521,7 +521,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
     // toggle, so a "read-only" virtio-fs share would only be ro by the
     // guest's own mount flag — a compromised guest could remount it rw.
     // Rather than make a false ro promise, refuse it and point at the
-    // hypervisor-enforced alternatives. (Vz/Firecracker enforce ro shares
+    // hypervisor-enforced alternatives. (HVF/Firecracker enforce ro shares
     // natively; this restriction is libkrun-specific.)
     for (idx, vol) in config.volumes.iter().enumerate() {
         let tag = format!("uvol{idx}");
@@ -533,7 +533,7 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
                          krun_add_virtiofs has no host-side read-only toggle, so a compromised \
                          guest could remount it read-write. Use a read-only disk image \
                          (host:/guest:SIZE) for hypervisor-enforced read-only, share it ':rw' if \
-                         writes are intended, or run on the Vz backend.",
+                         writes are intended, or run on the HVF backend.",
                         vol.host,
                         vol.guest
                     );
@@ -1146,9 +1146,8 @@ impl VmBackend for LibkrunBackend {
             return Err(WarmStartError::Unsupported {
                 requested,
                 available,
-                hint: "libkrun has no live-memory snapshot — use the Firecracker (Linux) or \
-                       Vz (macOS 26+) backend for a live-memory resume, or `mvmctl up` for a \
-                       cold boot"
+                hint: "libkrun has no live-memory snapshot — use the Firecracker (Linux) \
+                       backend for a live-memory resume, or `mvmctl up` for a cold boot"
                     .to_string(),
             });
         }

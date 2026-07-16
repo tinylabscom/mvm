@@ -59,8 +59,8 @@ fn closure_nar_path(arch_dir: &Path) -> Option<PathBuf> {
 /// carries one.
 ///
 /// - Reads the base `vmlinux` + `rootfs.ext4` (and optional `nix-closure.nar`)
-///   from `builder_vm_cache_dir()/<arch>/` (the same source the libkrun/vz
-///   builders use).
+///   from `builder_vm_cache_dir()/<arch>/` (the same source the libkrun
+///   builder uses).
 /// - Injects `mvm-host-vm-init` into a copy of the base rootfs using the
 ///   vsock-less HVF patcher VM.
 /// - Caches the baked kernel/rootfs pair under `builder_vm_cache_dir()/hvf/<key>/`.

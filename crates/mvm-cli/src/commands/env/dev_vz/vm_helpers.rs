@@ -21,13 +21,14 @@ pub(in crate::commands) struct ReapOutcome {
 /// side, distinct from the prevention path.
 ///
 /// The dir traversal below is **prefix-agnostic**: it iterates every
-/// subdirectory of `~/.cache/mvm/builder-vm/vms/`, so both
-/// `mvm-builder-vm-<job_id>` (libkrun) and `mvm-builder-vz-<job_id>`
-/// (Vz) state dirs are picked up by the same loop, and the sidecar PID
+/// subdirectory of `~/.cache/mvm/builder-vm/vms/` regardless of naming, so
+/// `mvm-builder-vm-<job_id>` (libkrun) state dirs, any HVF builder state
+/// dirs, and leftover `mvm-builder-vz-<job_id>` (the removed Vz backend)
+/// state dirs are all picked up by the same loop, and the sidecar PID
 /// names (`builder.pid` / `stage0.pid`) are shared across backends. The
-/// `reap_picks_up_orphaned_vz_builder_state_dir` test pins this: a
-/// future refactor that narrows the traversal or renames the sidecar
-/// must update that test.
+/// `reap_picks_up_orphaned_vz_builder_state_dir` test pins the
+/// leftover-Vz-dir case: a future refactor that narrows the traversal or
+/// renames the sidecar must update that test.
 ///
 /// A microVM is several processes: the supervisor (the VMM-host that
 /// owns the guest) plus dependent helpers (for example a
@@ -35,7 +36,7 @@ pub(in crate::commands) struct ReapOutcome {
 /// liveness signal, so the sweep runs in two phases per dir:
 ///
 /// 1. **Supervisor phase.** Read the supervisor sidecars (`builder.pid` /
-///    `stage0.pid` / `vz.pid` / `libkrun.pid`: see
+///    `stage0.pid` / `vz.pid` / `libkrun.pid` / `hvf.pid`: see
 ///    [`is_supervisor_sidecar`]). On a managed dir (the persistent dev
 ///    builder `mvm-persistent-builder-*`, or any named workload under
 ///    `~/.mvm/vms/`) an alive supervisor is the running VM, spared:
@@ -92,11 +93,14 @@ pub(in crate::commands) fn sweep_orphaned_vm_helpers_on_startup() {
     }
 }
 
-/// Sidecar PID file names a builder VM dir carries (libkrun + Vz).
+/// Sidecar PID file names a builder VM dir carries (libkrun + HVF).
 pub(super) const BUILDER_SIDECARS: &[&str] = &["builder.pid", "stage0.pid"];
 
 /// Sidecar PID file names a workload VM dir under `~/.mvm/vms/<name>/`.
-pub(super) const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid"];
+/// `vz.pid` stays recognised so a leftover from the removed Vz backend still
+/// gets reaped; live HVF supervisors write `hvf.pid` (mvm-runtime's
+/// `vm::reconcile::PID_FILE_NAMES` recognises the same pair).
+pub(super) const WORKLOAD_SIDECARS: &[&str] = &["libkrun.pid", "vz.pid", "hvf.pid"];
 
 /// Dir-name prefix of the persistent dev builder VM.
 const PERSISTENT_BUILDER_DIR_PREFIX: &str = "mvm-persistent-builder-";
@@ -282,7 +286,7 @@ fn reap_or_track(
 fn is_supervisor_sidecar(name: &str) -> bool {
     matches!(
         name,
-        "builder.pid" | "stage0.pid" | "vz.pid" | "libkrun.pid"
+        "builder.pid" | "stage0.pid" | "vz.pid" | "libkrun.pid" | "hvf.pid"
     )
 }
 

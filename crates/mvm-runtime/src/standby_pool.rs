@@ -367,7 +367,7 @@ mod tests {
         assert!(SupervisorStandbyPool::is_live_or_saved(&saved));
     }
 
-    // ── saved-state standby tests (Vz) ───────────────────────────────────────────
+    // ── saved-state standby tests (HVF) ──────────────────────────────────────────
 
     fn saved_handle(id: &str, kernel: &str, image: &str, state: StandbyState) -> StandbyHandle {
         StandbyHandle {
@@ -384,7 +384,7 @@ mod tests {
         }
     }
 
-    fn vz_compat(kernel: &str, image: &str) -> StandbyCompat {
+    fn hvf_compat(kernel: &str, image: &str) -> StandbyCompat {
         StandbyCompat {
             kernel_sha256: kernel.into(),
             vcpus: 2,
@@ -398,12 +398,12 @@ mod tests {
     fn select_idle_finds_saved_state_standby_without_live_pid() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
-        pool.record(&saved_handle("vz1", "kk", "img-aa", StandbyState::Idle))
+        pool.record(&saved_handle("hvf1", "kk", "img-aa", StandbyState::Idle))
             .unwrap();
         let picked = pool
-            .select_idle_compatible(&vz_compat("kk", "img-aa"))
+            .select_idle_compatible(&hvf_compat("kk", "img-aa"))
             .unwrap();
-        assert_eq!(picked.unwrap().id, "vz1");
+        assert_eq!(picked.unwrap().id, "hvf1");
     }
 
     /// Image sha must match exactly — wrong image returns None.
@@ -411,9 +411,9 @@ mod tests {
     fn select_idle_rejects_saved_standby_on_image_mismatch() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
-        pool.record(&saved_handle("vz1", "kk", "img-aa", StandbyState::Idle))
+        pool.record(&saved_handle("hvf1", "kk", "img-aa", StandbyState::Idle))
             .unwrap();
-        // libkrun compat (None) does not match a Vz standby (Some).
+        // libkrun compat (None) does not match an HVF standby (Some).
         assert!(
             pool.select_idle_compatible(&compat("kk"))
                 .unwrap()
@@ -421,7 +421,7 @@ mod tests {
         );
         // Different image sha also misses.
         assert!(
-            pool.select_idle_compatible(&vz_compat("kk", "img-bb"))
+            pool.select_idle_compatible(&hvf_compat("kk", "img-bb"))
                 .unwrap()
                 .is_none()
         );
@@ -433,7 +433,7 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path());
         let now = 1_000_000u64;
         // Idle saved-state (pid=0), expired by the warm ttl.
-        let mut h = saved_handle("vz1", "aa", "img", StandbyState::Idle);
+        let mut h = saved_handle("hvf1", "aa", "img", StandbyState::Idle);
         h.spawned_unix_secs = now - 7_200; // 2h old
         pool.record(&h).unwrap();
 
@@ -441,8 +441,8 @@ mod tests {
             .reap_stale(std::time::Duration::from_secs(3_600), now)
             .unwrap();
 
-        assert!(!reaped.contains(&"vz1".to_string()), "demoted, not reaped");
-        assert_eq!(pool.load("vz1").unwrap().state, StandbyState::Parked);
+        assert!(!reaped.contains(&"hvf1".to_string()), "demoted, not reaped");
+        assert_eq!(pool.load("hvf1").unwrap().state, StandbyState::Parked);
     }
 
     #[test]
@@ -494,7 +494,7 @@ mod tests {
     fn select_claims_compatible_parked_saved_state_standby() {
         let tmp = tempfile::tempdir().unwrap();
         let pool = SupervisorStandbyPool::at(tmp.path());
-        let want = vz_compat("aa", "img");
+        let want = hvf_compat("aa", "img");
         let parked = saved_handle("vzp", "aa", "img", StandbyState::Parked);
         pool.record(&parked).unwrap();
 
@@ -508,11 +508,11 @@ mod tests {
         let pool = SupervisorStandbyPool::at(tmp.path());
         let now = now_unix_secs();
 
-        let mut recent = saved_handle("vz-keep", "kk", "img", StandbyState::Idle);
+        let mut recent = saved_handle("hvf-keep", "kk", "img", StandbyState::Idle);
         recent.spawned_unix_secs = now;
         pool.record(&recent).unwrap();
 
-        let mut old = saved_handle("vz-old", "kk", "img", StandbyState::Idle);
+        let mut old = saved_handle("hvf-old", "kk", "img", StandbyState::Idle);
         old.spawned_unix_secs = 1; // ancient — past warm TTL, demoted to Parked
         pool.record(&old).unwrap();
 
@@ -520,13 +520,13 @@ mod tests {
             .reap_stale(std::time::Duration::from_secs(3600), now)
             .unwrap();
 
-        assert!(!reaped.contains(&"vz-keep".to_string()));
+        assert!(!reaped.contains(&"hvf-keep".to_string()));
         assert!(
-            !reaped.contains(&"vz-old".to_string()),
+            !reaped.contains(&"hvf-old".to_string()),
             "demoted, not reaped"
         );
-        assert!(pool.load("vz-keep").is_ok());
-        assert_eq!(pool.load("vz-old").unwrap().state, StandbyState::Parked);
+        assert!(pool.load("hvf-keep").is_ok());
+        assert_eq!(pool.load("hvf-old").unwrap().state, StandbyState::Parked);
     }
 
     #[test]

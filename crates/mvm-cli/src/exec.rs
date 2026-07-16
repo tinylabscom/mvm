@@ -1048,7 +1048,7 @@ fn run_inner(
 
     // Template-restore VMs run without plan admission. Leave tenant_id /
     // plan_json / bundle_json at their None defaults (via
-    // `..Default::default()`) so the libkrun/Vz backends take the legacy
+    // `..Default::default()`) so the libkrun/HVF backends take the legacy
     // `run_supervisor` dispatch. Routing template restores through
     // admission would add an `admit_for_run` call here and a
     // `populate_audit_substrate` invocation after the struct literal.
@@ -1108,7 +1108,7 @@ fn run_inner(
     }
 
     // Admit the transient run as a locally-signed workload. Setting
-    // tenant_id + plan_json makes the libkrun/Vz supervisor spawn the gateway
+    // tenant_id + plan_json makes the libkrun/HVF supervisor spawn the gateway
     // bridge (so it enforces `network_policy` + chain-audits the run) instead
     // of the legacy unfiltered path; on Firecracker the policy already enforces
     // via the FlakeRunConfig firewall. Force cold boot when admitted — the
@@ -1169,9 +1169,9 @@ fn run_inner(
             match restore_via_snapshot(&vm_name, tmpl, snap, &start_config) {
                 Ok(()) => true,
                 Err(e) => {
-                    // macOS / Lima QEMU returns os error 95 (EOPNOTSUPP) on vsock
-                    // snapshots; cold boot still works there. Fall back rather
-                    // than failing the whole exec.
+                    // macOS backends without Firecracker (HVF, libkrun) return os
+                    // error 95 (EOPNOTSUPP) on vsock snapshots; cold boot still
+                    // works there. Fall back rather than failing the whole exec.
                     ui::warn(&format!("Snapshot restore failed: {e}; cold-booting."));
                     false
                 }
@@ -1213,9 +1213,10 @@ fn run_inner(
     let _ = backend.stop_transient(&VmId(vm_name.clone()));
 
     // Top the warm pool back toward target after the run (best-effort,
-    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; Vz
-    // boot+capture rewarm stays explicit via `pool warm` so teardown does not
-    // spawn background work that can contend with foreground launches.
+    // no-daemon replenish-on-use). No-ops when `warm_pool_size == 0`; the
+    // image-bound boot+capture rewarm the removed Vz backend used to do
+    // stays explicit via `pool warm` so teardown does not spawn background
+    // work that can contend with foreground launches.
     if let Err(e) = crate::commands::pool::replenish_after_launch(&backend, &start_config) {
         tracing::debug!(error = %e, "pool replenish skipped (best-effort)");
     }

@@ -184,7 +184,7 @@ pub fn template_load(id: &str) -> Result<TemplateSpec> {
     validate_legacy_template_name(id)?;
     let path = template_spec_path(id);
     // Read directly from host filesystem — ~/.mvm/ resolves to $HOME/.mvm
-    // which is the same path on both host and Lima (home dir is mounted).
+    // on the host (no VM-nesting layer to route through).
     let data = std::fs::read_to_string(&path).with_context(|| {
         format!(
             "Failed to load template {} (does it exist? try `mvm template list`)",
@@ -778,7 +778,7 @@ pub fn template_list_slots() -> Result<Vec<SlotEntry>> {
 }
 
 /// Build a manifest-keyed slot using the dev build pipeline (local Nix in
-/// Lima or host). Mirrors `template_build` but operates on a
+/// the builder VM or on the host). Mirrors `template_build` but operates on a
 /// [`PersistedManifest`] instead of looking up by name.
 ///
 /// On success, the slot's `current` symlink points at
@@ -1249,7 +1249,7 @@ fn require_local_template_fs() -> Result<()> {
 /// Resolve a built template to its current artifact paths.
 ///
 /// Returns `(spec, vmlinux, initrd, rootfs, revision_hash)`.
-/// The artifact paths are absolute and valid inside the Lima VM.
+/// The artifact paths are absolute and valid on the host.
 #[instrument(skip_all, fields(template_id = id))]
 pub fn template_artifacts(
     id: &str,
@@ -1597,8 +1597,8 @@ mod tests {
     /// asserts on the tier it actually applies to.
     #[cfg(target_os = "macos")]
     #[test]
-    fn update_fod_hash_fails_closed_on_vz_default_tier() {
-        if !mvm_core::platform::current().is_vz_default_tier() {
+    fn update_fod_hash_fails_closed_on_hvf_default_tier() {
+        if !mvm_core::platform::current().is_hvf_default_tier() {
             return;
         }
         let err = update_fod_hash("/nonexistent/flake")

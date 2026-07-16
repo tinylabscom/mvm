@@ -118,7 +118,7 @@ mod tests {
     fn fixture_plan() -> ExecutionPlan {
         mvm_core::plan::test_support::PlanFixture::new()
             .plan_id("plan-persist-test")
-            .runtime_profile("vz")
+            .runtime_profile("hvf")
             .build()
     }
 

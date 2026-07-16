@@ -261,7 +261,7 @@ pub fn resolve_effective_hypervisor(requested: &str) -> String {
     let plat = mvm_core::platform::current();
     if plat.has_kvm() {
         "firecracker"
-    } else if plat.is_vz_default_tier() {
+    } else if plat.is_hvf_default_tier() {
         // macOS 26+ Apple Silicon: the HVF VMM (`hvf`) is the workload
         // default; the hvf path carries claim-10 egress over vsock via its
         // per-VM gating endpoint — no guest-NIC helper sidecar.
@@ -425,7 +425,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn macos_26_default_is_hvf() {
-        if !mvm_core::platform::current().is_vz_default_tier() {
+        if !mvm_core::platform::current().is_hvf_default_tier() {
             return; // Not on the macOS-26 tier (e.g. macOS 13-25 CI runner).
         }
         let saved_hv = std::env::var_os("MVM_HYPERVISOR");

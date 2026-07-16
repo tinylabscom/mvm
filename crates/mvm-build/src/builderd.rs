@@ -632,35 +632,35 @@ pub fn dispatch_with_executor(
 /// socket per forwarded port directly in the state dir (matching
 /// `persistent_builder::dispatch_socket_path`).
 ///
-/// Vz nests its per-port sockets one level deeper, under a `vsock/`
-/// subdir — use [`builderd_vz_control_socket_path`] there, or
+/// HVF nests its per-port sockets one level deeper, under a `vsock/`
+/// subdir — use [`builderd_hvf_control_socket_path`] there, or
 /// [`builderd_control_socket_candidates`] when the backend is unknown
 /// (e.g. scanning the builder-VM `vms/` root). Mixing the two shapes is
-/// the libkrun-vs-Vz socket-path bug class that has bitten the broker
+/// the libkrun-vs-HVF socket-path bug class that has bitten the broker
 /// path before.
 pub fn builderd_control_socket_path(vm_state_dir: &Path) -> PathBuf {
     vm_state_dir.join(builderd_control_socket_filename())
 }
 
-/// The **Vz**-shape control socket for a builder VM rooted at
-/// `vm_state_dir`: `<vm_state_dir>/vsock/vsock-<port>.sock`. The Vz
+/// The **HVF**-shape control socket for a builder VM rooted at
+/// `vm_state_dir`: `<vm_state_dir>/vsock/vsock-<port>.sock`. The HVF
 /// supervisor nests per-port sockets under a `vsock/` subdir (see
-/// `mvm_core::config::vm_vz_vsock_dir`).
-pub fn builderd_vz_control_socket_path(vm_state_dir: &Path) -> PathBuf {
+/// `mvm_core::config::vm_hvf_vsock_dir`).
+pub fn builderd_hvf_control_socket_path(vm_state_dir: &Path) -> PathBuf {
     vm_state_dir
         .join("vsock")
         .join(builderd_control_socket_filename())
 }
 
-/// Both candidate control-socket paths (libkrun shape, then Vz shape)
+/// Both candidate control-socket paths (libkrun shape, then HVF shape)
 /// for a builder VM rooted at `vm_state_dir`. Use when the backend isn't
 /// known up front — e.g. `mvmctl doctor` scanning the builder-VM `vms/`
-/// root, where a dir may be a libkrun or a Vz builder VM. Probe whichever
+/// root, where a dir may be a libkrun or an HVF builder VM. Probe whichever
 /// exists.
 pub fn builderd_control_socket_candidates(vm_state_dir: &Path) -> [PathBuf; 2] {
     [
         builderd_control_socket_path(vm_state_dir),
-        builderd_vz_control_socket_path(vm_state_dir),
+        builderd_hvf_control_socket_path(vm_state_dir),
     ]
 }
 
@@ -1516,18 +1516,18 @@ mod tests {
             builderd_control_socket_path(dir),
             Path::new(&format!("/var/lib/mvm/vm-foo/vsock-{port}.sock"))
         );
-        // Vz: one subdir deeper, under `vsock/` (the bug the live Vz boot
+        // HVF: one subdir deeper, under `vsock/` (the bug the live HVF boot
         // surfaced — doctor/client must not assume the libkrun shape).
         assert_eq!(
-            builderd_vz_control_socket_path(dir),
+            builderd_hvf_control_socket_path(dir),
             Path::new(&format!("/var/lib/mvm/vm-foo/vsock/vsock-{port}.sock"))
         );
-        // Candidates: libkrun first, then Vz.
+        // Candidates: libkrun first, then HVF.
         assert_eq!(
             builderd_control_socket_candidates(dir),
             [
                 builderd_control_socket_path(dir),
-                builderd_vz_control_socket_path(dir),
+                builderd_hvf_control_socket_path(dir),
             ]
         );
     }

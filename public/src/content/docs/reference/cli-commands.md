@@ -58,7 +58,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl machine run --profile <p>` | Security posture: `restrictive`, `standard` (default), `dev`, `permissive` |
 | `mvmctl machine run --net` | Enable broad dev-tier outbound egress (default is deny-all) |
 | `mvmctl machine run --allow-host HOST[:PORT]` | Allow egress only to these hosts (repeatable; PORT defaults to 443; wins over `--net`) |
-| `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `vz` (macOS 26+ opt-in, sunsetting), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
+| `mvmctl machine run --hypervisor <backend>` | Backend: `firecracker` (Linux/KVM), `hvf` (macOS 26+ default, vsock-only), `libkrun` (macOS 13–25 & Linux), `qemu` (dev/test) |
 | `mvmctl machine run --flake <ref> --flake-profile <variant>` | Flake package variant (e.g. worker, gateway) |
 | `mvmctl machine session start <template> --agent-verb <verb>` | Boot a prod session with an explicit ProdSafe agent-verb allow-list instead of the computed sealed-image default. Repeatable; refused with `--dev` |
 | `mvmctl machine build --flake <ref> --watch` | Watch the flake and rebuild on change |
@@ -506,7 +506,7 @@ For OCI `--image` runs that request outbound egress (`--net` or `--allow-host`),
 traffic through the host-side vsock mediation endpoint. On that path the
 injected guest `/init` starts `mvm-egress-client` and the runtime injects proxy
 env vars pointing at its loopback SOCKS listener automatically. Today that
-means `hvf` and `vz`; incapable backends are refused rather than silently
+means `hvf`; incapable backends are refused rather than silently
 falling back to a guest NIC. That makes TCP/HTTP clients work, but it does
 **not** add ICMP
 support: `ping` is not a valid smoke test for `--allow-host`.
@@ -599,13 +599,13 @@ host registry records.
 
 ## Checkpoint
 
-`mvmctl machine save` / `mvmctl machine restore` are the first-class Vz machine-state verbs. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk through Vz `saveMachineStateToURL`, restore verifies the sealed checkpoint content and resumes the same VM identity. `mvmctl machine checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl machine snapshot ls` / `mvmctl machine snapshot rm` remain for Firecracker sealed snapshots.
+`mvmctl machine save` / `mvmctl machine restore` are the first-class HVF machine-state verbs. They are thin aliases over the `vm-full` checkpoint path: save captures memory + disk through HVF `saveMachineStateToURL`, restore verifies the sealed checkpoint content and resumes the same VM identity. `mvmctl machine checkpoint` remains the advanced checkpoint store surface for list/remove/fork/diff and explicit class selection. `mvmctl machine snapshot ls` / `mvmctl machine snapshot rm` remain for Firecracker sealed snapshots.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl machine save <name> [--tag <tag>] [--json]` | Save a running Vz VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
+| `mvmctl machine save <name> [--tag <tag>] [--json]` | Save a running HVF VM as a `vm_full` checkpoint. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
 | `mvmctl machine restore <checkpoint> [--json]` | Restore a previously saved `vm_full` checkpoint into the original VM identity after content verification. Refuses when the active host/backend does not report the `save-restore` snapshot tier. |
-| `mvmctl machine checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via Vz's `saveMachineStateToURL`. Records content hash in the audit chain. |
+| `mvmctl machine checkpoint create <name> [--class fs-quick\|vm-full] [--tag <tag>] [--json]` | Capture a checkpoint. `--class vm-full` saves full machine state (memory + disk) via HVF's `saveMachineStateToURL`. Records content hash in the audit chain. |
 | `mvmctl machine checkpoint restore <checkpoint> [--json]` | Restore a previously created `vm_full` checkpoint into the original VM identity. Re-hashes content against the recorded metadata before loading. |
 | `mvmctl machine checkpoint fork <checkpoint> [--new-id <name>] [--boot] [--json]` | Restore a checkpoint into a new VM identity (new name, separate audit lineage). `vm_full` forks auto-boot; `fs_quick` forks boot only with `--boot`. |
 | `mvmctl machine checkpoint ls [--json]` | List checkpoints. |
@@ -706,7 +706,7 @@ The snapshot path activates only when *all* of the following hold:
   snapshot's recorded drive layout);
 - the active backend reports snapshot support.
 
-On macOS backends without Firecracker (HVF, Vz, libkrun), vsock
+On macOS backends without Firecracker (HVF, libkrun), vsock
 snapshots return `os error 95` (EOPNOTSUPP); restore failures fall back
 to cold boot with a warning rather than aborting the exec. See the
 [Sandboxed Exec](/guides/exec/) guide for the full background.

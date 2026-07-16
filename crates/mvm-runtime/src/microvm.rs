@@ -17,13 +17,13 @@ use mvm_net::{NetHandle, NetworkProvider, NetworkSpec};
 // RAII resource guards — prevent leaks when VM launch fails partway through
 // ============================================================================
 
-/// RAII guard for a Firecracker process started inside the Lima VM.
+/// RAII guard for a Firecracker process started on the Linux host.
 ///
 /// On drop, kills the Firecracker process using the PID file and cleans up
 /// the API socket. Call `defuse()` after a successful launch to prevent
 /// cleanup (ownership transfers to the normal stop path).
 pub struct FirecrackerGuard {
-    /// Absolute path to the VM directory inside the Lima VM (contains fc.pid, fc.socket).
+    /// Absolute path to the VM directory on the Linux host (contains fc.pid, fc.socket).
     abs_dir: Option<String>,
 }
 
@@ -65,7 +65,7 @@ impl Drop for FirecrackerGuard {
     }
 }
 
-/// RAII guard for a TAP network interface created inside the Lima VM.
+/// RAII guard for a TAP network interface created on the Linux host.
 ///
 /// On drop, destroys the TAP device. Call `defuse()` after a successful
 /// launch to prevent cleanup (ownership transfers to the normal stop path).
@@ -175,12 +175,12 @@ fn require_linux_env() -> Result<()> {
     Ok(())
 }
 
-/// Resolve MICROVM_DIR (~) to an absolute path inside the Lima VM.
+/// Resolve MICROVM_DIR (~) to an absolute path on the Linux host.
 fn resolve_microvm_dir() -> Result<String> {
     run_in_vm_stdout(&format!("echo {}", MICROVM_DIR))
 }
 
-/// Resolve a per-VM directory path (~ expansion) inside the Lima VM.
+/// Resolve a per-VM directory path (~ expansion) on the Linux host.
 pub fn resolve_vm_dir(slot: &VmSlot) -> Result<String> {
     run_in_vm_stdout(&format!("echo {}", slot.vm_dir))
 }
@@ -267,7 +267,7 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(format!("{abs_dir}/console.log")))
 }
 
-/// Start the Firecracker daemon inside the Lima VM (background).
+/// Start the Firecracker daemon on the Linux host (background).
 #[instrument(skip_all)]
 fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
     ui::info("Starting Firecracker...");
@@ -506,7 +506,8 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
 /// Full start sequence: network, firecracker, configure, boot (headless).
 ///
 /// MicroVMs never have SSH enabled. They run as headless workloads and
-/// communicate via vsock. Use `mvmctl shell` to access the Lima VM environment.
+/// communicate via vsock. Use `mvmctl console` for interactive guest access
+/// (dev-mode only).
 #[instrument(skip_all)]
 pub fn start() -> Result<()> {
     require_linux_env()?;
@@ -568,7 +569,7 @@ pub fn start() -> Result<()> {
         "",
         "Use 'mvmctl status' to check the microVM.",
         "Use 'mvmctl stop' to shut down the microVM.",
-        "Use 'mvmctl shell' to access the Lima VM environment.",
+        "Use 'mvmctl console' for interactive guest access (dev-mode only).",
     ]);
 
     Ok(())
@@ -700,14 +701,14 @@ pub struct FlakeRunConfig {
     pub name: String,
     /// Network slot for this VM.
     pub slot: VmSlot,
-    /// Absolute path to the kernel image inside the Lima VM.
+    /// Absolute path to the kernel image on the Linux host.
     pub vmlinux_path: String,
     /// Absolute path to the initial ramdisk (NixOS stage-1), if present.
     pub initrd_path: Option<String>,
-    /// Absolute path to the root filesystem inside the Lima VM.
+    /// Absolute path to the root filesystem on the Linux host.
     pub rootfs_path: String,
-    /// Absolute path to the dm-verity sidecar (Merkle hash tree) inside
-    /// the Lima VM. Present when the flake was built with
+    /// Absolute path to the dm-verity sidecar (Merkle hash tree) on
+    /// the Linux host. Present when the flake was built with
     /// `verifiedBoot = true` (the production default).
     /// Must be paired with `roothash`.
     pub verity_path: Option<String>,
@@ -921,7 +922,7 @@ fn run_configured_firecracker(
     // No-op on non-Linux hosts (this Firecracker spawn path is Linux-only; the
     // shared sidecar binary lives at `crates/mvm-hostd/src/bin/mvm-bridge.rs`).
     //
-    // Opt-in via MVM_GATEWAY_BRIDGE=1, the same gate the libkrun/Vz
+    // Opt-in via MVM_GATEWAY_BRIDGE=1, the same gate the libkrun/hvf
     // gateway-bridge factory sits behind: the FC bridge lane is not yet
     // working end-to-end (its confinement spec doesn't grant the
     // observer-allowlist path it reads post-confinement), and its
@@ -2819,7 +2820,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Scan `VMS_DIR` inside the Lima VM for orphaned entries — run-info.json files
+/// Scan `VMS_DIR` on the Linux host for orphaned entries — run-info.json files
 /// whose stored Firecracker PID is no longer alive.
 ///
 /// Returns a list of VM names with orphaned state files.
@@ -2908,11 +2909,9 @@ pub fn read_run_info() -> Option<RunInfo> {
 // ============================================================================
 // mvm-bridge spawn + watchdog (Linux only)
 //
-// Mirrors Vz's `AttachedDrainerGuard` shape
-// (`crates/mvm-runtime/src/vz.rs`) — Drop kills+waits the child on
-// early return, `detach()` hands ownership to the caller which
-// records the PID in
-// `<state_dir>/fc-bridge.pid` and lets the watchdog thread inherit it.
+// An attached-then-detached child-process guard: Drop kills+waits the child on
+// early return, `detach()` hands ownership to the caller which records the PID
+// in `<state_dir>/fc-bridge.pid` and lets the watchdog thread inherit it.
 // The bridge is Linux-only so every helper is `#[cfg(target_os = "linux")]`;
 // non-Linux builds compile but never call into this path.
 // ============================================================================
@@ -2924,8 +2923,7 @@ pub fn read_run_info() -> Option<RunInfo> {
 #[cfg(target_os = "linux")]
 const FC_BRIDGE_PID_FILE_NAME: &str = "fc-bridge.pid";
 
-/// RAII guard for a spawned `mvm-bridge` child. Mirrors
-/// the Vz `AttachedDrainerGuard` pattern: dropping the guard kills +
+/// RAII guard for a spawned `mvm-bridge` child: dropping the guard kills +
 /// waits the child so an early return / panic between bridge spawn
 /// and VM boot completion cleans up the bridge process.
 ///
@@ -2984,8 +2982,7 @@ fn passt_path_from_env_or_default() -> std::path::PathBuf {
 
 /// Resolve the `mvm-bridge` binary path, checking three
 /// sources in order. Pure resolver — exercised directly from tests
-/// without touching `std::env`. Mirrors the Vz
-/// `resolve_vz_drainer_path_inner` shape.
+/// without touching `std::env`.
 #[cfg(target_os = "linux")]
 fn resolve_fc_bridge_path_inner(
     env_override: Option<&std::path::Path>,
@@ -3152,7 +3149,7 @@ fn secret_env_cmdline_token(vm_name: &str) -> Option<String> {
 /// and encodes it. Best-effort: a missing or malformed sidecar yields `None`
 /// (grant-less boot), mirroring `secret_env_cmdline_token`.
 ///
-/// Exported as `pub(crate)` so the libkrun, Vz, and QEMU cmdline builders
+/// Exported as `pub(crate)` so the libkrun, HVF, and QEMU cmdline builders
 /// can append the same token without duplicating the sidecar-read logic.
 pub(crate) fn verb_grant_cmdline_token(vm_name: &str) -> Option<String> {
     let path = mvm_core::config::vm_state_dir(vm_name).join("verb-grant.json");
@@ -3416,9 +3413,8 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
     Ok(AttachedBridgeGuard { child: Some(child) })
 }
 
-/// Atomically write the bridge PID file at mode 0600. Same shape as
-/// Vz's `write_drainer_pid_file` — tmp + rename so a concurrent
-/// reader (a future `stop_vm` reaper) never sees a partial value.
+/// Atomically write the bridge PID file at mode 0600 — tmp + rename so a
+/// concurrent reader (a future `stop_vm` reaper) never sees a partial value.
 #[cfg(target_os = "linux")]
 fn write_fc_bridge_pid_file(path: &std::path::Path, pid: u32) -> Result<()> {
     use std::io::Write;

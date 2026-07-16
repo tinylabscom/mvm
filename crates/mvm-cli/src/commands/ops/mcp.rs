@@ -388,7 +388,7 @@ fn build_tool_registry() -> ToolRegistry {
 
 /// The admission hook every MCP code-run boots under — cold and warm alike.
 /// MCP runs untrusted AI code, so each VM is admitted as a deny-all transient
-/// workload: the signed plan's `tenant_id` makes the libkrun/Vz supervisor
+/// workload: the signed plan's `tenant_id` makes the libkrun/HVF supervisor
 /// spawn the enforcing gateway bridge (Firecracker enforces the same policy
 /// field via nftables). Without admission no bridge spawns and the deny-all is
 /// inert on the bridge backends.
@@ -434,7 +434,7 @@ impl ExecDispatcher {
             healthcheck: None,
         };
         // Admit the run (see `mcp_untrusted_admit`): without it no bridge spawns
-        // and the deny-all above is inert on the libkrun/Vz backends.
+        // and the deny-all above is inert on the libkrun/HVF backends.
         let admit = mcp_untrusted_admit();
         crate::exec::run_captured(req, Some(&admit))
     }

@@ -801,9 +801,10 @@ fn fork_vm_full_arm(
 
 fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     // A vm_full fork restores a saved machine state whose cpu/mem are baked
-    // into the snapshot; Vz validates device config against the saved state
-    // and refuses a mismatch. Accepting these flags would silently fail at
-    // restore time with a confusing hypervisor error — refuse early.
+    // into the snapshot; the removed Vz backend validated device config
+    // against the saved state and refused a mismatch. Accepting these flags
+    // would silently fail at restore time with a confusing hypervisor error
+    // — refuse early.
     if p.cpus_override.is_some() {
         anyhow::bail!(
             "--cpus is not valid for a vm_full fork: a memory restore resumes the saved \
@@ -939,7 +940,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
         .map(|ctx| ctx.admitted.plan.tenant.0.clone());
 
     // Mint the child's verb-grant sidecar up front so it's readable below for
-    // post-restore delivery. Mirrors the Vz fork path.
+    // post-restore delivery. Mirrors the former Vz backend's fork path.
     if let Some(ref plan_json_str) = child_plan_json {
         let mint_cfg = mvm_core::vm_backend::VmStartConfig {
             name: p.child_vm_name.clone(),
@@ -976,7 +977,7 @@ fn fork_vm_full_arm_fc(p: ForkVmFullArmFcParams<'_>) -> Result<()> {
     // agent over the FC vsock UDS, re-pinning it to the child's plan instead
     // of running class-gate-only. `FcForkRestorer::restore_fork` already
     // resumed the VMM with a zero VMGenID token before returning; this is the
-    // real token + grant delivery, mirroring the Vz fork path and
+    // real token + grant delivery, mirroring the former Vz backend's fork path and
     // `warm_restore_instance_from_path`'s own post-restore signal.
     if let Some(mut grant_env) = read_grant_envelope_for(&p.child_vm_name) {
         if let Some(parent_vm_name) = p.store.read_meta(p.checkpoint).ok().map(|m| m.vm_name)
@@ -1492,7 +1493,7 @@ mod tests {
 
     /// When mode.json carries `rootfs_path` but the file no longer exists on
     /// disk, the error mentions the pause workflow (same user-visible guidance
-    /// as the Vz supervisor-config path).
+    /// as the former Vz backend's supervisor-config path).
     #[test]
     fn mode_json_rootfs_path_missing_on_disk_produces_actionable_error() {
         let mut env = mvm_core::util::test_env::TestEnv::new();

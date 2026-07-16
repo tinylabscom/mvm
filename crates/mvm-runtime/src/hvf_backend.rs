@@ -1,6 +1,6 @@
 //! `HvfBackend` — the `VmBackend` impl for the raw-HVF macOS path.
 //!
-//! Lifecycle mirrors the other detached-supervisor backends (vz/libkrun): `start`
+//! Lifecycle mirrors the other detached-supervisor backend (libkrun): `start`
 //! builds an [`HvfSupervisorConfig`] from the `VmStartConfig`, spawns
 //! `mvm-hvf-supervisor` with the JSON on stdin, and waits for it to write its PID
 //! file (boot confirmed). `stop` signals that PID; `status` probes it with
@@ -466,11 +466,11 @@ impl VmBackend for HvfBackend {
     }
 
     fn security_profile(&self) -> BackendSecurityProfile {
-        // Same Hypervisor.framework microVM tier as Vz (Tier 2), but the in-house
-        // VMM owns the surface and the data plane is vsock-only (no guest NIC;
-        // egress rides the host gating endpoint). Claims 1-2/4-7 hold as on FC;
-        // claim 3 (verified boot) does not hold on the default path — the
-        // virtiofs-root serves a host directory that cannot be dm-verity-sealed.
+        // Hypervisor.framework microVM tier (Tier 2): the in-house VMM owns the
+        // surface and the data plane is vsock-only (no guest NIC; egress rides
+        // the host gating endpoint). Claims 1-2/4-7 hold as on FC; claim 3
+        // (verified boot) does not hold on the default path — the virtiofs-root
+        // serves a host directory that cannot be dm-verity-sealed.
         BackendSecurityProfile {
             claims: [
                 ClaimStatus::Holds,       // 1 — host-fs isolation via the VMM + admitted shares
@@ -571,7 +571,7 @@ impl VmBackend for HvfBackend {
 
         // Interactive PTY runs (`machine run -it`) pre-open the console data
         // ports so the host can attach a shell; the supervisor binds them under
-        // the shared Vz-style console socket dir. Create that dir up front so
+        // the shared HVF-style console socket dir. Create that dir up front so
         // the bind can't miss.
         let console_data_sockets = hvf_console_data_sockets(&state_dir, config.dev_console);
         if !console_data_sockets.is_empty() {
@@ -670,14 +670,14 @@ impl VmBackend for HvfBackend {
         tunnel_guard.defuse();
 
         // Register an admitted workload with the per-tenant host-agent daemon,
-        // same as libkrun/vz: the daemon starts tracking this VM and binds its
+        // same as on libkrun: the daemon starts tracking this VM and binds its
         // BROKER_PORT socket. The guest-side BROKER_PORT bridge is wired on this
         // backend too — the supervisor config carries `broker_socket`
         // (`broker_listen_socket` above) and the vsock dispatcher relays
         // BROKER_PORT to it — so a guest `host.audit.v1` call reaches the broker
-        // here just as it does on libkrun/vz (host->guest agent RPC over
+        // here just as it does on libkrun (host->guest agent RPC over
         // GUEST_AGENT_PORT is a separate path). Registration keeps daemon-side
-        // tracking + lifecycle parity with the other backends. Unlike libkrun/vz
+        // tracking + lifecycle parity with the other backends. Unlike libkrun,
         // there is no per-VM broker-fork fallback here, so MVM_HOST_AGENT_DAEMON=0
         // selects nothing — this backend is daemon-only. Best-effort: a
         // registration failure is logged, never a launch rollback (the workload
@@ -1307,12 +1307,12 @@ mod tests {
     }
 
     /// `start()` registers an admitted VM with the per-tenant host-agent
-    /// daemon (mirrors libkrun/vz); `stop()` must reap that registration.
+    /// daemon (mirrors libkrun); `stop()` must reap that registration.
     /// This exercises the `stop()` half of the wiring without spawning a real
     /// supervisor: it plants the tenant-ref marker `register_host_agent_
     /// services_if_admitted` would have written, then asserts `stop()`
     /// removes it via `reap_host_agent_services_from_state` — the same call
-    /// libkrun/vz make. The daemon connect itself is best-effort (no daemon
+    /// libkrun makes. The daemon connect itself is best-effort (no daemon
     /// is running for this fake tenant), so this only verifies the reap path
     /// is wired, not the network round-trip (covered by `host_agent_spawn`'s
     /// own tests).
@@ -1396,7 +1396,7 @@ mod tests {
         for s in &socks {
             assert_eq!(
                 s.host_socket,
-                mvm_core::config::vm_vz_vsock_port_socket_at(state, s.guest_port),
+                mvm_core::config::vm_hvf_vsock_port_socket_at(state, s.guest_port),
             );
         }
     }

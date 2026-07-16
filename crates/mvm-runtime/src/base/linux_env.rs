@@ -302,7 +302,7 @@ impl LinuxEnv for DevVmEnv {
 pub fn create_linux_env() -> Box<dyn LinuxEnv> {
     let plat = platform::current();
 
-    if plat.is_vz_default_tier() {
+    if plat.is_hvf_default_tier() {
         return Box::new(DevVmEnv::new(DEV_VM_NAME));
     }
 
@@ -320,7 +320,7 @@ pub fn create_linux_env() -> Box<dyn LinuxEnv> {
 /// builder on that tier should check this and fail closed via
 /// [`require_guest_exec_available`] instead of attempting the doomed call.
 pub fn guest_exec_via_vm_available() -> bool {
-    !platform::current().is_vz_default_tier()
+    !platform::current().is_hvf_default_tier()
 }
 
 /// Fails closed with an actionable error naming `limitation` when
@@ -510,10 +510,10 @@ mod tests {
     // ── guest_exec gating ───────────────────────────────────────────
 
     #[test]
-    fn guest_exec_via_vm_available_is_negation_of_vz_default_tier() {
+    fn guest_exec_via_vm_available_is_negation_of_hvf_default_tier() {
         assert_eq!(
             guest_exec_via_vm_available(),
-            !platform::current().is_vz_default_tier()
+            !platform::current().is_hvf_default_tier()
         );
     }
 

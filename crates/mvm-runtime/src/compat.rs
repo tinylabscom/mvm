@@ -10,13 +10,13 @@
 //! - **Libkrun**: `crates/mvm-libkrun/src/sys.rs` FFI mapping;
 //!   `crates/mvm-runtime/src/libkrun.rs` `DEFAULT_CMDLINE`; macOS-only so
 //!   `console=hvc0`; no jailer or snapshots (host process == supervisor).
-//! - (Vz removed)
-//!   macOS-only, aarch64-only in practice (Apple Silicon + HVF),
-//!   native-gateway networking, snapshot-capable on macOS 14+
-//!   (capabilities() is host-probed; compat reports the nominal capability).
 //! - **Qemu**: no implementation yet; capabilities are conventional QEMU
 //!   defaults for the mvm workload shape (ELF/Image per arch, ext4 rootfs,
 //!   TAP networking, snapshots, no jailer). Flagged with `// assumption`.
+//!
+//! `MicrovmBackend` has no `Hvf` variant yet (the removed Vz backend's row
+//! was deleted rather than repurposed); the raw HVF backend
+//! (`crates/mvm-runtime/src/hvf_backend.rs`) does not go through this table.
 
 use mvm_core::arch::GuestArch;
 use mvm_core::kernel_format::KernelFormat;

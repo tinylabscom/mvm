@@ -2,7 +2,7 @@
 //! guest exit code to `<vm_state_dir>/workload.exit`.
 //!
 //! The poll is state-dir based and therefore backend-agnostic: the supervisor
-//! (libkrun or vz) persists `workload.exit` BEFORE the guest powers off — the
+//! (libkrun or hvf) persists `workload.exit` BEFORE the guest powers off — the
 //! ack handshake guarantees that ordering — so the file's presence is the
 //! reliable "workload finished" signal. We deliberately do NOT poll supervisor
 //! PID liveness: on a busy host a dead supervisor's PID can be reused by another
@@ -29,7 +29,7 @@ pub(crate) fn read_exit_status_from(state_dir: &Path) -> VmExitStatus {
 }
 
 /// Block until the captured exit code appears under `state_dir`, or the bounded
-/// timeout elapses (→ UNKNOWN). Shared by the libkrun and vz `VmBackend::wait`
+/// timeout elapses (→ UNKNOWN). Shared by the libkrun and hvf `VmBackend::wait`
 /// impls — both supervisors write the same `workload.exit` file.
 pub(crate) fn wait_for_workload_exit(state_dir: &Path) -> VmExitStatus {
     let deadline = Instant::now() + WORKLOAD_WAIT_TIMEOUT;

@@ -347,7 +347,7 @@ impl NetworkPolicy {
     /// Generate the iptables shell script fragment for this policy.
     /// Returns `None` if unrestricted (no rules needed).
     ///
-    /// The script assumes it runs inside the Lima VM with sudo and that
+    /// The script assumes it runs on the Linux host with sudo and that
     /// the bridge device and FORWARD chain are already set up.
     pub fn iptables_script(&self, bridge_dev: &str, guest_ip: &str) -> Option<String> {
         let rules = self.resolve_rules()?;

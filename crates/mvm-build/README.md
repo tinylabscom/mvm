@@ -6,7 +6,7 @@ Nix builder pipeline for producing Firecracker microVM images. Supports two buil
 
 | Module | Purpose |
 |--------|---------|
-| `dev_build` | Local `nix build` in Lima VM, artifact caching by Nix store hash |
+| `dev_build` | Local `nix build` in the builder VM, artifact caching by Nix store hash |
 | `build` | Orchestrated pool builds via ephemeral Firecracker builder VMs |
 | `artifacts` | Artifact path resolution and caching |
 | `cache` | Build cache utilities |

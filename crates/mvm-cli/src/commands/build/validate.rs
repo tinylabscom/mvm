@@ -129,8 +129,8 @@ mod tests {
     /// dispatch to).
     #[cfg(target_os = "macos")]
     #[test]
-    fn ensure_guest_exec_available_fails_closed_on_vz_default_tier() {
-        if !mvm_core::platform::current().is_vz_default_tier() {
+    fn ensure_guest_exec_available_fails_closed_on_hvf_default_tier() {
+        if !mvm_core::platform::current().is_hvf_default_tier() {
             return;
         }
         let err =

@@ -199,7 +199,7 @@ pub struct SessionRecord {
     #[serde(default)]
     pub creator_pid: u32,
     /// When true, the session is torn down automatically after an
-    /// attach completes (vz-style `--ephemeral`). Defaults false so
+    /// attach completes (`--ephemeral`). Defaults false so
     /// records written before this field still parse.
     #[serde(default)]
     pub ephemeral: bool,

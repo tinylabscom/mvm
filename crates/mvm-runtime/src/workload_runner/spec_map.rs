@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use mvm_agentd::vsock::{
     EGRESS_PORT, GUEST_AGENT_PORT, WORKLOAD_EXIT_PORT, dev_console_data_ports,
 };
-use mvm_core::config::{vm_vsock_port_socket_at, vm_vz_vsock_port_socket_at};
+use mvm_core::config::{vm_hvf_vsock_port_socket_at, vm_vsock_port_socket_at};
 use mvm_core::vm_backend::VmStartConfig;
 
 use crate::driver::{BlockDev, ConsoleCapture, KernelImage, VmmSpec, VsockDirection, VsockPort};
@@ -117,7 +117,7 @@ pub fn workload_vsock_ports(socks: &WorkloadSockets) -> Vec<VsockPort> {
 }
 
 /// Build the per-port (port, host-UDS) list for the interactive console data
-/// range, rooted under the shared Vz-style socket helper (`<socket-dir>/vsock/`).
+/// range, rooted under the shared HVF-style socket helper (`<socket-dir>/vsock/`).
 /// Returns an empty vec when `dev_console` is false (claim 15: sealed prod boots
 /// carry no console listeners).
 pub fn console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<(u32, PathBuf)> {
@@ -125,7 +125,7 @@ pub fn console_data_sockets(state_dir: &Path, dev_console: bool) -> Vec<(u32, Pa
         return Vec::new();
     }
     dev_console_data_ports()
-        .map(|port| (port, vm_vz_vsock_port_socket_at(state_dir, port)))
+        .map(|port| (port, vm_hvf_vsock_port_socket_at(state_dir, port)))
         .collect()
 }
 
@@ -428,7 +428,7 @@ mod tests {
     }
 
     #[test]
-    fn console_data_sockets_paths_follow_vz_convention() {
+    fn console_data_sockets_paths_follow_hvf_convention() {
         use mvm_agentd::vsock::CONSOLE_PORT_BASE;
         let state_dir = Path::new("/state/myvm");
         let sockets = console_data_sockets(state_dir, true);
@@ -438,8 +438,8 @@ mod tests {
         assert_eq!(*port, CONSOLE_PORT_BASE + 1);
         assert_eq!(
             path,
-            &mvm_core::config::vm_vz_vsock_port_socket_at(state_dir, *port),
-            "path must follow the shared Vz-socket helper"
+            &mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, *port),
+            "path must follow the shared HVF-socket helper"
         );
 
         // Last port: CONSOLE_PORT_BASE + 128 = 20128
@@ -447,7 +447,7 @@ mod tests {
         assert_eq!(*last_port, CONSOLE_PORT_BASE + 128);
         assert_eq!(
             last_path,
-            &mvm_core::config::vm_vz_vsock_port_socket_at(state_dir, *last_port)
+            &mvm_core::config::vm_hvf_vsock_port_socket_at(state_dir, *last_port)
         );
     }
 

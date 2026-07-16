@@ -214,7 +214,7 @@ just lint         # Both format check + clippy
 
 ### Multi-Backend
 
-mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; Vz and libkrun-backed components cover Apple Silicon macOS. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
+mvmctl's supported local microVM hosts are native Linux with `/dev/kvm` and macOS Apple Silicon. Firecracker is the Linux baseline; HVF and libkrun-backed components cover Apple Silicon macOS. WSL2 nested KVM and a Hyper-V managed Linux builder are future backend work.
 
 ### Host vs. VM
 
@@ -279,7 +279,7 @@ microVMs have no SSH. Interactive access is via `mvmctl machine console` which u
 - Authenticated via the existing Ed25519 vsock protocol
 - Dev-mode only (`access.console` must be `true` in the guest security policy)
 - Single session per VM, 15-minute idle timeout
-- Supports both Firecracker and Vz backends
+- Supports Firecracker, libkrun, and HVF backends
 
 ### XDG Directory Layout
 

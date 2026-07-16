@@ -1,9 +1,11 @@
 //! Shared audit-substrate resolution for backends that own a
-//! `SupervisorConfig`-shaped audit surface (libkrun, Vz).
+//! `SupervisorConfig`-shaped audit surface. Currently used by libkrun
+//! only; the removed Vz backend used to share it too, and the hvf
+//! backend may adopt it as its own audit surface lands.
 //!
 //! Lifts the path-derivation + `vm_name` / `tenant_id` allowlist
-//! validation out of the per-backend `start()` paths so libkrun.rs and
-//! vz.rs share one source of truth. A future `NetworkProvider` trait
+//! validation out of the per-backend `start()` paths so any adopting
+//! backend shares one source of truth. A future `NetworkProvider` trait
 //! will lift `compute_audit_substrate(...)` into a trait method
 //! (`provider.activate_audit(...)`). Keeping the free-function
 //! signature stable now makes that extraction mechanical.

@@ -281,7 +281,7 @@ impl GuestSidecar {
     /// genuinely overlay-aware: the `/mvm/runtime` mount point exists
     /// and the injected `/init` prefers an overlay-resident agent when
     /// one is attached (Firecracker) and falls back to the baked agent
-    /// otherwise (libkrun/Vz). `overlay_aware: true` is therefore an
+    /// otherwise (libkrun/HVF). `overlay_aware: true` is therefore an
     /// honest claim, not a gate bypass — only emit this sidecar once
     /// the injection has actually run.
     ///
@@ -411,8 +411,7 @@ pub enum BuilderVmError {
     #[error(
         "libkrun-as-Linux-builder bootstrap is in flight; \
          the libkrun builder path does not use host Nix; \
-         see ADR-005 §\"Linux builder via libkrun (no Lima)\" \
-         for the design and Sprint 50 for the schedule. \
+         builds run inside a builder VM the CLI launches directly. \
          Rebuild or restart the project builder VM before retrying."
     )]
     NotYetImplemented,
@@ -423,7 +422,7 @@ pub enum BuilderVmError {
 
     /// A host VMM the operator explicitly asked for isn't available on
     /// this platform. Carries the requested label (e.g.
-    /// `"linux-builder-vm"`, `"vz"`) and an
+    /// `"linux-builder-vm"`, `"hvf"`) and an
     /// actionable hint pointing at the kernel-module parameter,
     /// platform-version gap, or install step the operator needs.
     #[error("{requested} is not available on this host: {reason}")]
@@ -685,7 +684,7 @@ pub struct BuilderVmRunConfig {
     pub kernel_cmdline: String,
     /// Optional initrd path.
     pub initrd_path: Option<PathBuf>,
-    /// vCPU count. The libkrun + Vz backends both refuse values
+    /// vCPU count. The libkrun + HVF backends both refuse values
     /// above their host-determined caps.
     pub vcpus: u8,
     /// Guest memory in MiB.
@@ -700,8 +699,8 @@ pub struct BuilderVmRunConfig {
 }
 
 /// virtio-fs share to attach for the builder run. Maps onto
-/// `libkrun_add_virtiofs` (libkrun) or
-/// `VZVirtioFileSystemDeviceConfiguration` (Vz).
+/// `libkrun_add_virtiofs` (libkrun) or the equivalent share-attach call
+/// on the hypervisor in use (HVF, QEMU).
 ///
 /// Builder mode is the *only* path that attaches virtio-fs shares
 /// today; workload microVMs default to zero shares and refuse

@@ -1843,8 +1843,8 @@ impl VmBackendForBuilder for LibkrunBuilderBackend {
             // libkrun's add_virtio_fs takes only (tag, host_path) —
             // every share is RW from the guest's perspective. The
             // `BuilderVmMount::read_only` flag is currently ignored
-            // on this backend; Vz's impl will honour it via
-            // VZSharedDirectory's `readOnly:` parameter.
+            // on this backend; a hypervisor with native virtio-fs
+            // read-only support can honour it instead.
             krun = krun.add_virtio_fs(
                 mount.tag.clone(),
                 path_to_str(&mount.host_path, "mount_host_path")?,

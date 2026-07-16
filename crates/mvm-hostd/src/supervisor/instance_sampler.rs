@@ -21,7 +21,7 @@ use mvm_core::observability::instance_metrics::{
 /// One VM's resource readings as taken at a single instant.
 /// Optional fields are `None` when the underlying source is
 /// unavailable (e.g. `/sys/class/net/<tap>/...` doesn't exist on
-/// macOS Lima dev hosts).
+/// macOS dev hosts).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sample {
     pub cpu_user_us: Option<u64>,
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     #[cfg(not(target_os = "linux"))]
     fn os_sources_return_empty_on_non_linux() {
-        // Confirms the Lima-dev-host fallback compiles and yields
+        // Confirms the non-Linux-dev-host fallback compiles and yields
         // `None` rather than panicking. The supervisor will fall
         // through to "no metrics" in that case.
         assert_eq!(read_os_proc_stat(1), Sample::default());

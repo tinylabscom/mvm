@@ -35,8 +35,8 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
 /// Forward a port from a running microVM to localhost.
 ///
-/// On macOS this tunnels through Lima's SSH connection; on native Linux
-/// it spawns a local socat proxy.
+/// The microVM is directly reachable on the host bridge, so this spawns a
+/// local socat proxy on every platform.
 ///
 /// Each `port_spec` is either `GUEST_PORT` (binds to same local port) or
 /// `LOCAL_PORT:GUEST_PORT`.  Multiple ports are forwarded concurrently —

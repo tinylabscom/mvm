@@ -340,7 +340,7 @@ fn ext4_materializer_choice() -> crate::builder_backend_select::BuilderBackendCh
 
 /// Safety margin (bytes) left between the formatted ext4 size and the
 /// backing device size. The builder VM (libkrun) and the workload
-/// backends (Vz, Firecracker) can report a virtio-blk device size that
+/// backends (HVF, Firecracker) can report a virtio-blk device size that
 /// differs from the host sparse file by up to ~64 KiB in either
 /// direction (kernel/VMM rounding). Formatting `mkfs.ext4` to the full
 /// device size makes a filesystem that boots on the backend whose device
@@ -1203,8 +1203,8 @@ mod tests {
         let mut env = TestEnv::new();
         env.remove(MVM_BUILDER_BACKEND_ENV);
 
-        // No override → the resolved backend (macOS 26+ Apple Silicon → Vz,
-        // everywhere else → libkrun). On a Vz Mac, forcing libkrun looked for an
+        // No override → the resolved backend (macOS 26+ Apple Silicon → HVF,
+        // everywhere else → libkrun). On an HVF Mac, forcing libkrun looked for an
         // `aarch64` builder image that is never built there.
         assert_eq!(
             ext4_materializer_choice(),
