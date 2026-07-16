@@ -358,11 +358,11 @@ mod tests {
         assert_eq!(count, 5);
     }
 
-    // Pin the wasm-clean `mvm-verify` re-implementation to the
+    // Pin the wasm-clean `mvm_protocol::verify` re-implementation to the
     // bytes this crate actually writes. If `AuditEntry`'s serde shape
-    // drifts from `mvm_verify::MirrorEntry`, a genuine line stops
-    // verifying and this fails here (loudly, in CI) rather than only in
-    // the browser tool.
+    // drifts from `mvm_protocol::verify::MirrorEntry`, a genuine line
+    // stops verifying and this fails here (loudly, in CI) rather than
+    // only in the browser tool.
     #[tokio::test]
     async fn mvm_verify_matches_supervisor_chain() {
         let dir = tempfile::tempdir().unwrap();
@@ -384,18 +384,18 @@ mod tests {
             .unwrap();
 
         let content = std::fs::read_to_string(signer.tenant_path("tenant-a")).unwrap();
-        let verified = mvm_verify::verify_audit_chain_bytes(&content, &vk)
-            .expect("mvm-verify must accept a chain mvm-supervisor wrote");
+        let verified = mvm_protocol::verify::verify_audit_chain_bytes(&content, &vk)
+            .expect("mvm-protocol's verifier must accept a chain mvm-supervisor wrote");
         assert_eq!(verified.count, 2);
         assert_eq!(verified.entries[0].event, "plan.launched");
         assert_eq!(verified.entries[0].tenant, "tenant-a");
 
         // And it must reject a tampered stream just like the native path.
         let tampered = content.replacen("plan.launched", "plan.hijacked", 1);
-        let err = mvm_verify::verify_audit_chain_bytes(&tampered, &vk).unwrap_err();
+        let err = mvm_protocol::verify::verify_audit_chain_bytes(&tampered, &vk).unwrap_err();
         assert_eq!(
             err,
-            mvm_verify::AuditVerifyError::SignatureInvalid { line: 0 }
+            mvm_protocol::verify::AuditVerifyError::SignatureInvalid { line: 0 }
         );
     }
 

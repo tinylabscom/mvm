@@ -2439,9 +2439,9 @@ dependencies = [
  "mvm-build",
  "mvm-core",
  "mvm-net",
+ "mvm-protocol",
  "mvm-runtime",
  "mvm-sdk",
- "mvm-verify",
  "rand 0.8.6",
  "regex",
  "reqwest 0.13.4",
@@ -2473,6 +2473,17 @@ dependencies = [
  "mvm-core",
  "mvm-sdk",
  "serde_json",
+]
+
+[[package]]
+name = "mvm-protocol"
+version = "0.18.0"
+dependencies = [
+ "base64",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
 ]
 
 [[package]]
@@ -2556,17 +2567,6 @@ dependencies = [
  "tempfile",
  "tokio",
  "zeroize",
-]
-
-[[package]]
-name = "mvm-verify"
-version = "0.18.0"
-dependencies = [
- "base64",
- "ed25519-dalek",
- "serde",
- "serde_json",
- "sha2 0.11.0",
 ]
 
 [[package]]

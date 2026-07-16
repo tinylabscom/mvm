@@ -1,4 +1,4 @@
-//! Standalone verifier for mvm's chain-signed audit log (claim 8).
+//! Verifier for mvm's chain-signed audit log (claim 8).
 //!
 //! `mvm-supervisor` writes per-tenant `<tenant>.jsonl` streams where
 //! each line is a [`SignedEnvelope`]: an audit entry, the SHA-256 of
@@ -7,11 +7,11 @@
 //! verifies those streams from a file path — but it lives in a crate
 //! that pulls tokio/libc/rustix and cannot compile to `wasm32`.
 //!
-//! This crate re-implements *exactly* that verification against an
+//! This module re-implements *exactly* that verification against an
 //! in-memory `&str` and an Ed25519 public key, with no filesystem and
-//! no `mvm-*` dependencies, so the same logic runs in a browser tab
-//! (see `web/audit-verify/`) and lets anyone audit a downloaded log
-//! with no host and no trust in a server.
+//! no other `mvm-*` dependencies, so the same logic runs in a browser
+//! tab (see `web/audit-verify/`) and lets anyone audit a downloaded
+//! log with no host and no trust in a server.
 //!
 //! Byte-exactness: the signed payload is `serde_json::to_vec(entry)`.
 //! [`MirrorEntry`] reproduces `mvm_hostd::supervisor::audit::AuditEntry`'s
@@ -23,13 +23,16 @@
 //! `mvm_verify_matches_supervisor_chain` test pins this equivalence so
 //! a field added upstream trips CI here.
 
+use alloc::collections::BTreeMap;
+use alloc::format;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use core::fmt;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
-use std::fmt;
 
 /// Mirror of `mvm_hostd::supervisor::audit::AuditEntry`. Field order and serde
 /// attributes MUST match the upstream struct byte-for-byte — the
@@ -147,7 +150,7 @@ impl fmt::Display for AuditVerifyError {
     }
 }
 
-impl std::error::Error for AuditVerifyError {}
+impl core::error::Error for AuditVerifyError {}
 
 /// Parse a 32-byte Ed25519 public key from hex (64 hex chars, optional
 /// `0x` prefix and surrounding whitespace).
@@ -277,6 +280,7 @@ fn hex_nibble(c: u8) -> Result<u8, AuditVerifyError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use ed25519_dalek::{Signer, SigningKey};
 
     const SEED: [u8; 32] = [7u8; 32];

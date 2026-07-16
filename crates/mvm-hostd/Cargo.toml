@@ -157,7 +157,7 @@ hex.workspace = true
 mvm-core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }
 # audit-chain drift tripwire (supervisor tests).
-mvm-verify = { path = "../mvm-verify" }
+mvm-protocol.workspace = true
 # jailer property tests re-spawn under SECCOMP_PROBE=1 before main.
 ctor = "0.2"
 
