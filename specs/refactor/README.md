@@ -35,5 +35,6 @@ This status line is the single source of truth for "where are we" — if any oth
 | [07-progress-and-decisions.md](07-progress-and-decisions.md) | Execution reality: what's done, what's deviated from plan and why, what's left |
 | [08-adr-consolidation.md](08-adr-consolidation.md) | The ADR consolidation: 92 legacy ADRs → 30 contiguous, and the cluster mapping |
 | [09-closeout.md](09-closeout.md) | Issue/PR disposition table and the biggest confirmed code removals |
+| [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md) | The `mvm-core` → `mvm-protocol` wire/policy DTO split — per-module cut, extraction order, byte-identity invariant (design of record for the Phase 1a long pole) |
 
 Read order for a newcomer: this README, then [01-goals.md](01-goals.md), then [02-architecture.md](02-architecture.md), then whichever of 03–09 matches what you're touching.
