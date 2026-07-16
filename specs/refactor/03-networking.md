@@ -43,4 +43,4 @@ Wire types live in `mvm-protocol` (no_std, fuzzable — see the crate map in [02
 
 ## Where this replaces prior art
 
-This design folds and retires several previously-separate paths: PR #1717 / issue #1701 (Firecracker's TAP+iptables egress), issue #1601 (HVF's host-vsock-proxy), the dead rvproxy/native-gateway subsystem (~1,281 lines, zero live callers), and the `NetworkingPreference`/`MVM_NETWORKING` knob. Execution detail and current status: [06-execution-plan.md](06-execution-plan.md) WS-NET, [07-progress-and-decisions.md](07-progress-and-decisions.md).
+This design retires **every userspace network gateway** — passt (Linux), gvproxy (macOS), and the opt-in native/rvproxy path — because once all egress rides the one vsock seam they have nothing left to do. It also folds in Firecracker's TAP+iptables egress (PR #1717 / issue #1701), HVF's host-vsock-proxy (issue #1601), the `native_gateway` subsystem (~1,281 lines), and the `NetworkingPreference`/`MVM_NETWORKING` knob. Execution detail and current status: [06-execution-plan.md](06-execution-plan.md) WS-NET, [07-progress-and-decisions.md](07-progress-and-decisions.md).

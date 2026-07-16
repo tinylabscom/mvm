@@ -26,7 +26,7 @@ Per [06-execution-plan.md](06-execution-plan.md) WS13: fold each still-relevant 
 
 ## Biggest confirmed removals
 
-- **rvproxy / native-gateway subsystem** — ~1,281 lines, zero live callers (WS-NET).
+- **Userspace network gateways** — passt, gvproxy, and the opt-in native/rvproxy `native_gateway` subsystem (~1,281 lines); all replaced by the one vsock seam (WS-NET).
 - **`mvm/src/vm/egress_proxy.rs`** L7 stub — dead (WS8).
 - **`mvm/src/storage/`** dm-thin substrate — every method returns "phase-2 work" (WS8).
 - **QEMU backend** (WS1e), Vz remnants, `mvm-vz-supervisor` Swift dir (WS0.4).

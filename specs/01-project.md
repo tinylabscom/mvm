@@ -14,9 +14,11 @@ outside world, no secret ever lives inside a running workload — and sensitive
 data, including personally identifiable information, is stripped from traffic in
 both directions, whether you declared it or we detected it.
 
-We run on multiple backends — libkrun and Apple Virtualization.framework on
-macOS, Firecracker on Linux KVM, and QEMU as the development/test backend —
-with WASM preview and promotion work tracked separately. We support the
+We run on multiple backends behind one backend abstraction — libkrun and our
+in-house HVF (Hypervisor.framework) VMM on macOS, and Firecracker on Linux KVM.
+The same architecture also targets a WASM backend that runs a workload as a wasm
+container — a core goal — so a sandbox can reach hosts without hardware
+virtualization, including CI, the edge, and the browser. We support the
 operations people already expect: pull, build, run, snapshot, pause/resume,
 stop, and clean up, plus host-mediated service interactions. It runs on both Arm
 and x86-64 hardware.
