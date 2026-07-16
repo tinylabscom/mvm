@@ -326,7 +326,7 @@ live microVM remains out of scope for this repository; it is
 fleet-orchestration territory that must keep the console byte-stream and
 its protocol cleanly bridgeable, nothing more.
 
-### Dev-VM mutation boundary and SSH-agent scope
+### Dev-VM mutation boundary
 
 A dev microVM is a mutable work surface only. Its rootfs mutations, ad
 hoc package installs, and dev-lifecycle side effects never implicitly
@@ -340,17 +340,21 @@ promotion mechanism; a dev-produced change that should matter to
 production must cross the boundary as a host workspace edit, an explicit
 export, or a signed artifact re-admitted through a declared input path.
 
-SSH-agent forwarding, when offered, means Unix-socket forwarding of the
-agent socket only, on an explicitly dev-tier machine or run posture, and
-never authorizes an SSH session: private key files, `~/.ssh/`, known-hosts
-material, SSH clients, SSH servers, and SSH config are never copied,
-mounted, or installed into any guest template, on any tier. This is the
-same "no SSH in microVMs, ever" boundary the rest of this ADR states,
-applied to the one host capability that could otherwise be mistaken for
-an exception. Every dev-tier hook — SSH-agent forwarding, writable
-volumes, dev-lifecycle side effects — stays visible in dry-run, admission
-and audit output, and receipts; it is never hidden behind a convenience
-default.
+"No SSH in microVMs, ever" is absolute, with no dev-tier carve-out:
+private key files, `~/.ssh/`, known-hosts material, SSH clients, SSH
+servers, SSH config, and any form of host ssh-agent forwarding are never
+copied, mounted, installed, or bridged into any guest template, on any
+tier or run posture. A host ssh-agent socket in particular is never
+forwarded — doing so would hand a guest every key the agent holds,
+bypassing the bound-destination, claim-13/16 secret-substitution model
+this ADR otherwise requires. The sole interactive path into a microVM is
+the console PTY-over-vsock transport on a dev-tier machine (claim 15
+gates it out of sealed production); nothing SSH-shaped exists anywhere in
+this repository. `scripts/check-no-ssh.sh` (CI: `no-ssh-forwarding`) greps
+source for ssh-agent-forwarding identifiers as a regression backstop.
+Every dev-tier hook — writable volumes, dev-lifecycle
+side effects — stays visible in dry-run, admission and audit output, and
+receipts; it is never hidden behind a convenience default.
 
 ### Cloud control-plane trust boundary
 

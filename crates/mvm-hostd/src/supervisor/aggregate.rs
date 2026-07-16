@@ -1179,7 +1179,6 @@ mod tests {
             network_policy: PolicyRef("default-deny".to_string()),
             fs_policy: FsPolicyRef("default".to_string()),
             secrets: vec![],
-            auth: AuthPolicy::none(),
             egress_policy: PolicyRef("agent-l7".to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),

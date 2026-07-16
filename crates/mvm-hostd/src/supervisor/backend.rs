@@ -257,7 +257,6 @@ mod tests {
             network_policy: mvm_core::plan::PolicyRef("default-deny".to_string()),
             fs_policy: mvm_core::plan::FsPolicyRef("default".to_string()),
             secrets: vec![],
-            auth: mvm_core::plan::AuthPolicy::none(),
             egress_policy: mvm_core::plan::PolicyRef("agent-l7".to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),

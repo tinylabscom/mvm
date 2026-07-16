@@ -18,7 +18,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use mvm_core::plan::{AuthPolicy, PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
+use mvm_core::plan::{PlanSeccompTier, SecretReleasePolicy, SynthesisInput};
 use mvm_core::vm_backend::VmStartConfig;
 use mvm_runtime::AnyBackend;
 
@@ -94,7 +94,6 @@ pub fn admit_and_boot_local(
         tool_policy_ref: None,
         secret_release: SecretReleasePolicy::None,
         secrets: Vec::new(),
-        auth: AuthPolicy::none(),
         audit_event_prefix: None,
         cpus: req.cpus,
         mem_mib: u64::from(req.mem_mib),

@@ -20,7 +20,6 @@ pub(crate) mod pool;
 mod qemu_bridge;
 mod runtime_overlay;
 mod shared;
-mod ssh_agent_proxy;
 mod storage;
 mod trust;
 pub(crate) mod vm;
@@ -182,9 +181,6 @@ pub(in crate::commands) enum Commands {
     /// user-facing command.
     #[command(name = "__qemu-vsock-bridge", hide = true)]
     QemuVsockBridge(qemu_bridge::Args),
-    /// Internal: per-machine SSH_AUTH_SOCK proxy for dev-tier machines.
-    #[command(name = "__ssh-agent-proxy", hide = true)]
-    SshAgentProxy(ssh_agent_proxy::Args),
 }
 
 // ============================================================================

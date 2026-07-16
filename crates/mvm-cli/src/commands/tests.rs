@@ -72,7 +72,6 @@ fn internal_subprocess_commands_are_hidden_from_help() {
         "persistent-builder",
         "__builder-vm-bootstrap",
         "__qemu-vsock-bridge",
-        "__ssh-agent-proxy",
     ] {
         assert!(
             !visible.iter().any(|n| n == hidden),
@@ -3941,14 +3940,6 @@ fn internal_helper_commands_short_circuit_before_startup_side_effects() {
         "5252",
         "--watch-pid-file",
         "/tmp/qemu.pid",
-    ]));
-    assert!(exits_early(&[
-        "mvmctl",
-        "__ssh-agent-proxy",
-        "--host-sock",
-        "/tmp/ssh-agent.sock",
-        "--listen-vsock-port",
-        "5000",
     ]));
     assert!(!exits_early(&["mvmctl", "doctor"]));
     assert!(!exits_early(&[

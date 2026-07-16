@@ -675,13 +675,10 @@ mod tests {
     fn build_shell_env_adds_valid_extra_env() {
         let out = build_shell_env_from(
             [(oss("PATH"), oss("/usr/bin"))],
-            &[(
-                "SSH_AUTH_SOCK".to_string(),
-                "/run/mvm/ssh-agent.sock".to_string(),
-            )],
+            &[("MVM_SESSION_TAG".to_string(), "abc123".to_string())],
         );
         let strs: Vec<&str> = out.iter().filter_map(|c| c.to_str().ok()).collect();
-        assert!(strs.contains(&"SSH_AUTH_SOCK=/run/mvm/ssh-agent.sock"));
+        assert!(strs.contains(&"MVM_SESSION_TAG=abc123"));
     }
 
     #[test]

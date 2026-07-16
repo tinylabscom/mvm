@@ -4029,12 +4029,12 @@ mod tests {
 
     #[test]
     fn unix_forward_guest_path_is_confined_to_run_mvm() {
-        validate_unix_forward_guest_path("/run/mvm/ssh-agent.sock").expect("valid path");
-        let relative = validate_unix_forward_guest_path("run/mvm/ssh-agent.sock")
+        validate_unix_forward_guest_path("/run/mvm/forward.sock").expect("valid path");
+        let relative = validate_unix_forward_guest_path("run/mvm/forward.sock")
             .expect_err("relative path rejected");
         assert!(relative.to_string().contains("absolute"));
         let outside =
-            validate_unix_forward_guest_path("/tmp/ssh-agent.sock").expect_err("outside rejected");
+            validate_unix_forward_guest_path("/tmp/forward.sock").expect_err("outside rejected");
         assert!(outside.to_string().contains("under /run/mvm"));
     }
 

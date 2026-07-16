@@ -130,6 +130,20 @@ jobs:
       - name: Build prod agent and assert no console symbols
         run: ./scripts/check-prod-agent-no-console.sh
 
+  # ── Lane 1b.2: No SSH forwarding of any kind (ADR-001) ────────────
+  # "No SSH in microVMs, ever" is absolute — the tree once carried a
+  # dev-tier ssh-agent-forwarding feature (host SSH_AUTH_SOCK -> vsock
+  # 5301 -> guest /run/mvm/ssh-agent.sock); it was removed entirely.
+  # Pure source-grep regression backstop, no build needed.
+  no-ssh-forwarding:
+    name: No SSH forwarding of any kind (ADR-001)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Assert no ssh-agent-forwarding identifiers in source
+        run: ./scripts/check-no-ssh.sh
+
   # ── Lane 1c: No host-authority symbols in a sealed prod agent ─────
   # The workload agent is the untrusted edge: it must not carry
   # host-side signing-key loading or plan-admission code. Asserts

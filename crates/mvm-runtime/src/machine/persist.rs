@@ -56,8 +56,6 @@ pub struct MachineSpec {
     pub volumes: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub init: Vec<String>,
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub ssh_agent: bool,
     /// Explicit agent verb allowlist from `--agent-verb`. Empty ⇒ use the
     /// computed sealed-prod default at each start.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -174,7 +172,6 @@ pub fn machine_config_matches(a: &MachineSpec, b: &MachineSpec) -> bool {
         && a.profile == b.profile
         && a.volumes == b.volumes
         && a.init == b.init
-        && a.ssh_agent == b.ssh_agent
         && a.agent_verb == b.agent_verb
 }
 
@@ -211,9 +208,6 @@ pub fn machine_config_diff(current: &MachineSpec, desired: &MachineSpec) -> Stri
     }
     if current.init != desired.init {
         changed.push("init");
-    }
-    if current.ssh_agent != desired.ssh_agent {
-        changed.push("ssh-agent");
     }
     if current.agent_verb != desired.agent_verb {
         changed.push("agent-verb");
@@ -359,7 +353,6 @@ mod tests {
             profile: "standard".to_string(),
             volumes: vec![],
             init: vec![],
-            ssh_agent: false,
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,
@@ -416,7 +409,6 @@ mod tests {
             spec.agent_verb.is_empty(),
             "agent_verb should default empty"
         );
-        assert!(!spec.ssh_agent, "ssh_agent should default false");
         assert!(spec.volumes.is_empty(), "volumes should default empty");
         assert!(spec.init.is_empty(), "init should default empty");
         assert!(spec.created_at.is_none());
@@ -535,7 +527,6 @@ mod tests {
             profile: "standard".into(),
             volumes: vec!["/data:/data:ro".into()],
             init: vec![],
-            ssh_agent: false,
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,

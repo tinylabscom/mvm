@@ -662,7 +662,6 @@ mod tests {
             profile: "standard".to_string(),
             volumes: vec![],
             init: vec![],
-            ssh_agent: false,
             agent_verb: vec![],
             created_at: None,
             last_started_at: None,

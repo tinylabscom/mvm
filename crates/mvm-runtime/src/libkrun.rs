@@ -214,11 +214,7 @@ fn krun_context_base(
         // unconditionally so libkrun proxies the guest's connect; fail-closed:
         // nothing binds the UDS until the per-VM broker subprocess is spawned,
         // so a stray guest dial gets ECONNREFUSED.
-        .add_host_listen_port(mvm_agentd::vsock::BROKER_PORT)
-        // Dev-tier SSH-agent forwarding. The guest receives only a Unix socket
-        // path; this host-listen port is inert unless `machine start` spawned
-        // the per-machine proxy that connects to SSH_AUTH_SOCK.
-        .add_host_listen_port(mvm_agentd::vsock::SSH_AGENT_PORT);
+        .add_host_listen_port(mvm_agentd::vsock::BROKER_PORT);
     krun.rootfs_path = None;
     // The active libkrun transport is direct-vsock only; keep the workload
     // base aligned with the builder path so no guest-NIC helper can be
@@ -2121,32 +2117,6 @@ mod tests {
                 .vsock_ports
                 .contains(&mvm_agentd::vsock::BROKER_PORT),
             "BROKER_PORT must not appear in vsock_ports"
-        );
-    }
-
-    #[test]
-    fn build_supervisor_config_registers_ssh_agent_port() {
-        let config = VmStartConfig {
-            name: "ssh-agent-port-test".into(),
-            rootfs_path: "/tmp/rootfs.ext4".into(),
-            kernel_path: Some("/tmp/vmlinux".into()),
-            cpus: 1,
-            memory_mib: 256,
-            ..Default::default()
-        };
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = build_supervisor_config(&config, tmp.path()).expect("build");
-        assert!(
-            cfg.krun
-                .host_listen_ports
-                .contains(&mvm_agentd::vsock::SSH_AGENT_PORT),
-            "SSH_AGENT_PORT must be in host_listen_ports"
-        );
-        assert!(
-            !cfg.krun
-                .vsock_ports
-                .contains(&mvm_agentd::vsock::SSH_AGENT_PORT),
-            "SSH_AGENT_PORT must not appear in vsock_ports"
         );
     }
 

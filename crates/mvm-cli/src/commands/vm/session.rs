@@ -1023,7 +1023,6 @@ fn cmd_start(args: StartArgs) -> Result<()> {
             seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
             secret_release: mvm_core::plan::SecretReleasePolicy::default(),
             secrets: vec![],
-            auth: mvm_core::plan::AuthPolicy::none(),
             no_supervisor: false,
             ledger: &ledger,
             keys_dir: None,

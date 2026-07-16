@@ -414,10 +414,11 @@ explicit `machine create`/`start` lifecycle make a long-lived machine.
 paths so later reconnects re-mount the same share regardless of your working
 directory; the host directory must exist at boot.
 
-SSH sessions are banned in microVMs. `--allow-host <host:22>` is refused, and
-the runtime also denies TCP/22 even under broad egress. Dev-tier `ssh_agent`
-means only Unix-socket forwarding of the host `SSH_AUTH_SOCK`; it never copies
-or mounts private keys, `~/.ssh`, known-hosts material, or SSH config.
+SSH is banned in microVMs, with no dev-tier carve-out: `--allow-host <host:22>`
+is refused, the runtime also denies TCP/22 even under broad egress, and there
+is no ssh-agent forwarding of any kind — no private keys, `~/.ssh`,
+known-hosts material, SSH config, or host agent socket ever crosses into a
+guest, on any tier.
 
 | Command | Description |
 |---------|-------------|
@@ -564,10 +565,10 @@ manifest, `machine create --manifest`
 persists the manifest's `net`, `[network].allow_hosts`, `cpus`, `mem`,
 `mem_initial`, `[dev].volumes`, and `[dev].init` fields into the durable
 machine spec; relative manifest volume paths are resolved against the manifest
-directory when persisted. `dev.init` and `ssh_agent = true` currently require
+directory when persisted. `dev.init` currently requires
 `--profile dev` or `--profile permissive`; standard/prod-like profiles refuse
-them. `machine start --dry-run` reports the
-effective network posture, enforcement tier, auth mode, dev-init hash/count,
+it. `machine start --dry-run` reports the
+effective network posture, enforcement tier, dev-init hash/count,
 and redacted volume policy without resolving or booting the image; the signed
 machine-start receipt carries the same policy summary plus the resolved digest
 and start timestamp after a real boot. `exec` / `shell` / `stop` reuse the

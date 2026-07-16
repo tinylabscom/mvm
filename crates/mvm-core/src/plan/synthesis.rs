@@ -43,10 +43,10 @@
 
 use crate::plan::{
     AdmissionProfile, ArtifactPolicy, AttestationMode, AttestationRequirement, AuditLabels,
-    AuditTaxonomy, AuthPolicy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec,
-    Nonce, PlanId, PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef,
-    SCHEMA_VERSION, SecretBinding, SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec,
-    WorkloadId, WorkloadIntent,
+    AuditTaxonomy, DepsVolumeBinding, ExecutionPlan, FsPolicyRef, KeyRotationSpec, Nonce, PlanId,
+    PlanSeccompTier, PolicyRef, PostRunLifecycle, Resources, RuntimeProfileRef, SCHEMA_VERSION,
+    SecretBinding, SecretReleasePolicy, SignedImageRef, TenantId, TimeoutSpec, WorkloadId,
+    WorkloadIntent,
 };
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -114,8 +114,6 @@ pub struct SynthesisInput<'a> {
     pub secret_release: SecretReleasePolicy,
     /// Secret refs lowered into plan-visible bindings.
     pub secrets: Vec<SecretBinding>,
-    /// Host-auth capability admitted for this boot.
-    pub auth: AuthPolicy,
     /// Optional audit event prefix override. `None` derives from the
     /// intent.
     pub audit_event_prefix: Option<&'a str>,
@@ -214,10 +212,6 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         &tool_policy,
     );
     let mut audit_labels = audit_labels_for_profile(&admission_profile);
-    audit_labels.insert(
-        "auth_mode".to_string(),
-        input.auth.mode.as_str().to_string(),
-    );
     // Caller labels fill additional keys; profile-derived keys stay authoritative.
     for (k, v) in &input.audit_labels {
         audit_labels.entry(k.clone()).or_insert_with(|| v.clone());
@@ -260,7 +254,6 @@ pub fn synthesize_plan(input: &SynthesisInput<'_>) -> Result<ExecutionPlan> {
         network_policy,
         fs_policy,
         secrets: input.secrets.clone(),
-        auth: input.auth.clone(),
         egress_policy,
         redaction: input.redaction.clone(),
         reversible_replacement: input.reversible_replacement.clone(),
@@ -382,7 +375,6 @@ mod tests {
             tool_policy_ref: None,
             secret_release: SecretReleasePolicy::None,
             secrets: Vec::new(),
-            auth: AuthPolicy::none(),
             audit_event_prefix: None,
             cpus: 2,
             mem_mib: 512,
@@ -418,14 +410,6 @@ mod tests {
     fn defaults_tenant_to_local() {
         let plan = synthesize_plan(&input("myvm")).unwrap();
         assert_eq!(plan.tenant.0, DEFAULT_TENANT);
-    }
-
-    #[test]
-    fn carries_auth_policy() {
-        let mut inp = input("myvm");
-        inp.auth = AuthPolicy::ssh_agent_socket();
-        let plan = synthesize_plan(&inp).unwrap();
-        assert_eq!(plan.auth, AuthPolicy::ssh_agent_socket());
     }
 
     #[test]

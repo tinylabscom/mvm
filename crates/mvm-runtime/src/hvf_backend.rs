@@ -1004,8 +1004,8 @@ mod tests {
     /// `<state_dir>/plan.json`, the shape `decode_plan_secrets_from_state` reads.
     fn write_plan_with_secret(state_dir: &Path) {
         use mvm_core::plan::{
-            AuthPolicy, PlanSeccompTier, SecretBinding, SecretReleasePolicy, SecretSource,
-            SynthesisInput, synthesize_plan,
+            PlanSeccompTier, SecretBinding, SecretReleasePolicy, SecretSource, SynthesisInput,
+            synthesize_plan,
         };
         use mvm_core::policy::RedactionPolicy;
 
@@ -1029,7 +1029,6 @@ mod tests {
                     value: "s3cr3t".into(),
                 },
             }],
-            auth: AuthPolicy::none(),
             audit_event_prefix: None,
             cpus: 2,
             mem_mib: 512,

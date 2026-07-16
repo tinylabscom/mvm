@@ -79,13 +79,6 @@ pub const BROKER_PORT: u32 = 5300;
 /// guest network agent consume one source of truth.
 pub const NETWORK_TUNNEL_PORT: u32 = mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT;
 
-/// Vsock port used for dev-tier SSH-agent socket forwarding. The guest agent
-/// binds a guest Unix socket and splices each accepted connection to
-/// `connect_host_vsock(SSH_AGENT_PORT)`, where the host-side mvmctl proxy
-/// connects to the operator's `SSH_AUTH_SOCK`. This is dev-only: no private key
-/// files or `~/.ssh` material cross the boundary.
-pub const SSH_AGENT_PORT: u32 = 5301;
-
 /// Base vsock port for TCP port forwarding.
 /// The forwarded vsock port = `PORT_FORWARD_BASE + guest_tcp_port`.
 pub const PORT_FORWARD_BASE: u32 = 10000;
@@ -302,7 +295,8 @@ pub enum GuestRequest {
     /// forwards each connection to `localhost:guest_port`.
     StartPortForward { guest_port: u16 },
     /// Bind a guest Unix socket and forward each accepted connection to a host
-    /// vsock port. Used for dev-tier SSH-agent forwarding only.
+    /// vsock port. The guest path must live under `/run/mvm/` (see
+    /// `validate_unix_forward_guest_path`).
     StartUnixSocketForward {
         guest_path: String,
         host_vsock_port: u32,
@@ -1778,8 +1772,9 @@ pub enum GuestCapability {
     FilesystemRpc,
     ProcessRpc,
     Console,
-    /// Dev-tier Unix-domain socket forwarding. Used for socket-only SSH-agent
-    /// forwarding; not a general SSH session capability.
+    /// Unix-domain socket forwarding (`StartUnixSocketForward`). Not an SSH
+    /// session capability — no SSH client/server or key material crosses the
+    /// guest boundary.
     UnixSocketForward,
     VolumeMount,
     UpdateIdleTimeout,
@@ -3715,8 +3710,8 @@ mod tests {
             GuestRequest::FsDiff,
             GuestRequest::StartPortForward { guest_port: 8080 },
             GuestRequest::StartUnixSocketForward {
-                guest_path: "/run/mvm/ssh-agent.sock".to_string(),
-                host_vsock_port: SSH_AGENT_PORT,
+                guest_path: "/run/mvm/forward.sock".to_string(),
+                host_vsock_port: BROKER_PORT,
                 socket_mode: 0o600,
             },
             GuestRequest::ConsoleOpen {
@@ -6068,8 +6063,8 @@ mod tests {
             GuestRequest::FsDiff,
             GuestRequest::StartPortForward { guest_port: 1 },
             GuestRequest::StartUnixSocketForward {
-                guest_path: "/run/mvm/ssh-agent.sock".to_string(),
-                host_vsock_port: SSH_AGENT_PORT,
+                guest_path: "/run/mvm/forward.sock".to_string(),
+                host_vsock_port: BROKER_PORT,
                 socket_mode: 0o600,
             },
             GuestRequest::ConsoleOpen {
@@ -6632,8 +6627,8 @@ mod tests {
             ),
             (
                 GuestRequest::StartUnixSocketForward {
-                    guest_path: "/run/mvm/ssh-agent.sock".to_string(),
-                    host_vsock_port: SSH_AGENT_PORT,
+                    guest_path: "/run/mvm/forward.sock".to_string(),
+                    host_vsock_port: BROKER_PORT,
                     socket_mode: 0o600,
                 },
                 "start-unix-socket-forward",

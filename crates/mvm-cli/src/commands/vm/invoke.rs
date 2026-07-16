@@ -201,7 +201,6 @@ fn admit_entrypoint_boot(
         seccomp_tier: mvm_core::plan::PlanSeccompTier::Standard,
         secret_release: params.lowered_secrets.secret_release,
         secrets: params.lowered_secrets.secrets.clone(),
-        auth: mvm_core::plan::AuthPolicy::none(),
         no_supervisor: false,
         ledger: &ledger,
         keys_dir: None,

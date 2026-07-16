@@ -85,7 +85,7 @@ fn run_persistent(
         apply_machine_ttl(&name, dur_str)?;
     }
 
-    run_persistent_post_start(cli, cfg, &args, &name, &spec)
+    run_persistent_post_start(cli, cfg, &args, &name)
 }
 
 fn persist_and_boot_machine(
@@ -118,7 +118,6 @@ fn run_persistent_post_start(
     cfg: &MvmConfig,
     args: &MachineRunArgs,
     name: &str,
-    spec: &MachineSpec,
 ) -> Result<()> {
     if !args.argv.is_empty() {
         if !shared::wait_for_guest_agent(name, 30) {
@@ -130,7 +129,7 @@ fn run_persistent_post_start(
                 name: name.to_string(),
                 command: Some(machine_exec_command(&args.argv)),
                 force: false,
-                env: machine_console_env(spec.ssh_agent),
+                env: Vec::new(),
                 pty_argv: Vec::new(),
             },
             cfg,

@@ -13,10 +13,10 @@ use serde::{Deserialize, Serialize};
 use crate::lifecycle::SnapshotAt;
 use crate::plan::bundle::PlanArtifact;
 use crate::plan::types::{
-    AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, AuthPolicy,
-    BuildProvenance, DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, NetworkMode,
-    Nonce, PlanId, PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef,
-    SecretBinding, SignedImageRef, TenantId, WorkloadId,
+    AdmissionProfile, ArtifactPolicy, AttestationRequirement, AuditLabels, BuildProvenance,
+    DepsVolumeBinding, FsPolicyRef, HostShareGrant, KeyRotationSpec, NetworkMode, Nonce, PlanId,
+    PolicyRef, PostRunLifecycle, ReleasePin, Resources, RuntimeProfileRef, SecretBinding,
+    SignedImageRef, TenantId, WorkloadId,
 };
 use crate::plan::verb::VerbId;
 
@@ -97,11 +97,6 @@ pub struct ExecutionPlan {
     pub fs_policy: FsPolicyRef,
 
     pub secrets: Vec<SecretBinding>,
-
-    /// Host-authentication capabilities admitted for this boot. Defaults to
-    /// `none`; dev-tier SSH-agent forwarding is represented explicitly as
-    /// `ssh_agent_socket` so receipts, audit, and signed admission cannot drift.
-    pub auth: AuthPolicy,
 
     /// L7 egress + PII rules. The same kind of `PolicyRef` as
     /// `network_policy` so the resolver is shared, but kept separate

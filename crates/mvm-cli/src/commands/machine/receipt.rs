@@ -19,14 +19,8 @@ pub(super) struct MachineStartReceiptInput {
     pub(super) profile: String,
     pub(super) network_posture: String,
     pub(super) egress_enforcement: String,
-    pub(super) auth: MachineStartAuthPolicy,
     pub(super) volumes: Vec<MachineStartVolumePolicy>,
     pub(super) init: MachineStartInitPolicy,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct MachineStartAuthPolicy {
-    pub(super) mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,21 +130,6 @@ impl MachineStartJsonSummary {
     }
 }
 
-pub(super) fn machine_start_auth_policy(spec: &MachineSpec) -> MachineStartAuthPolicy {
-    let mode = machine_start_plan_auth_policy(spec).mode.as_str();
-    MachineStartAuthPolicy {
-        mode: mode.to_string(),
-    }
-}
-
-pub(super) fn machine_start_plan_auth_policy(spec: &MachineSpec) -> mvm_core::plan::AuthPolicy {
-    if spec.ssh_agent {
-        mvm_core::plan::AuthPolicy::ssh_agent_socket()
-    } else {
-        mvm_core::plan::AuthPolicy::none()
-    }
-}
-
 pub(super) fn machine_start_init_policy(spec: &MachineSpec) -> MachineStartInitPolicy {
     let script_sha256 =
         (!spec.init.is_empty()).then(|| sha256_hex(spec.init.join("\n").as_bytes()));
@@ -193,7 +172,6 @@ pub(super) fn machine_start_receipt_input(
     spec: &MachineSpec,
     backend: &str,
 ) -> Result<MachineStartReceiptInput> {
-    enforce_ssh_agent_profile(&spec.profile, spec.ssh_agent)?;
     let network_policy = shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
     crate::exec::validate_image_egress_backend_name(
         backend,
@@ -213,7 +191,6 @@ pub(super) fn machine_start_receipt_input(
         profile: spec.profile.clone(),
         network_posture: network_policy.posture_label(),
         egress_enforcement: shared::egress_enforcement_label(backend, &network_policy),
-        auth: machine_start_auth_policy(spec),
         volumes,
         init: machine_start_init_policy(spec),
     })
@@ -302,7 +279,6 @@ pub(super) fn print_machine_start_preflight_human(summary: &MachineStartPrefligh
     println!("profile: {}", summary.invocation.profile);
     println!("network: {}", summary.invocation.network_posture);
     println!("enforced: {}", summary.invocation.egress_enforcement);
-    println!("auth: {}", summary.invocation.auth.mode);
     if summary.invocation.init.command_count == 0 {
         println!("dev.init: none");
     } else {

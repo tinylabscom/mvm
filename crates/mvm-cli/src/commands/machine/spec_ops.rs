@@ -90,7 +90,6 @@ pub(super) fn inspect_machine(args: MachineInspectArgs) -> Result<()> {
             println!("mem-initial: {mem_initial}");
         }
         println!("profile: {}", spec.profile);
-        println!("ssh-agent: {}", spec.ssh_agent);
         if !spec.volumes.is_empty() {
             println!("volumes: {}", spec.volumes.join(","));
         }

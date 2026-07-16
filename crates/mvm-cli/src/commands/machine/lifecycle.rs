@@ -80,11 +80,6 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         .map(String::from)
         .unwrap_or_else(|| shared::resolve_effective_hypervisor("firecracker"));
     let receipt_input = machine_start_receipt_input(&spec, &effective_hypervisor)?;
-    let ssh_auth_sock = if spec.ssh_agent {
-        Some(ssh_auth_sock_from_env()?)
-    } else {
-        None
-    };
     let network_policy = shared::resolve_run_network_policy(spec.net, &spec.allow_host)?;
     let (memory_mib, mem_initial_mib) =
         validate_machine_memory(&spec.memory, spec.mem_initial.as_deref())?;
@@ -162,22 +157,14 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
         mem_initial_mib,
         volumes: &volume_cfg,
         network_policy,
-        auth: machine_start_plan_auth_policy(&spec),
         backend_name: &effective_hypervisor,
         no_supervisor: args.no_supervisor,
         kernel_path,
         agent_verb: spec.agent_verb.clone(),
         has_ad_hoc_argv: args.has_ad_hoc_argv,
     })?;
-    if let Some(host_sock) = ssh_auth_sock.as_deref()
-        && let Err(err) =
-            configure_machine_ssh_agent_forwarding(&spec.name, &effective_hypervisor, host_sock)
-    {
-        stop_failed_machine_start(&spec.name, &effective_hypervisor);
-        return Err(err);
-    }
     if !spec.init.is_empty()
-        && let Err(err) = run_machine_init_commands(&spec.name, &spec.init, spec.ssh_agent)
+        && let Err(err) = run_machine_init_commands(&spec.name, &spec.init)
     {
         stop_failed_machine_start(&spec.name, &effective_hypervisor);
         return Err(err);
@@ -212,7 +199,7 @@ pub(super) fn start_machine(args: MachineStartArgs) -> Result<()> {
 }
 
 pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) -> Result<()> {
-    let spec = ensure_machine_spec_exists(&args.name)?;
+    ensure_machine_spec_exists(&args.name)?;
     let command = if args.argv.is_empty() {
         None
     } else {
@@ -222,10 +209,11 @@ pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) ->
         use std::io::IsTerminal as _;
         require_tty(std::io::stdin().is_terminal())?;
         console::enforce_accessible_gate(&args.name, args.force)?;
-        let env = machine_console_env(spec.ssh_agent);
         return match command {
-            Some(cmd) => console::console_pty_command(&args.name, cmd, env),
-            None => console::console_interactive_with_env_and_argv(&args.name, env, Vec::new()),
+            Some(cmd) => console::console_pty_command(&args.name, cmd, Vec::new()),
+            None => {
+                console::console_interactive_with_env_and_argv(&args.name, Vec::new(), Vec::new())
+            }
         };
     }
     console::run(
@@ -234,7 +222,7 @@ pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) ->
             name: args.name,
             command,
             force: args.force,
-            env: machine_console_env(spec.ssh_agent),
+            env: Vec::new(),
             pty_argv: Vec::new(),
         },
         cfg,
@@ -242,14 +230,14 @@ pub(super) fn exec_machine(cli: &Cli, args: MachineExecArgs, cfg: &MvmConfig) ->
 }
 
 pub(super) fn shell_machine(cli: &Cli, args: MachineShellArgs, cfg: &MvmConfig) -> Result<()> {
-    let spec = ensure_machine_spec_exists(&args.name)?;
+    ensure_machine_spec_exists(&args.name)?;
     console::run(
         cli,
         console::Args {
             name: args.name,
             command: None,
             force: args.force,
-            env: machine_console_env(spec.ssh_agent),
+            env: Vec::new(),
             pty_argv: Vec::new(),
         },
         cfg,
@@ -281,7 +269,6 @@ pub(super) fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) ->
     }
     let mut had_err = false;
     for name in &args.names {
-        reap_proxy(name);
         if let Err(err) = down::run(
             cli,
             down::Args {
@@ -308,7 +295,6 @@ pub(super) fn machine_is_running(name: &str) -> bool {
 }
 
 pub(super) fn stop_running_machine(name: &str) {
-    reap_proxy(name);
     let backend = AnyBackend::from_hypervisor(&shared::resolve_effective_hypervisor("firecracker"));
     if let Err(err) = backend.stop(&VmId(name.to_string())) {
         tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");

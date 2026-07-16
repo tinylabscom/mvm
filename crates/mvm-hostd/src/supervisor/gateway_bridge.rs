@@ -3788,7 +3788,6 @@ mod tests {
             network_policy: PolicyRef("local-default".into()),
             fs_policy: FsPolicyRef("local-default".into()),
             secrets: Vec::new(),
-            auth: Default::default(),
             egress_policy: PolicyRef("local-default".into()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),

@@ -41,7 +41,7 @@ path.
 
 For the higher-level `mvmctl machine` workflow map, see
 [Machine use cases](/guides/machine-use-cases/). For explicit network, volume,
-SSH-agent, macOS, GPU, and architecture limits, see
+macOS, GPU, and architecture limits, see
 [Machine limitations](/guides/machine-limitations/).
 
 **Failure recovery:**

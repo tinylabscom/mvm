@@ -73,7 +73,7 @@ visible top-level surface. Every other historical top-level command —
 `env`, `manifest`, `image`, `storage`, `ops`, `network`, `catalog`,
 `cache`, `pool`, `reconcile`, `secret`, `bundle`, `trust`, `deps`,
 `artifact`, and internal subprocess transports (`shell-init`,
-`persistent-builder`, the QEMU vsock bridge, the SSH-agent proxy) — is
+`persistent-builder`, the QEMU vsock bridge) — is
 marked hidden. They still work; they simply do not compete for attention
 in `--help`.
 

@@ -124,7 +124,6 @@ impl PlanFixture {
             network_policy: PolicyRef("local-default".to_string()),
             fs_policy: FsPolicyRef("local-default".to_string()),
             secrets: self.secrets,
-            auth: Default::default(),
             egress_policy: PolicyRef("local-default".to_string()),
             redaction: Default::default(),
             reversible_replacement: Default::default(),

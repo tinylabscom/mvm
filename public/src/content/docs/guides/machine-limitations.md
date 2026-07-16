@@ -37,15 +37,14 @@ or symlink traversal as portable volume features. Production inputs should be
 declared host-side and promoted into builds or artifacts explicitly; mutable dev
 state inside a persistent machine is not automatically a production input.
 
-## SSH-Agent Prerequisites
+## No SSH, On Any Tier
 
-SSH-agent forwarding is dev-tier only. It requires host `SSH_AUTH_SOCK` to point
-to a Unix socket and forwards only an agent socket into the guest.
-
-Private key files, `~/.ssh`, known-hosts files, SSH servers, SSH clients, and
-template-provided SSH material are not copied or mounted by the machine feature.
-TCP/22 remains blocked on the default machine path, and non-standard-port SSH
-protocol denial is tracked separately from the agent socket transport.
+There is no SSH capability of any kind in a machine, on any profile —
+including dev/permissive. Private key files, `~/.ssh`, known-hosts files, SSH
+servers, SSH clients, SSH config, and host ssh-agent forwarding are never
+copied, mounted, or bridged into a guest. TCP/22 is blocked on the default
+machine path. The console PTY-over-vsock transport (`machine exec -it`,
+`machine shell`) is the only interactive path into a dev-tier machine.
 
 ## macOS Signing And Entitlements
 

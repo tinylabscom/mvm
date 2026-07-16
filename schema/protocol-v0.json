@@ -880,7 +880,7 @@
           ]
         },
         {
-          "description": "Dev-tier Unix-domain socket forwarding. Used for socket-only SSH-agent forwarding; not a general SSH session capability.",
+          "description": "Unix-domain socket forwarding (`StartUnixSocketForward`). Not an SSH session capability — no SSH client/server or key material crosses the guest boundary.",
           "type": "string",
           "enum": [
             "unix_socket_forward"
@@ -1294,7 +1294,7 @@
           "additionalProperties": false
         },
         {
-          "description": "Bind a guest Unix socket and forward each accepted connection to a host vsock port. Used for dev-tier SSH-agent forwarding only.",
+          "description": "Bind a guest Unix socket and forward each accepted connection to a host vsock port. The guest path must live under `/run/mvm/` (see `validate_unix_forward_guest_path`).",
           "type": "object",
           "required": [
             "StartUnixSocketForward"
