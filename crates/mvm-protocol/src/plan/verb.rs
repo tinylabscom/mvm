@@ -1,5 +1,7 @@
+use alloc::string::{String, ToString};
+use core::fmt;
+
 use serde::{Deserialize, Deserializer, Serialize};
-use std::fmt;
 
 /// A guest-agent control-verb identifier: the stable `kind_name()` token
 /// (non-empty kebab-case). Validated at construction so an `agent_verbs`

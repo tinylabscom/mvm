@@ -30,11 +30,13 @@ pub mod signing;
 pub mod synthesis;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
-pub mod types;
 pub mod validity;
-pub mod verb;
 pub mod verb_grant;
-pub mod verb_trust;
+
+// `types`, `verb`, `verb_trust` are pure-DTO leaves that now live in
+// `mvm-protocol`; re-exported here as module aliases so every existing
+// `crate::plan::{types,verb,verb_trust}::X` path keeps resolving unchanged.
+pub use mvm_protocol::plan::{types, verb, verb_trust};
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,

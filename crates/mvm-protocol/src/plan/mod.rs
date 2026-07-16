@@ -1,0 +1,21 @@
+//! Plan DTO leaves — the pure serde types the signed `ExecutionPlan`
+//! contract is built from. Logic (sign/verify/hash/resolve/synth/fs/net/io)
+//! stays in `mvm-core::plan`, which re-exports these types at their
+//! existing paths.
+
+pub mod types;
+pub mod validity;
+pub mod verb;
+pub mod verb_trust;
+
+pub use types::{
+    AdmissionProfile, ArtifactDigests, ArtifactPolicy, AttestationMode, AttestationRequirement,
+    AuditLabels, AuditTaxonomy, BuildProvenance, DepsVolumeBinding, DepsVolumeBindingError,
+    FsPolicyRef, HostShareGrant, InputKind, KeyRotationSpec, NetworkMode, Nonce, NonceParseError,
+    PlanId, PlanSeccompTier, PlanSeccompTierParseError, PolicyRef, PostRunLifecycle, ReleasePin,
+    Resources, RuntimeProfileRef, SecretBinding, SecretReleasePolicy, SecretSource, ShareKind,
+    SignedImageRef, TenantId, TimeoutSpec, Variant, WorkloadId, WorkloadIntent,
+};
+pub use validity::FreshnessClaims;
+pub use verb::{VerbId, VerbIdError};
+pub use verb_trust::{GrantKeySource, VERB_TRUST_POLICY_VERSION, VerbTrustPolicy};

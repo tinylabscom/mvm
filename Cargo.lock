@@ -2359,6 +2359,7 @@ dependencies = [
  "hmac",
  "ipnet",
  "keyring",
+ "mvm-protocol",
  "rand 0.8.6",
  "rcgen",
  "regex",
@@ -2482,11 +2483,13 @@ name = "mvm-protocol"
 version = "0.18.0"
 dependencies = [
  "base64",
+ "chrono",
  "ed25519-dalek",
  "schemars",
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

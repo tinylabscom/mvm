@@ -11,11 +11,16 @@ description = "no_std + alloc core for mvm: audit-log verifier (and, incremental
 
 [dependencies]
 # All no_std + alloc — pinned directly (not `workspace = true`) because
-# the workspace-level entries for these five carry default features (or
+# the workspace-level entries for these carry default features (or
 # a hardcoded `std` feature) that a member can't override away. Versions
 # match the workspace's resolved versions so Cargo still unifies on one
 # copy of each.
 base64 = { version = "0.22", default-features = false, features = ["alloc"] }
+# `DateTime<Utc>`'s serde impl emits/parses RFC-3339 identically under
+# `std` and `no_std` — the `clock` feature only gates `Utc::now()`
+# (wall-clock reads), never serialization — so plan DTOs keep their
+# `DateTime<Utc>` fields byte-identical across the move.
+chrono = { version = "0.4", default-features = false, features = ["serde", "alloc"] }
 ed25519-dalek = { version = "3", default-features = false }
 # Only under the `schema` feature (IR JSON-Schema codegen for
 # `mvm-sdk`'s `emit_schema`/`emit_addon_schema` bins). schemars 0.8's
@@ -27,6 +32,10 @@ schemars = { version = "0.8", default-features = false, features = ["derive"], o
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.11", default-features = false }
+# `core::error::Error` (stable since 1.81) behind the default `std`
+# feature — the moved plan DTO error enums derive `thiserror::Error`
+# under `no_std` this way.
+thiserror = { version = "2", default-features = false }
 
 [features]
 default = []

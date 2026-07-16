@@ -16,4 +16,5 @@ extern crate alloc;
 
 pub mod entrypoint;
 pub mod ir;
+pub mod plan;
 pub mod verify;
