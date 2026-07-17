@@ -16,6 +16,7 @@ use crate::backend::{AnyBackend, BackendTier, FirecrackerBackend};
 use crate::libkrun::LibkrunBackend;
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
+use crate::wasm_backend::WasmBackend;
 use mvm_core::vm_backend::VmBackend;
 
 // `BackendKind` is defined in `mvm-core` alongside the `VmBackend` trait
@@ -196,6 +197,23 @@ backend_catalog![
         bundled_kernel: false,
         needs_plan_json: false,
         is_workload: true
+    },
+    {
+        kind: Wasm,
+        selector: "wasm",
+        aliases: [],
+        constructor: AnyBackend::Wasm(WasmBackend::new()),
+        tier: Tier3,
+        // No pid-file lifecycle — a module runs to completion inside
+        // `start` and leaves no long-lived host process behind.
+        marker_file: None,
+        started_vm_probe_order: None,
+        list_all: true,
+        balloon_support: false,
+        warm_start_support: false,
+        bundled_kernel: false,
+        needs_plan_json: false,
+        is_workload: true
     }
 ];
 
@@ -319,7 +337,7 @@ mod tests {
         );
         assert_eq!(
             selectors(list_all_descriptors()),
-            ["firecracker", "libkrun", "qemu", "hvf"]
+            ["firecracker", "libkrun", "qemu", "hvf", "wasm"]
         );
         // Started-VM probe is sorted by probe order, not declaration order.
         assert_eq!(

@@ -60,6 +60,8 @@ impl AnyBackend {
     /// Mirrors the production-first preference; platform *availability* is a
     /// separate concern handled by [`AnyBackend::auto_select`]. The in-memory
     /// mock is excluded — it is a test double, never selected for a workload.
+    /// The wasm portability tier is excluded too — it is opt-in only and
+    /// must never be a capability-selection candidate.
     fn capability_candidates() -> [AnyBackend; 4] {
         [
             AnyBackend::Firecracker(FirecrackerBackend),
@@ -175,5 +177,18 @@ mod tests {
 
         let backend = AnyBackend::select_capable(&required).unwrap();
         assert!(backend.capabilities().vsock);
+    }
+
+    /// Capability-based selection is a form of auto-detection: the wasm
+    /// portability tier must never be a candidate, even for a trivially
+    /// satisfiable requirement (the empty `RequiredCapabilities`).
+    #[test]
+    fn capability_candidates_never_include_wasm() {
+        let backend = AnyBackend::select_capable(&RequiredCapabilities::default()).unwrap();
+        assert_ne!(
+            backend.kind(),
+            mvm_core::vm_backend::BackendKind::Wasm,
+            "capability-aware selection must never pick the opt-in wasm tier"
+        );
     }
 }

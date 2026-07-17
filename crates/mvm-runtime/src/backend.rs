@@ -18,6 +18,7 @@ use crate::libkrun::LibkrunBackend;
 use crate::microvm::{DriveFile, FlakeRunConfig};
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
+use crate::wasm_backend::WasmBackend;
 use crate::workload_runner::{RealEndpointSpawner, WorkloadRunner};
 use crate::{firecracker, microvm};
 
@@ -505,6 +506,14 @@ pub enum AnyBackend {
     /// the runner role. `auto_select` picks the raw [`Self::Hvf`] variant on the
     /// macOS-26 tier today, not this one.
     HvfRunner(HvfRunner),
+    /// Host-`wasmtime` claim-free portability tier — see
+    /// [`crate::wasm_backend`]. Selectable only via explicit
+    /// `--hypervisor wasm` / `MVM_BACKEND=wasm`; `auto_select` never falls
+    /// through here. Always constructible; the real engine only compiles in
+    /// behind the `wasm-backend` feature, so a build without it fails
+    /// closed with a typed error the first time the backend is actually
+    /// used, not at construction.
+    Wasm(WasmBackend),
 }
 
 impl AnyBackend {
@@ -636,6 +645,7 @@ impl AnyBackend {
             Self::Mock(backend) => backend,
             Self::Hvf(backend) => backend,
             Self::HvfRunner(backend) => backend,
+            Self::Wasm(backend) => backend,
         }
     }
 
@@ -653,6 +663,7 @@ impl AnyBackend {
             Self::HvfRunner(backend) => {
                 std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>
             }
+            Self::Wasm(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
         }
     }
 
@@ -708,6 +719,11 @@ impl AnyBackend {
             // Same hvf VMM as Hvf, reached via the runner role: claim-10 at
             // the endpoint, claims 12/13 at the per-VM substitution endpoint.
             AnyBackend::HvfRunner(b) => Some(b),
+            // Wasm has no egress substitution channel yet — it mediates no
+            // networking at all (a later phase wires the governed WASI
+            // egress seam). Barred from the admitted launch funnel until
+            // then, the same carve-out as `Qemu`.
+            AnyBackend::Wasm(_) => None,
         }
     }
 
@@ -1150,6 +1166,21 @@ mod tests {
         );
     }
 
+    /// `auto_select` must never return the wasm portability tier — it is
+    /// opt-in only (explicit `--hypervisor wasm` / `MVM_BACKEND=wasm`), never
+    /// a platform-ladder fallback. `auto_select`'s implementation has exactly
+    /// three return sites (Firecracker/Hvf/Libkrun) and none of them
+    /// construct `Self::Wasm`, so this holds on every platform the ladder
+    /// can resolve to, not just the host running this test.
+    #[test]
+    fn auto_select_never_returns_wasm() {
+        assert_ne!(
+            AnyBackend::auto_select().kind(),
+            mvm_core::vm_backend::BackendKind::Wasm,
+            "auto_select must never fall through to the wasm portability tier"
+        );
+    }
+
     #[test]
     fn backend_catalog_matrix_is_stable() {
         let actual: Vec<_> = catalog::descriptors()
@@ -1217,6 +1248,16 @@ mod tests {
                     BackendTier::Tier2,
                     Some("hvf.pid"),
                     Some(5),
+                    true,
+                    false,
+                    false,
+                ),
+                (
+                    "wasm",
+                    Vec::new(),
+                    BackendTier::Tier3,
+                    None,
+                    None,
                     true,
                     false,
                     false,

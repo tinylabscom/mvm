@@ -988,6 +988,10 @@ pub enum BackendKind {
     Qemu,
     Mock,
     Hvf,
+    /// Host-`wasmtime` tier running a user-supplied WASI module. Claim-free
+    /// portability/demo backend: opt-in only, never returned by auto-detect,
+    /// no hardware isolation boundary.
+    Wasm,
 }
 
 #[cfg(test)]

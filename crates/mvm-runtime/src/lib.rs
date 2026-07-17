@@ -100,6 +100,10 @@ pub mod vmm;
 /// Shared host-side vsock egress support. Backend-agnostic; every VMM path uses
 /// the same gate/relay substrate while policy remains in the host endpoint.
 pub mod vsock_egress_bridge;
+/// `WasmBackend` — host-`wasmtime` claim-free portability tier running a
+/// user-supplied WASI module. Always constructible; the real engine only
+/// compiles in behind the opt-in `wasm-backend` feature.
+pub mod wasm_backend;
 /// `WorkloadBackend` marker trait — the type-level permission to carry an
 /// untrusted workload. The admitted launch path accepts `&dyn WorkloadBackend`
 /// only, so a non-workload backend (QEMU dev/test, mock) cannot reach it.

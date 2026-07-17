@@ -61,6 +61,12 @@ object_store = { version = "0.11", optional = true, default-features = false, fe
 # Already in the `storage-s3` dep tree via object_store/reqwest, so gating
 # it here adds nothing new.
 futures = { version = "0.3", optional = true }
+# `wasm_backend`'s host engine: instantiates a user-supplied WASI module.
+# Optional + off by default (`wasm-backend` feature) so the default workspace
+# build carries no wasmtime — it is a large dependency tree, like
+# object_store behind `storage-s3` above.
+wasmtime = { version = "46", optional = true }
+wasmtime-wasi = { version = "46", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
@@ -100,6 +106,9 @@ template-registry-s3 = ["dep:object_store"]
 # Real S3-backed `MountProvider` (`storage::volume::s3`). Off by default;
 # pulls object_store + its reqwest/rustls closure only when enabled.
 storage-s3 = ["dep:object_store", "dep:futures"]
+# The claim-free host-wasmtime portability tier (`WasmBackend`). Off by
+# default; pulls the wasmtime + wasmtime-wasi closure only when enabled.
+wasm-backend = ["dep:wasmtime", "dep:wasmtime-wasi"]
 
 [lints]
 workspace = true
