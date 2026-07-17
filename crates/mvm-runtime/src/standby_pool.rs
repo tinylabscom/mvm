@@ -226,7 +226,7 @@ mod tests {
     fn handle(id: &str, kernel: &str, state: StandbyState) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
-            control_socket: format!("/p/{id}/control.sock").into(),
+            control_socket: format!("/p/{id}/control.sock"),
             pid: std::process::id(), // a live pid so liveness passes
             kernel_sha256: kernel.into(),
             vcpus: 2,
@@ -372,7 +372,7 @@ mod tests {
     fn saved_handle(id: &str, kernel: &str, image: &str, state: StandbyState) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
-            control_socket: format!("/p/{id}/control.sock").into(),
+            control_socket: format!("/p/{id}/control.sock"),
             pid: 0, // no live supervisor for saved-state standbys
             kernel_sha256: kernel.into(),
             vcpus: 2,

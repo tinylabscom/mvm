@@ -99,9 +99,14 @@ pub fn build_standby_spec(p: &StandbySpecParams<'_>) -> Result<StandbySpec> {
         kernel_sha256: p.kernel_sha256.to_string(),
         vcpus: p.vcpus,
         mem_mib: p.mem_mib,
-        signing_key_path: p.signing_key_path.to_path_buf(),
+        signing_key_path: p.signing_key_path.to_string_lossy().into_owned(),
         signer_id: p.signer_id.to_string(),
-        control_socket: p.pool_root.join(&id).join("control.sock"),
+        control_socket: p
+            .pool_root
+            .join(&id)
+            .join("control.sock")
+            .to_string_lossy()
+            .into_owned(),
         vm_state_dir: p.vms_root.join(&id).to_string_lossy().into_owned(),
         binding_nonce: nonce,
         image_path: p.image_path.map(|p| p.to_string_lossy().into_owned()),
@@ -625,8 +630,11 @@ mod tests {
         // short + fixed so the path fits SUN_LEN (the full 64-char nonce would overflow it).
         assert!(spec.id.starts_with("standby-"));
         assert!(spec.binding_nonce.starts_with(&spec.id["standby-".len()..]));
-        assert!(spec.control_socket.starts_with(pool_root.join(&spec.id)));
-        assert_eq!(spec.control_socket.file_name().unwrap(), "control.sock");
+        assert!(Path::new(&spec.control_socket).starts_with(pool_root.join(&spec.id)));
+        assert_eq!(
+            Path::new(&spec.control_socket).file_name().unwrap(),
+            "control.sock"
+        );
         // Keep the realistic ~/.mvm path well under the macOS SUN_LEN (~104 bytes).
         assert!(
             std::path::Path::new("/Users/someuser/.mvm/pool")
@@ -677,7 +685,7 @@ mod tests {
     fn idle_handle(id: &str, kernel: &str) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
-            control_socket: format!("/p/{id}.sock").into(),
+            control_socket: format!("/p/{id}.sock"),
             pid: std::process::id(),
             kernel_sha256: kernel.into(),
             vcpus: 2,
@@ -692,7 +700,7 @@ mod tests {
     fn saved_idle_handle(id: &str, kernel: &str, image: &str) -> StandbyHandle {
         StandbyHandle {
             id: id.into(),
-            control_socket: format!("/p/{id}/control.sock").into(),
+            control_socket: format!("/p/{id}/control.sock"),
             pid: 0,
             kernel_sha256: kernel.into(),
             vcpus: 2,

@@ -238,10 +238,10 @@ fn standby_base_config(spec: &StandbySpec) -> SupervisorBaseConfig {
         krun,
         vm_state_dir: spec.vm_state_dir.clone(),
         pid_file_name: None,
-        signing_key_path: spec.signing_key_path.clone(),
+        signing_key_path: spec.signing_key_path.clone().into(),
         signer_id: spec.signer_id.clone(),
         binding_nonce: spec.binding_nonce.clone(),
-        control_socket_path: spec.control_socket.clone(),
+        control_socket_path: spec.control_socket.clone().into(),
         bridge_restart_policy: BridgeRestartPolicy::HardFail,
     }
 }
@@ -1193,7 +1193,7 @@ impl VmBackend for LibkrunBackend {
         let base = standby_base_config(spec);
         // Pre-create the control-UDS parent dir 0700 (the supervisor re-binds the socket
         // itself; this only ensures the dir exists with the right mode).
-        if let Some(parent) = spec.control_socket.parent() {
+        if let Some(parent) = Path::new(&spec.control_socket).parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| StandbyError::SpawnFailed(format!("create control dir: {e}")))?;
             let _ = std::fs::set_permissions(
@@ -1211,8 +1211,7 @@ impl VmBackend for LibkrunBackend {
         // Capture the standby supervisor's stderr next to its control socket so a standby
         // that dies before it's claimed leaves a diagnosable trail (it's detached, so there
         // is no parent to inherit into).
-        let stderr = spec
-            .control_socket
+        let stderr = Path::new(&spec.control_socket)
             .parent()
             .map(|d| d.join("standby.stderr.log"))
             .and_then(|p| std::fs::File::create(p).ok())
@@ -1262,7 +1261,7 @@ impl VmBackend for LibkrunBackend {
         let mut stream = UnixStream::connect(&handle.control_socket).map_err(|e| {
             StandbyError::ClaimFailed(format!(
                 "connect control UDS {}: {e}",
-                handle.control_socket.display()
+                handle.control_socket
             ))
         })?;
         libkrun_sys::framing::write_json_frame_sync(&mut stream, &attach)
@@ -2343,7 +2342,7 @@ mod tests {
     fn libkrun_claim_standby_refuses_outbound_egress() {
         let handle = StandbyHandle {
             id: "standby-x".into(),
-            control_socket: std::path::PathBuf::from("/tmp/does-not-matter.sock"),
+            control_socket: "/tmp/does-not-matter.sock".to_string(),
             pid: 1,
             kernel_sha256: "a".repeat(64),
             vcpus: 2,

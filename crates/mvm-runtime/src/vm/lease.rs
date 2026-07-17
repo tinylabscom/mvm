@@ -174,7 +174,7 @@ mod tests {
         let c = compat();
         StandbyHandle {
             id: id.to_string(),
-            control_socket: std::path::PathBuf::from("/tmp/unused.sock"),
+            control_socket: "/tmp/unused.sock".to_string(),
             pid: 0,
             kernel_sha256: c.kernel_sha256,
             vcpus: c.vcpus,

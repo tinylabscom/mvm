@@ -152,7 +152,7 @@ fn firecracker_spawn_standby(spec: &StandbySpec) -> Result<StandbyHandle> {
     slot_reservation.defuse();
     Ok(StandbyHandle {
         id: spec.id.clone(),
-        control_socket: std::path::PathBuf::from(abs_socket),
+        control_socket: abs_socket,
         pid,
         kernel_sha256: spec.kernel_sha256.clone(),
         vcpus: spec.vcpus,
@@ -182,11 +182,11 @@ fn firecracker_claim_standby(handle: &StandbyHandle, claim: &StandbyClaim) -> Re
     let fc_config = FirecrackerConfig::from_start_config_with_slot(&start_config, slot)?;
     let abs_dir = microvm::resolve_vm_dir(&fc_config.run_config.slot)?;
     let resolved_socket = format!("{}/fc.socket", abs_dir);
-    if std::path::Path::new(&resolved_socket) != handle.control_socket {
+    if resolved_socket != handle.control_socket {
         anyhow::bail!(
             "Firecracker standby '{}' socket mismatch: handle {}, slot {}",
             handle.id,
-            handle.control_socket.display(),
+            handle.control_socket,
             resolved_socket
         );
     }

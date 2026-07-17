@@ -31,10 +31,16 @@ fn spec(dir: &Path, nonce: &str) -> StandbySpec {
         kernel_sha256: "a".repeat(64),
         vcpus: 1,
         mem_mib: 256,
-        signing_key_path: dir.join("host-signer.ed25519"),
+        signing_key_path: dir
+            .join("host-signer.ed25519")
+            .to_string_lossy()
+            .into_owned(),
         signer_id: "host:test".into(),
         binding_nonce: nonce.into(),
-        control_socket: dir.join(format!("control-{nonce}.sock")),
+        control_socket: dir
+            .join(format!("control-{nonce}.sock"))
+            .to_string_lossy()
+            .into_owned(),
         vm_state_dir: dir.join("state").to_string_lossy().into_owned(),
     }
 }
@@ -68,7 +74,7 @@ fn spawn_standby_binds_control_socket() {
     // The spawned supervisor is a live process that binds its control UDS and blocks there
     // (before any boot). Both must hold for the warm-pool primitive to be claimable.
     assert!(
-        wait_for_socket(&handle.control_socket, Duration::from_secs(10)),
+        wait_for_socket(Path::new(&handle.control_socket), Duration::from_secs(10)),
         "standby must bind its control UDS"
     );
     assert!(
