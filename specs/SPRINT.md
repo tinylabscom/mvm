@@ -334,6 +334,10 @@ Then unify + retire the old paths:
 - [ ] **P4**: browser POC — `mvm-protocol` + `no_std` OCI decoders run in the browser (image inspect/verify).
 - Gate: `mvm-protocol` wasm build+tests green; no_std-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
 
+**Semantic address (UOR-ADDR) pilot — QUEUED, decision-ready (orthogonal to WS11; do NOT weave into P3)**
+- [x] **DESIGN** (`specs/refactor/12-semantic-address-pilot.md`; builds on the research note `specs/research/uor-addr-integration-assessment.md`): an additive **`SemanticAddress`** (`sha256(JCS(ir))` = UOR-ADDR JSON realization) for the **Workload IR** — cross-language "same meaning → same label". **Host-side pilot = ZERO new deps** (`serde_jcs` already in mvm-core + `sha2`); distinct newtype (never interchangeable w/ `Sha256Hex`/`OciDigest`/`KeyId`/`Nonce`). HARD BOUNDARY (ADR-002): never in OCI/`.mvm`/verity/signature/nonce/ephemeral-ID paths — pilot proves those tests stay green. The `uor-addr` **crate** itself is a DEFERRED, verification-gated **WS11-P4/browser** decision (where its no_std+wasm cross-impl-equality guarantee earns the dep) — not adopted now.
+- [ ] EXECUTE (when scheduled): the host-side pilot per doc 12 (§Pilot steps + §Tests incl. the boundary-proof + a UOR conformance-vector interop test).
+
 **WS14 — mvmd contract (secondary)**
 - [ ] Freeze the mvmd-facing surface (`mvm-protocol` + `mvm-client` + `BuildEnvironment`/`ShellEnvironment` traits); document it; file the coordinated rename for the mvmd repo.
 - Gate: the public surface is documented and stable; mvmd rename tracked as a follow-up.
