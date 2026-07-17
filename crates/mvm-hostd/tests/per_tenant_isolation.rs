@@ -140,9 +140,14 @@ async fn start_tenant(id: &str) -> TenantHandle {
         vm_id: vm.clone(),
         workload_id: Some(format!("wl-{vm}")),
         tenant_id: id.to_string(),
-        broker_listen_socket: broker_socket.clone(),
-        workload_chain_path: chain.clone(),
-        workload_chain_head_path: Some(config::host_agent_dir(id).join("signer.head")),
+        broker_listen_socket: broker_socket.to_string_lossy().into_owned(),
+        workload_chain_path: chain.to_string_lossy().into_owned(),
+        workload_chain_head_path: Some(
+            config::host_agent_dir(id)
+                .join("signer.head")
+                .to_string_lossy()
+                .into_owned(),
+        ),
         audit_signer_uds_path: None,
         services_bindings: vec![],
     };

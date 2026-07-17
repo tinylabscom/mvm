@@ -22,7 +22,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use mvm_core::protocol::broker_control::{
-    ControlRequest, ControlResponse, DeregisterVm, RegisterVm, SignedControl,
+    self, ControlRequest, ControlResponse, DeregisterVm, RegisterVm,
 };
 
 use crate::broker_services_spawn::{
@@ -229,9 +229,16 @@ pub fn register_host_agent_services_if_admitted(
             vm_id: vm_name.to_string(),
             workload_id: Some(workload_id.to_string()),
             tenant_id: tenant.to_string(),
-            broker_listen_socket: broker_listen_socket.to_path_buf(),
-            workload_chain_path: mvm_core::config::workload_audit_path(tenant, vm_name),
-            workload_chain_head_path: Some(state_dir.join(AUDIT_SIGNER_HEAD_FILE)),
+            broker_listen_socket: broker_listen_socket.to_string_lossy().into_owned(),
+            workload_chain_path: mvm_core::config::workload_audit_path(tenant, vm_name)
+                .to_string_lossy()
+                .into_owned(),
+            workload_chain_head_path: Some(
+                state_dir
+                    .join(AUDIT_SIGNER_HEAD_FILE)
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             audit_signer_uds_path: None,
             services_bindings: vec![],
         },
@@ -350,7 +357,7 @@ fn send_control(
     key_bytes: &[u8; 32],
     request: ControlRequest,
 ) -> Result<()> {
-    let signed = SignedControl::sign_with_key_bytes(request, key_bytes)
+    let signed = broker_control::sign_with_key_bytes(request, key_bytes)
         .context("sign host-agent control request")?;
     let mut last_err = None;
     for attempt in 0..CONTROL_RETRIES {
@@ -421,6 +428,7 @@ fn read_framed<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Resul
 mod tests {
     use super::*;
     use crate::test_support::{bind_unix_listener, error_chain_has_permission_denied};
+    use mvm_core::protocol::broker_control::SignedControl;
 
     fn key() -> [u8; 32] {
         [11u8; 32]
@@ -484,10 +492,17 @@ mod tests {
             vm_id: "vm-1".into(),
             workload_id: Some("wl-1".into()),
             tenant_id: "local".into(),
-            broker_listen_socket: dir.join("vsock-5300.sock"),
-            workload_chain_path: dir.join("local.vm-1.workload.jsonl"),
-            workload_chain_head_path: Some(dir.join("local.vm-1.head")),
-            audit_signer_uds_path: Some(dir.join("audit-signer.sock")),
+            broker_listen_socket: dir.join("vsock-5300.sock").to_string_lossy().into_owned(),
+            workload_chain_path: dir
+                .join("local.vm-1.workload.jsonl")
+                .to_string_lossy()
+                .into_owned(),
+            workload_chain_head_path: Some(
+                dir.join("local.vm-1.head").to_string_lossy().into_owned(),
+            ),
+            audit_signer_uds_path: Some(
+                dir.join("audit-signer.sock").to_string_lossy().into_owned(),
+            ),
             services_bindings: vec![],
         }
     }
@@ -582,7 +597,10 @@ mod tests {
                 match &signed.request {
                     ControlRequest::Register(r) => {
                         assert_eq!(r.vm_id, "vm-1");
-                        assert_eq!(r.broker_listen_socket, dir.join("vsock-5300.sock"));
+                        assert_eq!(
+                            r.broker_listen_socket,
+                            dir.join("vsock-5300.sock").to_string_lossy()
+                        );
                     }
                     other => panic!("expected Register, got {other:?}"),
                 }

@@ -31,6 +31,7 @@ use mvm_core::protocol::audit_signer::{
     SignerHelperAppendEntry, SignerHelperDeregisterVm, SignerHelperRegisterVm, SignerHelperRequest,
     SignerHelperResponse,
 };
+use mvm_core::protocol::broker_control;
 use tokio::net::UnixListener;
 use tokio::sync::Mutex;
 use tracing::warn;
@@ -319,16 +320,17 @@ impl HostAgentDaemon {
             warn!(vm_id = %r.vm_id, error = %e, "stale signer-helper deregister failed before re-register");
         }
 
-        if let Some(parent) = r.broker_listen_socket.parent() {
+        let broker_listen_socket = Path::new(&r.broker_listen_socket);
+        if let Some(parent) = broker_listen_socket.parent() {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("create broker socket dir {}", parent.display()))?;
         }
         // Clear a stale socket so bind doesn't fail with EADDRINUSE.
-        let _ = std::fs::remove_file(&r.broker_listen_socket);
-        let listener = UnixListener::bind(&r.broker_listen_socket).with_context(|| {
+        let _ = std::fs::remove_file(broker_listen_socket);
+        let listener = UnixListener::bind(broker_listen_socket).with_context(|| {
             format!(
                 "bind broker listen socket {}",
-                r.broker_listen_socket.display()
+                broker_listen_socket.display()
             )
         })?;
 
@@ -363,7 +365,7 @@ impl HostAgentDaemon {
         self.vms.insert(
             r.vm_id.clone(),
             VmHandle {
-                listen_socket: r.broker_listen_socket.clone(),
+                listen_socket: broker_listen_socket.to_path_buf(),
                 serve_task,
             },
         );
@@ -425,13 +427,13 @@ impl HostAgentDaemon {
             vm_id: r.vm_id.clone(),
             tenant_id: r.tenant_id.clone(),
             workload_id: r.workload_id.clone().unwrap_or_else(|| r.vm_id.clone()),
-            workload_chain_path: r.workload_chain_path.to_string_lossy().into_owned(),
-            chain_head_secondary_path: r
-                .workload_chain_head_path
-                .clone()
-                .unwrap_or_else(|| r.workload_chain_path.with_extension("head"))
-                .to_string_lossy()
-                .into_owned(),
+            workload_chain_path: r.workload_chain_path.clone(),
+            chain_head_secondary_path: r.workload_chain_head_path.clone().unwrap_or_else(|| {
+                Path::new(&r.workload_chain_path)
+                    .with_extension("head")
+                    .to_string_lossy()
+                    .into_owned()
+            }),
         });
         match SignerHelperClient::new(path.clone()).send(&req)? {
             SignerHelperResponse::Registered { .. } => Ok(()),
@@ -490,7 +492,7 @@ impl HostAgentDaemon {
             };
             let resp = match read_frame::<SignedControl>(&mut stream, CONTROL_MAX_FRAME_BYTES).await
             {
-                Ok(signed) => match signed.verify(&verifying_key) {
+                Ok(signed) => match broker_control::verify(&signed, &verifying_key) {
                     Ok(req) => {
                         let req = req.clone();
                         let mut daemon = daemon.lock().await;
@@ -631,10 +633,20 @@ mod tests {
             vm_id: vm.into(),
             workload_id: Some(format!("wl-{vm}")),
             tenant_id: tenant.into(),
-            broker_listen_socket: dir.join(format!("{vm}.sock")),
-            workload_chain_path: dir.join(format!("{tenant}.{vm}.workload.jsonl")),
-            workload_chain_head_path: Some(dir.join(format!("{tenant}.{vm}.head"))),
-            audit_signer_uds_path: signer,
+            broker_listen_socket: dir
+                .join(format!("{vm}.sock"))
+                .to_string_lossy()
+                .into_owned(),
+            workload_chain_path: dir
+                .join(format!("{tenant}.{vm}.workload.jsonl"))
+                .to_string_lossy()
+                .into_owned(),
+            workload_chain_head_path: Some(
+                dir.join(format!("{tenant}.{vm}.head"))
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            audit_signer_uds_path: signer.map(|p| p.to_string_lossy().into_owned()),
             services_bindings: vec![],
         }
     }
@@ -687,7 +699,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut d = daemon("local");
         let reg = register(dir.path(), "vm-1", "local", None);
-        let sock = reg.broker_listen_socket.clone();
+        let sock = PathBuf::from(&reg.broker_listen_socket);
 
         d.apply(&ControlRequest::Register(reg)).unwrap();
         assert!(d.is_registered("vm-1"));
@@ -757,7 +769,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let journal_path = dir.path().join("registrations.json");
         let reg = register(dir.path(), "vm-1", "local", None);
-        let sock = reg.broker_listen_socket.clone();
+        let sock = PathBuf::from(&reg.broker_listen_socket);
 
         {
             let mut first = daemon("local").with_registration_journal(&journal_path);
@@ -837,7 +849,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut d = daemon("local");
         let reg = register(dir.path(), "vm-1", "local", None);
-        let sock = reg.broker_listen_socket.clone();
+        let sock = PathBuf::from(&reg.broker_listen_socket);
         d.apply(&ControlRequest::Register(reg)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -876,10 +888,10 @@ mod tests {
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
         let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
         let reg_a = register(dir.path(), "vm-a", "local", None);
-        let sock_a = reg_a.broker_listen_socket.clone();
-        let chain_a = reg_a.workload_chain_path.clone();
+        let sock_a = PathBuf::from(&reg_a.broker_listen_socket);
+        let chain_a = PathBuf::from(&reg_a.workload_chain_path);
         let reg_b = register(dir.path(), "vm-b", "local", None);
-        let chain_b = reg_b.workload_chain_path.clone();
+        let chain_b = PathBuf::from(&reg_b.workload_chain_path);
 
         d.apply(&ControlRequest::Register(reg_a)).unwrap();
         d.apply(&ControlRequest::Register(reg_b)).unwrap();
@@ -920,8 +932,8 @@ mod tests {
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
         let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
         let reg = register(dir.path(), "vm-a", "local", None);
-        let sock = reg.broker_listen_socket.clone();
-        let chain = reg.workload_chain_path.clone();
+        let sock = PathBuf::from(&reg.broker_listen_socket);
+        let chain = PathBuf::from(&reg.workload_chain_path);
         d.apply(&ControlRequest::Register(reg)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -984,7 +996,7 @@ mod tests {
         let vk = SigningKey::from_bytes(&[5u8; 32]).verifying_key();
         let mut d = HostAgentDaemon::new_with_signer_helper("local", vk, &helper_sock, 64 * 1024);
         let reg = register(dir.path(), "vm-a", "local", None);
-        let chain = reg.workload_chain_path.clone();
+        let chain = PathBuf::from(&reg.workload_chain_path);
         d.apply(&ControlRequest::Register(reg)).unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 

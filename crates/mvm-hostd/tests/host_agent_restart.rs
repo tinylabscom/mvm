@@ -66,9 +66,15 @@ impl HostAgentFixture {
             vm_id: vm_name.clone(),
             workload_id: Some("wl-vm-1".to_string()),
             tenant_id: tenant_id.clone(),
-            broker_listen_socket: broker_socket.clone(),
-            workload_chain_path: workload_chain.clone(),
-            workload_chain_head_path: Some(data_dir.path().join("audit-signer.head")),
+            broker_listen_socket: broker_socket.to_string_lossy().into_owned(),
+            workload_chain_path: workload_chain.to_string_lossy().into_owned(),
+            workload_chain_head_path: Some(
+                data_dir
+                    .path()
+                    .join("audit-signer.head")
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
             audit_signer_uds_path: None,
             services_bindings: vec![],
         };
