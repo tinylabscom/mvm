@@ -40,8 +40,11 @@ pub mod kernel_artifact;
 pub mod kernel_format;
 /// Flat launch-metadata parsers for `mvm-init` (no JSON in PID 1).
 pub mod launch_metadata;
-/// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
-pub mod lifecycle;
+// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host
+// contract) are a pure-DTO leaf that now lives in `mvm-protocol`;
+// re-exported here as a module alias so every existing
+// `crate::lifecycle::X` path keeps resolving unchanged.
+pub use mvm_protocol::lifecycle;
 /// Resident-memory accounting for warm pools (learned charge + admission).
 pub mod memory_budget;
 pub mod metering;

@@ -7,6 +7,8 @@
 //! so a runbook can answer "what plan was this workload running at
 //! the moment of incident?" in O(1) without re-deriving from logs.
 
+use alloc::vec::Vec;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -109,14 +111,14 @@ pub struct ExecutionPlan {
     /// without resolving the bundle. Default = the all-off curated baseline (no
     /// per-destination entropy/name redaction).
     #[serde(default)]
-    pub redaction: crate::policy::RedactionPolicy,
+    pub redaction: crate::policy::redaction::RedactionPolicy,
 
     /// Per-destination reversible replacement policy. Disabled by default; when
     /// enabled for a destination, the runtime may replace detected secret / PII
     /// bytes with opaque request-scoped tokens on owned outbound cleartext
     /// paths, and exact-token reinject on the paired owned response path.
     #[serde(default)]
-    pub reversible_replacement: crate::policy::ReversibleReplacementPolicy,
+    pub reversible_replacement: crate::policy::reversible_replacement::ReversibleReplacementPolicy,
 
     /// Tool-call policy (which tools the model is allowed to invoke
     /// over the supervisor's vsock RPC).
@@ -200,12 +202,87 @@ pub struct ExecutionPlan {
 
 #[cfg(test)]
 mod tests {
+    use alloc::collections::BTreeMap;
+    use alloc::string::ToString;
+    use alloc::vec;
+
+    use chrono::{Duration, TimeZone};
+
     use super::*;
-    use crate::plan::signing::test_support::sample_plan;
+    use crate::plan::types::{AttestationMode, PlanSeccompTier, TimeoutSpec};
+
+    /// Minimal, valid local `ExecutionPlan`. Rebuilt inline rather than
+    /// reusing `mvm-core`'s `plan::signing::test_support::sample_plan` —
+    /// that fixture lives above `plan::signing` (which stays in
+    /// `mvm-core`), so it's unreachable from here. A fixed timestamp
+    /// stands in for `Utc::now()`, which needs chrono's `clock` feature
+    /// this crate doesn't enable.
+    fn minimal_plan() -> ExecutionPlan {
+        let valid_from = Utc.with_ymd_and_hms(2026, 7, 16, 12, 0, 0).unwrap();
+        ExecutionPlan {
+            schema_version: SCHEMA_VERSION,
+            plan_id: PlanId("fixture-plan".to_string()),
+            plan_version: 1,
+            tenant: TenantId("local".to_string()),
+            workload: WorkloadId("vm-test".to_string()),
+            runtime_profile: RuntimeProfileRef("firecracker".to_string()),
+            image: SignedImageRef {
+                name: "vm-test".to_string(),
+                sha256: "a".repeat(64),
+                cosign_bundle: None,
+                entrypoint_present: true,
+            },
+            resources: Resources {
+                cpus: 1,
+                mem_mib: 128,
+                disk_mib: 0,
+                timeouts: TimeoutSpec {
+                    boot_secs: 30,
+                    exec_secs: 0,
+                },
+            },
+            admission_profile: AdmissionProfile::local_default(
+                "vm:boot",
+                PlanSeccompTier::Standard,
+            ),
+            network_policy: PolicyRef("local-default".to_string()),
+            network_mode: Default::default(),
+            snapshot_at: Default::default(),
+            build_provenance: Default::default(),
+            fs_policy: FsPolicyRef("local-default".to_string()),
+            secrets: Vec::new(),
+            egress_policy: PolicyRef("local-default".to_string()),
+            redaction: Default::default(),
+            reversible_replacement: Default::default(),
+            tool_policy: PolicyRef("local-default".to_string()),
+            artifact_policy: ArtifactPolicy {
+                capture_paths: Vec::new(),
+                retention_days: 0,
+            },
+            audit_labels: BTreeMap::new(),
+            key_rotation: KeyRotationSpec { interval_days: 0 },
+            attestation: AttestationRequirement {
+                mode: AttestationMode::Noop,
+            },
+            release_pin: None,
+            post_run: PostRunLifecycle {
+                destroy_on_exit: true,
+                snapshot_on_idle: false,
+                idle_secs: 0,
+            },
+            valid_from,
+            valid_until: valid_from + Duration::minutes(10),
+            nonce: Nonce::from_bytes([0u8; 16]),
+            agent_verbs: None,
+            bundle: None,
+            deps_volume: None,
+            shares: Vec::new(),
+        }
+    }
 
     #[test]
     fn agent_verbs_defaults_none_and_roundtrips() {
-        let plan = sample_plan();
+        let plan = minimal_plan();
         assert!(plan.agent_verbs.is_none(), "field must default to None");
 
         // None => key is omitted entirely, not serialized as null.

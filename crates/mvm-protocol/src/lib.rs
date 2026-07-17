@@ -16,6 +16,8 @@ extern crate alloc;
 
 pub mod entrypoint;
 pub mod ir;
+/// Guest lifecycle markers + snapshot timing (the `mvm-init` ↔ host contract).
+pub mod lifecycle;
 pub mod plan;
 pub mod policy;
 pub mod protocol;

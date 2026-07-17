@@ -25,18 +25,18 @@
 //!   valid plan now".
 
 pub mod bundle;
-pub mod execution_plan;
 pub mod signing;
 pub mod synthesis;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 pub mod validity;
 
-// `types`, `verb`, `verb_grant`, `verb_trust` are pure-DTO leaves that now
-// live in `mvm-protocol`; re-exported here as module aliases so every
-// existing `crate::plan::{types,verb,verb_grant,verb_trust}::X` path keeps
-// resolving unchanged.
-pub use mvm_protocol::plan::{types, verb, verb_grant, verb_trust};
+// `execution_plan`, `types`, `verb`, `verb_grant`, `verb_trust` are
+// pure-DTO leaves that now live in `mvm-protocol`; re-exported here as
+// module aliases so every existing
+// `crate::plan::{execution_plan,types,verb,verb_grant,verb_trust}::X` path
+// keeps resolving unchanged.
+pub use mvm_protocol::plan::{execution_plan, types, verb, verb_grant, verb_trust};
 
 pub use bundle::{
     ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleInstallError, BundleManifest,
