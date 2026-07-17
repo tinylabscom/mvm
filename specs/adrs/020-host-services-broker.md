@@ -96,7 +96,7 @@ untrusted-parser/key-holder split scales with tenant count, not VM count.
 Starting a VM does not spawn a host-services process. The backend that
 starts the VM (`crates/mvm-backend/src/host_agent_spawn.rs`) lazily ensures
 the tenant's daemon is running, then signs and sends a `RegisterVm` control
-message (`crates/mvm-core/src/protocol/broker_control.rs`) carrying the
+message (`crates/mvm-protocol/src/protocol/broker_control.rs`) carrying the
 VM's id, its broker socket path, its workload audit-chain path, and the set
 of services its registration may reach. The message is signed — Ed25519
 over its JCS canonical bytes, by the host signer key — so a guest, which
