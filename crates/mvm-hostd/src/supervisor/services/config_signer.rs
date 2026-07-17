@@ -7,7 +7,7 @@
 //! pinned verifying key before deserialising the inner config.
 
 use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
-use mvm_core::protocol::signed_config::{SignedConfigEnvelope, encode_envelope, wrap_payload};
+use mvm_core::protocol::signed_config::{encode_envelope, key_id_for, wrap_payload};
 use mvm_core::security::SIG_ALG_ED25519;
 use rand::rngs::OsRng;
 
@@ -55,7 +55,7 @@ impl ConfigSigner {
     /// Canonical `signer_key_id` (hex SHA-256 of the verifying key) —
     /// same shape the subprocess's verify path expects.
     pub fn signer_key_id(&self) -> String {
-        SignedConfigEnvelope::key_id_for(&self.signing_key.verifying_key())
+        key_id_for(&self.signing_key.verifying_key())
     }
 
     /// Wrap `payload` (the raw inner-config JSON bytes) in a signed
