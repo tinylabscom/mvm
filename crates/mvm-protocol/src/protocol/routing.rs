@@ -1,6 +1,7 @@
-use std::collections::HashSet;
+use alloc::collections::BTreeSet;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 
-use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 
 /// A routing table for a gateway pool's instances.
@@ -50,41 +51,63 @@ pub enum InstanceSelector {
     LeastConnections,
 }
 
+/// Errors from parsing or validating a [`RoutingTable`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RoutingError {
+    /// The input was not well-formed `RoutingTable` JSON.
+    #[error("invalid routing table json: {0}")]
+    InvalidJson(String),
+    /// A route matched nothing: none of `port`, `path_prefix`,
+    /// `source_cidr` were set.
+    #[error(
+        "Route {index} ({name}) has no match criteria — at least one of port, path_prefix, or source_cidr must be set"
+    )]
+    NoMatchCriteria { index: usize, name: String },
+    /// Two routes claim the same inbound port.
+    #[error(
+        "Route {index} ({name}) has duplicate port {port}: another route already matches this port"
+    )]
+    DuplicatePort {
+        index: usize,
+        name: String,
+        port: u16,
+    },
+}
+
 impl RoutingTable {
-    pub fn from_json(json: &str) -> Result<Self> {
-        let table: Self = serde_json::from_str(json)?;
+    pub fn from_json(json: &str) -> Result<Self, RoutingError> {
+        let table: Self =
+            serde_json::from_str(json).map_err(|e| RoutingError::InvalidJson(e.to_string()))?;
         table.validate()?;
         Ok(table)
     }
 
-    pub fn to_json(&self) -> Result<String> {
-        Ok(serde_json::to_string_pretty(self)?)
+    pub fn to_json(&self) -> Result<String, RoutingError> {
+        serde_json::to_string_pretty(self).map_err(|e| RoutingError::InvalidJson(e.to_string()))
     }
 
-    pub fn validate(&self) -> Result<()> {
-        let mut seen_ports: HashSet<u16> = HashSet::new();
+    pub fn validate(&self) -> Result<(), RoutingError> {
+        let mut seen_ports: BTreeSet<u16> = BTreeSet::new();
 
         for (i, route) in self.routes.iter().enumerate() {
             if route.match_rule.port.is_none()
                 && route.match_rule.path_prefix.is_none()
                 && route.match_rule.source_cidr.is_none()
             {
-                bail!(
-                    "Route {} ({}) has no match criteria — at least one of port, path_prefix, or source_cidr must be set",
-                    i,
-                    route.name,
-                );
+                return Err(RoutingError::NoMatchCriteria {
+                    index: i,
+                    name: route.name.clone(),
+                });
             }
 
             if let Some(port) = route.match_rule.port
                 && !seen_ports.insert(port)
             {
-                bail!(
-                    "Route {} ({}) has duplicate port {}: another route already matches this port",
-                    i,
-                    route.name,
+                return Err(RoutingError::DuplicatePort {
+                    index: i,
+                    name: route.name.clone(),
                     port,
-                );
+                });
             }
         }
 
@@ -94,6 +117,8 @@ impl RoutingTable {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
 
     #[test]

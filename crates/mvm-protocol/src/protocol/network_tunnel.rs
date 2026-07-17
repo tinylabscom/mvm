@@ -13,6 +13,10 @@
 //! The host/guest packet pumps land in later slices; pinning the contract here
 //! first lets both ends converge on one fail-closed shape.
 
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
+use core::net::{IpAddr, Ipv4Addr};
+
 use serde::{Deserialize, Serialize};
 
 /// Fixed header magic for every tunnel frame (`MVNT`).
@@ -405,7 +409,7 @@ impl TunnelHelloAck {
 #[serde(deny_unknown_fields)]
 pub struct TunnelHostEntry {
     pub name: String,
-    pub ip: std::net::Ipv4Addr,
+    pub ip: Ipv4Addr,
 }
 
 /// Host-provided guest network configuration for the tunnel endpoint.
@@ -413,11 +417,11 @@ pub struct TunnelHostEntry {
 #[serde(deny_unknown_fields)]
 pub struct TunnelNetworkConfig {
     pub interface_name: String,
-    pub guest_ipv4: std::net::Ipv4Addr,
+    pub guest_ipv4: Ipv4Addr,
     pub prefix_len: u8,
-    pub gateway_ipv4: std::net::Ipv4Addr,
+    pub gateway_ipv4: Ipv4Addr,
     #[serde(default)]
-    pub dns_servers: Vec<std::net::IpAddr>,
+    pub dns_servers: Vec<IpAddr>,
     pub mtu: u16,
     /// Admission pins the guest injects into `/etc/hosts` for name resolution.
     #[serde(default)]
@@ -721,6 +725,8 @@ fn validate_host_entry_name(name: &str) -> Result<(), ControlMessageError> {
 
 #[cfg(test)]
 mod tests {
+    use alloc::{format, vec};
+
     use super::*;
 
     #[test]

@@ -3,12 +3,14 @@
 //!
 //! The types here cross every process boundary in the broker subprocess set
 //! (`mvm-broker`, `mvm-host-signer`, `mvm-audit-signer`) plus the
-//! supervisor's UDS proxies. They MUST stay in `mvm-core` so all four
-//! processes can import them without pulling each other's runtime deps.
-//! An algorithm-identifier byte pairs with these envelopes on the vsock
-//! side.
+//! supervisor's UDS proxies. They live in the no_std `mvm-protocol` crate so
+//! all four processes — and any lighter-weight consumer — can import them
+//! without pulling in a runtime. An algorithm-identifier byte pairs with
+//! these envelopes on the vsock side.
 
-use std::time::Duration;
+use alloc::string::String;
+use alloc::vec::Vec;
+use core::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -71,8 +73,8 @@ impl ServiceId {
     }
 }
 
-impl std::fmt::Display for ServiceId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for ServiceId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -129,8 +131,8 @@ impl CorrelationId {
     }
 }
 
-impl std::fmt::Display for CorrelationId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Display for CorrelationId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str(&self.0)
     }
 }
@@ -277,6 +279,8 @@ impl AuditDurability {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+
     use super::*;
 
     #[test]

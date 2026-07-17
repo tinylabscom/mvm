@@ -1,7 +1,7 @@
 //! `host.time.v1` payload types — host wall-clock query.
 //!
 //! One verb, `now`: the request carries no fields (the workload identity
-//! comes from the supervisor's [`crate::protocol::handler::ServiceCallCtx`],
+//! comes from the supervisor's `ServiceCallCtx` (`mvm-core::protocol::handler`),
 //! not the payload), and the response is [`TimeNowResponse`] carrying the
 //! host wall-clock in milliseconds since the Unix epoch. Time is an integer
 //! on the wire — no floating-point clock — matching the broker's int-only
@@ -27,6 +27,8 @@ pub struct TimeNowResponse {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+
     use super::*;
 
     #[test]

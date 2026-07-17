@@ -2,7 +2,7 @@
 //!
 //! Two verbs select the scope; the request body is empty in both cases
 //! because the scope is the verb and the identity comes from the
-//! supervisor's [`crate::protocol::handler::ServiceCallCtx`]:
+//! supervisor's `ServiceCallCtx` (`mvm-core::protocol::handler`):
 //!
 //! - `workload` — spend attributed to the calling workload. No mvmd
 //!   dependency; served in-process by the broker.
@@ -33,6 +33,8 @@ pub struct CostReport {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+
     use super::*;
 
     #[test]

@@ -26,6 +26,9 @@
 //! payload still parses for forward-compat with future workload-side
 //! tagging within the `workload_audit` umbrella.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -144,6 +147,9 @@ pub enum EmitErrorCode {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+    use alloc::vec;
+
     use super::*;
 
     #[test]
