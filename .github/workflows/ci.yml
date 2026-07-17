@@ -294,6 +294,48 @@ jobs:
             nix flake check --no-build "./$d"
           done
 
+  # `mvm-protocol` is `no_std` + `alloc` (the IR, wire protocol, policy/audit
+  # DTOs, and the audit-log verifier) so the same logic can run in a browser.
+  # A `std`/OS-only API creeping into its default build is the one thing that
+  # would break that — and the wasm32-unknown-unknown *build itself* is the
+  # proof: it only succeeds if the crate stays no_std-clean, so no separate
+  # lint is needed. The crate also goes `std` under `cfg(test)` (libtest
+  # needs `std` to link), so its tests run for real under wasm on
+  # wasm32-wasip1 via wasmtime, confirming the no_std surface behaves
+  # correctly and not just that it compiles.
+  wasm-no-std-boundary:
+    name: mvm-protocol wasm32 no_std boundary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown,wasm32-wasip1
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-wasm-
+
+      - name: Install wasmtime (wasm32-wasip1 test runner)
+        run: |
+          set -euo pipefail
+          curl https://wasmtime.dev/install.sh -sSf | bash
+          echo "$HOME/.wasmtime/bin" >> "$GITHUB_PATH"
+
+      - name: mvm-protocol builds no_std + alloc on wasm32-unknown-unknown
+        run: cargo build -p mvm-protocol --target wasm32-unknown-unknown
+
+      - name: mvm-protocol tests run under wasm (wasm32-wasip1, via wasmtime)
+        run: cargo test -p mvm-protocol --target wasm32-wasip1
+
   # The pure-Rust `mvm-ext4` writer (Plan 221) must produce an image the real
   # Linux kernel mounts — the strongest correctness oracle, beyond the in-process
   # `am-fs-ext4` read oracle. Write a fixed sample image and loop-mount it.

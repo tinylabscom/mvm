@@ -46,6 +46,12 @@ thiserror = { version = "2", default-features = false }
 # path (mvm-core's toml_loader) relies on.
 [dev-dependencies]
 toml.workspace = true
+# Re-declaring chrono here (feature-unified with the no_std `[dependencies]`
+# entry above, for this crate's own test builds only) turns on `clock` so
+# `mod tests` can call `Utc::now()`. Dev-dependencies never join the
+# wasm32-unknown-unknown lib build, so the wasm-clean gate stays chrono
+# clock-free.
+chrono = { version = "0.4", features = ["clock"] }
 
 [features]
 default = []
