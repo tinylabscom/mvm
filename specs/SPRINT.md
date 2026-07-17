@@ -325,13 +325,14 @@ Then unify + retire the old paths:
 - [ ] Fold each still-relevant intent into its WS; close the 8 issues + 4 PRs with a pointer to the superseding WS. Keep **#1637** open.
 - Gate: only #1637 remains open.
 
-**WS11 — wasm-container backend + `no_std` core (CORE goal; see §2.5 + `specs/refactor/02-architecture.md` §Wasm-container)**
-- [ ] `mvm-protocol` is `#![no_std] + alloc`, `unsafe_code = "forbid"`, with a `wasm32-unknown-unknown` CI build **and its tests running under wasm**; CI-gated `no_std` boundary (nothing workload-execution-relevant reaches for `std`/OS/crypto-impl). Lands with 1a-protocol + 1b (one designed pass).
-- [ ] `WasmBackend` implements the same `VmBackend`/Workload contract, selected via `BackendKind`; runs a workload as a WASI wasm module under a host wasm runtime (`wasmtime`/`wasmer`), end-to-end.
-- [ ] Wasm egress/audit/secret-substitution rides a `VmDuplexTransport` **WASI variant** through the same default-deny host seam; wasm guest sees no secrets / emits no PII (data-governance witness covers it; `${NAME}` and all).
-- [ ] Browser POC: `mvm-protocol` + the `no_std` OCI layer decoders (per holospaces) run in the browser.
-- [ ] Resolve open design Qs: wasm-workload definition (user WASI module vs mvm-compiled), overlay/agent mapping onto a wasm instance with no Linux init, browser `mvm-fs` slice.
-- Gate: `mvm-protocol` wasm CI build + tests green; no_std-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
+**WS11 — wasm-container backend + `no_std` core (CORE goal; DESIGN LANDED — see `specs/refactor/11-wasm-backend.md` + §2.5)**
+- [x] **DESIGN + scope decided** (`specs/refactor/11-wasm-backend.md`; ADR-024 → Accepted): `WasmBackend` = the **claim-free portability/demo/browser tier** (host `wasmtime`, opt-in, honest capability matrix, zero numbered claims — ADR-024's 3 constraints); **workload = user-supplied WASI module**; production-untrusted-wasm (engine-in-guest per ADR-024) DEFERRED. Open Qs resolved: no in-guest agent (agent responsibilities → host WASI-imports), browser slice = `no_std` OCI decoders only. `no_std` FOUNDATION already done (Increment 3 — mvm-protocol builds on wasm32).
+- [x] `mvm-protocol` is `#![no_std] + alloc`, `unsafe_code = "forbid"`, `wasm32-unknown-unknown` CI build (Increment 1–3). _GAP → P1:_ tests running UNDER wasm (lib-build only today) + explicit no_std-boundary lint.
+- [ ] **P1** (next): wire a `wasm32` **test** lane (`wasm-bindgen-test`/`wasmtime` runner — IR + verifier tests run under wasm) + the `no_std`-boundary lint. Bounded, no new backend.
+- [ ] **P2**: `BackendKind::Wasm` + `WasmBackend: VmBackend` skeleton — honest capability matrix + fail-closed typed errors on every unsupported request; `wasmtime` behind opt-in `wasm-backend` feature (default build carries none); never auto-selected. Runs a no-egress WASI module.
+- [ ] **P3**: `VmDuplexTransport::Wasi` egress through the same default-deny/substitute/audit host seam → POC gate: a WASI module's outbound request is default-denied-then-policy-allowed, chain-signed audit entry, data-governance witness (no secret/no PII) passes — same witness the microVM backends pass.
+- [ ] **P4**: browser POC — `mvm-protocol` + `no_std` OCI decoders run in the browser (image inspect/verify).
+- Gate: `mvm-protocol` wasm build+tests green; no_std-boundary lint holds; `WasmBackend` runs a workload through the shared egress/audit seam (POC-gated) with the data-governance witness passing.
 
 **WS14 — mvmd contract (secondary)**
 - [ ] Freeze the mvmd-facing surface (`mvm-protocol` + `mvm-client` + `BuildEnvironment`/`ShellEnvironment` traits); document it; file the coordinated rename for the mvmd repo.

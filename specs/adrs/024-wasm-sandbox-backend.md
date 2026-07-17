@@ -2,11 +2,15 @@
 
 ## Status
 
-Proposed — no implementation exists. `BackendKind` (`mvm-backend::catalog`)
-enumerates exactly `Firecracker`, `Libkrun`, `Qemu`, `Mock`, `Hvf`; no
-`wasmtime` dependency appears anywhere in the workspace; `mvm-guest`'s
-runner has no WASM variant. This document records a boundary decision for
-if and when that changes, not a shipped backend.
+Accepted — boundary ratified; scoped as the **claim-free portability / demo /
+browser tier** (host `wasmtime`, opt-in, honest capabilities, zero numbered
+claims). The seam design of record is
+[specs/refactor/11-wasm-backend.md](../refactor/11-wasm-backend.md); executing
+a wasm workload as more than a demo (attacker-controlled production) stays
+deferred under the engine-in-guest rule below. No implementation has landed yet:
+`BackendKind` (`mvm_runtime::…::catalog`) still enumerates the microVM backends
+only; no `wasmtime` dependency is in the workspace. The three constraints below
+bind the implementation.
 
 ## Context
 
