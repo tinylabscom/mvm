@@ -111,6 +111,28 @@ model, many transports.
   default build carries no `wasmtime`.
 - **P3 — the governed seam + POC.** `VmDuplexTransport::Wasi` egress through the
   default-deny/substitute/audit host seam; meet the POC acceptance gate above.
+  **Feasibility (recon'd): GO, and decoupled from the in-flux WS-NET.** The real
+  transport abstraction the design's "`VmDuplexTransport`" refers to is
+  `EndpointTransport` (`mvm-runtime/src/substitution_spawn.rs` — today `Vsock {
+  port }` / `Uds { path }`), the per-backend way a workload reaches the per-VM
+  **substitution endpoint** (`mvm-substitution-endpoint`, an `mvm-hostd` bin):
+  the backend-agnostic governance seam that does secret substitution + egress
+  policy + audit (libkrun/FC/qemu all spawn it). That layer is **separate from
+  the actively-churning smoltcp-vsock *tunnel/forwarder* layer** (`smoltcp_egress`
+  / `network_tunnel`, Plan 236 `#1681`). A wasm container has no vsock/TUN, so it
+  **bypasses the tunnel entirely** — P3 adds an `EndpointTransport::Wasi` variant
+  and routes the WASI module's outbound host-calls (intercepted by the host
+  `wasmtime` embedding) straight into the substitution endpoint. So P3 touches
+  the *stable* governance layer, not the WS-NET flux — it need not wait for
+  WS-NET. Real work: (a) the `EndpointTransport::Wasi` variant (enum-variant
+  churn like `BackendKind::Wasm`); (b) the WASI host-call → substitution-endpoint
+  routing in the `wasmtime` embedding; (c) the POC's **data-governance witness**
+  — referenced across the specs (04/06) as a planned CI witness but not yet a
+  concrete test, so P3 must identify/build it. Scope note: the endpoint's full
+  TLS-terminating secret-substitution (per-VM egress-CA intermediate the guest
+  trusts) is heavier than a byte relay; a first P3 cut can prove
+  default-deny/allow + audit + `${NAME}` substitution through the seam and defer
+  full TLS termination to P3b if it complicates.
 - **P4 — the browser slice.** `mvm-protocol` + the `no_std` OCI decoders running
   in the browser (image inspect/verify), per the holospaces path.
 
