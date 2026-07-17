@@ -20,11 +20,16 @@
 //! how every other backend surfaces "not available" at first use rather
 //! than at construction.
 //!
-//! No networking: a module runs fully isolated from the network by
-//! construction (no WASI socket capability is ever granted), and any launch
-//! config that asks for real egress, a kernel/verified boot, a snapshot, or
-//! an interactive console fails closed with a typed error naming the
-//! supported alternative. The governed WASI egress seam is a later phase.
+//! Governed egress, not raw networking: a module is never granted a WASI
+//! socket capability directly, so it cannot dial the network on its own.
+//! Instead, a run whose policy allows egress gets a host-mediated
+//! `mvm:egress` import that relays each request through the same
+//! substitution-endpoint seam every other backend uses — default-deny,
+//! `${NAME}` secret substitution on a bound destination, and a
+//! chain-signed audit entry, with the module never holding the real
+//! secret. A launch config that instead asks for a kernel/verified boot, a
+//! snapshot, or an interactive console still fails closed with a typed
+//! error naming the supported alternative.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -108,9 +113,6 @@ fn reject_unsupported_start_config(
     }
     if config.verity_path.is_some() || config.roothash.is_some() {
         return Err(WasmBackendError::VerifiedBootNotSupported);
-    }
-    if config.network_policy.allows_egress() {
-        return Err(WasmBackendError::NetworkingNotSupported);
     }
     if config.dev_console {
         return Err(WasmBackendError::ConsoleNotSupported);
@@ -848,11 +850,22 @@ mod tests {
     }
 
     #[test]
-    fn network_allow_request_fails_closed() {
+    fn start_config_with_egress_policy_is_now_allowed() {
+        // A policy that allows egress must NOT be rejected: egress is
+        // governed (the substitution endpoint mediates it), not unsupported.
         let mut config = cfg("x", "/tmp/does-not-matter.wasm");
         config.network_policy = mvm_core::network_policy::NetworkPolicy::unrestricted();
-        let err = reject_unsupported_start_config(&config).unwrap_err();
-        assert_eq!(err, WasmBackendError::NetworkingNotSupported);
+        assert!(reject_unsupported_start_config(&config).is_ok());
+    }
+
+    #[test]
+    fn start_config_still_rejects_kernel_and_console() {
+        let mut config = cfg("x", "/tmp/does-not-matter.wasm");
+        config.kernel_path = Some("/x".to_string());
+        assert_eq!(
+            reject_unsupported_start_config(&config),
+            Err(WasmBackendError::KernelBootNotSupported)
+        );
     }
 
     #[test]
