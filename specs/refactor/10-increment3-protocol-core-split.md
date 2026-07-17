@@ -1,5 +1,17 @@
 # Increment 3 — the `mvm-core` → `mvm-protocol` wire/policy split (DESIGN)
 
+> **Status: COMPLETE.** Executed in 13 subagent-driven batches on branch
+> `plan/mvm-simplification` (Tier 0 `6577d06ba` → final `51471dd7`). Every
+> `plan/`+`policy/`+`protocol/` wire/policy DTO — leaves, the two biggest
+> single-file splits (`bundle.rs` 2360, `vm_backend.rs` 2693), and the
+> claim-8 signed `ExecutionPlan` itself — now lives in `#![no_std]+alloc`
+> `mvm-protocol`, which builds on `wasm32`; all signing/verify/synthesis/
+> resolution/fs/net/tar logic stays in `mvm-core` on top. Each batch was
+> byte-identity `git show`-verified and left the workspace green (nextest
+> ~6596/0, clippy `-D`, wasm build, xtask gates). Per-batch detail is in the
+> Tier-2/3 checklist of `specs/SPRINT.md`. This document is the design of
+> record; the prose below is the plan as authored.
+
 This is the design of record for the long pole of Phase 1a: pulling the pure
 wire/policy **DTOs** out of `mvm-core`'s `plan/` + `policy/` + `protocol/`
 down into the `#![no_std] + alloc` `mvm-protocol` crate, and leaving every
@@ -209,15 +221,32 @@ move to `mvm-protocol`. Rename the `policies.rs` one to **`BundleNetworkPolicy`*
 (hard rename, no alias — consistent with the no-back-compat norm) before or
 during the move so a flatter DTO namespace doesn't collide.
 
-## Explicitly deferred (not missed)
+## Intentionally stays in `mvm-core` (not gaps)
 
-Record these in the SPRINT ledger as intentional so a later reviewer doesn't
-read them as gaps:
+On execution, two candidates the draft flagged as "deferred pending a move"
+resolved to **permanent `mvm-core` residents** — moving them would be wrong,
+not merely postponed:
 
-- `policy::security_profile.rs` — not a serde DTO + `crypto::seccomp` dep.
-- `protocol::protocol.rs` `HostdRequest`/`HostdResponse` — `domain/` deps.
-- `vm_backend::VmStartConfig`/`StandbyClaim`/`VerbGrantEnvelope` — heavy field deps.
-- All signing/verification/synthesis/resolution/projection **logic** — stays in `mvm-core` by design; this increment is DTO-only.
+- `policy::security_profile.rs` — **stays.** `SecurityProfile` is not a serde
+  wire type at all (a `Copy` runtime value with a `&'static str` field) and it
+  depends on `crypto::seccomp::SeccompTier`. It is core logic, not a DTO.
+- `protocol::protocol.rs` `HostdRequest`/`HostdResponse` (+ `PROTOCOL_VERSION`,
+  `HOSTD_SOCKET_PATH`) — **stays.** It is the mvmd↔hostd *host-side* IPC control
+  protocol: it embeds `domain::{instance::VolumeAttach, tenant::TenantNet}` —
+  and per the architecture, mvmd-orchestration `domain/` types deliberately
+  stay in `mvm-core` — and its transport is the `hostd-transport`-gated tokio
+  framing (`read_frame`/`write_frame`/…). Nothing here runs in a guest or the
+  browser, so it belongs with the host-side std/tokio logic, not in the
+  no_std/edge crate. This draws the clean line for the whole increment:
+  **`mvm-protocol` holds the DTOs a no_std/edge/guest/browser consumer needs
+  (signed plans, audit, guest wire protocol, policy); the host-only mvmd↔hostd
+  IPC and orchestration domain types stay in `mvm-core`.**
+
+The composites the draft listed as staying (`vm_backend::VmStartConfig`/
+`StandbyClaim`/`VerbGrantEnvelope`) did stay — as `mvm-core` composites over
+`mvm-protocol` sub-DTOs, alongside the `VmBackend` trait (Batch K). And all
+signing/verification/synthesis/resolution/projection **logic** stays in
+`mvm-core` by design — this increment was DTO-only.
 
 ## Global extraction order (leaf-first; green after every step)
 
