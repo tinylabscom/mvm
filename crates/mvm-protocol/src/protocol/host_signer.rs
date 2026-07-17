@@ -16,6 +16,9 @@
 //! events have their own `EventCategory` — they're not `ServiceCall`
 //! entries).
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -24,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 /// What the supervisor is asking the host-signer to sign.
 ///
-/// `SignPlan` carries `crate::plan::ExecutionPlan` bytes; the host-signer
+/// `SignPlan` carries `ExecutionPlan` bytes; the host-signer
 /// treats the input as opaque bytes and does not parse them. The
 /// `SignCredential` variant was dropped when `host.secrets.v1` was
 /// removed from v1 scope; future verbs (PQC, attestation) extend this
@@ -128,6 +131,8 @@ pub enum HostSignerErrorCode {
 
 #[cfg(test)]
 mod tests {
+    use alloc::vec;
+
     use super::*;
     use crate::policy::security::{SIG_ALG_ECDSA_P256, SIG_ALG_ED25519};
 

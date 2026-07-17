@@ -14,8 +14,9 @@
 //! to know the live `EventCategory` enum from `mvm-supervisor`; the
 //! audit-signer's typed schema lives in its own crate.
 
+use alloc::string::String;
+
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 
 use super::host_signer::{SignRequest, SignResponse};
 
@@ -168,9 +169,9 @@ pub struct SignerHelperRegisterVm {
     /// Workload identifier recorded in diagnostics and future admission logs.
     pub workload_id: String,
     /// Per-VM workload audit chain JSONL.
-    pub workload_chain_path: PathBuf,
+    pub workload_chain_path: String,
     /// Secondary persisted chain-head file for this VM.
-    pub chain_head_secondary_path: PathBuf,
+    pub chain_head_secondary_path: String,
 }
 
 /// Deregister a VM from the resident signer helper.
@@ -299,6 +300,9 @@ impl SignerHelperResponse {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+    use alloc::vec;
+
     use super::*;
     use crate::policy::security::{SIG_ALG_ECDSA_P256, SIG_ALG_ED25519};
 
@@ -433,8 +437,8 @@ mod tests {
             vm_id: "vm-1".into(),
             tenant_id: "local".into(),
             workload_id: "wl-1".into(),
-            workload_chain_path: PathBuf::from("/audit/local.vm-1.workload.jsonl"),
-            chain_head_secondary_path: PathBuf::from("/audit/local.vm-1.head"),
+            workload_chain_path: "/audit/local.vm-1.workload.jsonl".to_string(),
+            chain_head_secondary_path: "/audit/local.vm-1.head".to_string(),
         })
     }
 

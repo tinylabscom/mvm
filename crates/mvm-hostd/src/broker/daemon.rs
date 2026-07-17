@@ -425,11 +425,13 @@ impl HostAgentDaemon {
             vm_id: r.vm_id.clone(),
             tenant_id: r.tenant_id.clone(),
             workload_id: r.workload_id.clone().unwrap_or_else(|| r.vm_id.clone()),
-            workload_chain_path: r.workload_chain_path.clone(),
+            workload_chain_path: r.workload_chain_path.to_string_lossy().into_owned(),
             chain_head_secondary_path: r
                 .workload_chain_head_path
                 .clone()
-                .unwrap_or_else(|| r.workload_chain_path.with_extension("head")),
+                .unwrap_or_else(|| r.workload_chain_path.with_extension("head"))
+                .to_string_lossy()
+                .into_owned(),
         });
         match SignerHelperClient::new(path.clone()).send(&req)? {
             SignerHelperResponse::Registered { .. } => Ok(()),
