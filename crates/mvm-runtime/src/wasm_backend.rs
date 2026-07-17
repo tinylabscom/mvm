@@ -287,7 +287,7 @@ impl VmBackend for WasmBackend {
         // `DoesNotHold`, matching the mock test double's framing rather
         // than a real microVM's partial-claim profile. There is no
         // guest, no rootfs block device, and no hardware isolation
-        // boundary — nothing here approximates the ADR-002 threat model.
+        // boundary — nothing here approximates the security posture's threat model.
         BackendSecurityProfile {
             claims: [ClaimStatus::DoesNotHold; 7],
             layer_coverage: LayerCoverage::default(),
@@ -675,7 +675,7 @@ mod tests {
                 .claims
                 .iter()
                 .all(|c| matches!(c, ClaimStatus::DoesNotHold)),
-            "wasm tier must not claim any ADR-002 guarantee"
+            "wasm tier must not claim any numbered security guarantee"
         );
         assert_eq!(profile.dropped_claims(), vec![1, 2, 3, 4, 5, 6, 7]);
         assert_eq!(profile.layer_coverage, LayerCoverage::default());
