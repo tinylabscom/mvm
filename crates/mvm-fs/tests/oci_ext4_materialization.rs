@@ -1,4 +1,4 @@
-//! Linux-gated integration test for [`mvm_build::oci_to_rootfs::
+//! Linux-gated integration test for [`mvm_fs::oci_to_rootfs::
 //! materialize_to_ext4`].
 //!
 //! The default deterministic path is in-process now, but the public API remains
@@ -7,7 +7,7 @@
 
 #![cfg(target_os = "linux")]
 
-use mvm_build::oci_to_rootfs::{
+use mvm_fs::oci_to_rootfs::{
     ImageStaging, MaterializedRootfs, Mke2fsOptions, StagingOptions, materialize_to_ext4,
 };
 use std::io::Cursor;

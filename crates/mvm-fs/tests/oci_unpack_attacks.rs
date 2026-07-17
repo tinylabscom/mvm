@@ -13,7 +13,7 @@
 
 mod oci_unpack_common;
 
-use mvm_build::oci_to_rootfs::{ImageStaging, OciUnpackError, StagingOptions};
+use mvm_fs::oci_to_rootfs::{ImageStaging, OciUnpackError, StagingOptions};
 use oci_unpack_common::*;
 use std::io::Cursor;
 use tar::{Builder, EntryType, Header};

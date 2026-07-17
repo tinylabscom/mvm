@@ -1294,7 +1294,7 @@ fn verify_stage0_rootfs_has_init_rejects_non_ext4() {
 /// Build a tiny real ext4 from `staged_dir` at `image`, returning
 /// `false` if `mke2fs` isn't installed (so the test skips rather than
 /// fails on a host without e2fsprogs). Mirrors the preallocate-then-
-/// `mke2fs -d` shape `mvm_build::oci_to_rootfs::ext4` uses.
+/// `mke2fs -d` shape `mvm_fs::oci_to_rootfs::ext4` uses.
 #[cfg(all(feature = "builder-vm", target_os = "linux"))]
 fn mke2fs_from_dir(staged_dir: &std::path::Path, image: &std::path::Path) -> bool {
     {

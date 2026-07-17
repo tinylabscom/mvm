@@ -13,10 +13,10 @@ use anyhow::{Context, Result};
 
 use crate::guest_agent_build::GuestRuntimeBinaryBytes;
 use crate::oci_runtime_inject::{MvmRuntimeBinaries, OciEntrypointConfig};
-use crate::oci_to_rootfs::{
+use crate::rootfs::MaterializeExt4Input;
+use mvm_fs::oci_to_rootfs::{
     MaterializedRootfs, OciUnpackError, VeritySealedRootfs, VeritysetupOptions, seal_with_verity,
 };
-use crate::rootfs::MaterializeExt4Input;
 
 /// Guest runtime binaries embedded in the host binary at build time — the
 /// end-user fallback for a shipped mvmctl with no source checkout to
@@ -324,11 +324,11 @@ printf '%s\n' "$roothash" > "$ROOTHASH"
         rootfs_name = rootfs_name,
         sidecar_name = sidecar_name,
         roothash_name = roothash_name,
-        data_block_size = crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE,
-        hash_block_size = crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE,
-        salt = crate::oci_to_rootfs::MVM_VERITY_PINNED_SALT,
-        uuid = crate::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID,
-        algorithm = crate::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM,
+        data_block_size = mvm_fs::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE,
+        hash_block_size = mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE,
+        salt = mvm_fs::oci_to_rootfs::MVM_VERITY_PINNED_SALT,
+        uuid = mvm_fs::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID,
+        algorithm = mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM,
     ))
 }
 
@@ -701,23 +701,23 @@ mod tests {
         assert!(script.contains("veritysetup format"));
         assert!(script.contains(&format!(
             "--data-block-size={}",
-            crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE
+            mvm_fs::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE
         )));
         assert!(script.contains(&format!(
             "--hash-block-size={}",
-            crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE
+            mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE
         )));
         assert!(script.contains(&format!(
             "--salt={}",
-            crate::oci_to_rootfs::MVM_VERITY_PINNED_SALT
+            mvm_fs::oci_to_rootfs::MVM_VERITY_PINNED_SALT
         )));
         assert!(script.contains(&format!(
             "--uuid={}",
-            crate::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID
+            mvm_fs::oci_to_rootfs::verity::MVM_VERITY_PINNED_UUID
         )));
         assert!(script.contains(&format!(
             "--hash={}",
-            crate::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM
+            mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM
         )));
     }
 
@@ -800,8 +800,8 @@ mod tests {
                     sidecar_path: rootfs.with_extension("verity"),
                     roothash_path: rootfs.with_extension("roothash"),
                     roothash: "abcd".repeat(16),
-                    algorithm: crate::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM.to_string(),
-                    data_block_size: crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE,
+                    algorithm: mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_ALGORITHM.to_string(),
+                    data_block_size: mvm_fs::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE,
                 })
             },
             |_rootfs| {

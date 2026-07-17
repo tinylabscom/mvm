@@ -39,7 +39,7 @@
 //!
 //! ## Attack-surface coverage
 //!
-//! The integration tests under `mvm-build/tests/oci_unpack_*` are
+//! The integration tests under `mvm-fs/tests/oci_unpack_*` are
 //! the canonical mitigation evidence. Every variant in
 //! `OciUnpackError` has at least one negative test that proves
 //! the corresponding attack class is rejected without a partial

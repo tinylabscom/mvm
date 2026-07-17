@@ -110,12 +110,6 @@ pub mod nix;
 /// mount point) into an OCI-unpacked rootfs so `run --image` has a vsock
 /// control plane. Host-side filesystem I/O against the staging tree.
 pub mod oci_runtime_inject;
-/// OCI layer unpack to a staging rootfs directory. Handles whiteouts,
-/// symlinks, hardlinks, ownership, permissions, path traversal, the
-/// `/mvm` reserved-path collision check, and per-entry + per-layer
-/// size caps (decompression-bomb mitigation). ext4 generation
-/// (`mke2fs -d` against the staging dir) runs inside the builder VM.
-pub mod oci_to_rootfs;
 pub mod pipeline;
 /// Host-side resolver for the mvm runtime overlay disk. Picks the right
 /// ext4 + verity sidecar + roothash for the running mvmctl version and

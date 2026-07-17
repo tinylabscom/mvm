@@ -23,6 +23,7 @@ sha2 = { workspace = true }
 tar = { workspace = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "time"] }
+uuid.workspace = true
 xattr = { workspace = true }
 
 [dev-dependencies]

@@ -188,10 +188,10 @@ fn materialized_rootfs(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn in_process_build_options(options: &Mke2fsOptions) -> Option<mvm_fs::ext4::BuildOptions> {
+fn in_process_build_options(options: &Mke2fsOptions) -> Option<crate::ext4::BuildOptions> {
     let defaults = Mke2fsOptions::default();
     if options.hash_seed != defaults.hash_seed
-        || options.block_size != mvm_fs::ext4::BLOCK_SIZE
+        || options.block_size != crate::ext4::BLOCK_SIZE
         || options.size_padding_bytes != defaults.size_padding_bytes
         || options.source_date_epoch != defaults.source_date_epoch
         || options.mke2fs_binary.is_some()
@@ -201,7 +201,7 @@ fn in_process_build_options(options: &Mke2fsOptions) -> Option<mvm_fs::ext4::Bui
 
     let uuid = uuid::Uuid::parse_str(&options.uuid).ok()?;
     Some(
-        mvm_fs::ext4::BuildOptions::default()
+        crate::ext4::BuildOptions::default()
             .with_uuid(*uuid.as_bytes())
             .with_volume_name(options.label.as_bytes()),
     )
@@ -212,7 +212,7 @@ fn materialize_in_process(
     staged_root: &Path,
     output: &Path,
     options: &Mke2fsOptions,
-    build_options: &mvm_fs::ext4::BuildOptions,
+    build_options: &crate::ext4::BuildOptions,
 ) -> Result<MaterializedRootfs, OciUnpackError> {
     let nodes = collect_nodes(staged_root)?;
     if let Some(parent) = output.parent() {
@@ -220,24 +220,24 @@ fn materialize_in_process(
     }
     let mut file = std::fs::File::create(output)?;
     let size_bytes =
-        match mvm_fs::ext4::emit_image_with_options(&nodes, build_options, |offset, bytes| {
+        match crate::ext4::emit_image_with_options(&nodes, build_options, |offset, bytes| {
             file.seek(SeekFrom::Start(offset))
                 .and_then(|_| file.write_all(bytes))
         }) {
             Ok(size_bytes) => size_bytes,
-            Err(mvm_fs::ext4::EmitImageError::Build(err)) => {
+            Err(crate::ext4::EmitImageError::Build(err)) => {
                 return Err(OciUnpackError::Mke2fsFailed {
                     reason: format!("in-process ext4 build failed: {err}"),
                 });
             }
-            Err(mvm_fs::ext4::EmitImageError::Emit(err)) => return Err(err.into()),
+            Err(crate::ext4::EmitImageError::Emit(err)) => return Err(err.into()),
         };
     file.set_len(size_bytes)?;
     Ok(materialized_rootfs(output, size_bytes, options))
 }
 
 #[cfg(target_os = "linux")]
-fn collect_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, OciUnpackError> {
+fn collect_nodes(root: &Path) -> Result<Vec<crate::ext4::Node>, OciUnpackError> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -248,12 +248,12 @@ fn collect_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, OciUnpackError>
             let ft = entry.file_type()?;
             if ft.is_symlink() {
                 let target = std::fs::read_link(&path)?;
-                out.push(mvm_fs::ext4::Node::Symlink {
+                out.push(crate::ext4::Node::Symlink {
                     path: guest_path,
                     target: target.to_string_lossy().into_owned(),
                 });
             } else if ft.is_dir() {
-                out.push(mvm_fs::ext4::Node::Dir {
+                out.push(crate::ext4::Node::Dir {
                     path: guest_path,
                     mode: mode_of(&path, 0o755),
                     xattrs: Vec::new(),
@@ -261,7 +261,7 @@ fn collect_nodes(root: &Path) -> Result<Vec<mvm_fs::ext4::Node>, OciUnpackError>
                 stack.push(path);
             } else if ft.is_file() {
                 let data = std::fs::read(&path)?;
-                out.push(mvm_fs::ext4::Node::File {
+                out.push(crate::ext4::Node::File {
                     path: guest_path,
                     mode: mode_of(&path, 0o644),
                     data,
@@ -622,7 +622,7 @@ mod tests {
         let build_options = in_process_build_options(&options).expect("default options supported");
         let nodes = collect_nodes(&staged.root).expect("collect nodes");
         let dense =
-            mvm_fs::ext4::build_image_with_options(&nodes, &build_options).expect("dense image");
+            crate::ext4::build_image_with_options(&nodes, &build_options).expect("dense image");
 
         let materialized = materialize_in_process(&staged.root, &output, &options, &build_options)
             .expect("streamed in-process materialize");

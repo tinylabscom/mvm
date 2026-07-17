@@ -1,4 +1,4 @@
-//! Linux-gated integration test for [`mvm_build::oci_to_rootfs::
+//! Linux-gated integration test for [`mvm_fs::oci_to_rootfs::
 //! seal_with_verity`].
 //!
 //! `veritysetup` is Linux-only and not present on macOS / Windows
@@ -13,14 +13,19 @@
 //! 3. `which::which("mke2fs")` — the round-trip tests need to
 //!    produce a real ext4 first (via `materialize_to_ext4`),
 //!    then seal it. CI's Linux KVM lane has both binaries.
+//!
+//! This test also exercises [`mvm_build::run_image::seal_run_rootfs_with_verity`],
+//! an mvm-build-only orchestration helper built on top of `seal_with_verity` —
+//! that coupling is why the file stays in mvm-build rather than moving with the
+//! rest of the `oci_to_rootfs` integration tests.
 
 #![cfg(target_os = "linux")]
 
-use mvm_build::oci_to_rootfs::{
+use mvm_build::run_image::seal_run_rootfs_with_verity;
+use mvm_fs::oci_to_rootfs::{
     ImageStaging, MaterializedRootfs, Mke2fsOptions, OciUnpackError, StagingOptions,
     VeritysetupOptions, materialize_to_ext4, seal_with_verity,
 };
-use mvm_build::run_image::seal_run_rootfs_with_verity;
 use std::path::Path;
 use tempfile::TempDir;
 

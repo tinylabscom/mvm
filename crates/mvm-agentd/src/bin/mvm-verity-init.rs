@@ -606,7 +606,7 @@ mod linux {
     ///   superblock in block 0, else `0` for the no-superblock
     ///   layout the in-process builder emits.
     /// - `algorithm = sha256`, `salt = 64 hex zeros` — match
-    ///   `mvm_build::oci_to_rootfs::verity::VeritysetupOptions::default()`.
+    ///   `mvm_fs::oci_to_rootfs::verity::VeritysetupOptions::default()`.
     fn setup_verity_target(
         fd: i32,
         device_name: &str,

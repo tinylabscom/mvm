@@ -544,8 +544,8 @@ fn emit_verity_sidecars_for_image(
     let verity = mvm_fs::ext4::verity::format(
         image,
         &salt,
-        crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
-        crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
+        mvm_fs::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
+        mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
     );
     let dir = image_path
         .parent()
@@ -1101,8 +1101,8 @@ mod tests {
         let expected = mvm_fs::ext4::verity::format(
             &image,
             &[0u8; 32],
-            crate::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
-            crate::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
+            mvm_fs::oci_to_rootfs::MVM_VERITY_DATA_BLOCK_SIZE as usize,
+            mvm_fs::oci_to_rootfs::MVM_VERITY_HASH_BLOCK_SIZE as usize,
         );
         let wrong_contract = mvm_fs::ext4::verity::format(&image, &[0u8; 32], 1024, 4096);
 
