@@ -164,18 +164,27 @@ subprocess** (the `mvm-hostd` bin that already does policy + `${NAME}`
 substitution + chain-signed audit for libkrun/FC/qemu), via a new
 `EndpointTransport::Wasi`.
 
-**The wiring:**
-1. `EndpointTransport::Wasi { socket: PathBuf }` — a new variant of
-   `substitution_spawn::EndpointTransport` (today `Vsock`/`Uds`). The host binds a
-   UDS the wasm host-import writes egress requests to (the wasm analogue of the
-   per-port UDS the in-process VMMs proxy for libkrun/FC).
-2. `WasmBackend::start()` (when the plan carries secrets or the policy allows
+**The wiring (simplified after reading the endpoint — no new transport needed).**
+The endpoint already speaks a clean, transport-agnostic framed-JSON contract:
+`mvm_core::substitution_wire::{WireRequest, WireResponse}` (length-prefixed JSON;
+`WireRequest { method, url, headers, body_b64 }` where a header value carries the
+`${NAME}` placeholder; `WireResponse::{Ok{status,headers,body_b64} | Refused{message}}`).
+`SubstitutionService::serve(UnixListener)` reads a `WireRequest`, runs
+`process()` — bound-destination policy + `${NAME}` substitution + chain-signed
+audit + forward — and replies `WireResponse`. **The wasm host-import is therefore
+just another `WireRequest` client over the existing `Uds` transport** — faithful
+by construction, because it hits the *same* endpoint + the *same* `process()` the
+microVM SDK path uses. No `EndpointTransport::Wasi` variant, no new relay protocol,
+no touching the 2972-line proxy.
+1. `WasmBackend::start()` (when the plan carries secrets / the policy allows
    egress) spawns the substitution endpoint via the *same* `spawn_substitution_endpoint`
-   path the microVM backends use, passing `EndpointTransport::Wasi`.
-3. The `mvm:egress` host-import, on each module call, frames the request onto that
-   UDS to the endpoint; the endpoint applies default-deny policy, substitutes
-   `${NAME}` on the bound destination, writes the chain-signed audit entry, and
-   forwards. The module only ever holds the placeholder.
+   path (`substitution_spawn.rs`) with `EndpointTransport::Uds { path }`.
+2. The `mvm:egress` host-import, on each module call, builds a `WireRequest`
+   (`mvm_core::substitution_wire`, reachable from `mvm-runtime`), connects to that
+   Uds, writes the length-prefixed JSON frame, reads the `WireResponse`, returns
+   it to the module. Reuse the existing frame writer/reader (the in-guest client
+   in `mvm-agentd` already speaks this) rather than a second copy. The module only
+   ever holds the placeholder — the real secret lives host-side in the endpoint.
 4. **Data-governance witness (must be built — it is referenced in specs 04/06 but
    is not yet a concrete test):** a WASI module requests egress with a `${SECRET}`
    placeholder to (a) a denied and (b) a policy-allowed destination; assert
