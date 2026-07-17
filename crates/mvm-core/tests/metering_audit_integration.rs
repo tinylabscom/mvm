@@ -8,12 +8,12 @@
 //! without spawning the supervisor.
 //!
 //! The `LocalAuditLog` writer is exercised via the existing
-//! `LocalAuditEvent::now` constructor + serde round-trip; the
+//! `now_event` constructor + serde round-trip; the
 //! signing layer (`FileAuditSigner`, mvm-core/src/policy/audit*)
 //! is plumbed by downstream callers.
 
 use mvm_core::metering::{MeteringBucket, MeteringSample};
-use mvm_core::policy::audit::{LocalAuditEvent, LocalAuditKind};
+use mvm_core::policy::audit::{LocalAuditKind, now_event};
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
@@ -60,7 +60,7 @@ fn bucket_seals_into_audit_event() {
 
     // Seal: serialize the bucket and stuff it into a LocalAuditEvent.
     let detail = buckets[0].to_jsonl().expect("bucket serializes");
-    let event = LocalAuditEvent::now(
+    let event = now_event(
         LocalAuditKind::MeteringEpoch,
         Some(buckets[0].instance_id.clone()),
         Some(detail.clone()),
