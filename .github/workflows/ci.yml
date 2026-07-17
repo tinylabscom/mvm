@@ -237,11 +237,11 @@ jobs:
       - name: Run dev-shell agent handler tests
         # The default workspace run builds the guest agent without `dev-shell`,
         # so the dev-tier handlers (exec, run-code, run-detached) and their
-        # tests are compiled out. Run mvm-guest with the feature on so the
+        # tests are compiled out. Run mvm-agentd with the feature on so the
         # detached-workload handler is actually exercised on every PR — a fresh
         # agent that links the handler but can't run the workload would slip an
         # all-default run.
-        run: cargo nextest run -p mvm-guest --features dev-shell
+        run: cargo nextest run -p mvm-agentd --features dev-shell
 
       - name: Run doctests
         # nextest does not run doctests; gate them separately.
@@ -305,7 +305,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Write a sample image with the pure-Rust ext4 writer
-        run: cargo run -p mvm-ext4 --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
+        run: cargo run -p mvm-fs --example write_sample -- /tmp/sample.ext4 | tee /tmp/sample.out
       - name: Loop-mount read-only and verify the tree on the real kernel
         run: |
           set -euo pipefail
@@ -360,7 +360,7 @@ jobs:
       - name: Write + loop-mount a MULTI-block-group image (> 128 MiB)
         run: |
           set -euo pipefail
-          cargo run -p mvm-ext4 --example write_multigroup -- /tmp/multigroup.ext4
+          cargo run -p mvm-fs --example write_multigroup -- /tmp/multigroup.ext4
           # Sanity: bigger than one group's 128 MiB.
           [ "$(stat -c '%s' /tmp/multigroup.ext4)" -gt 134217728 ]
           mnt=$(mktemp -d)
@@ -379,7 +379,7 @@ jobs:
       - name: Write + loop-mount a DEPTH-1 extent-tree image (>512 MiB single file)
         run: |
           set -euo pipefail
-          cargo run -p mvm-ext4 --example write_extent_tree -- /tmp/extent_tree.ext4
+          cargo run -p mvm-fs --example write_extent_tree -- /tmp/extent_tree.ext4
           # >4 groups → the single file needs a depth-1 extent tree.
           [ "$(stat -c '%s' /tmp/extent_tree.ext4)" -gt 536870912 ]
           mnt=$(mktemp -d)

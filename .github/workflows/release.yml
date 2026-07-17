@@ -115,7 +115,7 @@ jobs:
         run: cargo build --release --target "${TARGET}" --features "${MVMCTL_RELEASE_FEATURES}"
 
       # The per-VM host processes mvmctl spawns at runtime (one process per
-      # guest). They are SEPARATE bin targets in `mvm-vm-host` — the root
+      # guest). They are SEPARATE bin targets in `mvm-hostd` — the root
       # `cargo build` above only produces `mvmctl`, so without this step a
       # downloaded (non-source) install has no `mvm-bridge` and the backend's
       # adjacent-to-exe resolver (which also checks `MVM_BRIDGE_PATH` and the
@@ -146,12 +146,12 @@ jobs:
         shell: bash
         run: |
           if [[ "${TARGET}" == *apple-darwin ]]; then
-            cargo build --release --target "${TARGET}" -p mvm-vm-host \
+            cargo build --release --target "${TARGET}" -p mvm-hostd \
               --bin mvm-bridge \
               --bin mvm-hvf-supervisor \
               --bin mvm-libkrun-supervisor --features libkrun-sys
           else
-            cargo build --release --target "${TARGET}" -p mvm-vm-host \
+            cargo build --release --target "${TARGET}" -p mvm-hostd \
               --bin mvm-bridge
           fi
           # The per-VM substitution endpoint (mvm-hostd) is the egress gate every

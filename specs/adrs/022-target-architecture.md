@@ -36,22 +36,15 @@ The current architectural crates:
 |---|---|
 | `mvm-core` | Foundation types: IDs, config, protocol, signing, routing. Absorbs the execution-plan types, policy (including session security policy), and the crypto substrate (attestation, keystore, secret store, snapshot crypto). Runtime-free by default — `tokio` is gated behind the opt-in `hostd-transport` and `manifest-verify` features, and a workspace lint asserts the default dependency tree carries no async runtime. |
 | `mvm-sdk` | The build-time derivation engine: the canonical Workload IR (`ir/`), the decorator SDK (`decorator/`, parses source statically via AST — never runs user code on the host), the runtime/record-mode SDK (`runtime.rs`), and the compile/builder/addon pipeline that lowers every authoring surface to one IR and one builder-VM Nix build. |
-| `mvm` | Runtime: shell execution, VM lifecycle, UI, templates. |
-| `mvm-backend` | The `VmBackend` trait and every backend implementation (Firecracker, libkrun, HVF, QEMU, Mock), plus backend selection and dispatch. |
+| `mvm-runtime` | Runtime: shell execution, VM lifecycle, UI, templates; the `VmBackend` trait and every backend implementation (Firecracker, libkrun, HVF, QEMU, Mock), plus backend selection and dispatch; the volume-backend trait and its local implementation (`storage::volume`) — object-store and encrypted-volume implementations live outside this repo, in the fleet orchestrator that consumes it. Folds together the former `mvm`, `mvm-backend`, and `mvm-storage` crates. |
 | `mvm-build` | The Nix builder pipeline; also hosts the builder-VM-only binaries (the resident builder daemon and its supporting init/egress/patch tools), cross-compiled and embedded into the CLI at build time, inert on non-Linux hosts. |
-| `mvm-guest` | The vsock protocol, console, in-guest integrations, and guest agent; the in-guest function-workload runner. |
-| `mvm-guest-helpers` | Small in-guest helper binaries (loopback DNS resolution, a loopback-TCP-to-vsock bridge) baked into the runtime overlay. |
-| `mvm-cli` | The Clap CLI, bootstrap, update, doctor, and template commands — a thin shell with no business logic of its own. |
-| `mvm-hostd` | Host-side daemon roles: the broker and its per-tenant successor, the signing-key holders, the secret-substitution endpoint, and the per-VM packet-tunnel worker — each its own `[[bin]]` target so each role is its own process. |
-| `mvm-vm-host` | Per-VM host processes, one per guest VM: the libkrun and HVF supervisors, and the shared external-VMM gateway/audit bridge Firecracker uses. |
-| `mvm-network` | The `NetworkProvider` trait: provisioning, ingress/egress policy, DNS, and audit as a seam; the TAP/bridge/gateway implementation itself lives in `mvm-backend`, which owns the in-VM shell it runs from. |
-| `mvm-storage` | The volume-backend trait and the local implementation; object-store and encrypted-volume implementations live outside this repo, in the fleet orchestrator that consumes it. |
-| `mvm-oci` | OCI image distribution: registry resolution, manifest fetch, digest verification, layer fetch with streaming and size caps. |
-| `mvm-ext4` | A minimal, `#![forbid(unsafe_code)]`, deterministic ext4 image writer for read-only rootfs materialization — no external `mkfs`, no builder VM, no subprocess, zero `mvm-*` dependencies. |
-| `mvm-mcp` | The Model Context Protocol server: wire types, tool schemas, and the stdio JSON-RPC loop (ADR-002). |
+| `mvm-agentd` | The vsock protocol, console, in-guest integrations, and guest agent; the in-guest function-workload runner; small in-guest helper binaries (loopback DNS resolution, a loopback-TCP-to-vsock bridge) baked into the runtime overlay. Folds together the former `mvm-guest` and `mvm-guest-helpers` crates. |
+| `mvm-cli` | The Clap CLI, bootstrap, update, doctor, and template commands — a thin shell with no business logic of its own. Also hosts the former `mvm-mcp` Model Context Protocol server (wire types, tool schemas, the stdio JSON-RPC loop) behind the `mcp` feature flag. |
+| `mvm-hostd` | Host-side daemon roles: the broker and its per-tenant successor, the signing-key holders, the secret-substitution endpoint, and the per-VM packet-tunnel worker — each its own `[[bin]]` target so each role is its own process. Also hosts the per-VM host processes absorbed from the former `mvm-vm-host` crate, one per guest VM: the libkrun and HVF supervisors, and the shared external-VMM gateway/audit bridge Firecracker uses. |
+| `mvm-net` | The `NetworkProvider` trait: provisioning, ingress/egress policy, DNS, and audit as a seam; the TAP/bridge/gateway implementation itself lives in `mvm-runtime`, which owns the in-VM shell it runs from. (Renamed from `mvm-network`.) |
+| `mvm-fs` | OCI image distribution: registry resolution, manifest fetch, digest verification, layer fetch with streaming and size caps; the OCI-to-rootfs materialization pipeline; and a minimal, `#![forbid(unsafe_code)]`, deterministic ext4 image writer for read-only rootfs materialization — no external `mkfs`, no builder VM, no subprocess, zero `mvm-*` dependencies. Folds together the former `mvm-oci` and `mvm-ext4` crates. |
 | `mvm-client` | The stable consumer-facing client trait and its DTOs (defined in `mvm-core` behind a feature flag to avoid a dependency cycle, re-exported here), with an in-process `LocalBackend` and an optional remote `GatewayBackend` behind a feature flag — one trait for every consumer regardless of whether the target is local or remote. |
 | `mvm-host-services-ffi` | A C-ABI cdylib veneer over the in-guest host-services broker clients, so each language SDK binding loads one shared object instead of carrying its own Rust FFI surface. |
-| `mvm-verify` | A dependency-light, wasm-clean verifier for the chain-signed audit log — zero `mvm-*` dependencies, consumed both on the host and compiled to wasm for a browser-side transparency tool. |
 
 Two more workspace members sit outside this architectural count: `xtask`
 (workspace tooling and the claim-gate lints) and `mvm-conformance` (a
@@ -65,7 +58,7 @@ minimal crate grouped under `crates/deps/`, holding only the binding
 surface plus a thin safe wrapper — never selection, dispatch, or policy.
 No architectural crate links a C library directly; it always goes
 through a `crates/deps/*-sys` crate. Only `crates/deps/libkrun-sys` (the
-libkrun C ABI, consumed by `mvm-backend`) exists today. Adding a new
+libkrun C ABI, consumed by `mvm-runtime`) exists today. Adding a new
 native dependency is a new `crates/deps/<name>-sys` crate plus a trait
 impl in the consuming crate — nothing else moves.
 
@@ -92,10 +85,10 @@ plan, or write the audit chain — machine-checked by
   `xtask check-core-runtime-free` and its guest-agent-runtime-free
   counterpart guard the crates these binaries link against from
   regaining an async runtime dependency they don't need.
-- **Per-VM tier.** `mvm-vm-host` runs one process per guest VM — a
-  backend-specific supervisor (libkrun, HVF) or a shared external-VMM
-  gateway/audit bridge (Firecracker) — confining a VMM-level compromise
-  to that one VM.
+- **Per-VM tier.** `mvm-hostd`'s per-VM `[[bin]]` targets run one process
+  per guest VM — a backend-specific supervisor (libkrun, HVF) or a shared
+  external-VMM gateway/audit bridge (Firecracker) — confining a VMM-level
+  compromise to that one VM.
 
 ### 4. Consumption topology — library, thin CLI, one client trait
 
@@ -141,7 +134,7 @@ entry point per tier.
 **Negative.** `mvm-core` dep-purity has to be actively guarded — nothing
 folding into it may quietly reintroduce an async runtime dependency to
 the default build. The Linux-only binaries in `mvm-build` and
-`mvm-vm-host` must stay inert, buildable stubs on non-Linux hosts so the
+`mvm-hostd` must stay inert, buildable stubs on non-Linux hosts so the
 workspace build stays green for every contributor.
 
 **Neutral.** Crate count is a consequence of the role/trait-seam

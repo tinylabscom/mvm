@@ -224,7 +224,7 @@ jobs:
           restore-keys: cargo-seccomp-fn-
 
       - name: Run seccomp functional tests
-        run: cargo test -p mvm-guest --test seccomp_apply
+        run: cargo test -p mvm-agentd --test seccomp_apply
 
   # ── Lane 3: Reproducibility ────────────────────────────────────────
   # ADR-001 §W5.3 — two clean builds must produce byte-identical
@@ -397,7 +397,7 @@ jobs:
         # death before the parent's watchdog has a sentinel to react
         # to. Same contract as `fuzz_supervisor_config`: "never panic
         # on any input." `#[serde(deny_unknown_fields)]` on
-        # `BridgeConfigJson` (Task 12 — `crates/mvm-vm-host/
+        # `BridgeConfigJson` (Task 12 — `crates/mvm-hostd/
         # src/parse.rs`) means unknown keys fail-closed inside
         # deserialization.
         run: cargo fuzz run fuzz_bridge_config_json -- -max_total_time="$DURATION"
@@ -491,14 +491,14 @@ jobs:
         with:
           name: fuzz-corpus-${{ github.run_id }}
           path: |
-            crates/mvm-guest/fuzz/corpus/
-            crates/mvm-guest/fuzz/artifacts/
+            crates/mvm-agentd/fuzz/corpus/
+            crates/mvm-agentd/fuzz/artifacts/
             crates/deps/libkrun-sys/fuzz/corpus/
             crates/deps/libkrun-sys/fuzz/artifacts/
-            crates/mvm-oci/fuzz/corpus/
-            crates/mvm-oci/fuzz/artifacts/
-            crates/mvm-vm-host/fuzz/corpus/
-            crates/mvm-vm-host/fuzz/artifacts/
+            crates/mvm-fs/fuzz-oci/corpus/
+            crates/mvm-fs/fuzz-oci/artifacts/
+            crates/mvm-hostd/fuzz-vmhost/corpus/
+            crates/mvm-hostd/fuzz-vmhost/artifacts/
             crates/mvm-sdk/fuzz/corpus/
             crates/mvm-sdk/fuzz/artifacts/
 

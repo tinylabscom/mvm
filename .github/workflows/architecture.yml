@@ -77,7 +77,7 @@ jobs:
   #      `MockBackend`. Tier-3 / test-only; never selected by
   #      `AnyBackend::auto_select`. Production callers can't reach it.
   #   7. In-guest local addon plumbing
-  #      (`crates/mvm-guest-helpers/src/addon_vsock_bridge.rs`). Binds loopback-only TCP
+  #      (`crates/mvm-agentd/src/addon_vsock_bridge.rs`). Binds loopback-only TCP
   #      listeners inside the guest and forwards to the local host
   #      addon proxy over vsock. This is per-VM developer substrate;
   #      distributed service discovery, tenant policy, and
@@ -194,7 +194,7 @@ jobs:
               --type rust \
               --files-with-matches \
               --glob '!**/target/**' \
-              --glob '!crates/mvm-guest/**' \
+              --glob '!crates/mvm-agentd/**' \
               --glob '!xtask/**' \
               --glob '!**/tests/**' \
               --glob '!**/benches/**' \
@@ -206,7 +206,7 @@ jobs:
               --glob '!crates/mvm-cli/src/template_cmd.rs' \
               --glob '!crates/deps/libkrun-sys/src/native_gateway.rs' \
               --glob '!crates/mvm-runtime/src/mock_guest_agent.rs' \
-              --glob '!crates/mvm-guest-helpers/src/addon_vsock_bridge.rs' \
+              --glob '!crates/mvm-agentd/src/addon_vsock_bridge.rs' \
               --glob '!crates/mvm-runtime/src/qemu.rs' \
               -e "$PATTERNS" \
               crates/ src/ \

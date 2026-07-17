@@ -894,8 +894,7 @@ jobs:
   # acceptance criterion it ratifies.
   #
   # Lanes share the same paths-filter so they run as a group when
-  # any of `crates/mvm-oci/**`, `crates/mvm-build/src/oci_to_rootfs/**`,
-  # `crates/mvm-build/tests/oci_*`, or `crates/mvm-cli/src/commands/image.rs`
+  # any of `crates/mvm-fs/**` or `crates/mvm-cli/src/commands/image/**`
   # changes — or on every push to `main`.
   #
   # The lanes deliberately stay lightweight (each runs a single
@@ -916,11 +915,8 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-build/src/oci_to_rootfs/**'
-              - 'crates/mvm-build/tests/oci_unpack_attacks.rs'
-              - 'crates/mvm-build/tests/oci_unpack_common/**'
-              - 'crates/mvm-cli/src/commands/image.rs'
+              - 'crates/mvm-fs/**'
+              - 'crates/mvm-cli/src/commands/image/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -948,7 +944,7 @@ jobs:
         # path traversal, hardlink chains, device-node sneak-ins,
         # symlink escapes, per-entry / per-layer size caps, null-byte
         # injection. Plan 85 §R1.
-        run: cargo test --test oci_unpack_attacks -p mvm-build -- --include-ignored
+        run: cargo test --test oci_unpack_attacks -p mvm-fs -- --include-ignored
 
   oci-digest-mismatch-reject:
     name: oci-digest-mismatch-reject (Plan 85 §AC4)
@@ -963,9 +959,8 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-build/src/oci_to_rootfs/**'
-              - 'crates/mvm-cli/src/commands/image.rs'
+              - 'crates/mvm-fs/**'
+              - 'crates/mvm-cli/src/commands/image/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -993,7 +988,7 @@ jobs:
         # exercises the streaming verifier against a deliberately
         # tampered blob; sibling tests cover cap-exceeded and
         # retry-exhaust paths.
-        run: cargo test --test hermetic_registry -p mvm-oci rejects
+        run: cargo test --test hermetic_registry -p mvm-fs rejects
 
   oci-malformed-manifest:
     name: oci-malformed-manifest (Plan 85 §AC4)
@@ -1008,7 +1003,7 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
+              - 'crates/mvm-fs/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1039,7 +1034,7 @@ jobs:
         # accepts multiple positional filters as an OR. cargo test
         # itself only takes one TESTNAME positional, so the `--` is
         # what lets us filter for both modules in one run.
-        run: "cargo test -p mvm-oci -- manifest:: reference::"
+        run: "cargo test -p mvm-fs -- manifest:: reference::"
 
   oci-mutable-tag-prod-reject:
     name: oci-mutable-tag-prod-reject (Plan 85 §AC2/AC4)
@@ -1054,8 +1049,8 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-cli/src/commands/image.rs'
+              - 'crates/mvm-fs/**'
+              - 'crates/mvm-cli/src/commands/image/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1105,8 +1100,7 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-build/src/oci_to_rootfs/**'
+              - 'crates/mvm-fs/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1135,7 +1129,7 @@ jobs:
         if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
         # Unpack the same layer set into two clean staging dirs and
         # assert byte-identical content modulo inode metadata.
-        run: cargo test -p mvm-oci reproducibility_two_unpacks_match_modulo_inode
+        run: cargo test -p mvm-fs reproducibility_two_unpacks_match_modulo_inode
 
       - name: Byte-identical ext4 materialization
         if: steps.filter.outputs.oci == 'true' || github.ref == 'refs/heads/main'
@@ -1144,7 +1138,7 @@ jobs:
         # identical input. Linux-gated via `#![cfg(target_os = "linux")]`
         # at the top of the test module; on this lane (`ubuntu-latest`)
         # it runs.
-        run: cargo test --test oci_ext4_materialization -p mvm-build materialize_is_byte_deterministic
+        run: cargo test --test oci_ext4_materialization -p mvm-fs materialize_is_byte_deterministic
 
   oci-image-runner-smoke:
     name: oci-image-runner-smoke (Plan 85 §Phase B)
@@ -1159,9 +1153,7 @@ jobs:
         with:
           filters: |
             oci:
-              - 'crates/mvm-oci/**'
-              - 'crates/mvm-build/src/oci_to_rootfs/**'
-              - 'crates/mvm-build/tests/oci_ext4_materialization.rs'
+              - 'crates/mvm-fs/**'
               - '.github/workflows/ci.yml'
 
       - name: Install Rust toolchain
@@ -1200,4 +1192,4 @@ jobs:
         # additionally requires libkrun/KVM, which github-hosted
         # runners cannot provide (no nested KVM). The boot half is
         # tracked separately in the self-hosted libkrun lane.
-        run: cargo test --test oci_ext4_materialization -p mvm-build
+        run: cargo test --test oci_ext4_materialization -p mvm-fs
