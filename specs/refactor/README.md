@@ -12,9 +12,9 @@ Two capabilities are **core goals** in their own right, not by-products of simpl
 
 **Phase 0 — COMPLETE.** Spec sweep, ADR consolidation (92 → 30, contiguous, absolute decision form), dead-dep drop, BDD harness scaffolding, worktree sweep, SDK relocation, `bin/dev` → `scripts/dev`, and the `${NAME}` secrets decision are all landed. Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
 
-**Phase 1a — 7 of 7 crate consolidations done.** Crate count 20 → 14, workspace green after every move. Remaining: the `mvm-protocol` extraction (a design effort, not a mechanical merge — see below) and the full `nextest --workspace` behavioral gate (per-move validation so far has been `cargo check --workspace --all-targets`, not the full test suite). Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
+**Phase 1a — crate consolidations (7/7) + the `mvm-protocol` extraction COMPLETE.** Crate count 20 → 14; the long pole — pulling all `plan/`+`policy/`+`protocol/` wire/policy DTOs (through the signed `ExecutionPlan` itself) down into the `#![no_std]` `mvm-protocol`, which compiles on `wasm32` — landed in 13 subagent-driven batches (design of record: [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md)). The full `nextest --workspace` behavioral gate is met (green after every move). Remaining Phase-1 absorptions: `mvm-fs` (1c) + `mvm-net` (1d) fold-ins, `mvm-build` slim (1f), `mvm-sdk` `PackageType` (1g), and the `mvm-client` facade + CLI routing (1h/1i). Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
 
-**Phases 1b–4 — not started.**
+**Phases 1b–4 — not started** (1b `mvm-core`-on-`mvm-protocol` is largely subsumed by the completed extraction; the `WasmBackend` seam WS11 is now unblocked).
 
 This status line is the single source of truth for "where are we" — if any other doc in this set implies a later stage is further along, this line wins.
 
