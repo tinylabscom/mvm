@@ -1658,7 +1658,7 @@ mod tests {
 
     fn eff_with_l4(specs: Vec<L4RuleSpec>) -> mvm_core::policy::EffectivePolicy {
         mvm_core::policy::EffectivePolicy {
-            network: mvm_core::policy::NetworkPolicy {
+            network: mvm_core::policy::BundleNetworkPolicy {
                 l4: specs,
                 ..Default::default()
             },

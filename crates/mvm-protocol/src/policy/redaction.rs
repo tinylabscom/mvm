@@ -4,9 +4,12 @@
 //! structured PII per the workload `PiiPolicy`, curated secrets block,
 //! entropy + names off.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
-use crate::policy::PiiPolicy;
+use crate::policy::policies::PiiPolicy;
 
 /// Entropy detection disposition for a destination.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

@@ -211,8 +211,8 @@ fn generated_policy_bundle_for_network_policy(
 ) -> Result<Option<(String, PolicyBundle)>> {
     use mvm_core::policy::bundle::{PolicyId, SCHEMA_VERSION as POLICY_SCHEMA_VERSION};
     use mvm_core::policy::policies::{
-        ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, L4RuleSpec, NetworkPolicy, PiiPolicy,
-        ToolPolicy, WasiCapPolicy,
+        ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, L4RuleSpec,
+        PiiPolicy, ToolPolicy, WasiCapPolicy,
     };
     use std::net::{IpAddr, ToSocketAddrs};
 
@@ -229,7 +229,7 @@ fn generated_policy_bundle_for_network_policy(
                 schema_version: POLICY_SCHEMA_VERSION,
                 bundle_id: PolicyId(format!("{tenant}/{vm_name}/cli-egress")),
                 bundle_version: 1,
-                network: NetworkPolicy::default(),
+                network: BundleNetworkPolicy::default(),
                 egress,
                 pii: PiiPolicy::default(),
                 tool: ToolPolicy::default(),
@@ -302,7 +302,7 @@ fn generated_policy_bundle_for_network_policy(
         schema_version: POLICY_SCHEMA_VERSION,
         bundle_id: PolicyId(format!("{tenant}/{vm_name}/cli-egress")),
         bundle_version: 1,
-        network: NetworkPolicy {
+        network: BundleNetworkPolicy {
             preset: Some("cli-allow-list".to_string()),
             l4,
             observers: Vec::new(),

@@ -36,8 +36,8 @@ use serde::{Deserialize, Serialize};
 use crate::plan::TenantId;
 use crate::policy::bundle::PolicyBundle;
 use crate::policy::policies::{
-    ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
-    WasiCapPolicy,
+    ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy,
+    ToolPolicy, WasiCapPolicy,
 };
 
 /// An out-of-band deny instruction with bounded lifetime. Emergency
@@ -86,7 +86,7 @@ impl EmergencyDeny {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectivePolicy {
-    pub network: NetworkPolicy,
+    pub network: BundleNetworkPolicy,
     pub egress: EgressPolicy,
     pub pii: PiiPolicy,
     pub tool: ToolPolicy,
@@ -154,9 +154,9 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             bundle_id: PolicyId("test-bundle".to_string()),
             bundle_version: 1,
-            network: NetworkPolicy {
+            network: BundleNetworkPolicy {
                 preset: Some("base-net".to_string()),
-                ..NetworkPolicy::default()
+                ..BundleNetworkPolicy::default()
             },
             egress: EgressPolicy {
                 mode: Some("base-egress".to_string()),

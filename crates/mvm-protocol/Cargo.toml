@@ -37,6 +37,13 @@ sha2 = { version = "0.11", default-features = false }
 # under `no_std` this way.
 thiserror = { version = "2", default-features = false }
 
+# Test-only; std-based, so it can't join [dependencies] on a no_std lib —
+# but dev-dependencies never link into the wasm32 lib-only build, so the
+# gate stays clean. Exercises the TOML round-trip the bundle-authoring
+# path (mvm-core's toml_loader) relies on.
+[dev-dependencies]
+toml.workspace = true
+
 [features]
 default = []
 # Derive `schemars::JsonSchema` on the Workload IR types so

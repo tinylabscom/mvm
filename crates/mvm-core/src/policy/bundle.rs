@@ -6,8 +6,8 @@ use crate::plan::TenantId;
 use serde::{Deserialize, Serialize};
 
 use crate::policy::policies::{
-    ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
-    WasiCapPolicy,
+    ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy,
+    ToolPolicy, WasiCapPolicy,
 };
 
 /// Wire-format version. Same fail-closed semantics as
@@ -33,7 +33,7 @@ pub struct PolicyBundle {
     /// Monotonic per-`bundle_id` revision counter.
     pub bundle_version: u32,
 
-    pub network: NetworkPolicy,
+    pub network: BundleNetworkPolicy,
     pub egress: EgressPolicy,
     pub pii: PiiPolicy,
     pub tool: ToolPolicy,
@@ -55,7 +55,7 @@ pub struct PolicyBundle {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenantOverlay {
-    pub network: Option<NetworkPolicy>,
+    pub network: Option<BundleNetworkPolicy>,
     pub egress: Option<EgressPolicy>,
     pub pii: Option<PiiPolicy>,
     pub tool: Option<ToolPolicy>,

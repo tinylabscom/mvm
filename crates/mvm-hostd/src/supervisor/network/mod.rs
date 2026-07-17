@@ -507,7 +507,7 @@ fn validate_policy_path_segment(segment: &str, kind: &str) -> Result<(), BuildEr
 /// `mvm-cli → mvm-supervisor → mvm-cli`). Inline the same parse logic
 /// here: `"<tenant>:<workload>"` → `~/.mvm/policies/<tenant>/<workload>.toml`.
 /// This `BundleShim` reads `network.observers` directly off the bundle
-/// without depending on `mvm_core::policy::NetworkPolicy`. The shim stays
+/// without depending on `mvm_core::policy::BundleNetworkPolicy`. The shim stays
 /// private to this function so it can later be swapped for the real type.
 ///
 /// `pub` (not `pub(crate)`) because `run_with_bridge` in the leaf bin
@@ -992,7 +992,7 @@ mod tests {
     fn resolve_observer_chain_uses_supplied_bundle_for_generated_ref() {
         use mvm_core::policy::bundle::{PolicyBundle, PolicyId, SCHEMA_VERSION};
         use mvm_core::policy::policies::{
-            ArtifactPolicy, AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy,
+            ArtifactPolicy, AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy,
             ToolPolicy, WasiCapPolicy,
         };
 
@@ -1001,7 +1001,7 @@ mod tests {
             schema_version: SCHEMA_VERSION,
             bundle_id: PolicyId("acme/generated-cli-egress".to_string()),
             bundle_version: 1,
-            network: NetworkPolicy {
+            network: BundleNetworkPolicy {
                 observers: vec!["flow-count-metrics".to_string()],
                 ..Default::default()
             },

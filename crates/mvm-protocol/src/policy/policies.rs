@@ -7,7 +7,7 @@
 //!   modes), and `ToolPolicy` (RPC allowlist).
 //! - `KeyPolicy` (per-run secret grants) and `AuditPolicy` (chain
 //!   signing, per-tenant streams).
-//! - `NetworkPolicy` (per-tenant netns) and `ArtifactPolicy` retention
+//! - `BundleNetworkPolicy` (per-tenant netns) and `ArtifactPolicy` retention
 //!   sweeps.
 //!
 //! Every type uses `#[serde(deny_unknown_fields)]` so a future
@@ -15,6 +15,9 @@
 //! and every type derives `Default` so `TenantOverlay`'s
 //! `Option<T>` semantics ("None inherits from base") compose
 //! cleanly with the bundle's resolution algorithm.
+
+use alloc::string::String;
+use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
@@ -29,7 +32,7 @@ use serde::{Deserialize, Serialize};
 /// allow outbound traffic, add explicit rows.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NetworkPolicy {
+pub struct BundleNetworkPolicy {
     /// Name of the network preset
     /// (`open` / `agent` / `tenant-isolated` / etc.). Stub.
     pub preset: Option<String>,
@@ -159,12 +162,12 @@ pub struct EgressPolicy {
     /// Per-destination egress redaction. Synthesized into the signed
     /// `ExecutionPlan.redaction` at admission. Default = all-off.
     #[serde(default)]
-    pub redaction: crate::policy::RedactionPolicy,
+    pub redaction: crate::policy::redaction::RedactionPolicy,
     /// Per-destination reversible replacement / reinjection. Synthesized into
     /// the signed `ExecutionPlan.reversible_replacement` at admission. Default
     /// = disabled.
     #[serde(default)]
-    pub reversible_replacement: crate::policy::ReversibleReplacementPolicy,
+    pub reversible_replacement: crate::policy::reversible_replacement::ReversibleReplacementPolicy,
 }
 
 /// Default body cap when `EgressPolicy::body_cap_bytes` is 0.
@@ -248,6 +251,8 @@ pub struct AuditPolicy {
 #[cfg(test)]
 mod plan_113_observer_tests {
     use super::*;
+    use alloc::string::ToString;
+    use alloc::vec;
 
     #[test]
     fn network_policy_parses_observers_chain() {
@@ -255,7 +260,7 @@ mod plan_113_observer_tests {
 preset = "deny-by-default"
 observers = ["flow-count-metrics"]
 "#;
-        let p: NetworkPolicy = toml::from_str(toml).expect("parse");
+        let p: BundleNetworkPolicy = toml::from_str(toml).expect("parse");
         assert_eq!(p.observers, vec!["flow-count-metrics".to_string()]);
     }
 
@@ -264,7 +269,7 @@ observers = ["flow-count-metrics"]
         let toml = r#"
 preset = "deny-by-default"
 "#;
-        let p: NetworkPolicy = toml::from_str(toml).expect("parse");
+        let p: BundleNetworkPolicy = toml::from_str(toml).expect("parse");
         assert!(p.observers.is_empty());
     }
 
@@ -284,7 +289,7 @@ dst_cidr = "10.0.0.0/24"
 port_lo  = 443
 port_hi  = 443
 "#;
-        let p: NetworkPolicy = toml::from_str(toml).expect("parse v1 bundle");
+        let p: BundleNetworkPolicy = toml::from_str(toml).expect("parse v1 bundle");
         assert_eq!(p.l4.len(), 1);
         assert!(p.observers.is_empty());
     }
@@ -292,9 +297,10 @@ port_hi  = 443
     #[test]
     fn network_policy_flow_byte_log_defaults_off() {
         // A bundle without the field still parses and logging is off.
-        let np = NetworkPolicy::default();
+        let np = BundleNetworkPolicy::default();
         assert!(np.flow_byte_log.is_none());
-        let p: NetworkPolicy = toml::from_str("preset = \"open\"\n").expect("parse without field");
+        let p: BundleNetworkPolicy =
+            toml::from_str("preset = \"open\"\n").expect("parse without field");
         assert!(p.flow_byte_log.is_none());
     }
 

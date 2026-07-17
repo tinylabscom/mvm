@@ -302,7 +302,7 @@ mod tests {
         RuntimeProfileRef, SCHEMA_VERSION, SignedImageRef, TimeoutSpec, WorkloadId,
     };
     use mvm_core::policy::{
-        AuditPolicy, EgressPolicy, KeyPolicy, NetworkPolicy, PiiPolicy, ToolPolicy,
+        AuditPolicy, BundleNetworkPolicy, EgressPolicy, KeyPolicy, PiiPolicy, ToolPolicy,
     };
     use std::collections::BTreeMap;
 
@@ -374,7 +374,7 @@ mod tests {
             schema_version: 1,
             bundle_id: PolicyId("bundle-y".to_string()),
             bundle_version: 3,
-            network: NetworkPolicy::default(),
+            network: BundleNetworkPolicy::default(),
             egress: EgressPolicy::default(),
             pii: PiiPolicy::default(),
             tool: ToolPolicy::default(),
