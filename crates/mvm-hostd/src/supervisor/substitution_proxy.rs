@@ -2417,14 +2417,14 @@ mod server_tests {
     /// each self-pinned so a literal-IP destination projects. `from_network_policy`
     /// fails closed on any projection error.
     fn gate_admitting(hosts: &[(&str, u16)]) -> mvm_runtime::vmm::egress_gate::EgressGate {
-        use mvm_core::policy::dns_pin::{DnsPin, DnsPinRegistry};
+        use mvm_core::policy::dns_pin::{DnsPinRegistry, new_pin};
         use mvm_core::policy::network_policy::{HostPort, NetworkPolicy};
         let mut pins = DnsPinRegistry::new();
         let rules = hosts
             .iter()
             .map(|(h, p)| {
                 if let Ok(ip) = h.parse::<std::net::IpAddr>() {
-                    pins.add(DnsPin::new(*h, vec![ip], chrono::Duration::hours(1)));
+                    pins.add(new_pin(*h, vec![ip], chrono::Duration::hours(1)));
                 }
                 HostPort::new(*h, *p)
             })
