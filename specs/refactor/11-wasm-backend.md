@@ -136,6 +136,63 @@ model, many transports.
 - **P4 — the browser slice.** `mvm-protocol` + the `no_std` OCI decoders running
   in the browser (image inspect/verify), per the holospaces path.
 
+## P3 implementation design (recon'd — do this before building)
+
+The feasibility recon settled the two sub-forks that would otherwise sink a
+build:
+
+**Fork 1 — how the module's egress is expressed → explicit host-import ABI (for
+the POC).** The wasm module reaches egress through an `mvm:egress` host-import
+the `wasmtime` embedding provides (the module calls `egress(dest, payload) ->
+outcome`), not transparent WASI-socket interception. Transparent interception is
+the eventual goal (truest to "run a user module as-is") but is more `wasmtime`
+plumbing; the host-import proves the governance seam with the least uncertainty
+and is cleanly testable. Adding it does not change the "user-supplied module"
+story for the POC — the demo module is written against the import.
+
+**Fork 2 — in-process vs. subprocess governance → SUBPROCESS (Approach X),
+decided by a reachability fact.** `mvm-runtime` (where `WasmBackend` lives) does
+**not** depend on `mvm-hostd`, and the real chain-signed audit emitter
+(`mvm-hostd/src/audit/emitter.rs`) + the full substitution machinery live in
+`mvm-hostd`. Reachable in-process from `mvm-runtime`: the egress **policy** check
+(`network_policy`), plan-**secret decode** (`egress_shared`), and only the
+*local* audit (`mvm-core::policy::audit`, not the claim-8 chain). So an
+in-process POC would emit a *parallel* audit, not the chain the microVM backends
+use — which defeats the entire point ("the same witness"). Therefore P3 routes
+the module's egress through the **existing `mvm-substitution-endpoint`
+subprocess** (the `mvm-hostd` bin that already does policy + `${NAME}`
+substitution + chain-signed audit for libkrun/FC/qemu), via a new
+`EndpointTransport::Wasi`.
+
+**The wiring:**
+1. `EndpointTransport::Wasi { socket: PathBuf }` — a new variant of
+   `substitution_spawn::EndpointTransport` (today `Vsock`/`Uds`). The host binds a
+   UDS the wasm host-import writes egress requests to (the wasm analogue of the
+   per-port UDS the in-process VMMs proxy for libkrun/FC).
+2. `WasmBackend::start()` (when the plan carries secrets or the policy allows
+   egress) spawns the substitution endpoint via the *same* `spawn_substitution_endpoint`
+   path the microVM backends use, passing `EndpointTransport::Wasi`.
+3. The `mvm:egress` host-import, on each module call, frames the request onto that
+   UDS to the endpoint; the endpoint applies default-deny policy, substitutes
+   `${NAME}` on the bound destination, writes the chain-signed audit entry, and
+   forwards. The module only ever holds the placeholder.
+4. **Data-governance witness (must be built — it is referenced in specs 04/06 but
+   is not yet a concrete test):** a WASI module requests egress with a `${SECRET}`
+   placeholder to (a) a denied and (b) a policy-allowed destination; assert
+   deny-by-default, allow-by-policy, a chain-verifying audit entry, and that the
+   module's memory never contains the secret value while the forwarded request
+   does. Wire it as the CI witness across all workload backends (wasm joins the
+   set), per the design's "same witness" promise.
+
+**Deferred to P3b:** the endpoint's full TLS-terminating substitution (per-VM
+egress-CA intermediate the guest trusts) is heavier than the UDS-framed
+request/response the POC needs; a first cut proves policy + audit + `${NAME}`
+over the UDS and defers TLS termination. **Sequencing:** the subprocess is the
+*stable* substitution/audit layer, so P3 does not block on the in-flux
+smoltcp-tunnel WS-NET work — but it does touch the endpoint's input protocol
+(adding the Wasi transport), so it wants a careful, focused build, not a
+tail-of-session cram.
+
 ## Risks / notes
 
 - **Dep budget**: `wasmtime` is a large dependency tree. It stays strictly behind
