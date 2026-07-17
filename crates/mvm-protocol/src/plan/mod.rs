@@ -3,6 +3,7 @@
 //! stays in `mvm-core::plan`, which re-exports these types at their
 //! existing paths.
 
+pub mod bundle;
 pub mod types;
 pub mod validity;
 pub mod verb;

@@ -776,7 +776,7 @@ mod tests {
 
     use mvm_core::plan::bundle::{
         BundleResolveError, BundleResolver, KeyId as BundleKeyId, PlanArtifact, TrustStore,
-        bundle_sha256, write_bundle,
+        bundle_sha256, key_id_from_pubkey, write_bundle,
     };
     use std::collections::HashMap;
 
@@ -805,7 +805,7 @@ mod tests {
             ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
             sha256_hex,
         };
-        let key_id = BundleKeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let make_art = |name: &str, role: ArtifactRole, bytes: &[u8]| BundleArtifact {
             name: name.to_string(),
             role,
@@ -874,7 +874,7 @@ mod tests {
         };
         let (archive, pin) = make_test_bundle(&sk, b"kernel-bytes", b"rootfs-bytes");
         let mut map = HashMap::new();
-        let key_id = BundleKeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         map.insert(key_id, sk.verifying_key());
         let trust = MapTrust(map);
         let resolver = FixedResolver(archive);
@@ -965,10 +965,7 @@ mod tests {
         let (_archive_a, pin_a) = make_test_bundle(&sk, b"kA", b"rA");
         let (archive_b, _pin_b) = make_test_bundle(&sk, b"kB", b"rB");
         let mut map = HashMap::new();
-        map.insert(
-            BundleKeyId::from_pubkey(&sk.verifying_key()),
-            sk.verifying_key(),
-        );
+        map.insert(key_id_from_pubkey(&sk.verifying_key()), sk.verifying_key());
         let trust = MapTrust(map);
         let resolver = FixedResolver(archive_b);
         let ctx = BundleAdmissionContext {

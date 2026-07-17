@@ -1,6 +1,15 @@
 //! Portable image bundle (`.mvmpkg`) — content-addressed, signed
 //! archive of the artifacts needed to launch one microVM workload.
 //!
+//! The DTO half — `KeyId`, `ArtifactRole`, `BundleArtifact`,
+//! `BundleResources`, `VerityInfo`, `BundleManifest`, `PlanArtifact`, the
+//! schema/filename consts, and the base64 signature helpers — lives in
+//! `mvm_protocol::plan::bundle` and is re-exported below so every existing
+//! `crate::plan::bundle::X` / `mvm_core::plan::bundle::X` path keeps
+//! resolving unchanged. This module carries the rest: signing, hashing,
+//! tar archive I/O, the on-disk resolver/registry/trust-store, and
+//! verification.
+//!
 //! ## Trust model (sigstore/cosign-style)
 //!
 //! A bundle ships a `manifest.json` listing every artifact + its
@@ -55,273 +64,51 @@ use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as B64;
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-/// Highest bundle-manifest schema version this build understands.
-/// Verifiers fail closed on a future bump rather than silently
-/// dropping fields they don't know about.
+pub use mvm_protocol::plan::bundle::{
+    ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
+    BundleResources, KeyId, MANIFEST_FILENAME, PlanArtifact, SIGNATURE_FILENAME, VerityInfo,
+    signature_from_base64, signature_to_base64,
+};
+
+/// Derive the key_id from a verifying-key's bytes.
 ///
-/// Bumped 1 → 2 when `BundleManifest` gained the optional
-/// `resources: Option<BundleResources>` field. Older verifiers
-/// `#[serde(deny_unknown_fields)]` would
-/// refuse v2 bundles on the field alone, but the version sniff
-/// runs first and surfaces a clear `UnsupportedSchema` error.
-/// Newer verifiers reading a v1 bundle accept the missing field
-/// via `#[serde(default)]` and fall back to operator-config
-/// defaults at launch time.
-pub const BUNDLE_SCHEMA_VERSION: u32 = 2;
+/// A free function rather than an inherent method on [`KeyId`]: that type
+/// now lives in `mvm-protocol`, and the orphan rule forbids `mvm-core`
+/// from adding inherent `impl`s to a foreign type.
+pub fn key_id_from_pubkey(pk: &VerifyingKey) -> KeyId {
+    let bytes = pk.to_bytes();
+    let hex = hex::encode(Sha256::digest(bytes));
+    KeyId(hex[..32].to_string())
+}
 
-/// Filename inside the archive for the canonical-JSON manifest.
-pub const MANIFEST_FILENAME: &str = "manifest.json";
+/// Derive a stable, well-formed key_id from a signer *identity* string (a
+/// keyless OIDC subject). Unlike [`key_id_from_pubkey`] there is no key
+/// here, so this id is only an identifier for revocation keying and audit
+/// — never a lookup into a key store.
+pub fn key_id_from_identity(identity: &str) -> KeyId {
+    let hex = hex::encode(Sha256::digest(identity.as_bytes()));
+    KeyId(hex[..32].to_string())
+}
 
-/// Filename inside the archive for the detached Ed25519 signature.
-/// 64 raw bytes — no header, no encoding.
-pub const SIGNATURE_FILENAME: &str = "manifest.sig";
-
-/// Directory inside the archive that holds the actual artifact
-/// bytes (kernel, rootfs, verity sidecar, ...).
-pub const ARTIFACTS_DIR: &str = "artifacts";
-
-/// Content-derived identifier for a publisher's Ed25519 key. Equals
-/// `sha256(pubkey_bytes)` truncated to 32 hex characters.
+/// Canonical JSON bytes used as the signing input. Pure function;
+/// the same bytes round-trip from sign → verify.
 ///
-/// `key_id` is the lookup token a consumer uses to find the matching
-/// pubkey in its trust store. It is **not a substitute for the
-/// pubkey itself**: verification always uses the full key loaded
-/// from `~/.mvm/trusted-publishers/<key_id>.pub`. Truncation is for
-/// filesystem readability, not cryptographic strength.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct KeyId(pub String);
-
-impl KeyId {
-    /// Derive the key_id from a verifying-key's bytes.
-    pub fn from_pubkey(pk: &VerifyingKey) -> Self {
-        let bytes = pk.to_bytes();
-        let hex = hex::encode(Sha256::digest(bytes));
-        Self(hex[..32].to_string())
-    }
-
-    /// Derive a stable, well-formed key_id from a signer *identity* string (a
-    /// keyless OIDC subject). Unlike `from_pubkey` there is no key here, so this
-    /// id is only an identifier for revocation keying and audit — never a lookup
-    /// into a key store.
-    pub fn from_identity(identity: &str) -> Self {
-        let hex = hex::encode(Sha256::digest(identity.as_bytes()));
-        Self(hex[..32].to_string())
-    }
-
-    /// Validation: 32 lowercase hex characters. Anything else
-    /// indicates a tampered or malformed manifest.
-    pub fn is_well_formed(&self) -> bool {
-        self.0.len() == 32
-            && self
-                .0
-                .chars()
-                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
-    }
-}
-
-/// Role of an artifact inside a bundle. Verifiers + launchers use
-/// this to find the kernel, rootfs, verity sidecar, etc. without
-/// pinning to specific filenames.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactRole {
-    /// Linux kernel image (`vmlinux`).
-    Kernel,
-    /// Root filesystem block image (ext4 or squashfs).
-    Rootfs,
-    /// dm-verity Merkle-hash sidecar paired with `Rootfs`.
-    VerityHashSidecar,
-    /// Firecracker base VM config JSON.
-    FirecrackerBaseConfig,
-    /// Initial ramdisk (NixOS stage-1 or similar).
-    Initrd,
-    /// Catch-all for backend-specific extras. The role consumer
-    /// must inspect `name` to know what it's looking at.
-    Other,
-}
-
-/// One file inside the bundle. The `path` is relative to the
-/// archive root (e.g. `artifacts/vmlinux`). `sha256` is the
-/// lowercase-hex digest of the file bytes — verifiers re-hash at
-/// extract time and reject on mismatch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BundleArtifact {
-    pub name: String,
-    pub role: ArtifactRole,
-    /// Archive-relative path, forward-slash separated. The verifier
-    /// rejects absolute paths, `..` traversal, and `\` separators.
-    pub path: String,
-    /// Lowercase hex SHA-256 of the file bytes.
-    pub sha256: String,
-    pub size_bytes: u64,
-}
-
-/// Resource expectations the bundle publisher recorded at build
-/// time. Optional on the wire (`#[serde(default)]` via the parent
-/// struct's `Option<BundleResources>`), present in v2+ bundles.
-/// Old (`schema_version = 1`) bundles deserialise with `None` and
-/// the template loader defaults to operator config.
-///
-/// Both fields are advisory: `mvmctl up --cpus / --memory`
-/// overrides them. The point is to let a bundle ship with sensible
-/// resource expectations baked in so dev-laptop users don't have
-/// to remember the right values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BundleResources {
-    /// vCPU count the workload was sized for at build time.
-    pub vcpus: u32,
-    /// Memory cap in MiB the workload was sized for at build time.
-    pub mem_mib: u32,
-}
-
-/// dm-verity binding for the rootfs. Present when the workload was
-/// built with `verifiedBoot = true`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VerityInfo {
-    /// 64-char lowercase-hex Merkle-tree root hash. Baked into the
-    /// kernel cmdline as `dm-mod.create=`.
-    pub roothash: String,
-    /// `name` of the `VerityHashSidecar` artifact inside this
-    /// bundle. Verifier matches on `name`, not `path`, so a later
-    /// re-layout of the archive doesn't break the binding.
-    pub sidecar_artifact: String,
-}
-
-/// Top-level signed bundle manifest. Serialised as canonical JSON
-/// (via `serde_json::to_vec`); the signed bytes are exactly those.
-///
-/// `deny_unknown_fields` keeps the wire format strict: a future
-/// field added in v2 will fail to parse in a v1 verifier. The
-/// `schema_version` sniff happens *after* signature check (same
-/// pattern as `ExecutionPlan`), so an attacker who flips
-/// `schema_version` doesn't slip in a v2 plan past a v1 build.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct BundleManifest {
-    pub schema_version: u32,
-    /// Human-readable name for the publisher (not authoritative —
-    /// trust derives from `key_id` lookup, not from this string).
-    pub publisher: String,
-    /// Lookup token for the publisher's Ed25519 pubkey. The full
-    /// pubkey lives at `~/.mvm/trusted-publishers/<key_id>.pub` on
-    /// the consumer side.
-    pub key_id: KeyId,
-    /// Target architecture (`x86_64`, `aarch64`). Verifiers refuse
-    /// to launch a bundle whose arch doesn't match the host.
-    pub arch: String,
-    /// Optional kernel version string, e.g. `6.6.39`. Surfaced in
-    /// `mvmctl bundle inspect` and `mvmctl doctor`; not authoritative.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub kernel_version: Option<String>,
-    /// Optional flake profile name the bundle was built for.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-    /// Optional human-readable workload label.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workload_label: Option<String>,
-    /// ISO-8601 timestamp the bundle was sealed at.
-    pub created_at: String,
-    /// Free-form metadata key/value pairs. Reserved for publisher
-    /// annotations; verifiers must not interpret these.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub labels: BTreeMap<String, String>,
-    /// Every artifact inside the archive. Order is preserved in the
-    /// JSON for determinism; consumers find artifacts by `role` or
-    /// `name`, not by index.
-    pub artifacts: Vec<BundleArtifact>,
-    /// dm-verity binding, when the rootfs was built verified.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verity: Option<VerityInfo>,
-    /// Advisory resource expectations recorded by the publisher at
-    /// build time. `Some(...)` in v2+ bundles; `None` for v1
-    /// bundles (handled via `#[serde(default)]`). The template
-    /// loader uses these to set defaults when `mvmctl up` doesn't
-    /// pass `--cpus` / `--memory` explicitly. The claim-9 re-verify
-    /// still re-hashes the field as part of the manifest.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resources: Option<BundleResources>,
-}
-
-impl BundleManifest {
-    /// Find an artifact by role. Returns the first match — manifests
-    /// shouldn't carry two artifacts with the same role, but the
-    /// schema doesn't enforce uniqueness so consumers should treat
-    /// duplicates as undefined.
-    pub fn find_by_role(&self, role: &ArtifactRole) -> Option<&BundleArtifact> {
-        self.artifacts.iter().find(|a| &a.role == role)
-    }
-
-    /// Find an artifact by exact name.
-    pub fn find_by_name(&self, name: &str) -> Option<&BundleArtifact> {
-        self.artifacts.iter().find(|a| a.name == name)
-    }
-
-    /// Canonical JSON bytes used as the signing input. Pure function;
-    /// the same bytes round-trip from sign → verify.
-    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
-        serde_json::to_vec(self).context("serialise BundleManifest to canonical JSON")
-    }
+/// A free function rather than an inherent method on [`BundleManifest`]:
+/// that type now lives in `mvm-protocol`, and the orphan rule forbids
+/// `mvm-core` from adding inherent `impl`s to a foreign type.
+pub fn canonical_manifest_bytes(manifest: &BundleManifest) -> Result<Vec<u8>> {
+    serde_json::to_vec(manifest).context("serialise BundleManifest to canonical JSON")
 }
 
 /// Compute lowercase-hex SHA-256 of arbitrary bytes. Mirrors the
 /// hex-digest pattern used in `mvm-core::manifest::canonical_key_for_path`.
 pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
-}
-
-/// Pin from an `ExecutionPlan` to a specific signed bundle. Captures
-/// the three quantities the supervisor needs to re-verify on admit:
-///
-/// 1. **`bundle_sha256`** — SHA-256 of the entire archive bytes. The
-///    plan's pin is "I authorise launching this exact byte string."
-/// 2. **`manifest_sig_base64`** — the publisher's signature over the
-///    bundle's manifest. Held in the plan so the verifier can refuse
-///    the launch without trusting whatever copy of the manifest the
-///    archive on disk contains.
-/// 3. **`key_id`** — the publisher's key_id. Lets admission reject
-///    plans whose pinning publisher isn't in the local trust store
-///    *before* opening the archive.
-///
-/// `serde(deny_unknown_fields)` keeps the wire format strict — a
-/// future field added in v2 fails closed in older builds.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlanArtifact {
-    /// Lowercase-hex SHA-256 of the entire `.mvmpkg` archive.
-    pub bundle_sha256: String,
-    /// Base64-encoded 64-byte Ed25519 signature over the bundle's
-    /// `manifest.json` bytes. Use [`signature_from_base64`] to decode.
-    pub manifest_sig_base64: String,
-    /// Publisher key_id the bundle was signed under.
-    pub key_id: KeyId,
-}
-
-impl PlanArtifact {
-    /// Construct from raw signature bytes + bundle hash + key_id.
-    pub fn new(bundle_sha256: String, sig: &[u8; 64], key_id: KeyId) -> Self {
-        Self {
-            bundle_sha256,
-            manifest_sig_base64: signature_to_base64(sig),
-            key_id,
-        }
-    }
-
-    /// Decode the base64-encoded signature back to raw bytes.
-    /// Returns `None` when the field is malformed.
-    pub fn signature_bytes(&self) -> Option<[u8; 64]> {
-        signature_from_base64(&self.manifest_sig_base64)
-    }
 }
 
 /// Look up bundle archive bytes by SHA-256 at admit time.
@@ -581,13 +368,10 @@ impl BundleRegistry {
         // archive-relative path the verifier already validated as
         // safe — direct join is OK.
         let manifest_bytes =
-            verified
-                .manifest
-                .canonical_bytes()
-                .map_err(|e| BundleInstallError::Io {
-                    bundle_sha256: sha.clone(),
-                    reason: format!("re-serialising manifest: {e:#}"),
-                })?;
+            canonical_manifest_bytes(&verified.manifest).map_err(|e| BundleInstallError::Io {
+                bundle_sha256: sha.clone(),
+                reason: format!("re-serialising manifest: {e:#}"),
+            })?;
         write_into(&staging, MANIFEST_FILENAME, &manifest_bytes, &sha)?;
 
         // Recover the signature blob from the original archive —
@@ -1021,7 +805,7 @@ pub fn write_bundle(
     // signing key would derive. Mismatch is a publisher bug, not a
     // verifier concern, but catching it at write-time stops bad
     // bundles from ever leaving the build host.
-    let derived = KeyId::from_pubkey(&signing_key.verifying_key());
+    let derived = key_id_from_pubkey(&signing_key.verifying_key());
     anyhow::ensure!(
         manifest.key_id == derived,
         "manifest key_id ({}) does not match signing key derivation ({})",
@@ -1056,7 +840,7 @@ pub fn write_bundle(
         ensure_safe_path(path).context("artifact path validation")?;
     }
 
-    let manifest_bytes = manifest.canonical_bytes()?;
+    let manifest_bytes = canonical_manifest_bytes(manifest)?;
     let sig: Signature = signing_key.sign(&manifest_bytes);
     let sig_bytes = sig.to_bytes();
 
@@ -1246,7 +1030,7 @@ pub fn read_and_verify_bundle(
     // the declared key_id. Defends against a misnamed file in the
     // trust store; the trust-store file naming convention is the
     // verifier's only link from declared id to actual key.
-    let actual_id = KeyId::from_pubkey(&pubkey);
+    let actual_id = key_id_from_pubkey(&pubkey);
     if actual_id != declared_key_id {
         return Err(BundleVerifyError::KeyIdMismatch {
             declared: declared_key_id.0,
@@ -1318,19 +1102,6 @@ pub fn bundle_sha256(archive_bytes: &[u8]) -> String {
     sha256_hex(archive_bytes)
 }
 
-/// Base64-encode a signature for transport on a JSON wire (e.g.
-/// inside an `ExecutionPlan`). Round-trips via [`signature_from_base64`].
-pub fn signature_to_base64(sig: &[u8; 64]) -> String {
-    B64.encode(sig)
-}
-
-/// Inverse of [`signature_to_base64`]. Returns `None` for malformed
-/// input; the verifier surfaces this as `MalformedSignature`.
-pub fn signature_from_base64(s: &str) -> Option<[u8; 64]> {
-    let bytes = B64.decode(s).ok()?;
-    bytes.as_slice().try_into().ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1383,7 +1154,7 @@ mod tests {
     }
 
     fn build_bundle(sk: &SigningKey, kernel: &[u8], rootfs: &[u8]) -> Vec<u8> {
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let manifest = make_manifest(
             key_id,
             vec![
@@ -1409,7 +1180,7 @@ mod tests {
 
     fn trust(sk: &SigningKey) -> MapTrustStore {
         let mut m = HashMap::new();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         m.insert(key_id, sk.verifying_key());
         MapTrustStore(m)
     }
@@ -1417,29 +1188,22 @@ mod tests {
     #[test]
     fn key_id_is_32_hex_chars() {
         let sk = fresh_key();
-        let id = KeyId::from_pubkey(&sk.verifying_key());
+        let id = key_id_from_pubkey(&sk.verifying_key());
         assert_eq!(id.0.len(), 32);
         assert!(id.is_well_formed());
-    }
-
-    #[test]
-    fn well_formed_rejects_wrong_length_and_case() {
-        assert!(!KeyId("abc".to_string()).is_well_formed());
-        assert!(!KeyId("X".repeat(32)).is_well_formed());
-        assert!(!KeyId("g".repeat(32)).is_well_formed());
     }
 
     #[test]
     fn key_id_from_identity_is_well_formed_and_stable() {
         let id =
             "https://github.com/tinylabscom/mvm/.github/workflows/release.yml@refs/tags/v0.17.0";
-        let a = KeyId::from_identity(id);
-        let b = KeyId::from_identity(id);
+        let a = key_id_from_identity(id);
+        let b = key_id_from_identity(id);
         assert_eq!(a, b, "same identity yields same id");
         assert!(a.is_well_formed(), "32 lowercase hex");
         assert_ne!(
             a,
-            KeyId::from_identity("other"),
+            key_id_from_identity("other"),
             "different identity differs"
         );
     }
@@ -1501,7 +1265,7 @@ mod tests {
         let sk_b = fresh_key();
         let bundle = build_bundle(&sk_a, b"k", b"r");
         let mut m = HashMap::new();
-        let key_id_a = KeyId::from_pubkey(&sk_a.verifying_key());
+        let key_id_a = key_id_from_pubkey(&sk_a.verifying_key());
         m.insert(key_id_a, sk_b.verifying_key()); // wrong key under A's id
         let bad_store = MapTrustStore(m);
         match read_and_verify_bundle(&bundle, &bad_store) {
@@ -1518,7 +1282,7 @@ mod tests {
         let sk = fresh_key();
         let kernel = b"kernel-bytes".to_vec();
         let real_rootfs = b"rootfs-bytes".to_vec();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let manifest = make_manifest(
             key_id,
             vec![
@@ -1537,7 +1301,7 @@ mod tests {
             ],
         );
         // Sign over the canonical manifest bytes.
-        let manifest_bytes = manifest.canonical_bytes().unwrap();
+        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
         let sig = sk.sign(&manifest_bytes);
 
         // Hand-roll the archive with a *different* rootfs body.
@@ -1567,7 +1331,7 @@ mod tests {
         let sk = fresh_key();
         let kernel = b"kernel-bytes".to_vec();
         let rootfs = b"rootfs-bytes".to_vec();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let manifest = make_manifest(
             key_id,
             vec![
@@ -1585,7 +1349,7 @@ mod tests {
                 ),
             ],
         );
-        let manifest_bytes = manifest.canonical_bytes().unwrap();
+        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
         let sig = sk.sign(&manifest_bytes);
 
         // Archive omits rootfs.ext4 — manifest still lists it.
@@ -1612,7 +1376,7 @@ mod tests {
         // branch.
         let sk = fresh_key();
         let kernel = b"k".to_vec();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let manifest = make_manifest(
             key_id,
             vec![BundleArtifact {
@@ -1623,7 +1387,7 @@ mod tests {
                 size_bytes: kernel.len() as u64,
             }],
         );
-        let manifest_bytes = manifest.canonical_bytes().unwrap();
+        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
         let sig = sk.sign(&manifest_bytes);
 
         let mut buf = Cursor::new(Vec::<u8>::new());
@@ -1651,7 +1415,7 @@ mod tests {
     #[test]
     fn future_schema_version_rejected_after_load() {
         let sk = fresh_key();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
 
         // Hand-roll a manifest at SCHEMA_VERSION + 1 and sign it.
         // Use serde_json::Value so we can bump the version field
@@ -1681,12 +1445,12 @@ mod tests {
     #[test]
     fn manifest_canonical_bytes_round_trip() {
         let sk = fresh_key();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let m = make_manifest(
             key_id,
             vec![art("k", ArtifactRole::Kernel, "artifacts/k", b"X")],
         );
-        let bytes = m.canonical_bytes().unwrap();
+        let bytes = canonical_manifest_bytes(&m).unwrap();
         let parsed: BundleManifest = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed, m);
     }
@@ -1696,7 +1460,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let sk = fresh_key();
         let vk = sk.verifying_key();
-        let key_id = KeyId::from_pubkey(&vk);
+        let key_id = key_id_from_pubkey(&vk);
         std::fs::write(tmp.path().join(format!("{}.pub", key_id.0)), vk.to_bytes()).unwrap();
         let store = FsTrustStore::new(tmp.path());
         let recovered = store.lookup(&key_id).expect("found");
@@ -1732,7 +1496,7 @@ mod tests {
         // ship an unverifiable bundle.
         let sk_a = fresh_key();
         let sk_b = fresh_key();
-        let key_id_a = KeyId::from_pubkey(&sk_a.verifying_key());
+        let key_id_a = key_id_from_pubkey(&sk_a.verifying_key());
         let manifest = make_manifest(key_id_a, vec![]);
         let err = write_bundle(&manifest, &sk_b, vec![]).expect_err("rejects");
         assert!(format!("{err:#}").contains("does not match"));
@@ -1741,7 +1505,7 @@ mod tests {
     #[test]
     fn write_bundle_rejects_artifact_sha256_drift() {
         let sk = fresh_key();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let manifest = make_manifest(
             key_id,
             vec![BundleArtifact {
@@ -1769,15 +1533,6 @@ mod tests {
             h,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-    }
-
-    #[test]
-    fn signature_base64_round_trips() {
-        let sk = fresh_key();
-        let sig = sk.sign(b"some message");
-        let s = signature_to_base64(&sig.to_bytes());
-        let recovered = signature_from_base64(&s).unwrap();
-        assert_eq!(recovered, sig.to_bytes());
     }
 
     #[test]
@@ -1818,16 +1573,6 @@ mod tests {
         assert_eq!(parsed.key_id, key_id);
     }
 
-    #[test]
-    fn plan_artifact_rejects_bad_base64_signature() {
-        let pin = PlanArtifact {
-            bundle_sha256: "0".repeat(64),
-            manifest_sig_base64: "not-base64-!!".to_string(),
-            key_id: KeyId("0".repeat(32)),
-        };
-        assert!(pin.signature_bytes().is_none());
-    }
-
     /// In-memory resolver: hands back a fixed byte string regardless
     /// of what `bundle_sha256` is asked for. Tests choose what to
     /// return by constructing one of these per-test.
@@ -1862,7 +1607,7 @@ mod tests {
             }
         }
         let sig_arr: [u8; 64] = sig_bytes.as_slice().try_into().unwrap();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let pin = PlanArtifact::new(bundle_sha256(&archive), &sig_arr, key_id);
         (archive, pin)
     }
@@ -1925,7 +1670,7 @@ mod tests {
         let sk = fresh_key();
         let kernel = b"kernel-bytes".to_vec();
         let real_rootfs = b"rootfs-bytes".to_vec();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let manifest = make_manifest(
             key_id.clone(),
             vec![
@@ -1943,7 +1688,7 @@ mod tests {
                 ),
             ],
         );
-        let manifest_bytes = manifest.canonical_bytes().unwrap();
+        let manifest_bytes = canonical_manifest_bytes(&manifest).unwrap();
         let sig = sk.sign(&manifest_bytes);
 
         let mut buf = Cursor::new(Vec::<u8>::new());
@@ -2282,13 +2027,13 @@ mod tests {
     #[test]
     fn bundle_manifest_resources_round_trip_when_set() {
         let sk = fresh_key();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let mut manifest = make_manifest(key_id, Vec::new());
         manifest.resources = Some(BundleResources {
             vcpus: 4,
             mem_mib: 2048,
         });
-        let bytes = manifest.canonical_bytes().unwrap();
+        let bytes = canonical_manifest_bytes(&manifest).unwrap();
         let parsed: BundleManifest = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed.resources, manifest.resources);
         let json = String::from_utf8(bytes).unwrap();
@@ -2302,9 +2047,9 @@ mod tests {
         // an empty "resources":null object, so a v1 verifier doing
         // a "would this parse as v1?" check sees a clean wire.
         let sk = fresh_key();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let manifest = make_manifest(key_id, Vec::new()); // resources: None
-        let bytes = manifest.canonical_bytes().unwrap();
+        let bytes = canonical_manifest_bytes(&manifest).unwrap();
         let json = String::from_utf8(bytes).unwrap();
         assert!(
             !json.contains("resources"),
@@ -2319,7 +2064,7 @@ mod tests {
         // with `resources = None`. Protects against a future
         // accidental drop of `#[serde(default)]` on the field.
         let sk = fresh_key();
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let v1_json = format!(
             r#"{{
                 "schema_version": 1,
@@ -2335,26 +2080,5 @@ mod tests {
         assert_eq!(parsed.schema_version, 1);
         assert!(parsed.resources.is_none());
         assert!(parsed.verity.is_none());
-    }
-
-    #[test]
-    fn bundle_schema_version_is_two() {
-        // Pin the current version constant — bumps are deliberate;
-        // a silent rev should trip this test.
-        assert_eq!(BUNDLE_SCHEMA_VERSION, 2);
-    }
-
-    #[test]
-    fn plan_artifact_deny_unknown_fields() {
-        // Defence in depth: an attacker bumping the schema must
-        // fail closed in older verifiers.
-        let json = serde_json::json!({
-            "bundle_sha256": "0".repeat(64),
-            "manifest_sig_base64": "AA==",
-            "key_id": "0".repeat(32),
-            "extra_future_field": 42,
-        });
-        let result: Result<PlanArtifact, _> = serde_json::from_value(json);
-        assert!(result.is_err(), "deny_unknown_fields must reject");
     }
 }

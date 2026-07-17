@@ -20,7 +20,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::arch::GuestArch;
-use crate::plan::bundle::KeyId;
+use crate::plan::bundle::{KeyId, key_id_from_identity, key_id_from_pubkey};
 
 pub const PACK_SCHEMA_VERSION: u32 = 1;
 pub const EMPTY_PACK_HASH: &str =
@@ -431,7 +431,7 @@ pub fn verify_pack_keyless_at(
     let candidates: Vec<&str> = keyless
         .accepted_identities
         .iter()
-        .filter(|identity| KeyId::from_identity(identity) == *stamped)
+        .filter(|identity| key_id_from_identity(identity) == *stamped)
         .map(String::as_str)
         .collect();
     if candidates.is_empty() {
@@ -1056,12 +1056,12 @@ impl<'a> PackBuilder<'a> {
         // anything out of `self.signer`.
         let (signing_key_id, signature_format, signing_key) = match &self.signer {
             PackSigner::Ed25519(signing_key) => (
-                KeyId::from_pubkey(&signing_key.verifying_key()),
+                key_id_from_pubkey(&signing_key.verifying_key()),
                 SignatureFormat::Ed25519,
                 Some(*signing_key),
             ),
             PackSigner::Keyless { identity } => (
-                KeyId::from_identity(identity),
+                key_id_from_identity(identity),
                 SignatureFormat::Sigstore,
                 None,
             ),
@@ -1262,7 +1262,7 @@ mod tests {
         fs::write(dir.path().join("runtime/builder.img"), b"builder").expect("write builder");
 
         let key = signing_key();
-        let key_id = KeyId::from_pubkey(&key.verifying_key());
+        let key_id = key_id_from_pubkey(&key.verifying_key());
         let now = utc(2026, 6, 24);
         let policy_hash = hash("policy");
         let mut manifest = PackManifest {
@@ -1663,7 +1663,7 @@ mod tests {
 
     fn hvf_trust_store() -> MapTrustStore {
         let key = signing_key();
-        let key_id = KeyId::from_pubkey(&key.verifying_key());
+        let key_id = key_id_from_pubkey(&key.verifying_key());
         MapTrustStore {
             keys: HashMap::from([(key_id, key.verifying_key())]),
         }
@@ -1688,7 +1688,7 @@ mod tests {
         assert_eq!(verified.pack_hash, manifest.outputs.pack_hash);
         assert_eq!(
             verified.signer_key_id,
-            KeyId::from_pubkey(&signing_key().verifying_key())
+            key_id_from_pubkey(&signing_key().verifying_key())
         );
     }
 
@@ -1763,7 +1763,7 @@ mod tests {
         assert_eq!(verified.file_count, 2);
         assert_eq!(
             verified.signer_key_id,
-            KeyId::from_pubkey(&signing_key().verifying_key())
+            key_id_from_pubkey(&signing_key().verifying_key())
         );
     }
 
@@ -1840,7 +1840,7 @@ mod tests {
         assert!(manifest.provenance.signature_bundle.signatures.is_empty());
         assert_eq!(
             manifest.trust.signing_key_id,
-            KeyId::from_identity(SIGSTORE_IDENTITY)
+            key_id_from_identity(SIGSTORE_IDENTITY)
         );
     }
 
@@ -1889,7 +1889,7 @@ mod tests {
             .signature_bundle
             .signatures
             .push(PackSignature {
-                key_id: KeyId::from_pubkey(&key.verifying_key()),
+                key_id: key_id_from_pubkey(&key.verifying_key()),
                 signature_base64: B64.encode(signature.to_bytes()),
                 signed_at: utc(2026, 6, 24),
                 expires_at: utc(2026, 12, 31),
@@ -1920,7 +1920,7 @@ mod tests {
             let mut m = produced_hvf_builder_pack(dir);
             m.provenance.signature_bundle.format = SignatureFormat::Sigstore;
             m.provenance.signature_bundle.signatures.clear();
-            m.trust.signing_key_id = KeyId::from_identity(IDENTITY);
+            m.trust.signing_key_id = key_id_from_identity(IDENTITY);
             m.outputs.pack_hash = m.computed_pack_hash().expect("pack hash");
             m
         }
@@ -2008,7 +2008,7 @@ mod tests {
                 .signature_bundle
                 .signatures
                 .push(PackSignature {
-                    key_id: KeyId::from_identity(IDENTITY),
+                    key_id: key_id_from_identity(IDENTITY),
                     signature_base64: B64.encode([0u8; 64]),
                     signed_at: utc(2026, 6, 24),
                     expires_at: utc(2026, 12, 31),

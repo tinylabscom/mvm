@@ -2896,11 +2896,11 @@ mod admit_plan_tests {
     /// `--bundle-pin` test path doesn't need a real fetched bundle.
     /// Uses mvm_plan's own writer + signing primitives.
     fn make_bundle_for_pin(sk: &ed25519_dalek::SigningKey) -> (Vec<u8>, mvm_core::plan::KeyId) {
-        use mvm_core::plan::{
-            ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, KeyId, sha256_hex,
-            write_bundle,
+        use mvm_core::plan::bundle::{
+            ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest,
+            key_id_from_pubkey, sha256_hex, write_bundle,
         };
-        let key_id = KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = key_id_from_pubkey(&sk.verifying_key());
         let kernel = b"kernel-bytes".to_vec();
         let rootfs = b"rootfs-bytes".to_vec();
         let manifest = BundleManifest {
@@ -2982,7 +2982,7 @@ mod admit_plan_tests {
             rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut __ed_seed);
             ed25519_dalek::SigningKey::from_bytes(&__ed_seed)
         };
-        let key_id = mvm_core::plan::KeyId::from_pubkey(&sk.verifying_key());
+        let key_id = mvm_core::plan::bundle::key_id_from_pubkey(&sk.verifying_key());
         let err = bundle_pin_from_archive(&archive, key_id).expect_err("must fail");
         let msg = format!("{err:#}");
         assert!(msg.contains("manifest.sig"), "msg was: {msg}");

@@ -293,7 +293,7 @@ mod tests {
 
     use mvm_core::pack_cache::VerifiedPackDir;
     use mvm_core::packs::Sha256Hex;
-    use mvm_core::plan::bundle::KeyId;
+    use mvm_core::plan::bundle::key_id_from_identity;
     use mvm_core::util::test_env::TestEnv;
 
     use super::*;
@@ -304,7 +304,7 @@ mod tests {
             verified: mvm_core::packs::VerifiedPack {
                 pack_hash: Sha256Hex::from_bytes(b"runtime-pack-test"),
                 file_count: 4,
-                signer_key_id: KeyId::from_identity("test-identity"),
+                signer_key_id: key_id_from_identity("test-identity"),
             },
         }
     }
@@ -476,7 +476,7 @@ mod not_instant_reason_tests {
         let diagnosis = PackDiagnosis::Rejected {
             pack_hash: hash("pack"),
             reason: PackVerifyError::ExpiredSignature {
-                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+                key_id: mvm_core::plan::bundle::key_id_from_identity("test-identity"),
                 expired_at,
             },
         };
@@ -489,7 +489,7 @@ mod not_instant_reason_tests {
         let diagnosis = PackDiagnosis::Rejected {
             pack_hash: hash("pack"),
             reason: PackVerifyError::Revoked {
-                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+                key_id: mvm_core::plan::bundle::key_id_from_identity("test-identity"),
                 reason: "compromised signing key".to_string(),
             },
         };
@@ -503,7 +503,7 @@ mod not_instant_reason_tests {
         let diagnosis = PackDiagnosis::Rejected {
             pack_hash: hash("pack"),
             reason: PackVerifyError::UnknownSigningKey {
-                key_id: mvm_core::plan::bundle::KeyId::from_identity("test-identity"),
+                key_id: mvm_core::plan::bundle::key_id_from_identity("test-identity"),
             },
         };
         let reason = not_instant_reason(&diagnosis).expect("Rejected must produce a reason");

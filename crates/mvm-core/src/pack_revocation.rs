@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use crate::pack_trust::{RevokedPack, revocation_status};
 use crate::packs::{KeylessTrust, PackRevocationChecker, RevocationStatus, Sha256Hex};
 use crate::plan::bundle::KeyId;
+#[cfg(test)]
+use crate::plan::bundle::key_id_from_pubkey;
 
 pub const PACK_REVOCATION_SCHEMA_VERSION: u32 = 1;
 
@@ -153,7 +155,7 @@ mod tests {
 
     fn key_id(seed: u8) -> KeyId {
         use ed25519_dalek::SigningKey;
-        KeyId::from_pubkey(&SigningKey::from_bytes(&[seed; 32]).verifying_key())
+        key_id_from_pubkey(&SigningKey::from_bytes(&[seed; 32]).verifying_key())
     }
 
     fn sample_list() -> PackRevocationList {

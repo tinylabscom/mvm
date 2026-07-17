@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::packs::{PackRevocationChecker, PackTrustStore, RevocationStatus, Sha256Hex};
-use crate::plan::bundle::KeyId;
+use crate::plan::bundle::{KeyId, key_id_from_pubkey};
 
 /// Trusted publishers plus revocations. Absence of this file means "trust
 /// nothing" — the inert, fail-closed default (`load_pack_trust_config` returns
@@ -126,7 +126,7 @@ impl PackTrustStore for PackTrustConfig {
             // Skip malformed keys defensively; `load_pack_trust_config` already
             // rejects them, so this only matters for hand-built configs.
             let vk = decode_pubkey(&publisher.pubkey_base64).ok()?;
-            (KeyId::from_pubkey(&vk) == *key_id).then_some(vk)
+            (key_id_from_pubkey(&vk) == *key_id).then_some(vk)
         })
     }
 }
@@ -260,12 +260,12 @@ mod tests {
         let mut config = sample_config();
         config.revocations = vec![
             RevokedPack {
-                key_id: KeyId::from_pubkey(&signing_key(1).verifying_key()),
+                key_id: key_id_from_pubkey(&signing_key(1).verifying_key()),
                 pack_hash: None,
                 reason: "key compromised".to_string(),
             },
             RevokedPack {
-                key_id: KeyId::from_pubkey(&signing_key(2).verifying_key()),
+                key_id: key_id_from_pubkey(&signing_key(2).verifying_key()),
                 pack_hash: Some(Sha256Hex::from_bytes(b"bad-pack")),
                 reason: "bad build".to_string(),
             },
@@ -380,7 +380,7 @@ mod tests {
     fn verifying_key_returns_publisher_key() {
         let config = sample_config();
         let key = signing_key(1);
-        let key_id = KeyId::from_pubkey(&key.verifying_key());
+        let key_id = key_id_from_pubkey(&key.verifying_key());
         assert_eq!(
             config.verifying_key(&key_id),
             Some(key.verifying_key()),
@@ -391,7 +391,7 @@ mod tests {
     #[test]
     fn verifying_key_returns_none_for_unknown_key() {
         let config = sample_config();
-        let unknown = KeyId::from_pubkey(&signing_key(99).verifying_key());
+        let unknown = key_id_from_pubkey(&signing_key(99).verifying_key());
         assert_eq!(config.verifying_key(&unknown), None);
     }
 
@@ -406,7 +406,7 @@ mod tests {
 
     #[test]
     fn whole_key_revocation_covers_any_pack_hash() {
-        let key_id = KeyId::from_pubkey(&signing_key(1).verifying_key());
+        let key_id = key_id_from_pubkey(&signing_key(1).verifying_key());
         let config = PackTrustConfig {
             publishers: vec![publisher(&signing_key(1), &["stable"])],
             revocations: vec![RevokedPack {
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn pack_pinned_revocation_matches_only_that_pack() {
-        let key_id = KeyId::from_pubkey(&signing_key(1).verifying_key());
+        let key_id = key_id_from_pubkey(&signing_key(1).verifying_key());
         let bad = Sha256Hex::from_bytes(b"bad-pack");
         let good = Sha256Hex::from_bytes(b"good-pack");
         let config = PackTrustConfig {
@@ -450,7 +450,7 @@ mod tests {
     #[test]
     fn no_revocation_entry_is_good() {
         let config = sample_config();
-        let key_id = KeyId::from_pubkey(&signing_key(1).verifying_key());
+        let key_id = key_id_from_pubkey(&signing_key(1).verifying_key());
         assert_eq!(
             config.status(&key_id, &Sha256Hex::from_bytes(b"pack")),
             RevocationStatus::Good
@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(verified.file_count, 2);
         assert_eq!(
             verified.signer_key_id,
-            KeyId::from_pubkey(&key.verifying_key())
+            key_id_from_pubkey(&key.verifying_key())
         );
     }
 
@@ -594,7 +594,7 @@ mod tests {
         let config = PackTrustConfig {
             publishers: vec![publisher(&key, &["stable"])],
             revocations: vec![RevokedPack {
-                key_id: KeyId::from_pubkey(&key.verifying_key()),
+                key_id: key_id_from_pubkey(&key.verifying_key()),
                 pack_hash: None,
                 reason: "key compromised".to_string(),
             }],

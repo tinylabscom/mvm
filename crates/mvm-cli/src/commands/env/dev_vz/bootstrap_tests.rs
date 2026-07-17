@@ -20,7 +20,7 @@ mod attested_builder_pack_tests {
         PackTrustMeta, PackTrustStore, PolicyCompatibility, ReproducibilityStatus,
         RevocationStatus, SbomReference, Sha256Hex, SignatureValidity, VerifiedPack,
     };
-    use mvm_core::plan::bundle::KeyId;
+    use mvm_core::plan::bundle::{KeyId, key_id_from_pubkey};
     use mvm_core::util::test_env::TestEnv;
     use tempfile::TempDir;
 
@@ -348,7 +348,7 @@ mod attested_builder_pack_tests {
     fn trust_store(key: &SigningKey) -> MapTrustStore {
         MapTrustStore {
             keys: HashMap::from([(
-                KeyId::from_pubkey(&key.verifying_key()),
+                key_id_from_pubkey(&key.verifying_key()),
                 key.verifying_key(),
             )]),
         }

@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 use ed25519_dalek::VerifyingKey;
 
-use mvm_core::plan::bundle::KeyId;
+use mvm_core::plan::bundle::key_id_from_pubkey;
 use mvm_core::user_config::MvmConfig;
 
 use super::super::Cli;
@@ -50,7 +50,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             args.pubkey.display()
         )
     })?;
-    let key_id = KeyId::from_pubkey(&vk);
+    let key_id = key_id_from_pubkey(&vk);
 
     let dir = super::ensure_trust_dir()?;
     let dst = dir.join(format!("{}.pub", key_id.0));

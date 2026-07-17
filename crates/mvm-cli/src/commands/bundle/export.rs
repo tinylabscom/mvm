@@ -12,8 +12,8 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::Args as ClapArgs;
 use mvm_core::plan::bundle::{
-    ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, KeyId,
-    VerityInfo, sha256_hex, write_bundle,
+    ARTIFACTS_DIR, ArtifactRole, BUNDLE_SCHEMA_VERSION, BundleArtifact, BundleManifest, VerityInfo,
+    key_id_from_pubkey, sha256_hex, write_bundle,
 };
 
 use mvm_core::user_config::MvmConfig;
@@ -73,7 +73,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 
     // ---- 3. Build the BundleManifest ----
     let signer = host_signer::load_or_init().context("loading host signer for bundle sign")?;
-    let key_id = KeyId::from_pubkey(&signer.verifying);
+    let key_id = key_id_from_pubkey(&signer.verifying);
 
     let mut artifacts: Vec<BundleArtifact> = Vec::new();
     let mut payload: Vec<(String, Vec<u8>)> = Vec::new();

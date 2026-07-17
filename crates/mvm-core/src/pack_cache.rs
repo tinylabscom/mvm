@@ -741,7 +741,7 @@ mod tests {
         ReproducibilityStatus, RevocationStatus, SbomReference, Sha256Hex, SignatureFormat,
         SignatureValidity,
     };
-    use crate::plan::bundle::KeyId;
+    use crate::plan::bundle::{KeyId, key_id_from_identity, key_id_from_pubkey};
     use crate::util::test_env::TestEnv;
 
     struct MapTrustStore {
@@ -885,7 +885,7 @@ mod tests {
         let (dir, mut manifest) = staged_builder_pack();
         manifest.provenance.signature_bundle.format = SignatureFormat::Sigstore;
         manifest.provenance.signature_bundle.signatures.clear();
-        manifest.trust.signing_key_id = KeyId::from_identity("test-identity");
+        manifest.trust.signing_key_id = key_id_from_identity("test-identity");
         manifest.outputs.pack_hash = manifest.computed_pack_hash().expect("pack hash");
         (dir, manifest)
     }
@@ -912,7 +912,7 @@ mod tests {
         let key = signing_key();
         MapTrustStore {
             keys: HashMap::from([(
-                KeyId::from_pubkey(&key.verifying_key()),
+                key_id_from_pubkey(&key.verifying_key()),
                 key.verifying_key(),
             )]),
         }
