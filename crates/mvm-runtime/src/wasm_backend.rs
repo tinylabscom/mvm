@@ -151,13 +151,116 @@ impl WasmBackend {
     }
 
     /// Point this backend's `mvm:egress` host-import at a substitution
-    /// endpoint UDS. Builder-style so the real endpoint spawn can wire
-    /// this in before `start` once it exists; tests inject a stub path
-    /// directly.
+    /// endpoint UDS. Builder-style; mainly a test seam — production `start`
+    /// spawns and wires its own endpoint (see [`spawn_wasm_egress_endpoint_if_needed`])
+    /// and only falls back to this manually-configured path when a run has
+    /// nothing to mediate.
     pub fn with_egress_endpoint(mut self, path: PathBuf) -> Self {
         self.egress_endpoint = Some(path);
         self
     }
+}
+
+/// Owned inputs for a wasm run's per-VM substitution-endpoint spawn, decided
+/// once by [`wasm_endpoint_plan`] so the skip/spawn branch is unit-testable
+/// without touching a subprocess. Kept separate from
+/// `crate::substitution_spawn::SubstitutionSpawnParams` (which borrows) so
+/// the decided values can be asserted directly in a test.
+struct WasmEndpointPlan {
+    vm_name: String,
+    state_dir: PathBuf,
+    tenant: String,
+    secrets: Vec<mvm_core::plan::SecretBinding>,
+    redaction: mvm_core::policy::RedactionPolicy,
+    socket_path: PathBuf,
+}
+
+/// Decide whether a wasm run needs the per-VM substitution endpoint, and if
+/// so, the owned inputs the spawn needs. Mirrors libkrun's
+/// `spawn_libkrun_egress_endpoint_if_needed` skip logic exactly: nothing to
+/// mediate — no bound secrets and the resolved policy denies egress — is a
+/// no-op, returning `None`. `start()` then leaves the `mvm:egress`
+/// host-import unconfigured, so every egress call fails closed with
+/// `NoEndpointConfigured` (correct: no policy/secrets ⇒ no egress).
+fn wasm_endpoint_plan(
+    config: &VmStartConfig,
+    state_dir: &std::path::Path,
+) -> Result<Option<WasmEndpointPlan>> {
+    let default_redaction = mvm_core::policy::RedactionPolicy::default();
+    let decoded = crate::egress_shared::decode_plan_secrets_from_state(state_dir)?;
+    let (secrets, redaction, tenant) = match decoded {
+        Some((secrets, redaction, tenant)) => (secrets, redaction, tenant),
+        None => (
+            Vec::new(),
+            default_redaction,
+            match config.tenant_id.as_deref() {
+                Some(t) if !t.is_empty() => t.to_string(),
+                _ => "local".to_string(),
+            },
+        ),
+    };
+    if secrets.is_empty() && !config.network_policy.allows_egress() {
+        return Ok(None);
+    }
+    Ok(Some(WasmEndpointPlan {
+        vm_name: config.name.clone(),
+        state_dir: state_dir.to_path_buf(),
+        tenant,
+        secrets,
+        redaction,
+        socket_path: mvm_core::config::vm_substitution_endpoint_socket(&config.name),
+    }))
+}
+
+/// Build the [`substitution_spawn::SubstitutionSpawnParams`] a wasm run's
+/// endpoint spawn needs from a decided [`WasmEndpointPlan`]. Pure (no I/O)
+/// so the wasm-specific literal fields are unit-testable without a spawn:
+/// always `Uds` (the host-import connects to the endpoint directly — wasm has
+/// no VMM to proxy a per-port vsock socket), no terminator (no TAP/nft
+/// REDIRECT to feed), no TLS intermediate (http-only POC; HTTPS termination
+/// is a later phase), and — unlike libkrun/hvf, which serve raw pass-through
+/// when a run carries no secrets — `raw_egress` is unconditionally `false`:
+/// the `mvm:egress` host-import always speaks the `WireRequest` wire
+/// protocol, never a raw byte relay.
+fn wasm_substitution_spawn_params<'a>(
+    plan: &'a WasmEndpointPlan,
+    network_policy: &'a mvm_core::network_policy::NetworkPolicy,
+) -> crate::substitution_spawn::SubstitutionSpawnParams<'a> {
+    crate::substitution_spawn::SubstitutionSpawnParams {
+        vm_name: &plan.vm_name,
+        state_dir: &plan.state_dir,
+        tenant: &plan.tenant,
+        secrets: &plan.secrets,
+        redaction: &plan.redaction,
+        transport: crate::substitution_spawn::EndpointTransport::Uds {
+            path: plan.socket_path.clone(),
+        },
+        terminator_listen: None,
+        tls_intermediate: None,
+        network_policy: Some(network_policy),
+        raw_egress: false,
+    }
+}
+
+/// Spawn the per-VM substitution endpoint for a wasm run — mirroring
+/// libkrun's `spawn_libkrun_egress_endpoint_if_needed` — and return the UDS
+/// path to wire into the `mvm:egress` host-import. `None` when
+/// [`wasm_endpoint_plan`] finds nothing to mediate; the caller then leaves
+/// the host-import unconfigured rather than spawning a needless endpoint.
+/// Creating `state_dir` is deferred to this Some-branch so a run that spawns
+/// nothing touches no filesystem state.
+fn spawn_wasm_egress_endpoint_if_needed(
+    config: &VmStartConfig,
+    state_dir: &std::path::Path,
+) -> Result<Option<PathBuf>> {
+    let Some(plan) = wasm_endpoint_plan(config, state_dir)? else {
+        return Ok(None);
+    };
+    std::fs::create_dir_all(state_dir)
+        .map_err(|e| anyhow::anyhow!("create per-VM state dir {}: {e}", state_dir.display()))?;
+    let params = wasm_substitution_spawn_params(&plan, &config.network_policy);
+    crate::substitution_spawn::spawn_substitution_endpoint(params)?;
+    Ok(Some(plan.socket_path))
 }
 
 impl VmBackend for WasmBackend {
@@ -182,8 +285,21 @@ impl VmBackend for WasmBackend {
 
     fn start_with_mode(&self, config: &VmStartConfig, _mode: StartMode) -> Result<VmId> {
         reject_unsupported_start_config(config)?;
-        let exit =
-            engine::run_module_to_completion(&config.rootfs_path, self.egress_endpoint.clone())?;
+        let state_dir = mvm_core::config::vm_state_dir(&config.name);
+        let spawned_endpoint = spawn_wasm_egress_endpoint_if_needed(config, &state_dir)?;
+        let egress_endpoint = spawned_endpoint
+            .clone()
+            .or_else(|| self.egress_endpoint.clone());
+
+        let result = engine::run_module_to_completion(&config.rootfs_path, egress_endpoint);
+        if spawned_endpoint.is_some() {
+            // A wasm run is synchronous end-to-end inside `start` — there is
+            // no later `stop()` boundary to reap the endpoint at, so its
+            // decrypted secrets must not outlive this call either way.
+            crate::substitution_spawn::reap_substitution_endpoint(&state_dir, &config.name);
+        }
+        let exit = result?;
+
         let mut runs = self
             .runs
             .lock()
@@ -758,6 +874,113 @@ mod tests {
         let config = cfg("x", "   ");
         let err = reject_unsupported_start_config(&config).unwrap_err();
         assert_eq!(err, WasmBackendError::ModulePathMissing);
+    }
+
+    // ── P3b.1: wasm_endpoint_plan / wasm_substitution_spawn_params ──
+    // Decision + params only — no subprocess is ever spawned in this module.
+
+    // Mirrors `libkrun_substitution_not_spawned_when_no_secrets_and_no_egress`:
+    // a fresh state dir (no plan.json) plus the default deny-all policy has
+    // nothing to mediate, so the plan must skip.
+    #[test]
+    fn wasm_endpoint_plan_is_none_when_no_secrets_and_no_egress() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            name: "no-secrets-wasm-vm".to_string(),
+            ..Default::default()
+        };
+        let plan = wasm_endpoint_plan(&config, dir.path()).unwrap();
+        assert!(
+            plan.is_none(),
+            "deny-all policy with no bound secrets must skip the endpoint spawn"
+        );
+    }
+
+    // A policy that allows egress must still produce a spawn plan even with
+    // no bound secrets — the endpoint runs in wire mode regardless and gates
+    // the destination itself, mirroring libkrun's own skip condition.
+    #[test]
+    fn wasm_endpoint_plan_is_some_when_policy_allows_egress_without_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = VmStartConfig {
+            name: "policy-allow-wasm-vm".to_string(),
+            network_policy: mvm_core::network_policy::NetworkPolicy::preset(
+                mvm_core::network_policy::NetworkPreset::Dev,
+            ),
+            ..Default::default()
+        };
+        let plan = wasm_endpoint_plan(&config, dir.path())
+            .unwrap()
+            .expect("a policy allowing egress must produce a spawn plan");
+        assert!(plan.secrets.is_empty());
+        assert_eq!(plan.tenant, "local");
+    }
+
+    // Secrets present (even under a deny-all `VmStartConfig::network_policy`,
+    // since the endpoint itself gates per-destination) must produce a spawn
+    // plan whose params mirror libkrun/hvf except for the wasm-only
+    // deviations: always `Uds`, no terminator, no TLS, and — the one field
+    // that must NOT mirror libkrun — `raw_egress` is always `false`.
+    #[test]
+    fn wasm_endpoint_plan_params_mirror_libkrun_with_wasm_deviations() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = mvm_core::plan::SecretBinding {
+            name: "API_KEY".to_string(),
+            source: mvm_core::plan::SecretSource::Keystore {
+                address: "addr".to_string(),
+            },
+        };
+        let admitted = mvm_core::plan::test_support::PlanFixture::new()
+            .tenant("acme")
+            .secrets(vec![secret.clone()])
+            .build();
+        std::fs::write(
+            dir.path().join("plan.json"),
+            serde_json::to_string(&admitted).unwrap(),
+        )
+        .unwrap();
+
+        let config = VmStartConfig {
+            name: "secret-wasm-vm".to_string(),
+            ..Default::default()
+        };
+        let plan = wasm_endpoint_plan(&config, dir.path())
+            .unwrap()
+            .expect("bound secrets must produce a spawn plan");
+
+        assert_eq!(plan.vm_name, "secret-wasm-vm");
+        assert_eq!(plan.state_dir, dir.path().to_path_buf());
+        assert_eq!(plan.tenant, "acme");
+        assert_eq!(plan.secrets, vec![secret]);
+        assert_eq!(
+            plan.socket_path,
+            mvm_core::config::vm_substitution_endpoint_socket("secret-wasm-vm")
+        );
+
+        let params = wasm_substitution_spawn_params(&plan, &config.network_policy);
+        assert_eq!(params.vm_name, "secret-wasm-vm");
+        assert_eq!(
+            params.transport,
+            crate::substitution_spawn::EndpointTransport::Uds {
+                path: plan.socket_path.clone(),
+            }
+        );
+        assert!(
+            params.terminator_listen.is_none(),
+            "wasm has no TAP/nft REDIRECT to feed a terminator"
+        );
+        assert!(
+            params.tls_intermediate.is_none(),
+            "http-only POC; HTTPS termination is a later phase"
+        );
+        assert!(
+            params.network_policy.is_some(),
+            "the endpoint must gate the destination itself"
+        );
+        assert!(
+            !params.raw_egress,
+            "wasm always speaks WireRequest wire mode, never libkrun's raw pass-through"
+        );
     }
 
     #[test]
