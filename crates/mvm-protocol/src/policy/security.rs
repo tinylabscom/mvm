@@ -1,6 +1,9 @@
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
-use crate::signing::SignedPayload;
+use crate::protocol::signing::SignedPayload;
 
 /// Current authenticated protocol version.
 pub const PROTOCOL_VERSION_AUTHENTICATED: u8 = 2;
@@ -471,6 +474,9 @@ fn default_rate_fpm() -> u32 {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+    use alloc::vec;
+
     use super::*;
 
     #[test]

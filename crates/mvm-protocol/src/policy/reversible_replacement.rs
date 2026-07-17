@@ -1,6 +1,9 @@
 //! Per-destination reversible replacement policy plus shared token /
 //! correlation / proof types for owned-path exact restore.
 
+use alloc::string::String;
+use alloc::vec::Vec;
+
 use serde::{Deserialize, Serialize};
 
 /// Sensitive classes v1 handles.
@@ -35,8 +38,8 @@ pub enum ReversibleFallback {
 #[serde(transparent)]
 pub struct OpaqueRewriteToken(pub String);
 
-impl std::fmt::Debug for OpaqueRewriteToken {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl core::fmt::Debug for OpaqueRewriteToken {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.write_str("OpaqueRewriteToken(REDACTED)")
     }
 }
