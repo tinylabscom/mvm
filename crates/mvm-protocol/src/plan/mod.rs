@@ -6,6 +6,7 @@
 pub mod types;
 pub mod validity;
 pub mod verb;
+pub mod verb_grant;
 pub mod verb_trust;
 
 pub use types::{
@@ -18,4 +19,5 @@ pub use types::{
 };
 pub use validity::FreshnessClaims;
 pub use verb::{VerbId, VerbIdError};
+pub use verb_grant::{VERB_GRANT_BASELINE, VerbGrant, VerbGrantError};
 pub use verb_trust::{GrantKeySource, VERB_TRUST_POLICY_VERSION, VerbTrustPolicy};

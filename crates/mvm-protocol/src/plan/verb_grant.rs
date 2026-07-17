@@ -1,4 +1,8 @@
-use crate::plan::{Nonce, VerbId};
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use crate::plan::types::Nonce;
+use crate::plan::verb::VerbId;
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -93,6 +97,7 @@ impl VerbGrant {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
     use chrono::Duration;
     use ed25519_dalek::{Signer, SigningKey};
 

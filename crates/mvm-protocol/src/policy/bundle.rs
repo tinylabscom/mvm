@@ -1,8 +1,9 @@
 //! `PolicyBundle` — the bundle of policies a workload boots under.
 
-use std::collections::BTreeMap;
+use alloc::collections::BTreeMap;
+use alloc::string::String;
 
-use crate::plan::TenantId;
+use crate::plan::types::TenantId;
 use serde::{Deserialize, Serialize};
 
 use crate::policy::policies::{

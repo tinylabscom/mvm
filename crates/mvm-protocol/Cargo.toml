@@ -28,7 +28,10 @@ ed25519-dalek = { version = "3", default-features = false }
 # build under `no_std` at all — optional + off by default keeps the
 # wasm32 build (which uses only this crate's own default features)
 # schemars-free. Mirrors `mvm-core`/`mvm-agentd`'s `schema` feature.
-schemars = { version = "0.8", default-features = false, features = ["derive"], optional = true }
+# `chrono` gives schemars its `impl JsonSchema for DateTime<Utc>` bridge —
+# `VerbGrant::not_after` needs it under this feature the same way
+# `mvm-core`'s schemars dep already carries it.
+schemars = { version = "0.8", default-features = false, features = ["derive", "chrono"], optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.11", default-features = false }

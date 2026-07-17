@@ -5,6 +5,7 @@
 //! `mvm-core::policy`, which re-exports these modules at their existing
 //! paths.
 
+pub mod bundle;
 pub mod policies;
 pub mod redaction;
 pub mod reversible_replacement;
