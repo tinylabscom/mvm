@@ -14,7 +14,7 @@ The execution reality: what's landed, what's been deliberately deviated from pla
 - **`bin/dev` → `scripts/dev`.**
 - **Secrets decision made and committed:** the `${NAME}` named-placeholder design (ADR-023 + WS-NET) — see [04-security.md](04-security.md) for the design and [03-networking.md](03-networking.md) for where it rides the wire.
 
-## Phase 1a — 6 of 7 crate consolidations done (crate count 20 → 15)
+## Phase 1a — 7 of 7 crate consolidations done (crate count 20 → 14)
 
 Method: structure-first / easy-first, on a single long-lived green branch. Each move landed as its own commit, validated by `cargo check --workspace --all-targets` green immediately after. The whole set was then validated together by a full `cargo clippy --workspace --all-targets` (0 errors / 0 warnings), the xtask gates, and nightly `cargo fmt --all` clean.
 
@@ -26,8 +26,9 @@ Method: structure-first / easy-first, on a single long-lived green branch. Each 
 | `mvm-mcp` → `mvm-cli` (`crate::mcp`, behind `mcp` feature) | `42b432b89` |
 | `mvm` + `mvm-backend` → `mvm-runtime` (flat; ~96 files rewired) | `764b7d897` |
 | `mvm-guest` + `mvm-guest-helpers` → `mvm-agentd` (~214 files) | `19f1830ba` |
+| `mvm-storage` → `mvm-runtime` `crate::storage::volume` (nested to dodge a `backend.rs`/`mod.rs` collision with the pre-existing dm-thin `crate::storage`; `s3` feature renamed `storage-s3`) | — |
 
-Current crate set (15): `mvm-agentd, mvm-build, mvm-cli, mvm-client, mvm-conformance, mvm-core, mvm-fs, mvm-host-services-ffi, mvm-hostd, mvm-net, mvm-runtime, mvm-sdk, mvm-storage, mvm-verify` + `crates/deps/libkrun-sys`.
+Current crate set (14): `mvm-agentd, mvm-build, mvm-cli, mvm-client, mvm-conformance, mvm-core, mvm-fs, mvm-host-services-ffi, mvm-hostd, mvm-net, mvm-runtime, mvm-sdk, mvm-verify` + `crates/deps/libkrun-sys`.
 
 ## Key decisions & deviations
 
@@ -36,6 +37,7 @@ Each of these is a deliberate call made during execution, diverging from the lit
 - **`mvm-host-services-ffi` kept separate**, not folded into `mvm-agentd` as the crate map says. It's a `cdylib` (lib name `mvm_host_services`) that the SDK Python/TypeScript runtimes `dlopen` and that nix bakes into the runtime-overlay. Folding it in would change the artifact name and break both the FFI contract and the nix packaging contract. It stays a standalone crate; its dependency on the renamed guest crate was updated to point at `mvm-agentd`.
 - **`qemu.rs` kept** in `mvm-runtime`. SPRINT WS1e literally says "delete qemu.rs" and the backend/egress model in [02-architecture.md](02-architecture.md) lists QEMU as dropped, but the standing direction from outside this sprint is to keep QEMU as an opt-in Linux dev substrate. The drop is deferred/contested — flagged here for an explicit decision, not silently kept or silently dropped.
 - **`egress_server.rs` parked/dead** — it moved into `mvm-hostd` during the `mvm-vm-host` → `mvm-hostd` consolidation, but it's unwired: it references a removed `EgressGate::admitted_addrs` API from an earlier API refactor. It needs to either be revived during the WS-NET networking consolidation (see [03-networking.md](03-networking.md) / [06-execution-plan.md](06-execution-plan.md) WS-NET) or deleted outright. Leaving it as dead code past WS-NET would violate the WS8 "0 dead modules" gate.
+- **`mvm-storage` landed at `crate::storage::volume`, not bare `crate::storage`.** `mvm-runtime` already had an unrelated `crate::storage` module (the dm-thin CoW pool for instance rootfs/snapshots — `ThinPool`/`DmsetupBackend`/its own `StorageError`), imported verbatim from the pre-consolidation `mvm` crate. A flat merge would have collided on `backend.rs`/`mod.rs` filenames and on two distinct `StorageError` types with the same name. `volume` nests the former `mvm-storage` crate (the `VolumeBackend`/`StorageProvider` data-plane traits) as a sibling of `pool`/`thin`/`backend` under the existing `storage` module — same host-storage-substrate grouping, no symbol or file clash.
 - **`architecture.yml`'s category-10 "substrate server" invariant is CI-only** — there's no local xtask mirror of it. The absorbed `substrate_server_category` metadata was merged into `mvm-hostd` along with the rest of `mvm-vm-host`. If that CI gate flags the single-host-binary consolidation (i.e. it was written assuming multiple substrate-server binaries and now sees one), the gate needs to be reconciled to match — the consolidation into one host binary is what the plan intends, so the gate is what should move, not the crate structure.
 
 ## Remaining Phase 1a
@@ -46,7 +48,6 @@ Each of these is a deliberate call made during execution, diverging from the lit
 
   **All three increments have landed.** Increments 1–2: `mvm-verify` → `mvm_protocol::verify`; Workload IR + entrypoint → `mvm_protocol::{ir,entrypoint}`, wasm-clean. **Increment 3 — the wire/policy DTO split — is COMPLETE** (13 subagent-driven batches, Tier 0 `6577d06ba` → final `51471dd7`), per the design of record [10-increment3-protocol-core-split.md](10-increment3-protocol-core-split.md). Every `plan/`+`policy/`+`protocol/` wire/policy DTO — leaves, the two biggest single-file splits (`bundle.rs` 2360, `vm_backend.rs` 2693), and the claim-8 signed `ExecutionPlan` itself (46/46 fields byte-identical) — now lives in `#![no_std]+alloc` `mvm-protocol`; all signing/verify/synthesis/resolution/fs/net/tar logic stays in `mvm-core` on top. The four mechanics held as designed (kept `DateTime<Utc>` via scoped no_std chrono; `std::net`→`core::net`; scoped `thiserror`; orphan-rule free-fn rewrites), the mvm↔mvmd signed contract stayed byte-identical (pinned JCS fixture for `ControlRequest`; verbatim `ExecutionPlan`), and the whole signed plan now compiles on `wasm32` — the `no_std` foundation the wasm-container core goal (WS11) needs. Two candidates the design flagged "deferred" resolved to permanent `mvm-core` residents (`security_profile`, the mvmd↔hostd `HostdRequest` IPC) — see the design doc's "Intentionally stays in mvm-core" section.
 
-- **`mvm-storage` placement** — there's no target crate for it in the [02-architecture.md](02-architecture.md) crate map at all; it needs to be folded into either `mvm-core` or `mvm-runtime`. Not yet decided.
 - **The full `nextest --workspace` behavioral gate** — everything above has been validated by `cargo check --workspace --all-targets` per move plus one full `clippy --workspace --all-targets` + nightly `fmt --all` pass, but not yet by the full `cargo nextest run --workspace` behavioral suite. That's the real completion gate for WS1a-mechanical and hasn't run yet as of this writing.
 
 ## Not started

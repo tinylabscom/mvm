@@ -24,7 +24,7 @@ use mvm_core::crypto::volume;
 use mvm_core::volume::VolumeError;
 use zeroize::Zeroizing;
 
-use crate::provider::{AttachedVolume, StorageProvider, VolumeHandle, VolumeSpec};
+use crate::storage::volume::provider::{AttachedVolume, StorageProvider, VolumeHandle, VolumeSpec};
 
 /// At-rest-encrypted `StorageProvider` for non-Linux hosts. Holds the
 /// 32-byte per-volume DEK (zeroized on drop) and seals/opens the backing

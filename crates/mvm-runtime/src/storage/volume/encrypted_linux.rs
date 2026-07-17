@@ -1,6 +1,6 @@
 //! `EncryptedStorage` — the Linux at-rest `StorageProvider` arm: block-level
 //! LUKS2 over a loop-backed image (`cryptsetup`), the counterpart to the
-//! non-Linux per-file AEAD arm in [`crate::encrypted`]. Same type name +
+//! non-Linux per-file AEAD arm in [`crate::storage::volume::encrypted`]. Same type name +
 //! constructor on both platforms so callers never branch on `target_os`.
 //!
 //! A volume is a LUKS2 image file under `root`. `provision` formats it once
@@ -32,7 +32,7 @@ use std::process::{Command, Stdio};
 use mvm_core::volume::{VolumeError, VolumeName};
 use zeroize::Zeroizing;
 
-use crate::provider::{AttachedVolume, StorageProvider, VolumeHandle, VolumeSpec};
+use crate::storage::volume::provider::{AttachedVolume, StorageProvider, VolumeHandle, VolumeSpec};
 
 /// Backing-image size used when a [`VolumeSpec`] doesn't pin one. Must clear
 /// the LUKS2 header (16 MiB default metadata + alignment) with room for a

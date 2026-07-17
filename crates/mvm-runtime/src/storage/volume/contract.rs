@@ -1,6 +1,6 @@
 //! Generic [`VolumeBackend`] contract test fixture.
 //!
-//! Every backend impl — [`crate::LocalBackend`], mvmd-side
+//! Every backend impl — [`crate::storage::volume::LocalBackend`], mvmd-side
 //! `ObjectStoreBackend`, mvmd-side `EncryptedBackend<B>` — must pass
 //! [`assert_backend_contract`] for the same set of operations.
 //!
@@ -10,7 +10,7 @@ use bytes::Bytes;
 
 use mvm_core::volume::{VolumeError, VolumePath};
 
-use crate::backend::VolumeBackend;
+use crate::storage::volume::backend::VolumeBackend;
 
 /// Run the full trait contract against `backend`. Panics on the first
 /// violation, with a message identifying the failed assertion.
@@ -190,7 +190,7 @@ async fn list_returns_entries<B: VolumeBackend>(b: &B) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LocalBackend;
+    use crate::storage::volume::LocalBackend;
 
     #[tokio::test]
     async fn local_backend_passes_contract() {

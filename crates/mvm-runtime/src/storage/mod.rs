@@ -26,6 +26,15 @@
 //!   query the pool through the trait.
 //! - Audit kinds for pool operations.
 //!
+//! # `volume` submodule
+//!
+//! [`volume`] is a separate concern nested here: the `VolumeBackend` /
+//! `StorageProvider` data-plane traits (local / S3 / encrypted volume
+//! mounts) that `VmBackend` impls attach into a guest. It doesn't share
+//! any types with the dm-thin pool above — the two are grouped under one
+//! `storage` module because both are host-side storage substrate, not
+//! because they're the same abstraction.
+//!
 //! A follow-on change wires the actual instance-create path in
 //! `vm/template/lifecycle.rs` to use `ThinPool::clone_from_base`
 //! instead of `cp -a`. That's the behavioral change; this is the
@@ -34,6 +43,7 @@
 pub mod backend;
 pub mod pool;
 pub mod thin;
+pub mod volume;
 
 pub use backend::{DeviceMapperBackend, DmsetupBackend, MockBackend};
 pub use pool::{PoolConfig, PoolStats, ThinPool, ThinPoolImpl};

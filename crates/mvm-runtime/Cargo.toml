@@ -20,10 +20,6 @@ mvm-core = { workspace = true, features = ["egress-ca"] }
 # The NetworkProvider seam this crate implements (BridgeTapNetworkProvider).
 # Acyclic: mvm-net deps only mvm-core + mvm-protocol.
 mvm-net.workspace = true
-# `SnapshotUpper` materializes the disk snapshot the libkrun disk-only
-# warm-start boots from. Acyclic: mvm-storage deps only mvm-core +
-# mvm-protocol (both already in this crate's graph).
-mvm-storage.workspace = true
 mvm-agentd.workspace = true
 # IR `HealthCheck` that `machine::persist` (de)serializes. Direct dep
 # on the no_std foundation crate now that the IR lives there.
@@ -43,6 +39,9 @@ anyhow.workspace = true
 async-trait = "0.1"
 thiserror.workspace = true
 base64.workspace = true
+# `LocalBackend`/`VolumeBackend` put/get payloads + the content-addressed
+# volume digest store.
+bytes = "1"
 chrono.workspace = true
 ed25519-dalek.workspace = true
 rand.workspace = true
@@ -51,12 +50,17 @@ rand.workspace = true
 # Crypto helpers come from mvm_core::crypto, already available via the
 # mvm-core dep above.
 secrecy.workspace = true
-# The lean S3 client (consolidated with mvm-storage; replaced the
-# heavier `opendal` whose ~70-crate closure the dep budget rejects). `aws` gives
-# the S3 builder + its reqwest/rustls path; only `template-registry-s3` pulls it.
+# The lean S3 client (replaced the heavier `opendal` whose ~70-crate
+# closure the dep budget rejects). `aws` gives the S3 builder + its
+# reqwest/rustls path; `template-registry-s3` pulls it for the template
+# registry, `storage-s3` pulls it for the S3 `MountProvider`.
 object_store = { version = "0.11", optional = true, default-features = false, features = [
     "aws",
 ] }
+# Stream adapter for object_store's list(), used by the S3 `MountProvider`.
+# Already in the `storage-s3` dep tree via object_store/reqwest, so gating
+# it here adds nothing new.
+futures = { version = "0.3", optional = true }
 serde.workspace = true
 serde_json.workspace = true
 hex.workspace = true
@@ -72,8 +76,12 @@ ext4-view.workspace = true
 tempfile.workspace = true
 toml.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+# `fs`: `LocalBackend`'s atomic put (write-tmp + fsync + rename) over
+# `tokio::fs`.
+tokio = { workspace = true, features = ["fs"] }
 fs2.workspace = true
+# DEK held in `EncryptedStorage` is zeroized on drop.
+zeroize.workspace = true
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }
@@ -89,6 +97,9 @@ default = []
 contributor-bootstrap = ["mvm-build/contributor-bootstrap"]
 manifest-verify = ["mvm-core/manifest-verify"]
 template-registry-s3 = ["dep:object_store"]
+# Real S3-backed `MountProvider` (`storage::volume::s3`). Off by default;
+# pulls object_store + its reqwest/rustls closure only when enabled.
+storage-s3 = ["dep:object_store", "dep:futures"]
 
 [lints]
 workspace = true

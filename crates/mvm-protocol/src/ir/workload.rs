@@ -590,7 +590,7 @@ pub enum MountSource {
     /// provider's own schema — the IR doesn't interpret it, so new sources
     /// plug in without a core-enum edit. An unregistered provider is
     /// rejected at resolve time (`MountError::UnknownFsProvider`), never
-    /// silently defaulted. See `mvm_storage::mount_provider`.
+    /// silently defaulted. See `mvm_runtime::storage::volume::mount_provider`.
     External {
         provider: String,
         config: serde_json::Value,

@@ -1,6 +1,6 @@
-//! mvm-storage — `VolumeBackend` trait + `LocalBackend` impl.
+//! `VolumeBackend` trait + `LocalBackend` impl.
 //!
-//! This crate ships **only** the trait and `LocalBackend`.
+//! This module ships **only** the trait and `LocalBackend`.
 //! `ObjectStoreBackend` and `EncryptedBackend<B>` live
 //! in mvmd — they wrap the same trait so callers don't see the
 //! difference.
@@ -8,7 +8,7 @@
 //! ## Why the trait lives here
 //!
 //! Both mvm and mvmd need a uniform way to dispatch volume data-plane
-//! operations. Putting the trait in this crate (re-exported through
+//! operations. Putting the trait here (re-exported through
 //! the `mvmctl` facade) lets mvmd implement additional backings
 //! against the same contract, with no API duplication.
 //!
@@ -37,8 +37,8 @@ pub mod encrypted;
 #[path = "encrypted_linux.rs"]
 pub mod encrypted;
 
-// S3 mount source — off by default; pulls object_store only under `s3`.
-#[cfg(feature = "s3")]
+// S3 mount source — off by default; pulls object_store only under `storage-s3`.
+#[cfg(feature = "storage-s3")]
 pub mod s3;
 
 pub use backend::VolumeBackend;
@@ -52,7 +52,7 @@ pub use snapshot::SnapshotUpper;
 
 pub use encrypted::EncryptedStorage;
 
-#[cfg(feature = "s3")]
+#[cfg(feature = "storage-s3")]
 pub use s3::S3MountProvider;
 
 use std::sync::Arc;
@@ -108,7 +108,7 @@ mod tests {
             credentials_ref: None,
         });
         match make_backend(&cfg).await {
-            Ok(_) => panic!("must reject ObjectStore in mvm-storage"),
+            Ok(_) => panic!("must reject ObjectStore in the runtime volume-backend module"),
             Err(err) => {
                 let msg = err.to_string();
                 assert!(

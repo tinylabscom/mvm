@@ -28,7 +28,7 @@ use mvm_protocol::ir::MountSource;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjPath;
 
-use crate::mount_provider::{MountError, MountProvider, Mountable};
+use crate::storage::volume::mount_provider::{MountError, MountProvider, Mountable};
 
 /// Syncs an object-store prefix into a local cache dir on resolve.
 pub struct S3MountProvider {

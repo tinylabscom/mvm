@@ -12,7 +12,7 @@ use std::sync::Arc;
 use mvm_core::volume::{VolumeError, VolumeName};
 use mvm_protocol::ir::MountSource;
 
-use crate::provider::{StorageProvider, VolumeSpec};
+use crate::storage::volume::provider::{StorageProvider, VolumeSpec};
 
 /// A resolved mount source `VmBackend` can attach into a guest. More variants
 /// (`BlockDev`, `Fuse`) arrive with their producers — the LUKS block-volume
@@ -212,7 +212,7 @@ impl MountProvider for TmpfsFs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::LocalStorage;
+    use crate::storage::volume::LocalStorage;
 
     fn registry_with_builtins(root: &std::path::Path) -> MountRegistry {
         let mut reg = MountRegistry::new();

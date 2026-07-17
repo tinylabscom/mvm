@@ -14,7 +14,7 @@ pub struct TemplateRegistry {
     store: AmazonS3,
     // object_store is async; this registry's API is sync, so it owns a
     // current-thread runtime to drive the get/put calls (mirrors
-    // `mvm_storage::s3::S3MountProvider`).
+    // `crate::storage::volume::s3::S3MountProvider`).
     rt: tokio::runtime::Runtime,
     prefix: String,
 }

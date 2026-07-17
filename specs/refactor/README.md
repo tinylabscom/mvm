@@ -12,7 +12,7 @@ Two capabilities are **core goals** in their own right, not by-products of simpl
 
 **Phase 0 — COMPLETE.** Spec sweep, ADR consolidation (92 → 30, contiguous, absolute decision form), dead-dep drop, BDD harness scaffolding, worktree sweep, SDK relocation, `bin/dev` → `scripts/dev`, and the `${NAME}` secrets decision are all landed. Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
 
-**Phase 1a — 6 of 7 crate consolidations done.** Crate count 20 → 15, workspace green after every move. Remaining: the `mvm-protocol` extraction (a design effort, not a mechanical merge — see below), `mvm-storage` placement, and the full `nextest --workspace` behavioral gate (per-move validation so far has been `cargo check --workspace --all-targets`, not the full test suite). Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
+**Phase 1a — 7 of 7 crate consolidations done.** Crate count 20 → 14, workspace green after every move. Remaining: the `mvm-protocol` extraction (a design effort, not a mechanical merge — see below) and the full `nextest --workspace` behavioral gate (per-move validation so far has been `cargo check --workspace --all-targets`, not the full test suite). Detail: [07-progress-and-decisions.md](07-progress-and-decisions.md).
 
 **Phases 1b–4 — not started.**
 

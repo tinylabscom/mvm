@@ -54,7 +54,7 @@ Note: by the time of writing, this WS has run further than "~15" — the ADR set
 - [x] `mvm`+`mvm-backend`→`mvm-runtime` (flat, 96 files) — `764b7d897`
 - [x] `mvm-guest`+`mvm-guest-helpers`→`mvm-agentd` (214 files) — `19f1830ba`. **`mvm-host-services-ffi` kept SEPARATE** — it is a `cdylib` (`mvm_host_services`) the SDK runtimes `dlopen` + nix bakes into the overlay; folding it would break that FFI/nix contract (deviation from the crate map).
 - [ ] `mvm-protocol` extraction is a **design effort, not a mechanical merge**: `mvm-core`'s `plan/`+`policy/`+`protocol/` carry ~126 `crate::` refs into `config`/`crypto`/`security`/`instance`/`tenant`, so pulling "wire+policy" below `mvm-core` inverts much of the foundation. The `no_std` lens (1b) is what defines the clean pure-DTO boundary — do 1a-protocol + 1b as one designed pass.
-- [ ] `mvm-storage` placement — no target crate in the crate map; fold into `mvm-core` or `mvm-runtime` (decide).
+- [x] `mvm-storage`→`mvm-runtime` `crate::storage::volume` (nested under the pre-existing dm-thin `crate::storage` to dodge a `backend.rs`/`mod.rs` collision; `s3` feature renamed `storage-s3`)
 - [ ] Full `nextest --workspace` + `clippy` + nightly `fmt --all` + xtask gates (the real 1a gate, beyond per-move `cargo check`).
 
 Full narrative on this progress, including why `mvm-protocol` needs to be a designed pass rather than a mechanical move: [07-progress-and-decisions.md](07-progress-and-decisions.md).

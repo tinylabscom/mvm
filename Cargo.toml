@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/mvm-core",
-    "crates/mvm-storage",
     # plan 123 Phase A — NetworkProvider trait + provisioning/policy seam.
     # Low seam crate: the TAP/bridge/native-gateway/passt impl stays in mvm-runtime
     # (where the in-VM shell lives) and the WireGuard/Tailscale mesh impl is
@@ -176,7 +175,7 @@ too_many_arguments = "deny"
 # across the workspace. Dropping `io-std` (no `tokio::io::std*`
 # consumers) and `parking_lot` (no consumers; `tokio::sync::Mutex`
 # uses its own primitives). `fs`, `process`, and `signal` are no
-# longer workspace-wide either: `mvm-storage`, `mvm-hostd`, and the
+# longer workspace-wide either: `mvm-runtime`, `mvm-hostd`, and the
 # small set of signal-aware bins request them directly. `test-util`
 # is dev-dep-only — the crates that need it (`mvm-oci`,
 # `mvm-supervisor`, root) add it on their own `[dev-dependencies]
@@ -346,7 +345,6 @@ mvm-agentd = { path = "crates/mvm-agentd", version = "0.18.0" }
 mvm-build = { path = "crates/mvm-build", version = "0.18.0", default-features = false }
 mvm-runtime = { path = "crates/mvm-runtime", version = "0.18.0", default-features = false }
 mvm-fs = { path = "crates/mvm-fs", version = "0.18.0" }
-mvm-storage = { path = "crates/mvm-storage", version = "0.18.0" }
 mvm-net = { path = "crates/mvm-net", version = "0.18.0" }
 mvm-cli = { path = "crates/mvm-cli", version = "0.18.0", default-features = false }
 # default-features = false drops `packet-forwarder` (the smoltcp egress stack) for

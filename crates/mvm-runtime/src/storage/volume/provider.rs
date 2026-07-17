@@ -1,6 +1,6 @@
 //! `StorageProvider` — host-side volume *lifecycle* (provision / attach /
 //! detach; `snapshot` lands later), distinct from the data-plane
-//! [`VolumeBackend`](crate::VolumeBackend).
+//! [`VolumeBackend`](crate::storage::volume::VolumeBackend).
 //!
 //! `VolumeBackend` moves bytes in and out of a volume's namespace.
 //! `StorageProvider` owns the volume as a *host* resource: it creates the
@@ -100,7 +100,7 @@ impl AttachedVolume {
 
 /// Host-side volume lifecycle. Sync on purpose: these are cold control-plane
 /// ops (mkdir, `cryptsetup` open/close), not the hot data path that
-/// [`VolumeBackend`](crate::VolumeBackend) serves.
+/// [`VolumeBackend`](crate::storage::volume::VolumeBackend) serves.
 pub trait StorageProvider: Send + Sync {
     /// Stable identifier for metrics / audit / error messages.
     fn kind(&self) -> &'static str;

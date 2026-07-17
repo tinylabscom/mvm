@@ -2500,10 +2500,12 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "bytes",
  "chrono",
  "ed25519-dalek",
  "ext4-view",
  "fs2",
+ "futures",
  "hex",
  "kvm-bindings",
  "kvm-ioctls",
@@ -2515,7 +2517,6 @@ dependencies = [
  "mvm-core",
  "mvm-net",
  "mvm-protocol",
- "mvm-storage",
  "object_store",
  "rand 0.8.6",
  "secrecy",
@@ -2529,6 +2530,7 @@ dependencies = [
  "tracing",
  "uuid",
  "which",
+ "zeroize",
 ]
 
 [[package]]
@@ -2557,24 +2559,6 @@ dependencies = [
  "tree-sitter-nix",
  "tree-sitter-python",
  "tree-sitter-typescript",
-]
-
-[[package]]
-name = "mvm-storage"
-version = "0.18.0"
-dependencies = [
- "async-trait",
- "bytes",
- "chrono",
- "futures",
- "mvm-core",
- "mvm-protocol",
- "object_store",
- "serde_json",
- "sha2 0.11.0",
- "tempfile",
- "tokio",
- "zeroize",
 ]
 
 [[package]]

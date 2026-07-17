@@ -6,8 +6,8 @@
 //! - Symlink-escape defence: every operation re-canonicalises the
 //!   resolved path and asserts `starts_with(<root>)` after resolution.
 //!
-//! This impl ships in mvm-storage. mvmd uses it directly for buckets
-//! whose backend is `BucketProvider::LocalVirtiofs`.
+//! This impl ships in the runtime's volume-backend module. mvmd uses it
+//! directly for buckets whose backend is `BucketProvider::LocalVirtiofs`.
 
 use std::path::{Path, PathBuf};
 
@@ -19,7 +19,7 @@ use tokio::io::AsyncWriteExt;
 
 use mvm_core::volume::{VolumeEntry, VolumeError, VolumePath};
 
-use crate::backend::VolumeBackend;
+use crate::storage::volume::backend::VolumeBackend;
 
 pub struct LocalBackend {
     root: PathBuf,
