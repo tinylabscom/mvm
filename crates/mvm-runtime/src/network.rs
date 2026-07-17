@@ -159,7 +159,9 @@ pub fn apply_network_policy(
     // rules pushes them under the deny set in chain order. None
     // for unrestricted policies — that's fine; the deny rules
     // still apply.
-    if let Some(script) = policy.iptables_script(BRIDGE_DEV, &slot.guest_ip) {
+    if let Some(script) =
+        mvm_core::network_policy::iptables_script(policy, BRIDGE_DEV, &slot.guest_ip)
+    {
         combined.push_str(&script);
     }
 

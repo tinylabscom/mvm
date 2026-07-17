@@ -8,6 +8,7 @@
 
 pub mod bundle;
 pub mod dns_pin;
+pub mod network_policy;
 pub mod policies;
 pub mod redaction;
 pub mod reversible_replacement;
