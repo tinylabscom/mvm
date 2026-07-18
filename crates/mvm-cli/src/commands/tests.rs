@@ -19,7 +19,9 @@ use super::machine;
 use super::ops;
 use super::ops::{audit, cache, config, metrics, secret};
 use super::trust;
-use super::vm::{checkpoint, console, cp, exec, forward, group, pause, sandbox, session, volume};
+use super::vm::{
+    checkpoint, console, cp, exec, forward, group, sandbox, session, snapshot, volume,
+};
 
 use audit::AuditAction;
 use cache::CacheAction;
@@ -2000,8 +2002,8 @@ fn test_snapshot_ls_json_parses() {
     assert!(matches!(
         cli.command,
         Commands::Machine(machine::Args {
-            action: machine::MachineAction::Vm(group::VmCmd::Snapshot(pause::SnapshotArgs {
-                command: pause::SnapshotCmd::Ls { json: true }
+            action: machine::MachineAction::Vm(group::VmCmd::Snapshot(snapshot::SnapshotArgs {
+                command: snapshot::SnapshotCmd::Ls { json: true }
             }))
         })
     ));
@@ -2014,8 +2016,8 @@ fn test_snapshot_rm_json_parses() {
     assert!(matches!(
         cli.command,
         Commands::Machine(machine::Args {
-            action: machine::MachineAction::Vm(group::VmCmd::Snapshot(pause::SnapshotArgs {
-                command: pause::SnapshotCmd::Rm { json: true, .. }
+            action: machine::MachineAction::Vm(group::VmCmd::Snapshot(snapshot::SnapshotArgs {
+                command: snapshot::SnapshotCmd::Rm { json: true, .. }
             }))
         })
     ));

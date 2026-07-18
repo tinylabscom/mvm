@@ -13,8 +13,8 @@ use mvm_core::user_config::MvmConfig;
 
 use super::Cli;
 use super::{
-    checkpoint, cp, diff, forward, fs, pause, proc, rekernel, sandbox, session, set_ttl, volume,
-    wait,
+    checkpoint, cp, diff, forward, fs, pause, proc, rekernel, sandbox, session, set_ttl, snapshot,
+    volume, wait,
 };
 
 #[derive(ClapArgs, Debug, Clone)]
@@ -33,7 +33,7 @@ pub(in crate::commands) enum VmCmd {
     Resume(pause::ResumeArgs),
     /// Manage sealed instance snapshots (`ls`, `rm`)
     #[command(hide = true)]
-    Snapshot(pause::SnapshotArgs),
+    Snapshot(snapshot::SnapshotArgs),
     /// Save a running VM's memory + disk state (requires a backend with
     /// memory-snapshot support)
     #[command(hide = true)]
@@ -87,7 +87,9 @@ impl VmCmd {
     pub(in crate::commands) fn emits_machine_readable_stdout(&self) -> bool {
         match self {
             VmCmd::Snapshot(a) => match &a.command {
-                pause::SnapshotCmd::Ls { json } | pause::SnapshotCmd::Rm { json, .. } => *json,
+                snapshot::SnapshotCmd::Ls { json } | snapshot::SnapshotCmd::Rm { json, .. } => {
+                    *json
+                }
             },
             VmCmd::Save(a) => a.json,
             VmCmd::Restore(a) => a.json,
@@ -143,7 +145,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
     match args.action {
         VmCmd::Pause(a) => pause::run_pause(cli, a, cfg),
         VmCmd::Resume(a) => pause::run_resume(cli, a, cfg),
-        VmCmd::Snapshot(a) => pause::run_snapshot(cli, a, cfg),
+        VmCmd::Snapshot(a) => snapshot::run_snapshot(cli, a, cfg),
         VmCmd::Save(a) => checkpoint::run_save(cli, a),
         VmCmd::Restore(a) => checkpoint::run_restore(cli, a),
         VmCmd::Checkpoint(a) => checkpoint::run_checkpoint(cli, a),
