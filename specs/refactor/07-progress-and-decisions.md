@@ -62,7 +62,7 @@ Phases 1b through 4 have not started. One line each:
 - **1h/1i** `mvm-client` facade completion + `mvm-cli` routed entirely through it.
 - **WS4** single `~/.mvm` directory — **DONE** (WS4.1 `1b62d8212`+`31d793bd0`: one `mvm_home()` root under `MVM_HOME`, six env vars + XDG deleted, `vms/` tree replaces `~/microvm/vms`; WS4.2 `2b85a8ff6`+`cc16c511d`: `check-single-home` CI lint, 117 bypass hits fixed — several were real `MVM_HOME`-ignoring bugs in security-adjacent paths, fail-closed posture verified per site, one pre-existing deny-list gap closed). Note for post-merge: parallel-session isolation now uses `MVM_HOME` (the old `MVM_DATA_DIR`/`MVM_CACHE_DIR` are gone).
 - **WS5** two-feature collapse.
-- **WS6** trait dispatch + zero hardcoding.
+- **WS6** trait dispatch + zero hardcoding — **DONE**. String-backend dispatch removed earlier (`check-no-string-backend-dispatch`); WS6.2 (`3d098ecb0`+`30a531141`) routed all baked network literals through `mvm_core::dev_network`/`guest_netd`, deleted the `/tmp/firecracker.socket` global for a per-VM socket, and added `check-no-network-literals` (value-preservation reviewer-verified byte-for-byte). Known pre-existing (out of scope, unrelated to this change): `mvm-runtime`'s `substitution_spawn::…emits_uds_transport` test races on a shared tmp dir under bare `cargo test` (passes under nextest/`--test-threads=1`) — worth a future tmpdir-isolation fix.
 - **WS2** single host + single guest binary, no forks.
 - **WS-NET** consolidated vsock networking + standardized protocol.
 - **WS9** lifecycle correctness (vsock-sourced exit codes, healthcheck reaper).
