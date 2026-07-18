@@ -55,7 +55,7 @@ Each of these is a deliberate call made during execution, diverging from the lit
 Phases 1b through 4 have not started. One line each:
 
 - **1b** `mvm-core` rebuild on `mvm-protocol` (entangled with the `mvm-protocol` extraction above).
-- **1c** `mvm-fs`: fold in build's rootfs/overlay/unpack (the `mvm-ext4`+`mvm-oci` merge already landed; this is the remaining absorption).
+- **1c** `mvm-fs`: fold in build's rootfs/overlay/unpack — IN PROGRESS. `oci_to_rootfs` moved (`67e492f87`); 1c.1 unified the duplicate tree-walk/materialize mid-layer into one `mvm_fs::rootfs` module (`a28f583b2`; `oci_to_rootfs::ext4` thinned to an adapter, `mvm_build::rootfs` reduced to the builder-VM dispatcher). Remaining: `runtime_overlay.rs` (split its build half from its cache-resolve half) + virtiofs-root-for-OCI. Review follow-up: the owner-unreadable-file widen/restore read (chmod-read-chmod) carries a narrow pre-existing TOCTOU window — harden via open-then-fstat when touched next.
 - **1d** `mvm-net`: fold in host tunnel/gateway/dns + guest net/tun/netinit (the crate rename already landed; this is the remaining absorption).
 - **1f** `mvm-build`: slim the builder pipeline.
 - **1g** `mvm-sdk`: `PackageType` trait, language-surface relocation under `crates/mvm-sdk/languages/`, runtime SDK/decorator first-class enablement.
