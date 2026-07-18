@@ -168,13 +168,11 @@ fn libkrun_lifecycle_start_status_stop() {
 }
 
 fn dev_artifacts_dir() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".mvm/dev/current")
+    PathBuf::from(mvm_core::config::mvm_home()).join("dev/current")
 }
 
 fn vms_root() -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME must be set");
-    PathBuf::from(home).join(".mvm/vms")
+    mvm_core::config::vms_dir()
 }
 
 /// Poll `cond` every 100ms until it returns `true` or the timeout

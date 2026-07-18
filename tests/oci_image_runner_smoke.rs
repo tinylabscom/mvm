@@ -139,15 +139,12 @@ impl Drop for SessionCleanup {
 
 #[cfg(target_os = "macos")]
 fn mvm_home() -> PathBuf {
-    std::env::var_os("MVM_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".mvm")))
-        .expect("MVM_HOME or HOME must be set")
+    PathBuf::from(mvm_core::config::mvm_home())
 }
 
 #[cfg(target_os = "macos")]
 fn mvm_cache_dir() -> PathBuf {
-    mvm_home().join("cache")
+    PathBuf::from(mvm_core::config::mvm_cache_dir())
 }
 
 fn mvmctl_with_target_path() -> Command {

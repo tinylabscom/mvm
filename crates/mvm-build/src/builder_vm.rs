@@ -1140,13 +1140,13 @@ mod tests {
     #[test]
     fn degraded_store_error_names_the_recovery_dir_and_command() {
         let e = BuilderVmError::DegradedBuilderStore {
-            cache_dir: "/home/u/.mvm/cache/builder-vm".into(),
+            cache_dir: "/home/u/mvm-home/cache/builder-vm".into(),
             log_path: "/tmp/job/nix-stderr.log".into(),
             detail: "error: path '/nix/store/x-source/flake.nix' does not exist".into(),
         };
         let msg = e.to_string();
         assert!(msg.contains("mvmctl cache repair")); // the first-class recovery
-        assert!(msg.contains("rm -rf /home/u/.mvm/cache/builder-vm")); // manual fallback
+        assert!(msg.contains("rm -rf /home/u/mvm-home/cache/builder-vm")); // manual fallback
         assert!(msg.contains("mvmctl bootstrap"));
         assert!(msg.contains("dangling")); // distinct from a generic build failure
     }

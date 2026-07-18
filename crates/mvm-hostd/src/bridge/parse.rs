@@ -140,10 +140,10 @@ mod tests {
     fn base_fields() -> serde_json::Value {
         serde_json::json!({
             "vm_name": "vm-1",
-            "audit_dir": "/home/u/.mvm/audit",
-            "audit_socket": "/home/u/.mvm/audit/gateway-vm-1.sock",
-            "keys_dir": "/home/u/.mvm/keys",
-            "signing_key_path": "/home/u/.mvm/keys/host-signer.ed25519",
+            "audit_dir": "/home/u/mvm-home/audit",
+            "audit_socket": "/home/u/mvm-home/audit/gateway-vm-1.sock",
+            "keys_dir": "/home/u/mvm-home/keys",
+            "signing_key_path": "/home/u/mvm-home/keys/host-signer.ed25519",
             "plan_json": "{}",
         })
     }
@@ -161,7 +161,7 @@ mod tests {
         let json = with_endpoint(serde_json::json!({
             "passt": {
                 "passt_path": "/usr/bin/passt",
-                "passt_hashes_path": "/home/u/.mvm/passt-hashes.toml",
+                "passt_hashes_path": "/home/u/mvm-home/passt-hashes.toml",
                 "gateway_fd_raw": 7,
                 "supervisor_fd_raw": 8,
             }
@@ -315,17 +315,17 @@ mod tests {
         let np = serde_json::to_string(&NetworkPolicy::unrestricted()).unwrap();
         let json = serde_json::json!({
             "vm_name": "fc-vm",
-            "audit_dir": "/h/.mvm/audit",
-            "audit_socket": "/h/.mvm/audit/gateway-fc-vm.sock",
-            "keys_dir": "/h/.mvm/keys",
-            "signing_key_path": "/h/.mvm/keys/host-signer.ed25519",
+            "audit_dir": "/h/mvm-home/audit",
+            "audit_socket": "/h/mvm-home/audit/gateway-fc-vm.sock",
+            "keys_dir": "/h/mvm-home/keys",
+            "signing_key_path": "/h/mvm-home/keys/host-signer.ed25519",
             "plan_json": "{}",
             "bundle_json": serde_json::Value::Null,
             "network_policy_json": np,
             "endpoint": {
                 "passt": {
                     "passt_path": "/usr/bin/passt",
-                    "passt_hashes_path": "/h/.mvm/passt-hashes.toml",
+                    "passt_hashes_path": "/h/mvm-home/passt-hashes.toml",
                     "gateway_fd_raw": 7,
                     "supervisor_fd_raw": 8,
                 }

@@ -66,13 +66,13 @@ impl ObserverLatency {
 
     /// Atomic-ish write (tmp + rename), mirroring
     /// `FlowCountMetrics::write_scrape_file`. Fails closed (no-op) when
-    /// `HOME` is unset — never falls back to a world-writable directory.
+    /// no home root resolves (neither `MVM_HOME` nor `$HOME` set) —
+    /// never falls back to a world-writable directory.
     pub fn write_scrape_file(&self) {
-        let Some(home) = std::env::var_os("HOME") else {
+        if mvm_core::config::mvm_home_strict().is_err() {
             return;
-        };
-        let path = std::path::Path::new(&home)
-            .join(".mvm/audit")
+        }
+        let path = mvm_core::config::mvm_audit_dir()
             .join(format!("metrics-{}-observer-latency.prom", self.vm));
         self.write_scrape_file_to(&path);
     }
@@ -124,12 +124,10 @@ mod tests {
     #[test]
     fn write_scrape_file_to_uses_observer_latency_name() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".mvm/audit")).unwrap();
+        std::fs::create_dir_all(dir.path().join("audit")).unwrap();
         let l = ObserverLatency::new("vm-x", "t");
         l.record("hostname-filter", FlowDirection::Egress, 5);
-        let target = dir
-            .path()
-            .join(".mvm/audit/metrics-vm-x-observer-latency.prom");
+        let target = dir.path().join("audit/metrics-vm-x-observer-latency.prom");
         l.write_scrape_file_to(&target);
         let body = std::fs::read_to_string(&target).unwrap();
         assert!(body.contains("mvm_observer_latency_us_count"));

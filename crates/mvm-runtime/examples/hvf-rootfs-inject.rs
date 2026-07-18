@@ -22,8 +22,7 @@ fn main() {
         InjectRequest, default_inject_work_dir, inject_host_binaries,
     };
 
-    let home = std::env::var("HOME").unwrap();
-    let dev = format!("{home}/.mvm/dev/current");
+    let dev = format!("{}/dev/current", mvm_core::config::mvm_home());
     let kernel = PathBuf::from(
         std::env::var("MVM_INJECT_KERNEL").unwrap_or_else(|_| format!("{dev}/vmlinux")),
     );

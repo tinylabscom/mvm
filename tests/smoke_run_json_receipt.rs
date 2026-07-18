@@ -54,12 +54,12 @@ impl SmokeSandbox {
         #[allow(deprecated)]
         let mut cmd = Command::cargo_bin("mvmctl").expect("cargo_bin mvmctl");
         cmd.env("HOME", self.path())
-            .env("MVM_HOME", self.path().join(".mvm"));
+            .env("MVM_HOME", self.path().join("mvm-home"));
         cmd
     }
 
     fn scratch_cache(&self) -> PathBuf {
-        self.path().join(".mvm/cache")
+        self.path().join("mvm-home/cache")
     }
 
     fn seed_cached_runtime_caches(&self) {

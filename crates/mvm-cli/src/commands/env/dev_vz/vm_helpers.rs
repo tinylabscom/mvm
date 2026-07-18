@@ -111,7 +111,7 @@ fn reap_orphaned_vm_helpers_both_roots(
 ) -> Result<ReapOutcome> {
     let builder_root =
         std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm/vms");
-    let workload_root = std::path::PathBuf::from(mvm_core::config::mvm_home()).join("vms");
+    let workload_root = mvm_core::config::vms_dir();
     let snapshot = ProcSnapshot::capture();
 
     let mut out = reap_orphaned_vm_helpers_at_with_snapshot(

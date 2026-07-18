@@ -5524,10 +5524,7 @@ mod tests {
         env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let arch = host_arch_tag().to_string();
-        let source_arch_dir = scratch
-            .path()
-            .join(".mvm")
-            .join("cache")
+        let source_arch_dir = std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir())
             .join("builder-vm")
             .join(&arch);
         std::fs::create_dir_all(&source_arch_dir).unwrap();
@@ -5584,10 +5581,7 @@ mod tests {
         env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let arch = host_arch_tag().to_string();
-        let source_arch_dir = scratch
-            .path()
-            .join(".mvm")
-            .join("cache")
+        let source_arch_dir = std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir())
             .join("builder-vm")
             .join(&arch);
         std::fs::create_dir_all(&source_arch_dir).unwrap();

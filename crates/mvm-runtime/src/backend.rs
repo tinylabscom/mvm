@@ -144,7 +144,7 @@ fn firecracker_spawn_standby(spec: &StandbySpec) -> Result<StandbyHandle> {
     let slot = microvm::allocate_slot(&spec.id)
         .with_context(|| format!("reserve Firecracker slot for standby '{}'", spec.id))?;
     let mut slot_reservation = microvm::SlotReservationGuard::new(&slot);
-    let abs_dir = microvm::resolve_vm_dir(&slot)?;
+    let abs_dir = slot.vm_dir.clone();
     let abs_socket = format!("{}/fc.socket", abs_dir);
     microvm::start_vm_firecracker(&abs_dir, &abs_socket)
         .with_context(|| format!("prestart Firecracker daemon for standby '{}'", spec.id))?;
@@ -181,7 +181,7 @@ fn firecracker_claim_standby(handle: &StandbyHandle, claim: &StandbyClaim) -> Re
         .with_context(|| format!("read reserved Firecracker slot for '{}'", handle.id))?;
     let mut slot_reservation = microvm::SlotReservationGuard::new(&slot);
     let fc_config = FirecrackerConfig::from_start_config_with_slot(&start_config, slot)?;
-    let abs_dir = microvm::resolve_vm_dir(&fc_config.run_config.slot)?;
+    let abs_dir = fc_config.run_config.slot.vm_dir.clone();
     let resolved_socket = format!("{}/fc.socket", abs_dir);
     if resolved_socket != handle.control_socket {
         anyhow::bail!(
@@ -1127,13 +1127,13 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let temp = tempfile::tempdir().expect("create temp HOME");
-        let vms = temp.path().join(".mvm/vms");
+        let vms = temp.path().join("vms");
         for (name, marker) in [("q1", "qemu.pid"), ("l1", "libkrun.pid"), ("f1", "fc.pid")] {
             std::fs::create_dir_all(vms.join(name)).expect("mkdir vm dir");
             std::fs::write(vms.join(name).join(marker), "123").expect("write marker");
         }
         env.set("HOME", temp.path());
-        env.set("MVM_HOME", temp.path().join(".mvm"));
+        env.set("MVM_HOME", temp.path());
 
         let q = AnyBackend::for_started_vm("q1");
         let l = AnyBackend::for_started_vm("l1");

@@ -370,7 +370,7 @@ pub fn converge_at(registry_path: &Path, vms_root: &Path, opts: &ConvergeOpts) -
 /// self-heal is observable and `audit verify` still chains.
 pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
     let registry_path = crate::vm::name_registry::registry_path();
-    let vms_root = PathBuf::from(mvm_core::config::mvm_home()).join("vms");
+    let vms_root = mvm_core::config::vms_dir();
     let report = converge_at(&registry_path, &vms_root, opts);
     if !opts.dry_run {
         emit_audit(&report);

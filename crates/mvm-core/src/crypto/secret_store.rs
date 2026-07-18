@@ -73,6 +73,14 @@ pub fn default_secrets_dir() -> Result<PathBuf> {
     Ok(crate::config::mvm_home_strict()?.join("secrets"))
 }
 
+/// Last-resort store dir when no home root resolves (neither `MVM_HOME`
+/// nor `$HOME` set): a cwd-relative hidden dir. Deliberately NOT the
+/// lenient `/tmp` fallback — this store holds secret material and must
+/// not land somewhere world-readable.
+fn fallback_secrets_dir() -> PathBuf {
+    PathBuf::from(".mvm-secrets")
+}
+
 const FILE_SECRET_MAGIC: &[u8] = b"MVMS1\0";
 const FILE_STORE_KEY_FILENAME: &str = ".secret-store.key";
 const FILE_STORE_KEYRING_SERVICE: &str = "mvm-secret-store";
@@ -168,11 +176,11 @@ impl FileSecretStore {
 
 impl Default for FileSecretStore {
     fn default() -> Self {
-        // Falls back to `./.mvm/secrets/` if $HOME is unset; callers
-        // that care about absolute paths should construct via
+        // Falls back to a cwd-relative dir if no home root resolves;
+        // callers that care about absolute paths should construct via
         // `with_dir(default_secrets_dir()?)` and surface the env
         // error.
-        let base = default_secrets_dir().unwrap_or_else(|_| PathBuf::from(".mvm").join("secrets"));
+        let base = default_secrets_dir().unwrap_or_else(|_| fallback_secrets_dir());
         Self::with_dir(base)
     }
 }
@@ -492,7 +500,7 @@ impl KeyringSecretStore {
 
 impl Default for KeyringSecretStore {
     fn default() -> Self {
-        let base = default_secrets_dir().unwrap_or_else(|_| PathBuf::from(".mvm").join("secrets"));
+        let base = default_secrets_dir().unwrap_or_else(|_| fallback_secrets_dir());
         Self::with_dir(base)
     }
 }
@@ -628,8 +636,7 @@ pub const BACKEND_ENV: &str = "MVM_SECRET_STORE_BACKEND";
 pub fn default_secret_store() -> Box<dyn SecretStore> {
     match std::env::var(BACKEND_ENV).ok().as_deref() {
         Some(v) if v.eq_ignore_ascii_case("file") => {
-            let base =
-                default_secrets_dir().unwrap_or_else(|_| PathBuf::from(".mvm").join("secrets"));
+            let base = default_secrets_dir().unwrap_or_else(|_| fallback_secrets_dir());
             return Box::new(FileSecretStore::with_dir(base));
         }
         Some(v) if v.eq_ignore_ascii_case("keyring") => {

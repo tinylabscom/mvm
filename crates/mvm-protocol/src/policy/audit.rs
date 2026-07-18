@@ -129,8 +129,9 @@ pub enum LocalAuditKind {
     ImageVerifyFailed,
     // --- Registry / cache mutations (no-unaudited-mutation fillers) ---
     /// `mvmctl cache prune` removed temporary files / empty subdirs
-    /// from `~/.cache/mvm`. Pure read-only `cache info` is not
-    /// audited; the prune verb is, because it deletes host bytes.
+    /// from the cache tree (`<mvm_home>/cache`). Pure read-only
+    /// `cache info` is not audited; the prune verb is, because it
+    /// deletes host bytes.
     CachePrune,
     /// `mvmctl pack rollback` / `pack download` / `pack update` changed
     /// the attested-pack cache: retargeted a key's active version, or
@@ -275,7 +276,7 @@ pub enum LocalAuditKind {
     // Dev sessions hold a long-lived microVM with PTY / shell-exec
     // surface available behind the session id. The session id IS the
     // capability: anyone with read access to
-    // `$XDG_RUNTIME_DIR/mvm/sessions/<id>.json` can attach. Every
+    // `<mvm_home>/run/sessions/<id>.json` can attach. Every
     // dev-shell entry point therefore lands in the audit log so a
     // forensics pass can reconstruct who-attached-when even after
     // the session record is reaped.

@@ -496,9 +496,9 @@ pub(crate) struct AuditLog {
 
 impl AuditLog {
     pub(crate) fn default() -> Result<Self> {
-        // No `$HOME` → no-op log (CI sandboxes, daemons without a home
-        // dir). MVM_HOME is honored by mvm_audit_dir when set.
-        if std::env::var_os("HOME").is_none() && std::env::var_os("MVM_HOME").is_none() {
+        // No resolvable home root → no-op log (CI sandboxes, daemons
+        // without a home dir).
+        if mvm_core::config::mvm_home_strict().is_err() {
             return Ok(Self {
                 path: None,
                 recorder: None,

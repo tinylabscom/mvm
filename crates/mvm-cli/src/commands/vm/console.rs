@@ -541,7 +541,7 @@ mod accessible_gate_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
         env.set("HOME", tmp.path());
-        env.set("MVM_HOME", tmp.path().join(".mvm"));
+        env.set("MVM_HOME", tmp.path());
         f(tmp.path());
     }
 

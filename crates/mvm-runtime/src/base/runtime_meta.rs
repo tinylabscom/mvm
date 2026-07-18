@@ -249,24 +249,18 @@ mod tests {
     {
         let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var_os("HOME");
-        // `meta_path` resolves via `vm_state_dir`, which prefers MVM_HOME
-        // over $HOME — clear it so these $HOME-rooted assertions hold even if
-        // a sibling test (under the same lock) leaked the override.
-        let prev_data = std::env::var_os("MVM_HOME");
-        // SAFETY: tests only; HOME/MVM_HOME are process-global but the
-        // HOME_TEST_LOCK serializes us with everything else that reads them.
+        // `meta_path` resolves via `vm_state_dir`, which honors the MVM_HOME
+        // override — point it at the tempdir so every path lands there, even
+        // if a sibling test (under the same lock) leaked its own override.
+        let prev = std::env::var_os("MVM_HOME");
+        // SAFETY: tests only; MVM_HOME is process-global but the
+        // HOME_TEST_LOCK serializes us with everything else that reads it.
         unsafe {
-            std::env::set_var("HOME", tmp.path());
-            std::env::remove_var("MVM_HOME");
+            std::env::set_var("MVM_HOME", tmp.path());
         }
         f(tmp.path());
         unsafe {
             match prev {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-            match prev_data {
                 Some(v) => std::env::set_var("MVM_HOME", v),
                 None => std::env::remove_var("MVM_HOME"),
             }
@@ -317,7 +311,7 @@ mod tests {
         // Older VMs wrote only `{"mode":"attached"}`; we treat them
         // as accessible by default to preserve historical behavior.
         with_home_temp(|home| {
-            let dir = home.join(".mvm").join("vms").join("legacy");
+            let dir = home.join("vms").join("legacy");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("mode.json"), "{\"mode\":\"attached\"}\n").unwrap();
             let meta = read("legacy").expect("read").expect("present");
@@ -407,7 +401,7 @@ mod tests {
     #[test]
     fn rootfs_path_absent_in_old_file_reads_as_none() {
         with_home_temp(|home| {
-            let dir = home.join(".mvm").join("vms").join("oldvm");
+            let dir = home.join("vms").join("oldvm");
             std::fs::create_dir_all(&dir).unwrap();
             // Old shape: no rootfs_path field.
             std::fs::write(
@@ -462,7 +456,7 @@ mod tests {
     #[test]
     fn runtime_overlay_fields_absent_in_old_file_read_as_defaults() {
         with_home_temp(|home| {
-            let dir = home.join(".mvm").join("vms").join("oldvm-runtime");
+            let dir = home.join("vms").join("oldvm-runtime");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
                 dir.join("mode.json"),

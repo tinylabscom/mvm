@@ -278,7 +278,7 @@ fn confirm_tier(tier: Tier, yes_flag: bool) -> Result<bool> {
 /// the probe are conservative: a failed readdir returns None (the check
 /// is a guardrail, not a guarantee).
 fn first_running_vm() -> Option<String> {
-    let vms_root = PathBuf::from(mvm_core::config::mvm_home()).join("vms");
+    let vms_root = mvm_core::config::vms_dir();
     let entries = std::fs::read_dir(&vms_root).ok()?;
     for entry in entries.flatten() {
         let pid_path = entry.path().join("libkrun.pid");

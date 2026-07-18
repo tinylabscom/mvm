@@ -314,10 +314,13 @@ fn expand_tilde(p: &str) -> std::path::PathBuf {
 /// host signer key, the audit chain, and common credential stores.
 /// Sharing any of these would hand a guest the host's trust roots.
 fn denied_host_roots() -> Vec<std::path::PathBuf> {
-    let mut roots = Vec::new();
+    let mut roots = vec![
+        mvm_core::config::mvm_keys_dir(),
+        mvm_core::config::mvm_audit_dir(),
+    ];
     if let Some(home) = std::env::var_os("HOME") {
         let h = std::path::PathBuf::from(home);
-        for sub in [".mvm/keys", ".mvm/audit", ".ssh", ".gnupg", ".aws"] {
+        for sub in [".ssh", ".gnupg", ".aws"] {
             roots.push(h.join(sub));
         }
     }

@@ -473,10 +473,10 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("mvm-as-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_home = std::env::var_os("HOME");
-        // Route mvm_audit_dir() / mvm_keys_dir() under a disposable HOME.
+        let saved_mvm_home = std::env::var_os("MVM_HOME");
+        // Route mvm_audit_dir() / mvm_keys_dir() under a disposable MVM_HOME.
         // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("HOME", &dir) };
+        unsafe { std::env::set_var("MVM_HOME", &dir) };
 
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -551,9 +551,9 @@ mod tests {
         reap_audit_signer(&state_dir);
         // SAFETY: serialised by HOME_TEST_LOCK.
         unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
+            match saved_mvm_home {
+                Some(v) => std::env::set_var("MVM_HOME", v),
+                None => std::env::remove_var("MVM_HOME"),
             }
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -566,9 +566,9 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("mvm-as-nobind-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_home = std::env::var_os("HOME");
+        let saved_mvm_home = std::env::var_os("MVM_HOME");
         // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("HOME", &dir) };
+        unsafe { std::env::set_var("MVM_HOME", &dir) };
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
 
@@ -597,9 +597,9 @@ mod tests {
                 Some(v) => std::env::set_var("MVM_AUDIT_SIGNER_PATH", v),
                 None => std::env::remove_var("MVM_AUDIT_SIGNER_PATH"),
             }
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
+            match saved_mvm_home {
+                Some(v) => std::env::set_var("MVM_HOME", v),
+                None => std::env::remove_var("MVM_HOME"),
             }
         }
         let err = res.expect_err("must fail closed when the UDS never binds");
@@ -646,9 +646,9 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("mvm-broker-spawn-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_home = std::env::var_os("HOME");
+        let saved_mvm_home = std::env::var_os("MVM_HOME");
         // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("HOME", &dir) };
+        unsafe { std::env::set_var("MVM_HOME", &dir) };
 
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -718,9 +718,9 @@ mod tests {
         reap_broker(&state_dir);
         // SAFETY: serialised by HOME_TEST_LOCK.
         unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
+            match saved_mvm_home {
+                Some(v) => std::env::set_var("MVM_HOME", v),
+                None => std::env::remove_var("MVM_HOME"),
             }
         }
         std::fs::remove_dir_all(&dir).ok();
@@ -755,9 +755,9 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("mvm-bs-admit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_home = std::env::var_os("HOME");
+        let saved_mvm_home = std::env::var_os("MVM_HOME");
         // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("HOME", &dir) };
+        unsafe { std::env::set_var("MVM_HOME", &dir) };
 
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).unwrap();
@@ -828,9 +828,9 @@ mod tests {
         reap_broker_services(&state_dir);
         // SAFETY: serialised by HOME_TEST_LOCK.
         unsafe {
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
+            match saved_mvm_home {
+                Some(v) => std::env::set_var("MVM_HOME", v),
+                None => std::env::remove_var("MVM_HOME"),
             }
         }
         std::fs::remove_dir_all(&dir).ok();

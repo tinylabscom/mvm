@@ -348,9 +348,7 @@ pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Resul
     let Some(plan_json) = cfg.plan_json.as_deref() else {
         return Ok(());
     };
-    let state_dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
-        .join("vms")
-        .join(&cfg.name);
+    let state_dir = mvm_core::config::vm_state_dir(&cfg.name);
     std::fs::create_dir_all(&state_dir)
         .with_context(|| format!("create per-VM state dir {}", state_dir.display()))?;
     write_secret_file(&state_dir.join("plan.json"), plan_json.as_bytes())?;

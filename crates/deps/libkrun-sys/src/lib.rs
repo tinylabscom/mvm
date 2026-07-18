@@ -2086,12 +2086,12 @@ mod tests {
 
     #[test]
     fn vsock_socket_path_uses_configured_dir_when_set() {
-        let ctx =
-            KrunContext::new("vm-1", "/k", "/r").with_vsock_socket_dir("/home/user/.mvm/vms/vm-1");
+        let ctx = KrunContext::new("vm-1", "/k", "/r")
+            .with_vsock_socket_dir("/home/user/mvm-home/vms/vm-1");
         let path = ctx.vsock_socket_path(5252);
         assert_eq!(
             path,
-            std::path::PathBuf::from("/home/user/.mvm/vms/vm-1/vsock-5252.sock")
+            std::path::PathBuf::from("/home/user/mvm-home/vms/vm-1/vsock-5252.sock")
         );
     }
 

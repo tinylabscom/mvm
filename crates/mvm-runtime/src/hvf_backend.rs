@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
-use mvm_core::config::{mvm_home, vm_state_dir};
+use mvm_core::config::{vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, VmBackend, VmCapabilities,
     VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
@@ -114,7 +114,7 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
 }
 
 fn vms_root() -> PathBuf {
-    PathBuf::from(mvm_home()).join("vms")
+    vms_dir()
 }
 
 /// The per-VM gating endpoint is the sole egress gate on hvf (claim-10

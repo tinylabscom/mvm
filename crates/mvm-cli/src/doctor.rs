@@ -611,9 +611,7 @@ fn network_tunnel_worker_check() -> Check {
         name: "network tunnel worker",
         category: "platform",
         ok: true,
-        info: network_tunnel_worker_summary(
-            &std::path::PathBuf::from(mvm_core::config::mvm_home()).join("vms"),
-        ),
+        info: network_tunnel_worker_summary(&mvm_core::config::vms_dir()),
     }
 }
 

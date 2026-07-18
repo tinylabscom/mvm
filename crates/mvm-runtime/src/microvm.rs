@@ -180,11 +180,6 @@ fn resolve_microvm_dir() -> Result<String> {
     run_in_vm_stdout(&format!("echo {}", MICROVM_DIR))
 }
 
-/// Resolve a per-VM directory path (~ expansion) on the Linux host.
-pub fn resolve_vm_dir(slot: &VmSlot) -> Result<String> {
-    run_in_vm_stdout(&format!("echo {}", slot.vm_dir))
-}
-
 /// Absolute root of the per-VM directories (`<mvm_home>/vms`) as a `String`
 /// for shell interpolation. A host path, resolved on the host — never `echo`d
 /// inside a VM (on macOS every `run_in_vm` shells into the dev VM,
@@ -209,8 +204,8 @@ pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
 /// nor `$HOME` set — e.g. hermetic test environments that intentionally
 /// omit them).
 pub fn fc_pid_path(name: &str) -> Option<std::path::PathBuf> {
-    let root = mvm_core::config::mvm_home_strict().ok()?;
-    Some(root.join("vms").join(name).join("fc.pid"))
+    mvm_core::config::mvm_home_strict().ok()?;
+    Some(mvm_core::config::vm_state_dir(name).join("fc.pid"))
 }
 
 /// Path to the host-side UDS that proxies the guest agent's vsock port for a
@@ -797,7 +792,7 @@ pub fn run_from_build(config: &FlakeRunConfig) -> Result<()> {
     let slot = &config.slot;
 
     // Check if this VM name is already running
-    let abs_dir = resolve_vm_dir(slot)?;
+    let abs_dir = slot.vm_dir.clone();
     let abs_socket = format!("{}/fc.socket", abs_dir);
     let pid_file = format!("{}/fc.pid", abs_dir);
 
@@ -823,7 +818,7 @@ pub fn run_from_prestarted_build(
     config.validate()?;
     require_linux_env()?;
 
-    let expected_dir = resolve_vm_dir(&config.slot)?;
+    let expected_dir = config.slot.vm_dir.clone();
     if expected_dir != abs_dir {
         anyhow::bail!(
             "prestarted Firecracker dir mismatch for '{}': expected {}, got {}",
@@ -1074,7 +1069,7 @@ pub fn restore_from_template_snapshot(
     let slot = &config.slot;
 
     // Check if this VM name is already running
-    let abs_dir = resolve_vm_dir(slot)?;
+    let abs_dir = slot.vm_dir.clone();
     let abs_socket = format!("{}/fc.socket", abs_dir);
     let pid_file = format!("{}/fc.pid", abs_dir);
 
@@ -3216,8 +3211,7 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
     let bridge_bin =
         resolve_fc_bridge_path().with_context(|| "locate mvm-bridge binary".to_string())?;
 
-    let data_dir = std::path::PathBuf::from(mvm_core::config::mvm_home());
-    let state_dir = data_dir.join("vms").join(vm_name);
+    let state_dir = mvm_core::config::vm_state_dir(vm_name);
     let plan_path = state_dir.join("plan.json");
     let bundle_path = state_dir.join("bundle.json");
     let plan_json = match std::fs::read_to_string(&plan_path) {
@@ -3252,12 +3246,13 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
     //            relative to `mvm_home()` so an `MVM_HOME`
     //            override (tests, mvmd) transparently re-roots the
     //            whole tree.
-    let audit_dir = data_dir.join("audit");
+    let audit_dir = mvm_core::config::mvm_audit_dir();
     let audit_socket = audit_dir.join(format!("gateway-{vm_name}.sock"));
-    let keys_dir = data_dir.join("keys");
+    let keys_dir = mvm_core::config::mvm_keys_dir();
     let signing_key_path = keys_dir.join("host-signer.ed25519");
     let passt_path = passt_path_from_env_or_default();
-    let passt_hashes_path = data_dir.join("passt-hashes.toml");
+    let passt_hashes_path =
+        std::path::PathBuf::from(mvm_core::config::mvm_home()).join("passt-hashes.toml");
 
     // ── Step 3: create the socketpair. Both halves go to the child
     //            (one feeds passt, one feeds the supervisor's gateway

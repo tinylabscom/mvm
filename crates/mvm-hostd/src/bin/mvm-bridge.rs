@@ -320,7 +320,7 @@ mod tests {
     fn passt() -> BridgeEndpointKind {
         BridgeEndpointKind::Passt {
             passt_path: PathBuf::from("/usr/bin/passt"),
-            passt_hashes_path: PathBuf::from("/h/.mvm/passt-hashes.toml"),
+            passt_hashes_path: PathBuf::from("/h/mvm-home/passt-hashes.toml"),
             gateway_fd_raw: 7,
             supervisor_fd_raw: 8,
         }

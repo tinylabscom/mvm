@@ -76,7 +76,7 @@ impl PostureReport {
 }
 
 pub(super) fn run(json: bool) -> Result<()> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = mvm_core::config::mvm_home_strict().ok();
     let report = build_report(home.as_deref());
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
@@ -131,7 +131,8 @@ fn check_host_signer(home: Option<&std::path::Path>) -> PostureCheck {
         return PostureCheck {
             name: "host_signer",
             status: PostureStatus::Fail,
-            detail: "$HOME unset — cannot locate ~/.mvm/keys/host-signer.ed25519".into(),
+            detail: "no home root (MVM_HOME/$HOME unset) — cannot locate the host signer key"
+                .into(),
         };
     }
     let path = mvm_core::config::mvm_keys_dir().join("host-signer.ed25519");
@@ -186,7 +187,7 @@ fn check_audit_chain(home: Option<&std::path::Path>) -> PostureCheck {
         return PostureCheck {
             name: "audit_chain",
             status: PostureStatus::Fail,
-            detail: "$HOME unset — cannot locate ~/.mvm/audit/local.jsonl".into(),
+            detail: "no home root (MVM_HOME/$HOME unset) — cannot locate the audit chain".into(),
         };
     }
     let path = mvm_core::config::mvm_audit_dir().join("local.jsonl");
@@ -331,7 +332,8 @@ fn check_tool_staging_dir(home: Option<&std::path::Path>) -> PostureCheck {
                 return PostureCheck {
                     name: "tool_staging_dir",
                     status: PostureStatus::Fail,
-                    detail: "$HOME unset and $MVM_TOOL_STAGING_DIR not set".into(),
+                    detail: "no home root (MVM_HOME/$HOME unset) and $MVM_TOOL_STAGING_DIR not set"
+                        .into(),
                 };
             }
         },
@@ -354,7 +356,7 @@ fn check_overlay_root(home: Option<&std::path::Path>) -> PostureCheck {
         return PostureCheck {
             name: "overlay_root",
             status: PostureStatus::Fail,
-            detail: "$HOME unset".into(),
+            detail: "no home root (MVM_HOME/$HOME unset)".into(),
         };
     }
     let path = mvm_core::config::mvm_overlays_dir();
@@ -385,7 +387,7 @@ fn check_secret_store(home: Option<&std::path::Path>) -> PostureCheck {
         return PostureCheck {
             name: "secret_store",
             status: PostureStatus::Fail,
-            detail: "$HOME unset".into(),
+            detail: "no home root (MVM_HOME/$HOME unset)".into(),
         };
     }
     let path = mvm_core::config::mvm_secrets_dir();
@@ -475,14 +477,14 @@ mod tests {
 
     fn build_fake_home() -> tempfile::TempDir {
         let dir = tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".mvm").join("keys")).unwrap();
+        std::fs::create_dir_all(dir.path().join("keys")).unwrap();
         dir
     }
 
-    // Production paths now resolve via mvm_core::config::mvm_home()
-    // (MVM_HOME first, then $HOME). Point MVM_HOME at the test's
-    // `<temp>/.mvm` so the helper-built paths land in the temp tree the
-    // test populates. Restored on drop by the shared process-env guard.
+    // Production paths resolve via mvm_core::config::mvm_home()
+    // (MVM_HOME first, then $HOME). Point MVM_HOME at the tempdir so the
+    // helper-built paths land in the temp tree the test populates.
+    // Restored on drop by the shared process-env guard.
 
     struct DataDirGuard {
         _env: mvm_core::util::test_env::TestEnv,
@@ -491,7 +493,7 @@ mod tests {
     impl DataDirGuard {
         fn new(home: &std::path::Path) -> Self {
             let mut env = mvm_core::util::test_env::TestEnv::new();
-            env.set("MVM_HOME", home.join(".mvm"));
+            env.set("MVM_HOME", home);
             Self { _env: env }
         }
     }
@@ -523,11 +525,7 @@ mod tests {
     fn host_signer_check_fails_when_mode_loose() {
         let dir = build_fake_home();
         let _g = DataDirGuard::new(dir.path());
-        let signer = dir
-            .path()
-            .join(".mvm")
-            .join("keys")
-            .join("host-signer.ed25519");
+        let signer = dir.path().join("keys").join("host-signer.ed25519");
         write_mode(&signer, &[0u8; 32], 0o644);
         let check = check_host_signer(Some(dir.path()));
         assert_eq!(check.status, PostureStatus::Fail);
@@ -539,11 +537,7 @@ mod tests {
     fn host_signer_check_passes_at_0600() {
         let dir = build_fake_home();
         let _g = DataDirGuard::new(dir.path());
-        let signer = dir
-            .path()
-            .join(".mvm")
-            .join("keys")
-            .join("host-signer.ed25519");
+        let signer = dir.path().join("keys").join("host-signer.ed25519");
         write_mode(&signer, &[0u8; 32], 0o600);
         let check = check_host_signer(Some(dir.path()));
         assert_eq!(check.status, PostureStatus::Ok);
@@ -566,7 +560,7 @@ mod tests {
     fn overlay_root_check_passes_at_0700_with_tenant_count() {
         let dir = build_fake_home();
         let _g = DataDirGuard::new(dir.path());
-        let overlay = dir.path().join(".mvm").join("overlays");
+        let overlay = dir.path().join("overlays");
         std::fs::create_dir_all(&overlay).unwrap();
         std::fs::create_dir_all(overlay.join("acme")).unwrap();
         std::fs::create_dir_all(overlay.join("beta")).unwrap();
@@ -582,7 +576,7 @@ mod tests {
     fn overlay_root_check_fails_at_0755() {
         let dir = build_fake_home();
         let _g = DataDirGuard::new(dir.path());
-        let overlay = dir.path().join(".mvm").join("overlays");
+        let overlay = dir.path().join("overlays");
         std::fs::create_dir_all(&overlay).unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&overlay, std::fs::Permissions::from_mode(0o755)).unwrap();

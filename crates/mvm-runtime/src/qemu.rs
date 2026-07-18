@@ -34,7 +34,7 @@
 //! - `status` probes the qemu PID; `list` walks `~/.mvm/vms/*/qemu.pid`.
 
 use anyhow::{Result, anyhow, bail};
-use mvm_core::config::{mvm_home, vm_console_log, vm_state_dir};
+use mvm_core::config::{vm_console_log, vm_state_dir, vms_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
     SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig,
@@ -469,7 +469,7 @@ impl VmBackend for QemuBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = PathBuf::from(mvm_home()).join("vms");
+        let root = vms_dir();
         let entries = match std::fs::read_dir(&root) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -661,7 +661,7 @@ fn allocate_cid(name: &str) -> Result<u32> {
     // cheapest cross-process mutex; it's released when `_lock` (the open
     // file description) drops at function return.
     use std::os::fd::AsRawFd;
-    let vms_root = PathBuf::from(mvm_home()).join("vms");
+    let vms_root = vms_dir();
     std::fs::create_dir_all(&vms_root)
         .map_err(|e| anyhow!("create {}: {e}", vms_root.display()))?;
     let lock_path = vms_root.join(".qemu-cid-alloc.lock");
@@ -694,7 +694,7 @@ fn allocate_cid(name: &str) -> Result<u32> {
 /// from a crashed VM is ignored so its CID can be reclaimed.
 fn used_cids() -> std::collections::HashSet<u32> {
     let mut set = std::collections::HashSet::new();
-    let root = PathBuf::from(mvm_home()).join("vms");
+    let root = vms_dir();
     let Ok(entries) = std::fs::read_dir(&root) else {
         return set;
     };

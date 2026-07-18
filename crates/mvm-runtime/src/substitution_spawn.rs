@@ -400,11 +400,11 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let dir = std::env::temp_dir().join(format!("mvm-subst-uds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let saved_home = std::env::var_os("HOME");
-        // Route vm_substitution_env_path under our temp HOME so the write lands
+        let saved_mvm_home = std::env::var_os("MVM_HOME");
+        // Route vm_substitution_env_path under a temp MVM_HOME so the write lands
         // somewhere disposable.
         // SAFETY: serialised by HOME_TEST_LOCK.
-        unsafe { std::env::set_var("HOME", &dir) };
+        unsafe { std::env::set_var("MVM_HOME", &dir) };
 
         // Stub endpoint: dump stdin (the config JSON) to a file, then emit one
         // handshake line so the spawn helper's read_handshake_line succeeds.
@@ -427,7 +427,7 @@ mod tests {
         unsafe { std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", &stub) };
 
         // The spawn helper writes the minted (var→placeholder) handshake to
-        // `vm_substitution_env_path` — ensure its parent dir exists under HOME.
+        // `vm_substitution_env_path` — ensure its parent dir exists under the root.
         if let Some(parent) = mvm_core::config::vm_substitution_env_path("uds-xport-vm").parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
@@ -453,9 +453,9 @@ mod tests {
                 Some(v) => std::env::set_var("MVM_SUBSTITUTION_ENDPOINT_PATH", v),
                 None => std::env::remove_var("MVM_SUBSTITUTION_ENDPOINT_PATH"),
             }
-            match saved_home {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
+            match saved_mvm_home {
+                Some(v) => std::env::set_var("MVM_HOME", v),
+                None => std::env::remove_var("MVM_HOME"),
             }
         }
         res.expect("spawn with stub endpoint should succeed");

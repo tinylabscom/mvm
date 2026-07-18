@@ -30,7 +30,7 @@ fn uninstall_all_dry_run_mentions_config_and_binary() {
         .success();
     let stdout = String::from_utf8(assert.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.contains(".mvm") || stdout.contains("config"),
+        stdout.contains(&mvm_core::config::mvm_home()) || stdout.contains("config"),
         "dry-run --all should mention config dir, got: {stdout}"
     );
     assert!(

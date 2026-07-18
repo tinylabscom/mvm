@@ -98,25 +98,26 @@ impl FlowCountMetrics {
     }
 
     /// Per-VM scrape file the CLI's `/metrics` handler concatenates.
-    /// Lives under `~/.mvm/audit/` (mode 0700) because
+    /// Lives in the audit dir (`<mvm_home>/audit/`, mode 0700) because
     /// the supervisor and the CLI run as the same user and share that
     /// directory already — no new socket or RPC is needed to cross
     /// the process boundary.
     ///
-    /// Fails closed (`None`) when `HOME` or `MVM_VM_NAME` is unset, or
-    /// when `MVM_VM_NAME` is not valid UTF-8 (the on-disk filename
-    /// needs a `&str` for `format!`). Mirrors the `ObserverAllowlist::
-    /// resolve` posture: a misconfigured systemd unit must not silently
-    /// fall back to a world-writable directory like `/tmp` where a
-    /// local attacker could pre-plant a symlink at the rename target.
-    /// `var_os` is preferred over `var` so a non-UTF-8 `HOME` is treated
-    /// as unset rather than falling through `Err(NotUnicode)` into a
-    /// fallback path.
+    /// Fails closed (`None`) when no home root resolves (neither
+    /// `MVM_HOME` nor `$HOME` set) or `MVM_VM_NAME` is unset or not
+    /// valid UTF-8 (the on-disk filename needs a `&str` for `format!`).
+    /// Mirrors the `ObserverAllowlist::resolve` posture: a misconfigured
+    /// systemd unit must not silently fall back to a world-writable
+    /// directory like `/tmp` where a local attacker could pre-plant a
+    /// symlink at the rename target.
     fn scrape_file_path(&self) -> Option<std::path::PathBuf> {
-        let home = std::env::var_os("HOME")?;
+        mvm_core::config::mvm_home_strict().ok()?;
         let vm_name = std::env::var_os("MVM_VM_NAME")?;
         let vm_name = vm_name.to_str()?;
-        Some(scrape_file_path_for(std::path::Path::new(&home), vm_name))
+        Some(scrape_file_path_in(
+            &mvm_core::config::mvm_audit_dir(),
+            vm_name,
+        ))
     }
 
     /// Atomic-ish write: tmp + rename so a concurrent CLI scrape sees
@@ -124,7 +125,9 @@ impl FlowCountMetrics {
     /// blob mid-fwrite.
     fn write_scrape_file(&self) {
         let Some(path) = self.scrape_file_path() else {
-            tracing::debug!("flow-count metrics scrape skipped (HOME or MVM_VM_NAME unset)");
+            tracing::debug!(
+                "flow-count metrics scrape skipped (no home root or MVM_VM_NAME unset)"
+            );
             return;
         };
         self.write_scrape_file_to(&path);
@@ -143,9 +146,8 @@ impl FlowCountMetrics {
     }
 }
 
-fn scrape_file_path_for(home: &std::path::Path, vm_name: &str) -> std::path::PathBuf {
-    home.join(".mvm/audit")
-        .join(format!("metrics-{vm_name}-flow-count.prom"))
+fn scrape_file_path_in(audit_dir: &std::path::Path, vm_name: &str) -> std::path::PathBuf {
+    audit_dir.join(format!("metrics-{vm_name}-flow-count.prom"))
 }
 
 impl Observer for FlowCountMetrics {
@@ -286,13 +288,14 @@ mod tests {
     }
 
     #[test]
-    fn scrape_file_path_for_composes_home_and_vm_name() {
-        let p = scrape_file_path_for(std::path::Path::new("/var/folders/x"), "test-vm-scrape");
+    fn scrape_file_path_in_composes_audit_dir_and_vm_name() {
+        let p = scrape_file_path_in(
+            std::path::Path::new("/var/folders/x/audit"),
+            "test-vm-scrape",
+        );
         assert_eq!(
             p,
-            std::path::PathBuf::from(
-                "/var/folders/x/.mvm/audit/metrics-test-vm-scrape-flow-count.prom"
-            )
+            std::path::PathBuf::from("/var/folders/x/audit/metrics-test-vm-scrape-flow-count.prom")
         );
     }
 
@@ -302,14 +305,14 @@ mod tests {
         // race-free. The env-reading wrapper's None-on-missing
         // behaviour is asserted by code-review of the body, not by
         // manipulating env at runtime.
-        let p = scrape_file_path_for(std::path::Path::new("/home/u"), "vm-a");
-        assert!(p.ends_with(".mvm/audit/metrics-vm-a-flow-count.prom"));
+        let p = scrape_file_path_in(std::path::Path::new("/home/u/audit"), "vm-a");
+        assert!(p.ends_with("audit/metrics-vm-a-flow-count.prom"));
     }
 
     #[test]
     fn write_scrape_file_to_writes_prometheus_body() {
         let tmpdir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmpdir.path().join(".mvm/audit")).unwrap();
+        std::fs::create_dir_all(tmpdir.path().join("audit")).unwrap();
         let m = FlowCountMetrics {
             tenant: "scrape-test".into(),
             opened: AtomicU64::new(1),
@@ -318,7 +321,7 @@ mod tests {
         };
         let target = tmpdir
             .path()
-            .join(".mvm/audit/metrics-test-vm-scrape-flow-count.prom");
+            .join("audit/metrics-test-vm-scrape-flow-count.prom");
         m.write_scrape_file_to(&target);
         let body = std::fs::read_to_string(&target).expect("scrape file exists");
         assert!(body.contains("mvm_flow_opened_total{tenant=\"scrape-test\"} 1"));

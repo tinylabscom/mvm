@@ -30,7 +30,7 @@ use libkrun_sys::{
     BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
     SupervisorConfig,
 };
-use mvm_core::config::{mvm_home, vm_console_log, vm_libkrun_pid, vm_state_dir};
+use mvm_core::config::{vm_console_log, vm_libkrun_pid, vm_state_dir, vms_dir};
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
@@ -1286,7 +1286,7 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = PathBuf::from(mvm_home()).join("vms");
+        let root = vms_dir();
         let entries = match std::fs::read_dir(&root) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

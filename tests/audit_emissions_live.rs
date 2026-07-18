@@ -118,9 +118,9 @@
 //! ## Hermetic setup
 //!
 //! Each test spawns the real `mvmctl` binary via `assert_cmd` with
-//! `HOME` pointed at a per-test `tempfile::tempdir()` (and `MVM_HOME`
-//! cleared so the default `<HOME>/.mvm` root wins). The audit log
-//! resolves to `<tempdir>/.mvm/state/log/audit.jsonl`
+//! `MVM_HOME` (and `HOME`) pointed inside a per-test
+//! `tempfile::tempdir()`. The audit log resolves to
+//! `<mvm root>/state/log/audit.jsonl`
 //! (`mvm_core::policy::audit::default_audit_log()`). Tests read that
 //! file and assert the expected `LocalAuditKind` (in its
 //! `serde(rename_all = "snake_case")` form, e.g. `"cache_prune"`)
@@ -161,27 +161,30 @@ impl AuditSandbox {
         self.home.path()
     }
 
+    /// The mvm root the subprocess resolves: `MVM_HOME` points here (see
+    /// [`Self::mvmctl`]), so every `mvm_core::config` path the subprocess
+    /// derives lands under it.
+    fn mvm_root(&self) -> PathBuf {
+        self.home_path().join("mvm-home")
+    }
+
     /// Resolve the audit log path the subprocess will write to:
     /// `mvm_core::policy::audit::default_audit_log()` returns
-    /// `<mvm root>/state/log/audit.jsonl`, and with `HOME` pointed at
-    /// the sandbox the root is `<HOME>/.mvm`.
+    /// `<mvm root>/state/log/audit.jsonl`, and `MVM_HOME` pins the root
+    /// to the sandbox's [`Self::mvm_root`].
     fn audit_log_path(&self) -> PathBuf {
-        self.home_path()
-            .join(".mvm")
+        self.mvm_root()
             .join("state")
             .join("log")
             .join("audit.jsonl")
     }
 
     /// The `mvmctl secret` command writes its own per-action JSONL
-    /// to `~/.mvm/audit/secrets.jsonl` (distinct from the
+    /// to `<mvm root>/audit/secrets.jsonl` (distinct from the
     /// `LocalAudit` stream). Entries have shape
     /// `{"action":"put","tenant":"...","name":"...","outcome":"ok",...}`.
     fn secret_audit_log_path(&self) -> PathBuf {
-        self.home_path()
-            .join(".mvm")
-            .join("audit")
-            .join("secrets.jsonl")
+        self.mvm_root().join("audit").join("secrets.jsonl")
     }
 
     /// Build a Command pre-wired with `HOME` overridden so every
@@ -189,12 +192,12 @@ impl AuditSandbox {
     fn mvmctl(&self) -> Command {
         #[allow(deprecated)]
         let mut c = Command::cargo_bin("mvmctl").expect("cargo_bin mvmctl");
-        // HOME drives every dir helper in mvm_core::config — the whole
-        // tree cascades off `<HOME>/.mvm` when MVM_HOME is unset.
-        // Clearing MVM_HOME guarantees HOME wins so the test runner's
-        // own override doesn't leak into the subprocess.
+        // MVM_HOME drives every dir helper in mvm_core::config — the
+        // whole tree cascades off it. Setting it explicitly (instead of
+        // relying on the HOME fallback) also guarantees the test
+        // runner's own override doesn't leak into the subprocess.
         c.env("HOME", self.home_path())
-            .env_remove("MVM_HOME")
+            .env("MVM_HOME", self.mvm_root())
             // Pin the file-backed secret store. The default
             // (`default_secret_store`) auto-picks the OS keyring
             // when reachable, which on Linux CI runners means the
@@ -1059,10 +1062,9 @@ struct MockVmAgentFixture {
 /// listening at `<vm_dir>/runtime/v.sock`. Returns when the listener
 /// is ready to accept connections.
 fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture {
-    // mvm_home() resolves to `<HOME>/.mvm` by default. The
-    // subprocess sees HOME=sandbox.home_path() and so will compute
-    // the same path; we compute it here from the same root.
-    let vm_dir = sandbox.home_path().join(".mvm").join("mock-vms").join(name);
+    // The subprocess resolves mvm_home() from the MVM_HOME the sandbox
+    // sets, so it computes the same path we compute here.
+    let vm_dir = sandbox.mvm_root().join("mock-vms").join(name);
     std::fs::create_dir_all(&vm_dir).expect("mkdir mock vm_dir");
     let agent = mvm_runtime::mock_guest_agent::MockGuestAgent::start(&vm_dir)
         .expect("start mock guest agent");
@@ -1304,8 +1306,7 @@ fn snapshot_rm_emits_snapshot_delete_audit_entry() {
     // No real Firecracker / VM is involved.
     let sandbox = AuditSandbox::new();
     let snap_dir = sandbox
-        .home_path()
-        .join(".mvm")
+        .mvm_root()
         .join("instances")
         .join("test-snap")
         .join("snapshot");

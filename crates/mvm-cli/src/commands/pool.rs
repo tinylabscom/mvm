@@ -173,7 +173,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     };
     let have = pool.idle_count_compatible(&want)? as u32;
     let pool_root = mvm_core::config::mvm_pool_dir()?;
-    let vms_root = mvm_core::config::mvm_home_strict()?.join("vms");
+    let vms_root = mvm_core::config::vms_dir();
     let mut spawned = 0u32;
     let mut failed = 0u32;
     for _ in have..p.target {
@@ -635,9 +635,9 @@ mod tests {
             Path::new(&spec.control_socket).file_name().unwrap(),
             "control.sock"
         );
-        // Keep the realistic ~/.mvm path well under the macOS SUN_LEN (~104 bytes).
+        // Keep a realistic home-rooted path well under the macOS SUN_LEN (~104 bytes).
         assert!(
-            std::path::Path::new("/Users/someuser/.mvm/pool")
+            std::path::Path::new("/Users/someuser/mvm-home/pool")
                 .join(&spec.id)
                 .join("control.sock")
                 .as_os_str()

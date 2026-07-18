@@ -1584,7 +1584,8 @@ mod tests {
         env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
-        let default_cache_root = scratch.path().join(".mvm").join("cache");
+        let default_cache_root =
+            std::path::PathBuf::from(mvm_core::config::default_mvm_cache_dir());
         install_overlay_into_cache(&source, &default_cache_root, &InstallOptions::default())
             .expect("install source into default cache");
 

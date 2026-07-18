@@ -277,21 +277,23 @@ impl ObserverAllowlist {
     /// surfaces a `BuildError::AllowlistRead` error explaining what the operator
     /// must create.
     ///
-    /// HOME must be set for the per-user path to be considered. If HOME is
-    /// unset we refuse outright — we don't fall back to `/tmp` or any other
-    /// default, because a writable-by-anyone fallback directory would let a
-    /// local user place a malicious allowlist that any process running with
-    /// HOME unset (e.g. a misconfigured systemd unit or chroot) would trust.
-    /// Operator action in that case is "set HOME" or "place
-    /// /etc/mvm/observers/allowlist.toml" — both are explicit.
+    /// A home root (`MVM_HOME` | `$HOME`) must resolve for the per-user
+    /// path to be considered. If neither is set we refuse outright — we
+    /// don't fall back to `/tmp` or any other default, because a
+    /// writable-by-anyone fallback directory would let a local user place
+    /// a malicious allowlist that any process running without a home
+    /// (e.g. a misconfigured systemd unit or chroot) would trust.
+    /// Operator action in that case is "set MVM_HOME (or HOME)" or
+    /// "place /etc/mvm/observers/allowlist.toml" — both are explicit.
     pub fn load_from_host_config() -> Result<Self, BuildError> {
-        let home = std::env::var("HOME").map_err(|_| BuildError::AllowlistRead {
-            path: "$HOME unset".to_string(),
-            detail: "HOME environment variable is not set; cannot resolve user allowlist path. \
-                     Either set HOME or run with /etc/mvm/observers/allowlist.toml present."
-                .into(),
-        })?;
-        let user_path = std::path::PathBuf::from(home).join(".mvm/observers/allowlist.toml");
+        let home_root =
+            mvm_core::config::mvm_home_strict().map_err(|_| BuildError::AllowlistRead {
+                path: "<mvm home unset>".to_string(),
+                detail: "neither MVM_HOME nor HOME is set; cannot resolve user allowlist path. \
+                     Either set one or run with /etc/mvm/observers/allowlist.toml present."
+                    .into(),
+            })?;
+        let user_path = home_root.join("observers/allowlist.toml");
         if user_path.exists() {
             return Self::load_from_path(&user_path);
         }
@@ -551,11 +553,11 @@ pub fn resolve_observer_chain_from_plan(
         });
     }
 
-    let home = std::env::var("HOME").map_err(|_| BuildError::AllowlistRead {
-        path: "$HOME unset".to_string(),
-        detail: "HOME is unset; cannot resolve policy bundle path".to_string(),
+    let home_root = mvm_core::config::mvm_home_strict().map_err(|_| BuildError::AllowlistRead {
+        path: "<mvm home unset>".to_string(),
+        detail: "neither MVM_HOME nor HOME is set; cannot resolve policy bundle path".to_string(),
     })?;
-    let policies_root = std::path::PathBuf::from(&home).join(".mvm/policies");
+    let policies_root = home_root.join("policies");
     let path = policies_root.join(tenant).join(format!("{workload}.toml"));
 
     if !path.exists() {

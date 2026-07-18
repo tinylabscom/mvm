@@ -278,10 +278,10 @@ mod tests {
     #[test]
     fn probe_state_dir_resolves_under_mvm_home_not_xdg_state() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_HOME", "/tmp/mvm-bench-probe-test/.mvm");
+        env.set("MVM_HOME", "/tmp/mvm-bench-probe-test/mvm-home");
         let dir = probe_state_dir("vm-x");
         assert_eq!(dir, mvm_core::config::vm_state_dir("vm-x"));
-        assert!(dir.starts_with("/tmp/mvm-bench-probe-test/.mvm"));
+        assert!(dir.starts_with("/tmp/mvm-bench-probe-test/mvm-home"));
         assert!(!dir.to_string_lossy().contains(".local/state"));
     }
 

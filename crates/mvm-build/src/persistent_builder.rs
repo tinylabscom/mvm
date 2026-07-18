@@ -1238,8 +1238,8 @@ mod tests {
         // `mvm_cli::commands::build::persistent_builder` emits.
         let json = r#"{
             "session_id": "abc123",
-            "dispatch_socket_path": "/home/u/.mvm/vms/foo/vsock-21471.sock",
-            "job_dir": "/home/u/.mvm/jobs/foo",
+            "dispatch_socket_path": "/home/u/mvm-home/vms/foo/vsock-21471.sock",
+            "job_dir": "/home/u/mvm-home/jobs/foo",
             "workspace_root": "/work",
             "supervisor_pid": 7777,
             "last_activity_unix_secs": 1234567890
@@ -1254,8 +1254,8 @@ mod tests {
     fn session_record_defaults_missing_last_activity_to_none() {
         let json = r#"{
             "session_id": "abc123",
-            "dispatch_socket_path": "/home/u/.mvm/vms/foo/vsock-21471.sock",
-            "job_dir": "/home/u/.mvm/jobs/foo",
+            "dispatch_socket_path": "/home/u/mvm-home/vms/foo/vsock-21471.sock",
+            "job_dir": "/home/u/mvm-home/jobs/foo",
             "workspace_root": "/work",
             "supervisor_pid": 7777
         }"#;
@@ -1337,7 +1337,7 @@ mod tests {
     #[test]
     fn touch_active_session_updates_live_record_timestamp() {
         let scratch = tempfile::tempdir().expect("tempdir");
-        let data_dir = scratch.path().join(".mvm");
+        let data_dir = scratch.path().join("mvm-home");
         let run_dir = data_dir.join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let record = SessionRecord {
@@ -1369,7 +1369,7 @@ mod tests {
         // than error.
         let scratch = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_HOME", scratch.path().join(".mvm"));
+        env.set("MVM_HOME", scratch.path().join("mvm-home"));
         let result = read_active_session();
         assert!(result.is_none());
     }
@@ -1383,7 +1383,7 @@ mod tests {
         // sentinel; this one is safely unallocated.
         const DEFINITELY_DEAD_PID: u32 = 2_000_000_000;
         let scratch = tempfile::tempdir().expect("tempdir");
-        let run_dir = scratch.path().join(".mvm").join("run");
+        let run_dir = scratch.path().join("mvm-home").join("run");
         std::fs::create_dir_all(&run_dir).unwrap();
         let record = SessionRecord {
             session_id: "x".to_string(),
@@ -1399,7 +1399,7 @@ mod tests {
         )
         .unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_HOME", scratch.path().join(".mvm"));
+        env.set("MVM_HOME", scratch.path().join("mvm-home"));
         let result = read_active_session();
         assert!(
             result.is_none(),
