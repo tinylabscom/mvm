@@ -181,6 +181,7 @@ impl From<SandboxDto> for MachineState {
             id: MachineId(s.sandbox_id),
             name: s.name,
             status: map_status(&s.status),
+            ..Default::default()
         }
     }
 }
@@ -482,11 +483,13 @@ mod tests {
                 id: MachineId("1".into()),
                 name: "a".into(),
                 status: MachineStatus::Running,
+                ..Default::default()
             },
             MachineState {
                 id: MachineId("2".into()),
                 name: "b".into(),
                 status: MachineStatus::Stopped,
+                ..Default::default()
             },
         ];
         let f = MachineFilter {

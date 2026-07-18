@@ -16,6 +16,9 @@ mvm-build = { workspace = true, default-features = false }
 libkrun-sys.workspace = true
 mvm-fs.workspace = true
 mvm-hostd.workspace = true
+# The `MvmClient` facade: read-only listing/inspect commands route through
+# `mvm_client::LocalBackend` instead of reaching `mvm_runtime` internals.
+mvm-client.workspace = true
 # `mvmctl compile` reads the Workload IR (mvm_protocol::ir, re-exported from
 # mvm_protocol::ir) and routes it through the compile pipeline.
 mvm-sdk.workspace = true

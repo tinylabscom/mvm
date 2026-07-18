@@ -2745,6 +2745,7 @@ dependencies = [
  "libkrun-sys",
  "mvm-agentd",
  "mvm-build",
+ "mvm-client",
  "mvm-core",
  "mvm-fs",
  "mvm-hostd",

@@ -32,6 +32,7 @@ impl MockBackend {
             id: MachineId(format!("m{n}")),
             name: spec.name,
             status,
+            ..Default::default()
         };
         self.machines.lock().unwrap().push(state.clone());
         Ok(state)

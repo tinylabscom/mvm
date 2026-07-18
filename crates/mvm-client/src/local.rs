@@ -30,8 +30,10 @@ use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
+    PortMapping,
 };
 use mvm_core::client::{MvmClient, MvmError, Result};
+use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 
 /// Drives the host's VM backend directly. Construct with [`LocalBackend::new`]
 /// (auto-selected backend) or [`LocalBackend::with_hypervisor`].
@@ -63,18 +65,74 @@ fn map_status(s: &VmStatus) -> MachineStatus {
     match s {
         VmStatus::Running => MachineStatus::Running,
         VmStatus::Starting => MachineStatus::Starting,
-        // A paused VM isn't accepting work; surface it as stopped rather than
-        // inventing a facade state that callers don't model.
-        VmStatus::Stopped | VmStatus::Paused => MachineStatus::Stopped,
+        VmStatus::Stopped => MachineStatus::Stopped,
+        // A paused VM stays distinct from stopped so it remains visible in a
+        // default listing rather than folding away.
+        VmStatus::Paused => MachineStatus::Paused,
         VmStatus::Failed { .. } => MachineStatus::Failed,
     }
 }
 
-fn to_state(v: VmInfo) -> MachineState {
+/// The detail behind a non-happy status — currently the failure reason, which
+/// rides on [`MachineState::status_detail`] because [`MachineStatus::Failed`] is
+/// a unit variant.
+fn status_detail(s: &VmStatus) -> Option<String> {
+    match s {
+        VmStatus::Failed { reason } => Some(reason.clone()),
+        VmStatus::Running | VmStatus::Starting | VmStatus::Stopped | VmStatus::Paused => None,
+    }
+}
+
+/// Resolve the backend that owns a started VM by its state-dir marker, falling
+/// back to the platform default so the column is accurate for a marker-less VM.
+fn resolve_backend_name(vm_name: &str) -> String {
+    AnyBackend::for_started_vm(vm_name)
+        .map(|b| b.name().to_string())
+        .unwrap_or_else(|| {
+            if mvm_core::platform::current().is_hvf_default_tier() {
+                "hvf".to_string()
+            } else {
+                "firecracker".to_string()
+            }
+        })
+}
+
+/// Load the persistent VM name registry, degrading to empty when absent or
+/// unreadable so a listing falls back to backend-only rows rather than failing.
+fn load_name_registry() -> VmNameRegistry {
+    let path = mvm_runtime::vm::name_registry::registry_path();
+    VmNameRegistry::load(&path).unwrap_or_default()
+}
+
+/// Build a [`MachineState`] from a backend `VmInfo` joined with its optional
+/// registry entry (tags / TTL / readiness) and its resolved owning backend.
+fn to_state(info: VmInfo, reg: Option<&VmRegistration>) -> MachineState {
+    let backend = resolve_backend_name(&info.name);
     MachineState {
-        id: MachineId(v.id.0),
-        name: v.name,
-        status: map_status(&v.status),
+        id: MachineId(info.id.0),
+        status: map_status(&info.status),
+        status_detail: status_detail(&info.status),
+        backend,
+        guest_ip: info.guest_ip,
+        cpus: info.cpus,
+        memory_mib: info.memory_mib,
+        profile: info.profile,
+        revision: info.revision,
+        flake_ref: info.flake_ref,
+        ports: info
+            .ports
+            .into_iter()
+            .map(|p| PortMapping {
+                host: p.host,
+                guest: p.guest,
+            })
+            .collect(),
+        tags: reg.map(|r| r.tags.clone()).unwrap_or_default(),
+        expires_at: reg.and_then(|r| r.expires_at.clone()),
+        auto_resume: reg.map(|r| r.auto_resume).unwrap_or(true),
+        readiness: reg.and_then(|r| r.readiness.clone()),
+        last_readiness_change_at: reg.and_then(|r| r.last_readiness_change_at.clone()),
+        name: info.name,
     }
 }
 
@@ -218,21 +276,64 @@ fn host_verity_sidecars(rootfs: &Path) -> (Option<String>, Option<String>) {
 #[async_trait]
 impl MvmClient for LocalBackend {
     async fn list_machines(&self, filter: MachineFilter) -> Result<Vec<MachineState>> {
-        let infos = self.backend.list().map_err(backend_err)?;
+        let registry = load_name_registry();
+
+        // Aggregate every backend's live VMs (the host-wide view `mvmctl ls`
+        // shows), then fold in this backend's own listing — the in-process mock
+        // is excluded from `list_all`, so a single-backend caller (tests, a
+        // mock-driven consumer) would otherwise see nothing. Dedup by name.
+        let mut infos: Vec<VmInfo> = AnyBackend::list_all();
+        for vm in self.backend.list().map_err(backend_err)? {
+            if !infos.iter().any(|existing| existing.name == vm.name) {
+                infos.push(vm);
+            }
+        }
+
+        // Fold in registered-but-not-running machines as stopped rows so the
+        // registry's TTL/tag metadata is listable; the CLI hides these unless
+        // `--all` is asked.
+        let listed: std::collections::BTreeSet<&str> =
+            infos.iter().map(|i| i.name.as_str()).collect();
+        let registry_only: Vec<VmInfo> = registry
+            .vms
+            .iter()
+            .filter(|(name, _)| !listed.contains(name.as_str()))
+            .map(|(name, reg)| VmInfo {
+                id: VmId(name.clone()),
+                name: name.clone(),
+                status: VmStatus::Stopped,
+                guest_ip: reg.guest_ip.clone(),
+                cpus: 0,
+                memory_mib: 0,
+                profile: None,
+                revision: None,
+                flake_ref: None,
+                ports: Vec::new(),
+            })
+            .collect();
+        infos.extend(registry_only);
+
         Ok(infos
             .into_iter()
-            .map(to_state)
+            .map(|info| {
+                let reg = registry.lookup(&info.name);
+                to_state(info, reg)
+            })
             .filter(|m| filter.matches(m))
             .collect())
     }
 
     async fn inspect_machine(&self, id: &MachineId) -> Result<MachineState> {
+        let registry = load_name_registry();
         self.backend
             .list()
             .map_err(backend_err)?
             .into_iter()
-            .map(to_state)
-            .find(|m| m.id == *id)
+            .find(|v| v.id.0 == id.0)
+            .map(|info| {
+                let reg = registry.lookup(&info.name);
+                to_state(info, reg)
+            })
             .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
     }
 
@@ -304,6 +405,10 @@ impl MvmClient for LocalBackend {
             id: MachineId(started.vm_id.0),
             name: spec.name,
             status: MachineStatus::Running,
+            backend: self.backend.name().to_string(),
+            cpus: spec.cpus,
+            memory_mib: spec.memory_mib,
+            ..Default::default()
         })
     }
 
@@ -416,6 +521,7 @@ impl MvmClient for LocalBackend {
                 id: id.clone(),
                 name: existing.name,
                 status,
+                ..Default::default()
             });
         }
 
@@ -447,6 +553,7 @@ impl MvmClient for LocalBackend {
             id: id.clone(),
             name: desired.name,
             status: MachineStatus::Stopped,
+            ..Default::default()
         })
     }
 }
@@ -489,13 +596,94 @@ mod tests {
         assert_eq!(map_status(&VmStatus::Running), MachineStatus::Running);
         assert_eq!(map_status(&VmStatus::Starting), MachineStatus::Starting);
         assert_eq!(map_status(&VmStatus::Stopped), MachineStatus::Stopped);
-        assert_eq!(map_status(&VmStatus::Paused), MachineStatus::Stopped);
+        // Paused stays distinct from Stopped (it must remain visible by default).
+        assert_eq!(map_status(&VmStatus::Paused), MachineStatus::Paused);
         assert_eq!(
             map_status(&VmStatus::Failed {
                 reason: "boom".into()
             }),
             MachineStatus::Failed
         );
+    }
+
+    #[test]
+    fn status_detail_carries_only_failure_reason() {
+        assert_eq!(
+            status_detail(&VmStatus::Failed {
+                reason: "boom".into()
+            }),
+            Some("boom".to_string())
+        );
+        assert_eq!(status_detail(&VmStatus::Running), None);
+        assert_eq!(status_detail(&VmStatus::Paused), None);
+    }
+
+    #[test]
+    fn to_state_joins_backend_info_with_registry_metadata() {
+        let info = VmInfo {
+            id: VmId("vm-1".into()),
+            name: "web".into(),
+            status: VmStatus::Running,
+            guest_ip: Some("172.16.0.2".into()),
+            cpus: 2,
+            memory_mib: 512,
+            profile: Some("worker".into()),
+            revision: None,
+            flake_ref: Some(".#worker".into()),
+            ports: vec![mvm_core::protocol::vm_backend::VmPortMapping {
+                host: 8080,
+                guest: 80,
+            }],
+        };
+        let mut registry = VmNameRegistry::default();
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert("env".to_string(), "prod".to_string());
+        registry
+            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams {
+                name: "web",
+                vm_dir: "/tmp/web",
+                network: "default",
+                guest_ip: Some("172.16.0.2"),
+                slot_index: 0,
+                tags,
+                expires_at: Some("2099-01-01T00:00:00Z".into()),
+                auto_resume: false,
+            })
+            .unwrap();
+
+        let state = to_state(info, registry.lookup("web"));
+        assert_eq!(state.name, "web");
+        assert_eq!(state.status, MachineStatus::Running);
+        assert_eq!(state.cpus, 2);
+        assert_eq!(state.memory_mib, 512);
+        assert_eq!(state.flake_ref.as_deref(), Some(".#worker"));
+        assert_eq!(
+            state.ports,
+            vec![PortMapping {
+                host: 8080,
+                guest: 80
+            }]
+        );
+        assert_eq!(state.tags.get("env").map(String::as_str), Some("prod"));
+        assert_eq!(state.expires_at.as_deref(), Some("2099-01-01T00:00:00Z"));
+        assert!(!state.auto_resume);
+        // No registry entry → metadata defaults (auto_resume true).
+        let bare = to_state(
+            VmInfo {
+                id: VmId("vm-2".into()),
+                name: "solo".into(),
+                status: VmStatus::Stopped,
+                guest_ip: None,
+                cpus: 0,
+                memory_mib: 0,
+                profile: None,
+                revision: None,
+                flake_ref: None,
+                ports: Vec::new(),
+            },
+            None,
+        );
+        assert!(bare.tags.is_empty() && bare.auto_resume && bare.expires_at.is_none());
     }
 
     #[tokio::test]

@@ -1,10 +1,12 @@
 //! `mvmctl ls` / `mvmctl ps` — list running VMs.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
+use mvm_client::{LocalBackend, MachineFilter, MachineState, MachineStatus, MvmClient};
 use mvm_core::user_config::MvmConfig;
-use mvm_runtime::backend::AnyBackend;
 
 use super::Cli;
 
@@ -35,146 +37,165 @@ impl Args {
 
 pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Result<()> {
     use anyhow::Context;
-    use mvm_core::vm_backend::{VmInfo, VmStatus};
 
-    // Parse the tag filter early so an invalid `--tag` errors out before
-    // we go talk to backends. Validation is shared with `mvmctl up`,
-    // which keeps charset/length invariants consistent.
-    let mut tag_filter: std::collections::BTreeMap<String, String> =
-        std::collections::BTreeMap::new();
+    // Parse the tag filter early so an invalid `--tag` errors out before we go
+    // talk to backends. Validation is shared with `mvmctl up`, keeping
+    // charset/length invariants consistent.
+    let mut tag_filter: BTreeMap<String, String> = BTreeMap::new();
     for raw in &args.tags {
         let (k, v) = mvm_core::crypto::policy::InputValidator::parse_tag_arg(raw)
             .with_context(|| format!("Invalid --tag value: {:?}", raw))?;
         tag_filter.insert(k, v);
     }
 
-    // Aggregate across every backend (QEMU, libkrun, Firecracker, Apple
-    // Container, Docker) so a VM started under any VMM is listed — not just
-    // the platform default. Single source of truth in `AnyBackend::list_all`.
-    // Cross-reference the backend listing with the persistent name
-    // registry so tags / TTLs / auto-resume can flow through `mvmctl
-    // ls` without changing the `VmInfo` shape every backend produces.
-    // If the registry can't be loaded we fall through to "no metadata"
-    // and only the backend listing is shown.
-    let registry_path = mvm_runtime::vm::name_registry::registry_path();
-    let registry =
-        mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path).unwrap_or_default();
-
-    let mut all_vms: Vec<VmInfo> = AnyBackend::list_all();
-    merge_registry_only_stopped_rows(&mut all_vms, &registry, args.all);
-    if !args.all {
-        all_vms.retain(|vm| !matches!(vm.status, VmStatus::Stopped));
-    }
+    // The facade owns data acquisition: it aggregates every backend's live VMs
+    // and joins them with the persistent name registry (tags / TTLs / readiness)
+    // in one call. The CLI keeps presentation only — filtering, columns, JSON.
+    let client = LocalBackend::new();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .context("build runtime for machine listing")?;
+    let mut machines = runtime
+        .block_on(client.list_machines(MachineFilter::all()))
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("listing machines")?;
 
     let now = chrono::Utc::now();
-    let is_expired = |reg: &mvm_runtime::vm::name_registry::VmRegistration| -> bool {
-        reg.expires_at
-            .as_deref()
-            .and_then(mvm_core::util::time::parse_iso8601)
-            .map(|t| t < now)
-            .unwrap_or(false)
-    };
-
-    all_vms.retain(|vm| {
-        let reg_entry = registry.lookup(&vm.name);
-        // Tag filter: every key/value in `tag_filter` must be present.
-        if !tag_filter.is_empty() {
-            let Some(reg) = reg_entry else { return false };
-            for (k, v) in &tag_filter {
-                if reg.tags.get(k).map(String::as_str) != Some(v.as_str()) {
-                    return false;
-                }
-            }
-        }
-        // Expiry filter: hide VMs past their TTL unless asked.
-        if !args.show_expired
-            && let Some(reg) = reg_entry
-            && is_expired(reg)
-        {
-            return false;
-        }
-        true
-    });
+    machines.retain(|m| passes_filters(m, args.all, &tag_filter, args.show_expired, now));
 
     if args.json {
-        // JSON output augments the backend `VmInfo` with the metadata
-        // we just looked up, so SDK callers get tags and expiry
-        // without a second registry round-trip. `readiness` and
-        // `last_readiness_change_at` thread through here from the
-        // registry, populated by `mvmctl up`'s launch milestones.
-        // Legacy registry entries that pre-date the readiness fields
-        // serialize as `null` for both.
-        #[derive(serde::Serialize)]
-        struct LsRow<'a> {
-            #[serde(flatten)]
-            info: &'a VmInfo,
-            tags: &'a std::collections::BTreeMap<String, String>,
-            expires_at: Option<&'a str>,
-            auto_resume: bool,
-            expired: bool,
-            readiness: Option<&'a mvm_core::domain::instance::InstanceReadiness>,
-            last_readiness_change_at: Option<&'a str>,
-        }
-        let empty_tags: std::collections::BTreeMap<String, String> = Default::default();
-        let rows: Vec<LsRow<'_>> = all_vms
-            .iter()
-            .map(|vm| {
-                let reg = registry.lookup(&vm.name);
-                LsRow {
-                    info: vm,
-                    tags: reg.map(|r| &r.tags).unwrap_or(&empty_tags),
-                    expires_at: reg.and_then(|r| r.expires_at.as_deref()),
-                    auto_resume: reg.map(|r| r.auto_resume).unwrap_or(true),
-                    expired: reg.map(is_expired).unwrap_or(false),
-                    readiness: reg.and_then(|r| r.readiness.as_ref()),
-                    last_readiness_change_at: reg
-                        .and_then(|r| r.last_readiness_change_at.as_deref()),
-                }
-            })
-            .collect();
-        crate::json_out::emit_json(&rows)?;
-        return Ok(());
+        return emit_json(&machines, now);
     }
 
-    if all_vms.is_empty() {
+    if machines.is_empty() {
         println!("No running VMs.");
         return Ok(());
     }
 
-    // Docker-style table output
+    print_table(&machines);
+    Ok(())
+}
+
+/// Whether a machine passes the `ps` visibility filters. Split out so the
+/// column/JSON rendering stays declarative and this policy is unit-testable.
+fn passes_filters(
+    m: &MachineState,
+    all: bool,
+    tag_filter: &BTreeMap<String, String>,
+    show_expired: bool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    // Hide registered-but-stopped machines unless `--all`. A paused machine is
+    // NOT stopped, so it stays visible by default.
+    if !all && m.status == MachineStatus::Stopped {
+        return false;
+    }
+    // Tag filter: every key/value in `tag_filter` must be present.
+    if !tag_filter.is_empty()
+        && !tag_filter
+            .iter()
+            .all(|(k, v)| m.tags.get(k).map(String::as_str) == Some(v.as_str()))
+    {
+        return false;
+    }
+    // Expiry filter: hide machines past their TTL unless asked.
+    if !show_expired && machine_expired(m, now) {
+        return false;
+    }
+    true
+}
+
+/// Whether a machine's TTL has elapsed relative to `now`. A missing or
+/// unparseable `expires_at` is treated as "no TTL" (never expired).
+fn machine_expired(m: &MachineState, now: chrono::DateTime<chrono::Utc>) -> bool {
+    m.expires_at
+        .as_deref()
+        .and_then(mvm_core::util::time::parse_iso8601)
+        .map(|t| t < now)
+        .unwrap_or(false)
+}
+
+/// The STATUS column text: `MachineStatus`'s debug form, reconstructing the
+/// `Failed { reason: … }` shape so a failed machine's reason stays visible even
+/// though `MachineStatus::Failed` is a unit variant.
+fn render_status(m: &MachineState) -> String {
+    match (&m.status, &m.status_detail) {
+        (MachineStatus::Failed, Some(reason)) => format!("Failed {{ reason: {reason:?} }}"),
+        (status, _) => format!("{status:?}"),
+    }
+}
+
+fn emit_json(machines: &[MachineState], now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    // Row shape mirrors the historical `ls --json` output so SDK callers keep
+    // getting tags / expiry / readiness in one round-trip. The `status` value
+    // now serializes as the snake_case facade `MachineStatus` (the intended
+    // shift from the old raw-VmStatus PascalCase). `expired` is computed here.
+    #[derive(serde::Serialize)]
+    struct LsRow<'a> {
+        id: &'a str,
+        name: &'a str,
+        status: MachineStatus,
+        guest_ip: Option<&'a str>,
+        cpus: u32,
+        memory_mib: u32,
+        profile: Option<&'a str>,
+        revision: Option<&'a str>,
+        flake_ref: Option<&'a str>,
+        ports: &'a [mvm_client::PortMapping],
+        tags: &'a BTreeMap<String, String>,
+        expires_at: Option<&'a str>,
+        auto_resume: bool,
+        expired: bool,
+        readiness: Option<&'a mvm_core::domain::instance::InstanceReadiness>,
+        last_readiness_change_at: Option<&'a str>,
+    }
+    let rows: Vec<LsRow<'_>> = machines
+        .iter()
+        .map(|m| LsRow {
+            id: &m.id.0,
+            name: &m.name,
+            status: m.status,
+            guest_ip: m.guest_ip.as_deref(),
+            cpus: m.cpus,
+            memory_mib: m.memory_mib,
+            profile: m.profile.as_deref(),
+            revision: m.revision.as_deref(),
+            flake_ref: m.flake_ref.as_deref(),
+            ports: &m.ports,
+            tags: &m.tags,
+            expires_at: m.expires_at.as_deref(),
+            auto_resume: m.auto_resume,
+            expired: machine_expired(m, now),
+            readiness: m.readiness.as_ref(),
+            last_readiness_change_at: m.last_readiness_change_at.as_deref(),
+        })
+        .collect();
+    crate::json_out::emit_json(&rows)?;
+    Ok(())
+}
+
+fn print_table(machines: &[MachineState]) {
+    // Docker-style table output.
     println!(
         "{:<20} {:<18} {:<10} {:<8} {:<10} {:<20} IMAGE",
         "NAME", "BACKEND", "STATUS", "CPUS", "MEMORY", "PORTS"
     );
-    for vm in &all_vms {
-        // Prefer the VM's actual owning backend (resolved from its
-        // state-dir pid marker — qemu/libkrun/firecracker); fall back to a
-        // platform guess for a marker-less VM so the column is accurate for
-        // pid-file VMMs. macOS 26+ Apple Silicon defaults to the HVF VMM.
-        let backend_name: String = AnyBackend::for_started_vm(&vm.name)
-            .map(|b| b.name().to_string())
-            .unwrap_or_else(|| {
-                if mvm_core::platform::current().is_hvf_default_tier() {
-                    "hvf".to_string()
-                } else {
-                    "firecracker".to_string()
-                }
-            });
-        let status = format!("{:?}", vm.status);
-        let mem = if vm.memory_mib > 0 {
-            format!("{}Mi", vm.memory_mib)
+    for m in machines {
+        let status = render_status(m);
+        let mem = if m.memory_mib > 0 {
+            format!("{}Mi", m.memory_mib)
         } else {
             "-".to_string()
         };
-        let image = vm
+        let image = m
             .flake_ref
             .as_deref()
-            .or(vm.profile.as_deref())
+            .or(m.profile.as_deref())
             .unwrap_or("-");
-        let ports = if vm.ports.is_empty() {
+        let ports = if m.ports.is_empty() {
             "-".to_string()
         } else {
-            vm.ports
+            m.ports
                 .iter()
                 .map(|p| format!("{}→{}", p.host, p.guest))
                 .collect::<Vec<_>>()
@@ -182,11 +203,11 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         };
         println!(
             "{:<20} {:<18} {:<10} {:<8} {:<10} {:<20} {}",
-            vm.name,
-            backend_name,
+            m.name,
+            m.backend,
             status,
-            if vm.cpus > 0 {
-                vm.cpus.to_string()
+            if m.cpus > 0 {
+                m.cpus.to_string()
             } else {
                 "-".to_string()
             },
@@ -195,107 +216,124 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             image,
         );
     }
-
-    Ok(())
-}
-
-fn merge_registry_only_stopped_rows(
-    all_vms: &mut Vec<mvm_core::vm_backend::VmInfo>,
-    registry: &mvm_runtime::vm::name_registry::VmNameRegistry,
-    include_stopped: bool,
-) {
-    if !include_stopped {
-        return;
-    }
-
-    let listed: std::collections::BTreeSet<String> =
-        all_vms.iter().map(|vm| vm.name.clone()).collect();
-    for (name, reg) in &registry.vms {
-        if listed.contains(name.as_str()) {
-            continue;
-        }
-        all_vms.push(mvm_core::vm_backend::VmInfo {
-            id: mvm_core::vm_backend::VmId(name.clone()),
-            name: name.clone(),
-            status: mvm_core::vm_backend::VmStatus::Stopped,
-            guest_ip: reg.guest_ip.clone(),
-            cpus: 0,
-            memory_mib: 0,
-            profile: None,
-            revision: None,
-            flake_ref: None,
-            ports: Vec::new(),
-        });
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mvm_client::{MachineId, MachineState, MachineStatus};
 
-    fn registered(name: &str) -> mvm_runtime::vm::name_registry::VmNameRegistry {
-        let mut registry = mvm_runtime::vm::name_registry::VmNameRegistry::default();
-        registry
-            .register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams::minimal(
-                name,
-                "/tmp/mvm-test-vm",
-                "default",
-            ))
-            .unwrap();
-        registry
-    }
-
-    fn running_vm(name: &str) -> mvm_core::vm_backend::VmInfo {
-        mvm_core::vm_backend::VmInfo {
-            id: mvm_core::vm_backend::VmId(name.to_string()),
+    fn machine(name: &str, status: MachineStatus) -> MachineState {
+        MachineState {
+            id: MachineId(name.to_string()),
             name: name.to_string(),
-            status: mvm_core::vm_backend::VmStatus::Running,
-            guest_ip: None,
-            cpus: 1,
-            memory_mib: 256,
-            profile: None,
-            revision: None,
-            flake_ref: None,
-            ports: Vec::new(),
+            status,
+            ..Default::default()
         }
     }
 
     #[test]
-    fn registry_only_rows_appear_when_all_requested() {
-        let registry = registered("detached-hvf");
-        let mut rows = Vec::new();
-
-        merge_registry_only_stopped_rows(&mut rows, &registry, true);
-
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "detached-hvf");
-        assert!(matches!(
-            rows[0].status,
-            mvm_core::vm_backend::VmStatus::Stopped
+    fn running_machine_shown_by_default() {
+        let m = machine("web", MachineStatus::Running);
+        assert!(passes_filters(
+            &m,
+            false,
+            &BTreeMap::new(),
+            false,
+            chrono::Utc::now()
         ));
     }
 
     #[test]
-    fn registry_only_rows_are_hidden_without_all() {
-        let registry = registered("detached-hvf");
-        let mut rows = Vec::new();
-
-        merge_registry_only_stopped_rows(&mut rows, &registry, false);
-
-        assert!(rows.is_empty());
+    fn stopped_machine_hidden_without_all_and_shown_with_all() {
+        let m = machine("web", MachineStatus::Stopped);
+        assert!(!passes_filters(
+            &m,
+            false,
+            &BTreeMap::new(),
+            false,
+            chrono::Utc::now()
+        ));
+        assert!(passes_filters(
+            &m,
+            true,
+            &BTreeMap::new(),
+            false,
+            chrono::Utc::now()
+        ));
     }
 
     #[test]
-    fn registry_merge_does_not_duplicate_backend_rows() {
-        let registry = registered("running-hvf");
-        let mut rows = vec![running_vm("running-hvf")];
-
-        merge_registry_only_stopped_rows(&mut rows, &registry, true);
-
-        assert_eq!(rows.len(), 1);
-        assert!(matches!(
-            rows[0].status,
-            mvm_core::vm_backend::VmStatus::Running
+    fn paused_machine_stays_visible_by_default() {
+        // The regression this migration fixes: a paused machine must not fold
+        // into stopped and vanish from the default listing.
+        let m = machine("web", MachineStatus::Paused);
+        assert!(passes_filters(
+            &m,
+            false,
+            &BTreeMap::new(),
+            false,
+            chrono::Utc::now()
         ));
+    }
+
+    #[test]
+    fn tag_filter_requires_every_pair() {
+        let mut m = machine("web", MachineStatus::Running);
+        m.tags.insert("env".into(), "prod".into());
+        let now = chrono::Utc::now();
+
+        let mut want = BTreeMap::new();
+        want.insert("env".to_string(), "prod".to_string());
+        assert!(passes_filters(&m, false, &want, false, now));
+
+        // A second required pair the machine lacks excludes it.
+        want.insert("job".to_string(), "etl".to_string());
+        assert!(!passes_filters(&m, false, &want, false, now));
+    }
+
+    #[test]
+    fn tag_filter_excludes_untagged_machine() {
+        let m = machine("web", MachineStatus::Running);
+        let mut want = BTreeMap::new();
+        want.insert("env".to_string(), "prod".to_string());
+        assert!(!passes_filters(&m, false, &want, false, chrono::Utc::now()));
+    }
+
+    #[test]
+    fn expired_machine_hidden_unless_requested() {
+        let mut m = machine("web", MachineStatus::Running);
+        m.expires_at = Some("2000-01-01T00:00:00Z".into());
+        let now = chrono::Utc::now();
+        assert!(!passes_filters(&m, false, &BTreeMap::new(), false, now));
+        assert!(passes_filters(&m, false, &BTreeMap::new(), true, now));
+    }
+
+    #[test]
+    fn future_ttl_is_not_expired() {
+        let mut m = machine("web", MachineStatus::Running);
+        m.expires_at = Some("2999-01-01T00:00:00Z".into());
+        assert!(!machine_expired(&m, chrono::Utc::now()));
+    }
+
+    #[test]
+    fn render_status_reconstructs_failure_reason() {
+        // The failure reason survives the STATUS column even though
+        // MachineStatus::Failed is a unit variant.
+        let mut m = machine("web", MachineStatus::Failed);
+        m.status_detail = Some("boom".into());
+        assert_eq!(render_status(&m), "Failed { reason: \"boom\" }");
+    }
+
+    #[test]
+    fn render_status_uses_debug_for_plain_variants() {
+        assert_eq!(
+            render_status(&machine("a", MachineStatus::Running)),
+            "Running"
+        );
+        assert_eq!(
+            render_status(&machine("a", MachineStatus::Paused)),
+            "Paused"
+        );
     }
 }

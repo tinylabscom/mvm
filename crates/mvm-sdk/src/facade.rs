@@ -261,6 +261,7 @@ fn parse_machine_list(bytes: &[u8]) -> Result<Vec<MachineState>> {
             id: MachineId(it.name.clone()),
             status: status_from_label(it.status.as_deref()),
             name: it.name,
+            ..Default::default()
         })
         .collect())
 }
@@ -291,6 +292,7 @@ impl MvmClient for SubprocessBackend {
             id: MachineId(name.clone()),
             name,
             status: MachineStatus::Stopped,
+            ..Default::default()
         })
     }
 
@@ -304,6 +306,7 @@ impl MvmClient for SubprocessBackend {
             name: id.0.clone(),
             id,
             status: MachineStatus::Running,
+            ..Default::default()
         })
     }
 
@@ -313,6 +316,7 @@ impl MvmClient for SubprocessBackend {
             id: id.clone(),
             name: id.0.clone(),
             status: MachineStatus::Running,
+            ..Default::default()
         })
     }
 

@@ -14,6 +14,11 @@ pub enum MachineStatus {
     Starting,
     Running,
     Stopped,
+    /// vCPUs paused with the VMM still alive. Kept distinct from `Stopped` so a
+    /// paused machine stays visible in a default listing instead of folding
+    /// away. Any detail behind a non-happy status (e.g. a `Failed` reason)
+    /// travels in [`MachineState::status_detail`], which keeps this enum `Copy`.
+    Paused,
     Failed,
 }
 
@@ -114,12 +119,100 @@ impl MachineSpecBuilder {
     }
 }
 
+/// A host:guest port forwarding on a machine — plain listing data that mirrors a
+/// backend's port mapping so a machine record can carry its forwards without
+/// exposing a runtime type.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PortMapping {
+    pub host: u16,
+    pub guest: u16,
+}
+
+/// A machine's observed runtime state — the shared listing/inspect record. Every
+/// field is REST-satisfiable plain data (no host handles, no paths, no keys), so
+/// the same struct crosses the gateway wire. New fields carry `#[serde(default)]`
+/// so an older serialized record still deserializes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MachineState {
     pub id: MachineId,
     pub name: String,
     pub status: MachineStatus,
+    /// Free-text detail for a non-happy `status` — e.g. the reason behind
+    /// [`MachineStatus::Failed`]. `None` when the status needs no elaboration.
+    /// Kept off `MachineStatus` so that enum stays `Copy` and cheap to compare.
+    #[serde(default)]
+    pub status_detail: Option<String>,
+    /// Backend that owns this machine (e.g. `"firecracker"`, `"hvf"`,
+    /// `"libkrun"`). Empty when unknown.
+    #[serde(default)]
+    pub backend: String,
+    /// Guest IP, when networking is configured.
+    #[serde(default)]
+    pub guest_ip: Option<String>,
+    /// vCPU count. `0` when unknown (e.g. a registered-but-stopped machine).
+    #[serde(default)]
+    pub cpus: u32,
+    /// Guest memory in MiB. `0` when unknown.
+    #[serde(default)]
+    pub memory_mib: u32,
+    /// Flake profile name, when built from a profile.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Nix store revision hash, when known.
+    #[serde(default)]
+    pub revision: Option<String>,
+    /// Original flake reference, when known.
+    #[serde(default)]
+    pub flake_ref: Option<String>,
+    /// Active host:guest port forwardings.
+    #[serde(default)]
+    pub ports: Vec<PortMapping>,
+    /// Caller-supplied metadata tags.
+    #[serde(default)]
+    pub tags: std::collections::BTreeMap<String, String>,
+    /// RFC 3339 TTL expiry, when set. Whether it has elapsed is a caller
+    /// (presentation) decision, not modeled here.
+    #[serde(default)]
+    pub expires_at: Option<String>,
+    /// Whether connecting auto-resumes a sleeping machine.
+    #[serde(default = "default_auto_resume")]
+    pub auto_resume: bool,
+    /// Finer-grained host-observed readiness, when tracked.
+    #[serde(default)]
+    pub readiness: Option<crate::domain::instance::InstanceReadiness>,
+    /// RFC 3339 timestamp of the last `readiness` change.
+    #[serde(default)]
+    pub last_readiness_change_at: Option<String>,
+}
+
+fn default_auto_resume() -> bool {
+    true
+}
+
+impl Default for MachineState {
+    fn default() -> Self {
+        Self {
+            id: MachineId(String::new()),
+            name: String::new(),
+            status: MachineStatus::Stopped,
+            status_detail: None,
+            backend: String::new(),
+            guest_ip: None,
+            cpus: 0,
+            memory_mib: 0,
+            profile: None,
+            revision: None,
+            flake_ref: None,
+            ports: Vec::new(),
+            tags: std::collections::BTreeMap::new(),
+            expires_at: None,
+            auto_resume: true,
+            readiness: None,
+            last_readiness_change_at: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,6 +349,71 @@ mod tests {
             serde_json::to_string(&MachineStatus::Running).unwrap(),
             "\"running\""
         );
+        assert_eq!(
+            serde_json::to_string(&MachineStatus::Paused).unwrap(),
+            "\"paused\""
+        );
+    }
+
+    #[test]
+    fn machine_state_serde_round_trips_with_all_fields() {
+        let state = MachineState {
+            id: MachineId("m1".into()),
+            name: "web".into(),
+            status: MachineStatus::Failed,
+            status_detail: Some("boom".into()),
+            backend: "firecracker".into(),
+            guest_ip: Some("172.16.0.2".into()),
+            cpus: 2,
+            memory_mib: 512,
+            profile: Some("worker".into()),
+            revision: Some("abc123".into()),
+            flake_ref: Some(".#worker".into()),
+            ports: vec![PortMapping {
+                host: 8080,
+                guest: 80,
+            }],
+            tags: std::collections::BTreeMap::from([("env".into(), "prod".into())]),
+            expires_at: Some("2099-01-01T00:00:00Z".into()),
+            auto_resume: false,
+            readiness: Some(crate::domain::instance::InstanceReadiness::AgentReady),
+            last_readiness_change_at: Some("2026-01-01T00:00:00Z".into()),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: MachineState = serde_json::from_str(&json).unwrap();
+        assert_eq!(state, back);
+    }
+
+    #[test]
+    fn machine_state_deserializes_legacy_three_field_record() {
+        // A record serialized before the listing fields existed still loads:
+        // the added fields fall back to their serde defaults.
+        let legacy = r#"{"id":"m1","name":"web","status":"running"}"#;
+        let state: MachineState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(state.status, MachineStatus::Running);
+        assert!(state.status_detail.is_none());
+        assert!(state.backend.is_empty());
+        assert_eq!(state.cpus, 0);
+        assert!(state.ports.is_empty());
+        assert!(state.tags.is_empty());
+        // auto_resume defaults true (matches the registry default), not false.
+        assert!(state.auto_resume);
+    }
+
+    #[test]
+    fn machine_state_default_is_stopped_and_empty() {
+        let d = MachineState::default();
+        assert_eq!(d.status, MachineStatus::Stopped);
+        assert!(d.auto_resume);
+        assert!(d.backend.is_empty() && d.ports.is_empty() && d.tags.is_empty());
+    }
+
+    #[test]
+    fn machine_state_rejects_unknown_field_fail_closed() {
+        let err = serde_json::from_str::<MachineState>(
+            r#"{"id":"m1","name":"w","status":"running","rogue":true}"#,
+        );
+        assert!(err.is_err(), "unknown field must be rejected");
     }
 
     #[test]
