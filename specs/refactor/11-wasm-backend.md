@@ -86,7 +86,7 @@ builds on wasm32". P1 closes both.
   for this tier. `mvmctl doctor` and the per-backend tier matrix show it as a
   portability tier, never an isolation tier. No claim-catalog witness is added.
 
-## POC acceptance gate
+## POC acceptance gate — MET (`e669bcc5d`/`4d709d196`/`8c270214d`)
 
 `WasmBackend` runs a trivial WASI module that makes one outbound request; the
 request is **default-denied, then allowed by an explicit policy**, through the
@@ -94,6 +94,21 @@ host seam, producing a **chain-signed audit entry** — and the **data-governanc
 witness passes** (the module sees no secret value and emits no PII), *the same
 witness the microVM backends pass*. That is the whole point: one governance
 model, many transports.
+
+**Gate met.** `crates/mvm-hostd/tests/wasm_egress_witness.rs` (two tests, allow +
+deny) drives a `.wat` module's `mvm:egress` host-import through the REAL
+`SubstitutionService` (real registry/resolver/encrypted secret store/claim-10
+gate/chain-signed recorder), swapping only the outbound TCP dial for a `Forwarder`
+test double — the production forward leg refuses loopback by construction (SSRF),
+so this is the one hermetic concession, and it is the crate's own test seam. The
+allow path witnesses `WireResponse::Ok{200}` through the claim-10 gate + host-side
+substitution (destination gets the real secret, module holds only the placeholder)
++ a verifying `secret.substituted` chain entry with no secret in it; the deny path
+witnesses a claim-12 bind-check drop (refused, destination never contacted,
+verifying `secret.placeholder_dropped` entry). The witness homes in mvm-hostd (not
+mvm-runtime) because mvm-hostd deps both `WasmBackend` and `SubstitutionService`, so
+it drives the real governance in-process with no dependency inversion. See
+`specs/plans/13-ws11-wasm-egress-poc.md`.
 
 ## Phased plan
 
@@ -185,13 +200,18 @@ no touching the 2972-line proxy.
    it to the module. Reuse the existing frame writer/reader (the in-guest client
    in `mvm-agentd` already speaks this) rather than a second copy. The module only
    ever holds the placeholder — the real secret lives host-side in the endpoint.
-4. **Data-governance witness (must be built — it is referenced in specs 04/06 but
-   is not yet a concrete test):** a WASI module requests egress with a `${SECRET}`
-   placeholder to (a) a denied and (b) a policy-allowed destination; assert
-   deny-by-default, allow-by-policy, a chain-verifying audit entry, and that the
-   module's memory never contains the secret value while the forwarded request
-   does. Wire it as the CI witness across all workload backends (wasm joins the
-   set), per the design's "same witness" promise.
+4. **Data-governance witness — BUILT (wasm leg).** `crates/mvm-hostd/tests/wasm_egress_witness.rs`:
+   a WASI module requests egress with a placeholder to (a) a policy-allowed but
+   secret-bound destination and (b) a network-admitted-but-not-secret-bound
+   destination; it asserts allow-by-policy through the claim-10 gate, host-side
+   substitution (destination gets the real secret, module holds only the
+   placeholder), a chain-verifying `secret.substituted` entry, deny-by-drop
+   (claim-12 bind-check → refused, destination never contacted), and a
+   chain-verifying `secret.placeholder_dropped` entry — with no secret in either
+   chain. **Cross-backend follow-up:** the microVM backends do not yet run this
+   *same* chain-verifying witness as a shared CI lane; wiring it across all
+   workload backends (so wasm and the microVMs pass one witness) is tracked in
+   [07-progress-and-decisions.md](07-progress-and-decisions.md) §"Not started".
 
 **Deferred to P3b:** the endpoint's full TLS-terminating substitution (per-VM
 egress-CA intermediate the guest trusts) is heavier than the UDS-framed

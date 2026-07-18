@@ -70,6 +70,7 @@ Phases 1b through 4 have not started. One line each:
 - **WS7** simple CLI (`Command` trait dispatch, verb redesign).
 - **WS10** tiny kernel + low memory + density.
 - **WS-DX** developer experience & performance (sub-second launch, warm start, snapshot/fork).
+- **Cross-backend data-governance witness** (WS11 follow-up). WS11 P3b.2 landed the *wasm* leg of the "same governance witness on every workload backend" promise (`crates/mvm-hostd/tests/wasm_egress_witness.rs`: allow/deny + substitution + chain-verifying audit). The microVM backends (libkrun/HVF/Firecracker) have their own substitution/audit tests but do **not** yet run this *same* witness as a shared CI lane. Wiring one parametrized witness across all workload backends — so wasm and the microVMs demonstrably pass the identical governance assertions — is the remaining piece; not scoped into P3b.2. Specs 04/06 reference this shared witness.
 - **WS12** ADRs-alive + website docs.
 - **WS13** issue/PR close-out.
 - **WS11** wasm-container backend + `no_std` core (**core goal** — its `no_std` core lands with `mvm-protocol` in 1a/1b and is CI-gated from then; the `WasmBackend` seam follows once the protocol crate is wasm-clean).
