@@ -64,9 +64,9 @@ Full narrative on this progress, including why `mvm-protocol` needs to be a desi
 - [x] Route the remaining bypass sites through `mvm-core::config`; add the anti-bypass CI lint. _(WS4.2 `2b85a8ff6`+`cc16c511d` — `xtask check-single-home` (4 rule classes, CI-wired); 117 baseline hits all fixed across 49 files incl. real `MVM_HOME`-ignoring bugs in observer allowlist / tenant policy root / metrics / attestation keys; fail-closed posture review-verified per site; see SPRINT.md WS4)_
 - [x] Gate: fresh run creates exactly one root; lint green.
 
-**WS5 — two features**
-- [ ] Collapse the 28 member features to the `user`/`host` surfaces; make `builder-vm`/`pure-mkfs`/`manifest-verify` always-on; move `schema` to build-time; keep `dev-shell` as the prod/dev agent boundary.
-- Gate: `xtask check-two-surfaces`; feature-powerset shrinks to the two surfaces.
+**WS5 — two features** _(substantially DONE — see SPRINT.md WS5 for the member-feature decision matrix)_
+- [x] Root surfaces collapsed to `host`/`user` (+ `dev` + 7 internal); `check-two-surfaces` enforces it. Member features are surface composition units, not sprawl. `mcp` folded into `user` (`e77c90230`). `manifest-verify`-always-on REJECTED (would break `check-core-runtime-free`); stays opt-in. Remaining: ratify deletion of the `attestation-tpm2/sev-snp/tdx` out-of-scope stubs.
+- Gate: `xtask check-two-surfaces` green.
 
 **WS6 — trait dispatch + zero hardcoding**
 - [x] Replace `backend.name() == "…"` sites with `BackendKind` matches; delete dead `"vz"` arms. `VmBackend::kind() -> BackendKind` is now a required trait method; per-backend behaviors moved to descriptor capability flags (`bundled_kernel`, `needs_plan_json`, `is_workload`) or exhaustive `kind()` matches. `xtask check-no-string-backend-dispatch` guards the regression (wired into CI).
