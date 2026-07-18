@@ -98,6 +98,38 @@ replaces.
    `ui`/`shell`/`base` + the out-of-scope image/build modules). Defer until the
    migration proves the boundary; a lint written first would be all-allowlist.
 
+## Contract-faithfulness rule (resolved during slice 1)
+
+Routing the CLI through the facade means the CLI renders **contract types**
+(`MachineState`/`MachineStatus`), not internal runtime types (`VmInfo`/`VmStatus`).
+Slice 1 surfaced that `mvmctl ps` currently leaks the internal `VmStatus` into its
+`--json` and table output. The rule for the whole migration:
+
+- **The client contract must be faithful, not lossy.** Where the contract
+  under-models a real state the CLI needs, ENRICH the contract (it must stay
+  REST-satisfiable — plain serde data, no internal-type leak), rather than either
+  accepting information loss or leaking the internal type into the DTO. Concretely
+  for status: `MachineStatus` gains a `Paused` unit variant (today it folds
+  `Paused → Stopped`, which makes a paused VM vanish from the default `ps` table —
+  a real functional regression that enrichment fixes). The failure *reason* rides
+  as an optional `MachineState` field (e.g. `status_detail: Option<String>`), so
+  `MachineStatus::Failed` stays a simple unit variant and `MachineFilter` equality
+  stays clean.
+- **The visible table/output a human reads is preserved.** Adding `Paused` keeps
+  paused VMs in the non-`Stopped` retain; the failure detail keeps the reason on
+  screen. No human-visible regression.
+- **CLI machine-readable surfaces (`--json`) deliberately shift from the internal
+  representation to the contract representation.** This is the *point* of the
+  migration (the CLI/SDK speak the stable contract, not runtime internals) and is
+  acceptable under the project's pre-1.0 / no-backcompat policy. Verify no in-repo
+  consumer depends on the old bytes before landing each slice (for `ps --json`:
+  confirmed none — the in-repo SDKs do not parse it). Note the shift in the slice's
+  commit + report; if a slice's `--json` change WOULD break an in-repo consumer,
+  that consumer moves to the contract type in the same slice.
+- Adding a `MachineStatus` variant ripples to every exhaustive match (compiler-
+  caught, ~bounded) and to the separate mvmd repo's copy of the contract — expected
+  and handled under no-backcompat; the in-repo matches are fixed in the slice.
+
 ## Non-goals / invariants
 
 - The `mvmctl::runtime::*` re-export contract mvmd depends on is unchanged — this
