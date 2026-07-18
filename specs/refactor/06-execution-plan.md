@@ -60,8 +60,8 @@ Note: by the time of writing, this WS has run further than "~15" — the ADR set
 Full narrative on this progress, including why `mvm-protocol` needs to be a designed pass rather than a mechanical move: [07-progress-and-decisions.md](07-progress-and-decisions.md).
 
 **WS4 — single `~/.mvm`** (can land alongside 1b)
-- [ ] Reparent cache/state/share/runtime/config under `~/.mvm`; `MVM_HOME` override; delete the `~/microvm/vms` const; move per-VM UDS under `~/.mvm/run` (#1654).
-- [ ] Route the ~10 known bypass sites through `mvm-core::config`; add the anti-bypass CI lint.
+- [x] Reparent cache/state/share/runtime/config under `~/.mvm`; `MVM_HOME` override; delete the `~/microvm/vms` const; move per-VM UDS under `~/.mvm/run` (#1654). _(WS4.1 `1b62d8212` + review-fix `31d793bd0` — one `mvm_home()` root, six env vars + XDG deleted, `vms_dir()` absolute; see SPRINT.md WS4 for detail)_
+- [ ] Route the remaining bypass sites through `mvm-core::config`; add the anti-bypass CI lint. _(WS4.2 — incl. the hand-rolled `+"vms"` joins → `vms_dir()` and the stale `mvm-protocol` comments)_
 - Gate: fresh run creates exactly one root; lint green.
 
 **WS5 — two features**
