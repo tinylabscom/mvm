@@ -3,7 +3,7 @@
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use mvm_client::{LocalBackend, MachineFilter, MachineId, MachineStatus, MvmClient};
+use mvm_client::{LocalBackend, MachineId, MvmClient};
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::user_config::MvmConfig;
 
@@ -57,18 +57,13 @@ fn stop_one(client: &LocalBackend, runtime: &tokio::runtime::Runtime, name: &str
 /// inside the facade), so QEMU/libkrun VMs are stopped too — not just whichever
 /// backend the CLI defaulted to.
 fn stop_all(client: &LocalBackend, runtime: &tokio::runtime::Runtime) -> Result<()> {
-    let machines = runtime
-        .block_on(client.list_machines(MachineFilter::all()))
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("listing machines to stop")?;
+    // The backend-observed set (not the registry-folded `list_machines`): it
+    // includes a crashed VM that still holds a pid marker so its stop reaps the
+    // orphaned per-VM subprocesses, and it leaves registry-only rows untouched.
+    // Every listed VM is an unconditional stop target, exactly as the old
+    // `AnyBackend::list_all()` scan was. Infallible, so the audit always emits.
     let mut last_err = None;
-    for m in machines {
-        // The host-wide listing folds in registered-but-stopped machines; only
-        // the actually-running ones are stop targets (mirroring the old
-        // live-VM-only scan), so a stopped registry row is left alone.
-        if m.status == MachineStatus::Stopped {
-            continue;
-        }
+    for m in client.list_stop_targets() {
         record_vm_readiness(&m.name, InstanceReadiness::Stopping);
         if let Err(e) = runtime.block_on(client.stop_machine(&m.id)) {
             last_err = Some(e);

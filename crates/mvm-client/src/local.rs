@@ -53,6 +53,28 @@ impl LocalBackend {
             backend: AnyBackend::from_hypervisor(name),
         }
     }
+
+    /// The backend-observed VMs on this host — every VMM's live listing plus this
+    /// client's own backend, deduped by name — as the target set for a bulk stop.
+    ///
+    /// This is deliberately NOT [`list_machines`](MvmClient::list_machines): it
+    /// omits the registry-only rows that call folds in (a stopped registration
+    /// with no backend process), which must never be swept by `down`, and it
+    /// KEEPS a crashed VM that still holds a pid marker — reported `Stopped` by
+    /// its backend — so [`stop_machine`](MvmClient::stop_machine) can reap that
+    /// VM's orphaned per-VM subprocesses (secret substitution, broker, …).
+    ///
+    /// Infallible: a per-backend listing error degrades to fewer rows rather than
+    /// aborting a host-wide stop before it can reap anything.
+    pub fn list_stop_targets(&self) -> Vec<MachineState> {
+        let mut infos: Vec<VmInfo> = AnyBackend::list_all();
+        for vm in self.backend.list().unwrap_or_default() {
+            if !infos.iter().any(|existing| existing.name == vm.name) {
+                infos.push(vm);
+            }
+        }
+        infos.into_iter().map(|i| to_state(i, None)).collect()
+    }
 }
 
 impl Default for LocalBackend {
