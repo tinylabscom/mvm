@@ -108,6 +108,21 @@ and the first that grows the `MvmClient` trait with a genuinely rich subsystem.
 - This is a bigger diff than slices 1–2; commit in two parts (trait+DTOs+impls, then
   the `pause.rs` swap) and run the full gate.
 
+## Follow-up (review-flagged, non-blocking)
+
+The slice landed with `resume_machine -> Result<()>`, so the resume `WorkloadWake`
+audit entry and the `--warm` success line lost their detail fields — the old
+entries carried `epoch=/vmstate=/mem=` and the warm line carried the
+`ReseedStatus` summary, now reduced to `backend=<hv>` / a plain line. The resume
+is still emitted + still replay-refused (the security property is intact) and no
+test asserted the old strings, so nothing silently broke — but for an
+auditability-first project the resume audit entry should carry the same detail
+`pause` does. **Follow-up:** give resume a `ResumeOutcome { epoch, vmstate_len,
+mem_len, reseed: Option<String> }` return (plain serde, REST-satisfiable, mirrors
+`PauseOutcome`) so the CLI can emit the full `WorkloadWake` + the reseed summary.
+A one-signature change across the four impls + `pause.rs`; deferred only to avoid
+another full trait-change rebuild on a saturated machine.
+
 ## Not in this slice
 
 Snapshot **list/delete** subcommands (`list_instance_snapshots`/`delete_instance_snapshot`
