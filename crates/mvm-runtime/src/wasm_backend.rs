@@ -77,12 +77,6 @@ pub enum WasmBackendError {
     VerifiedBootNotSupported,
 
     #[error(
-        "wasm backend does not mediate real networking yet — the governed WASI egress seam \
-         is a later phase; drop --network-allow or select a microVM backend"
-    )]
-    NetworkingNotSupported,
-
-    #[error(
         "wasm backend has no interactive console — a WASI instance has no PTY; select a \
          microVM backend for `mvmctl console`"
     )]
