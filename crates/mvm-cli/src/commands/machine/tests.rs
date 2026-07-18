@@ -21,7 +21,7 @@ impl IsolatedMachineState {
     fn new() -> Self {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         Self {
             _env: env,
             _tmp: tmp,
@@ -743,7 +743,7 @@ fn interactive_refuses_a_sealed_machine_via_the_claim15_gate() {
     let mut env = TestEnv::new();
     let tmp = tempfile::tempdir().expect("tempdir");
     env.set("HOME", tmp.path());
-    env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+    env.set("MVM_HOME", tmp.path().join(".mvm"));
     let name = "sealed-machine";
     mvm_runtime::vm::runtime_meta::write(
         name,

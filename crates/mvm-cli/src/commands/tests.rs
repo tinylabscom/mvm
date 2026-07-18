@@ -4181,7 +4181,7 @@ fn machine_console_refused_on_sealed_image() {
     let mut env = mvm_core::util::test_env::TestEnv::new();
     let tmp = tempfile::tempdir().expect("tempdir");
     env.set("HOME", tmp.path());
-    env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+    env.set("MVM_HOME", tmp.path().join(".mvm"));
 
     let name = "sealed-machine-console";
     write_meta(

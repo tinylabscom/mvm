@@ -298,7 +298,7 @@ pub fn populate_audit_substrate(
 /// bridge reader never sees a partial file.
 ///
 /// Parent dir is assumed pre-created by the caller (the producer sites
-/// in `up.rs` ensure `mvm_data_dir/vms/<name>/` exists with the same
+/// in `up.rs` ensure `mvm_home/vms/<name>/` exists with the same
 /// `0700` umbrella as `~/.mvm`).
 #[cfg(unix)]
 pub(crate) fn write_secret_file(path: &std::path::Path, body: &[u8]) -> Result<()> {
@@ -348,7 +348,7 @@ pub fn stash_plan_for_bridge(cfg: &mvm_core::vm_backend::VmStartConfig) -> Resul
     let Some(plan_json) = cfg.plan_json.as_deref() else {
         return Ok(());
     };
-    let state_dir = std::path::PathBuf::from(mvm_core::config::mvm_data_dir())
+    let state_dir = std::path::PathBuf::from(mvm_core::config::mvm_home())
         .join("vms")
         .join(&cfg.name);
     std::fs::create_dir_all(&state_dir)
@@ -1161,7 +1161,7 @@ mod tests {
         // because there's nothing to stash.
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let cfg = VmStartConfig {
             name: "skip-me".into(),
@@ -1181,7 +1181,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let cfg = VmStartConfig {
             name: "with-plan".into(),
@@ -1252,7 +1252,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let keys_dir = mvm_core::config::mvm_keys_dir();
 
         // Build an admitted plan that carries agent_verbs.
@@ -1310,7 +1310,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let keys_dir = mvm_core::config::mvm_keys_dir();
 
         // Plain plan with no agent_verbs — the fixture default.
@@ -1344,7 +1344,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let keys_dir = mvm_core::config::mvm_keys_dir();
 
         let vm_name = "vm-stale-grant";

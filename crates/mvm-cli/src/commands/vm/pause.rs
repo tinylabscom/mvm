@@ -78,7 +78,7 @@ pub(in crate::commands) struct ResumeArgs {
 fn snapshot_io_for(hypervisor: &str, vm_name: &str) -> Result<Box<dyn SnapshotIO>> {
     if hypervisor == "mock" {
         // The mock VM's per-VM directory lives at
-        // `<mvm_data_dir>/mock-vms/<name>/` and is created by
+        // `<mvm_home>/mock-vms/<name>/` and is created by
         // `MockBackend::start_with_mode`. Nothing to validate here
         // beyond its existence — `pause_and_seal` writes the
         // snapshot files into a sibling `snapshot/` directory.

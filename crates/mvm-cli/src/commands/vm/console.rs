@@ -541,7 +541,7 @@ mod accessible_gate_tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
         env.set("HOME", tmp.path());
-        env.set("MVM_DATA_DIR", tmp.path().join(".mvm"));
+        env.set("MVM_HOME", tmp.path().join(".mvm"));
         f(tmp.path());
     }
 
@@ -575,7 +575,7 @@ mod accessible_gate_tests {
     fn touch_activity_refreshes_last_active_for_registered_vm() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_SHARE_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let path = mvm_runtime::vm::name_registry::registry_path();
         let mut reg = mvm_runtime::vm::name_registry::VmNameRegistry::default();
@@ -672,7 +672,7 @@ mod picker_hvf_tests {
     use super::*;
 
     /// Bind `hvf-agent.sock` under a fresh temp state-dir and set
-    /// `MVM_DATA_DIR` so `vm_state_dir` resolves there. Returns the guard
+    /// `MVM_HOME` so `vm_state_dir` resolves there. Returns the guard
     /// objects that keep the socket and env alive for the test.
     fn setup_hvf_agent(
         name: &str,
@@ -683,7 +683,7 @@ mod picker_hvf_tests {
     ) {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         let state = mvm_core::config::vm_state_dir(name);
         std::fs::create_dir_all(&state).unwrap();
         let agent = mvm_core::config::vm_hvf_agent_socket(name);
@@ -720,7 +720,7 @@ mod picker_hvf_tests {
     fn pick_console_transport_skips_hvf_for_sealed_workload() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let name = "hvf-sealed-workload";
         let state = mvm_core::config::vm_state_dir(name);
@@ -769,7 +769,7 @@ mod picker_hvf_tests {
     fn pick_console_transport_selects_hvf_for_accessible_workload_without_dev_env() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir_in("/tmp").expect("state tempdir");
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         // Deliberately NOT dev mode.
         env.set("MVM_ENV", "prod");
 

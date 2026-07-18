@@ -9,7 +9,7 @@ macOS is a supported local development target. Linux-specific build and runtime 
 
 - Use host cargo for checks that compile cleanly.
 - Use the builder VM for Nix builds and microVM operations.
-- Keep worktree state isolated with `MVM_DATA_DIR`, `CARGO_TARGET_DIR`, and `CARGO_HOME`.
+- Keep worktree state isolated with `MVM_HOME`, `CARGO_TARGET_DIR`, and `CARGO_HOME`.
 
 ## Useful commands
 

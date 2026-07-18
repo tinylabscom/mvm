@@ -160,7 +160,7 @@ impl<'a> BuilderVmRuntime<'a> {
     }
 }
 
-/// Stage the per-job dir inside `~/.cache/mvm/builder-vm/jobs/<id>/`
+/// Stage the per-job dir inside `~/.mvm/cache/builder-vm/jobs/<id>/`
 /// so the in-guest `mvm-host-vm-init` finds the right artifact
 /// for dispatch:
 ///
@@ -1354,7 +1354,7 @@ pub fn ensure_persistent_volume_image(
 ///
 /// `builder_cache_dir` is the host-side root the builder VM uses for
 /// shared state — callers compute this themselves (typically
-/// `~/.cache/mvm/builder-vm/`) so the helper stays free of
+/// `~/.mvm/cache/builder-vm/`) so the helper stays free of
 /// `mvm_core::config` lookups. The directory is created if missing.
 ///
 /// `arch` only appears in the filename (`nix-store-<arch>.img`) so
@@ -1989,7 +1989,7 @@ mod tests {
     // Tests migrated from libkrun_builder.rs alongside NixStoreImageLock
     // and acquire_nix_store_image_lock. The new signature takes the
     // cache dir as a &Path arg,
-    // so the XDG_CACHE_HOME env hack from the old tests is gone — each
+    // so the cache-env override hack from the old tests is gone — each
     // test passes a fresh TempDir path directly and runs without
     // process-wide env mutation.
     // -----------------------------------------------------------------
@@ -2102,7 +2102,7 @@ mod tests {
     #[test]
     fn acquire_nix_store_image_lock_creates_missing_cache_dir() {
         // `create_dir_all` is part of the contract — callers pass the
-        // computed `~/.cache/mvm/builder-vm/` path and expect it to be
+        // computed `~/.mvm/cache/builder-vm/` path and expect it to be
         // created on demand.
         let scratch = tempfile::TempDir::new().unwrap();
         let cache_dir = scratch.path().join("not").join("yet").join("created");

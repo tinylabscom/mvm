@@ -185,46 +185,32 @@ pub fn resolve_vm_dir(slot: &VmSlot) -> Result<String> {
     run_in_vm_stdout(&format!("echo {}", slot.vm_dir))
 }
 
-/// Resolve the absolute directory path for a running VM by name.
-///
-/// Expands `~/microvm/vms` on the host. This used to `echo` it *inside* the VM
-/// to resolve `~`, but on macOS every `run_in_vm` shells into the dev VM —
-/// auto-starting a heavyweight builder — and this resolver sits on the
-/// agent-reachability poll (`wait_for_agent`), so a Firecracker-fallback probe
-/// for an hvf workload woke the dev VM before the hvf agent bound. The instance
-/// dir is a host path the VMM reads; expand it here. On Linux (Firecracker) the
-/// in-VM env is the host, so this is identical to the old echo.
-pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
-    let abs_vms = VMS_DIR
-        .strip_prefix("~/")
-        .and_then(|rest| {
-            std::env::var("HOME")
-                .ok()
-                .map(|home| format!("{home}/{rest}"))
-        })
-        .unwrap_or_else(|| VMS_DIR.to_string());
-    Ok(format!("{abs_vms}/{name}"))
+/// Absolute root of the per-VM directories (`<mvm_home>/vms`) as a `String`
+/// for shell interpolation. A host path, resolved on the host — never `echo`d
+/// inside a VM (on macOS every `run_in_vm` shells into the dev VM,
+/// auto-starting a heavyweight builder; on Linux the in-VM env is the host,
+/// so host-side resolution is identical anyway).
+pub(crate) fn abs_vms_dir() -> String {
+    mvm_core::config::vms_dir().display().to_string()
 }
 
-/// Return the host-side path to Firecracker's PID file for VM `name`.
+/// Resolve the absolute directory path for a running VM by name:
+/// `<mvm_home>/vms/<name>`. A host path the VMM reads, resolved on the host.
+pub fn resolve_running_vm_dir(name: &str) -> Result<String> {
+    Ok(format!("{}/{name}", abs_vms_dir()))
+}
+
+/// Return the host-side path to Firecracker's PID file for VM `name`:
+/// `<mvm_home>/vms/<name>/fc.pid`. The Firecracker workspace shares the
+/// per-VM directory with the host metadata every backend writes; the file
+/// sets are disjoint (`fc.*`, `run-info.json` vs pid/console/socket files).
 ///
-/// Firecracker writes `fc.pid` into the VMS_DIR-based per-VM directory
-/// (`~/microvm/vms/<name>/fc.pid`), NOT into `vm_state_dir(name)` which is
-/// `~/.mvm/vms/<name>`. These are two separate trees: VMS_DIR is the in-VM
-/// (or native-Linux host) Firecracker workspace; vm_state_dir is the host
-/// metadata store shared by all backends.
-///
-/// Returns `None` when `$HOME` is not set (e.g. hermetic test environments
-/// that intentionally omit it).
+/// Returns `None` when the mvm root cannot be resolved (neither `MVM_HOME`
+/// nor `$HOME` set — e.g. hermetic test environments that intentionally
+/// omit them).
 pub fn fc_pid_path(name: &str) -> Option<std::path::PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        std::path::PathBuf::from(home)
-            .join("microvm")
-            .join("vms")
-            .join(name)
-            .join("fc.pid"),
-    )
+    let root = mvm_core::config::mvm_home_strict().ok()?;
+    Some(root.join("vms").join(name).join("fc.pid"))
 }
 
 /// Path to the host-side UDS that proxies the guest agent's vsock port for a
@@ -800,7 +786,7 @@ impl FlakeRunConfig {
 
 /// Boot a Firecracker VM from flake-built artifacts (headless).
 ///
-/// Each VM gets its own directory under `~/microvm/vms/<name>/` with a
+/// Each VM gets its own directory under `<mvm_home>/vms/<name>/` with a
 /// separate Firecracker socket, PID file, and log.  The bridge network
 /// is shared, but each VM has its own TAP device and guest IP.
 #[instrument(skip_all, fields(name = %config.name))]
@@ -1136,7 +1122,7 @@ pub fn restore_from_template_snapshot(
     // when multiple instances start simultaneously.
     let template_runtime_dir = format!(
         "{}/templates/{}/runtime",
-        mvm_core::config::mvm_data_dir(),
+        mvm_core::config::mvm_home(),
         template_id
     );
     let lock_file = format!("{}.lock", template_runtime_dir);
@@ -1427,7 +1413,7 @@ pub fn warm_restore_instance_from_path(
 pub fn pause_vm(name: &str) -> Result<()> {
     require_linux_env()?;
 
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
@@ -1455,7 +1441,7 @@ pub fn pause_vm(name: &str) -> Result<()> {
 pub fn resume_vm(name: &str) -> Result<()> {
     require_linux_env()?;
 
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
@@ -1503,7 +1489,7 @@ pub fn create_snapshot_files(
         mem_path.display()
     );
 
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let socket = format!("{}/fc.socket", abs_dir);
     let q_socket = shell_quote(&socket);
@@ -1543,7 +1529,7 @@ pub fn create_snapshot_files(
 pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
     require_linux_env()?;
 
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
@@ -1578,7 +1564,7 @@ pub fn balloon_set_target(name: &str, target_inflate_mib: u32) -> Result<()> {
 pub fn balloon_state(name: &str) -> Result<u32> {
     require_linux_env()?;
 
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
@@ -1630,7 +1616,7 @@ fn await_graceful_exit(
 pub fn stop_vm(name: &str) -> Result<()> {
     require_linux_env()?;
 
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms, name);
     let pid_file = format!("{}/fc.pid", abs_dir);
     let socket = format!("{}/fc.socket", abs_dir);
@@ -1641,7 +1627,7 @@ pub fn stop_vm(name: &str) -> Result<()> {
     // if an FC VM crashes/OOMs on its own, a later `stop_vm` must still reap the
     // moat — decrypted secrets must not outlive the guest, even on a crash. Both
     // are best-effort + idempotent (no-op when the VM carried no secrets). The
-    // substitution sidecars live under `vm_state_dir(name)`, NOT the VMS_DIR
+    // substitution sidecars live under `vm_state_dir(name)`, not the workspace
     // `abs_dir`. Mirrors qemu.rs ordering (reap-before-not-running-return).
     crate::substitution_spawn::reap_substitution_endpoint(
         &mvm_core::config::vm_state_dir(name),
@@ -1760,7 +1746,7 @@ pub fn stop_all_vms() -> Result<()> {
 pub fn logs(name: &str, follow: bool, lines: u32, hypervisor: bool) -> Result<()> {
     require_linux_env()?;
 
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let filename = if hypervisor {
         "firecracker.log"
     } else {
@@ -1843,7 +1829,7 @@ const CONSOLE_WARNING_PATTERNS: &[&str] = &[
 pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     require_linux_env()?;
 
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms, name);
 
     // Check VM directory exists
@@ -2036,12 +2022,12 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     Ok(result)
 }
 
-/// List all running VMs by scanning ~/microvm/vms/*/run-info.json.
+/// List all running VMs by scanning `<mvm_home>/vms/*/run-info.json`.
 #[instrument(skip_all)]
 pub fn list_vms() -> Result<Vec<RunInfo>> {
     let output = run_in_vm_stdout(&format!(
         "for f in {dir}/*/run-info.json; do [ -f \"$f\" ] && cat \"$f\"; done 2>/dev/null || true",
-        dir = VMS_DIR,
+        dir = abs_vms_dir(),
     ))?;
 
     let mut vms = Vec::new();
@@ -2053,7 +2039,7 @@ pub fn list_vms() -> Result<Vec<RunInfo>> {
         if let Ok(info) = serde_json::from_str::<RunInfo>(line) {
             // Verify the VM is actually running
             if let Some(ref name) = info.name {
-                let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+                let abs_vms = abs_vms_dir();
                 let pid_file = format!("{}/{}/fc.pid", abs_vms, name);
                 if firecracker::is_vm_running(&pid_file).unwrap_or(false) {
                     vms.push(info);
@@ -2093,7 +2079,7 @@ pub fn allocate_slot(name: &str) -> Result<VmSlot> {
           exit 2
         ) 9>{dir}/.slot.lock
         "#,
-        dir = VMS_DIR,
+        dir = abs_vms_dir(),
         name = q_name,
         json_name = q_json_name,
     ))?;
@@ -2109,7 +2095,7 @@ pub fn allocate_slot(name: &str) -> Result<VmSlot> {
 /// Recreate a slot from a previously reserved VM directory.
 pub fn read_reserved_slot(name: &str) -> Result<VmSlot> {
     let q_name = shell_quote(name);
-    let output = run_in_vm_stdout(&format!("cat {}/{}/run-info.json", VMS_DIR, q_name))?;
+    let output = run_in_vm_stdout(&format!("cat {}/{}/run-info.json", abs_vms_dir(), q_name))?;
     let value: serde_json::Value =
         serde_json::from_str(output.trim()).with_context(|| format!("parse slot for {name}"))?;
     let index = value
@@ -2129,7 +2115,7 @@ fn release_slot_reservation(slot: &VmSlot) -> Result<()> {
           rm -f {run_info}
         fi
         "#,
-        dir = VMS_DIR,
+        dir = abs_vms_dir(),
         name = q_name,
         run_info = "$run_info",
     ))
@@ -2754,7 +2740,7 @@ pub fn write_vm_run_info(config: &FlakeRunConfig, abs_dir: &str) -> Result<()> {
 /// Read run info for a named VM.
 #[instrument(skip_all, fields(name))]
 pub fn read_vm_run_info(name: &str) -> Result<RunInfo> {
-    let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+    let abs_vms = abs_vms_dir();
     let abs_dir = format!("{}/{}", abs_vms.trim(), name);
     read_vm_run_info_from(&abs_dir)
         .ok_or_else(|| anyhow::anyhow!("No run-info found for VM '{}'. Is it running?", name))
@@ -2813,7 +2799,7 @@ pub fn is_pid_alive(pid: u32) -> bool {
     }
 }
 
-/// Scan `VMS_DIR` on the Linux host for orphaned entries — run-info.json files
+/// Scan the vms root on the Linux host for orphaned entries — run-info.json files
 /// whose stored Firecracker PID is no longer alive.
 ///
 /// Returns a list of VM names with orphaned state files.
@@ -2830,7 +2816,7 @@ pub fn find_orphaned_vms() -> Result<Vec<String>> {
                 echo "$name"
             fi
         done 2>/dev/null || true"#,
-        vms_dir = VMS_DIR,
+        vms_dir = abs_vms_dir(),
     ))?;
 
     Ok(output
@@ -2840,7 +2826,7 @@ pub fn find_orphaned_vms() -> Result<Vec<String>> {
         .collect())
 }
 
-/// Remove orphaned `run-info.json` entries from `VMS_DIR`.
+/// Remove orphaned `run-info.json` entries from the vms root.
 ///
 /// In dry-run mode: lists orphaned entries without deleting.
 /// In normal mode: removes the orphaned files and logs each removal.
@@ -2866,7 +2852,7 @@ pub fn cleanup_orphaned_vms(dry_run: bool) -> Result<()> {
     for name in &orphans {
         let result = run_in_vm(&format!(
             "rm -f {vms_dir}/{name}/run-info.json",
-            vms_dir = VMS_DIR,
+            vms_dir = abs_vms_dir(),
             name = name,
         ));
         match result {
@@ -3230,7 +3216,7 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
     let bridge_bin =
         resolve_fc_bridge_path().with_context(|| "locate mvm-bridge binary".to_string())?;
 
-    let data_dir = std::path::PathBuf::from(mvm_core::config::mvm_data_dir());
+    let data_dir = std::path::PathBuf::from(mvm_core::config::mvm_home());
     let state_dir = data_dir.join("vms").join(vm_name);
     let plan_path = state_dir.join("plan.json");
     let bundle_path = state_dir.join("bundle.json");
@@ -3263,7 +3249,7 @@ fn spawn_fc_bridge(vm_name: &str, abs_dir: &str) -> Result<AttachedBridgeGuard> 
     };
 
     // ── Step 2: substrate paths the bridge needs to bind/read. All
-    //            relative to `mvm_data_dir()` so an `MVM_DATA_DIR`
+    //            relative to `mvm_home()` so an `MVM_HOME`
     //            override (tests, mvmd) transparently re-roots the
     //            whole tree.
     let audit_dir = data_dir.join("audit");
@@ -3581,8 +3567,8 @@ mod tests {
     #[test]
     fn firecracker_vsock_uds_lives_under_vm_runtime_dir() {
         assert_eq!(
-            firecracker_vsock_uds_path("/builder/microvm/vms/vm-a"),
-            "/builder/microvm/vms/vm-a/runtime/v.sock"
+            firecracker_vsock_uds_path("/builder/vms/vm-a"),
+            "/builder/vms/vm-a/runtime/v.sock"
         );
     }
 
@@ -3968,14 +3954,15 @@ mod tests {
 
     #[test]
     fn resolve_running_vm_dir_expands_host_side() {
-        // Must resolve `~/microvm/vms` on the host, never shelling into the VM:
+        // Must resolve the vms root on the host, never shelling into the VM:
         // this sits on the agent-reachability poll, and a `run_in_vm` here wakes
         // the macOS dev VM. (The old in-VM `echo` returned Err in a test env with
         // no dev VM reachable.)
-        let home = std::env::var("HOME").expect("HOME set in the test env");
+        let mut env = mvm_core::util::test_env::TestEnv::new();
+        env.set("MVM_HOME", "/custom/root");
         assert_eq!(
             resolve_running_vm_dir("my-vm").unwrap(),
-            format!("{home}/microvm/vms/my-vm"),
+            "/custom/root/vms/my-vm",
         );
     }
 
@@ -4679,7 +4666,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let vm_name = "verb-grant-token-test";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -4725,7 +4712,7 @@ mod tests {
     fn verb_grant_cmdline_token_none_when_sidecar_absent() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let vm_name = "no-grant-vm";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -4743,7 +4730,7 @@ mod tests {
     fn require_grant_cmdline_token_some_when_sidecar_present() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let vm_name = "require-grant-present-test";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -4765,7 +4752,7 @@ mod tests {
     fn require_grant_cmdline_token_none_when_no_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let vm_name = "require-grant-absent-test";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);
@@ -4795,7 +4782,7 @@ mod tests {
     fn host_signer_pub_cmdline_token_some_when_grant_and_key_present() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let vm_name = "host-signer-pub-present";
         let pubkey = [0xABu8; 32];
@@ -4818,7 +4805,7 @@ mod tests {
     fn host_signer_pub_cmdline_token_none_when_grant_absent() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         // Key present, but no verb-grant sidecar (plan carried no agent_verbs).
         let keys_dir = mvm_core::config::mvm_keys_dir();
@@ -4839,7 +4826,7 @@ mod tests {
     fn host_signer_pub_cmdline_token_none_when_key_wrong_size() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let vm_name = "host-signer-pub-bad-key";
         let state_dir = mvm_core::config::vm_state_dir(vm_name);

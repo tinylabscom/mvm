@@ -6,7 +6,7 @@
 //!   - `embedded` — `include_bytes!`'d payload + SHA-256 hashes
 //!     produced by `build.rs`.
 //!   - `extract` — race-safe extraction to
-//!     `~/.cache/mvm/host-bins/<content-hash>/` on first use.
+//!     `~/.mvm/cache/host-bins/<content-hash>/` on first use.
 
 pub mod embedded;
 pub mod extract;

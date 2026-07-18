@@ -177,19 +177,19 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 }
 
 fn default_managed_volume_root() -> std::path::PathBuf {
-    std::path::PathBuf::from(mvm_core::config::mvm_data_dir())
+    std::path::PathBuf::from(mvm_core::config::mvm_home())
         .join("volumes")
         .join("local")
 }
 
 fn default_mvm_volume_root() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_data_dir())
+    PathBuf::from(mvm_core::config::mvm_home())
         .join("volumes")
         .join("mvm-managed")
 }
 
 fn local_master_key_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_data_dir())
+    PathBuf::from(mvm_core::config::mvm_home())
         .join("volumes")
         .join("master-keys")
         .join("local")
@@ -837,7 +837,7 @@ mod tests {
         fn new() -> Self {
             let mut env = mvm_core::util::test_env::TestEnv::new();
             let tmp = tempfile::tempdir().expect("tempdir");
-            env.set("MVM_DATA_DIR", tmp.path());
+            env.set("MVM_HOME", tmp.path());
             Self { _env: env, tmp }
         }
 

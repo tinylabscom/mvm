@@ -57,12 +57,12 @@ check-linux TARGET="x86_64-unknown-linux-gnu":
 run *ARGS:
     cargo run -- {{ARGS}}
 
-# Run mvmctl with the dev env set (worktree-local MVM_DATA_DIR).
+# Run mvmctl with the dev env set (worktree-local MVM_HOME).
 dev *ARGS:
     sh ./bin/dev {{ARGS}}
 
-# Run cargo with the dev env set (worktree-local MVM_DATA_DIR /
-# MVM_CACHE_DIR / CARGO_TARGET_DIR).
+# Run cargo with the dev env set (worktree-local MVM_HOME /
+# CARGO_TARGET_DIR / CARGO_HOME).
 dev-cargo *ARGS:
     bash -c 'source scripts/dev-env.sh && cargo {{ARGS}}'
 

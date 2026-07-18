@@ -33,7 +33,7 @@ pub const PLAN_MODE: u32 = 0o600;
 
 /// Resolve `~/.mvm/vms/<vm_name>/`.
 pub fn vm_state_dir(vm_name: &str) -> Result<PathBuf> {
-    Ok(mvm_core::config::mvm_data_dir_strict()?
+    Ok(mvm_core::config::mvm_home_strict()?
         .join("vms")
         .join(vm_name))
 }

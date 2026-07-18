@@ -11,7 +11,7 @@
 //! Safety:
 //! - Tier flags refuse to run if any VM is currently running, unless
 //!   `--force` is set. Wiping `~/.mvm/vms/<id>/` or
-//!   `~/.cache/mvm/builder-vm/vms/<id>/` while a supervisor is reading
+//!   `~/.mvm/cache/builder-vm/vms/<id>/` while a supervisor is reading
 //!   the state dir corrupts the running guest.
 //! - `--nuclear` always requires an interactive text confirmation
 //!   (`DELETE-EVERYTHING`). `--yes` does not bypass it.
@@ -42,11 +42,11 @@ pub(in crate::commands) struct Args {
     #[arg(long)]
     pub all: bool,
 
-    /// Also wipe `~/.cache/mvm` (Stage 0 staging, builder VM artifacts).
+    /// Also wipe `~/.mvm/cache` (Stage 0 staging, builder VM artifacts).
     /// All cache contents are regenerable; the next build rebuilds them.
     #[arg(long)]
     pub cache: bool,
-    /// Wipe `~/.cache/mvm` PLUS regenerable subdirs of `~/.mvm`
+    /// Wipe `~/.mvm/cache` PLUS regenerable subdirs of `~/.mvm`
     /// (`dev`, `vms`, `log`, `dev-cluster`, `mock-vms`, `tool-staging`).
     /// Preserves identity (`keys`, `audit`, `volumes`, `secrets`,
     /// `config.toml`) and `templates`.
@@ -186,7 +186,7 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resul
 
     // ---- host-side tier sweep (new) ----
     if let Some(t) = tier {
-        let data_root = PathBuf::from(mvm_core::config::mvm_data_dir());
+        let data_root = PathBuf::from(mvm_core::config::mvm_home());
         let cache_root = PathBuf::from(mvm_core::config::mvm_cache_dir());
         let plan = build_plan_at(&data_root, &cache_root, t);
 
@@ -278,7 +278,7 @@ fn confirm_tier(tier: Tier, yes_flag: bool) -> Result<bool> {
 /// the probe are conservative: a failed readdir returns None (the check
 /// is a guardrail, not a guarantee).
 fn first_running_vm() -> Option<String> {
-    let vms_root = PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");
+    let vms_root = PathBuf::from(mvm_core::config::mvm_home()).join("vms");
     let entries = std::fs::read_dir(&vms_root).ok()?;
     for entry in entries.flatten() {
         let pid_path = entry.path().join("libkrun.pid");
@@ -318,7 +318,7 @@ struct CleanupPlan {
 
 /// Build the set of paths a tier sweep would remove, anchored at the
 /// supplied data + cache roots. Tests pass tempdirs; production passes
-/// `mvm_data_dir()` / `mvm_cache_dir()`. A path is only added if it
+/// `mvm_home()` / `mvm_cache_dir()`. A path is only added if it
 /// currently exists on disk — the plan IS the actual delete list, not
 /// a hypothetical superset.
 fn build_plan_at(data_root: &Path, cache_root: &Path, tier: Tier) -> CleanupPlan {

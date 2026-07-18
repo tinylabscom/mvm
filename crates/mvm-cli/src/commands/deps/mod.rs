@@ -27,7 +27,7 @@
 //! [`mvm_build::app_deps::resolve_cache_root`] so the supervisor's
 //! admission gate and this CLI agree on where volumes
 //! live. The optional `--cache-root` flag exists for tests + the
-//! `MVM_DEPS_VOLUMES_DIR` env var; production users have no reason
+//! `MVM_HOME` env var; production users have no reason
 //! to override.
 
 use anyhow::Result;
@@ -52,7 +52,7 @@ pub(in crate::commands) enum DepsAction {
     /// Pretty-print the sealed artifacts of one deps volume. Read-only.
     ///
     /// Resolves `~/.mvm/volumes/deps/<volume_hash>/` (honoring
-    /// `MVM_DEPS_VOLUMES_DIR`), reads SBOM / fetch.log / cve.json /
+    /// `MVM_HOME`), reads SBOM / fetch.log / cve.json /
     /// meta.json, and prints a human-readable summary. Useful for
     /// `--dev` users who want to see what landed without inspecting
     /// the raw JSON by hand.
@@ -64,7 +64,7 @@ pub(in crate::commands) enum DepsAction {
         /// Override the deps-volumes cache root. Defaults to
         /// `mvm_core::config::mvm_deps_volumes_dir()`. Mostly used by
         /// tests + integration harnesses; production users should set
-        /// `MVM_DEPS_VOLUMES_DIR` instead.
+        /// `MVM_HOME` instead.
         #[arg(long)]
         cache_root: Option<PathBuf>,
         /// Emit a machine-readable JSON object on stdout instead of

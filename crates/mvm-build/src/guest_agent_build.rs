@@ -7,7 +7,7 @@
 //! them in. This module mirrors the existing host cross-compile pattern
 //! (`crates/mvm-cli/build.rs` cross-compiles the host-vm bins with
 //! `cargo-zigbuild` to a static musl target) and caches the result under
-//! `~/.cache/mvm/guest-agent/<version>/<arch>/dev-shell/`.
+//! `~/.mvm/cache/guest-agent/<version>/<arch>/dev-shell/`.
 //!
 //! `cargo-zigbuild` is the single portable cross path: the agent pulls
 //! `ring` (C), so a static musl build needs a musl C cross-compiler, and
@@ -733,10 +733,10 @@ fn apply_zigbuild_env(
     }
     cmd.env("CARGO_TARGET_DIR", &spec.target_dir);
 
-    // Keep cargo-zigbuild's own cache under the mvm/XDG cache root instead of
+    // Keep cargo-zigbuild's own cache under the mvm cache root instead of
     // whatever platform-global default the host picks (for example
     // `~/Library/Caches/cargo-zigbuild` on macOS). This keeps the direct guest
-    // binary path aligned with `MVM_CACHE_DIR` / `~/.cache/mvm` and avoids
+    // binary path aligned with `MVM_HOME` / `~/.mvm/cache` and avoids
     // depending on unrelated host cache permissions.
     let zigbuild_cache_dir = zigbuild_cache_dir(&spec.target_dir);
     let zig_global_cache_dir = zig_global_cache_dir(&spec.target_dir);

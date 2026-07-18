@@ -77,7 +77,7 @@ pub const MAX_PATH_LEN: usize = 512;
 /// Default per-tenant staging dir.
 /// `~/.mvm/tool-staging/<tenant>/`.
 pub fn default_staging_root() -> Option<PathBuf> {
-    mvm_core::config::mvm_data_dir_strict()
+    mvm_core::config::mvm_home_strict()
         .ok()
         .map(|d| d.join("tool-staging"))
 }

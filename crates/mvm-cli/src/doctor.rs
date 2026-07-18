@@ -98,10 +98,9 @@ struct Check {
 /// (`VM_NAME`) is the routing key for `shell::run_on_vm`, not a filesystem
 /// path.
 fn dev_vm_socket_path() -> String {
-    format!(
-        "{}/vms/mvm-dev/vsock.sock",
-        mvm_core::config::mvm_share_dir()
-    )
+    mvm_core::config::vm_vsock_proxy_socket("mvm-dev")
+        .display()
+        .to_string()
 }
 
 fn dev_vm_running() -> bool {
@@ -613,7 +612,7 @@ fn network_tunnel_worker_check() -> Check {
         category: "platform",
         ok: true,
         info: network_tunnel_worker_summary(
-            &std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms"),
+            &std::path::PathBuf::from(mvm_core::config::mvm_home()).join("vms"),
         ),
     }
 }
@@ -2156,11 +2155,11 @@ fn parse_macos_diskutil_encryption_status(
     ))
 }
 
-/// `~/.mvm` should be mode 0700. The XDG share directory
-/// (`mvm_share_dir`) lands at the OS default mode (0755 on macOS Tahoe);
-/// the data dir (`mvm_data_dir`) is the one the security model owns.
+/// The mvm root (`mvm_home`) should be mode 0700 — it is the single
+/// tree the security model owns; every subdirectory inherits its
+/// privacy from this boundary.
 fn security_data_dir_mode_check() -> Check {
-    let dir = mvm_core::config::mvm_data_dir();
+    let dir = mvm_core::config::mvm_home();
     let Ok(meta) = std::fs::symlink_metadata(&dir) else {
         return Check {
             name: "data dir mode",
@@ -2199,10 +2198,7 @@ fn security_data_dir_mode_check() -> Check {
 
 /// Dev VM vsock proxy socket should be mode 0700.
 fn security_proxy_socket_mode_check() -> Check {
-    let path = format!(
-        "{}/vms/mvm-dev/vsock.sock",
-        mvm_core::config::mvm_share_dir()
-    );
+    let path = dev_vm_socket_path();
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return Check {
             name: "vsock socket mode",
@@ -2339,7 +2335,7 @@ fn security_network_policy_default_check() -> Check {
 /// any local user could read the key and forge sidecars.
 fn security_snapshot_key_check() -> Check {
     let path = mvm_core::crypto::snapshot_hmac::default_key_path(std::path::Path::new(
-        &mvm_core::config::mvm_data_dir(),
+        &mvm_core::config::mvm_home(),
     ));
     let Ok(meta) = std::fs::symlink_metadata(&path) else {
         return Check {
@@ -2649,12 +2645,12 @@ mod tests {
     #[test]
     fn builder_egress_check_reports_no_vm_when_console_log_absent() {
         use mvm_core::util::test_env::TestEnv;
-        // With MVM_CACHE_DIR pointed at an empty dir there is no
+        // With MVM_HOME pointed at an empty dir there is no
         // persistent builder console.log, so the check reports the
         // no-VM-yet info and exits ok.
         let scratch = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path());
+        env.set("MVM_HOME", scratch.path());
         let c = builder_egress_check();
         assert!(c.ok);
         assert!(c.info.contains("no builder VM yet"));
@@ -2666,7 +2662,7 @@ mod tests {
         use mvm_core::util::test_env::TestEnv;
         let scratch = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", scratch.path());
+        env.set("MVM_HOME", scratch.path());
         // Materialize a fixture console.log at the exact path the helper
         // resolves, then assert the lease is read end-to-end.
         let log = mvm_core::config::vm_state_dir("mvm-dev").join("console.log");
@@ -3143,7 +3139,7 @@ mod tests {
 
     // ── Dev-VM gating + data-dir-mode routing tests ─────────────────
     //
-    // These tests mutate `MVM_DATA_DIR` / `MVM_SHARE_DIR` (and the ts-runner
+    // These tests mutate `MVM_HOME` / `MVM_HOME` (and the ts-runner
     // tests below, PATH / MVM_TSX) to redirect doctor's probes at a tempdir.
     // Env-var mutation is process-wide, so they all go through the shared
     // `TestEnv` guard, which serializes them behind one lock and restores the
@@ -3153,38 +3149,33 @@ mod tests {
 
     struct EnvGuard {
         _env: mvm_core::util::test_env::TestEnv,
-        _tmp_data: Option<tempfile::TempDir>,
-        _tmp_share: Option<tempfile::TempDir>,
+        _tmp_root: Option<tempfile::TempDir>,
     }
 
     impl EnvGuard {
-        fn new(data: Option<tempfile::TempDir>, share: Option<tempfile::TempDir>) -> Self {
+        fn new(root: Option<tempfile::TempDir>) -> Self {
             let mut env = mvm_core::util::test_env::TestEnv::new();
-            if let Some(d) = data.as_ref() {
-                env.set("MVM_DATA_DIR", d.path());
-            }
-            if let Some(s) = share.as_ref() {
-                env.set("MVM_SHARE_DIR", s.path());
+            if let Some(r) = root.as_ref() {
+                env.set("MVM_HOME", r.path());
             }
             EnvGuard {
                 _env: env,
-                _tmp_data: data,
-                _tmp_share: share,
+                _tmp_root: root,
             }
         }
     }
 
     #[test]
-    fn dev_vm_socket_path_uses_share_dir() {
+    fn dev_vm_socket_path_lives_in_the_dev_vm_state_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let expected = format!("{}/vms/mvm-dev/vsock.sock", tmp.path().display());
-        let _g = EnvGuard::new(None, Some(tmp));
+        let _g = EnvGuard::new(Some(tmp));
         assert_eq!(dev_vm_socket_path(), expected);
     }
 
     #[test]
     fn dev_vm_running_is_false_when_no_socket() {
-        let _g = EnvGuard::new(None, Some(tempfile::tempdir().unwrap()));
+        let _g = EnvGuard::new(Some(tempfile::tempdir().unwrap()));
         assert!(
             !dev_vm_running(),
             "fresh tempdir has no vsock socket; dev_vm_running must be false"
@@ -3217,14 +3208,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn security_data_dir_mode_check_reads_data_dir_not_share_dir() {
+    fn security_data_dir_mode_check_reads_the_root_mode() {
         use std::os::unix::fs::PermissionsExt;
         let data = tempfile::tempdir().unwrap();
-        let share = tempfile::tempdir().unwrap();
-        // data dir 0700 (the one we want checked), share dir 0755 (decoy).
         std::fs::set_permissions(data.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(share.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-        let _g = EnvGuard::new(Some(data), Some(share));
+        let _g = EnvGuard::new(Some(data));
         let c = security_data_dir_mode_check();
         assert!(
             c.ok,

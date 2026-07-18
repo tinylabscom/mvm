@@ -63,7 +63,7 @@ pub const SIGNATURE_FILENAME: &str = "snapshot.sig";
 /// The host identity that signs snapshots: the attestation identity,
 /// resolved under the mvm **data dir** (`<data_dir>/attestation`) rather
 /// than the attestation module's `$HOME`-based default. This honours
-/// `MVM_DATA_DIR` isolation (so tests and parallel sessions don't share or
+/// `MVM_HOME` isolation (so tests and parallel sessions don't share or
 /// pollute the real `~/.mvm/attestation`) while coinciding with the
 /// canonical `~/.mvm/attestation` in the default layout.
 ///
@@ -71,7 +71,7 @@ pub const SIGNATURE_FILENAME: &str = "snapshot.sig";
 /// that worker's enrolled attestation pubkey via [`verify_signature`]'s
 /// `trusted_signers`. This loader is the local host's own signing identity.
 pub fn host_snapshot_identity() -> Result<IdentityKey> {
-    let dir = PathBuf::from(crate::config::mvm_data_dir()).join("attestation");
+    let dir = PathBuf::from(crate::config::mvm_home()).join("attestation");
     crate::crypto::attestation::identity::load_or_init_at(&dir)
 }
 
@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn host_snapshot_identity_is_stable_under_data_dir() {
-        // Pin MVM_DATA_DIR to a tempdir; the identity loads from
+        // Pin MVM_HOME to a tempdir; the identity loads from
         // <data_dir>/attestation and is stable across calls.
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("attestation");

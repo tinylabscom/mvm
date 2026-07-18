@@ -148,7 +148,7 @@ pub(in crate::commands) enum Commands {
     /// Browse the bundled image catalog
     #[command(hide = true)]
     Catalog(catalog::Args),
-    /// Manage the XDG cache directory (~/.cache/mvm)
+    /// Manage the cache directory (~/.mvm/cache)
     #[command(hide = true)]
     Cache(ops::cache::Args),
     /// Manage the supervisor warm pool (pre-spawned standbys for fast `up`)

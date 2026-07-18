@@ -738,7 +738,7 @@ fn session_idle_duration(record: &SessionRecord, now_unix_secs: u64) -> Duration
 /// On-disk location of the session record. Returns `None` only if
 /// `$HOME` isn't set, which would be a misconfigured environment.
 pub fn session_record_path() -> Option<PathBuf> {
-    mvm_core::config::mvm_data_dir_strict()
+    mvm_core::config::mvm_home_strict()
         .ok()
         .map(|d| d.join("run").join("persistent-builder.json"))
 }
@@ -1354,7 +1354,7 @@ mod tests {
         )
         .unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", &data_dir);
+        env.set("MVM_HOME", &data_dir);
         let touched = touch_active_session(55).expect("touch active session");
         assert!(touched);
         let body = std::fs::read(run_dir.join("persistent-builder.json")).unwrap();
@@ -1364,12 +1364,12 @@ mod tests {
 
     #[test]
     fn read_active_session_returns_none_when_record_missing() {
-        // Point MVM_DATA_DIR at a tempdir with no run/persistent-
+        // Point MVM_HOME at a tempdir with no run/persistent-
         // builder.json; the read should silently return None rather
         // than error.
         let scratch = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
+        env.set("MVM_HOME", scratch.path().join(".mvm"));
         let result = read_active_session();
         assert!(result.is_none());
     }
@@ -1399,7 +1399,7 @@ mod tests {
         )
         .unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", scratch.path().join(".mvm"));
+        env.set("MVM_HOME", scratch.path().join(".mvm"));
         let result = read_active_session();
         assert!(
             result.is_none(),

@@ -121,7 +121,7 @@ const DIRECT_OVERLAY_HASH_BLOCK_SIZE: u32 = 4096;
 const LOCAL_BUILD_EPOCH: &str = "3";
 
 /// Resolve `arch`'s overlay from `resolver`'s cache; on a miss with a
-/// non-default cache root (e.g. a worktree-isolated `MVM_CACHE_DIR`), seed
+/// non-default cache root (e.g. a worktree-isolated `MVM_HOME`), seed
 /// that cache by installing the default cache's artifact and retry once. A
 /// default-cache miss surfaces the original resolve error unchanged. This is
 /// still a pure cache operation — no build, no download.
@@ -405,7 +405,7 @@ pub struct OverlayBuildSpec {
     pub arch: GuestArch,
     /// Where the resulting result-symlink should live. Typically
     /// a tempdir or a staging location under
-    /// `~/.cache/mvm/runtime-overlay/<version>/<arch>/.work/` —
+    /// `~/.mvm/cache/runtime-overlay/<version>/<arch>/.work/` —
     /// the install-to-cache step is the caller's responsibility.
     pub out_link: PathBuf,
     /// Override the `nix` binary location. Default `None` ⇒
@@ -1581,10 +1581,10 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("HOME", scratch.path());
-        env.set("MVM_CACHE_DIR", scratch.path().join("isolated-cache"));
+        env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let (_keep, source) = make_source_artifact("0.14.0", GuestArch::Aarch64, FAKE_ROOTHASH);
-        let default_cache_root = scratch.path().join(".cache").join("mvm");
+        let default_cache_root = scratch.path().join(".mvm").join("cache");
         install_overlay_into_cache(&source, &default_cache_root, &InstallOptions::default())
             .expect("install source into default cache");
 

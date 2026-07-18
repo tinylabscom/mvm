@@ -62,14 +62,11 @@ fn reconcile_dry_run_json_runs_against_isolated_dirs() {
     // Point all state at throwaway dirs so the run can't touch the host's
     // real registry. Dry-run + empty registry → clean, valid JSON report.
     let tmp = tempfile::tempdir().expect("tempdir");
-    let p = |s: &str| tmp.path().join(s).to_string_lossy().into_owned();
     #[allow(deprecated)]
     let out = Command::cargo_bin("mvmctl")
         .expect("locate mvmctl")
         .args(["reconcile", "--dry-run", "--json"])
-        .env("MVM_SHARE_DIR", p("share"))
-        .env("MVM_DATA_DIR", p("data"))
-        .env("MVM_STATE_DIR", p("state"))
+        .env("MVM_HOME", tmp.path().join("mvm-root"))
         .output()
         .expect("spawn mvmctl");
     assert!(

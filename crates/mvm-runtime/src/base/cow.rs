@@ -204,7 +204,7 @@ pub fn prepare_instance_rootfs(vm_name: &str, source_rootfs: &str) -> Result<Pat
 }
 
 /// Inner implementation that takes the instance path directly, so tests don't
-/// mutate `HOME` / `MVM_DATA_DIR`.
+/// mutate `HOME` / `MVM_HOME`.
 pub fn prepare_instance_rootfs_inner(instance_path: &Path, source_rootfs: &str) -> Result<PathBuf> {
     let source_path = Path::new(source_rootfs);
     if source_path == instance_path {

@@ -216,7 +216,7 @@ fn validate_revision_hash(s: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    /// Test guard that overrides `MVM_DATA_DIR` to a tempdir so
+    /// Test guard that overrides `MVM_HOME` to a tempdir so
     /// concurrent tests don't share `~/.mvm/templates/...` state.
     struct DataDirGuard {
         _env: crate::util::test_env::TestEnv,
@@ -227,9 +227,9 @@ mod tests {
         fn new() -> Self {
             let tmp = tempfile::tempdir().expect("tempdir");
             // `TestEnv` serializes env-mutating tests behind a process-wide
-            // lock and restores `MVM_DATA_DIR` on drop.
+            // lock and restores `MVM_HOME` on drop.
             let mut env = crate::util::test_env::TestEnv::new();
-            env.set("MVM_DATA_DIR", tmp.path());
+            env.set("MVM_HOME", tmp.path());
             DataDirGuard {
                 _env: env,
                 _tmp: tmp,

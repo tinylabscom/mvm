@@ -254,7 +254,7 @@ fn remove_state_dir(dir: &Path) -> Result<(), String> {
 }
 
 /// Real-filesystem [`RuntimeView`] rooted at a `vms` directory
-/// (`{mvm_data_dir}/vms`). State presence is a `stat`; liveness is
+/// (`{mvm_home}/vms`). State presence is a `stat`; liveness is
 /// `kill(pid, 0)` on the recorded supervisor pid files — no subprocess
 /// spawn, no VM boot (the cheapness budget).
 pub struct FsRuntimeView {
@@ -370,7 +370,7 @@ pub fn converge_at(registry_path: &Path, vms_root: &Path, opts: &ConvergeOpts) -
 /// self-heal is observable and `audit verify` still chains.
 pub fn converge(opts: &ConvergeOpts) -> ConvergeReport {
     let registry_path = crate::vm::name_registry::registry_path();
-    let vms_root = PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");
+    let vms_root = PathBuf::from(mvm_core::config::mvm_home()).join("vms");
     let report = converge_at(&registry_path, &vms_root, opts);
     if !opts.dry_run {
         emit_audit(&report);
@@ -808,17 +808,13 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let share = tmp.path().join("share");
-        let data = tmp.path().join("data");
-        let state = tmp.path().join("state");
-        std::fs::create_dir_all(data.join("vms")).unwrap();
+        let root = tmp.path().join("mvm-root");
+        std::fs::create_dir_all(root.join("vms")).unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_SHARE_DIR", share.to_str().unwrap());
-        env.set("MVM_DATA_DIR", data.to_str().unwrap());
-        env.set("MVM_STATE_DIR", state.to_str().unwrap());
+        env.set("MVM_HOME", root.to_str().unwrap());
 
         // A dead-process record under the relocated vms root + its registry.
-        let vms_root = data.join("vms");
+        let vms_root = root.join("vms");
         let dead_dir = make_state_dir(&vms_root, "dead", Some(i32::MAX));
         let mut reg = VmNameRegistry::default();
         reg.register_with_metadata(RegisterParams::minimal("dead", &dead_dir, "default"))
@@ -834,7 +830,7 @@ mod tests {
         assert!(reloaded.lookup("dead").is_none());
 
         // Audit line emitted to the local log (default path under state dir).
-        let audit = std::fs::read_to_string(state.join("log/audit.jsonl")).unwrap_or_default();
+        let audit = std::fs::read_to_string(root.join("state/log/audit.jsonl")).unwrap_or_default();
         assert!(
             audit.contains("registry_reconcile") && audit.contains("dead_process_left_state"),
             "expected a registry_reconcile audit line, got: {audit}"
@@ -848,9 +844,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_SHARE_DIR", tmp.path().join("share").to_str().unwrap());
-        env.set("MVM_DATA_DIR", tmp.path().join("data").to_str().unwrap());
-        env.set("MVM_STATE_DIR", tmp.path().join("state").to_str().unwrap());
+        env.set("MVM_HOME", tmp.path().join("mvm-root").to_str().unwrap());
         // No registry file, no vms dir — fail-open, clean report, no panic.
         let report = converge(&ConvergeOpts::default());
         assert!(report.is_clean(), "{report:?}");

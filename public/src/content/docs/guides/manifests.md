@@ -103,7 +103,7 @@ mvmctl machine create --name alpine-dev --manifest ./mvm.toml
 mvmctl machine start alpine-dev
 ```
 
-`machine create` stores a strict JSON spec under `MVM_DATA_DIR`, and
+`machine create` stores a strict JSON spec under `MVM_HOME`, and
 `machine start` boots it through the admitted OCI-backed launch path.
 `[dev].init` is intentionally fail-closed at start until its runtime
 transport is implemented.

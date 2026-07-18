@@ -28,7 +28,7 @@ pub mod volume_registry;
 pub use crate::base::{cow, runtime_meta};
 
 /// Crate-wide test serialization for tests that mutate
-/// `MVM_DATA_DIR` (and thus rely on a process-global env var).
+/// `MVM_HOME` (and thus rely on a process-global env var).
 /// Tests that mutate `HOME` use
 /// [`crate::base::runtime_meta::HOME_TEST_LOCK`] instead.
 /// Tests that mutate other process-globals can grab their own lock

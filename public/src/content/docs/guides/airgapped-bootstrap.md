@@ -109,7 +109,7 @@ network.
 The project's [revocation list](verify-release#recall-revocation-list)
 lives at a separate `revocations` release tag and tells mvmctl that
 specific versions have been recalled. mvmctl caches the list under
-`~/.cache/mvm/revocations/` and the cache policy is generous for
+`~/.mvm/cache/revocations/` and the cache policy is generous for
 offline tolerance:
 
 - Cache valid for **24 hours** before refresh.
@@ -120,7 +120,7 @@ offline tolerance:
 
 For long-running air-gapped deployments, periodically transfer a
 fresh `revoked-versions.json` + `.bundle` pair into
-`~/.cache/mvm/revocations/`:
+`~/.mvm/cache/revocations/`:
 
 ```bash
 # On a connected host:
@@ -129,10 +129,10 @@ curl -LO "${BASE}/revoked-versions.json"
 curl -LO "${BASE}/revoked-versions.json.bundle"
 
 # Transfer both files, then on the air-gapped host:
-mkdir -p ~/.cache/mvm/revocations
-cp revoked-versions.json ~/.cache/mvm/revocations/
-cp revoked-versions.json.bundle ~/.cache/mvm/revocations/
-touch ~/.cache/mvm/revocations/revoked-versions.json
+mkdir -p ~/.mvm/cache/revocations
+cp revoked-versions.json ~/.mvm/cache/revocations/
+cp revoked-versions.json.bundle ~/.mvm/cache/revocations/
+touch ~/.mvm/cache/revocations/revoked-versions.json
 ```
 
 `mvmctl dev up` will read the cached file, cosign-verify it, and

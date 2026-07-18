@@ -93,7 +93,7 @@ mod tests {
     fn isolated_cache() -> (TestEnv, tempfile::TempDir) {
         let scratch = tempfile::TempDir::new().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", scratch.path().join(".cache"));
+        env.set("MVM_HOME", scratch.path().join(".cache"));
         (env, scratch)
     }
 

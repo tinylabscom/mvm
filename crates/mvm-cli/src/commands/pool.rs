@@ -173,7 +173,7 @@ pub fn warm_to_target(pool: &SupervisorStandbyPool, p: &WarmParams<'_>) -> Resul
     };
     let have = pool.idle_count_compatible(&want)? as u32;
     let pool_root = mvm_core::config::mvm_pool_dir()?;
-    let vms_root = mvm_core::config::mvm_data_dir_strict()?.join("vms");
+    let vms_root = mvm_core::config::mvm_home_strict()?.join("vms");
     let mut spawned = 0u32;
     let mut failed = 0u32;
     for _ in have..p.target {

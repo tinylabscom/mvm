@@ -874,7 +874,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let _g = EnvGuard::set("MVM_SHARE_DIR", tmp.path().to_str().unwrap());
+        let _g = EnvGuard::set("MVM_HOME", tmp.path().to_str().unwrap());
 
         let name = "hc-test";
         let mut reg = VmNameRegistry::default();
@@ -897,7 +897,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let tmp = tempfile::tempdir().unwrap();
-        let _g = EnvGuard::set("MVM_SHARE_DIR", tmp.path().to_str().unwrap());
+        let _g = EnvGuard::set("MVM_HOME", tmp.path().to_str().unwrap());
 
         // No registry file on disk at all yet — must not panic.
         record_readiness("ghost", InstanceReadiness::ServicesReady);

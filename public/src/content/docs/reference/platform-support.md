@@ -20,7 +20,7 @@ and which backend limitations apply.
 | macOS Apple Silicon | aarch64 | HVF / libkrun-backed paths | Supported | Local development and runtime path for M-series Macs. OCI `--allow-host` runs use the HVF no-guest-NIC host-vsock-proxy path when `mvm-hvf-supervisor` is available; otherwise the CLI fails closed before pull/boot work. |
 | Linux without `/dev/kvm` | x86_64, aarch64 | QEMU (TCG) | Dev/test | Software-emulated microVM (`--hypervisor qemu`); Tier 2 dev/test — slower, not for production. |
 | Windows native | x86_64, aarch64 | None | Future | Use WSL2 for the supported Windows-adjacent workload path; native Windows runtime support is still tracked in [mvm#428](https://github.com/tinylabscom/mvm/issues/428). |
-| WSL2 with nested KVM | x86_64, aarch64 | libkrun | Supported workload path | Requires `/dev/kvm`, libkrun installed in the distro, and both the repo and `MVM_DATA_DIR` on the WSL ext4 filesystem rather than `/mnt/<drive>/...`. |
+| WSL2 with nested KVM | x86_64, aarch64 | libkrun | Supported workload path | Requires `/dev/kvm`, libkrun installed in the distro, and both the repo and `MVM_HOME` on the WSL ext4 filesystem rather than `/mnt/<drive>/...`. |
 | Intel macOS | x86_64 | None | Unsupported | Use Linux KVM or Apple Silicon macOS. |
 
 ## Build boundary by host

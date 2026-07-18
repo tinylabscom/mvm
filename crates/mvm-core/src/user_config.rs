@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Persistent operator configuration stored at `~/.mvm/config.toml`.
+/// Persistent operator configuration stored at `~/.mvm/config/config.toml`.
 ///
 /// CLI flags always take precedence over these values. This config is
 /// `mvmctl`-specific; `mvmd` maintains its own separate config.
@@ -66,37 +66,20 @@ impl Default for MvmConfig {
     }
 }
 
-/// Resolve the config directory.
-///
-/// Uses `mvm_config_dir()` (XDG-compliant) by default, or `override_dir` for tests.
-/// Falls back to `~/.mvm/` if an existing config lives there (migration compat).
+/// Resolve the config directory: `mvm_config_dir()` (`<mvm_home>/config`)
+/// by default, or `override_dir` for tests.
 fn config_dir(override_dir: Option<&Path>) -> PathBuf {
-    if let Some(d) = override_dir {
-        return d.to_path_buf();
+    match override_dir {
+        Some(d) => d.to_path_buf(),
+        None => PathBuf::from(crate::config::mvm_config_dir()),
     }
-
-    // Check XDG location first
-    let xdg_dir = PathBuf::from(crate::config::mvm_config_dir());
-    if xdg_dir.join("config.toml").exists() {
-        return xdg_dir;
-    }
-
-    // Fall back to the legacy data dir (`~/.mvm/`, or MVM_DATA_DIR) if a
-    // config lives there.
-    let legacy_dir = PathBuf::from(crate::config::mvm_data_dir());
-    if legacy_dir.join("config.toml").exists() {
-        return legacy_dir;
-    }
-
-    // New installs use XDG
-    xdg_dir
 }
 
 fn config_path(dir: &Path) -> PathBuf {
     dir.join("config.toml")
 }
 
-/// Load `MvmConfig` from `~/.mvm/config.toml` (or `override_dir/config.toml` in tests).
+/// Load `MvmConfig` from `<mvm_config_dir>/config.toml` (or `override_dir/config.toml` in tests).
 ///
 /// If the file does not exist, it is created with defaults. If it cannot be
 /// parsed, defaults are returned with a warning.
@@ -127,7 +110,7 @@ pub fn load(override_dir: Option<&Path>) -> MvmConfig {
     }
 }
 
-/// Save `MvmConfig` to `~/.mvm/config.toml` (or `override_dir/config.toml` in tests).
+/// Save `MvmConfig` to `<mvm_config_dir>/config.toml` (or `override_dir/config.toml` in tests).
 pub fn save(cfg: &MvmConfig, override_dir: Option<&Path>) -> Result<()> {
     let dir = config_dir(override_dir);
     std::fs::create_dir_all(&dir)

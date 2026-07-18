@@ -73,16 +73,16 @@ Agents working inside a worktree directory should not invoke `git` directly. If 
 
 ### Isolating mutable state
 
-Worktrees share `~/.mvm`, `~/.cache/mvm`, `~/.cargo`, `~/.rustup`, the builder VM, the Nix store, and any pushed registries with the main checkout. Per-worktree isolation is achieved by overriding three env vars for the duration of a command:
+Worktrees share `~/.mvm`, `~/.cargo`, `~/.rustup`, the builder VM, the Nix store, and any pushed registries with the main checkout. Per-worktree isolation is achieved by overriding three env vars for the duration of a command:
 
 ```bash
-MVM_DATA_DIR="$PWD/.mvm-test"      \
+MVM_HOME="$PWD/.mvm-test"          \
 CARGO_TARGET_DIR="$PWD/.mvm-test/target" \
 CARGO_HOME="$PWD/.mvm-test/cargo"  \
   cargo test --workspace
 ```
 
-- `MVM_DATA_DIR` redirects mvmctl's templates, sockets, microVM registry, snapshots, and signing keys away from `~/.mvm`.
+- `MVM_HOME` redirects mvmctl's entire state tree — templates, sockets, caches, the microVM registry, snapshots, and signing keys — away from `~/.mvm`.
 - `CARGO_TARGET_DIR` gives the worktree its own `target/` so two worktrees compiling at once don't fight over output paths or rustc invocation locks.
 - `CARGO_HOME` gives the worktree its own cargo registry/cache and (most importantly) its own `.package-cache` lock — without this, two concurrent `cargo test` invocations across worktrees serialize on `~/.cargo/registry/.package-cache` and one will block until the other finishes downloading or resolving.
 
@@ -107,7 +107,7 @@ Even with per-worktree isolation, a few resources are shared and can cause concu
 
 The builder VM is shared across worktrees by design — **never fork it per worktree**. It is expensive to boot, and the Nix store inside it is the warm cache that makes builds fast; a per-worktree VM would duplicate tens of GB of store, re-download the kernel/rootfs, and multiply boot time with no isolation benefit.
 
-The `MVM_DATA_DIR` override is what isolates per-feature state — templates, sockets, the microVM registry, snapshots, signing keys. Anything that would otherwise land in `~/.mvm` ends up under the worktree.
+The `MVM_HOME` override is what isolates per-feature state — templates, sockets, the microVM registry, snapshots, signing keys. Anything that would otherwise land in `~/.mvm` ends up under the worktree.
 
 State that *does* live inside the shared builder VM (`/var/lib/mvm/`, the `br-mvm` bridge, TAP devices, in-flight microVMs) is the only collision surface between worktrees. If two worktrees need to run microVMs concurrently, give them distinct microVM and TAP names — do not spin up a second builder VM.
 
@@ -203,10 +203,10 @@ work belongs in. Duplicated logic drifts out of sync, doubles the test surface,
 and is the single most common source of bugs in this repo. If an existing helper
 is *almost* right, extend or generalize it — don't fork a second copy.
 
-- **Use the helpers.** All `~/.mvm` **and** `~/.cache/mvm` paths go through
-  `mvm-core::config` helpers (`vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) —
+- **Use the helpers.** All `~/.mvm` paths go through `mvm-core::config`
+  helpers (`mvm_home`, `vm_state_dir`, `mvm_keys_dir`, `mvm_cache_dir`, …) —
   **never** build them inline with `std::env::var("HOME")` + `.join(...)`, which
-  silently ignores `MVM_DATA_DIR` / `MVM_CACHE_DIR` / XDG and breaks parallel-worktree
+  silently ignores `MVM_HOME` and breaks parallel-worktree
   isolation. Shell/VM ops go through the `ShellEnvironment`/`BuildEnvironment` traits.
   Find the established helper and call it; if one is missing, add it where it belongs
   and call it from every site.

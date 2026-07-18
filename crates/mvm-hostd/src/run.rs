@@ -160,7 +160,7 @@ mod tests {
     fn admit_and_boot_local_over_mock_boots_admitted_plan() {
         let data = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", data.path());
         let keys = tempfile::tempdir().unwrap();
 
         let rootfs = data.path().join("rootfs.ext4");

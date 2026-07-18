@@ -67,7 +67,7 @@ just release-build
 
 The runtime-overlay command only builds the **guest-executed** runtime payload
 and stores the sealed shared artifact under
-`~/.cache/mvm/runtime-overlay/<version>/<arch>/`. Host-side binaries used for
+`~/.mvm/cache/runtime-overlay/<version>/<arch>/`. Host-side binaries used for
 bootstrap or supervision stay outside that overlay.
 
 ### Kernel builds
@@ -281,18 +281,20 @@ microVMs have no SSH. Interactive access is via `mvmctl machine console` which u
 - Single session per VM, 15-minute idle timeout
 - Supports Firecracker, libkrun, and HVF backends
 
-### XDG Directory Layout
+### Directory Layout
 
-Dev tool state uses XDG-compliant paths (override with `MVM_CACHE_DIR`, `MVM_CONFIG_DIR`, etc.):
+All dev tool state lives under one root, `~/.mvm` (relocate the whole tree
+with `MVM_HOME`; `rm -rf ~/.mvm` removes every trace):
 
 | Path | Purpose |
 |------|---------|
-| `~/.cache/mvm/` | Build artifacts, images, VM runtime state |
-| `~/.config/mvm/` | User config (`config.toml`) |
-| `~/.local/state/mvm/` | Logs, audit trail |
-| `~/.local/share/mvm/` | Templates, network definitions, VM name registry |
-
-Legacy `~/.mvm/` paths are auto-detected as fallback.
+| `~/.mvm/` | Data: keys, audit chains, volumes, bundles, machine specs |
+| `~/.mvm/vms/` | Per-VM state: sockets, pid files, console logs, FC workspace |
+| `~/.mvm/cache/` | Build artifacts, images, VM runtime state |
+| `~/.mvm/config/` | User config (`config.toml`) |
+| `~/.mvm/run/` | Ephemeral per-session state |
+| `~/.mvm/state/` | Logs, audit trail |
+| `~/.mvm/share/` | Templates, network definitions, VM name registry |
 
 ## CI/CD
 

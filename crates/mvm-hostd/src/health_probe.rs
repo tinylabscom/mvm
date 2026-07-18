@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(command_string(&h), "'curl' '-f' 'http://x/health'");
     }
 
-    // ---- HealthProber::tick (disk-backed via MVM_DATA_DIR/MVM_SHARE_DIR) ----
+    // ---- HealthProber::tick (disk-backed via MVM_HOME) ----
 
     use mvm_core::domain::instance::InstanceReadiness;
     use mvm_core::health::HealthState;
@@ -496,13 +496,12 @@ mod tests {
     };
     use mvm_runtime::vm::name_registry::{VmNameRegistry, registry_path};
 
-    // Point both the machine-spec dir and the name-registry dir at `dir`, holding
-    // the process-wide env lock so these disk-backed tests don't race other tests
-    // that mutate the same vars under a threaded runner.
+    // Point the whole mvm root (machine specs + name registry) at `dir`,
+    // holding the process-wide env lock so these disk-backed tests don't race
+    // other tests that mutate the same var under a threaded runner.
     fn data_env(dir: &std::path::Path) -> TestEnv {
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir);
-        env.set("MVM_SHARE_DIR", dir);
+        env.set("MVM_HOME", dir);
         env
     }
 

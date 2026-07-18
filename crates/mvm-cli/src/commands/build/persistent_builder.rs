@@ -126,7 +126,7 @@ struct SessionRecord {
 }
 
 fn session_record_path() -> PathBuf {
-    mvm_core::config::mvm_data_dir_strict()
+    mvm_core::config::mvm_home_strict()
         .unwrap_or_else(|_| {
             std::env::var_os("HOME")
                 .map(PathBuf::from)

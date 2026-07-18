@@ -97,7 +97,7 @@ pub(super) fn stage0_failure_reason_summary(err: &anyhow::Error) -> String {
 }
 
 /// RAII advisory lock at
-/// `~/.cache/mvm/builder-vm/stage0.lock` (one directory above the
+/// `~/.mvm/cache/builder-vm/stage0.lock` (one directory above the
 /// per-arch cache). `try_acquire` is non-blocking, so a concurrent
 /// invocation bails fast with a clear message instead of silently
 /// queuing for minutes behind a libkrun-builder VM that's already
@@ -173,7 +173,7 @@ pub(super) fn validate_builder_vm_stage0_artifacts(dir: &std::path::Path) -> Res
 }
 
 /// Whether a Stage 0 bootstrap is currently in flight on this host — i.e. the
-/// shared advisory lock at `~/.cache/mvm/builder-vm/stage0.lock` is held by a
+/// shared advisory lock at `~/.mvm/cache/builder-vm/stage0.lock` is held by a
 /// live build. Non-blocking: tries the lock and reports contention,
 /// releasing immediately if it acquires. `cache repair` consults this before
 /// clearing the builder store so it never yanks the store from an active build.
@@ -183,7 +183,7 @@ pub(in crate::commands) fn stage0_bootstrap_in_flight() -> bool {
 }
 
 /// Inner form of [`stage0_bootstrap_in_flight`] with an explicit `builder-vm`
-/// root, so tests exercise it against a tempdir without touching `MVM_CACHE_DIR`.
+/// root, so tests exercise it against a tempdir without touching `MVM_HOME`.
 pub(super) fn stage0_bootstrap_in_flight_at(builder_vm: &std::path::Path) -> bool {
     use mvm_core::atomic_io::FileLock;
     // A fresh host with no builder-vm dir has nothing in flight. (Without this
@@ -241,7 +241,7 @@ pub(in crate::commands) fn sweep_orphaned_stage0_staging_dirs(
 
 /// Inner form of [`sweep_orphaned_stage0_staging_dirs`] that takes an
 /// explicit root path. Exists so unit tests can exercise the sweep
-/// against a tempdir without mutating `MVM_CACHE_DIR` or any other
+/// against a tempdir without mutating `MVM_HOME` or any other
 /// process-wide env var.
 pub(super) fn sweep_orphaned_stage0_staging_dirs_at(
     builder_vm_root: &std::path::Path,

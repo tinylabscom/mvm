@@ -30,7 +30,7 @@ use libkrun_sys::{
     BridgeRestartPolicy, KrunContext, SupervisorAttachConfig, SupervisorBaseConfig,
     SupervisorConfig,
 };
-use mvm_core::config::{mvm_data_dir, vm_console_log, vm_libkrun_pid, vm_state_dir};
+use mvm_core::config::{mvm_home, vm_console_log, vm_libkrun_pid, vm_state_dir};
 use mvm_core::kernel_format::KernelFormat;
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
@@ -1286,7 +1286,7 @@ impl VmBackend for LibkrunBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = PathBuf::from(mvm_data_dir()).join("vms");
+        let root = PathBuf::from(mvm_home()).join("vms");
         let entries = match std::fs::read_dir(&root) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -2266,7 +2266,7 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let vm_name = "libkrun-grant-parity";
         seed_grant_sidecar_and_key(vm_name);

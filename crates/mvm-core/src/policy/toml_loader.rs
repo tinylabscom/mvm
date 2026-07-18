@@ -91,7 +91,7 @@ pub enum LoadError {
 /// Per-tenant subdir `<base>/<tenant>/`, per-workload file
 /// `<base>/<tenant>/<workload>.toml`.
 pub fn default_policy_dir() -> Option<PathBuf> {
-    crate::config::mvm_data_dir_strict()
+    crate::config::mvm_home_strict()
         .ok()
         .map(|d| d.join("policies"))
 }

@@ -924,13 +924,13 @@ mod tests {
         }
     }
 
-    /// Point `MVM_CACHE_DIR` at a fresh tempdir so the cache is isolated per
+    /// Point `MVM_HOME` at a fresh tempdir so the cache is isolated per
     /// test, and hold the env guard for the whole test. Returns both so they
     /// outlive the promotion calls.
     fn isolated_cache() -> (TempDir, TestEnv) {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
         (cache, env)
     }
 
@@ -1081,7 +1081,7 @@ mod tests {
 
         assert!(
             promoted.root.starts_with(cache.path()),
-            "promoted dir {:?} not under MVM_CACHE_DIR {:?}",
+            "promoted dir {:?} not under MVM_HOME {:?}",
             promoted.root,
             cache.path()
         );
@@ -1115,7 +1115,11 @@ mod tests {
         let ctx = PackVerifyCtx::ed25519(&policy, &trust, &rev);
         promote(staged.path(), &manifest, &ctx).expect("promote");
 
-        let incoming = cache.path().join("packs").join(super::QUARANTINE_DIR_NAME);
+        let incoming = cache
+            .path()
+            .join("cache")
+            .join("packs")
+            .join(super::QUARANTINE_DIR_NAME);
         // The `.incoming` dir may exist but must hold no staging leftovers.
         if let Ok(entries) = fs::read_dir(&incoming) {
             assert_eq!(entries.count(), 0, "quarantine staging not cleaned up");
@@ -1190,6 +1194,7 @@ mod tests {
         assert!(
             !cache
                 .path()
+                .join("cache")
                 .join("packs")
                 .join(manifest.outputs.pack_hash.as_str())
                 .exists()
@@ -1207,7 +1212,11 @@ mod tests {
         let promoted = promote(staged.path(), &manifest, &ctx).expect("promote");
 
         // Rename the content-addressed dir so its name no longer equals the hash.
-        let renamed = cache.path().join("packs").join("not-a-pack-hash");
+        let renamed = cache
+            .path()
+            .join("cache")
+            .join("packs")
+            .join("not-a-pack-hash");
         fs::rename(&promoted.root, &renamed).expect("rename promoted dir");
 
         let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
@@ -1493,7 +1502,8 @@ mod tests {
 
         // A truncated / garbage `index.json` must not break resolution:
         // `load_index` fails open and resolve re-verifies via the scan.
-        std::fs::write(index_path(cache.path()), b"{ not json").expect("write corrupt index");
+        std::fs::write(index_path(&cache.path().join("cache")), b"{ not json")
+            .expect("write corrupt index");
 
         let found = resolve_pack(PackKind::Builder, GuestArch::host(), PackBackend::Hvf, &ctx)
             .expect("resolve ok")

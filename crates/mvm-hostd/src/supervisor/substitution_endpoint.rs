@@ -115,7 +115,7 @@ pub struct EndpointConfig {
     #[serde(default = "default_forward_timeout_secs")]
     pub forward_timeout_secs: u64,
     /// Override the value-store base dir. Default: the host's
-    /// `~/.mvm/secrets` (honors `MVM_DATA_DIR`).
+    /// `~/.mvm/secrets` (honors `MVM_HOME`).
     #[serde(default)]
     pub secret_store_dir: Option<PathBuf>,
     /// Override the binding-store base dir. Default: `~/.mvm/secret-bindings`.
@@ -166,7 +166,7 @@ pub fn resolve_store_dirs(cfg: &EndpointConfig) -> anyhow::Result<(PathBuf, Path
     };
     let binding_dir = match &cfg.binding_store_dir {
         Some(dir) => dir.clone(),
-        None => mvm_core::config::mvm_data_dir_strict()?.join("secret-bindings"),
+        None => mvm_core::config::mvm_home_strict()?.join("secret-bindings"),
     };
     Ok((secret_dir, binding_dir))
 }
@@ -278,7 +278,7 @@ mod tests {
         // No host signer key under a fresh data dir → no recorder (best-effort).
         let dir = tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         assert!(
             build_audit_recorder("local").is_none(),
             "no signer key ⇒ no recorder"
@@ -323,7 +323,7 @@ mod tests {
         // With overrides cleared, the resolver must land on the default
         // `~/.mvm` store layout (the dirs the confinement spec grants read on).
         // Assert the trailing components rather than the absolute base so the
-        // test stays independent of the host's MVM_DATA_DIR / HOME (no env
+        // test stays independent of the host's MVM_HOME / HOME (no env
         // mutation → no race with parallel readers).
         let mut cfg = vsock_cfg(vec![], std::path::Path::new("/tmp/x"));
         cfg.secret_store_dir = None;

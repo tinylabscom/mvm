@@ -20,8 +20,8 @@
 //! ## Usage
 //!
 //! ```text
-//! cargo xtask perf rootfs-size --rootfs ~/.cache/mvm/.../rootfs.ext4
-//! cargo xtask perf boot --runs 30 --rootfs ~/.cache/mvm/.../rootfs.ext4
+//! cargo xtask perf rootfs-size --rootfs ~/.mvm/cache/.../rootfs.ext4
+//! cargo xtask perf boot --runs 30 --rootfs ~/.mvm/cache/.../rootfs.ext4
 //! ```
 //!
 //! ## What this does NOT do (yet)

@@ -2157,7 +2157,7 @@ mod runtime_overlay_attach_tests {
         let cache = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         env.set("HOME", home.path());
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
         env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
 
         let release_root = tempfile::tempdir().unwrap();
@@ -2175,7 +2175,7 @@ mod runtime_overlay_attach_tests {
         };
         attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", None).unwrap();
 
-        let layout = RuntimeOverlayResolver::new(cache.path().to_path_buf(), version.to_string())
+        let layout = RuntimeOverlayResolver::new(cache.path().join("cache"), version.to_string())
             .layout(&arch.to_string());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(version));
         assert_eq!(
@@ -2223,7 +2223,7 @@ mod runtime_overlay_attach_tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let current = env!("CARGO_PKG_VERSION");
         let pinned = if current == "0.17.0" {
@@ -2232,8 +2232,8 @@ mod runtime_overlay_attach_tests {
             "0.17.0"
         };
         let arch = GuestArch::host();
-        seed_cache(dir.path(), current, arch);
-        seed_cache(dir.path(), pinned, arch);
+        seed_cache(&dir.path().join("cache"), current, arch);
+        seed_cache(&dir.path().join("cache"), pinned, arch);
 
         let mut sc = VmStartConfig {
             runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
@@ -2242,7 +2242,7 @@ mod runtime_overlay_attach_tests {
         attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(pinned)).unwrap();
 
         let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), pinned.to_string())
+            RuntimeOverlayResolver::new(dir.path().join("cache"), pinned.to_string())
                 .layout(&arch.to_string());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(pinned));
         assert_eq!(
@@ -2265,7 +2265,7 @@ mod runtime_overlay_attach_tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let current = env!("CARGO_PKG_VERSION");
         let missing = if current == "0.17.0" {
@@ -2274,7 +2274,7 @@ mod runtime_overlay_attach_tests {
             "0.17.0"
         };
         let arch = GuestArch::host();
-        seed_cache(dir.path(), current, arch);
+        seed_cache(&dir.path().join("cache"), current, arch);
 
         let mut sc = VmStartConfig {
             runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
@@ -2301,7 +2301,7 @@ mod runtime_overlay_attach_tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
 
         let current = env!("CARGO_PKG_VERSION");
@@ -2311,8 +2311,8 @@ mod runtime_overlay_attach_tests {
             "0.17.0"
         };
         let arch = GuestArch::host();
-        seed_cache(dir.path(), current, arch);
-        seed_cache(dir.path(), older, arch);
+        seed_cache(&dir.path().join("cache"), current, arch);
+        seed_cache(&dir.path().join("cache"), older, arch);
 
         let mut sc = VmStartConfig {
             runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
@@ -2321,7 +2321,7 @@ mod runtime_overlay_attach_tests {
         attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
 
         let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), current.to_string())
+            RuntimeOverlayResolver::new(dir.path().join("cache"), current.to_string())
                 .layout(&arch.to_string());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(current));
         assert_eq!(
@@ -2340,7 +2340,7 @@ mod runtime_overlay_attach_tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         env.set(RUNTIME_OVERLAY_ACQUIRE_MODE_ENV, "download");
 
         let current = env!("CARGO_PKG_VERSION");
@@ -2350,8 +2350,8 @@ mod runtime_overlay_attach_tests {
             "0.17.0"
         };
         let arch = GuestArch::host();
-        seed_cache(dir.path(), current, arch);
-        seed_cache(dir.path(), stale, arch);
+        seed_cache(&dir.path().join("cache"), current, arch);
+        seed_cache(&dir.path().join("cache"), stale, arch);
 
         let mut sc = VmStartConfig {
             runtime_source_policy: RuntimeSourcePolicy::RequiredOverlay,
@@ -2361,7 +2361,7 @@ mod runtime_overlay_attach_tests {
         attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
 
         let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), current.to_string())
+            RuntimeOverlayResolver::new(dir.path().join("cache"), current.to_string())
                 .layout(&arch.to_string());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(current));
         assert_eq!(
@@ -2537,7 +2537,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
         let cache = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
         env.set(
             crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "download",
@@ -2545,6 +2545,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
         let initrd_dir = cache
             .path()
+            .join("cache")
             .join("verity-initrd")
             .join(env!("CARGO_PKG_VERSION"))
             .join(if cfg!(target_arch = "aarch64") {
@@ -2587,7 +2588,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
         let cache = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
         env.set(
             crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV,
             "build",
@@ -2595,6 +2596,7 @@ mod runtime_source_policy_for_workload_boot_tests {
 
         let initrd_dir = cache
             .path()
+            .join("cache")
             .join("verity-initrd")
             .join(env!("CARGO_PKG_VERSION"))
             .join(if cfg!(target_arch = "aarch64") {
@@ -2749,7 +2751,7 @@ mod resolve_workload_kernel_tests {
     fn non_hvf_hypervisor_passes_through_even_when_missing() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         let result = resolve_workload_kernel("/nonexistent/vmlinux", "libkrun").unwrap();
         assert_eq!(result, "/nonexistent/vmlinux");
     }
@@ -2763,11 +2765,11 @@ mod resolve_workload_kernel_tests {
         } else {
             "x86_64"
         };
-        let fallback_dir = tmp.path().join("builder-vm").join(arch);
+        let fallback_dir = tmp.path().join("cache").join("builder-vm").join(arch);
         std::fs::create_dir_all(&fallback_dir).unwrap();
         let fallback = fallback_dir.join("vmlinux");
         std::fs::write(&fallback, b"builder-kernel").unwrap();
-        env.set("MVM_CACHE_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         let result = resolve_workload_kernel("/nonexistent/vmlinux", "hvf").unwrap();
         assert_eq!(result, fallback.to_str().unwrap());
     }
@@ -2785,11 +2787,11 @@ mod resolve_workload_kernel_tests {
         } else {
             "x86_64"
         };
-        let fallback_dir = tmp.path().join("builder-vm").join(arch);
+        let fallback_dir = tmp.path().join("cache").join("builder-vm").join(arch);
         std::fs::create_dir_all(&fallback_dir).unwrap();
         let fallback = fallback_dir.join("vmlinux");
         std::fs::write(&fallback, b"builder-kernel").unwrap();
-        env.set("MVM_CACHE_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         let result = resolve_workload_kernel("/nonexistent/vmlinux", "firecracker").unwrap();
         assert_eq!(result, fallback.to_str().unwrap());
     }
@@ -2798,7 +2800,7 @@ mod resolve_workload_kernel_tests {
     fn hvf_both_missing_returns_error_mentioning_bootstrap() {
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_CACHE_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         let err = resolve_workload_kernel("/nonexistent/vmlinux", "hvf").unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -3099,7 +3101,7 @@ mod admit_plan_tests {
     fn untrusted_transient_admit_yields_bridge_substrate() {
         let mut env = TestEnv::new();
         let data_dir = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", data_dir.path());
+        env.set("MVM_HOME", data_dir.path());
         let keys_dir = tempfile::tempdir().unwrap();
         let audit_dir = tempfile::tempdir().unwrap();
         let rootfs_dir = tempfile::tempdir().unwrap();

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
-use mvm_core::config::{mvm_data_dir, vm_state_dir, vm_substitution_endpoint_socket};
+use mvm_core::config::{mvm_home, vm_state_dir, vm_substitution_endpoint_socket};
 use mvm_core::plan::SecretBinding;
 use mvm_core::policy::RedactionPolicy;
 use mvm_core::policy::network_policy::NetworkPolicy;
@@ -273,7 +273,7 @@ impl<D: VmmDriver + 'static, S: EndpointSpawner + 'static> VmBackend for Workloa
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = PathBuf::from(mvm_data_dir()).join("vms");
+        let root = PathBuf::from(mvm_home()).join("vms");
         let entries = match std::fs::read_dir(&root) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),

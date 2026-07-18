@@ -137,15 +137,7 @@ impl SmokeHarness {
     fn configure_env(&self, cmd: &mut Command) {
         let path = std::env::var("PATH").unwrap_or_default();
         cmd.env("PATH", format!("{}:{path}", self.target_dir.display()))
-            .env("MVM_DATA_DIR", self.scratch.join(".mvm"))
-            .env("MVM_STATE_DIR", self.scratch.join(".local/state/mvm"))
-            .env("MVM_CONFIG_DIR", self.scratch.join(".config/mvm"))
-            .env("MVM_SHARE_DIR", self.scratch.join(".local/share/mvm"))
-            .env("MVM_CACHE_DIR", self.scratch.join(".cache/mvm"))
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("XDG_DATA_HOME")
-            .env_remove("XDG_CACHE_HOME")
-            .env_remove("XDG_CONFIG_HOME");
+            .env("MVM_HOME", self.scratch.join(".mvm"));
         set_helper_override_if_present(
             cmd,
             "MVM_LIBKRUN_SUPERVISOR_PATH",

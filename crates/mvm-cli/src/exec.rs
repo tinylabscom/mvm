@@ -961,7 +961,10 @@ fn run_inner(
     // Build read-only ext4 images for each --add-dir, staged in a transient
     // VMS subdirectory so cleanup is straightforward.
     let mut vm_name = req.name.clone().unwrap_or_else(transient_vm_name);
-    let staging_dir = format!("{}/{}/extras", mvm_runtime::config::VMS_DIR, vm_name);
+    let staging_dir = mvm_core::config::vm_state_dir(&vm_name)
+        .join("extras")
+        .display()
+        .to_string();
     let mut volumes: Vec<mvm_runtime::image::RuntimeVolume> = Vec::new();
     let mut add_dir_labels: Vec<String> = Vec::new();
     for (idx, dir) in req.add_dirs.iter().enumerate() {
@@ -2611,10 +2614,11 @@ mod tests {
 
         let cache = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
         env.set("MVM_RUNTIME_OVERLAY_ACQUIRE_MODE", "download");
         let initrd_dir = cache
             .path()
+            .join("cache")
             .join("verity-initrd")
             .join(env!("CARGO_PKG_VERSION"))
             .join(if cfg!(target_arch = "aarch64") {

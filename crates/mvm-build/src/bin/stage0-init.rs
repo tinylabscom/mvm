@@ -884,7 +884,7 @@ mod linux {
             run_streaming(cmd, &mut std::io::stderr()).map_err(|e| format!("nix build: {e}"))?;
 
         // Persist the full log to /out (a virtio-fs share) for host-side
-        // post-mortem at ~/.cache/mvm/builder-vm/.../nix-stderr.log.
+        // post-mortem at ~/.mvm/cache/builder-vm/.../nix-stderr.log.
         let _ = std::fs::write("/out/nix-stderr.log", &stderr_log);
         if !status.success() {
             return Err(format!("nix build exit {}", status.code().unwrap_or(-1)));

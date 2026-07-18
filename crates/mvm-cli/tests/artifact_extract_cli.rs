@@ -20,11 +20,11 @@ fn artifact_extract_round_trips_a_packed_dev_artifact() {
     let dest = work.join("extracted");
 
     // Pack a dev artifact, signed by the host signer materialized under
-    // the temp MVM_DATA_DIR.
+    // the temp MVM_HOME.
     #[allow(deprecated)]
     let pack = Command::cargo_bin("mvmctl")
         .unwrap()
-        .env("MVM_DATA_DIR", &data)
+        .env("MVM_HOME", &data)
         .args([
             "artifact",
             "pack",
@@ -54,7 +54,7 @@ fn artifact_extract_round_trips_a_packed_dev_artifact() {
     #[allow(deprecated)]
     let extract = Command::cargo_bin("mvmctl")
         .unwrap()
-        .env("MVM_DATA_DIR", &data)
+        .env("MVM_HOME", &data)
         .args([
             "artifact",
             "extract",

@@ -100,7 +100,7 @@ guest-RPC surface, fleet-shaped workflows).
 | `mvmctl build image --flake <ref> --watch` | Build and rebuild on flake.lock changes |
 | `mvmctl build image --json` | Output structured JSON events instead of human-readable output |
 | `mvmctl build image -o <path>` | Output path for the built .elf image |
-| `mvmctl build runtime-overlay build` | Prebuild the version-matched read-only runtime overlay into `~/.cache/mvm/runtime-overlay/<version>/<arch>/` without booting a VM. This is the explicit “pay the guest-binary build debt once” command for required-overlay workflows |
+| `mvmctl build runtime-overlay build` | Prebuild the version-matched read-only runtime overlay into `~/.mvm/cache/runtime-overlay/<version>/<arch>/` without booting a VM. This is the explicit “pay the guest-binary build debt once” command for required-overlay workflows |
 | `mvmctl build runtime-overlay build --force` | Refresh the cached overlay even when the matching cache entry already exists |
 | `mvmctl build runtime-overlay build --source build\|download\|auto` | Choose whether the overlay is assembled from the source checkout, downloaded from the published release, or resolved the same way ordinary required-overlay boots do |
 | Runtime overlay update model | Stopped VMs pick up the newer version-matched overlay on the next boot. Running VMs keep the overlay they booted with; mvm does not hot-remount a different runtime overlay into a live guest |
@@ -174,7 +174,7 @@ fail honestly instead of emitting fake numbers.
 |---------|-------------|
 | `mvmctl ops bench microvm-launch` | Measure serial cold runtime-microVM launch latency for the canonical default runtime image. Defaults: `--runs 20 --warmup 2 --hypervisor libkrun`. |
 | `mvmctl ops bench microvm-launch --concurrency N --warmup 0` | Launch `N` admitted probe VMs as one concurrent wave and report P50/P95/P99 launch latency. Use `--max-concurrency` as a safety cap (default 64). `--baseline` is serial-only. |
-| `mvmctl ops bench microvm-launch --out <path> --json` | Write the versioned JSON report to `<path>` and also print it to stdout. Without `--out`, reports are written under `<MVM_DATA_DIR>/bench/`. |
+| `mvmctl ops bench microvm-launch --out <path> --json` | Write the versioned JSON report to `<path>` and also print it to stdout. Without `--out`, reports are written under `<MVM_HOME>/bench/`. |
 | `mvmctl ops bench microvm-launch --baseline <path> --max-regression-pct <pct>` | Compare serial median `total_ready_ms` against a comparable baseline and fail if it regresses beyond the threshold. |
 | `mvmctl ops bench microvm-density --count K --max-count M` | Boot and hold `K` admitted libkrun probe VMs, sample each supervisor/VMM process footprint, and report total plus per-instance bytes. `--max-count` is a safety cap (default 16). |
 | `mvmctl ops bench microvm-density --out <path> --json` | Write the density JSON report and optionally print it to stdout. Linux samples PSS from `/proc/<pid>/smaps_rollup`; macOS samples `phys_footprint` through `proc_pid_rusage`. |
@@ -240,7 +240,7 @@ admission until their transports are wired.
 
 | Command | Description |
 |---------|-------------|
-| `mvmctl build runtime-overlay build` | Populate the local runtime-overlay cache at `~/.cache/mvm/runtime-overlay/<version>/<arch>/` for this `mvmctl` version and host architecture without booting a workload VM |
+| `mvmctl build runtime-overlay build` | Populate the local runtime-overlay cache at `~/.mvm/cache/runtime-overlay/<version>/<arch>/` for this `mvmctl` version and host architecture without booting a workload VM |
 | `mvmctl build runtime-overlay build --source build` | Build the overlay from the source checkout. Requires `nix/images/runtime-overlay/flake.nix` in the current checkout |
 | `mvmctl build runtime-overlay build --source download` | Download the published runtime-overlay artifact for this version into the cache |
 | `mvmctl build runtime-overlay build --arch aarch64\|x86_64 --version <semver>` | Override the target architecture or the expected overlay version |
@@ -259,7 +259,7 @@ admission until their transports are wired.
 
 ## Image Catalog
 
-`mvmctl catalog *` is the metadata-only browser for bundled application entries. `mvmctl image *` is reserved for the local OCI image cache under `~/.cache/mvm/oci/`.
+`mvmctl catalog *` is the metadata-only browser for bundled application entries. `mvmctl image *` is reserved for the local OCI image cache under `~/.mvm/cache/oci/`.
 
 | Command | Description |
 |---------|-------------|
@@ -273,7 +273,7 @@ admission until their transports are wired.
 | `mvmctl image rm <ref-or-digest>` | Remove a cached OCI image and garbage-collect unreferenced layer files |
 
 Production OCI policy reads `MVM_OCI_POLICY` when set, otherwise
-`$MVM_DATA_DIR/oci-policy.toml`. The policy allow-lists registries and trusted
+`$MVM_HOME/oci-policy.toml`. The policy allow-lists registries and trusted
 keyless cosign identities. Production mode always requires signatures and
 verifies the resolved digest form (`registry/repo@sha256:...`) before the image
 is cached or booted:
@@ -350,7 +350,7 @@ paths.
 over the existing runtime verbs and state helpers, not a parallel runtime.
 Booting machine commands use the same signed-`ExecutionPlan`, audited,
 OCI-provenance execution path as the lower-level commands; non-booting state
-commands persist declarative specs under `MVM_DATA_DIR`.
+commands persist declarative specs under `MVM_HOME`.
 
 The flagship verb is `machine run`, which selects one of three lifecycles by
 flag:
@@ -614,7 +614,7 @@ host registry records.
 | `mvmctl machine snapshot ls [--json]` | List sealed Firecracker instance snapshots. |
 | `mvmctl machine snapshot rm <name> [--json]` | Delete a sealed Firecracker instance snapshot. |
 
-Checkpoint blobs are stored under the configured checkpoint store (`MVM_DATA_DIR` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
+Checkpoint blobs are stored under the configured checkpoint store (`MVM_HOME` / `~/.mvm` via the core path helpers). The audit chain records `checkpoint.created`, `checkpoint.restored`, and `checkpoint.forked` entries with content hashes; restore and fork refuse tampered checkpoint content before booting.
 
 ## File Copy
 
@@ -753,7 +753,7 @@ This applies to:
 
 The image is the bundled default — a minimal `mkGuest` rootfs shipped
 with mvm. Built via Nix on first use, cached at
-`~/.cache/mvm/default-microvm/` (kernel + rootfs). To customize, pass
+`~/.mvm/cache/default-microvm/` (kernel + rootfs). To customize, pass
 `--manifest` or `--flake` pointing at your own project's `mkGuest`
 output (see [Building MicroVM Images](/guides/building-microvm-images)).
 
@@ -818,7 +818,7 @@ All commands accept these global options:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MVM_DATA_DIR` | Root data directory for templates and builds | `~/.mvm` |
+| `MVM_HOME` | The single root for all mvm state (data, cache, config, run, state, share, vms) | `~/.mvm` |
 | `MVM_FC_VERSION` | Firecracker version (auto-normalized to `vMAJOR.MINOR`) | Latest stable |
 | `MVM_FC_ASSET_BASE` | S3 base URL for Firecracker assets | AWS default |
 | `MVM_FC_ASSET_ROOTFS` | Override rootfs filename | Auto-detected |
@@ -840,14 +840,10 @@ All commands accept these global options:
 | `MVM_TEMPLATE_LOCAL_PROBE_TARGETS` | Comma-separated base URLs to probe for a local OpenAI-compatible endpoint in `auto` mode (overrides defaults `http://127.0.0.1:11434` and `http://127.0.0.1:8080`) | Defaults |
 | `MVM_TEMPLATE_NO_LOCAL_PROBE` | Set to `1` to skip the local-endpoint probe in `auto` mode (CI / sandboxed environments where loopback connects can hang) | Unset |
 | `MVM_PRODUCTION` | Enable production mode checks | `false` |
-| `MVM_OCI_POLICY` | OCI production policy TOML used by `mvmctl image pull --prod` and `mvmctl run --image --prod` | `$MVM_DATA_DIR/oci-policy.toml` |
+| `MVM_OCI_POLICY` | OCI production policy TOML used by `mvmctl image pull --prod` and `mvmctl run --image --prod` | `$MVM_HOME/oci-policy.toml` |
 | `MVM_OCI_BEARER_TOKEN_<HOST>` | Bearer token for one OCI registry host (`ghcr.io` -> `MVM_OCI_BEARER_TOKEN_GHCR_IO`) | Unset |
 | `MVM_OCI_BEARER_TOKEN` | Global fallback bearer token for OCI registry pulls | Unset |
 | `RUST_LOG` | Logging level (e.g., `debug`, `mvm=trace`) | `info` |
-| `MVM_CACHE_DIR` | Override cache directory | `~/.cache/mvm` |
-| `MVM_CONFIG_DIR` | Override config directory | XDG default |
-| `MVM_STATE_DIR` | Override state directory | XDG default |
-| `MVM_SHARE_DIR` | Override share directory | XDG default |
 | `MVM_DEV_FLAKE_URL` | Escape hatch for the dev-build's chained `--override-input mvm` target. When set, suppresses the default chained override. (Legacy from the previous iteration's dual-flake layout; today's same-flake-for-both-modes design rarely needs it.) | Unset |
 | `MVM_SRC` | Override the source repo path passed to `nix build` during dev builds | Workspace root |
 | `MVM_BUILDER_AGENT_BIN` | Override the path to the builder-agent binary baked into the builder VM image | Auto-detected from build closure |

@@ -26,7 +26,7 @@ Required host:
 
 Useful overrides:
   MVM_HVF_ALLOW_HOST_OUT_DIR=/tmp/path     evidence directory
-  MVM_HVF_ALLOW_HOST_DATA_DIR=/tmp/path    isolated MVM_DATA_DIR
+  MVM_HVF_ALLOW_HOST_DATA_DIR=/tmp/path    isolated MVM_HOME
   MVM_HVF_ALLOW_HOST_HOST=google.com       allow-host target for the exact CLI proof
   MVM_HVF_ALLOW_HOST_IMAGE=alpine          OCI image for the exact CLI proof
   MVM_HVF_ALLOW_HOST_SKIP_BUILD=1          skip helper binary builds
@@ -85,7 +85,7 @@ fi
 
 run_env=(
   env
-  "MVM_DATA_DIR=${DATA_DIR}"
+  "MVM_HOME=${DATA_DIR}"
   "MVM_HVF_SUPERVISOR_PATH=${SUPERVISOR_BIN}"
   "MVM_SUBSTITUTION_ENDPOINT_PATH=${ENDPOINT_BIN}"
 )

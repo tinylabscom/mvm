@@ -537,7 +537,7 @@ pub enum BuilderVmError {
     },
 }
 
-/// `~/.cache/mvm/builder-vm/` (honors `MVM_CACHE_DIR`) — the directory to clear
+/// `~/.mvm/cache/builder-vm/` (honors `MVM_HOME`) — the directory to clear
 /// to recover a degraded builder store. Lives here (ungated) so the build
 /// error path can name the recovery dir; the `builder-vm`-gated builder modules
 /// delegate to this for a single source of truth.
@@ -575,7 +575,7 @@ pub struct BuilderStoreRepair {
 
 /// Recover a degraded builder Nix store by removing the builder-VM cache
 /// dir so the next `mvmctl bootstrap` / `build` cold-rebuilds it clean — the documented
-/// `rm -rf ~/.cache/mvm/builder-vm` recovery as a first-class operation. The
+/// `rm -rf ~/.mvm/cache/builder-vm` recovery as a first-class operation. The
 /// whole dir goes (store image + per-VM dirs + job dirs): the store image is the
 /// degraded piece, and the kernel/rootfs/jobs are all rebuildable. `dry_run`
 /// reports what would be freed without deleting.
@@ -1140,13 +1140,13 @@ mod tests {
     #[test]
     fn degraded_store_error_names_the_recovery_dir_and_command() {
         let e = BuilderVmError::DegradedBuilderStore {
-            cache_dir: "/home/u/.cache/mvm/builder-vm".into(),
+            cache_dir: "/home/u/.mvm/cache/builder-vm".into(),
             log_path: "/tmp/job/nix-stderr.log".into(),
             detail: "error: path '/nix/store/x-source/flake.nix' does not exist".into(),
         };
         let msg = e.to_string();
         assert!(msg.contains("mvmctl cache repair")); // the first-class recovery
-        assert!(msg.contains("rm -rf /home/u/.cache/mvm/builder-vm")); // manual fallback
+        assert!(msg.contains("rm -rf /home/u/.mvm/cache/builder-vm")); // manual fallback
         assert!(msg.contains("mvmctl bootstrap"));
         assert!(msg.contains("dangling")); // distinct from a generic build failure
     }

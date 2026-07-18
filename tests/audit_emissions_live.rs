@@ -118,11 +118,10 @@
 //! ## Hermetic setup
 //!
 //! Each test spawns the real `mvmctl` binary via `assert_cmd` with
-//! `HOME` and `MVM_DATA_DIR` / `MVM_STATE_DIR` / `MVM_CACHE_DIR`
-//! pointed at a per-test `tempfile::tempdir()`. The audit log
-//! resolves to `<tempdir>/.local/state/mvm/log/audit.jsonl` (the
-//! XDG-state path `mvm_core::policy::audit::default_audit_log()`
-//! returns when no legacy `~/.mvm/log/` exists). Tests read that
+//! `HOME` pointed at a per-test `tempfile::tempdir()` (and `MVM_HOME`
+//! cleared so the default `<HOME>/.mvm` root wins). The audit log
+//! resolves to `<tempdir>/.mvm/state/log/audit.jsonl`
+//! (`mvm_core::policy::audit::default_audit_log()`). Tests read that
 //! file and assert the expected `LocalAuditKind` (in its
 //! `serde(rename_all = "snake_case")` form, e.g. `"cache_prune"`)
 //! appears.
@@ -162,16 +161,14 @@ impl AuditSandbox {
         self.home.path()
     }
 
-    /// Resolve the audit log path the subprocess will write to.
-    /// `mvm_core::policy::audit::default_audit_log()` returns the
-    /// XDG state path (`<state>/log/audit.jsonl`) when no legacy
-    /// `<data>/log/audit.jsonl` exists. Since the tempdir is empty,
-    /// the state path wins.
+    /// Resolve the audit log path the subprocess will write to:
+    /// `mvm_core::policy::audit::default_audit_log()` returns
+    /// `<mvm root>/state/log/audit.jsonl`, and with `HOME` pointed at
+    /// the sandbox the root is `<HOME>/.mvm`.
     fn audit_log_path(&self) -> PathBuf {
         self.home_path()
-            .join(".local")
+            .join(".mvm")
             .join("state")
-            .join("mvm")
             .join("log")
             .join("audit.jsonl")
     }
@@ -192,22 +189,12 @@ impl AuditSandbox {
     fn mvmctl(&self) -> Command {
         #[allow(deprecated)]
         let mut c = Command::cargo_bin("mvmctl").expect("cargo_bin mvmctl");
-        // HOME drives every state dir helper in mvm_core::config —
-        // mvm_data_dir, mvm_state_dir, mvm_cache_dir, mvm_share_dir,
-        // mvm_config_dir all cascade off it when no XDG_* / MVM_*
-        // override is set. Clearing those guarantees HOME wins so
-        // the test runner's own XDG env doesn't leak into the
-        // subprocess.
+        // HOME drives every dir helper in mvm_core::config — the whole
+        // tree cascades off `<HOME>/.mvm` when MVM_HOME is unset.
+        // Clearing MVM_HOME guarantees HOME wins so the test runner's
+        // own override doesn't leak into the subprocess.
         c.env("HOME", self.home_path())
-            .env_remove("XDG_STATE_HOME")
-            .env_remove("XDG_DATA_HOME")
-            .env_remove("XDG_CACHE_HOME")
-            .env_remove("XDG_CONFIG_HOME")
-            .env_remove("MVM_DATA_DIR")
-            .env_remove("MVM_STATE_DIR")
-            .env_remove("MVM_CACHE_DIR")
-            .env_remove("MVM_SHARE_DIR")
-            .env_remove("MVM_CONFIG_DIR")
+            .env_remove("MVM_HOME")
             // Pin the file-backed secret store. The default
             // (`default_secret_store`) auto-picks the OS keyring
             // when reachable, which on Linux CI runners means the
@@ -1072,7 +1059,7 @@ struct MockVmAgentFixture {
 /// listening at `<vm_dir>/runtime/v.sock`. Returns when the listener
 /// is ready to accept connections.
 fn start_mock_vm_agent(sandbox: &AuditSandbox, name: &str) -> MockVmAgentFixture {
-    // mvm_data_dir() resolves to `<HOME>/.mvm` by default. The
+    // mvm_home() resolves to `<HOME>/.mvm` by default. The
     // subprocess sees HOME=sandbox.home_path() and so will compute
     // the same path; we compute it here from the same root.
     let vm_dir = sandbox.home_path().join(".mvm").join("mock-vms").join(name);

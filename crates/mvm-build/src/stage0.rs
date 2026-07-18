@@ -121,10 +121,9 @@ pub fn asset_for_host_arch() -> Option<&'static BootstrapAsset> {
     }
 }
 
-/// `~/.cache/mvm/stage0/`. Materialized by [`prepare_assets`].
+/// `<mvm_home>/cache/stage0/`. Materialized by [`prepare_assets`].
 pub fn stage0_cache_dir() -> PathBuf {
-    // Honors MVM_CACHE_DIR / XDG_CACHE_HOME (parallel sessions isolate
-    // via MVM_CACHE_DIR) instead of the old hardcoded $HOME/.cache/mvm.
+    // Honors MVM_HOME so parallel sessions isolate their Stage 0 assets.
     PathBuf::from(mvm_core::config::mvm_cache_dir()).join("stage0")
 }
 
@@ -636,11 +635,10 @@ mod tests {
     fn cache_dir_is_under_home() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", tmp.path());
+        env.set("MVM_HOME", tmp.path());
         let path = stage0_cache_dir();
         let s = path.to_string_lossy();
-        assert!(s.contains("/mvm/stage0"), "got {s}");
+        assert!(s.ends_with("/cache/stage0"), "got {s}");
         assert!(path.starts_with(tmp.path()), "got {s}");
     }
 

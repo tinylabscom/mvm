@@ -187,7 +187,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         // Real input trees + placeholder image files on disk.
         let job = tmp.path().join("job");
@@ -260,7 +260,7 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = TestEnv::new();
         let tmp = tempfile::tempdir().unwrap();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let job = tmp.path().join("job");
         let work = tmp.path().join("work");

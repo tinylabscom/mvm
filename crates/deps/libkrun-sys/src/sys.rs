@@ -444,7 +444,7 @@ pub struct BundledKernel {
 /// load/entry addresses.
 ///
 /// `target_path` SHOULD be a stable per-host location (e.g.
-/// `~/.cache/mvm/libkrunfw/vmlinux`) so subsequent invocations skip the
+/// `~/.mvm/cache/libkrunfw/vmlinux`) so subsequent invocations skip the
 /// copy. Errors propagate as `Error::Init` with a description of the
 /// failed step.
 pub fn extract_bundled_kernel(target_path: &Path) -> Result<BundledKernel, Error> {

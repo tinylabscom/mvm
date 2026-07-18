@@ -745,7 +745,7 @@ mod tests {
         // one and the test is hermetic.
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
 
         let src = TempDir::new().expect("src tempdir");
         let out = TempDir::new().expect("out tempdir");

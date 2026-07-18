@@ -842,7 +842,7 @@ mod tests {
 
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
         let mut sidecar = GuestSidecar::for_oci_run("audit-probe", true, true);
@@ -898,7 +898,7 @@ mod tests {
 
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let rootfs = dir.path().join("rootfs.ext4");
         std::fs::write(&rootfs, b"rootfs").expect("write rootfs");
         let sidecar = GuestSidecar::for_oci_run("egress-probe", true, true);
@@ -1061,7 +1061,7 @@ mod tests {
     fn vsock_egress_env_empty_without_marker() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         assert!(super::vsock_egress_env("plain-vm").is_empty());
     }
 
@@ -1069,7 +1069,7 @@ mod tests {
     fn vsock_egress_env_emits_http_proxy_vars_when_marker_present() {
         let mut env = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let marker = mvm_core::config::vm_vsock_egress_marker_path("plain-vm");
         std::fs::create_dir_all(marker.parent().expect("marker parent"))
             .expect("mkdir marker parent");
@@ -1094,7 +1094,7 @@ mod tests {
     fn workload_egress_env_prefers_substitution_env_over_plain_vsock_env() {
         let mut env_guard = TestEnv::new();
         let dir = tempfile::tempdir().expect("tempdir");
-        env_guard.set("MVM_DATA_DIR", dir.path());
+        env_guard.set("MVM_HOME", dir.path());
 
         let marker = mvm_core::config::vm_vsock_egress_marker_path("pref-vm");
         std::fs::create_dir_all(marker.parent().expect("marker parent"))

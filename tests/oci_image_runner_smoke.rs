@@ -131,26 +131,23 @@ impl Drop for SessionCleanup {
             return;
         };
         let _ = mvmctl_with_target_path()
-            .env("MVM_DATA_DIR", &self.data_dir)
+            .env("MVM_HOME", &self.data_dir)
             .args(["session", "kill", session_id])
             .output();
     }
 }
 
 #[cfg(target_os = "macos")]
-fn mvm_data_dir() -> PathBuf {
-    std::env::var_os("MVM_DATA_DIR")
+fn mvm_home() -> PathBuf {
+    std::env::var_os("MVM_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".mvm")))
-        .expect("MVM_DATA_DIR or HOME must be set")
+        .expect("MVM_HOME or HOME must be set")
 }
 
 #[cfg(target_os = "macos")]
 fn mvm_cache_dir() -> PathBuf {
-    std::env::var_os("MVM_CACHE_DIR")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache/mvm")))
-        .expect("MVM_CACHE_DIR or HOME must be set")
+    mvm_home().join("cache")
 }
 
 fn mvmctl_with_target_path() -> Command {
@@ -254,7 +251,7 @@ fn resolved_digest_from_run_output(output: &str) -> Option<String> {
 fn prod_policy_path() -> PathBuf {
     std::env::var_os("MVM_OCI_POLICY")
         .map(PathBuf::from)
-        .unwrap_or_else(|| mvm_data_dir().join("oci-policy.toml"))
+        .unwrap_or_else(|| mvm_home().join("oci-policy.toml"))
 }
 
 #[cfg(target_os = "macos")]
@@ -635,7 +632,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let compile = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+        .env("MVM_HOME", &data_dir)
         .args([
             "build",
             "compile",
@@ -655,7 +652,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
 
     let run = run_with_stdin(
         mvmctl_with_target_path()
-            .env("MVM_DATA_DIR", &data_dir)
+            .env("MVM_HOME", &data_dir)
             .env("MVM_HYPERVISOR", "hvf")
             .args([
                 "machine",
@@ -690,7 +687,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     cleanup.arm(session_id.clone());
 
     let info = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+        .env("MVM_HOME", &data_dir)
         .args(["session", "info", &session_id])
         .output()
         .expect("spawn mvmctl session info");
@@ -726,7 +723,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let denied = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+        .env("MVM_HOME", &data_dir)
         .env("MVM_HYPERVISOR", "hvf")
         .args(["machine", "set-timeout", &vm_name, "349"])
         .output()
@@ -744,7 +741,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let verify = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+        .env("MVM_HOME", &data_dir)
         .args(["trust", "audit", "verify", "--tenant", "local"])
         .output()
         .expect("spawn mvmctl trust audit verify");
@@ -765,7 +762,7 @@ fn prod_agent_verb_grant_hvf_witness_proves_staging_denial_and_audit() {
     );
 
     let kill = mvmctl_with_target_path()
-        .env("MVM_DATA_DIR", &data_dir)
+        .env("MVM_HOME", &data_dir)
         .args(["session", "kill", &session_id])
         .output()
         .expect("spawn mvmctl session kill");

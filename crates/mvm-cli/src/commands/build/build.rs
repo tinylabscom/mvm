@@ -634,7 +634,7 @@ fn lockfile_sha256s_under(project_root: &std::path::Path) -> Vec<String> {
 /// reference it by hash without re-running the build.
 ///
 /// The slot hash is the `sha256(flake_synthetic_path)` key under
-/// `~/.cache/mvm/templates/`. Repeated calls with the same resolved flake ref
+/// `~/.mvm/cache/templates/`. Repeated calls with the same resolved flake ref
 /// return the same hash and skip the build on a cache hit.
 pub(in crate::commands) fn build_flake_to_slot(
     flake_ref: &str,

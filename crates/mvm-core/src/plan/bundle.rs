@@ -161,7 +161,7 @@ impl FsBundleResolver {
     /// `FsTrustStore::default_path` so admission code can resolve
     /// both with no extra plumbing.
     pub fn default_path() -> anyhow::Result<Self> {
-        let p = crate::config::mvm_data_dir_strict()?.join("bundles");
+        let p = crate::config::mvm_home_strict()?.join("bundles");
         Ok(Self::new(p))
     }
 
@@ -279,7 +279,7 @@ impl BundleRegistry {
     /// uses — the archive (`<sha>.mvmpkg`) and the unpacked
     /// directory (`<sha>/`) cohabit under one tree.
     pub fn default_path() -> anyhow::Result<Self> {
-        let p = crate::config::mvm_data_dir_strict()?.join("bundles");
+        let p = crate::config::mvm_home_strict()?.join("bundles");
         Ok(Self::new(p))
     }
 
@@ -904,7 +904,7 @@ impl FsTrustStore {
     /// Default path: `~/.mvm/trusted-publishers/`. Errors when
     /// `$HOME` is unset.
     pub fn default_path() -> Result<Self> {
-        let p = crate::config::mvm_data_dir_strict()?.join("trusted-publishers");
+        let p = crate::config::mvm_home_strict()?.join("trusted-publishers");
         Ok(Self::new(p))
     }
 

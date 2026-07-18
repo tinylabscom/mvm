@@ -1149,7 +1149,7 @@ fn cosign_verification_reference(image_ref: &ImageReference, resolved_digest: &s
 fn load_oci_registry_policy() -> Result<OciRegistryPolicy> {
     let path = match std::env::var_os("MVM_OCI_POLICY") {
         Some(path) => PathBuf::from(path),
-        None => PathBuf::from(mvm_core::config::mvm_data_dir()).join("oci-policy.toml"),
+        None => PathBuf::from(mvm_core::config::mvm_home()).join("oci-policy.toml"),
     };
     if !path.exists() {
         bail!(

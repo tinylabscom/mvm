@@ -113,7 +113,7 @@ pub mod oci_runtime_inject;
 pub mod pipeline;
 /// Host-side resolver for the mvm runtime overlay disk. Picks the right
 /// ext4 + verity sidecar + roothash for the running mvmctl version and
-/// host arch from `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
+/// host arch from `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 pub mod runtime_overlay;
 
 // Legacy re-exports — preserve `mvm_build::build::*`, `mvm_build::scripts::*`, etc.

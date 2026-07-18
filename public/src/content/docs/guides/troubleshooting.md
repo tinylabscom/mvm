@@ -64,8 +64,7 @@ Failed to activate device: BadActivate
 ```
 
 **Cause**: A from-scratch Stage 0 builder bootstrap against a *completely
-isolated, empty* cache (every one of `MVM_CACHE_DIR` / `MVM_DATA_DIR` pointed at
-fresh temp dirs at once — e.g. the `core_demo_e2e` smoke test under full
+isolated, empty* cache (`MVM_HOME` pointed at a fresh temp dir — e.g. the `core_demo_e2e` smoke test under full
 isolation) can panic in the libkrun guest during virtio device activation,
 before userspace. The Stage 0 device topology is identical to a warm build, so
 this is not a device-count problem; it surfaces in the upstream VMM's
@@ -74,9 +73,10 @@ a normal cold `mvmctl dev up` against the default cache.
 
 **Fix**: Don't run a builder bootstrap against a fully-isolated empty cache. Use
 the default cache, or pre-warm the builder once (`mvmctl dev up` with the default
-cache) before pointing a test at an isolated `MVM_DATA_DIR`. If you must isolate,
-let the run share the default `MVM_CACHE_DIR` so the builder VM image and nix
-store are reused rather than rebuilt from zero. A contributor host with
+cache) before pointing a test at an isolated `MVM_HOME`. Isolated roots
+seed the builder VM image and runtime overlay opportunistically from the
+default `~/.mvm/cache`, so a pre-warmed default cache keeps isolated runs
+from rebuilding from zero. A contributor host with
 `mkfs.ext4` available (e.g. `brew install e2fsprogs`) also avoids the warn-only
 in-guest seed-store fallback that aggravates first-boot geometry on a cold cache.
 
@@ -426,10 +426,10 @@ A `revocations` release entry has marked your mvmctl version unsafe. Read the re
 Network failure during the 24-hour revocation-list refresh. mvmctl tolerates up to 7 days of cached staleness. After 7 days, revocation enforcement is silently skipped (with a warning) — refresh manually:
 
 ```bash
-mkdir -p ~/.cache/mvm/revocations
-curl -L -o ~/.cache/mvm/revocations/revoked-versions.json \
+mkdir -p ~/.mvm/cache/revocations
+curl -L -o ~/.mvm/cache/revocations/revoked-versions.json \
   https://github.com/tinylabscom/mvm/releases/download/revocations/revoked-versions.json
-curl -L -o ~/.cache/mvm/revocations/revoked-versions.json.bundle \
+curl -L -o ~/.mvm/cache/revocations/revoked-versions.json.bundle \
   https://github.com/tinylabscom/mvm/releases/download/revocations/revoked-versions.json.bundle
 ```
 
@@ -443,10 +443,10 @@ operator's local `pack-trust.json` revocations only. Refresh the cached pair
 manually if you need the public recall channel immediately:
 
 ```bash
-mkdir -p ~/.cache/mvm/pack-revocations
-curl -L -o ~/.cache/mvm/pack-revocations/pack-revocations.json \
+mkdir -p ~/.mvm/cache/pack-revocations
+curl -L -o ~/.mvm/cache/pack-revocations/pack-revocations.json \
   https://github.com/tinylabscom/mvm/releases/download/revocations/pack-revocations.json
-curl -L -o ~/.cache/mvm/pack-revocations/pack-revocations.json.bundle \
+curl -L -o ~/.mvm/cache/pack-revocations/pack-revocations.json.bundle \
   https://github.com/tinylabscom/mvm/releases/download/revocations/pack-revocations.json.bundle
 ```
 

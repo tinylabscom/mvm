@@ -22,7 +22,7 @@ use mvm_build::packed_artifact::{
     pack as pack_artifact, verify as verify_artifact,
 };
 use mvm_core::arch::GuestArch;
-use mvm_core::config::mvm_data_dir;
+use mvm_core::config::mvm_home;
 use mvm_core::user_config::MvmConfig;
 use mvm_runtime::artifacts::manifest::ArtifactManifest;
 use mvm_runtime::artifacts::traits::{ArtifactError, ArtifactValidator, BackendConfigWriter};
@@ -420,7 +420,7 @@ fn run_extract(args: ExtractArgs) -> Result<()> {
 /// The id may be a full UUID or a unique prefix. Returns an error if the
 /// directory doesn't exist or if the prefix matches more than one entry.
 fn resolve_artifact_dir(id: &str) -> Result<PathBuf> {
-    let artifacts_root = PathBuf::from(mvm_data_dir()).join("artifacts");
+    let artifacts_root = PathBuf::from(mvm_home()).join("artifacts");
     let exact = artifacts_root.join(id);
     if exact.is_dir() {
         return Ok(exact);

@@ -21,7 +21,7 @@ pub(in crate::commands) struct ReapOutcome {
 /// side, distinct from the prevention path.
 ///
 /// The dir traversal below is **prefix-agnostic**: it iterates every
-/// subdirectory of `~/.cache/mvm/builder-vm/vms/` regardless of naming, so
+/// subdirectory of `~/.mvm/cache/builder-vm/vms/` regardless of naming, so
 /// `mvm-builder-vm-<job_id>` (libkrun) state dirs, any HVF builder state
 /// dirs, and leftover `mvm-builder-vz-<job_id>` (the removed Vz backend)
 /// state dirs are all picked up by the same loop, and the sidecar PID
@@ -111,7 +111,7 @@ fn reap_orphaned_vm_helpers_both_roots(
 ) -> Result<ReapOutcome> {
     let builder_root =
         std::path::PathBuf::from(mvm_core::config::mvm_cache_dir()).join("builder-vm/vms");
-    let workload_root = std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("vms");
+    let workload_root = std::path::PathBuf::from(mvm_core::config::mvm_home()).join("vms");
     let snapshot = ProcSnapshot::capture();
 
     let mut out = reap_orphaned_vm_helpers_at_with_snapshot(

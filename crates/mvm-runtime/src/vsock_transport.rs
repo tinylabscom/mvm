@@ -94,7 +94,7 @@ impl LibkrunTransport {
     }
 
     pub fn for_vm(vm_name: &str) -> Self {
-        // Single source of truth for the per-VM dir (honors MVM_DATA_DIR).
+        // Single source of truth for the per-VM dir (honors MVM_HOME).
         // for_vm(name).socket_path(port) now equals
         // mvm_core::config::vm_vsock_port_socket(name, port) — the same path
         // the dev-VM connect resolver uses, so they can't drift.
@@ -409,12 +409,12 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let name = "hvf-vsock-picker-probe";
         let sock =
             mvm_core::config::vm_hvf_vsock_port_socket(name, mvm_agentd::vsock::GUEST_AGENT_PORT);
         let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_DATA_DIR") };
+            unsafe { std::env::remove_var("MVM_HOME") };
             return;
         };
 
@@ -436,11 +436,11 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
         let name = "hvf-picker-probe";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
         let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_DATA_DIR") };
+            unsafe { std::env::remove_var("MVM_HOME") };
             return;
         };
 
@@ -456,13 +456,13 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut env = TestEnv::new();
         env.set(
-            "MVM_DATA_DIR",
+            "MVM_HOME",
             "/Users/auser/work/tinylabs/mvmco/.worktrees/mvm-interactive-oci-dev-console/.mvm-test",
         );
         let name = "hvf-picker-long-path";
         let sock = mvm_core::config::vm_hvf_agent_socket(name);
         let Some(_listener) = bind_unix_listener(&sock) else {
-            unsafe { std::env::remove_var("MVM_DATA_DIR") };
+            unsafe { std::env::remove_var("MVM_HOME") };
             return;
         };
 

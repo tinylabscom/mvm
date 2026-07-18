@@ -9,7 +9,7 @@ use mvm_core::vm_backend::{
 // Every backend variant + the FC support modules live in this crate.
 // `microvm`, `image` are siblings under `crate::`; the substrate
 // (`config`, `shell`, `runtime_meta`) lives in `crate::base`.
-use crate::base::config::{PortMapping, VMS_DIR, VmSlot};
+use crate::base::config::{PortMapping, VmSlot};
 use crate::base::shell::run_in_vm_stdout;
 use crate::driver::HvfDriver;
 use crate::hvf_backend::HvfBackend;
@@ -396,7 +396,7 @@ impl VmBackend for FirecrackerBackend {
     }
 
     fn logs(&self, id: &VmId, lines: u32, hypervisor: bool) -> Result<String> {
-        let abs_vms = run_in_vm_stdout(&format!("echo {}", VMS_DIR))?;
+        let abs_vms = crate::microvm::abs_vms_dir();
         let abs_vms = abs_vms.trim();
         let filename = if hypervisor {
             "firecracker.log"
@@ -1133,7 +1133,7 @@ mod tests {
             std::fs::write(vms.join(name).join(marker), "123").expect("write marker");
         }
         env.set("HOME", temp.path());
-        env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+        env.set("MVM_HOME", temp.path().join(".mvm"));
 
         let q = AnyBackend::for_started_vm("q1");
         let l = AnyBackend::for_started_vm("l1");

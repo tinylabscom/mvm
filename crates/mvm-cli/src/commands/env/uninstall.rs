@@ -54,7 +54,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
         "Remove /var/lib/mvm/ (VM state, volumes, run-info)".to_string(),
     ];
     if args.all {
-        actions.push("Remove ~/.mvm/ (config, signing keys)".to_string());
+        actions.push("Remove ~/.mvm/ (all mvm state: data, caches, config, keys)".to_string());
         actions.push("Remove /usr/local/bin/mvmctl (binary)".to_string());
     }
 
@@ -117,9 +117,10 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     }
 
     if args.all {
-        // Remove the mvm data dir (~/.mvm or MVM_DATA_DIR). Skip if it
-        // can't be resolved (no HOME + no override) rather than guessing.
-        if let Ok(config_dir) = mvm_core::config::mvm_data_dir_strict()
+        // Remove the mvm root (~/.mvm or MVM_HOME) — the single tree
+        // holding all host-side state. Skip if it can't be resolved
+        // (no HOME + no override) rather than guessing.
+        if let Ok(config_dir) = mvm_core::config::mvm_home_strict()
             && config_dir.exists()
         {
             ui::info("Removing ~/.mvm/...");

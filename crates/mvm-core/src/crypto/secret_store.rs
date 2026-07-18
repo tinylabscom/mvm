@@ -70,7 +70,7 @@ const KEYRING_TARGET: &str = "mvm-tenant-secrets";
 /// `~/.mvm/secrets/`. Per-tenant subdir mode 0700, per-secret file
 /// mode 0600.
 pub fn default_secrets_dir() -> Result<PathBuf> {
-    Ok(crate::config::mvm_data_dir_strict()?.join("secrets"))
+    Ok(crate::config::mvm_home_strict()?.join("secrets"))
 }
 
 const FILE_SECRET_MAGIC: &[u8] = b"MVMS1\0";

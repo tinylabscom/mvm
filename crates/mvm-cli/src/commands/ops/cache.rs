@@ -33,7 +33,7 @@ pub(in crate::commands) enum CacheAction {
         /// Skip reaping orphaned per-VM helpers. By default `prune` reaps
         /// `mvm-libkrun-supervisor` / legacy gateway / console-tail processes that
         /// were reparented to launchd when their parent `mvmctl` was killed
-        /// mid-run, plus their `~/.cache/mvm/builder-vm/vms/<id>/` cache
+        /// mid-run, plus their `~/.mvm/cache/builder-vm/vms/<id>/` cache
         /// directories — so dead microVMs don't accumulate. The sweep is
         /// liveness-aware: a running VM (a detached `up -d`, the persistent dev
         /// builder, any in-flight builder VM bootstrap) is spared; only already-dead
@@ -71,7 +71,7 @@ pub(in crate::commands) enum CacheAction {
         json: bool,
     },
     /// Repair a degraded builder VM store. Clears
-    /// `~/.cache/mvm/builder-vm/` so the next `mvmctl bootstrap`/`build` cold-rebuilds it.
+    /// `~/.mvm/cache/builder-vm/` so the next `mvmctl bootstrap`/`build` cold-rebuilds it.
     /// Use this when a build keeps failing with a dangling-store error
     /// (`error: path '/nix/store/…-source/flake.nix' does not exist`).
     Repair {
@@ -422,7 +422,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
             let mut freed = 0u64;
 
             // Sweep orphaned Stage 0 staging dirs first.
-            // They live under `~/.cache/mvm/builder-vm/.<arch>.stage0-*`
+            // They live under `~/.mvm/cache/builder-vm/.<arch>.stage0-*`
             // (or the legacy `<arch>-staging` shape) and are left
             // behind by crashed builder VM bootstrap invocations. The sweep
             // takes the Stage 0 advisory lock to avoid racing a live

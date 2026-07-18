@@ -12,7 +12,7 @@
 //! ## Backing store
 //!
 //! Each session is one JSON file at
-//! `$XDG_RUNTIME_DIR/mvmctl/sessions/<id>.json`. The runtime dir is
+//! `<mvm_home>/run/sessions/<id>.json`. The runtime dir is
 //! 0700 and per-user; the session file inherits 0600. Concurrent
 //! writers are serialized via `crate::atomic_io::write_atomic` (same
 //! discipline as the instance-state files).
@@ -144,7 +144,7 @@ impl std::fmt::Display for SessionState {
 }
 
 /// On-disk session metadata. Persisted at
-/// `$XDG_RUNTIME_DIR/mvmctl/sessions/<id>.json`.
+/// `<mvm_home>/run/sessions/<id>.json`.
 ///
 /// Every field except `id`, `vm_name`, `started_at` is mutated over
 /// the session's lifetime. Writers serialize through atomic-rename
@@ -595,7 +595,7 @@ mod tests {
     // --- on-disk store --------------------------------------------------
 
     /// Set up a temp runtime dir for the duration of one test. Returns a
-    /// guard that resets `MVM_RUNTIME_DIR` on drop and holds an exclusive
+    /// guard that resets `MVM_HOME` on drop and holds an exclusive
     /// lock for the duration so parallel tests don't race the env var.
     struct RuntimeDirGuard {
         _temp: tempfile::TempDir,
@@ -605,9 +605,9 @@ mod tests {
     fn isolated_runtime_dir() -> RuntimeDirGuard {
         let temp = tempfile::tempdir().expect("tempdir");
         // `TestEnv` serializes env-mutating tests behind a process-wide lock
-        // and restores `MVM_RUNTIME_DIR` to its prior value on drop.
+        // and restores `MVM_HOME` to its prior value on drop.
         let mut env = crate::util::test_env::TestEnv::new();
-        env.set("MVM_RUNTIME_DIR", temp.path());
+        env.set("MVM_HOME", temp.path());
         RuntimeDirGuard {
             _temp: temp,
             _env: env,

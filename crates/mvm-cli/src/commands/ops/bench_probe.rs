@@ -132,7 +132,7 @@ impl Drop for HeldProbeVm {
 /// Per-VM state dir the libkrun backend writes the supervisor PID file and host-side
 /// vsock socket into (`~/.mvm/vms/<name>`). Delegate to the
 /// canonical `mvm_core::config::vm_state_dir` the backend itself uses, instead of building
-/// the path from `mvm_state_dir()` — that's the **XDG** state dir (`~/.local/state/mvm`),
+/// the path from `mvm_state_dir()` — that's the state dir (`~/.mvm/state`),
 /// which the supervisor never writes to, so the `start_to_pid` mark never resolved and the
 /// probe timed out on every dev-host run.
 #[cfg(feature = "libkrun-live")]
@@ -272,13 +272,13 @@ mod tests {
     use super::*;
 
     // The probe pid path must resolve under the backend's data dir
-    // (`~/.mvm`, honouring MVM_DATA_DIR), NOT the XDG state dir the supervisor never
+    // (`~/.mvm`, honouring MVM_HOME), NOT the state dir the supervisor never
     // writes to. Regression guard for the `start_to_pid` timeout this fix closed.
     #[cfg(feature = "libkrun-live")]
     #[test]
-    fn probe_state_dir_resolves_under_mvm_data_dir_not_xdg_state() {
+    fn probe_state_dir_resolves_under_mvm_home_not_xdg_state() {
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", "/tmp/mvm-bench-probe-test/.mvm");
+        env.set("MVM_HOME", "/tmp/mvm-bench-probe-test/.mvm");
         let dir = probe_state_dir("vm-x");
         assert_eq!(dir, mvm_core::config::vm_state_dir("vm-x"));
         assert!(dir.starts_with("/tmp/mvm-bench-probe-test/.mvm"));
@@ -286,7 +286,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "touches ~/.cache/mvm; run on a host with the image cached"]
+    #[ignore = "touches ~/.mvm/cache; run on a host with the image cached"]
     fn resolve_probe_image_returns_existing_paths() {
         let img = resolve_probe_image().unwrap();
         assert!(std::path::Path::new(&img.kernel).exists());

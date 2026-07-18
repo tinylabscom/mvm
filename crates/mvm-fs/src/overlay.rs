@@ -282,7 +282,7 @@ pub struct RuntimeOverlayResolver {
 }
 
 impl RuntimeOverlayResolver {
-    /// Create a resolver against `cache_root` (typically `~/.cache/mvm/`)
+    /// Create a resolver against `cache_root` (typically `~/.mvm/cache/`)
     /// that expects overlays tagged with `expected_version` (typically the
     /// running binary's crate version).
     pub fn new(cache_root: PathBuf, expected_version: String) -> Self {

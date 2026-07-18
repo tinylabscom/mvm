@@ -2183,7 +2183,7 @@ Pss_Dirty:           128 kB
     /// `None` kernel sha would let a different kernel mis-compare as a
     /// regression-free run). Needs the cached image present, not a
     /// boot — gated under `libkrun-live` because it touches
-    /// `~/.cache/mvm`.
+    /// `~/.mvm/cache`.
     #[cfg(feature = "libkrun-live")]
     #[test]
     fn host_descriptor_is_populated() {

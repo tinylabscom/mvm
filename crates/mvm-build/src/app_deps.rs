@@ -147,7 +147,7 @@ pub struct InstallSpec {
     /// Optional override for the deps-volumes cache root. When
     /// `None`, resolves to
     /// [`mvm_core::config::mvm_deps_volumes_dir`] (which itself
-    /// honors `MVM_DEPS_VOLUMES_DIR` — the same env knob the
+    /// honors `MVM_HOME` — the same env knob the
     /// admission verifier uses).
     pub cache_root_override: Option<PathBuf>,
 }
@@ -628,7 +628,7 @@ pub fn derive_lockfile_hash(lockfile_sha256: &str, language: Language, gate: Gat
 /// Resolve the deps-volumes cache root, honoring the per-call
 /// override and falling back to
 /// [`mvm_core::config::mvm_deps_volumes_dir`] (which itself honors
-/// `MVM_DEPS_VOLUMES_DIR`). Shared lookup with the admission
+/// `MVM_HOME`). Shared lookup with the admission
 /// verifier — no duplication.
 pub fn resolve_cache_root(override_path: Option<&Path>) -> PathBuf {
     override_path

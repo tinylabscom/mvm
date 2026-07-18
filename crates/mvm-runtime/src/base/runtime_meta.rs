@@ -250,15 +250,15 @@ mod tests {
         let _guard = HOME_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let prev = std::env::var_os("HOME");
-        // `meta_path` resolves via `vm_state_dir`, which prefers MVM_DATA_DIR
+        // `meta_path` resolves via `vm_state_dir`, which prefers MVM_HOME
         // over $HOME — clear it so these $HOME-rooted assertions hold even if
         // a sibling test (under the same lock) leaked the override.
-        let prev_data = std::env::var_os("MVM_DATA_DIR");
-        // SAFETY: tests only; HOME/MVM_DATA_DIR are process-global but the
+        let prev_data = std::env::var_os("MVM_HOME");
+        // SAFETY: tests only; HOME/MVM_HOME are process-global but the
         // HOME_TEST_LOCK serializes us with everything else that reads them.
         unsafe {
             std::env::set_var("HOME", tmp.path());
-            std::env::remove_var("MVM_DATA_DIR");
+            std::env::remove_var("MVM_HOME");
         }
         f(tmp.path());
         unsafe {
@@ -267,8 +267,8 @@ mod tests {
                 None => std::env::remove_var("HOME"),
             }
             match prev_data {
-                Some(v) => std::env::set_var("MVM_DATA_DIR", v),
-                None => std::env::remove_var("MVM_DATA_DIR"),
+                Some(v) => std::env::set_var("MVM_HOME", v),
+                None => std::env::remove_var("MVM_HOME"),
             }
         }
     }

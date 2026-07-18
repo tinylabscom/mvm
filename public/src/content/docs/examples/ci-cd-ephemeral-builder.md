@@ -8,7 +8,7 @@ CI should prefer disposable runtime guests and explicit build artifacts.
 ## Basic CI shape
 
 ```sh
-export MVM_DATA_DIR="$PWD/.mvm-ci"
+export MVM_HOME="$PWD/.mvm-ci"
 
 mvmctl doctor --json
 mvmctl build ./ci-worker --json

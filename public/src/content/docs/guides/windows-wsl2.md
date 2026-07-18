@@ -49,9 +49,9 @@ If `mvmctl doctor` still reports KVM unavailable, see the [No /dev/kvm available
 The supported path is:
 
 - repo/worktree under the WSL distro filesystem, for example `~/work/...`
-- runtime state under the default `~/.mvm` or another ext4-backed `MVM_DATA_DIR`
+- runtime state under the default `~/.mvm` or another ext4-backed `MVM_HOME`
 
-Do **not** run the workload path from `/mnt/c/...` or point `MVM_DATA_DIR` at a
+Do **not** run the workload path from `/mnt/c/...` or point `MVM_HOME` at a
 DrvFs mount. `mvmctl doctor` refuses that shape because it is too flaky.
 
 ### Allocate WSL2 resources

@@ -122,7 +122,7 @@ pub fn workload_build_fingerprint(
 /// Directory holding `fingerprint -> revision` cache records
 /// (`~/.mvm/dev/build-cache/`).
 fn build_cache_dir() -> PathBuf {
-    PathBuf::from(mvm_core::config::mvm_data_dir())
+    PathBuf::from(mvm_core::config::mvm_home())
         .join("dev")
         .join("build-cache")
 }

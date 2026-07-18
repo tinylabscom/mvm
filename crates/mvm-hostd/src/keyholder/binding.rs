@@ -14,7 +14,7 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use mvm_core::config::mvm_data_dir_strict;
+use mvm_core::config::mvm_home_strict;
 use mvm_core::crypto::keystore::validate_shell_id;
 use mvm_protocol::ir::{AuthType, Sigv4Params};
 use serde::{Deserialize, Serialize};
@@ -62,10 +62,10 @@ impl FileBindingStore {
         Self { base: base.into() }
     }
 
-    /// `~/.mvm/secret-bindings/` (honors `MVM_DATA_DIR`).
+    /// `~/.mvm/secret-bindings/` (honors `MVM_HOME`).
     pub fn default_location() -> Result<Self> {
         Ok(Self {
-            base: mvm_data_dir_strict()?.join("secret-bindings"),
+            base: mvm_home_strict()?.join("secret-bindings"),
         })
     }
 

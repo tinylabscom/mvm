@@ -46,8 +46,7 @@ fn config_show() -> Result<()> {
 fn config_edit() -> Result<()> {
     // Ensure config file exists (load creates it with defaults if absent).
     let _ = mvm_core::user_config::load(None);
-    let config_path =
-        std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("config.toml");
+    let config_path = std::path::PathBuf::from(mvm_core::config::mvm_home()).join("config.toml");
     let editor = std::env::var("EDITOR").unwrap_or_else(|_| "nano".to_string());
     let status = std::process::Command::new(&editor)
         .arg(&config_path)

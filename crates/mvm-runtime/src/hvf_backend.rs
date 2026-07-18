@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use mvm_build::hvf_supervisor::{ConsoleDataSocket, HvfDisk, HvfSupervisorConfig};
-use mvm_core::config::{mvm_data_dir, vm_state_dir};
+use mvm_core::config::{mvm_home, vm_state_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, LayerCoverage, VmBackend, VmCapabilities,
     VmExitStatus, VmId, VmInfo, VmStartConfig, VmStatus,
@@ -114,7 +114,7 @@ pub(crate) fn resolve_supervisor_path() -> Result<PathBuf> {
 }
 
 fn vms_root() -> PathBuf {
-    PathBuf::from(mvm_data_dir()).join("vms")
+    PathBuf::from(mvm_home()).join("vms")
 }
 
 /// The per-VM gating endpoint is the sole egress gate on hvf (claim-10
@@ -1323,7 +1323,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let name = "hvf-host-agent-reap-test-vm";
         let state_dir = vm_state_dir(name);

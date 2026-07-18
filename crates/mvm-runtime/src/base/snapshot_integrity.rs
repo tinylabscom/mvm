@@ -33,9 +33,8 @@ use crate::base::ui;
 pub fn seal_snapshot_artifacts(snap_dir: &str) -> Result<()> {
     use std::path::Path;
     let snap_path = Path::new(snap_dir);
-    let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
-        &mvm_core::config::mvm_data_dir(),
-    ));
+    let key_path =
+        mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_home()));
     let key = mvm_core::crypto::snapshot_hmac::load_or_init_key(&key_path)
         .with_context(|| format!("loading snapshot HMAC key {}", key_path.display()))?;
     let files = mvm_core::crypto::snapshot_hmac::files_in(snap_path);
@@ -97,9 +96,8 @@ pub fn verify_snapshot_artifacts(snap_dir: &str) -> Result<()> {
         return Ok(());
     }
 
-    let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
-        &mvm_core::config::mvm_data_dir(),
-    ));
+    let key_path =
+        mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_home()));
     let key = mvm_core::crypto::snapshot_hmac::load_or_init_key(&key_path)
         .with_context(|| format!("loading snapshot HMAC key {}", key_path.display()))?;
     let files = mvm_core::crypto::snapshot_hmac::files_in(snap_path);

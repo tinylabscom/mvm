@@ -133,9 +133,8 @@ pub fn pause_and_seal<IO: SnapshotIO + ?Sized>(vm_name: &str, io: &IO) -> Result
     encrypt_artifacts_if_keyed(&dir)
         .with_context(|| format!("encrypting snapshot artifacts at {}", dir.display()))?;
 
-    let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
-        &mvm_core::config::mvm_data_dir(),
-    ));
+    let key_path =
+        mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_home()));
     let key = load_or_init_key(&key_path)
         .with_context(|| format!("loading HMAC key {}", key_path.display()))?;
     let files = files_in(&dir);
@@ -174,9 +173,8 @@ pub fn verify_and_resume<IO: SnapshotIO + ?Sized>(
             dir.display()
         );
     }
-    let key_path = mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(
-        &mvm_core::config::mvm_data_dir(),
-    ));
+    let key_path =
+        mvm_core::crypto::snapshot_hmac::default_key_path(Path::new(&mvm_core::config::mvm_home()));
     let key = load_or_init_key(&key_path)
         .with_context(|| format!("loading HMAC key {}", key_path.display()))?;
     let files = files_in(&dir);
@@ -546,7 +544,7 @@ pub struct InstanceSnapshotEntry {
 /// listing — a VM with a broken sidecar still surfaces with
 /// `sidecar = None` so the operator can investigate.
 pub fn list_instance_snapshots() -> Result<Vec<InstanceSnapshotEntry>> {
-    let root = PathBuf::from(mvm_core::config::mvm_data_dir()).join("instances");
+    let root = PathBuf::from(mvm_core::config::mvm_home()).join("instances");
     if !root.is_dir() {
         return Ok(Vec::new());
     }
@@ -754,7 +752,7 @@ mod tests {
     use mvm_core::util::test_env::TestEnv;
     use std::os::unix::fs::PermissionsExt;
 
-    /// Run a closure with `MVM_DATA_DIR` overridden to a tempdir
+    /// Run a closure with `MVM_HOME` overridden to a tempdir
     /// so each test gets an isolated `~/.mvm/instances/...` tree.
     /// The override is restored on drop. Tests that touch the data
     /// dir take this guard; serialisation across tests is via
@@ -772,7 +770,7 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner());
             let tmp = tempfile::tempdir().expect("tempdir");
             let mut env = TestEnv::new();
-            env.set("MVM_DATA_DIR", tmp.path());
+            env.set("MVM_HOME", tmp.path());
             DataDirGuard {
                 _guard: lock,
                 _env: env,
@@ -792,7 +790,7 @@ mod tests {
     fn snapshot_dir_lives_under_data_dir() {
         let _g = DataDirGuard::new();
         let dir = snapshot_dir("vm-1");
-        assert!(dir.starts_with(mvm_core::config::mvm_data_dir()));
+        assert!(dir.starts_with(mvm_core::config::mvm_home()));
         assert!(dir.ends_with("instances/vm-1/snapshot"));
     }
 

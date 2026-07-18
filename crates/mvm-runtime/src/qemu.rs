@@ -34,7 +34,7 @@
 //! - `status` probes the qemu PID; `list` walks `~/.mvm/vms/*/qemu.pid`.
 
 use anyhow::{Result, anyhow, bail};
-use mvm_core::config::{mvm_data_dir, vm_console_log, vm_state_dir};
+use mvm_core::config::{mvm_home, vm_console_log, vm_state_dir};
 use mvm_core::vm_backend::{
     BackendKind, BackendSecurityProfile, ClaimStatus, GuestChannelInfo, LayerCoverage,
     SnapshotCapability, StartMode, VmBackend, VmCapabilities, VmId, VmInfo, VmStartConfig,
@@ -469,7 +469,7 @@ impl VmBackend for QemuBackend {
     }
 
     fn list(&self) -> Result<Vec<VmInfo>> {
-        let root = PathBuf::from(mvm_data_dir()).join("vms");
+        let root = PathBuf::from(mvm_home()).join("vms");
         let entries = match std::fs::read_dir(&root) {
             Ok(it) => it,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -587,7 +587,7 @@ fn host_arch() -> &'static str {
 /// (builder/dev-shell images). A plain `mkGuest` **workload** is a bare
 /// rootfs with no kernel — libkrun boots it with libkrunfw's bundled
 /// kernel, but QEMU has none. For the dev tier we fall back to the cached
-/// builder VM kernel (`~/.cache/mvm/builder-vm/<arch>/vmlinux`), which has
+/// builder VM kernel (`~/.mvm/cache/builder-vm/<arch>/vmlinux`), which has
 /// virtio-blk/net/vsock + ext4 built-in and boots a workload rootfs
 /// (`root=/dev/vda init=/init`) just fine — the Linux analog of
 /// libkrunfw's bundled kernel. Production uses a workload kernel via
@@ -599,7 +599,7 @@ fn resolve_workload_kernel(config: &VmStartConfig) -> Result<PathBuf> {
             return Ok(p);
         }
     }
-    // ~/.cache/mvm/builder-vm/<arch>/vmlinux — same layout
+    // ~/.mvm/cache/builder-vm/<arch>/vmlinux — same layout
     // `mvm_build::libkrun_builder::ensure_builder_vm_image` promotes to.
     let builder_kernel = PathBuf::from(mvm_core::config::mvm_cache_dir())
         .join("builder-vm")
@@ -661,7 +661,7 @@ fn allocate_cid(name: &str) -> Result<u32> {
     // cheapest cross-process mutex; it's released when `_lock` (the open
     // file description) drops at function return.
     use std::os::fd::AsRawFd;
-    let vms_root = PathBuf::from(mvm_data_dir()).join("vms");
+    let vms_root = PathBuf::from(mvm_home()).join("vms");
     std::fs::create_dir_all(&vms_root)
         .map_err(|e| anyhow!("create {}: {e}", vms_root.display()))?;
     let lock_path = vms_root.join(".qemu-cid-alloc.lock");
@@ -694,7 +694,7 @@ fn allocate_cid(name: &str) -> Result<u32> {
 /// from a crashed VM is ignored so its CID can be reclaimed.
 fn used_cids() -> std::collections::HashSet<u32> {
     let mut set = std::collections::HashSet::new();
-    let root = PathBuf::from(mvm_data_dir()).join("vms");
+    let root = PathBuf::from(mvm_home()).join("vms");
     let Ok(entries) = std::fs::read_dir(&root) else {
         return set;
     };

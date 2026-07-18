@@ -38,7 +38,7 @@ host transport result when the command provides it.
 Use per-run state directories in CI so local developer state is not touched:
 
 ```sh
-export MVM_DATA_DIR="$PWD/.mvm-test"
+export MVM_HOME="$PWD/.mvm-test"
 export CARGO_TARGET_DIR="$PWD/.mvm-test/target"
 export CARGO_HOME="$PWD/.mvm-test/cargo"
 ```

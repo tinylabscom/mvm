@@ -16,16 +16,9 @@ pub use mvm_protocol::policy::audit::{AuditAction, AuditEntry, LocalAuditEvent, 
 // Local mvmctl audit log (single-host operations)
 // ============================================================================
 
-/// Default path for the local audit log.
-///
-/// Prefers XDG state directory (`~/.local/state/mvm/log/`). Falls back to
-/// legacy `~/.mvm/log/` if an audit log already exists there.
+/// Default path for the local audit log:
+/// `<mvm_state_dir>/log/audit.jsonl`.
 pub fn default_audit_log() -> String {
-    // Check legacy location for backward compat
-    let legacy = format!("{}/log/audit.jsonl", crate::config::mvm_data_dir());
-    if std::path::Path::new(&legacy).exists() {
-        return legacy;
-    }
     format!("{}/log/audit.jsonl", crate::config::mvm_state_dir())
 }
 
@@ -223,7 +216,7 @@ impl LocalAuditBuilder {
 
     /// Redirect the emission to an explicit path instead of
     /// [`default_audit_log`]. Used by tests so emission can be
-    /// observed without mutating `MVM_STATE_DIR` (which serializes
+    /// observed without mutating `MVM_HOME` (which serializes
     /// badly across the test runner).
     pub fn to_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.path_override = Some(path.into());

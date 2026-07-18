@@ -408,7 +408,7 @@ mod tests {
         let mut env = mvm_core::util::test_env::TestEnv::new();
         let tmp = tempfile::tempdir().expect("tempdir");
         env.set("HOME", tmp.path());
-        env.remove("MVM_DATA_DIR");
+        env.remove("MVM_HOME");
 
         // The dev env dials the libkrun dev VM's per-port vsock listener at
         // `<vm_state_dir>/vsock-<port>.sock` — the same path

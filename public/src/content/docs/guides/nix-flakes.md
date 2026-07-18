@@ -357,15 +357,15 @@ yourself per [Building MicroVM Images](/guides/building-microvm-images).
 ```
 
 ```bash
-mkdir -p ~/.config/mvm/secrets
-printf '%s\n' 'sk-ant-…' > ~/.config/mvm/secrets/anthropic
-chmod 0400 ~/.config/mvm/secrets/anthropic
+mkdir -p ~/.mvm/config/secrets
+printf '%s\n' 'sk-ant-…' > ~/.mvm/config/secrets/anthropic
+chmod 0400 ~/.mvm/config/secrets/anthropic
 
 cd my-claude-code-vm
 mvmctl machine build
 mvmctl machine run --manifest . --profile dev \
   --mount "$PWD:/workspace:rw" \
-  --mount "$HOME/.config/mvm/secrets:/mnt/secrets"
+  --mount "$HOME/.mvm/config/secrets:/mnt/secrets"
 ```
 
 Inside the guest, your workload can read the file you mounted under

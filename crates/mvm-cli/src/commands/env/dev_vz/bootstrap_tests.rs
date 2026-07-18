@@ -167,7 +167,7 @@ mod attested_builder_pack_tests {
     fn full_chain_promote_resolve_materialize_marks_cache_ready() {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
 
         let staged = TempDir::new().expect("staged pack tempdir");
         write_valid_builder_artifacts(staged.path());
@@ -236,7 +236,7 @@ mod attested_builder_pack_tests {
     fn attempt_falls_through_when_no_pack_promoted() {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
         let out = TempDir::new().expect("out tempdir");
         let out_dir = out.path().join("builder-vm").join("aarch64");
 
@@ -458,11 +458,9 @@ mod attested_builder_pack_tests {
     /// the real `attempt_attested_builder_pack` entrypoint the flag hook calls.
     #[test]
     fn end_to_end_trusted_pack_materializes_and_marks_cache_ready() {
-        let cache = TempDir::new().expect("cache tempdir");
-        let data = TempDir::new().expect("data tempdir");
+        let cache = TempDir::new().expect("mvm root tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", cache.path());
 
         let staged = TempDir::new().expect("staged pack tempdir");
         write_valid_builder_artifacts(staged.path());
@@ -490,11 +488,9 @@ mod attested_builder_pack_tests {
 
     #[test]
     fn absent_trust_config_stays_inert() {
-        let cache = TempDir::new().expect("cache tempdir");
-        let data = TempDir::new().expect("data tempdir");
+        let cache = TempDir::new().expect("mvm root tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", cache.path());
 
         let staged = TempDir::new().expect("staged pack tempdir");
         write_valid_builder_artifacts(staged.path());
@@ -516,11 +512,9 @@ mod attested_builder_pack_tests {
 
     #[test]
     fn untrusted_key_is_rejected() {
-        let cache = TempDir::new().expect("cache tempdir");
-        let data = TempDir::new().expect("data tempdir");
+        let cache = TempDir::new().expect("mvm root tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", cache.path());
 
         let staged = TempDir::new().expect("staged pack tempdir");
         write_valid_builder_artifacts(staged.path());
@@ -547,11 +541,9 @@ mod attested_builder_pack_tests {
 
     #[test]
     fn disallowed_channel_is_rejected() {
-        let cache = TempDir::new().expect("cache tempdir");
-        let data = TempDir::new().expect("data tempdir");
+        let cache = TempDir::new().expect("mvm root tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
-        env.set("MVM_DATA_DIR", data.path());
+        env.set("MVM_HOME", cache.path());
 
         let staged = TempDir::new().expect("staged pack tempdir");
         write_valid_builder_artifacts(staged.path());
@@ -661,7 +653,7 @@ mod attested_builder_pack_tests {
     fn promote_staged_builder_pack_rejects_garbage_bundle() {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
 
         let src = TempDir::new().expect("src tempdir");
         let staging = TempDir::new().expect("staging tempdir");
@@ -706,7 +698,7 @@ mod attested_builder_pack_tests {
     fn promote_staged_builder_pack_rejects_missing_bundle() {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
 
         let src = TempDir::new().expect("src tempdir");
         let staging = TempDir::new().expect("staging tempdir");
@@ -748,7 +740,7 @@ mod attested_builder_pack_tests {
     fn promote_staged_builder_pack_malformed_manifest_is_an_error() {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
 
         let staging = TempDir::new().expect("staging tempdir");
         std::fs::write(staging.path().join("pack-manifest.json"), b"not json")
@@ -770,7 +762,7 @@ mod attested_builder_pack_tests {
     fn promote_staged_builder_pack_missing_manifest_is_an_error() {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
 
         let staging = TempDir::new().expect("staging tempdir");
         // No pack-manifest.json written at all.
@@ -795,7 +787,7 @@ mod attested_builder_pack_tests {
     fn promote_staged_builder_pack_records_release_version_and_active() {
         let cache = TempDir::new().expect("cache tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_CACHE_DIR", cache.path());
+        env.set("MVM_HOME", cache.path());
 
         let staged = TempDir::new().expect("staged pack tempdir");
         write_valid_builder_artifacts(staged.path());

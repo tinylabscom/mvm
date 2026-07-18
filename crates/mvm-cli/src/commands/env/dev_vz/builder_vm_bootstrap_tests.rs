@@ -486,7 +486,7 @@ fn stage0_in_flight_tracks_the_lock() {
 /// Name predicate must match both the current hidden
 /// `.<arch>.stage0-<pid>-<nonce>` form and the legacy
 /// `<arch>-staging[-...]` form, and reject everything else that
-/// lives alongside under `~/.cache/mvm/builder-vm/` (live cache
+/// lives alongside under `~/.mvm/cache/builder-vm/` (live cache
 /// dirs `aarch64/` / `x86_64/`, the `nix-store-<arch>.img` blob,
 /// `jobs/`, `vms/`, `stage0.lock`, sundry dotfiles).
 #[test]
@@ -706,7 +706,7 @@ fn sweep_is_noop_when_root_missing() {
 /// `mvm-builder-vm-<job_id>`. The traversal in
 /// `reap_orphaned_vm_helpers_at` is prefix-agnostic and
 /// `VzBuilderVm` writes a `builder.pid` sidecar under the shared
-/// `~/.cache/mvm/builder-vm/vms/` tree; this test guards against
+/// `~/.mvm/cache/builder-vm/vms/` tree; this test guards against
 /// a future refactor narrowing either invariant.
 #[test]
 fn reap_picks_up_orphaned_vz_builder_state_dir() {

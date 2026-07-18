@@ -26,8 +26,6 @@ pub const MICROVM_DIR: &str = "~/microvm";
 pub const BRIDGE_DEV: &str = "br-mvm";
 pub const BRIDGE_IP: &str = "172.16.0.1";
 pub const BRIDGE_CIDR: &str = "172.16.0.1/24";
-/// Per-VM state directory; resolves the same way as [`MICROVM_DIR`].
-pub const VMS_DIR: &str = "~/microvm/vms";
 
 /// Per-VM network + filesystem identity, derived from a slot index.
 #[derive(Debug, Clone)]
@@ -44,16 +42,19 @@ pub struct VmSlot {
 impl VmSlot {
     /// Create a slot from a name and 0-based index.
     /// Index N → guest IP 172.16.0.{N+2}, TAP tap{N}.
+    /// `vm_dir` / `api_socket` live in the per-VM directory under the
+    /// single mvm root (`mvm_core::config::vms_dir()`), as absolute paths.
     pub fn new(name: &str, index: u8) -> Self {
         let ip_octet = index + 2;
+        let vm_dir = mvm_core::config::vm_state_dir(name);
         Self {
             name: name.to_string(),
             index,
             tap_dev: format!("tap{}", index),
             mac: format!("06:00:AC:10:00:{:02x}", ip_octet),
             guest_ip: format!("172.16.0.{}", ip_octet),
-            vm_dir: format!("{}/{}", VMS_DIR, name),
-            api_socket: format!("{}/{}/fc.socket", VMS_DIR, name),
+            api_socket: vm_dir.join("fc.socket").display().to_string(),
+            vm_dir: vm_dir.display().to_string(),
         }
     }
 }
@@ -120,7 +121,6 @@ mod tests {
         assert!(!BRIDGE_DEV.is_empty());
         assert!(!BRIDGE_IP.is_empty());
         assert!(!BRIDGE_CIDR.is_empty());
-        assert!(!VMS_DIR.is_empty());
     }
 
     #[test]

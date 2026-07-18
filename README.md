@@ -483,7 +483,7 @@ claims), each backed by a named test or workflow gate. In summary:
     write-only, and the host gate refuses `console` on a sealed VM.
 
 The guest agent runs as an unprivileged uid under `setpriv`; `~/.mvm` and
-`~/.cache/mvm` are mode 0700. **Out of scope** (named in ADR-001): a malicious
+`~/.mvm/cache` are mode 0700. **Out of scope** (named in ADR-001): a malicious
 *host* (mvmctl trusts the host with the hypervisor and private keys),
 multi-tenant guests (one guest = one workload), and hardware-backed key
 attestation.
@@ -550,7 +550,7 @@ Ground rules (enforced by CI — see [AGENTS.md](AGENTS.md) for the full set):
   negative cases. SDK changes must keep the shared conformance fixtures
   (`tests/machine-fixtures/`) green — that is what keeps the wrappers thin.
 - **Reuse first.** Search the workspace before adding a helper — duplicated logic
-  is this repo's most common bug source. All `~/.mvm` and `~/.cache/mvm` paths go
+  is this repo's most common bug source. All `~/.mvm` paths go
   through `mvm-core::config` helpers, never inline `$HOME` joins.
 - **Specs discipline.** Design docs live in `specs/` (ADRs in `specs/adrs/`,
   plans in `specs/plans/`). If your change lands a plan workstream, tick the

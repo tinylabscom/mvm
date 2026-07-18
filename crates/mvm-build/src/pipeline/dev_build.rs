@@ -85,7 +85,7 @@ fn dev_override_flags(env: &dyn ShellEnvironment, mode: BuildMode) -> String {
 
 /// Base directory for dev build artifacts ($HOME/.mvm/dev/builds).
 fn dev_builds_dir() -> String {
-    format!("{}/dev/builds", mvm_core::config::mvm_data_dir())
+    format!("{}/dev/builds", mvm_core::config::mvm_home())
 }
 
 /// Path the CLI writes when a build notices the host-backed Nix
@@ -95,10 +95,7 @@ fn dev_builds_dir() -> String {
 /// absolute path in both).
 #[cfg(test)]
 fn gc_sentinel_path() -> String {
-    format!(
-        "{}/dev/nix-store-needs-gc",
-        mvm_core::config::mvm_data_dir()
-    )
+    format!("{}/dev/nix-store-needs-gc", mvm_core::config::mvm_home())
 }
 
 /// Consume the GC sentinel: if it exists, run `nix-collect-garbage
@@ -207,7 +204,7 @@ pub fn cleanup_old_dev_builds(keep: usize) -> Result<DevBuildCleanupReport> {
 
 /// Inner helper that operates on an explicit `builds_dir`. Lifted
 /// out so unit tests can drive the logic against a tempdir without
-/// touching `HOME` / `MVM_DATA_DIR`. The public
+/// touching `HOME` / `MVM_HOME`. The public
 /// [`cleanup_old_dev_builds`] is the production entry point.
 ///
 /// Newest-first sort uses mtime. Ties go to lexicographic order so a
@@ -1284,9 +1281,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn finalize_typed_build_derives_hash_and_copies_exported_artifacts() {
-        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
         let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+        process_env.set("MVM_HOME", temp.path().join(".mvm"));
 
         // Stand in for the daemon's export onto the `/job` share:
         // `<job_dir>/<id>/out/{vmlinux,rootfs.ext4}`.
@@ -1313,9 +1310,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn finalize_typed_build_rejects_a_malformed_store_path() {
-        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
         let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+        process_env.set("MVM_HOME", temp.path().join(".mvm"));
         let host_out = temp.path().join("job").join("build-2").join("out");
         std::fs::create_dir_all(&host_out).unwrap();
         let env = TestEnv::new();
@@ -1524,9 +1521,9 @@ mod tests {
 
     #[test]
     fn test_dev_build_cached() {
-        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
         let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+        process_env.set("MVM_HOME", temp.path().join(".mvm"));
         let env = TestEnv::new();
         env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
 
@@ -1553,9 +1550,9 @@ mod tests {
 
     #[test]
     fn test_dev_build_fresh() {
-        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
         let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+        process_env.set("MVM_HOME", temp.path().join(".mvm"));
         let env = TestEnv::new();
         env.stub_stdout("nix --version", "nix (Nix) 2.24.10");
 
@@ -1619,9 +1616,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_vm_dev_build_uses_vm_job_shape_without_host_nix() {
-        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
         let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+        process_env.set("MVM_HOME", temp.path().join(".mvm"));
         let env = TestEnv::new();
         env.stub_stdout("initrd", "0");
         env.stub_stdout("microvm-run", "no");
@@ -1687,9 +1684,9 @@ mod tests {
     #[cfg(feature = "builder-vm")]
     #[test]
     fn builder_vm_dev_build_fails_closed_when_builder_errors() {
-        let temp = tempfile::tempdir().expect("create temp MVM_DATA_DIR");
+        let temp = tempfile::tempdir().expect("create temp MVM_HOME");
         let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_DATA_DIR", temp.path().join(".mvm"));
+        process_env.set("MVM_HOME", temp.path().join(".mvm"));
         let env = TestEnv::new();
         let result = dev_build_with_builder_vm(
             &env,
@@ -1938,7 +1935,7 @@ mod tests {
     fn test_dev_build_includes_artifact_sizes() {
         let tmp = tempfile::tempdir().unwrap();
         let mut process_env = mvm_core::util::test_env::TestEnv::new();
-        process_env.set("MVM_DATA_DIR", tmp.path());
+        process_env.set("MVM_HOME", tmp.path());
 
         let env = TestEnv::new();
         env.stub_stdout("nix --version", "nix (Nix) 2.24.10");

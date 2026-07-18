@@ -471,7 +471,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = tempfile::tempdir().unwrap();
             let mut env = TestEnv::new();
-            env.set("MVM_DATA_DIR", dir.path());
+            env.set("MVM_HOME", dir.path());
             Self {
                 _lock: lock,
                 _env: env,
@@ -642,7 +642,7 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// Persist a minimal image-backed spec named `name` into the current
-    /// `MVM_DATA_DIR`-derived machine state dir.
+    /// `MVM_HOME`-derived machine state dir.
     fn persist_test_spec(name: &str) {
         use mvm_runtime::machine::persist::{
             MACHINE_SPEC_SCHEMA_VERSION, MachineSpec as PersistSpec, save_machine_spec,

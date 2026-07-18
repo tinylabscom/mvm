@@ -67,7 +67,7 @@ pub fn validate_vm_name(name: &str) -> Result<()> {
 }
 
 /// Derive the five audit-substrate paths for `vm_name` from
-/// `mvm_core::config::mvm_data_dir()` when `tenant_id` is `Some`.
+/// `mvm_core::config::mvm_home()` when `tenant_id` is `Some`.
 /// Returns `AuditSubstrate::default()` (all fields `None`) when
 /// `tenant_id` is `None` so the calling backend's supervisor takes the
 /// legacy `run_supervisor` path. Validates both `vm_name` and
@@ -85,7 +85,7 @@ pub fn compute_audit_substrate(vm_name: &str, tenant_id: Option<&str>) -> Result
         return Ok(AuditSubstrate::default());
     };
     validate_tenant_id(tenant)?;
-    let data_dir = PathBuf::from(mvm_core::config::mvm_data_dir());
+    let data_dir = PathBuf::from(mvm_core::config::mvm_home());
     let audit_dir = data_dir.join("audit");
     let gw_audit = audit_dir.join(format!("gateway-{vm_name}.sock"));
     let gw_events = audit_dir.join(format!("gateway-events-{vm_name}.sock"));

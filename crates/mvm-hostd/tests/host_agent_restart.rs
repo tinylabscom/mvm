@@ -44,7 +44,7 @@ impl HostAgentFixture {
     async fn start_inner(idle_timeout_secs: Option<u64>) -> Self {
         let mut env = TestEnv::new();
         let data_dir = tempfile::tempdir().expect("temp data dir");
-        env.set("MVM_DATA_DIR", data_dir.path());
+        env.set("MVM_HOME", data_dir.path());
         env.set("MVM_HOST_AGENT_PATH", HOST_AGENT_BIN);
         env.set("MVM_SIGNER_HELPER_PATH", SIGNER_HELPER_BIN);
         if let Some(secs) = idle_timeout_secs {

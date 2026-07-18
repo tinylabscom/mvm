@@ -346,7 +346,7 @@ fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
                 .join("runtime")
                 .join("v.sock"))
         }
-        "libkrun" | "krun" => Ok(Path::new(&mvm_core::config::mvm_data_dir())
+        "libkrun" | "krun" => Ok(Path::new(&mvm_core::config::mvm_home())
             .join("vms")
             .join(name)
             .join(format!(

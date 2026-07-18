@@ -116,7 +116,7 @@ fn artifact_model_build_stub_exits_zero() {
 /// `mvmctl artifact model-validate <id>` exits nonzero when check 1 fails
 /// (kernel + rootfs paths in the manifest point at files that don't exist).
 ///
-/// Wires `MVM_DATA_DIR` to a temp dir so `resolve_artifact_dir` lands there
+/// Wires `MVM_HOME` to a temp dir so `resolve_artifact_dir` lands there
 /// rather than `~/.mvm/artifacts/` — no real artifact state is required.
 #[test]
 fn artifact_model_validate_exits_nonzero_on_failed_check() {
@@ -167,7 +167,7 @@ fn artifact_model_validate_exits_nonzero_on_failed_check() {
     let out = Command::cargo_bin("mvmctl")
         .expect("locate mvmctl")
         .args(["artifact", "model-validate", artifact_id])
-        .env("MVM_DATA_DIR", tmp.path().to_str().unwrap())
+        .env("MVM_HOME", tmp.path().to_str().unwrap())
         .output()
         .expect("spawn mvmctl");
 
@@ -195,7 +195,7 @@ fn artifact_model_validate_exits_nonzero_on_failed_check() {
     );
 
     // Confirm the artifact dir path was not used in HOME — this is belt-and-
-    // suspenders: if MVM_DATA_DIR is ignored the test would still fail above
+    // suspenders: if MVM_HOME is ignored the test would still fail above
     // (no artifact found), but the error would be "no artifacts directory" not
     // "validation failed". Both are nonzero, so the assert above covers both.
     let _ = PathBuf::from(tmp.path()); // keep tmp alive until here

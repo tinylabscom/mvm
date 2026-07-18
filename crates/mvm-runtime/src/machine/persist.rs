@@ -328,7 +328,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
             let mut env = TestEnv::new();
             let tmp = tempfile::tempdir().expect("tempdir");
-            env.set("MVM_DATA_DIR", tmp.path());
+            env.set("MVM_HOME", tmp.path());
             Self {
                 _lock: lock,
                 _env: env,

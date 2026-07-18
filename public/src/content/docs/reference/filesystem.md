@@ -48,7 +48,7 @@ overlay** that is mounted inside the guest at `/mvm/runtime`.
   `overlay.roothash`, and `VERSION` files against the recorded
   `checksums-sha256.txt` manifest and refuses the boot on any mismatch.
 - The artifact is shared across microVMs from the local cache under
-  `~/.cache/mvm/runtime-overlay/<version>/<arch>/`.
+  `~/.mvm/cache/runtime-overlay/<version>/<arch>/`.
 
 ### Runtime updates
 
@@ -133,7 +133,7 @@ For managed encrypted local volumes and workspace cleanup policy, see
 On the host (on Linux) or inside the builder VM (on macOS), mvm stores data at:
 
 ```
-~/.mvm/                  # MVM_DATA_DIR
+~/.mvm/                  # MVM_HOME
 ├── templates/
 │   └── <name>/
 │       └── revisions/
@@ -159,7 +159,7 @@ On the host (on Linux) or inside the builder VM (on macOS), mvm stores data at:
 ```
 
 The shared guest-runtime overlay cache lives separately under
-`~/.cache/mvm/runtime-overlay/<version>/<arch>/` and contains the sealed
+`~/.mvm/cache/runtime-overlay/<version>/<arch>/` and contains the sealed
 `overlay.ext4`, `overlay.verity`, `overlay.roothash`, `VERSION`, and
 `checksums-sha256.txt` metadata reused by every VM that boots that runtime
 version.

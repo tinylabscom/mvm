@@ -16,8 +16,7 @@ repo_root=$(
 )
 dev_state_root="${repo_root}/.mvm-test"
 
-export MVM_DATA_DIR="${MVM_DATA_DIR:-${dev_state_root}}"
-export MVM_CACHE_DIR="${MVM_CACHE_DIR:-${dev_state_root}/cache}"
+export MVM_HOME="${MVM_HOME:-${dev_state_root}}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${dev_state_root}/target}"
 export CARGO_HOME="${CARGO_HOME:-${dev_state_root}/cargo}"
 export MVM_NO_LEGACY_BANNER="${MVM_NO_LEGACY_BANNER:-1}"

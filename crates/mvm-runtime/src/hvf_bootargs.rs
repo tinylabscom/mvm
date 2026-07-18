@@ -97,7 +97,7 @@ mod tests {
     fn grant_tokens_appends_all_three_for_parity_with_libkrun() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         let vm_name = "hvf-grant-parity";
         seed_grant_sidecar_and_key(vm_name);
@@ -120,7 +120,7 @@ mod tests {
     fn grant_tokens_empty_without_sidecar() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = mvm_core::util::test_env::TestEnv::new();
-        env.set("MVM_DATA_DIR", dir.path());
+        env.set("MVM_HOME", dir.path());
 
         assert!(
             grant_tokens("hvf-no-grant").is_empty(),

@@ -92,13 +92,13 @@ impl MockBackend {
     }
 
     /// Host-side per-VM directory for a mock VM. Lives under
-    /// `<mvm_data_dir>/mock-vms/<name>/` so it never collides with
-    /// the Lima-era `~/microvm/vms/<name>` path that
+    /// `<mvm_home>/mock-vms/<name>/` so it never collides with
+    /// the real per-VM `<mvm_home>/vms/<name>` workspace that
     /// `resolve_running_vm_dir` expects for real Firecracker VMs.
     /// `pause.rs` and `resume.rs` read the snapshot directory through
     /// here when `--hypervisor mock` is set.
     pub fn vm_dir(name: &str) -> std::path::PathBuf {
-        std::path::PathBuf::from(mvm_core::config::mvm_data_dir())
+        std::path::PathBuf::from(mvm_core::config::mvm_home())
             .join("mock-vms")
             .join(name)
     }

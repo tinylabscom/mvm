@@ -31,7 +31,7 @@ pub(in crate::commands) struct Args {
     /// Boot a pre-built manifest (path to `mvm.toml`, its directory, or a
     /// legacy slot name). If omitted, the bundled
     /// `nix/images/default-tenant/` image is used (built via Nix on first use,
-    /// cached at `~/.cache/mvm/default-microvm/`). Each invocation boots a
+    /// cached at `~/.mvm/cache/default-microvm/`). Each invocation boots a
     /// fresh transient microVM — never the long-running builder VM.
     #[arg(short = 'm', long)]
     pub manifest: Option<String>,

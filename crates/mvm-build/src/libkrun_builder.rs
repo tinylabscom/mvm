@@ -17,7 +17,7 @@
 //! 3. Locate or build `mvm-libkrun-supervisor` (env override / next-to-exe /
 //!    source checkout build / PATH).
 //! 4. Read the builder VM image from
-//!    `~/.cache/mvm/builder-vm/<arch>/` — vmlinux + rootfs.ext4 +
+//!    `~/.mvm/cache/builder-vm/<arch>/` — vmlinux + rootfs.ext4 +
 //!    cmdline.txt + manifest.json, the shape the builder-vm flake
 //!    emits. Populated by `bootstrap_builder_vm_image`
 //!    (`mvm-cli::commands::env::dev_vz`).
@@ -677,7 +677,7 @@ pub struct LibkrunBuilderVm {
     pub nix_store_mib: u32,
     /// Optional caller-supplied bootstrap image. When set, `run_build`
     /// boots from this kernel/rootfs/cmdline instead of looking up the
-    /// builder VM image in `~/.cache/mvm/builder-vm/<arch>/`.
+    /// builder VM image in `~/.mvm/cache/builder-vm/<arch>/`.
     ///
     /// This is the Stage 0 escape from the chicken-and-egg on source
     /// checkouts: a local dev image that contains `/sbin/mvm-host-vm-init`
@@ -758,7 +758,7 @@ impl LibkrunBuilderVm {
     }
 
     /// Boot from a caller-supplied kernel/rootfs/cmdline instead of
-    /// resolving the builder VM image from `~/.cache/mvm/builder-vm/`.
+    /// resolving the builder VM image from `~/.mvm/cache/builder-vm/`.
     pub fn with_image_override(mut self, image: BuilderVmImage) -> Self {
         self.image_override = Some(image);
         self
@@ -1725,7 +1725,7 @@ impl BuilderVm for LibkrunBuilderVm {
 
     fn cleanup(&self) -> Result<(), BuilderVmError> {
         // Hygiene: prune old job dirs under
-        // `~/.cache/mvm/builder-vm/jobs/` past N days. No-op until a
+        // `~/.mvm/cache/builder-vm/jobs/` past N days. No-op until a
         // retention policy is picked.
         Ok(())
     }
@@ -2183,7 +2183,7 @@ pub(crate) fn host_arch_tag() -> &'static str {
     }
 }
 
-/// `~/.cache/mvm/builder-vm/`. Wrapper around
+/// `~/.mvm/cache/builder-vm/`. Wrapper around
 /// `mvm_core::config::mvm_cache_dir()` to keep the per-arch
 /// subdirs in one place. Created lazily by callers — this
 /// function does not touch the filesystem.
@@ -5338,12 +5338,11 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
-            .join("mvm")
+            .join("cache")
             .join("builder-vm")
             .join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -5362,12 +5361,11 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
-            .join("mvm")
+            .join("cache")
             .join("builder-vm")
             .join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -5396,12 +5394,11 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
-            .join("mvm")
+            .join("cache")
             .join("builder-vm")
             .join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -5431,12 +5428,11 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch_dir = scratch
             .path()
-            .join("mvm")
+            .join("cache")
             .join("builder-vm")
             .join(host_arch_tag());
         std::fs::create_dir_all(&arch_dir).unwrap();
@@ -5480,16 +5476,15 @@ mod tests {
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
-        env.remove("MVM_CACHE_DIR");
-        env.set("XDG_CACHE_HOME", scratch.path());
+        env.set("MVM_HOME", scratch.path());
 
         let arch = host_arch_tag().to_string();
-        let cache_root = scratch.path().join("mvm");
+        let cache_root = scratch.path().join("cache");
         let script = scratch.path().join("bootstrap-builder-vm.sh");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$XDG_CACHE_HOME/mvm/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel' > \"$arch_dir/vmlinux\"\nprintf 'rootfs' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -5526,13 +5521,13 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("HOME", scratch.path());
-        env.set("MVM_CACHE_DIR", scratch.path().join("isolated-cache"));
+        env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let arch = host_arch_tag().to_string();
         let source_arch_dir = scratch
             .path()
-            .join(".cache")
-            .join("mvm")
+            .join(".mvm")
+            .join("cache")
             .join("builder-vm")
             .join(&arch);
         std::fs::create_dir_all(&source_arch_dir).unwrap();
@@ -5554,6 +5549,7 @@ mod tests {
         let target_arch_dir = scratch
             .path()
             .join("isolated-cache")
+            .join("cache")
             .join("builder-vm")
             .join(&arch);
 
@@ -5585,13 +5581,13 @@ mod tests {
         let mut env = TestEnv::new();
         let scratch = TempDir::new().unwrap();
         env.set("HOME", scratch.path());
-        env.set("MVM_CACHE_DIR", scratch.path().join("isolated-cache"));
+        env.set("MVM_HOME", scratch.path().join("isolated-cache"));
 
         let arch = host_arch_tag().to_string();
         let source_arch_dir = scratch
             .path()
-            .join(".cache")
-            .join("mvm")
+            .join(".mvm")
+            .join("cache")
             .join("builder-vm")
             .join(&arch);
         std::fs::create_dir_all(&source_arch_dir).unwrap();
@@ -5612,7 +5608,7 @@ mod tests {
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_CACHE_DIR/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
+                "#!/bin/sh\nset -eu\narch_dir=\"$MVM_HOME/cache/builder-vm/{arch}\"\nmkdir -p \"$arch_dir\"\nprintf 'kernel-new' > \"$arch_dir/vmlinux\"\nprintf 'rootfs-new' > \"$arch_dir/rootfs.ext4\"\nprintf '%s\\n' 'console=hvc0 root=/dev/vda ro rootfstype=ext4 rootwait panic=-1 loglevel=8 init=/init mvm.chain_init=/sbin/mvm-host-vm-init' > \"$arch_dir/cmdline.txt\"\nmanifest_tmp=\"$arch_dir/manifest.$$.json.tmp\"\ncat > \"$manifest_tmp\" <<'EOF'\n{{\"cache_contract_version\":3,\"runtime_overlay_ready\":true,\"vsock_egress_ready\":true}}\nEOF\nmv \"$manifest_tmp\" \"$arch_dir/manifest.json\"\n"
             ),
         )
         .unwrap();
@@ -5624,6 +5620,7 @@ mod tests {
         let target_arch_dir = scratch
             .path()
             .join("isolated-cache")
+            .join("cache")
             .join("builder-vm")
             .join(&arch);
 
@@ -7045,13 +7042,13 @@ mod tests {
         );
         let _env_lock = ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut env = TestEnv::new();
-        let bootstrap_cache = if std::env::var_os("MVM_CACHE_DIR").is_some() {
+        let bootstrap_cache = if std::env::var_os("MVM_HOME").is_some() {
             None
         } else {
             Some(tempfile::tempdir().expect("bootstrap cache tempdir"))
         };
         if let Some(cache) = &bootstrap_cache {
-            env.set("MVM_CACHE_DIR", cache.path());
+            env.set("MVM_HOME", cache.path());
         }
 
         let workspace_root =

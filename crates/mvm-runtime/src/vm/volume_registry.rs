@@ -76,7 +76,7 @@ pub enum LocalVolumeState {
 
 impl LocalVolumeCatalog {
     pub fn path() -> PathBuf {
-        PathBuf::from(mvm_core::config::mvm_data_dir())
+        PathBuf::from(mvm_core::config::mvm_home())
             .join("volumes")
             .join("registry.json")
     }
@@ -187,7 +187,7 @@ pub struct VolumeMountRegistry {
 impl VolumeMountRegistry {
     /// Disk path of the catalog for `vm_name`.
     pub fn path_for(vm_name: &str) -> PathBuf {
-        PathBuf::from(mvm_core::config::mvm_data_dir())
+        PathBuf::from(mvm_core::config::mvm_home())
             .join("instances")
             .join(vm_name)
             .join("volume_mounts.json")
@@ -284,7 +284,7 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner());
             let tmp = tempfile::tempdir().expect("tempdir");
             let mut env = TestEnv::new();
-            env.set("MVM_DATA_DIR", tmp.path());
+            env.set("MVM_HOME", tmp.path());
             DataDirGuard {
                 _guard: g,
                 _env: env,

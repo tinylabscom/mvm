@@ -326,9 +326,7 @@ fn check_tool_staging_dir(home: Option<&std::path::Path>) -> PostureCheck {
     let path = match std::env::var_os(mvm_hostd::supervisor::tools::staging::STAGING_DIR_ENV_VAR) {
         Some(p) => std::path::PathBuf::from(p),
         None => match home {
-            Some(_) => {
-                std::path::PathBuf::from(mvm_core::config::mvm_data_dir()).join("tool-staging")
-            }
+            Some(_) => std::path::PathBuf::from(mvm_core::config::mvm_home()).join("tool-staging"),
             None => {
                 return PostureCheck {
                     name: "tool_staging_dir",
@@ -481,8 +479,8 @@ mod tests {
         dir
     }
 
-    // Production paths now resolve via mvm_core::config::mvm_data_dir()
-    // (MVM_DATA_DIR first, then $HOME). Point MVM_DATA_DIR at the test's
+    // Production paths now resolve via mvm_core::config::mvm_home()
+    // (MVM_HOME first, then $HOME). Point MVM_HOME at the test's
     // `<temp>/.mvm` so the helper-built paths land in the temp tree the
     // test populates. Restored on drop by the shared process-env guard.
 
@@ -493,7 +491,7 @@ mod tests {
     impl DataDirGuard {
         fn new(home: &std::path::Path) -> Self {
             let mut env = mvm_core::util::test_env::TestEnv::new();
-            env.set("MVM_DATA_DIR", home.join(".mvm"));
+            env.set("MVM_HOME", home.join(".mvm"));
             Self { _env: env }
         }
     }

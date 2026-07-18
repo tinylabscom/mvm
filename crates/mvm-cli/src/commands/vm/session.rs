@@ -2,7 +2,7 @@
 //! verbs.
 //!
 //! Session metadata is persisted at
-//! `$XDG_RUNTIME_DIR/mvm/sessions/<id>.json` (see
+//! `<mvm_home>/run/sessions/<id>.json` (see
 //! `mvm_core::session` for the on-disk type and store helpers). These
 //! verbs operate on whatever is currently in the table.
 //!
@@ -1240,10 +1240,10 @@ mod tests {
     fn isolated_runtime_dir() -> RuntimeDirGuard {
         let temp = tempfile::tempdir().expect("tempdir");
         // `TestEnv` serializes env-mutating tests behind a process-wide lock
-        // and restores `MVM_RUNTIME_DIR` (and anything else set via the guard)
+        // and restores `MVM_HOME` (and anything else set via the guard)
         // on drop.
         let mut env = TestEnv::new();
-        env.set("MVM_RUNTIME_DIR", temp.path());
+        env.set("MVM_HOME", temp.path());
         RuntimeDirGuard { _temp: temp, env }
     }
 

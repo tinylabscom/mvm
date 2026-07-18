@@ -813,7 +813,7 @@ pub fn template_build_from_manifest(
 
     if force {
         ui::info("Force build: clearing dev build cache");
-        let builds_dir = format!("{}/dev/builds", mvm_core::config::mvm_data_dir());
+        let builds_dir = format!("{}/dev/builds", mvm_core::config::mvm_home());
         if let Err(e) = env.shell_exec(&format!("rm -rf {builds_dir}")) {
             warn!("failed to clear dev build cache: {e}");
         }
@@ -1626,7 +1626,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let err = template_create(&test_template_spec("../../etc/x"))
             .expect_err("traversal template id must reject");
@@ -1648,7 +1648,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let spec = test_template_spec("valid-template");
         template_create(&spec).expect("create valid template");
@@ -1663,7 +1663,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner());
         let tmp = tempfile::tempdir().expect("tempdir");
         let mut env = TestEnv::new();
-        env.set("MVM_DATA_DIR", tmp.path());
+        env.set("MVM_HOME", tmp.path());
 
         let slot_hash = "0123456789abcdef".repeat(4);
         assert!(is_slot_hash_dirname(&slot_hash));
@@ -2048,7 +2048,7 @@ mod tests {
     // mvm_core::manifest primitives that already have full coverage
     // against tempdir-backed scenarios, so we intentionally don't
     // re-test the env-driven path resolution here: doing so would force
-    // MVM_DATA_DIR mutation and serialise tests.
+    // MVM_HOME mutation and serialise tests.
     // -----------------------------------------------------------------
 
     fn hex_dirname() -> String {

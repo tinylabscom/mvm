@@ -417,7 +417,7 @@ jobs:
   # installs the extracted canonical names (`overlay.ext4`,
   # `overlay.verity`, `overlay.roothash`, `VERSION`,
   # `checksums-sha256.txt`) into
-  # `~/.cache/mvm/runtime-overlay/<mvmctl-version>/<arch>/`.
+  # `~/.mvm/cache/runtime-overlay/<mvmctl-version>/<arch>/`.
   runtime-overlay-image:
     # Skipped on a dry-run dispatch (see builder-vm-image).
     if: ${{ github.event_name == 'push' || github.event.inputs.dry_run == 'false' }}

@@ -123,7 +123,7 @@ struct Harness {
 
 /// Start a host-agent daemon for one tenant and register one VM.
 ///
-/// The env vars (MVM_DATA_DIR etc.) must already be set by the caller before
+/// The env vars (MVM_HOME etc.) must already be set by the caller before
 /// this runs.
 async fn start_tenant(id: &str) -> TenantHandle {
     let keys_dir = config::mvm_keys_dir();
@@ -167,7 +167,7 @@ async fn start_tenant(id: &str) -> TenantHandle {
 async fn build_harness() -> Harness {
     let mut env = TestEnv::new();
     let data_dir = tempfile::tempdir().expect("data dir");
-    env.set("MVM_DATA_DIR", data_dir.path());
+    env.set("MVM_HOME", data_dir.path());
     env.set("MVM_HOST_AGENT_PATH", HOST_AGENT_BIN);
     env.set("MVM_SIGNER_HELPER_PATH", SIGNER_HELPER_BIN);
 
