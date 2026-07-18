@@ -104,6 +104,18 @@ fn load_name_registry() -> VmNameRegistry {
     VmNameRegistry::load(&path).unwrap_or_default()
 }
 
+/// Best-effort removal of a machine name from the persistent VM name registry
+/// after a successful stop, so it stops showing as registered. A load or save
+/// failure is ignored — a direct-boot VM carries no registry entry, and the
+/// stop this follows already succeeded regardless.
+fn deregister_from_name_registry(name: &str) {
+    let path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = VmNameRegistry::load(&path) {
+        registry.deregister(name);
+        let _ = registry.save(&path);
+    }
+}
+
 /// Build a [`MachineState`] from a backend `VmInfo` joined with its optional
 /// registry entry (tags / TTL / readiness) and its resolved owning backend.
 fn to_state(info: VmInfo, reg: Option<&VmRegistration>) -> MachineState {
@@ -423,7 +435,24 @@ impl MvmClient for LocalBackend {
     }
 
     async fn stop_machine(&self, id: &MachineId) -> Result<()> {
-        self.backend.stop(&VmId(id.0.clone())).map_err(backend_err)
+        let vid = VmId(id.0.clone());
+        // Stop via the VMM that actually started this VM (resolved from its
+        // per-VM state-dir pid marker) so a QEMU/libkrun VM is torn down by its
+        // own hypervisor, not this client's default. A marker-less VM (mock or
+        // direct-boot) has no owning marker, so fall back to this client's
+        // configured backend — which keeps a `with_hypervisor("mock")` client
+        // hermetic rather than reaching a platform default.
+        let result = match AnyBackend::for_started_vm(&id.0) {
+            Some(owner) => owner.stop(&vid),
+            None => self.backend.stop(&vid),
+        };
+        // Deregister from the name registry only on a successful stop; on
+        // failure the entry (and any readiness the caller recorded) stays so
+        // the user can see what happened.
+        if result.is_ok() {
+            deregister_from_name_registry(&id.0);
+        }
+        result.map_err(backend_err)
     }
 
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
@@ -806,6 +835,53 @@ mod tests {
         be.remove_machine(&MachineId("never-existed-xyz".into()))
             .await
             .expect("removing an absent machine is Ok");
+    }
+
+    #[tokio::test]
+    async fn stop_machine_falls_back_to_configured_backend_and_is_idempotent() {
+        // A mock-driven VM writes no pid marker, so `for_started_vm` finds no
+        // owning VMM and the stop must fall back to this client's configured
+        // backend (mock). That fallback is what keeps `with_hypervisor("mock")`
+        // hermetic — no platform default, no real VMM reached.
+        let data = IsolatedDataDir::new();
+        let rootfs = data.path().join("rootfs.ext4");
+        std::fs::write(&rootfs, b"hashable-rootfs-bytes\n").unwrap();
+
+        let be = LocalBackend::with_hypervisor("mock");
+        let spec = MachineSpec {
+            name: "local-stop-target".into(),
+            image: rootfs.to_string_lossy().into_owned(),
+            cpus: 1,
+            memory_mib: 128,
+            env: vec![],
+        };
+        let state = be.run_machine(spec).await.expect("boot");
+        assert!(
+            be.list_machines(MachineFilter::all())
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == state.id),
+            "the booted machine should list before the stop"
+        );
+
+        // Stop drops it from the backend's live view.
+        be.stop_machine(&state.id).await.expect("stop");
+        assert!(
+            !be.list_machines(MachineFilter::all())
+                .await
+                .unwrap()
+                .iter()
+                .any(|m| m.id == state.id),
+            "stopped machine must not list as running"
+        );
+
+        // Idempotent: stopping the now-stopped machine, and a never-existed id,
+        // both succeed rather than erroring.
+        be.stop_machine(&state.id).await.expect("re-stop is Ok");
+        be.stop_machine(&MachineId("never-existed-xyz".into()))
+            .await
+            .expect("stopping an absent machine is Ok");
     }
 
     #[test]
