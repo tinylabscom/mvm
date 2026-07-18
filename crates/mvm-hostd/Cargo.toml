@@ -172,6 +172,11 @@ custom-dns = ["dep:hickory-resolver"]
 # normal workspace build; a consumer that only spawns the worker (mvm-cli) sets
 # default-features = false to keep the stack out of its closure.
 packet-forwarder = ["dep:smoltcp"]
+# Enable the wasm-container backend in the depended-on runtime crate, so the
+# data-governance witness (tests/wasm_egress_witness.rs) can drive a real
+# WasmBackend through this crate's real SubstitutionService/audit chain. Test-only
+# in practice; forwards to mvm-runtime's own optional wasm-backend feature.
+wasm-backend = ["mvm-runtime/wasm-backend"]
 # Build the libkrun supervisor bin against libkrun's FFI.
 libkrun-sys = ["libkrun-sys/libkrun-sys"]
 # Live-boot integration tests (dev host with libkrun). Never in CI's no-VM lanes.
