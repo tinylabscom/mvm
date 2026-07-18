@@ -30,9 +30,15 @@ use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    PortMapping,
+    PauseOpts, PauseOutcome, PortMapping, ResumeOpts,
 };
 use mvm_core::client::{MvmClient, MvmError, Result};
+use mvm_core::config::vm_state_dir;
+use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
+use mvm_runtime::vm::instance_snapshot::{
+    CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, VsockPrimedSignalSource,
+    await_primed_barrier, pause_and_seal, signal_post_restore, verify_and_resume,
+};
 use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
 
 /// Drives the host's VM backend directly. Construct with [`LocalBackend::new`]
@@ -74,6 +80,164 @@ impl LocalBackend {
             }
         }
         infos.into_iter().map(|i| to_state(i, None)).collect()
+    }
+
+    /// Whether this client drives the hermetic in-memory mock backend. The mock
+    /// has no live Firecracker socket and no guest agent, so the snapshot path
+    /// swaps in canned bytes and skips the guest-facing signals.
+    fn is_mock(&self) -> bool {
+        self.backend.kind() == BackendKind::Mock
+    }
+
+    /// Pick the `SnapshotIO` matching this client's backend. The mock writes
+    /// deterministic `CannedIO` stub bytes so the seal/verify round-trip runs
+    /// without a real Firecracker socket; every other backend drives
+    /// `FirecrackerIO` against the running VM's UDS control socket.
+    fn snapshot_io_for(&self, vm_name: &str) -> Result<Box<dyn SnapshotIO>> {
+        if self.is_mock() {
+            let dir = mvm_runtime::MockBackend::vm_dir(vm_name);
+            if !dir.exists() {
+                return Err(backend_err(format!(
+                    "mock VM {vm_name:?} is not running (no directory at {})",
+                    dir.display()
+                )));
+            }
+            return Ok(Box::new(CannedIO {
+                vmstate_bytes: b"mock-vmstate".to_vec(),
+                mem_bytes: b"mock-mem".to_vec(),
+            }));
+        }
+        let vm_dir = mvm_runtime::microvm::resolve_running_vm_dir(vm_name)
+            .map_err(|e| backend_err(format!("VM {vm_name:?} is not running: {e:#}")))?;
+        Ok(Box::new(FirecrackerIO::new(firecracker_socket(&vm_dir))))
+    }
+
+    /// Warm-resume through the backend's live-memory `warm_start` path: mint a
+    /// fresh VMGenID, load + resume live memory, reseed. Fails closed with the
+    /// typed `WarmStartError::Unsupported` recovery hint on a disk-only backend
+    /// rather than silently cold-booting.
+    fn warm_resume(&self, name: &str) -> Result<()> {
+        let config = VmStartConfig {
+            name: name.to_string(),
+            ..Default::default()
+        };
+        match self
+            .backend
+            .warm_start(&config, SnapshotCapability::LiveMemory)
+        {
+            Ok(_outcome) => {
+                // FC keeps its pid across pause/resume, so the marker must be
+                // cleared explicitly on a successful warm resume.
+                let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
+                set_registry_resumed(name);
+                Ok(())
+            }
+            // Name the tier mismatch + recovery hint verbatim (its `Display` is
+            // the actionable message); other failures keep a locating context.
+            Err(e @ WarmStartError::Unsupported { .. }) => Err(backend_err(format!("{e}"))),
+            Err(e) => Err(backend_err(format!("warm-starting VM {name:?}: {e}"))),
+        }
+    }
+
+    /// Plain resume: verify the sealed snapshot envelope — **refusing a replayed
+    /// older-epoch snapshot** — load it back and resume vCPUs, then finish
+    /// bringing the guest back with a fresh-VMGenID PostRestore (skipped for the
+    /// mock, which has no guest agent).
+    fn plain_resume(&self, name: &str) -> Result<()> {
+        let io = self.snapshot_io_for(name)?;
+        // The replay-refusal gate: `verify_and_resume` rejects a snapshot whose
+        // epoch is below the persisted high-water mark before restoring anything.
+        // Called unchanged — this is the security property of resume.
+        verify_and_resume(name, &*io)
+            .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
+
+        // FC keeps the same pid across pause/resume, so a stale fc.paused would
+        // keep matching the live pid — clear it now vCPUs are running again.
+        let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
+
+        // Mark resumed before signaling the guest so a post-restore failure below
+        // leaves the registry consistent (the VM *is* up) and the operator can
+        // simply re-run resume.
+        set_registry_resumed(name);
+
+        if !self.is_mock() {
+            signal_guest_post_restore(name)?;
+        }
+        Ok(())
+    }
+}
+
+/// Deliver the host-side PostRestore signal to a resumed guest. Mints a fresh
+/// generation token so the guest rotates its VMGenID and reseeds its CSPRNG (two
+/// clones of one snapshot must not draw identical randomness), audits the vsock
+/// RPC, then sends it — failing closed if the guest does not acknowledge (its
+/// config/secret drives may still be unmounted).
+fn signal_guest_post_restore(name: &str) -> Result<()> {
+    let token = mvm_core::crypto::vmgenid::fresh_generation_token(name).token;
+    // The verb-emits-at-least-one-audit invariant extends to the vsock messages a
+    // verb dispatches; this records the PostRestore RPC alongside where it fires.
+    mvm_core::audit_emit!(
+        NetworkPolicyAllow,
+        vm: name,
+        "scope=rpc,direction=in,kind=vsock,verb={verb}",
+        verb = "post-restore",
+    );
+    signal_post_restore(name, &VsockPostRestoreSignal { token })
+        .map_err(|e| backend_err(format!("post-restore signal for {name:?}: {e:#}")))?;
+    Ok(())
+}
+
+/// The primed-barrier timeout to enforce before sealing, or `None` when the
+/// barrier is not requested (or the backend is the hermetic mock, which has no
+/// live guest agent to answer). Pure so the opt-in gating is unit-tested.
+fn primed_barrier_timeout(opts: &PauseOpts, is_mock: bool) -> Option<std::time::Duration> {
+    if opts.primed_barrier && !is_mock {
+        Some(std::time::Duration::from_secs(opts.primed_timeout_secs))
+    } else {
+        None
+    }
+}
+
+/// The Firecracker control socket path inside a running VM's state dir — the
+/// `fc.socket` the start path actually creates.
+fn firecracker_socket(vm_dir: &str) -> PathBuf {
+    PathBuf::from(format!("{vm_dir}/fc.socket"))
+}
+
+/// Stamp the live Firecracker pid into an `fc.paused` marker so the quiesce gate
+/// can distinguish paused from running (FC keeps its pid across a pause, so
+/// pid-liveness alone cannot tell them apart). Guarded on `fc.pid` existing, so
+/// only Firecracker VMs get the marker; a write failure is logged, not fatal —
+/// the pause itself already succeeded.
+fn write_fc_paused_marker(name: &str) {
+    if let Some(fc_pid_path) = mvm_runtime::microvm::fc_pid_path(name)
+        && let Ok(pid) = std::fs::read_to_string(&fc_pid_path)
+        && let Err(e) = std::fs::write(vm_state_dir(name).join("fc.paused"), pid.trim())
+    {
+        tracing::warn!(error = %e, vm = %name, "could not write fc.paused marker (pause succeeded)");
+    }
+}
+
+/// Flip the persistent name-registry `paused` flag for `name`. Best-effort: a
+/// missing or unreadable registry is ignored (a direct-boot VM carries no entry,
+/// and the pause/resume this follows already succeeded regardless).
+fn set_registry_paused(name: &str, paused: bool) {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = VmNameRegistry::load(&registry_path) {
+        let _ = registry.set_paused(name, paused);
+        let _ = registry.save(&registry_path);
+    }
+}
+
+/// Mark `name` resumed in the name registry and refresh its idle tracking so the
+/// freshly-woken VM isn't immediately re-slept by the idle reaper. Best-effort,
+/// same rationale as [`set_registry_paused`].
+fn set_registry_resumed(name: &str) {
+    let registry_path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut registry) = VmNameRegistry::load(&registry_path) {
+        let _ = registry.set_paused(name, false);
+        let _ = registry.touch_last_active(name, mvm_core::time::utc_now());
+        let _ = registry.save(&registry_path);
     }
 }
 
@@ -475,6 +639,46 @@ impl MvmClient for LocalBackend {
             deregister_from_name_registry(&id.0);
         }
         result.map_err(backend_err)
+    }
+
+    async fn pause_machine(&self, id: &MachineId, opts: PauseOpts) -> Result<PauseOutcome> {
+        let name = &id.0;
+
+        // Opt-in warm-base barrier: wait for the workload to signal "primed"
+        // before sealing. Fails closed — a timeout propagates so no half-warmed
+        // snapshot is sealed. Skipped for the mock (no guest agent to answer).
+        if let Some(timeout) = primed_barrier_timeout(&opts, self.is_mock()) {
+            let source = VsockPrimedSignalSource {
+                vm_name: name.clone(),
+                poll_interval: std::time::Duration::from_millis(500),
+            };
+            await_primed_barrier(&source, timeout)
+                .map_err(|e| backend_err(format!("primed barrier for VM {name:?}: {e:#}")))?;
+        }
+
+        let io = self.snapshot_io_for(name)?;
+        let sidecar = pause_and_seal(name, &*io)
+            .map_err(|e| backend_err(format!("pausing VM {name:?}: {e:#}")))?;
+
+        write_fc_paused_marker(name);
+        set_registry_paused(name, true);
+
+        Ok(PauseOutcome {
+            epoch: sidecar.epoch,
+            vmstate_len: sidecar.vmstate_len,
+            mem_len: sidecar.mem_len,
+        })
+    }
+
+    async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<()> {
+        // `warm` routes through the backend's live-memory warm-start path (fails
+        // closed on a disk-only backend); the default plain path verifies +
+        // restores the sealed snapshot and signals the guest.
+        if opts.warm {
+            self.warm_resume(&id.0)
+        } else {
+            self.plain_resume(&id.0)
+        }
     }
 
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
@@ -924,6 +1128,76 @@ mod tests {
         // A malformed (non-hex / wrong-length) roothash is rejected.
         std::fs::write(dir.path().join("rootfs.roothash"), "nothex\n").unwrap();
         assert_eq!(host_verity_sidecars(&rootfs), (None, None));
+    }
+
+    // ---------------------------------------------------------------------------
+    // pause / resume tests
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn primed_barrier_timeout_is_opt_in_and_skips_mock() {
+        // Default off → no barrier.
+        assert!(primed_barrier_timeout(&PauseOpts::default(), false).is_none());
+        // Opt-in on a real backend → barrier with the requested timeout.
+        let on = PauseOpts {
+            primed_barrier: true,
+            primed_timeout_secs: 30,
+        };
+        assert_eq!(
+            primed_barrier_timeout(&on, false),
+            Some(std::time::Duration::from_secs(30))
+        );
+        // The hermetic mock has no live guest agent — never gate it.
+        assert!(primed_barrier_timeout(&on, true).is_none());
+    }
+
+    #[test]
+    fn firecracker_socket_is_fc_socket_in_vm_dir() {
+        assert_eq!(
+            firecracker_socket("/tmp/vms/web"),
+            std::path::PathBuf::from("/tmp/vms/web/fc.socket")
+        );
+    }
+
+    #[tokio::test]
+    async fn pause_seals_and_resume_verifies_over_mock_canned_io() {
+        // The mock snapshot transport keys off the mock VM's per-VM dir existing.
+        let _data = IsolatedDataDir::new();
+        let vm_dir = mvm_runtime::MockBackend::vm_dir("snap-roundtrip");
+        std::fs::create_dir_all(&vm_dir).unwrap();
+
+        let be = LocalBackend::with_hypervisor("mock");
+        let id = MachineId("snap-roundtrip".into());
+
+        let outcome = be
+            .pause_machine(&id, PauseOpts::default())
+            .await
+            .expect("pause seals the canned snapshot");
+        // CannedIO writes 12-byte vmstate + 8-byte mem stubs and seals epoch 1.
+        assert_eq!(outcome.vmstate_len, b"mock-vmstate".len() as u64);
+        assert_eq!(outcome.mem_len, b"mock-mem".len() as u64);
+        assert!(outcome.epoch >= 1);
+
+        // Plain resume drives the replay-refusal gate (`verify_and_resume`) and,
+        // for the mock, skips the guest PostRestore signal.
+        be.resume_machine(&id, ResumeOpts::default())
+            .await
+            .expect("resume verifies the sealed envelope and restores");
+    }
+
+    #[tokio::test]
+    async fn pause_on_absent_mock_vm_is_error() {
+        let _data = IsolatedDataDir::new();
+        let be = LocalBackend::with_hypervisor("mock");
+        let err = be
+            .pause_machine(&MachineId("never-brought-up".into()), PauseOpts::default())
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("is not running"),
+            "absent mock VM must fail with 'is not running'; got: {msg}"
+        );
     }
 
     // ---------------------------------------------------------------------------

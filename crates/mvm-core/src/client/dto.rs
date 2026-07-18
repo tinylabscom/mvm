@@ -252,6 +252,62 @@ pub struct ExecResult {
     pub stderr: Vec<u8>,
 }
 
+/// Options for `pause_machine` — intent only, so a remote gateway can carry them
+/// over REST. The snapshot transport (a live Firecracker socket vs the mock's
+/// canned bytes) is host-local and chosen by the backend, never named here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseOpts {
+    /// Wait for the workload to signal "primed" (a fully-warmed base) before
+    /// sealing, failing closed on timeout so no half-warmed snapshot is sealed.
+    /// A backend with no guest agent to answer (the mock) ignores it.
+    #[serde(default)]
+    pub primed_barrier: bool,
+    /// Seconds to wait for the primed signal when `primed_barrier` is set.
+    #[serde(default = "default_primed_timeout_secs")]
+    pub primed_timeout_secs: u64,
+}
+
+fn default_primed_timeout_secs() -> u64 {
+    120
+}
+
+impl Default for PauseOpts {
+    fn default() -> Self {
+        Self {
+            primed_barrier: false,
+            primed_timeout_secs: default_primed_timeout_secs(),
+        }
+    }
+}
+
+/// The outcome of a successful `pause_machine`: the sealed snapshot's replay
+/// epoch and the byte lengths of the sealed vmstate + memory artifacts. Plain
+/// data the caller renders in its success line and audit entry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PauseOutcome {
+    /// Monotonic replay-defence counter stamped into the sealed envelope; a
+    /// resume refuses any snapshot whose epoch is below the high-water mark.
+    pub epoch: u64,
+    /// Length in bytes of the sealed `vmstate.bin`.
+    pub vmstate_len: u64,
+    /// Length in bytes of the sealed `mem.bin`.
+    pub mem_len: u64,
+}
+
+/// Options for `resume_machine` — intent only, REST-satisfiable.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeOpts {
+    /// Drive the resume through the backend's live-memory warm-start path
+    /// instead of the plain verify-and-resume. Fails closed with a typed
+    /// recovery hint on a disk-only backend that cannot warm-start at the
+    /// live-memory tier.
+    #[serde(default)]
+    pub warm: bool,
+}
+
 /// A patch over a machine's reconfigurable fields — intent only. Every
 /// field is optional: `None` means "leave unchanged" (patch semantics).
 /// `mem_initial` is intentionally absent — it stays a CLI-only field
@@ -445,5 +501,67 @@ mod tests {
     fn reconfigure_request_rejects_unknown_field_fail_closed() {
         let err = serde_json::from_str::<ReconfigureRequest>(r#"{"rogue":true}"#);
         assert!(err.is_err(), "unknown field must be rejected");
+    }
+
+    #[test]
+    fn pause_opts_default_is_off_with_120s_timeout() {
+        let d = PauseOpts::default();
+        assert!(!d.primed_barrier);
+        assert_eq!(d.primed_timeout_secs, 120);
+    }
+
+    #[test]
+    fn pause_opts_serde_round_trips_and_defaults_timeout() {
+        let opts = PauseOpts {
+            primed_barrier: true,
+            primed_timeout_secs: 30,
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert_eq!(serde_json::from_str::<PauseOpts>(&json).unwrap(), opts);
+        // An omitted timeout falls back to the 120s default, not 0.
+        let partial: PauseOpts = serde_json::from_str(r#"{"primed_barrier":true}"#).unwrap();
+        assert_eq!(partial.primed_timeout_secs, 120);
+    }
+
+    #[test]
+    fn pause_opts_rejects_unknown_field_fail_closed() {
+        assert!(serde_json::from_str::<PauseOpts>(r#"{"rogue":true}"#).is_err());
+    }
+
+    #[test]
+    fn pause_outcome_serde_round_trips() {
+        let outcome = PauseOutcome {
+            epoch: 7,
+            vmstate_len: 4096,
+            mem_len: 1 << 20,
+        };
+        let json = serde_json::to_string(&outcome).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PauseOutcome>(&json).unwrap(),
+            outcome
+        );
+        assert_eq!(
+            PauseOutcome::default(),
+            PauseOutcome {
+                epoch: 0,
+                vmstate_len: 0,
+                mem_len: 0
+            }
+        );
+    }
+
+    #[test]
+    fn resume_opts_serde_round_trips_and_defaults_warm_off() {
+        let opts = ResumeOpts { warm: true };
+        let json = serde_json::to_string(&opts).unwrap();
+        assert_eq!(serde_json::from_str::<ResumeOpts>(&json).unwrap(), opts);
+        assert!(!ResumeOpts::default().warm);
+        // Omitted `warm` defaults false.
+        assert!(!serde_json::from_str::<ResumeOpts>("{}").unwrap().warm);
+    }
+
+    #[test]
+    fn resume_opts_rejects_unknown_field_fail_closed() {
+        assert!(serde_json::from_str::<ResumeOpts>(r#"{"rogue":true}"#).is_err());
     }
 }

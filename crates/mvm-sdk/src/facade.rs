@@ -15,7 +15,7 @@ use std::process::Command;
 use async_trait::async_trait;
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    ReconfigureRequest,
+    PauseOpts, PauseOutcome, ReconfigureRequest, ResumeOpts,
 };
 use mvm_core::client::{MvmClient, MvmError, Result};
 
@@ -332,6 +332,26 @@ impl MvmClient for SubprocessBackend {
         self.run_cli(&logs_args(id, &opts)?)
     }
 
+    async fn pause_machine(&self, _id: &MachineId, _opts: PauseOpts) -> Result<PauseOutcome> {
+        // Instance-snapshot pause is not one of the conformed `machine` verbs
+        // this courier drives (it seals a host-local snapshot). Drive it through
+        // the CLI (`mvmctl machine pause`) or `LocalBackend` directly.
+        Err(MvmError::Backend {
+            reason: "pause is not supported via the subprocess facade; \
+                     use `mvmctl machine pause` or LocalBackend"
+                .into(),
+        })
+    }
+
+    async fn resume_machine(&self, _id: &MachineId, _opts: ResumeOpts) -> Result<()> {
+        // Symmetric with `pause_machine`.
+        Err(MvmError::Backend {
+            reason: "resume is not supported via the subprocess facade; \
+                     use `mvmctl machine resume` or LocalBackend"
+                .into(),
+        })
+    }
+
     async fn exec_machine(&self, id: &MachineId, command: Vec<String>) -> Result<ExecResult> {
         // A non-zero exit is a valid result (the command failed), not a spawn
         // error, so this captures the full Output rather than going through
@@ -397,6 +417,22 @@ mod tests {
         assert_eq!(status_from_label(Some("stopped")), MachineStatus::Stopped);
         assert_eq!(status_from_label(Some("weird")), MachineStatus::Stopped);
         assert_eq!(status_from_label(None), MachineStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_are_fail_closed_via_subprocess() {
+        // The subprocess courier does not drive snapshot pause/resume; both must
+        // refuse with a typed error (no `mvmctl` is spawned).
+        let be = SubprocessBackend::new("/nonexistent/mvmctl");
+        let id = MachineId("web".into());
+        assert!(matches!(
+            be.pause_machine(&id, PauseOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
+        assert!(matches!(
+            be.resume_machine(&id, ResumeOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
     }
 
     #[test]

@@ -2784,6 +2784,7 @@ dependencies = [
  "mvm-runtime",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

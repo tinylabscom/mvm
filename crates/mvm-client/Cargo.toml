@@ -43,6 +43,9 @@ flate2 = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
+# Non-fatal diagnostics on the pause path (fc.paused marker best-effort write).
+# Already in the mvmctl closure via mvm-runtime, so this adds no crates.
+tracing = { workspace = true }
 
 [dev-dependencies]
 mvm-core = { workspace = true, features = ["test-support"] }

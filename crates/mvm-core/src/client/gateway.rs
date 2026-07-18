@@ -10,7 +10,8 @@ use reqwest::{StatusCode, Url};
 
 use crate::client::MvmClient;
 use crate::client::dto::{
-    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, ReconfigureRequest,
+    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, PauseOpts,
+    PauseOutcome, ReconfigureRequest, ResumeOpts,
 };
 use crate::client::error::{MvmError, Result};
 
@@ -313,6 +314,23 @@ impl MvmClient for GatewayBackend {
         }
     }
 
+    async fn pause_machine(&self, _id: &MachineId, _opts: PauseOpts) -> Result<PauseOutcome> {
+        // Instance-snapshot pause/resume is a host-local operation (sealing the
+        // vmstate + memory under a host key); the gateway exposes no snapshot
+        // endpoint. Refuse rather than fake an outcome — remote pause/resume is
+        // wired only when a fleet consumer needs it.
+        Err(MvmError::Backend {
+            reason: "gateway pause is not wired (remote instance snapshot unsupported)".into(),
+        })
+    }
+
+    async fn resume_machine(&self, _id: &MachineId, _opts: ResumeOpts) -> Result<()> {
+        // Symmetric with `pause_machine`: no remote snapshot restore endpoint yet.
+        Err(MvmError::Backend {
+            reason: "gateway resume is not wired (remote instance snapshot unsupported)".into(),
+        })
+    }
+
     async fn machine_logs(&self, id: &MachineId, opts: LogOpts) -> Result<Vec<u8>> {
         let mut url = self.endpoint(&format!("/api/v1/sandboxes/{}/logs", id.0))?;
         if let Some(n) = opts.tail_lines {
@@ -556,6 +574,22 @@ mod tests {
             url.as_str(),
             "https://fleet.example.com/api/v1/sandboxes/abc/reconfigure"
         );
+    }
+
+    #[tokio::test]
+    async fn pause_and_resume_fail_closed_until_wired() {
+        install_rustls_provider();
+        let be = GatewayBackend::new(cfg("https://fleet.example.com")).unwrap();
+        let id = MachineId("sbx-1".into());
+        // No request is sent — the stub refuses before touching the network.
+        assert!(matches!(
+            be.pause_machine(&id, PauseOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
+        assert!(matches!(
+            be.resume_machine(&id, ResumeOpts::default()).await,
+            Err(MvmError::Backend { .. })
+        ));
     }
 
     #[test]

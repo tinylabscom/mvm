@@ -7,7 +7,8 @@ use async_trait::async_trait;
 
 use crate::client::MvmClient;
 use crate::client::dto::{
-    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, ReconfigureRequest,
+    LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, PauseOpts,
+    PauseOutcome, ReconfigureRequest, ResumeOpts,
 };
 use crate::client::error::{MvmError, Result};
 
@@ -92,6 +93,28 @@ impl MvmClient for MockBackend {
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
         // Idempotent: removing an absent machine is Ok (per the trait contract).
         self.machines.lock().unwrap().retain(|m| m.id != *id);
+        Ok(())
+    }
+
+    async fn pause_machine(&self, id: &MachineId, _opts: PauseOpts) -> Result<PauseOutcome> {
+        // In-memory paused flag; no real snapshot substrate. Returns a zeroed
+        // outcome so pure trait-level tests exercise the pause→resume flow.
+        let mut all = self.machines.lock().unwrap();
+        let m = all
+            .iter_mut()
+            .find(|m| m.id == *id)
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })?;
+        m.status = MachineStatus::Paused;
+        Ok(PauseOutcome::default())
+    }
+
+    async fn resume_machine(&self, id: &MachineId, _opts: ResumeOpts) -> Result<()> {
+        let mut all = self.machines.lock().unwrap();
+        let m = all
+            .iter_mut()
+            .find(|m| m.id == *id)
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })?;
+        m.status = MachineStatus::Running;
         Ok(())
     }
 
@@ -209,6 +232,49 @@ mod tests {
         ));
         assert!(matches!(
             mock.start_machine(&missing).await,
+            Err(MvmError::NotFound { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn pause_flips_paused_resume_flips_running_unknown_is_not_found() {
+        let mock = MockBackend::default();
+        let started = mock
+            .run_machine(MachineSpec {
+                name: "web".into(),
+                image: "i".into(),
+                cpus: 1,
+                memory_mib: 64,
+                env: vec![],
+            })
+            .await
+            .unwrap();
+
+        let outcome = mock
+            .pause_machine(&started.id, PauseOpts::default())
+            .await
+            .unwrap();
+        assert_eq!(outcome, PauseOutcome::default());
+        assert_eq!(
+            mock.inspect_machine(&started.id).await.unwrap().status,
+            MachineStatus::Paused
+        );
+
+        mock.resume_machine(&started.id, ResumeOpts::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            mock.inspect_machine(&started.id).await.unwrap().status,
+            MachineStatus::Running
+        );
+
+        let missing = MachineId("nope".into());
+        assert!(matches!(
+            mock.pause_machine(&missing, PauseOpts::default()).await,
+            Err(MvmError::NotFound { .. })
+        ));
+        assert!(matches!(
+            mock.resume_machine(&missing, ResumeOpts::default()).await,
             Err(MvmError::NotFound { .. })
         ));
     }
