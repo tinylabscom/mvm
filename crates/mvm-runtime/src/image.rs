@@ -751,16 +751,16 @@ pub fn build_dir_image_ro(host_dir: &str, label: &str, dest_image_path: &str) ->
         anyhow::bail!("--add-dir host path must be a directory: {host_dir}");
     }
 
-    let nodes = mvm_build::rootfs::collect_nodes(
+    // Reject (rather than skip) unsupported inode kinds: silently dropping a
+    // device/FIFO/socket would leave the guest with less than what the user
+    // asked to share.
+    let options = mvm_fs::rootfs::MaterializeOptions::default()
+        .with_unsupported_node_policy(mvm_fs::rootfs::UnsupportedNodePolicy::Reject)
+        .with_volume_label(label.as_bytes());
+    mvm_fs::rootfs::materialize_ext4_pure(
         std::path::Path::new(host_dir),
-        mvm_build::rootfs::UnsupportedNodePolicy::Reject,
-    )
-    .with_context(|| format!("walking host directory '{host_dir}' for --add-dir"))?;
-
-    mvm_build::rootfs::materialize_ext4_pure_labeled(
-        &nodes,
         std::path::Path::new(dest_image_path),
-        label.as_bytes(),
+        &options,
     )
     .with_context(|| {
         format!("building read-only ext4 image from '{host_dir}' at '{dest_image_path}'")

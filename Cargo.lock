@@ -2967,6 +2967,7 @@ dependencies = [
  "mvm-agentd",
  "mvm-build",
  "mvm-core",
+ "mvm-fs",
  "mvm-net",
  "mvm-protocol",
  "object_store",

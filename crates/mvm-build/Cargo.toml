@@ -66,10 +66,6 @@ lzma-rs = "0.3"
 
 mvm-core.workspace = true
 mvm-fs.workspace = true
-# Read xattrs during the pure walk so a tree carrying attrs the writer can't
-# represent (e.g. `security.capability`) routes to the builder-VM fallback
-# instead of silently dropping them. Already in the mvmctl closure via mvm-fs.
-xattr = { workspace = true, optional = true }
 mvm-agentd.workspace = true
 # `LibkrunNetworkProvider` impls the `NetworkProvider`
 # seam. mvm-net deps only mvm-core + mvm-sdk, so this edge is acyclic.
@@ -149,6 +145,10 @@ rand = "0.8"
 # Builder-daemon readiness-probe tests bind a real UnixListener under a
 # temp dir to drive `serve_connection` end-to-end.
 tempfile.workspace = true
+# The pure-materialize fallback-routing test plants a real oversized xattr on
+# a fixture file to prove the failure routes to the builder VM. The walk
+# itself (and its xattr capture) lives in mvm-fs.
+xattr.workspace = true
 
 [features]
 default = []
@@ -156,11 +156,11 @@ default = []
 # `builder_pack`'s tests can exercise `verify_pack_keyless_at` without
 # every mvm-build build pulling the sigstore dependency tree.
 manifest-verify = ["mvm-core/manifest-verify"]
-# In-process, pure-Rust ext4 materialization (no builder VM / mkfs). Off by
-# default so the mvmctl default closure does not gain `mvm-fs`'s ext4 writer
-# until the pure path is the run-path default; enabled where
-# `materialize_ext4_pure` is used.
-pure-mkfs = ["dep:xattr"]
+# In-process, pure-Rust ext4 materialization (no builder VM / mkfs),
+# delegating the walk + emission to `mvm_fs::rootfs`. Off by default so the
+# mvmctl default closure keeps the pure path opt-in until it is the run-path
+# default; enabled where `materialize_ext4_pure` is used.
+pure-mkfs = []
 # Folded in with the mvm-egress-proxy bin. Off by default;
 # tests/dev enable it so the `mvm-egress-proxy` bin honors a
 # `MVM_EGRESS_ALLOWLIST=host1,host2` override. Production binaries (no

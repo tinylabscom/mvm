@@ -14,6 +14,10 @@
 //! still fall back to `mke2fs` on Linux, keeping the existing escape hatch for
 //! non-default formatting requests.
 //!
+//! The tree walk + streamed emission live in [`crate::rootfs`] — this module
+//! is the OCI-flavored adapter on top of it: typed staging input, error
+//! mapping to [`OciUnpackError`], and the `mke2fs` escape hatch.
+//!
 //! ## Host support
 //!
 //! The public behavior stays Linux-only for now. On Linux,
@@ -26,8 +30,6 @@
 
 use crate::oci_to_rootfs::error::OciUnpackError;
 use crate::oci_to_rootfs::unpack::StagedRootfs;
-#[cfg(target_os = "linux")]
-use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 #[cfg(any(target_os = "linux", test))]
@@ -214,80 +216,39 @@ fn materialize_in_process(
     options: &Mke2fsOptions,
     build_options: &crate::ext4::BuildOptions,
 ) -> Result<MaterializedRootfs, OciUnpackError> {
-    let nodes = collect_nodes(staged_root)?;
-    if let Some(parent) = output.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let mut file = std::fs::File::create(output)?;
-    let size_bytes =
-        match crate::ext4::emit_image_with_options(&nodes, build_options, |offset, bytes| {
-            file.seek(SeekFrom::Start(offset))
-                .and_then(|_| file.write_all(bytes))
-        }) {
-            Ok(size_bytes) => size_bytes,
-            Err(crate::ext4::EmitImageError::Build(err)) => {
-                return Err(OciUnpackError::Mke2fsFailed {
-                    reason: format!("in-process ext4 build failed: {err}"),
-                });
-            }
-            Err(crate::ext4::EmitImageError::Emit(err)) => return Err(err.into()),
-        };
-    file.set_len(size_bytes)?;
-    Ok(materialized_rootfs(output, size_bytes, options))
+    // Unsupported staging inodes (device/FIFO/socket) are silently omitted:
+    // devtmpfs recreates them at boot. Xattrs are ignored for parity with the
+    // `mke2fs` escape hatch below, which formats with `no_copy_xattrs` — both
+    // arms of this materializer must emit the same content set.
+    let materialize_options = crate::rootfs::MaterializeOptions::default()
+        .with_unsupported_node_policy(crate::rootfs::UnsupportedNodePolicy::Skip)
+        .with_xattr_policy(crate::rootfs::XattrPolicy::Ignore)
+        .with_build_options(build_options.clone());
+    let materialized =
+        crate::rootfs::materialize_ext4_pure(staged_root, output, &materialize_options)
+            .map_err(map_materialize_error)?;
+    Ok(materialized_rootfs(
+        output,
+        materialized.size_bytes,
+        options,
+    ))
 }
 
 #[cfg(target_os = "linux")]
-fn collect_nodes(root: &Path) -> Result<Vec<crate::ext4::Node>, OciUnpackError> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            let guest_path = guest_path_of(root, &path);
-            let ft = entry.file_type()?;
-            if ft.is_symlink() {
-                let target = std::fs::read_link(&path)?;
-                out.push(crate::ext4::Node::Symlink {
-                    path: guest_path,
-                    target: target.to_string_lossy().into_owned(),
-                });
-            } else if ft.is_dir() {
-                out.push(crate::ext4::Node::Dir {
-                    path: guest_path,
-                    mode: mode_of(&path, 0o755),
-                    xattrs: Vec::new(),
-                });
-                stack.push(path);
-            } else if ft.is_file() {
-                let data = std::fs::read(&path)?;
-                out.push(crate::ext4::Node::File {
-                    path: guest_path,
-                    mode: mode_of(&path, 0o644),
-                    data,
-                    xattrs: Vec::new(),
-                });
-            }
+fn map_materialize_error(err: crate::rootfs::MaterializeError) -> OciUnpackError {
+    use crate::rootfs::MaterializeError;
+
+    match err {
+        MaterializeError::Walk { source, .. } | MaterializeError::Write { source, .. } => {
+            OciUnpackError::Io(source)
         }
-    }
-    Ok(out)
-}
-
-#[cfg(target_os = "linux")]
-fn guest_path_of(root: &Path, path: &Path) -> String {
-    match path.strip_prefix(root) {
-        Ok(rel) => format!("/{}", rel.to_string_lossy()),
-        Err(_) => format!("/{}", path.to_string_lossy()),
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn mode_of(path: &Path, default: u16) -> u16 {
-    use std::os::unix::fs::PermissionsExt;
-
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => (metadata.permissions().mode() & 0o7777) as u16,
-        Err(_) => default,
+        MaterializeError::UnsupportedNodeType(path) => OciUnpackError::UnsupportedEntryType {
+            entry_path: path,
+            entry_type: "device, FIFO, or socket special file",
+        },
+        MaterializeError::Build(err) => OciUnpackError::Mke2fsFailed {
+            reason: format!("in-process ext4 build failed: {err}"),
+        },
     }
 }
 
@@ -620,7 +581,9 @@ mod tests {
         let output = output_dir.path().join("rootfs.ext4");
         let options = defaults();
         let build_options = in_process_build_options(&options).expect("default options supported");
-        let nodes = collect_nodes(&staged.root).expect("collect nodes");
+        let walk = crate::rootfs::WalkOptions::default()
+            .with_xattr_policy(crate::rootfs::XattrPolicy::Ignore);
+        let nodes = crate::rootfs::collect_nodes(&staged.root, walk).expect("collect nodes");
         let dense =
             crate::ext4::build_image_with_options(&nodes, &build_options).expect("dense image");
 

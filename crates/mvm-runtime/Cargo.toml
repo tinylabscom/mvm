@@ -31,6 +31,9 @@ mvm-build = { workspace = true, default-features = false, features = [
     "builder-vm",
     "pure-mkfs",
 ] }
+# Direct use of the pure in-process ext4 materializer
+# (`mvm_fs::rootfs`) for read-only host-directory share images.
+mvm-fs.workspace = true
 libkrun-sys.workspace = true
 mio.workspace = true
 anyhow.workspace = true
