@@ -28,6 +28,7 @@ mod check_machine_doc_guards;
 mod check_mvm_host_binaries_sync;
 mod check_no_display_on_secret_types;
 mod check_no_host_nix;
+mod check_no_network_literals;
 mod check_no_overclaim;
 mod check_no_spec_refs_in_comments;
 mod check_no_string_backend_dispatch;
@@ -140,6 +141,10 @@ fn main() -> Result<()> {
             let workspace = workspace_root();
             check_single_home::run(&workspace)
         }
+        Some("check-no-network-literals") => {
+            let workspace = workspace_root();
+            check_no_network_literals::run(&workspace)
+        }
         Some("check-claim-catalog") => {
             let workspace = workspace_root();
             check_claim_catalog::run(&workspace)
@@ -184,7 +189,7 @@ fn main() -> Result<()> {
             gen_stubs::check(&workspace)
         }
         Some(other) => anyhow::bail!(
-            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
+            "Unknown xtask: {:?}. Available: gen-man, check-adr-coverage, check-no-display-on-secret-types, check-audit-positional, check-doc-claims, check-machine-doc-guards, check-forbidden-deps, check-core-runtime-free, check-closure-budget, check-duplicate-majors, check-binary-size, check-kernel-config-budget, check-kernel-pin-freshness, check-builder-shell-job-sites, check-guest-agent-runtime-free, check-guest-agent-in-all-images, check-guest-images-no-builder-tools, check-guest-binary-lists, check-no-overclaim, check-two-surfaces, check-no-spec-refs-in-comments, check-no-string-backend-dispatch, check-single-home, check-no-network-literals, check-claim-catalog, check-trust-gradient, check-vsock-only-egress, check-require-grant-token-allowlist, check-mvm-host-binaries-sync, check-runtime-overlay-version, perf, build-dev-image, gen-stubs, check-stubs",
             other
         ),
         None => {
@@ -252,6 +257,9 @@ fn main() -> Result<()> {
             );
             eprintln!(
                 "  check-single-home                      Reject host-path derivations that bypass mvm-core::config's single MVM_HOME root"
+            );
+            eprintln!(
+                "  check-no-network-literals              Reject baked IPs/ports/tmp-sockets — route through mvm-core::dev_network / guest_netd"
             );
             eprintln!(
                 "  check-claim-catalog                    Verify the claims ledger embedded in specs/adrs/001-microvm-security-posture.md — witnesses still exist in the tree"
