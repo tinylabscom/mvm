@@ -61,8 +61,8 @@ Full narrative on this progress, including why `mvm-protocol` needs to be a desi
 
 **WS4 — single `~/.mvm`** (can land alongside 1b)
 - [x] Reparent cache/state/share/runtime/config under `~/.mvm`; `MVM_HOME` override; delete the `~/microvm/vms` const; move per-VM UDS under `~/.mvm/run` (#1654). _(WS4.1 `1b62d8212` + review-fix `31d793bd0` — one `mvm_home()` root, six env vars + XDG deleted, `vms_dir()` absolute; see SPRINT.md WS4 for detail)_
-- [ ] Route the remaining bypass sites through `mvm-core::config`; add the anti-bypass CI lint. _(WS4.2 — incl. the hand-rolled `+"vms"` joins → `vms_dir()` and the stale `mvm-protocol` comments)_
-- Gate: fresh run creates exactly one root; lint green.
+- [x] Route the remaining bypass sites through `mvm-core::config`; add the anti-bypass CI lint. _(WS4.2 `2b85a8ff6`+`cc16c511d` — `xtask check-single-home` (4 rule classes, CI-wired); 117 baseline hits all fixed across 49 files incl. real `MVM_HOME`-ignoring bugs in observer allowlist / tenant policy root / metrics / attestation keys; fail-closed posture review-verified per site; see SPRINT.md WS4)_
+- [x] Gate: fresh run creates exactly one root; lint green.
 
 **WS5 — two features**
 - [ ] Collapse the 28 member features to the `user`/`host` surfaces; make `builder-vm`/`pure-mkfs`/`manifest-verify` always-on; move `schema` to build-time; keep `dev-shell` as the prod/dev agent boundary.
