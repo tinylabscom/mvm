@@ -12,8 +12,8 @@ use crate::enforcement::EgressEnforcer;
 /// that `apply_network_policy` consumes, *not* the supervisor's L4 bundle).
 /// Its `Default` is `deny_all()` — the safe claim-10 posture; opening egress
 /// is opt-in. `slot_index` is the VM's network-slot ordinal: the backend
-/// derives the per-VM tap device + guest IP from it (`tap{index}`,
-/// `172.16.0.{index+2}`).
+/// derives the per-VM tap device + guest IP from it (`tap{index}` and the
+/// dev-subnet host octet `index + 2`).
 #[derive(Debug, Clone, Default)]
 pub struct NetworkSpec {
     pub policy: NetworkPolicy,

@@ -839,7 +839,7 @@ fn fork_vm_full_arm_inner(p: ForkVmFullArmParams<'_>) -> Result<()> {
     // Firecracker vm_full fork. A forked child restores the parent's saved guest
     // memory verbatim, which carries the parent's IP/MAC. VMGenID reseeds the
     // guest RNG on restore but does not re-address the network, so a booted child
-    // would collide with its parent on the shared 172.16.0.x bridge. The host-tap
+    // would collide with its parent on the shared dev-subnet bridge. The host-tap
     // side is remappable, but re-IP'ing the guest is a per-child network-model
     // decision that is not yet settled — refuse cleanly rather than boot a
     // colliding child. The restore mechanism stays reachable behind an explicit

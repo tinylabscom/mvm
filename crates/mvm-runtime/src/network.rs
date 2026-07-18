@@ -82,14 +82,15 @@ pub fn bridge_ensure() -> Result<()> {
         # NAT: MASQUERADE traffic from the bridge subnet to the internet.
         # Use -C to check first so we don't duplicate the rule.
         HOST_IFACE=$(ip -j route list default | jq -r '.[0].dev')
-        if ! sudo iptables -t nat -C POSTROUTING -s 172.16.0.0/24 -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null; then
-            sudo iptables -t nat -A POSTROUTING -s 172.16.0.0/24 -o "$HOST_IFACE" -j MASQUERADE
+        if ! sudo iptables -t nat -C POSTROUTING -s {subnet} -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null; then
+            sudo iptables -t nat -A POSTROUTING -s {subnet} -o "$HOST_IFACE" -j MASQUERADE
         fi
 
         echo "[mvm] Bridge network ready ({br}=$HOST_IFACE)."
         "#,
         br = BRIDGE_DEV,
         br_cidr = BRIDGE_CIDR,
+        subnet = mvm_core::dev_network::DEFAULT_SUBNET_CIDR,
     ))
 }
 
@@ -100,10 +101,11 @@ pub fn bridge_teardown() -> Result<()> {
         sudo ip link del {br} 2>/dev/null || true
         HOST_IFACE=$(ip -j route list default 2>/dev/null | jq -r '.[0].dev' 2>/dev/null) || true
         if [ -n "$HOST_IFACE" ]; then
-            sudo iptables -t nat -D POSTROUTING -s 172.16.0.0/24 -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null || true
+            sudo iptables -t nat -D POSTROUTING -s {subnet} -o "$HOST_IFACE" -j MASQUERADE 2>/dev/null || true
         fi
         "#,
         br = BRIDGE_DEV,
+        subnet = mvm_core::dev_network::DEFAULT_SUBNET_CIDR,
     ))
 }
 

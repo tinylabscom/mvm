@@ -691,7 +691,7 @@ fn vsock_egress_env(vm_name: &str) -> Vec<(String, String)> {
     if !mvm_core::config::vm_vsock_egress_marker_path(vm_name).is_file() {
         return Vec::new();
     }
-    mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
+    mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
 }
 
 /// Whether the per-VM egress CA sidecar exists — i.e. egress substitution

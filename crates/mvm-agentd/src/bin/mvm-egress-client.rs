@@ -5,8 +5,9 @@
 //! egress gateway, which makes the claim-10 decision and either splices raw
 //! bytes or acts as the forward proxy.
 //!
-//! Listen address: `MVM_EGRESS_LISTEN` (default `127.0.0.1:1080`). Linux-only
-//! (AF_VSOCK); a no-op off Linux so the workspace builds on macOS dev hosts.
+//! Listen address: `MVM_EGRESS_LISTEN` (default:
+//! `mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN`). Linux-only (AF_VSOCK);
+//! a no-op off Linux so the workspace builds on macOS dev hosts.
 
 use std::process::ExitCode;
 
@@ -18,7 +19,8 @@ fn main() -> ExitCode {
         )
         .init();
 
-    let listen = std::env::var("MVM_EGRESS_LISTEN").unwrap_or_else(|_| "127.0.0.1:1080".into());
+    let listen = std::env::var("MVM_EGRESS_LISTEN")
+        .unwrap_or_else(|_| mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN.into());
     let addr: std::net::SocketAddr = match listen.parse() {
         Ok(a) => a,
         Err(e) => {

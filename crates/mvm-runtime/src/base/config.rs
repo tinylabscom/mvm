@@ -8,11 +8,10 @@ use serde::{Deserialize, Serialize};
 /// hostname `mvm-dev` are deliberately *not* this constant — they exist
 /// on every host regardless of whether a builder VM is running.
 pub const VM_NAME: &str = "mvm-builder";
-pub const API_SOCKET: &str = "/tmp/firecracker.socket";
 pub const TAP_DEV: &str = "tap0";
-pub const TAP_IP: &str = "172.16.0.1";
+pub const TAP_IP: &str = mvm_core::dev_network::DEFAULT_GATEWAY_IP;
 pub const MASK_SHORT: &str = "/30";
-pub const GUEST_IP: &str = "172.16.0.2";
+pub const GUEST_IP: &str = mvm_core::dev_network::DEFAULT_GUEST_IP;
 pub const FC_MAC: &str = "06:00:AC:10:00:02";
 /// Firecracker assets root. `~` expands against whichever shell
 /// runs the script — on Linux+KVM that's the host user; on macOS
@@ -24,8 +23,8 @@ pub const MICROVM_DIR: &str = "~/microvm";
 
 // --- Multi-VM bridge networking ---
 pub const BRIDGE_DEV: &str = "br-mvm";
-pub const BRIDGE_IP: &str = "172.16.0.1";
-pub const BRIDGE_CIDR: &str = "172.16.0.1/24";
+pub const BRIDGE_IP: &str = mvm_core::dev_network::DEFAULT_GATEWAY_IP;
+pub const BRIDGE_CIDR: &str = mvm_core::dev_network::DEFAULT_GATEWAY_CIDR;
 
 /// Per-VM network + filesystem identity, derived from a slot index.
 #[derive(Debug, Clone)]
@@ -41,7 +40,7 @@ pub struct VmSlot {
 
 impl VmSlot {
     /// Create a slot from a name and 0-based index.
-    /// Index N → guest IP 172.16.0.{N+2}, TAP tap{N}.
+    /// Index N → guest IP at host octet N+2 in the dev subnet, TAP tap{N}.
     /// `vm_dir` / `api_socket` live in the per-VM directory under the
     /// single mvm root (`mvm_core::config::vms_dir()`), as absolute paths.
     pub fn new(name: &str, index: u8) -> Self {
@@ -52,7 +51,7 @@ impl VmSlot {
             index,
             tap_dev: format!("tap{}", index),
             mac: format!("06:00:AC:10:00:{:02x}", ip_octet),
-            guest_ip: format!("172.16.0.{}", ip_octet),
+            guest_ip: mvm_core::dev_network::default_guest_ip_for_index(index),
             api_socket: vm_dir.join("fc.socket").display().to_string(),
             vm_dir: vm_dir.display().to_string(),
         }
@@ -113,7 +112,6 @@ mod tests {
         assert!(!VM_NAME.is_empty());
         assert!(!mvm_core::config::fc_version().is_empty());
         assert!(!mvm_core::config::ARCH.is_empty());
-        assert!(!API_SOCKET.is_empty());
         assert!(!TAP_DEV.is_empty());
         assert!(!TAP_IP.is_empty());
         assert!(!GUEST_IP.is_empty());

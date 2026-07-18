@@ -61,11 +61,16 @@ impl Default for ResourceSection {
     }
 }
 
+/// Default guest RAM (MiB) for an image manifest that omits `[resources]`.
+const DEFAULT_MEM_MIB: u32 = 2048;
+/// Default vCPU count for an image manifest that omits `[resources]`.
+const DEFAULT_CPUS: u32 = 2;
+
 fn default_memory() -> u32 {
-    2048
+    DEFAULT_MEM_MIB
 }
 fn default_cpus() -> u32 {
-    2
+    DEFAULT_CPUS
 }
 
 #[derive(Debug, Deserialize, Default)]

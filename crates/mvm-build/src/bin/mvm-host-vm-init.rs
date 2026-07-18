@@ -395,7 +395,7 @@ fn runtime_overlay_device_from_cmdline(cmdline: &str) -> Option<String> {
 }
 
 #[cfg(any(target_os = "linux", test))]
-const VSOCK_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
+const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
 #[cfg(any(target_os = "linux", test))]
 const VSOCK_EGRESS_NO_PROXY: &str = "localhost,127.0.0.1,::1";
 #[cfg(target_os = "linux")]

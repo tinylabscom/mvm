@@ -68,9 +68,9 @@ mod linux {
     /// failed `File::open` (cheap, non-fatal).
     const STAGE0_DISK_CANDIDATES: &[&str] = &["/dev/vda", "/dev/vdb", "/dev/vdc", "/dev/vdd"];
 
-    const VSOCK_EGRESS_PROXY_URL: &str = "socks5h://127.0.0.1:1080";
+    const VSOCK_EGRESS_PROXY_URL: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_URL;
     const VSOCK_EGRESS_NO_PROXY: &str = "127.0.0.1,localhost";
-    const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = "127.0.0.1:1080";
+    const VSOCK_EGRESS_PROXY_LISTEN_ADDR: &str = mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN;
     const VSOCK_EGRESS_PROXY_READY_TIMEOUT: Duration = Duration::from_secs(5);
     const VSOCK_EGRESS_PORT_ENV: &str = "MVM_EGRESS_VSOCK_PORT";
     const VSOCK_EGRESS_PORT_TOKEN_PREFIX: &str = "mvm.vsock_egress_port=";

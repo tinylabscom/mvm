@@ -1290,7 +1290,7 @@ fn oci_vsock_proxy_env_for_capabilities(
     if !(caps.vsock && caps.no_routable_guest_nic && caps.host_vsock_proxy) {
         return Vec::new();
     }
-    mvm_core::guest_netd::proxy_env_vars("127.0.0.1:1080")
+    mvm_core::guest_netd::proxy_env_vars(mvm_core::guest_netd::DEFAULT_EGRESS_PROXY_LISTEN)
 }
 
 fn oci_vsock_proxy_env_for_backend(

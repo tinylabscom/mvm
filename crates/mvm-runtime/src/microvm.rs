@@ -218,6 +218,15 @@ pub fn firecracker_vsock_uds_path(dir: &str) -> String {
     format!("{dir}/runtime/v.sock")
 }
 
+/// Control (API) socket path for the legacy single-VM Firecracker daemon.
+///
+/// Lives inside the VM's own directory — matching `start_vm_firecracker` and
+/// `FirecrackerGuard` — rather than a world-visible, collision-prone shared
+/// `/tmp` path.
+fn firecracker_api_socket_path(dir: &str) -> String {
+    format!("{dir}/fc.socket")
+}
+
 /// Prepare the per-VM runtime directory that will hold the live vsock UDS.
 ///
 /// The host transport already resolves `<vm_dir>/runtime/v.sock`, so we bind
@@ -253,6 +262,7 @@ pub fn vm_console_log_path(vm_name: &str) -> Result<std::path::PathBuf> {
 fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
     ui::info("Starting Firecracker...");
     let vsock = firecracker_vsock_uds_path(abs_dir);
+    let socket = firecracker_api_socket_path(abs_dir);
     run_in_vm_visible(&format!(
         r#"
         mkdir -p {dir}
@@ -275,7 +285,7 @@ fn start_firecracker_daemon(abs_dir: &str) -> Result<()> {
         fi
         echo "[mvm] Firecracker started."
         "#,
-        socket = API_SOCKET,
+        socket = socket,
         dir = abs_dir,
     ))
 }
@@ -310,11 +320,6 @@ pub fn start_vm_firecracker(abs_dir: &str, abs_socket: &str) -> Result<()> {
         socket = abs_socket,
         dir = abs_dir,
     ))
-}
-
-/// Send API PUT request to Firecracker via its Unix socket.
-fn api_put(path: &str, data: &str) -> Result<()> {
-    api_put_socket(API_SOCKET, path, data)
 }
 
 /// Send API PUT request to a specific Firecracker socket.
@@ -388,8 +393,10 @@ fn fc_api_call(method: &str, socket: &str, path: &str, data: Option<&str>) -> Re
 /// Configure the microVM via the Firecracker API (dev-mode, legacy).
 #[instrument(skip_all)]
 fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
+    let api_socket = firecracker_api_socket_path(abs_dir);
     ui::info("Configuring logger...");
-    api_put(
+    api_put_socket(
+        &api_socket,
         "/logger",
         &format!(
             r#"{{"log_path": "{dir}/firecracker.log", "level": "Debug", "show_level": true, "show_log_origin": true}}"#,
@@ -441,7 +448,8 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
             .with_context(|| format!("preparing FC-loadable kernel from {kernel_path}"))?;
 
     ui::info(&format!("Setting boot source: {}", state.kernel));
-    api_put(
+    api_put_socket(
+        &api_socket,
         "/boot-source",
         &format!(
             r#"{{"kernel_image_path": "{kernel}", "boot_args": "{args}"}}"#,
@@ -451,7 +459,8 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
     )?;
 
     ui::info(&format!("Setting rootfs: {}", state.rootfs));
-    api_put(
+    api_put_socket(
+        &api_socket,
         "/drives/rootfs",
         &format!(
             r#"{{"drive_id": "rootfs", "path_on_host": "{rootfs}", "is_root_device": true, "is_read_only": false}}"#,
@@ -460,7 +469,8 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
     )?;
 
     ui::info("Setting network interface...");
-    api_put(
+    api_put_socket(
+        &api_socket,
         "/network-interfaces/net1",
         &format!(
             r#"{{"iface_id": "net1", "guest_mac": "{mac}", "host_dev_name": "{tap}"}}"#,
@@ -472,7 +482,8 @@ fn configure_microvm(state: &MvmState, abs_dir: &str) -> Result<()> {
     ui::info("Setting vsock device...");
     prepare_vsock_runtime_dir(abs_dir);
     let vsock = firecracker_vsock_uds_path(abs_dir);
-    api_put(
+    api_put_socket(
+        &api_socket,
         "/vsock",
         &format!(
             r#"{{"vsock_id": "vsock0", "guest_cid": {cid}, "uds_path": "{vsock}"}}"#,
@@ -522,7 +533,11 @@ pub fn start() -> Result<()> {
     // Start the instance
     ui::info("Starting microVM...");
     std::thread::sleep(std::time::Duration::from_millis(15));
-    api_put("/actions", r#"{"action_type": "InstanceStart"}"#)?;
+    api_put_socket(
+        &firecracker_api_socket_path(&abs_dir),
+        "/actions",
+        r#"{"action_type": "InstanceStart"}"#,
+    )?;
 
     mvm_core::observability::metrics::global()
         .vm_start_duration_ms
@@ -568,12 +583,14 @@ pub fn stop() -> Result<()> {
 
     ui::info("Stopping microVM...");
 
+    let api_socket = firecracker_api_socket_path(MICROVM_DIR);
+
     // Try graceful shutdown via API
     if let Err(e) = run_in_vm(&format!(
         r#"sudo curl -s -X PUT --unix-socket {socket} \
             --data '{{"action_type": "SendCtrlAltDel"}}' \
             "http://localhost/actions" 2>/dev/null || true"#,
-        socket = API_SOCKET,
+        socket = api_socket,
     )) {
         warn!("failed to send graceful shutdown to VM: {e}");
     }
@@ -593,7 +610,7 @@ pub fn stop() -> Result<()> {
         rm -f {vsock} {dir}/v.sock
         "#,
         dir = MICROVM_DIR,
-        socket = API_SOCKET,
+        socket = api_socket,
         vsock = firecracker_vsock_uds_path(MICROVM_DIR),
     ))?;
 
