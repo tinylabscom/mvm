@@ -688,6 +688,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_over_mock_backend_succeeds() {
+        // `list_machines` unions the host-wide backend scan + name registry, so
+        // isolate the data dir or leftover real `~/.mvm/vms` state leaks in.
+        let _data = IsolatedDataDir::new();
         let be = LocalBackend::with_hypervisor("mock");
         let machines = be.list_machines(MachineFilter::all()).await.unwrap();
         let none = be

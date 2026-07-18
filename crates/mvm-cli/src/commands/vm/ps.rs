@@ -53,6 +53,7 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
     // in one call. The CLI keeps presentation only — filtering, columns, JSON.
     let client = LocalBackend::new();
     let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
         .build()
         .context("build runtime for machine listing")?;
     let mut machines = runtime
@@ -135,6 +136,11 @@ fn emit_json(machines: &[MachineState], now: chrono::DateTime<chrono::Utc>) -> R
         id: &'a str,
         name: &'a str,
         status: MachineStatus,
+        // The detail behind a non-happy status (e.g. a `Failed` reason). The old
+        // JSON carried this inside the raw `VmStatus::Failed { reason }`; it now
+        // rides here so the reason survives the shift to the flat contract status.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        status_detail: Option<&'a str>,
         guest_ip: Option<&'a str>,
         cpus: u32,
         memory_mib: u32,
@@ -155,6 +161,7 @@ fn emit_json(machines: &[MachineState], now: chrono::DateTime<chrono::Utc>) -> R
             id: &m.id.0,
             name: &m.name,
             status: m.status,
+            status_detail: m.status_detail.as_deref(),
             guest_ip: m.guest_ip.as_deref(),
             cpus: m.cpus,
             memory_mib: m.memory_mib,
