@@ -130,6 +130,34 @@ Slice 1 surfaced that `mvmctl ps` currently leaks the internal `VmStatus` into i
   caught, ~bounded) and to the separate mvmd repo's copy of the contract — expected
   and handled under no-backcompat; the in-repo matches are fixed in the slice.
 
+## Sequence correction (learned executing slices 1–2)
+
+Slices 1 (`ps`) and 2 (`down`) are landed + reviewed. Reconnoitring the rest showed
+the original "simple lifecycle" framing was too optimistic — the remaining
+commands are NOT mechanical repeats, and each is its own design pass:
+
+- **`pause`/`resume`** (`vm/pause.rs`, 462 lines) is a full instance-snapshot
+  subsystem, not a state toggle: `pause_and_seal`/`verify_and_resume`, a
+  `SnapshotIO` abstraction with per-hypervisor + mock `CannedIO` transports,
+  snapshot-envelope **replay refusal** (a security property), warm-start via
+  `VmBackend::warm_start`, and snapshot list/delete subcommands. Growing the trait
+  with `pause_machine`/`resume_machine` means deciding what of that machinery is
+  the contract vs stays host-local, and implementing/​stubbing it across all four
+  `MvmClient` impls (`MockBackend`, `GatewayBackend`, `LocalBackend`,
+  `SubprocessBackend`). Its own design + brief.
+- **`checkpoint`** (18 reaches) — same shape, the checkpoint-store path.
+- **`up`/`run`** (8 reaches) — the admission+boot path; `run_machine`/`create_machine`
+  exist on the trait but the CLI's `up` does far more (image resolution, network,
+  overlay, readiness) that must be reconciled with the facade boundary.
+- **`logs`/`wait`** are streaming (`--follow`, vsock readiness waits) — like
+  `console`, they do not fit the request/response trait and likely stay CLI-direct
+  or need a streaming seam.
+- **`set_ttl`/`readiness`** are name-registry mutations — candidates for
+  `reconfigure_machine` or a small registry-facing method.
+
+Do each as its own designed slice; do not batch or blind-dispatch. The trait
+grows per slice and every impl must be updated (compiler-caught).
+
 ## Non-goals / invariants
 
 - The `mvmctl::runtime::*` re-export contract mvmd depends on is unchanged — this
