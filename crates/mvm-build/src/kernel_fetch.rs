@@ -3,7 +3,8 @@ use std::path::{Path, PathBuf};
 use mvm_core::kernel_artifact::KernelArtifactId;
 use thiserror::Error;
 
-use crate::runtime_overlay::{SKIP_HASH_VERIFY_ENV, compute_file_sha256};
+use crate::runtime_overlay::SKIP_HASH_VERIFY_ENV;
+use mvm_fs::overlay::compute_file_sha256;
 
 /// Error returned by [`verify_fetched_kernel`].
 #[derive(Debug, Error)]

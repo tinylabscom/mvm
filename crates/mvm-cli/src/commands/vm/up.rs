@@ -1517,7 +1517,7 @@ pub(crate) fn emit_runtime_source_status(start_config: &mvm_core::vm_backend::Vm
 
 fn apply_runtime_overlay_artifact(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
-    artifact: mvm_build::runtime_overlay::RuntimeOverlayArtifact,
+    artifact: mvm_fs::overlay::RuntimeOverlayArtifact,
 ) {
     start_config.runtime_overlay_path = Some(artifact.overlay_ext4.display().to_string());
     start_config.runtime_overlay_verity_path = Some(artifact.sidecar.display().to_string());
@@ -1531,18 +1531,19 @@ fn apply_runtime_overlay_artifact(
 /// read-only block devices and thread the matching roothash through the
 /// guest cmdline; unsupported backends ignore the fields.
 /// **Non-fatal**: a cold cache or a non-verity dev rootfs leaves the
-/// fields `None` and the VM boots legacy. `resolve()` is a pure cache read
-/// — no build, no download, no `nix` — so this is safe on every host.
+/// fields `None` and the VM boots legacy. The seeded resolve is a pure
+/// cache read — no build, no download, no `nix` — so this is safe on
+/// every host.
 pub(crate) fn attach_runtime_overlay(
     start_config: &mut mvm_core::vm_backend::VmStartConfig,
     hypervisor: &str,
-    resolver: &mvm_build::runtime_overlay::RuntimeOverlayResolver,
+    resolver: &mvm_fs::overlay::RuntimeOverlayResolver,
     arch: mvm_core::arch::GuestArch,
 ) -> Result<()> {
     if !matches!(hypervisor, "firecracker" | "hvf" | "qemu" | "libkrun") {
         return Ok(());
     }
-    match resolver.resolve(arch) {
+    match mvm_build::runtime_overlay::resolve_or_seed_from_default_cache(resolver, arch) {
         Ok(a) => {
             apply_runtime_overlay_artifact(start_config, a);
             Ok(())
@@ -1727,10 +1728,8 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
         apply_runtime_overlay_artifact(start_config, artifact);
         return Ok(());
     }
-    let resolver = mvm_build::runtime_overlay::RuntimeOverlayResolver::new(
-        cache_root.clone(),
-        version.to_string(),
-    );
+    let resolver =
+        mvm_fs::overlay::RuntimeOverlayResolver::new(cache_root.clone(), version.to_string());
     match attach_runtime_overlay(start_config, hypervisor, &resolver, arch) {
         Ok(()) => Ok(()),
         Err(_err)
@@ -1783,11 +1782,11 @@ pub(crate) fn attach_runtime_overlay_if_cached_version(
 mod runtime_overlay_attach_tests {
     use super::*;
     use crate::commands::runtime_overlay::RUNTIME_OVERLAY_ACQUIRE_MODE_ENV;
-    use mvm_build::runtime_overlay::RuntimeOverlayResolver;
     use mvm_core::arch::GuestArch;
     use mvm_core::util::test_env::TestEnv;
     use mvm_core::vm_backend::{RuntimeSourcePolicy, VmStartConfig};
     use mvm_fs::ext4::Node;
+    use mvm_fs::overlay::RuntimeOverlayResolver;
     use sha2::{Digest, Sha256};
 
     static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1863,8 +1862,8 @@ mod runtime_overlay_attach_tests {
     /// Stage a complete overlay cache entry (the four files the resolver
     /// validates) in the layout `resolve` expects.
     fn seed_cache(cache: &std::path::Path, version: &str, arch: GuestArch) {
-        let layout =
-            RuntimeOverlayResolver::new(cache.to_path_buf(), version.to_string()).layout(arch);
+        let layout = RuntimeOverlayResolver::new(cache.to_path_buf(), version.to_string())
+            .layout(&arch.to_string());
         std::fs::create_dir_all(&layout.artifact_dir).unwrap();
         let overlay_ext4 = valid_overlay_ext4_bytes(version, true);
         let sidecar = b"verity-bytes";
@@ -1943,7 +1942,7 @@ mod runtime_overlay_attach_tests {
     }
 
     fn seed_release_fixture(base: &std::path::Path, version: &str, arch: GuestArch) {
-        let names = mvm_build::runtime_overlay::RuntimeOverlayArtifactNames::for_arch(arch);
+        let names = mvm_fs::overlay::RuntimeOverlayArtifactNames::for_arch(&arch.to_string());
         let release_dir = base.join(format!("v{version}"));
         std::fs::create_dir_all(&release_dir).unwrap();
 
@@ -2177,7 +2176,7 @@ mod runtime_overlay_attach_tests {
         attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", None).unwrap();
 
         let layout = RuntimeOverlayResolver::new(cache.path().to_path_buf(), version.to_string())
-            .layout(arch);
+            .layout(&arch.to_string());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(version));
         assert_eq!(
             sc.runtime_overlay_path.as_deref(),
@@ -2243,7 +2242,8 @@ mod runtime_overlay_attach_tests {
         attach_runtime_overlay_if_cached_version(&mut sc, "firecracker", Some(pinned)).unwrap();
 
         let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), pinned.to_string()).layout(arch);
+            RuntimeOverlayResolver::new(dir.path().to_path_buf(), pinned.to_string())
+                .layout(&arch.to_string());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(pinned));
         assert_eq!(
             sc.runtime_overlay_path.as_deref(),
@@ -2321,7 +2321,8 @@ mod runtime_overlay_attach_tests {
         attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
 
         let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), current.to_string()).layout(arch);
+            RuntimeOverlayResolver::new(dir.path().to_path_buf(), current.to_string())
+                .layout(&arch.to_string());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(current));
         assert_eq!(
             sc.runtime_overlay_path.as_deref(),
@@ -2360,7 +2361,8 @@ mod runtime_overlay_attach_tests {
         attach_runtime_overlay_if_cached(&mut sc, "firecracker").unwrap();
 
         let expected_layout =
-            RuntimeOverlayResolver::new(dir.path().to_path_buf(), current.to_string()).layout(arch);
+            RuntimeOverlayResolver::new(dir.path().to_path_buf(), current.to_string())
+                .layout(&arch.to_string());
         assert_eq!(sc.runtime_overlay_version.as_deref(), Some(current));
         assert_eq!(
             sc.runtime_overlay_path.as_deref(),

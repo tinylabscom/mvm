@@ -11,6 +11,7 @@ description = "Image → mountable rootfs for mvm: OCI distribution client (regi
 
 [dependencies]
 async-trait = "0.1"
+ext4-view.workspace = true
 hex.workspace = true
 libc = { workspace = true }
 reqwest.workspace = true

@@ -2844,6 +2844,7 @@ dependencies = [
  "am-fs-ext4",
  "async-trait",
  "base64",
+ "ext4-view",
  "hex",
  "libc",
  "reqwest 0.13.4",

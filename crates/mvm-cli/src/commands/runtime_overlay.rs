@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
-use mvm_build::runtime_overlay::RuntimeOverlayArtifact;
 use mvm_core::arch::GuestArch;
+use mvm_fs::overlay::RuntimeOverlayArtifact;
 use std::path::{Path, PathBuf};
 
 pub(crate) struct RuntimeOverlayAcquireParams<'a> {

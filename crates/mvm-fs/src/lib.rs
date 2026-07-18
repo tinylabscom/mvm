@@ -9,6 +9,8 @@
 //!   materializer on top of the [`ext4`] writer.
 //! - [`oci_to_rootfs`]: OCI-unpacked staging tree to a materialized,
 //!   verity-sealed ext4 rootfs image.
+//! - [`overlay`]: runtime-overlay cache resolution — pick and validate the
+//!   verity-sealed overlay artifact set for one `(version, arch)`.
 
 pub mod ext4;
 pub mod oci;
@@ -18,4 +20,5 @@ pub mod oci;
 /// size caps (decompression-bomb mitigation). ext4 generation
 /// (`mke2fs -d` against the staging dir) runs inside the builder VM.
 pub mod oci_to_rootfs;
+pub mod overlay;
 pub mod rootfs;

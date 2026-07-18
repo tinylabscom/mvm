@@ -2,8 +2,8 @@
 //!
 //! The verity-sealed `/mvm/runtime` overlay is
 //! pinned to a single version, and the host-side resolver
-//! (`mvm_build::runtime_overlay`) **fails closed on a version mismatch**
-//! (`RuntimeOverlayError::VersionMismatch`): it picks the overlay whose
+//! (`mvm_fs::overlay`) **fails closed on a version mismatch**
+//! (`OverlayError::VersionMismatch`): it picks the overlay whose
 //! `VERSION` equals the running mvmctl's semver, else refuses. So a stale
 //! `overlayVersion` pin in the flake doesn't warn — it makes the overlay
 //! silently never load on any boot.
