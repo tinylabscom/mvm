@@ -173,6 +173,7 @@ fn spawn_mock_destination() -> (SocketAddr, mpsc::Receiver<String>) {
 fn build_service(
     dir: &std::path::Path,
     policy_dest: SocketAddr,
+    bound_host: &str,
     mock_addr: SocketAddr,
 ) -> (
     Arc<SubstitutionService>,
@@ -185,8 +186,12 @@ fn build_service(
         "the policy destination must be outside the mandatory-deny set or the \
          claim-10 gate refuses it before substitution: {policy_dest}"
     );
-    let allow_host = policy_dest.ip().to_string();
 
+    // The secret's binding allow-list (claim-12) is independent of the VM's
+    // network policy (claim-10): a destination can be network-admitted yet not a
+    // host this particular secret may be sent to. The allow path passes
+    // `policy_dest`'s host here; the deny path passes a different host to drive a
+    // bind-check drop against a network-admitted destination.
     let bindings = FileBindingStore::with_dir(dir.join("bindings"));
     bindings
         .put(
@@ -194,7 +199,7 @@ fn build_service(
             SECRET_ADDRESS,
             &SecretBindingMeta {
                 auth_type: AuthType::Bearer,
-                allowed_hosts: vec![allow_host],
+                allowed_hosts: vec![bound_host.to_string()],
                 sigv4: None,
             },
         )
@@ -318,14 +323,38 @@ fn ok_status_200_prefix() -> String {
     sample[..cut].to_string()
 }
 
+/// Assert the chain-signed audit log verifies, carries an entry of `expect_kind`,
+/// and never leaks the real secret value (claim 13). Shared by the allow path
+/// (`secret.substituted`) and the deny path (`secret.placeholder_dropped`).
+fn assert_audit_chain(
+    audit_path: &std::path::Path,
+    verifying_key: &ed25519_dalek::VerifyingKey,
+    expect_kind: &str,
+) {
+    verify_audit_chain(audit_path, verifying_key).expect("audit chain verifies");
+    let chain_text = std::fs::read_to_string(audit_path).expect("read audit chain");
+    assert!(
+        chain_text.contains(expect_kind),
+        "audit chain must carry a {expect_kind} entry: {chain_text}"
+    );
+    assert!(
+        !chain_text.contains(REAL_SECRET_VALUE),
+        "audit chain must never carry the real secret value (claim 13)"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn governed_egress_substitutes_secret_and_audits_on_bound_destination() {
     let dir = tempfile::tempdir().expect("tempdir");
     let (mock_addr, dest_requests) = spawn_mock_destination();
     let policy_dest = policy_dest();
 
-    let (service, handed, verifying_key, audit_path) =
-        build_service(dir.path(), policy_dest, mock_addr);
+    let (service, handed, verifying_key, audit_path) = build_service(
+        dir.path(),
+        policy_dest,
+        &policy_dest.ip().to_string(),
+        mock_addr,
+    );
     assert_eq!(handed.len(), 1, "exactly one secret binding was admitted");
     assert_eq!(handed[0].0, SECRET_ENV_VAR);
     let placeholder = handed[0].1.as_str().to_string();
@@ -409,16 +438,93 @@ async fn governed_egress_substitutes_secret_and_audits_on_bound_destination() {
         "no placeholder may leak to the destination, got: {auth_line}"
     );
 
-    // (d) a chain-signed `secret.substituted` audit entry exists and the
-    // chain verifies.
-    verify_audit_chain(&audit_path, &verifying_key).expect("audit chain verifies");
-    let chain_text = std::fs::read_to_string(&audit_path).expect("read audit chain");
+    // (d) a chain-signed `secret.substituted` audit entry exists, the chain
+    // verifies, and the real secret never appears in it.
+    assert_audit_chain(&audit_path, &verifying_key, "secret.substituted");
+}
+
+/// Deny path: a module carrying a valid secret placeholder targets a destination
+/// the VM's network policy admits (claim-10 passes) but the secret's own binding
+/// does not list (claim-12). The endpoint drops the placeholder before any
+/// forward leg — the module observes a refusal, the destination is never
+/// contacted, and a chain-signed `secret.placeholder_dropped` entry records the
+/// drop. This is the fail-closed, audited half of the governance seam.
+///
+/// It deliberately exercises the bind-check drop rather than a bare claim-10
+/// network-policy denial: the latter refuses too, but the gate denial is not
+/// audited by design, so it cannot witness the "refused AND audited" property.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn governed_egress_denies_unbound_destination() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (mock_addr, dest_requests) = spawn_mock_destination();
+    let policy_dest = policy_dest();
+    // The secret is bound to a different host than the module targets, so sending
+    // it to `policy_dest` is a claim-12 drop even though claim-10 admits the hop.
+    let bound_host = "198.51.100.7";
+    assert_ne!(bound_host, policy_dest.ip().to_string());
+
+    let (service, handed, verifying_key, audit_path) =
+        build_service(dir.path(), policy_dest, bound_host, mock_addr);
+    let placeholder = handed[0].1.as_str().to_string();
+
+    let uds_path = dir.path().join("egress.sock");
+    let listener = tokio::net::UnixListener::bind(&uds_path).expect("bind substitution UDS");
+    tokio::spawn(Arc::clone(&service).serve(listener));
+
+    let request_json = serde_json::to_string(&mvm_core::substitution_wire::WireRequest {
+        method: "GET".to_string(),
+        url: format!("http://{policy_dest}/ping"),
+        headers: vec![("authorization".to_string(), format!("Bearer {placeholder}"))],
+        body_b64: String::new(),
+    })
+    .expect("WireRequest serializes");
     assert!(
-        chain_text.contains("secret.substituted"),
-        "audit chain must carry a secret.substituted entry: {chain_text}"
+        !request_json.contains(REAL_SECRET_VALUE),
+        "the request handed to the module must never carry the real secret"
     );
+
+    // Same ok-prefix probe: the module exits 0 only on WireResponse::Ok{200}; a
+    // refusal fails the prefix match and exits nonzero.
+    let ok_prefix = ok_status_200_prefix();
+    let wat = egress_probe_wat(&request_json, &ok_prefix);
+    let mut module_file = tempfile::Builder::new()
+        .suffix(".wat")
+        .tempfile()
+        .expect("wat tempfile");
+    module_file
+        .write_all(wat.as_bytes())
+        .expect("write wat fixture");
+    module_file.flush().expect("flush wat fixture");
+
+    let backend = WasmBackend::new().with_egress_endpoint(uds_path);
+    let config = VmStartConfig {
+        name: "witness-deny".to_string(),
+        rootfs_path: module_file.path().to_str().unwrap().to_string(),
+        ..Default::default()
+    };
+    let status = tokio::task::spawn_blocking(move || {
+        let id = backend.start(&config).expect("wasm module must run");
+        backend.wait(&id).expect("wait returns the exit status")
+    })
+    .await
+    .expect("spawn_blocking join");
+
+    // The module did not observe Ok{200} — the endpoint refused.
     assert!(
-        !chain_text.contains(REAL_SECRET_VALUE),
-        "audit chain must never carry the real secret value (claim 13)"
+        !status.success,
+        "an unbound destination must not yield WireResponse::Ok; exit code {:?}",
+        status.code
     );
+
+    // The drop precedes the forward leg, so the loopback mock never accepts.
+    assert!(
+        dest_requests
+            .recv_timeout(Duration::from_millis(500))
+            .is_err(),
+        "a dropped request must never reach the destination"
+    );
+
+    // The drop is audited: a chain-signed secret.placeholder_dropped entry lands,
+    // the chain verifies, and the real secret never appears.
+    assert_audit_chain(&audit_path, &verifying_key, "secret.placeholder_dropped");
 }
