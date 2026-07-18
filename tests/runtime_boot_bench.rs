@@ -337,22 +337,13 @@ fn wait_for_hvf_guest_agent(name: &str) -> Result<()> {
 
 fn guest_agent_socket_path(backend: &str, name: &str) -> Result<PathBuf> {
     match backend {
-        "firecracker" => {
-            let home = std::env::var("HOME").context("resolving HOME for Firecracker VM state")?;
-            Ok(Path::new(&home)
-                .join("microvm")
-                .join("vms")
-                .join(name)
-                .join("runtime")
-                .join("v.sock"))
-        }
-        "libkrun" | "krun" => Ok(Path::new(&mvm_core::config::mvm_home())
-            .join("vms")
-            .join(name)
-            .join(format!(
-                "vsock-{}.sock",
-                mvm_agentd::vsock::GUEST_AGENT_PORT
-            ))),
+        "firecracker" => Ok(mvm_core::config::vm_state_dir(name)
+            .join("runtime")
+            .join("v.sock")),
+        "libkrun" | "krun" => Ok(mvm_core::config::vm_state_dir(name).join(format!(
+            "vsock-{}.sock",
+            mvm_agentd::vsock::GUEST_AGENT_PORT
+        ))),
         other => bail!(
             "{READY_VAR}=guest-agent is not wired for backend {other:?}; use {READY_VAR}=start-return"
         ),

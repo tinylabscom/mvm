@@ -3139,7 +3139,7 @@ mod tests {
 
     // ── Dev-VM gating + data-dir-mode routing tests ─────────────────
     //
-    // These tests mutate `MVM_HOME` / `MVM_HOME` (and the ts-runner
+    // These tests mutate `MVM_HOME` (and the ts-runner
     // tests below, PATH / MVM_TSX) to redirect doctor's probes at a tempdir.
     // Env-var mutation is process-wide, so they all go through the shared
     // `TestEnv` guard, which serializes them behind one lock and restores the
