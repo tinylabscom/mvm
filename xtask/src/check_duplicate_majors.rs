@@ -46,6 +46,10 @@ const ALLOWLIST: &[&str] = &[
     "linux-raw-sys",
     "mio",
     "nix",
+    // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;
+    // the shipped mvmctl closure resolves nom exclusively at 7.x (via rcgen).
+    // The duplicate never reaches a product binary.
+    "nom",
     "oid-registry",
     "rand",
     "rand_chacha",

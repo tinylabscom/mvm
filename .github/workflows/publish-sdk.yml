@@ -54,7 +54,7 @@ jobs:
           import urllib.parse
           import urllib.request
 
-          root = pathlib.Path(".")
+          root = pathlib.Path("crates/mvm-sdk")
           release = tomllib.loads((root / "sdks" / "release.toml").read_text())
           pyproject = tomllib.loads((root / "sdks" / "python" / "pyproject.toml").read_text())
           package = json.loads((root / "sdks" / "typescript" / "package.json").read_text())
