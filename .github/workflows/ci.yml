@@ -118,6 +118,9 @@ jobs:
       - name: No baked network literals (IPs/ports/tmp-sockets)
         run: cargo run -p xtask -- check-no-network-literals
 
+      - name: mvm-cli drives machines through the mvm-client facade
+        run: cargo run -p xtask -- check-cli-runtime-surface
+
       - name: Conformance claim catalog
         run: cargo run -p xtask -- check-claim-catalog
 
