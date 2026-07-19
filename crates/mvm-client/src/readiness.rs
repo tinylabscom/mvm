@@ -18,3 +18,13 @@ use mvm_core::domain::instance::InstanceReadiness;
 pub fn record_readiness(vm_name: &str, readiness: InstanceReadiness) {
     mvm_runtime::vm::name_registry::record_readiness(vm_name, readiness);
 }
+
+/// Read a machine's last-recorded readiness milestone from the name registry —
+/// the read counterpart to [`record_readiness`]. `None` if the machine has no
+/// registry entry or no recorded milestone. Best-effort: a registry that can't
+/// be loaded reads as `None`.
+pub fn readiness_of(vm_name: &str) -> Option<InstanceReadiness> {
+    let path = mvm_runtime::vm::name_registry::registry_path();
+    let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path).ok()?;
+    registry.lookup(vm_name).and_then(|reg| reg.readiness.clone())
+}
