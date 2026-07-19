@@ -158,6 +158,61 @@ commands are NOT mechanical repeats, and each is its own design pass:
 Do each as its own designed slice; do not batch or blind-dispatch. The trait
 grows per slice and every impl must be updated (compiler-caught).
 
+## Full remaining boundary (categorized worklist — done after slices 1–3)
+
+Slices 1–3 (`ps`, `down`, `pause`/`resume`) route the first machine-lifecycle
+verbs. A full sweep of mvm-cli's remaining `mvm_runtime::` reaches shows the rest
+splits into five categories. Only the first is migration work; the other four are
+legitimately-direct and become the eventual `check-cli-runtime-surface` lint's
+allowlist.
+
+**A. Facade-lifecycle (still to migrate — reach `vm::name_registry` / `AnyBackend`
+dispatch for a drive-a-machine op):**
+- `up`/`run` (`vm/up.rs`, ~4100 lines) — the boot path. `run_machine`/`create_machine`
+  exist on the trait, but `up` layers image-resolve + network + overlay + readiness
+  on top; its own decomposition (likely: keep the CLI prep, route the final
+  admit+boot through `run_machine`). The single biggest command — its own design.
+- `set_ttl` (`vm/set_ttl.rs`, 75 lines) — a name-registry `expires_at` mutation
+  (the reaper's TTL). Small; a dedicated `set_ttl(id, Option<expires_at>)` facade
+  method. Clean next slice.
+- `sandbox` (`vm/sandbox.rs`) — registers/drives a sandbox; registry-backed.
+- the **`machine` command group** (`commands/machine/{runtime,spec_ops,mod}.rs`) —
+  a parallel VM abstraction that also loads the name registry directly; its own
+  slice(s).
+- `console`'s registry bookkeeping (the *interactive stream* stays direct — see C —
+  but its `VmNameRegistry` reads/writes are lifecycle state).
+- the `readiness.rs` helper (`record_readiness`) — the shared milestone writer used
+  by up/down; folds behind the facade with the verbs that call it.
+
+**B. Store surfaces (stay DIRECT — not "drive a running sandbox"):** `checkpoint`
+(`vm/checkpoint.rs`, 2034 lines — create/ls/rm/fork/restore/diff over
+`~/.mvm/checkpoints` + CoW rootfs) and `snapshot` (`vm/snapshot.rs`, already split
+out in slice 3). These manage host-local artifact stores, exactly parallel to the
+snapshot ls/rm the migration already left direct. A remote fleet does not
+checkpoint through the machine-drive client. **Decision: checkpoint is not a facade
+slice** — its `mvm_runtime::checkpoint` reach is legitimate; keep it in its own
+well-bounded module.
+
+**C. Streaming / interactive (stay DIRECT — do not fit request/response):**
+`console` (PTY-over-vsock), `wait` (vsock readiness poll), `exec`/`proc` (exec-over-
+vsock), `forward` (port forward), `fs`/`invoke` — all bidirectional or streaming
+vsock transports, like `logs --follow`. A streaming seam could be added later; not
+this migration.
+
+**D. Image / build (stay DIRECT — out of the machine-drive scope, a separate
+surface):** `mvm_runtime::{image,catalog,artifacts}` + `mvm-build` reaches in
+`image`, `artifact`, `build/*`, `diff`. Contributor/authoring, not runtime drive.
+
+**E. Substrate (stay DIRECT — the facade is built ON these):** `mvm_runtime::{ui,
+base::{shell,shell_mock,runtime_meta,cow}}` in `ui.rs`, `doctor.rs`, `exec.rs`, etc.
+Presentation + the `ShellEnvironment` re-export contract.
+
+The migration is therefore larger than 3–4 slices: category A alone is `up`
+(major) + `set_ttl` + `sandbox` + the `machine` group + console/readiness registry
+bits. Each is its own designed slice. The `check-cli-runtime-surface` lint lands
+LAST — once category A is drained — forbidding `mvm_runtime::vm::name_registry` and
+`AnyBackend` dispatch in mvm-cli while allowlisting B–E.
+
 ## Non-goals / invariants
 
 - The `mvmctl::runtime::*` re-export contract mvmd depends on is unchanged — this
