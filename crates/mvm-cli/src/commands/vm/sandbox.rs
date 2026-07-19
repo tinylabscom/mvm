@@ -5,9 +5,8 @@ use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 use std::collections::BTreeSet;
 
+use mvm_client::MvmClient;
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::VmStatus;
-use mvm_runtime::backend::AnyBackend;
 
 use super::Cli;
 
@@ -75,46 +74,36 @@ pub(in crate::commands) fn run(cli: &Cli, args: Args, cfg: &MvmConfig) -> Result
 }
 
 fn run_gc(_cli: &Cli, args: GcArgs, _cfg: &MvmConfig) -> Result<()> {
-    let registry_path = mvm_runtime::vm::name_registry::registry_path();
-    let mut registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path)
-        .with_context(|| {
-            format!(
-                "Failed to load VM name registry at {}",
-                registry_path.display()
-            )
-        })?;
     let running_names = collect_live_vm_names();
-    let now = chrono::Utc::now();
-    let candidates = gc_candidates(&registry, &running_names, now);
+    let now = chrono::Utc::now().to_rfc3339();
+    let stale = mvm_client::gc_stale_registrations(&running_names, &now, args.apply)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .context("garbage-collecting the VM name registry")?;
+    let candidates: Vec<GcCandidate> = stale
+        .into_iter()
+        .map(|s| GcCandidate {
+            name: s.name,
+            reason: if s.expired {
+                GcReason::ExpiredStopped
+            } else {
+                GcReason::Stopped
+            },
+        })
+        .collect();
     let dry_run = !args.apply;
-
-    if dry_run {
-        let summary = GcSummary::new(true, 0, candidates);
-        emit_gc_summary(&summary, args.json)?;
-        return Ok(());
-    }
-
-    for candidate in &candidates {
-        registry.deregister(&candidate.name);
-    }
-    registry.save(&registry_path).with_context(|| {
-        format!(
-            "Failed to save VM name registry at {}",
-            registry_path.display()
-        )
-    })?;
-
-    let removed_count = candidates.len();
-    let summary = GcSummary::new(false, removed_count, candidates);
+    let removed_count = if dry_run { 0 } else { candidates.len() };
+    let summary = GcSummary::new(dry_run, removed_count, candidates);
     emit_gc_summary(&summary, args.json)?;
 
-    let names: Vec<&str> = summary.candidates.iter().map(|c| c.name.as_str()).collect();
-    let detail = if names.len() <= 8 {
-        format!("removed={},names=[{}]", names.len(), names.join(","))
-    } else {
-        format!("removed={}", names.len())
-    };
-    mvm_core::audit_emit!(SandboxGc, "{detail}");
+    if !dry_run {
+        let names: Vec<&str> = summary.candidates.iter().map(|c| c.name.as_str()).collect();
+        let detail = if names.len() <= 8 {
+            format!("removed={},names=[{}]", names.len(), names.join(","))
+        } else {
+            format!("removed={}", names.len())
+        };
+        mvm_core::audit_emit!(SandboxGc, "{detail}");
+    }
     Ok(())
 }
 
@@ -175,99 +164,33 @@ fn emit_gc_summary(summary: &GcSummary, json: bool) -> Result<()> {
 }
 
 fn collect_live_vm_names() -> BTreeSet<String> {
-    AnyBackend::list_all()
+    let client = mvm_client::LocalBackend::new();
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return BTreeSet::new();
+    };
+    let machines = runtime
+        .block_on(client.list_machines(mvm_client::MachineFilter::all()))
+        .unwrap_or_default();
+    machines
         .into_iter()
-        .filter(|vm| {
+        .filter(|m| {
             matches!(
-                vm.status,
-                VmStatus::Starting | VmStatus::Running | VmStatus::Paused
+                m.status,
+                mvm_client::MachineStatus::Starting
+                    | mvm_client::MachineStatus::Running
+                    | mvm_client::MachineStatus::Paused
             )
         })
-        .map(|vm| vm.name)
+        .map(|m| m.name)
         .collect()
-}
-
-fn gc_candidates(
-    registry: &mvm_runtime::vm::name_registry::VmNameRegistry,
-    live_names: &BTreeSet<String>,
-    now: chrono::DateTime<chrono::Utc>,
-) -> Vec<GcCandidate> {
-    let mut candidates: Vec<GcCandidate> = registry
-        .vms
-        .iter()
-        .filter_map(|(name, reg)| {
-            if live_names.contains(name) {
-                return None;
-            }
-            let expired = reg
-                .expires_at
-                .as_deref()
-                .and_then(mvm_core::util::time::parse_iso8601)
-                .map(|expires_at| expires_at < now)
-                .unwrap_or(false);
-            let reason = if expired {
-                GcReason::ExpiredStopped
-            } else {
-                GcReason::Stopped
-            };
-            Some(GcCandidate {
-                name: name.clone(),
-                reason,
-            })
-        })
-        .collect();
-    candidates.sort_by(|a, b| a.name.cmp(&b.name));
-    candidates
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mvm_runtime::vm::name_registry::{RegisterParams, VmNameRegistry};
-
-    fn registry_with(name: &str, expires_at: Option<&str>) -> VmNameRegistry {
-        let mut registry = VmNameRegistry::default();
-        let mut params = RegisterParams::minimal(name, "/tmp/mvm-test-vm", "default");
-        params.expires_at = expires_at.map(str::to_string);
-        registry
-            .register_with_metadata(params)
-            .expect("register vm");
-        registry
-    }
-
-    #[test]
-    fn gc_candidates_skip_live_vms() {
-        let registry = registry_with("live", None);
-        let live_names = BTreeSet::from(["live".to_string()]);
-        let candidates = gc_candidates(&registry, &live_names, chrono::Utc::now());
-        assert!(candidates.is_empty());
-    }
-
-    #[test]
-    fn gc_candidates_include_stopped_registry_entries() {
-        let registry = registry_with("stopped", None);
-        let candidates = gc_candidates(&registry, &BTreeSet::new(), chrono::Utc::now());
-        assert_eq!(
-            candidates,
-            vec![GcCandidate {
-                name: "stopped".to_string(),
-                reason: GcReason::Stopped,
-            }]
-        );
-    }
-
-    #[test]
-    fn gc_candidates_mark_expired_stopped_entries() {
-        let registry = registry_with("expired", Some("2000-01-01T00:00:00Z"));
-        let candidates = gc_candidates(&registry, &BTreeSet::new(), chrono::Utc::now());
-        assert_eq!(
-            candidates,
-            vec![GcCandidate {
-                name: "expired".to_string(),
-                reason: GcReason::ExpiredStopped,
-            }]
-        );
-    }
 
     #[test]
     fn gc_summary_serializes_candidates_and_counts() {
