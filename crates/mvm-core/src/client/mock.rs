@@ -157,6 +157,16 @@ impl MvmClient for MockBackend {
             .cloned()
             .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })
     }
+
+    async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
+        let mut all = self.machines.lock().unwrap();
+        let m = all
+            .iter_mut()
+            .find(|m| m.id == *id)
+            .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })?;
+        m.expires_at = expires_at;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

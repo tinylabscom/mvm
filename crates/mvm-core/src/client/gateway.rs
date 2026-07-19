@@ -392,6 +392,14 @@ impl MvmClient for GatewayBackend {
         })?;
         Ok(env.data.into())
     }
+
+    async fn set_ttl(&self, _id: &MachineId, _expires_at: Option<String>) -> Result<()> {
+        // The fleet's TTL lives in its own control plane; this client has no
+        // remote TTL endpoint yet. Refuse rather than fake success.
+        Err(MvmError::Backend {
+            reason: "gateway set-ttl is not wired (no remote TTL endpoint)".into(),
+        })
+    }
 }
 
 #[cfg(test)]

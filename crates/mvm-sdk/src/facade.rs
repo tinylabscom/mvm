@@ -378,6 +378,15 @@ impl MvmClient for SubprocessBackend {
                 .into(),
         })
     }
+
+    async fn set_ttl(&self, _id: &MachineId, _expires_at: Option<String>) -> Result<()> {
+        // TTL lives in the host name registry, which this courier doesn't own.
+        Err(MvmError::Backend {
+            reason: "set-ttl is not supported via the subprocess facade; \
+                     use `mvmctl set-ttl` or LocalBackend"
+                .into(),
+        })
+    }
 }
 
 #[cfg(test)]

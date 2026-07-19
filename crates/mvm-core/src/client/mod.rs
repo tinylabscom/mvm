@@ -80,6 +80,11 @@ pub trait MvmClient: Send + Sync {
         id: &MachineId,
         cfg: ReconfigureRequest,
     ) -> Result<MachineState>;
+
+    /// Set or clear a machine's TTL — the `expires_at` the idle reaper honors.
+    /// `Some(rfc3339)` arms it, `None` clears it. Errors if the machine is not
+    /// registered.
+    async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()>;
 }
 
 #[cfg(test)]

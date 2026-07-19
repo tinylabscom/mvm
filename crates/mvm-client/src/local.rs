@@ -693,6 +693,28 @@ impl MvmClient for LocalBackend {
         }
     }
 
+    async fn set_ttl(&self, id: &MachineId, expires_at: Option<String>) -> Result<()> {
+        let path = mvm_runtime::vm::name_registry::registry_path();
+        let mut registry = VmNameRegistry::load(&path).map_err(|e| {
+            backend_err(format!(
+                "loading VM name registry at {}: {e}",
+                path.display()
+            ))
+        })?;
+        let updated = registry
+            .set_expires_at(&id.0, expires_at)
+            .map_err(|e| backend_err(format!("updating registry record: {e}")))?;
+        if !updated {
+            return Err(MvmError::NotFound { id: id.0.clone() });
+        }
+        registry.save(&path).map_err(|e| {
+            backend_err(format!(
+                "saving VM name registry at {}: {e}",
+                path.display()
+            ))
+        })
+    }
+
     async fn remove_machine(&self, id: &MachineId) -> Result<()> {
         let vid = VmId(id.0.clone());
         // Idempotent: removing an absent machine is `Ok` (trait contract).
