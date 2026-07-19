@@ -4,10 +4,10 @@
 //! semver-incompatible major versions (a ratchet). A duplicate major means
 //! both versions compile into the tree: more build time, more code shipped,
 //! and two copies of a type that cannot be passed across the boundary between
-//! the two halves of the graph. The OCI/TLS stack is the standing offender
-//! (`http`/`hyper`/`reqwest`/`base64` 0.x↔1.x), and de-duplicating it is an
-//! open dependency-roadmap goal — this gate stops the set from *growing* while
-//! that work proceeds, and ratchets down as duplicates are removed.
+//! the two halves of the graph. The OCI/TLS stack (`http`/`hyper`/`reqwest`/
+//! `base64` 0.x↔1.x) was the historical offender; the workspace consolidation
+//! unified it on single majors. This gate stops the set from *growing* and
+//! ratchets down as the remaining duplicates are removed.
 //!
 //! The scan reads `cargo metadata` (the full resolved graph from `Cargo.lock`,
 //! every platform), so the result is deterministic regardless of the host
@@ -20,61 +20,29 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-/// Crates known to resolve at more than one major today. Baseline captured
-/// 2026-06-20 from `cargo metadata --locked`. Remove an entry freely once the
-/// duplication is gone (the gate flags stale entries); adding one must be
-/// justified in the PR that does — it admits a new duplicate major into the
-/// build.
+/// Crates known to resolve at more than one major today. Baseline recaptured
+/// 2026-07-19 from `cargo metadata --locked` after the workspace consolidation
+/// de-duplicated the OCI/TLS stack (ratcheted 44 → 11 entries). Remove an entry
+/// freely once the duplication is gone (the gate flags stale entries); adding
+/// one must be justified in the PR that does — it admits a new duplicate major
+/// into the build.
 const ALLOWLIST: &[&str] = &[
-    "asn1-rs",
-    "asn1-rs-derive",
-    "async-channel",
-    "base64",
     "bitflags",
-    "cpufeatures",
     // logging facade pulled transitively by smoltcp's heapless; the second
     // major is benign — there is no defmt consumer in the build.
     "defmt",
-    "der-parser",
-    "event-listener",
     "getrandom",
     "hashbrown",
-    "http",
-    "http-body",
-    "hyper",
-    "itertools",
-    "linux-raw-sys",
-    "mio",
-    "nix",
     // nom 8 is pulled only by the cargo-fuzz tooling in the fuzz member crates;
     // the shipped mvmctl closure resolves nom exclusively at 7.x (via rcgen).
     // The duplicate never reaches a product binary.
     "nom",
-    "oid-registry",
     "rand",
-    "rand_chacha",
     "rand_core",
-    "redox_syscall",
-    "reqwest",
-    "rustix",
-    "socket2",
-    "syn",
     "thiserror",
     "thiserror-impl",
-    "unicode-width",
-    "which",
     "windows-core",
     "windows-sys",
-    "windows-targets",
-    "windows_aarch64_gnullvm",
-    "windows_aarch64_msvc",
-    "windows_i686_gnu",
-    "windows_i686_gnullvm",
-    "windows_i686_msvc",
-    "windows_x86_64_gnu",
-    "windows_x86_64_gnullvm",
-    "windows_x86_64_msvc",
-    "x509-parser",
 ];
 
 pub fn run(workspace: &Path) -> Result<()> {
