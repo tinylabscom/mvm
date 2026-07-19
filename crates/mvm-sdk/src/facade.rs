@@ -15,7 +15,7 @@ use std::process::Command;
 use async_trait::async_trait;
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    PauseOpts, PauseOutcome, ReconfigureRequest, ResumeOpts,
+    PauseOpts, PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use mvm_core::client::{MvmClient, MvmError, Result};
 
@@ -343,7 +343,7 @@ impl MvmClient for SubprocessBackend {
         })
     }
 
-    async fn resume_machine(&self, _id: &MachineId, _opts: ResumeOpts) -> Result<()> {
+    async fn resume_machine(&self, _id: &MachineId, _opts: ResumeOpts) -> Result<ResumeOutcome> {
         // Symmetric with `pause_machine`.
         Err(MvmError::Backend {
             reason: "resume is not supported via the subprocess facade; \

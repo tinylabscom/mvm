@@ -11,7 +11,7 @@ use reqwest::{StatusCode, Url};
 use crate::client::MvmClient;
 use crate::client::dto::{
     LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, PauseOpts,
-    PauseOutcome, ReconfigureRequest, ResumeOpts,
+    PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
 
@@ -324,7 +324,7 @@ impl MvmClient for GatewayBackend {
         })
     }
 
-    async fn resume_machine(&self, _id: &MachineId, _opts: ResumeOpts) -> Result<()> {
+    async fn resume_machine(&self, _id: &MachineId, _opts: ResumeOpts) -> Result<ResumeOutcome> {
         // Symmetric with `pause_machine`: no remote snapshot restore endpoint yet.
         Err(MvmError::Backend {
             reason: "gateway resume is not wired (remote instance snapshot unsupported)".into(),

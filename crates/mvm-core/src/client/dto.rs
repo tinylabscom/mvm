@@ -308,6 +308,28 @@ pub struct ResumeOpts {
     pub warm: bool,
 }
 
+/// What a `resume_machine` did — the detail the caller renders in its success
+/// line and, crucially, the chain-signed `WorkloadWake` audit entry, at parity
+/// with [`PauseOutcome`]. Plain data, REST-satisfiable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeOutcome {
+    /// The verified snapshot's epoch (plain resume). `0` for a warm resume,
+    /// which restores live memory rather than a sealed snapshot.
+    #[serde(default)]
+    pub epoch: u64,
+    /// Length in bytes of the restored `vmstate.bin` (plain resume); `0` for warm.
+    #[serde(default)]
+    pub vmstate_len: u64,
+    /// Length in bytes of the restored `mem.bin` (plain resume); `0` for warm.
+    #[serde(default)]
+    pub mem_len: u64,
+    /// The warm-start reseed summary (whether the guest rotated its VMGenID and
+    /// reseeded). `Some` for a warm resume, `None` for a plain verify-and-resume.
+    #[serde(default)]
+    pub reseed: Option<String>,
+}
+
 /// A patch over a machine's reconfigurable fields — intent only. Every
 /// field is optional: `None` means "leave unchanged" (patch semantics).
 /// `mem_initial` is intentionally absent — it stays a CLI-only field

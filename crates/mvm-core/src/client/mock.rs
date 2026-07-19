@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use crate::client::MvmClient;
 use crate::client::dto::{
     LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus, PauseOpts,
-    PauseOutcome, ReconfigureRequest, ResumeOpts,
+    PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 use crate::client::error::{MvmError, Result};
 
@@ -108,14 +108,16 @@ impl MvmClient for MockBackend {
         Ok(PauseOutcome::default())
     }
 
-    async fn resume_machine(&self, id: &MachineId, _opts: ResumeOpts) -> Result<()> {
+    async fn resume_machine(&self, id: &MachineId, _opts: ResumeOpts) -> Result<ResumeOutcome> {
         let mut all = self.machines.lock().unwrap();
         let m = all
             .iter_mut()
             .find(|m| m.id == *id)
             .ok_or_else(|| MvmError::NotFound { id: id.0.clone() })?;
         m.status = MachineStatus::Running;
-        Ok(())
+        // No real snapshot substrate — a zeroed outcome keeps trait-level tests
+        // exercising the pause→resume flow without asserting snapshot detail.
+        Ok(ResumeOutcome::default())
     }
 
     async fn machine_logs(&self, id: &MachineId, _opts: LogOpts) -> Result<Vec<u8>> {

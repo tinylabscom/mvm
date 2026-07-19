@@ -30,7 +30,7 @@ use mvm_runtime::AnyBackend;
 
 use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, MachineStatus,
-    PauseOpts, PauseOutcome, PortMapping, ResumeOpts,
+    PauseOpts, PauseOutcome, PortMapping, ResumeOpts, ResumeOutcome,
 };
 use mvm_core::client::{MvmClient, MvmError, Result};
 use mvm_core::config::vm_state_dir;
@@ -116,7 +116,7 @@ impl LocalBackend {
     /// fresh VMGenID, load + resume live memory, reseed. Fails closed with the
     /// typed `WarmStartError::Unsupported` recovery hint on a disk-only backend
     /// rather than silently cold-booting.
-    fn warm_resume(&self, name: &str) -> Result<()> {
+    fn warm_resume(&self, name: &str) -> Result<ResumeOutcome> {
         let config = VmStartConfig {
             name: name.to_string(),
             ..Default::default()
@@ -125,12 +125,17 @@ impl LocalBackend {
             .backend
             .warm_start(&config, SnapshotCapability::LiveMemory)
         {
-            Ok(_outcome) => {
+            Ok(outcome) => {
                 // FC keeps its pid across pause/resume, so the marker must be
                 // cleared explicitly on a successful warm resume.
                 let _ = std::fs::remove_file(vm_state_dir(name).join("fc.paused"));
                 set_registry_resumed(name);
-                Ok(())
+                // A warm resume restores live memory, not a sealed snapshot, so it
+                // carries no epoch/lengths — only the reseed summary.
+                Ok(ResumeOutcome {
+                    reseed: Some(outcome.reseed.resume_summary().to_string()),
+                    ..Default::default()
+                })
             }
             // Name the tier mismatch + recovery hint verbatim (its `Display` is
             // the actionable message); other failures keep a locating context.
@@ -143,12 +148,12 @@ impl LocalBackend {
     /// older-epoch snapshot** — load it back and resume vCPUs, then finish
     /// bringing the guest back with a fresh-VMGenID PostRestore (skipped for the
     /// mock, which has no guest agent).
-    fn plain_resume(&self, name: &str) -> Result<()> {
+    fn plain_resume(&self, name: &str) -> Result<ResumeOutcome> {
         let io = self.snapshot_io_for(name)?;
         // The replay-refusal gate: `verify_and_resume` rejects a snapshot whose
         // epoch is below the persisted high-water mark before restoring anything.
         // Called unchanged — this is the security property of resume.
-        verify_and_resume(name, &*io)
+        let sidecar = verify_and_resume(name, &*io)
             .map_err(|e| backend_err(format!("resuming VM {name:?}: {e:#}")))?;
 
         // FC keeps the same pid across pause/resume, so a stale fc.paused would
@@ -163,7 +168,14 @@ impl LocalBackend {
         if !self.is_mock() {
             signal_guest_post_restore(name)?;
         }
-        Ok(())
+        // Report the verified snapshot's epoch + artifact lengths so the caller's
+        // WorkloadWake audit entry carries the same detail the pause did.
+        Ok(ResumeOutcome {
+            epoch: sidecar.epoch,
+            vmstate_len: sidecar.vmstate_len,
+            mem_len: sidecar.mem_len,
+            reseed: None,
+        })
     }
 }
 
@@ -670,7 +682,7 @@ impl MvmClient for LocalBackend {
         })
     }
 
-    async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<()> {
+    async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome> {
         // `warm` routes through the backend's live-memory warm-start path (fails
         // closed on a disk-only backend); the default plain path verifies +
         // restores the sealed snapshot and signals the guest.

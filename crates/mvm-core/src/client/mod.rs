@@ -22,7 +22,7 @@ pub use error::{MvmError, Result};
 
 use dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineState, PauseOpts,
-    PauseOutcome, ReconfigureRequest, ResumeOpts,
+    PauseOutcome, ReconfigureRequest, ResumeOpts, ResumeOutcome,
 };
 
 /// The single machine-driving contract. `async_trait` boxes the futures so
@@ -60,7 +60,7 @@ pub trait MvmClient: Send + Sync {
     /// restoring, then finishes bringing the guest back. `opts.warm` selects the
     /// backend's live-memory warm-start path, which fails closed on a disk-only
     /// backend.
-    async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<()>;
+    async fn resume_machine(&self, id: &MachineId, opts: ResumeOpts) -> Result<ResumeOutcome>;
 
     /// Remove a machine by id (stopping it first if needed). Idempotent:
     /// removing an absent machine is `Ok`.

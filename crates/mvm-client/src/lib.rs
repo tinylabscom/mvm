@@ -14,6 +14,7 @@ pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{
     ExecResult, LogOpts, MachineFilter, MachineId, MachineSpec, MachineSpecBuilder, MachineState,
     MachineStatus, PauseOpts, PauseOutcome, PortMapping, ReconfigureRequest, ResumeOpts,
+    ResumeOutcome,
 };
 #[cfg(feature = "remote")]
 pub use mvm_core::client::gateway;

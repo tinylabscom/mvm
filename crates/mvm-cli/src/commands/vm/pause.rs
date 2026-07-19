@@ -97,7 +97,7 @@ pub(in crate::commands) fn run_resume(
         .enable_all()
         .build()
         .context("build runtime for resuming")?;
-    runtime
+    let outcome = runtime
         .block_on(client.resume_machine(
             &MachineId(args.name.clone()),
             ResumeOpts { warm: args.warm },
@@ -105,11 +105,20 @@ pub(in crate::commands) fn run_resume(
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if args.warm {
-        println!("{}: warm-started (live-memory resume)", args.name);
-        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "warm_start backend={}", args.hypervisor);
+        // A warm resume restores live memory (no sealed snapshot), so the detail
+        // is the reseed summary rather than epoch/lengths.
+        let reseed = outcome.reseed.as_deref().unwrap_or("no reseed reported");
+        println!("{}: warm-started (live-memory resume, {reseed})", args.name);
+        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "warm_start backend={} {reseed}", args.hypervisor);
     } else {
-        println!("{}: resumed", args.name);
-        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "backend={}", args.hypervisor);
+        // Plain resume — carry the verified snapshot's epoch + artifact lengths
+        // into the WorkloadWake entry, at parity with the pause's WorkloadSleep.
+        println!(
+            "{}: resumed (epoch {}, vmstate {} B, mem {} B)",
+            args.name, outcome.epoch, outcome.vmstate_len, outcome.mem_len
+        );
+        mvm_core::audit_emit!(WorkloadWake, vm: &args.name, "epoch={} vmstate={} mem={}",
+            outcome.epoch, outcome.vmstate_len, outcome.mem_len);
     }
     Ok(())
 }
