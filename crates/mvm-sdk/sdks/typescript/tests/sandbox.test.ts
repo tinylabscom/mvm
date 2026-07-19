@@ -140,10 +140,11 @@ describe("Sandbox.kill / dispose", () => {
 // ── modes ────────────────────────────────────────────────────────────
 
 describe("MVM_SDK_MODE", () => {
-  it("live mode without MVM_CLI_BIN throws", () => {
+  it("live mode without the host CLI throws", () => {
     process.env.MVM_SDK_MODE = "live";
     delete process.env.MVM_CLI_BIN;
-    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/MVM_CLI_BIN/);
+    process.env.PATH = "";
+    expect(() => mvm.Sandbox.create("python-3.12")).toThrow(/mvmctl/);
   });
 
   it("plan mode redirects to mvmctl run --mode plan", () => {

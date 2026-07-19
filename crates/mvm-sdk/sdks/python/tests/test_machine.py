@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 import mvm
+from mvm._cli import resolve_cli_bin
 from mvm._machine import (
     _machine_check_artifact_argv,
     _machine_create_argv,
@@ -23,6 +24,7 @@ from mvm._machine import (
 
 @pytest.fixture(autouse=True)
 def _isolate() -> None:
+    path = os.environ.get("PATH")
     os.environ.pop("MVM_CLI_BIN", None)
     os.environ.pop("MVM_FAKE_MVM_RECORD", None)
     os.environ.pop("MVM_FAKE_MVM_EXIT", None)
@@ -32,10 +34,19 @@ def _isolate() -> None:
     os.environ.pop("MVM_FAKE_MVM_RECORD", None)
     os.environ.pop("MVM_FAKE_MVM_EXIT", None)
     os.environ.pop("MVM_FAKE_MVM_MACHINE_RUN_OUT", None)
+    if path is None:
+        os.environ.pop("PATH", None)
+    else:
+        os.environ["PATH"] = path
 
 
 def _fake_mvm() -> Path:
     return Path(__file__).parent / "fixtures" / "fake-mvm"
+
+
+def _write_fake_cli(path: Path) -> None:
+    path.write_text(_fake_mvm().read_text())
+    path.chmod(0o755)
 
 
 def _records(path: Path) -> list[str]:
@@ -50,6 +61,23 @@ def _fixture(name: str) -> list[str]:
         .read_text()
         .splitlines()
     )
+
+
+def test_resolve_cli_bin_prefers_explicit_env_override(tmp_path: Path) -> None:
+    explicit = tmp_path / "explicit-cli"
+    fallback = tmp_path / "mvmctl"
+    _write_fake_cli(explicit)
+    _write_fake_cli(fallback)
+    os.environ["MVM_CLI_BIN"] = str(explicit)
+    os.environ["PATH"] = str(tmp_path)
+    assert resolve_cli_bin(purpose="tests") == str(explicit)
+
+
+def test_resolve_cli_bin_prefers_mvmctl_on_path(tmp_path: Path) -> None:
+    fallback = tmp_path / "mvmctl"
+    _write_fake_cli(fallback)
+    os.environ["PATH"] = str(tmp_path)
+    assert resolve_cli_bin(purpose="tests") == str(fallback)
 
 
 def test_machine_run_default_argv_matches_cli_preflight_fixture() -> None:

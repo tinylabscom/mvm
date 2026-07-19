@@ -85,7 +85,7 @@ pub(in crate::commands) mod builder {
         };
         use mvm_core::packs::PackManifest;
 
-        use crate::commands::env::dev_vz::bootstrap::attested_builder_pack::{
+        use crate::commands::env::builder_vm::bootstrap::attested_builder_pack::{
             fetch_release_builder_pack_staging, host_pack_verify_inputs, keyless_release_policy,
         };
 

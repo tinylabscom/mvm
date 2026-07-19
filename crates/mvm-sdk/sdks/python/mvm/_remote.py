@@ -43,10 +43,11 @@ import inspect
 import json
 import os
 import re
-import shutil
 import signal
 import warnings
 from typing import Any, Awaitable, Callable
+
+from mvm._cli import resolve_cli_bin
 
 # Mirror of the IR-side `is_valid_id` rule. Defense-in-depth: even if a
 # caller bypassed the host validator (constructed IR by hand, etc.), the
@@ -257,19 +258,13 @@ def _no_vm_flags_for(fn: Callable[..., Any], format: str) -> list[str]:
 
 
 def _locate_mvmctl() -> str:
-    explicit = os.environ.get("MVM_MVM_BIN")
-    if explicit:
-        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
-            return explicit
-        raise MvmTransportError(
-            f"MVM_MVM_BIN points at {explicit!r} but it is not an executable file"
+    try:
+        return resolve_cli_bin(
+            purpose="remote function dispatch",
+            include_legacy_env=True,
         )
-    found = shutil.which("mvm") or shutil.which("mvmctl")
-    if found is None:
-        raise MvmTransportError(
-            "mvmctl not found via MVM_MVM_BIN or PATH; set MVM_MVM_BIN to the binary"
-        )
-    return found
+    except RuntimeError as exc:
+        raise MvmTransportError(str(exc)) from exc
 
 
 def _encode(format: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> bytes:

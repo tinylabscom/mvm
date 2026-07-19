@@ -32,7 +32,7 @@ pub(in crate::commands) fn bootstrap_environment(production: bool) -> Result<()>
     // published, SHA-256-verified image; on a source checkout it builds it
     // locally (a source checkout never downloads mvm-release artifacts).
     // Cache-gated, so it is a fast no-op when the image is already present.
-    super::dev_vz::bootstrap_builder_vm_image()?;
+    super::builder_vm::bootstrap_builder_vm_image()?;
     ui::success("\nBootstrap complete.");
     Ok(())
 }

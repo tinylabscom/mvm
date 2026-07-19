@@ -70,6 +70,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from mvm import _ir
+from mvm._cli import MVM_CLI_BIN_ENV, cli_resolution_hint, resolve_cli_bin
 from mvm._dsl import literal as _literal_value
 
 __all__ = [
@@ -121,13 +122,6 @@ MVM_SDK_MODE_ENV = "MVM_SDK_MODE"
 #: auto-exec path uses this to capture the recording without
 #: parsing stdout (which the user's own script may write to).
 MVM_SDK_OUT_PATH_ENV = "MVM_SDK_OUT_PATH"
-
-#: Plan 73 Followup H-live — when ``MVM_SDK_MODE=live`` is set, the
-#: SDK shells out to the ``mvmctl`` binary at this path. The host's
-#: ``mvmctl run --mode live`` verb sets it to its own
-#: ``current_exe()`` so a `cargo run -- run --mode live` flow finds
-#: the same binary it invoked through.
-MVM_CLI_BIN_ENV = "MVM_CLI_BIN"
 
 #: Plan ``Considerations to fold in or defer`` — every
 #: ``Sandbox.create()`` sets a default 30-minute TTL so the
@@ -297,13 +291,12 @@ def _resolve_mode() -> str:
     if raw == "record":
         return "record"
     if raw == "live":
-        if not os.environ.get(MVM_CLI_BIN_ENV):
+        try:
+            resolve_cli_bin(purpose="MVM_SDK_MODE=live")
+        except RuntimeError as exc:
             raise SandboxModeError(
-                "MVM_SDK_MODE=live requires MVM_CLI_BIN to point at a `mvmctl` binary. "
-                "The host's `mvmctl run --mode live` verb sets this automatically; if "
-                "you're running the SDK directly, export MVM_CLI_BIN=/path/to/mvmctl "
-                "before invoking your script."
-            )
+                str(exc)
+            ) from exc
         return "live"
     if raw == "plan":
         raise SandboxModeError(
@@ -560,11 +553,10 @@ class _LiveTransport:
         """Run ``mvmctl machine run -d --up-json --name <id> --manifest
         <template>`` and parse the JSON envelope. Raises
         :class:`SandboxLiveError` on any failure."""
-        mvm_cli_bin = os.environ.get(MVM_CLI_BIN_ENV) or ""
-        if not mvm_cli_bin:
-            raise SandboxModeError(
-                "MVM_SDK_MODE=live requires MVM_CLI_BIN to point at a `mvmctl` binary."
-            )
+        try:
+            mvm_cli_bin = resolve_cli_bin(purpose="Sandbox live mode")
+        except RuntimeError as exc:
+            raise SandboxModeError(str(exc)) from exc
         # Generate a short, validatable VM id. `mvmctl machine run` rejects
         # names that don't match its validator; alphanumerics with
         # a hyphen are safe.
@@ -594,7 +586,7 @@ class _LiveTransport:
             )
         except FileNotFoundError as exc:
             raise SandboxLiveError(
-                f"`{mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                f"`{mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
                 argv=argv,
             ) from exc
 
@@ -704,7 +696,7 @@ class _LiveTransport:
             )
         except FileNotFoundError as exc:
             raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
                 argv=start_shell,
             ) from exc
         if start_result.returncode != 0:
@@ -747,7 +739,7 @@ class _LiveTransport:
             )
         except FileNotFoundError as exc:
             raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
                 argv=wait_shell,
             ) from exc
         except subprocess.TimeoutExpired as exc:
@@ -777,7 +769,7 @@ class _LiveTransport:
             )
         except FileNotFoundError as exc:
             raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
                 argv=shell,
             ) from exc
         if result.returncode != 0:
@@ -797,7 +789,7 @@ class _LiveTransport:
             result = subprocess.run(shell, check=False, capture_output=True)
         except FileNotFoundError as exc:
             raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
                 argv=shell,
             ) from exc
         if result.returncode != 0:
@@ -823,7 +815,7 @@ class _LiveTransport:
             )
         except FileNotFoundError as exc:
             raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
                 argv=shell,
             ) from exc
         self._forwards.append(proc)
@@ -852,7 +844,7 @@ class _LiveTransport:
             )
         except FileNotFoundError as exc:
             raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
                 argv=shell,
             ) from exc
         if result.returncode != 0:
@@ -874,7 +866,7 @@ class _LiveTransport:
             )
         except FileNotFoundError as exc:
             raise SandboxLiveError(
-                f"`{self.mvm_cli_bin}` not found on disk; check MVM_CLI_BIN",
+                f"`{self.mvm_cli_bin}` not found on disk; {cli_resolution_hint()}",
                 argv=shell,
             ) from exc
         # Mirror the SDK's "user prints to their own stdout"

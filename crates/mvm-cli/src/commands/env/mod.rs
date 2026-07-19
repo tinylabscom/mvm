@@ -6,9 +6,9 @@
 
 pub(super) mod artifact_verify;
 pub(super) mod bootstrap;
+pub(super) mod builder_vm;
 pub(super) mod cleanup;
 pub(super) mod completions;
-pub(super) mod dev_vz;
 pub(super) mod doctor;
 pub(super) mod group;
 pub(super) mod init;

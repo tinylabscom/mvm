@@ -10,7 +10,7 @@ pub(super) fn run(cache_root: &Path, reference: String, prod: bool) -> Result<()
     // Materialization may spawn a builder VM (see `resolve_or_pull_run_image`);
     // sweep any helper processes a prior builder run orphaned before adding
     // another.
-    crate::commands::env::dev_vz::sweep_orphaned_vm_helpers_on_startup();
+    crate::commands::env::builder_vm::sweep_orphaned_vm_helpers_on_startup();
 
     let (image, trust, auth_source) = super::pull_image_with_trust(cache_root, &reference, prod)?;
     let provenance = image.provenance("image_pull", &reference, &trust);

@@ -1,75 +1,94 @@
 name: Publish SDK to PyPI
 
-# Publishes the Python SDK (crates/mvm-sdk/sdks/python, package `mvm`) to PyPI.
-#
-# Trigger:
-#   - automatically when a GitHub Release is published (same event that
-#     drives publish-crates.yml, so the SDK ships at the same version as
-#     the toolchain — see the version-vs-tag guard below);
-#   - manually via workflow_dispatch (dry_run=true builds + checks only,
-#     no upload — use this to rehearse before the first real publish).
-#
-# Auth: PyPI Trusted Publishing (OIDC) — no long-lived token. Configure a
-# trusted publisher on PyPI first (see
-# specs/adrs/105-sdk-facade-machine-client-convergence.md, "Runbook:
-# publishing the mvm SDKs"):
-#   project `mvm` → Publishing → add GitHub publisher
-#   (owner tinylabscom, repo mvm, workflow publish-pypi.yml, environment pypi).
-# New projects use a "pending publisher" so the first publish creates the
-# project under OIDC with no token.
-
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
+  workflow_call:
     inputs:
       dry_run:
-        description: "Build + validate only; skip the PyPI upload"
+        description: "Build + smoke only; skip the PyPI upload"
         required: true
-        default: true
         type: boolean
 
-concurrency:
-  group: publish-pypi
-  cancel-in-progress: false
-
 jobs:
-  publish:
+  build:
     runs-on: ubuntu-latest
-    environment: pypi
     permissions:
-      id-token: write # OIDC for Trusted Publishing
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # Version coupling: the SDK emits IR that the same-version toolchain
-      # consumes (launch.json `toolchain_version` == mvmctl CARGO_PKG_VERSION).
-      # Refuse to publish an SDK whose version doesn't match the release tag.
-      - name: Assert SDK version matches the release tag
-        if: github.event_name == 'release'
+      - name: Validate SDK release manifest and package metadata
         run: |
           set -euo pipefail
-          sdk_ver=$(grep -E '^version' crates/mvm-sdk/sdks/python/pyproject.toml | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          tag="${GITHUB_REF_NAME#v}"
-          echo "sdk=$sdk_ver tag=$tag"
-          if [ "$sdk_ver" != "$tag" ]; then
-            echo "::error::crates/mvm-sdk/sdks/python/pyproject.toml version ($sdk_ver) != release tag ($tag). Bump it in the release commit."
-            exit 1
-          fi
+          python - <<'PY'
+          import pathlib
+          import tomllib
+
+          root = pathlib.Path(".")
+          release = tomllib.loads((root / "sdks" / "release.toml").read_text())
+          project = tomllib.loads((root / "sdks" / "python" / "pyproject.toml").read_text())
+
+          manifest_version = release["version"]
+          package_version = project["project"]["version"]
+          package_name = project["project"]["name"]
+          package_path = "sdks/python"
+
+          assert release["python"]["name"] == package_name, (
+              f"sdks/release.toml python.name ({release['python']['name']}) != "
+              f"pyproject project.name ({package_name})"
+          )
+          assert release["python"]["path"] == package_path, (
+              f"sdks/release.toml python.path ({release['python']['path']}) != {package_path}"
+          )
+          assert manifest_version == package_version, (
+              f"sdks/release.toml version ({manifest_version}) != "
+              f"sdks/python/pyproject.toml version ({package_version})"
+          )
+          PY
 
       - name: Build sdist + wheel
         run: |
-          python -m pip install --upgrade build
-          python -m build crates/mvm-sdk/sdks/python --outdir dist
-          ls -l dist
+          python -m pip install --upgrade build twine
+          python -m build sdks/python --outdir dist
+          python -m twine check dist/*
+
+      - name: Smoke install built wheel
+        run: |
+          python -m venv .venv-smoke
+          . .venv-smoke/bin/activate
+          python -m pip install --upgrade pip
+          python -m pip install dist/*.whl
+          python - <<'PY'
+          import mvm
+          assert mvm.__name__ == "mvm"
+          PY
+
+      - name: Upload built artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: pypi-dist
+          path: dist/*
+          retention-days: 1
+
+  publish:
+    if: ${{ !inputs.dry_run }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Download built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: pypi-dist
+          path: dist
 
       - name: Publish to PyPI (Trusted Publishing)
-        if: ${{ github.event_name == 'release' || !inputs.dry_run }}
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist

@@ -16,8 +16,10 @@ import {
   machineStartArgv,
   machineStopArgv,
 } from "../src/_machine.js";
+import { resolveCliBin } from "../src/_cli.js";
 
 let tmpDir: string;
+let originalPath: string | undefined;
 
 function writeFixtureMvmctl(exitCode = 0, runStdout = ""): string {
   const log = path.join(tmpDir, "fixture-calls.log");
@@ -60,12 +62,47 @@ function readArgvFixture(name: string): string[] {
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mvm-sdk-machine-"));
+  originalPath = process.env.PATH;
   delete process.env.MVM_CLI_BIN;
 });
 
 afterEach(() => {
   delete process.env.MVM_CLI_BIN;
+  if (originalPath === undefined) {
+    delete process.env.PATH;
+  } else {
+    process.env.PATH = originalPath;
+  }
   fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+function writeNamedCli(name: string): string {
+  const script = path.join(tmpDir, name);
+  fs.writeFileSync(
+    script,
+    `#!/usr/bin/env bash
+set -u
+exit 0
+`,
+    { mode: 0o755 },
+  );
+  return script;
+}
+
+describe("resolveCliBin", () => {
+  it("prefers the explicit env override", () => {
+    const explicit = writeNamedCli("explicit-cli");
+    writeNamedCli("mvmctl");
+    process.env.MVM_CLI_BIN = explicit;
+    process.env.PATH = tmpDir;
+    expect(resolveCliBin("tests")).toBe(explicit);
+  });
+
+  it("resolves mvmctl on PATH", () => {
+    const cli = writeNamedCli("mvmctl");
+    process.env.PATH = tmpDir;
+    expect(resolveCliBin("tests")).toBe(cli);
+  });
 });
 
 describe("Machine.run", () => {

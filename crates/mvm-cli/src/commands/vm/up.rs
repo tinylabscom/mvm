@@ -17,7 +17,7 @@ use mvm_core::naming::validate_vm_name;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
 use mvm_runtime::image;
 
-use super::super::env::dev_vz::{ensure_workload_kernel, ensure_workload_verity_initrd};
+use super::super::env::builder_vm::{ensure_workload_kernel, ensure_workload_verity_initrd};
 use super::audit_chain::{AuditEmitter, default_audit_dir};
 use super::host_signer::{PUBLIC_FILENAME, load_or_init_at};
 use super::policy_resolver::{
@@ -1273,7 +1273,7 @@ pub(crate) fn persistent_oci_effective_initrd(
 ) -> Result<Option<String>> {
     if runtime_source_policy == mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay
         && runtime_overlay_acquire_mode() == RuntimeOverlayAcquireMode::BuildFromSourceCheckout
-        && super::super::env::dev_vz::find_builder_vm_flake_is_source_checkout()
+        && super::super::env::builder_vm::find_builder_vm_flake_is_source_checkout()
     {
         return Ok(Some(ensure_workload_verity_initrd()?));
     }
@@ -1672,7 +1672,7 @@ pub(in crate::commands) fn resolve_kernel_pin_path(pinned: bool) -> anyhow::Resu
     } else {
         "x86_64"
     };
-    let source_checkout = super::super::env::dev_vz::find_builder_vm_flake_is_source_checkout();
+    let source_checkout = super::super::env::builder_vm::find_builder_vm_flake_is_source_checkout();
     Ok(Some(resolve_pinned_kernel(
         &cache_dir,
         arch,

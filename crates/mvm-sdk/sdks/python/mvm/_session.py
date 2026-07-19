@@ -24,12 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import os
 import re
-import shutil
 import warnings
 import weakref
 from typing import TYPE_CHECKING, Any
+
+from mvm._cli import resolve_cli_bin
 
 if TYPE_CHECKING:
     from mvm._remote import RemoteFunction
@@ -68,19 +68,10 @@ def current_session_id() -> str | None:
 
 
 def _locate_mvmctl() -> str:
-    explicit = os.environ.get("MVM_MVM_BIN")
-    if explicit:
-        if os.path.isfile(explicit) and os.access(explicit, os.X_OK):
-            return explicit
-        raise RuntimeError(
-            f"MVM_MVM_BIN points at {explicit!r} but it is not an executable file"
-        )
-    found = shutil.which("mvm") or shutil.which("mvmctl")
-    if found is None:
-        raise RuntimeError(
-            "mvmctl not found via MVM_MVM_BIN or PATH; set MVM_MVM_BIN to the binary"
-        )
-    return found
+    return resolve_cli_bin(
+        purpose="session management",
+        include_legacy_env=True,
+    )
 
 
 def _start(workload_id: str) -> str:

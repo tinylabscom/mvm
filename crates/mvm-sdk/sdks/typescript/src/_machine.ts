@@ -6,7 +6,7 @@
  * persistent machine state in TypeScript.
  */
 
-import { MVM_CLI_BIN_ENV } from "./_sandbox.js";
+import { cliResolutionHint, resolveCliBin } from "./_cli.js";
 
 export interface MachineResult {
   exitCode: number;
@@ -102,7 +102,7 @@ export class MachineError extends Error {
 }
 
 function cliBin(): string {
-  return typeof process !== "undefined" ? process.env[MVM_CLI_BIN_ENV] || "mvmctl" : "mvmctl";
+  return resolveCliBin("Machine CLI commands");
 }
 
 function requireString(value: string, label: string): string {
@@ -127,7 +127,12 @@ function appendRepeated(argv: string[], flag: string, values: string[] | undefin
 }
 
 function runMachine(argv: string[]): MachineResult {
-  const bin = cliBin();
+  let bin: string;
+  try {
+    bin = cliBin();
+  } catch (err) {
+    throw new MachineError(String(err instanceof Error ? err.message : err));
+  }
   const full = [bin, "machine", ...argv];
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const child = require("node:child_process") as typeof import("node:child_process");
@@ -135,7 +140,7 @@ function runMachine(argv: string[]): MachineResult {
   try {
     result = child.spawnSync(bin, ["machine", ...argv], { encoding: "utf-8" });
   } catch (err) {
-    throw new MachineError(`\`${bin}\` not found on disk; check MVM_CLI_BIN: ${String(err)}`, {
+    throw new MachineError(`\`${bin}\` not found on disk; ${cliResolutionHint()}: ${String(err)}`, {
       argv: full,
     });
   }

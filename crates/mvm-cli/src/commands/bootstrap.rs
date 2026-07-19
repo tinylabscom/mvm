@@ -39,5 +39,5 @@ pub(in crate::commands) fn run_builder_vm_bootstrap(
     if mvm_build::libkrun_builder::maybe_reexec_builder_vm_bootstrap_helper()? {
         return Ok(());
     }
-    super::env::dev_vz::bootstrap_builder_vm_image()
+    super::env::builder_vm::bootstrap_builder_vm_image()
 }
