@@ -209,7 +209,14 @@ impl AuditSandbox {
             // a socket-not-found error. Pinning `file` here makes
             // the suite hermetic: no DBus, no keychain, no
             // host-state dependency.
-            .env("MVM_SECRET_STORE_BACKEND", "file");
+            .env("MVM_SECRET_STORE_BACKEND", "file")
+            // The update/download verbs fetch through `reqwest`, which honours
+            // `*_PROXY`. Tests point those at a loopback fixture, so pin
+            // `no_proxy` to loopback: an inherited proxy on a dev box or CI
+            // runner must never intercept the fixture request (real hosts still
+            // route through the proxy — this is a bypass list, not a disable).
+            .env("no_proxy", "127.0.0.1,localhost,::1")
+            .env("NO_PROXY", "127.0.0.1,localhost,::1");
         c
     }
 
@@ -274,8 +281,13 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
     let (tx, rx) = mpsc::channel::<()>();
     thread::spawn(move || {
         loop {
-            if rx.try_recv().is_ok() {
-                return;
+            // Stop when signalled OR when the owning test drops its sender
+            // (channel disconnected). The old `is_ok()` check only saw an
+            // explicit send — which never happens — so the accept loop, its
+            // thread, and the bound listener leaked for the whole test process.
+            match rx.try_recv() {
+                Ok(()) | Err(mpsc::TryRecvError::Disconnected) => return,
+                Err(mpsc::TryRecvError::Empty) => {}
             }
             match listener.accept() {
                 Ok((mut stream, _)) => {
@@ -330,7 +342,10 @@ fn serve_release_latest_fixture(response_body: String) -> (String, mpsc::Sender<
                             let _ = stream.flush();
                         }
                     }
-                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                    // Half-close the write side so the client reads a clean EOF;
+                    // a full Shutdown::Both can RST a client still draining the
+                    // response body.
+                    let _ = stream.shutdown(std::net::Shutdown::Write);
                 }
                 Err(_) => thread::sleep(std::time::Duration::from_millis(10)),
             }
