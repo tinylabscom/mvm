@@ -68,6 +68,54 @@ arbiter):
 Do NOT add a second `admit_*` seam to the trait; the admission gate stays
 `admit_and_boot_local` inside `run_machine`/`create_machine`.
 
+## Design resolution (from the boot-surface scoping)
+
+A full read of the boot surface settled the option-1-vs-2 question and the risk
+profile:
+
+- **One shared claim-8 gate.** `admit_plan_for_boot` (the CLI helper, shared by
+  ~6 boot sites: transient run, persistent, MCP code-runner, session-resume,
+  entrypoint-invoke, checkpoint-fork) and `run_machine`→`admit_and_boot_local`
+  both bottom out in `mvm_hostd::plan_admission::admit_for_run`
+  (synthesize→sign→verify→validity-window→nonce). The CLI has **no** independent
+  signing/verification. Routing boot through the facade therefore **cannot
+  duplicate or weaken the gate** — the two wrappers differ only in what they feed
+  it and what they emit around it.
+- **The wrappers differ in richness.** The CLI wrapper lowers network policy,
+  verifies the bundle pin, admits shares, builds the `AuditEmitter`
+  (`plan.admitted`/`launched`/`failed`/`grant_required`/…), registers the name,
+  and records readiness. `admit_and_boot_local` hardcodes deny-all egress +
+  `Standard` seccomp + no secrets/bundle/shares, emits nothing, and registers
+  nothing.
+- **Neither literal option works.** Option 1 (converge on `MachineSpec`) is
+  impossible: `MachineSpec` is a `deny_unknown_fields` wire DTO ("intent only,
+  never host paths"), so the CLI's resolved rootfs/kernel/verity/overlay-initrd
+  paths cannot travel through it. Option 2 (grow `MachineSpec`) only conveys
+  intent fields (net/kernel-pin/agent-verbs/profile/…), still not the artifacts.
+
+**Resolution: the facade grows to own the rich boot.** The register + audit-emit +
+policy + readiness orchestration moves from `up.rs` into `LocalBackend`, which
+takes a richer *host-local* request (a `LocalRunRequest`-plus carrying resolved
+paths + policy + secrets + shares + audit intent). The CLI keeps the prep
+(image/kernel resolve, overlay, IR load) and hands the resolved request to the
+facade. `MachineSpec` stays lean (the remote/create-intent surface).
+`admit_for_run` is never touched.
+
+**Staged, because the lint's two targets (`name_registry`, `AnyBackend`) are
+independently removable:**
+
+- **Stage 1 — `name_registry` behind the facade.** Add a facade registration
+  method; route `up.rs`'s `register_with_metadata`, `sandbox`, the `machine`
+  group's registry reads, and `console`'s registry bookkeeping through it +
+  existing `list`/`inspect`. Removes the `vm::name_registry` reaches. Lower risk
+  (registry read/write, not the boot dispatch).
+- **Stage 2 — boot dispatch behind the facade.** Move the admit+`backend.start`
+  orchestration into `LocalBackend` via the richer local request; the CLI hands
+  off its prepped inputs. Removes the `AnyBackend` dispatch. The architectural
+  core — full `nextest --workspace` gate.
+
+Then the `check-cli-runtime-surface` lint lands.
+
 ## Invariants the implementer + reviewer MUST preserve
 
 - **Claim 8 unweakened.** Every boot still goes through the signed-plan admission
