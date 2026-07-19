@@ -174,18 +174,11 @@ fn command_with_env(cmd: &str, env: &[(String, String)]) -> String {
     format!("{exports} {cmd}")
 }
 
-/// Record a coarse guest-activity touch on the named VM.
-/// Best-effort: only rewrites the registry when the name is registered;
-/// any load/save hiccup is swallowed so console attach never blocks.
+/// Record a coarse guest-activity touch on the named VM, through the client
+/// boundary (mvm-client owns the host-registry reach). Best-effort — a hiccup
+/// never blocks console attach.
 fn touch_activity(name: &str) {
-    let path = mvm_runtime::vm::name_registry::registry_path();
-    if let Ok(mut reg) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path)
-        && reg
-            .touch_last_active(name, mvm_core::time::utc_now())
-            .unwrap_or(false)
-    {
-        let _ = reg.save(&path);
-    }
+    mvm_client::touch_activity(name);
 }
 
 /// Open an interactive PTY console to a running VM.

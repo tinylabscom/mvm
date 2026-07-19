@@ -25,5 +25,5 @@ pub use mvm_core::client::{MvmClient, MvmError, Result};
 
 pub use connect::{Target, connect};
 pub use local::LocalBackend;
-pub use readiness::{readiness_of, record_readiness};
+pub use readiness::{readiness_of, record_readiness, touch_activity};
 pub use registration::{MachineRegistration, register_machine};

@@ -28,3 +28,18 @@ pub fn readiness_of(vm_name: &str) -> Option<InstanceReadiness> {
     let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path).ok()?;
     registry.lookup(vm_name).and_then(|reg| reg.readiness.clone())
 }
+
+/// Record a coarse guest-activity touch (`last_active`) on a machine's registry
+/// entry. Best-effort like [`record_readiness`]: only rewrites when the name is
+/// registered, and swallows any load/save hiccup so a console attach never
+/// blocks on registry I/O.
+pub fn touch_activity(vm_name: &str) {
+    let path = mvm_runtime::vm::name_registry::registry_path();
+    if let Ok(mut reg) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path)
+        && reg
+            .touch_last_active(vm_name, mvm_core::time::utc_now())
+            .unwrap_or(false)
+    {
+        let _ = reg.save(&path);
+    }
+}
