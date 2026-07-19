@@ -18,7 +18,7 @@ jobs:
       contents: read
     defaults:
       run:
-        working-directory: sdks/typescript
+        working-directory: crates/mvm-sdk/sdks/typescript
     steps:
       - uses: actions/checkout@v6
 
@@ -90,7 +90,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: npm-dist
-          path: sdks/typescript/dist/*.tgz
+          path: crates/mvm-sdk/sdks/typescript/dist/*.tgz
           retention-days: 1
 
   publish:
