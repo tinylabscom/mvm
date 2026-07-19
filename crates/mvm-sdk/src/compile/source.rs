@@ -343,7 +343,7 @@ fn compute_tree_hash(entries: &[TreeEntry]) -> String {
         hasher.update(entry.relative_path.as_bytes());
         hasher.update([0u8]);
         hasher.update(&entry.content_record);
-        hasher.update([b'\n']);
+        hasher.update(*b"\n");
     }
     hex(&hasher.finalize())
 }

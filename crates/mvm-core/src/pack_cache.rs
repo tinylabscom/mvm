@@ -1457,11 +1457,14 @@ mod tests {
         let promoted_a = promote(staged_a.path(), &manifest_a, &ctx).expect("promote a");
         let promoted_b = promote(staged_b.path(), &manifest_b, &ctx).expect("promote b");
 
-        let mut ix = load_index(cache.path());
+        // The index lives at `mvm_cache_dir()` (`$MVM_HOME/cache`), the same
+        // root `resolve_pack` reads — not the `MVM_HOME` root itself.
+        let cache_root = cache.path().join("cache");
+        let mut ix = load_index(&cache_root);
         ix.record(entry_for(&promoted_a, "stable", 10));
         ix.record(entry_for(&promoted_b, "stable", 20));
         assert!(ix.set_active(&builder_key(), &promoted_b.verified.pack_hash));
-        save_index(cache.path(), &ix).expect("save index");
+        save_index(&cache_root, &ix).expect("save index");
 
         // Scan order is by directory name (pack hash), which need not put `b`
         // first — the active pointer must win regardless.
@@ -1524,11 +1527,14 @@ mod tests {
         let promoted_a = promote(staged_a.path(), &manifest_a, &ctx).expect("promote a");
         let promoted_b = promote(staged_b.path(), &manifest_b, &ctx).expect("promote b");
 
-        let mut ix = load_index(cache.path());
+        // The index lives at `mvm_cache_dir()` (`$MVM_HOME/cache`), the same
+        // root `resolve_pack` reads — not the `MVM_HOME` root itself.
+        let cache_root = cache.path().join("cache");
+        let mut ix = load_index(&cache_root);
         ix.record(entry_for(&promoted_a, "stable", 10));
         ix.record(entry_for(&promoted_b, "stable", 20));
         assert!(ix.set_active(&builder_key(), &promoted_b.verified.pack_hash));
-        save_index(cache.path(), &ix).expect("save index");
+        save_index(&cache_root, &ix).expect("save index");
 
         // Poison the active pack's promoted copy after the fact.
         fs::write(
