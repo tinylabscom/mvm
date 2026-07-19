@@ -21,5 +21,7 @@ use mvm_core::domain::instance::InstanceReadiness;
 /// Callers must never rely on this function to gate launch/teardown
 /// — readiness is a downstream display signal, not a control flow.
 pub(super) fn record_vm_readiness(vm_name: &str, readiness: InstanceReadiness) {
-    mvm_runtime::vm::name_registry::record_readiness(vm_name, readiness);
+    // Through the client boundary: mvm-client owns the reach into the host name
+    // registry, so the CLI does not touch the runtime crate's internals here.
+    mvm_client::record_readiness(vm_name, readiness);
 }

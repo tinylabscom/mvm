@@ -9,6 +9,7 @@
 
 pub mod connect;
 pub mod local;
+pub mod readiness;
 
 pub use mvm_core::client::dto;
 pub use mvm_core::client::dto::{
@@ -23,3 +24,4 @@ pub use mvm_core::client::{MvmClient, MvmError, Result};
 
 pub use connect::{Target, connect};
 pub use local::LocalBackend;
+pub use readiness::record_readiness;

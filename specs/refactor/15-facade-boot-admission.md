@@ -95,8 +95,18 @@ requires host memory headroom the box lacks (see
 ## Sequencing within category A
 
 `up`/machine-boot is the capstone. Smaller category-A slices (`sandbox`'s registry
-reach; the `machine` group's non-boot registry reads; folding `readiness.rs`'s
-`record_readiness` behind the facade with its callers) can precede it and are also
+reach; the `machine` group's non-boot registry reads) precede it and are also
 test-gated but lower-risk. The `check-cli-runtime-surface` lint lands LAST, once
 category A is drained, banning `mvm_runtime::vm::name_registry` + `AnyBackend`
 dispatch in mvm-cli with B–E allowlisted.
+
+**`readiness.rs` — LANDED, as a sync free function (deviation from the implied
+trait method).** Recording a readiness milestone is best-effort *local
+observability*, not a machine-lifecycle op: a remote fleet's daemon records its
+own milestones, so an async, remote-capable `MvmClient` trait method is an
+impedance mismatch (it would force a tokio runtime around a purely-local registry
+write, and the gateway/subprocess impls could only no-op). Resolved instead by
+`mvm_client::record_readiness(vm_name, readiness)` — a sync free function on the
+client boundary crate, which *is* allowed to reach the host name registry.
+mvm-cli's `record_vm_readiness` shim now calls it, so mvm-cli no longer names
+`mvm_runtime` for readiness; the callers (`up`/`down`) are unchanged.
