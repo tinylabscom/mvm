@@ -1293,21 +1293,13 @@ pub(crate) fn persistent_oci_effective_initrd(
 }
 
 fn register_vm_name(vm_name: &str, network_name: &str) {
-    let registry_path = mvm_runtime::vm::name_registry::registry_path();
-    if let Ok(mut registry) = mvm_runtime::vm::name_registry::VmNameRegistry::load(&registry_path) {
-        registry.deregister(vm_name);
-        let _ = registry.register_with_metadata(mvm_runtime::vm::name_registry::RegisterParams {
-            name: vm_name,
-            vm_dir: "",
-            network: network_name,
-            guest_ip: None,
-            slot_index: 0,
-            tags: std::collections::BTreeMap::new(),
-            expires_at: None,
-            auto_resume: true,
-        });
-        let _ = registry.save(&registry_path);
-    }
+    // Through the client boundary: mvm-client owns the host name-registry reach
+    // (load → deregister-stale → register → save), so the CLI stays off the
+    // runtime crate's registry internals.
+    mvm_client::register_machine(&mvm_client::MachineRegistration::minimal(
+        vm_name,
+        network_name,
+    ));
 }
 
 pub(in crate::commands) fn start_persistent_oci_machine(
