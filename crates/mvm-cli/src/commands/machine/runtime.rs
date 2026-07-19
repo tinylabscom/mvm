@@ -168,7 +168,8 @@ fn apply_machine_ttl(name: &str, dur_str: &str) -> Result<()> {
         .enable_all()
         .build()
         .context("build runtime for machine TTL")?;
-    match runtime.block_on(client.set_ttl(&mvm_client::MachineId(name.to_string()), Some(expires_at)))
+    match runtime
+        .block_on(client.set_ttl(&mvm_client::MachineId(name.to_string()), Some(expires_at)))
     {
         Ok(()) => Ok(()),
         Err(mvm_client::MvmError::NotFound { .. }) => {

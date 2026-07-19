@@ -26,7 +26,9 @@ pub fn record_readiness(vm_name: &str, readiness: InstanceReadiness) {
 pub fn readiness_of(vm_name: &str) -> Option<InstanceReadiness> {
     let path = mvm_runtime::vm::name_registry::registry_path();
     let registry = mvm_runtime::vm::name_registry::VmNameRegistry::load(&path).ok()?;
-    registry.lookup(vm_name).and_then(|reg| reg.readiness.clone())
+    registry
+        .lookup(vm_name)
+        .and_then(|reg| reg.readiness.clone())
 }
 
 /// Record a coarse guest-activity touch (`last_active`) on a machine's registry

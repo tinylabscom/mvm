@@ -80,7 +80,10 @@ fn connect_uds_retry(path: &std::path::Path, timeout: Duration) -> UnixStream {
         match UnixStream::connect(path) {
             Ok(stream) => return stream,
             Err(e) if Instant::now() >= deadline => {
-                panic!("could not connect to {} within {timeout:?}: {e}", path.display())
+                panic!(
+                    "could not connect to {} within {timeout:?}: {e}",
+                    path.display()
+                )
             }
             Err(_) => std::thread::sleep(Duration::from_millis(10)),
         }
