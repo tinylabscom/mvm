@@ -559,6 +559,18 @@ debug = "line-tables-only"
 incremental = true
 codegen-units = 256
 
+# The `dev` profile is what cargo compiles every LIBRARY crate under, even during
+# `cargo test`/`nextest` (only the test *binaries* use `[profile.test]`). Without
+# this override it defaults to `debug = 2` — full DWARF — which is the single
+# biggest memory + disk cost of a workspace build: a large crate like `mvm-cli`
+# burns gigabytes of rustc + linker memory emitting debug info nothing on the
+# inner loop reads, and 16 of those in parallel is what makes the build a memory
+# hog on a shared dev machine. Drop it to line tables (matching `[profile.test]`):
+# panic backtraces keep their file:line, but the DWARF bloat — and its memory +
+# disk footprint — is gone. This also lightens `cargo build`/`check`/`clippy`.
+[profile.dev]
+debug = "line-tables-only"
+
 # Per-package optimisation overrides applied to the `dev` and `test`
 # profiles. Build scripts + proc-macros run during compilation, so a
 # tiny opt-level=3 build of these crates pays for itself many times
