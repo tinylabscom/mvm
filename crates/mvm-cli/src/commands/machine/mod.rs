@@ -26,7 +26,6 @@ use clap::{Args as ClapArgs, Subcommand};
 use ed25519_dalek::Signer;
 #[cfg(test)]
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-use mvm_runtime::backend::AnyBackend;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -34,7 +33,6 @@ use std::path::{Path, PathBuf};
 
 use mvm_core::manifest::{Manifest, ManifestMachineWorkflow, resolve_manifest_config_path};
 use mvm_core::user_config::MvmConfig;
-use mvm_core::vm_backend::{VmId, VmStatus};
 use mvm_core::{config, naming};
 
 use mvm_runtime::machine::persist::{
@@ -1303,8 +1301,7 @@ fn run_machine_init_commands(name: &str, commands: &[String]) -> Result<()> {
 }
 
 fn stop_failed_machine_start(name: &str, backend_name: &str) {
-    let backend = AnyBackend::from_hypervisor(backend_name);
-    if let Err(err) = backend.stop(&VmId(name.to_string())) {
+    if let Err(err) = mvm_client::backend_stop_by_name(backend_name, name) {
         tracing::warn!(error = %err, machine = name, "stopping machine after failed init failed");
     }
 }

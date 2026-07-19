@@ -15,7 +15,6 @@ use clap::Args as ClapArgs;
 use mvm_core::domain::instance::InstanceReadiness;
 use mvm_core::naming::validate_vm_name;
 use mvm_core::security::{AgentProfile, SecurityPolicy};
-use mvm_runtime::backend::AnyBackend;
 use mvm_runtime::image;
 
 use super::super::env::dev_vz::{ensure_workload_kernel, ensure_workload_verity_initrd};
@@ -1354,7 +1353,6 @@ pub(in crate::commands) fn start_persistent_oci_machine(
     };
     let initrd_path = persistent_oci_effective_initrd(rootfs_path, runtime_source_policy)?;
 
-    let backend = AnyBackend::from_hypervisor(backend_name);
     let admission_ledger = InMemoryNonceLedger::new();
     let admission = admit_plan_for_boot(AdmitPlanForBootParams {
         tenant: "local",
@@ -1432,11 +1430,10 @@ pub(in crate::commands) fn start_persistent_oci_machine(
         }
     }
     enforce_shares_if(&admission, &start_config.volumes)?;
-    if let Err(err) = mvm_runtime::workload_backend::require_workload_backend(&backend) {
-        emit_failed_if(&admission, "backend-start", &err);
-        return Err(err);
-    }
-    if let Err(err) = backend.start(&start_config) {
+    // VMM selection + workload-support check + start move behind the facade; the
+    // admission gate (above) and the launched/failed emits stay here.
+    if let Err(err) = mvm_client::start_prepared(backend_name, &start_config) {
+        let err = anyhow::anyhow!("{err}");
         emit_failed_if(&admission, "backend-start", &err);
         return Err(err);
     }
@@ -2873,7 +2870,7 @@ mod resolve_pinned_kernel_tests {
 // Firecracker) that need a live host environment. `admit_plan_for_boot`
 // is the bridge between CLI args and admission, so verifying it
 // in isolation covers the contract the dispatcher depends on without
-// pulling in `AnyBackend::from_hypervisor` startup.
+// pulling in VMM selection + start dispatch.
 
 #[cfg(test)]
 mod admit_plan_tests {

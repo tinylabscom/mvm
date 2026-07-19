@@ -287,16 +287,12 @@ pub(super) fn stop_machine(cli: &Cli, args: MachineStopArgs, cfg: &MvmConfig) ->
 }
 
 pub(super) fn machine_is_running(name: &str) -> bool {
-    let backend = AnyBackend::from_hypervisor(&shared::resolve_effective_hypervisor("firecracker"));
-    matches!(
-        backend.status(&VmId(name.to_string())),
-        Ok(VmStatus::Running)
-    )
+    mvm_client::backend_is_running(&shared::resolve_effective_hypervisor("firecracker"), name)
 }
 
 pub(super) fn stop_running_machine(name: &str) {
-    let backend = AnyBackend::from_hypervisor(&shared::resolve_effective_hypervisor("firecracker"));
-    if let Err(err) = backend.stop(&VmId(name.to_string())) {
+    let hypervisor = shared::resolve_effective_hypervisor("firecracker");
+    if let Err(err) = mvm_client::backend_stop_by_name(&hypervisor, name) {
         tracing::warn!(error = %err, machine = name, "stopping machine before recreate failed");
     }
 }
