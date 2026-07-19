@@ -109,10 +109,22 @@ independently removable:**
   group's registry reads, and `console`'s registry bookkeeping through it +
   existing `list`/`inspect`. Removes the `vm::name_registry` reaches. Lower risk
   (registry read/write, not the boot dispatch).
-- **Stage 2 — boot dispatch behind the facade.** Move the admit+`backend.start`
-  orchestration into `LocalBackend` via the richer local request; the CLI hands
-  off its prepped inputs. Removes the `AnyBackend` dispatch. The architectural
-  core — full `nextest --workspace` gate.
+- **Stage 2 — boot dispatch behind the facade.** Scoping the boot path refined
+  this: the admit is `mvm_hostd::plan_admission::admit_for_run` (an `mvm-hostd`
+  reach, NOT `mvm_runtime` — so not a lint target and it stays CLI-side), which
+  means only the VMM *dispatch* is in scope. In `start_persistent_oci_machine`
+  the `backend` handle is used for exactly two calls —
+  `require_workload_backend(&backend)` and `backend.start(&start_config)` — both
+  behind `AnyBackend::from_hypervisor(backend_name)`, and both failure arms emit
+  the same `backend-start` reason. So Stage 2 is a thin facade
+  `start_prepared(backend_name, &VmStartConfig)` that owns that
+  `from_hypervisor → require_workload_backend → start` triple; the CLI keeps
+  building the `VmStartConfig`, threading admission, and emitting
+  `launched`/`failed` + readiness. Behavior-preserving, routed in the category-A
+  boot sites (`up.rs`, `lifecycle.rs`, `machine/mod.rs`). The maximal
+  "move all admission + emits into `LocalBackend`" is NOT required to satisfy
+  the lint and is deferred. Full `nextest --workspace` gate because it touches
+  the live boot path.
 
 Then the `check-cli-runtime-surface` lint lands.
 
