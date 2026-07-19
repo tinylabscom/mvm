@@ -108,7 +108,16 @@ and the first that grows the `MvmClient` trait with a genuinely rich subsystem.
 - This is a bigger diff than slices 1–2; commit in two parts (trait+DTOs+impls, then
   the `pause.rs` swap) and run the full gate.
 
-## Follow-up (review-flagged, non-blocking)
+## Follow-up (review-flagged, non-blocking) — DONE (`dac181e55`)
+
+Landed: `resume_machine -> Result<ResumeOutcome>` (`ResumeOutcome { epoch,
+vmstate_len, mem_len, reseed: Option<String> }`). Plain resume returns the
+verified sidecar's epoch + lengths; warm resume returns the reseed summary; the
+CLI restores the full `WorkloadWake` detail + success line at pause parity. Full
+nextest green (the one failure was the unrelated flaky `install_sh` 404 test).
+The original text is kept below for context.
+
+
 
 The slice landed with `resume_machine -> Result<()>`, so the resume `WorkloadWake`
 audit entry and the `--warm` success line lost their detail fields — the old
