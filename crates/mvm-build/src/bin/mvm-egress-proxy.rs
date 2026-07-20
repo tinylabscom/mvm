@@ -5,7 +5,7 @@
 //!
 //! 1. Builds an `Allowlist` (production hostnames by default;
 //!    `MVM_EGRESS_ALLOWLIST` env-var override gated behind the
-//!    `dev-shell` Cargo feature for tests).
+//!    `interactive` Cargo feature for tests).
 //! 2. Binds the proxy at `DEFAULT_BIND` (or
 //!    `MVM_EGRESS_BIND` if set — gated the same way for tests).
 //! 3. Prints `mvm-egress-proxy: listening on <addr>` to stdout so
@@ -83,7 +83,7 @@ mod linux {
     /// `MVM_EGRESS_ALLOWLIST=host1,host2,host3` override + optional
     /// `MVM_EGRESS_ALLOWLIST_PORT=443` override.
     fn build_allowlist() -> Allowlist {
-        #[cfg(feature = "dev-shell")]
+        #[cfg(feature = "interactive")]
         {
             if let Ok(raw) = std::env::var("MVM_EGRESS_ALLOWLIST") {
                 let hosts: Vec<String> = raw
@@ -96,7 +96,7 @@ mod linux {
                     .and_then(|s| s.parse::<u16>().ok())
                     .unwrap_or(mvm_build::egress_proxy::ALLOWED_PORT);
                 eprintln!(
-                    "mvm-egress-proxy: dev-shell feature on — allowlist override `{raw}` :{port}"
+                    "mvm-egress-proxy: interactive feature on — allowlist override `{raw}` :{port}"
                 );
                 return Allowlist::from_parts(hosts, port);
             }
@@ -105,7 +105,7 @@ mod linux {
     }
 
     fn resolve_bind_addr() -> String {
-        #[cfg(feature = "dev-shell")]
+        #[cfg(feature = "interactive")]
         {
             if let Ok(b) = std::env::var("MVM_EGRESS_BIND") {
                 return b;

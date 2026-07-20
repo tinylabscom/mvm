@@ -584,7 +584,7 @@ fn host_arch() -> &'static str {
 /// Resolve the kernel to boot the workload under QEMU.
 ///
 /// `config.kernel_path` is the build's emitted `vmlinux` when there is one
-/// (builder/dev-shell images). A plain `mkGuest` **workload** is a bare
+/// (builder/interactive images). A plain `mkGuest` **workload** is a bare
 /// rootfs with no kernel — libkrun boots it with libkrunfw's bundled
 /// kernel, but QEMU has none. For the dev tier we fall back to the cached
 /// builder VM kernel (`~/.mvm/cache/builder-vm/<arch>/vmlinux`), which has

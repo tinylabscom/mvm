@@ -2,7 +2,7 @@
 //!
 //! The former bare `mvmctl exec` was folded into `run`: `run` was already a
 //! strict superset (see `RunArgs::into_exec_args`), so `exec` is gone and
-//! `run --profile dev -- <argv>` covers its dev-shell case. The `Args`
+//! `run --profile dev -- <argv>` covers its interactive case. The `Args`
 //! struct + internal request machinery stay — `run_secure` reuses them.
 
 use anyhow::{Context, Result};
@@ -1993,7 +1993,7 @@ mod tests {
         assert!(!grant_eligible(false, true, false, true));
         // Transient baked-entrypoint (no pty, no argv, prod, sealed) → eligible.
         assert!(grant_eligible(false, false, false, true));
-        // Same run but image not sealed (dev-shell / OCI) → NOT eligible.
+        // Same run but image not sealed (interactive / OCI) → NOT eligible.
         assert!(!grant_eligible(false, false, false, false));
     }
 }

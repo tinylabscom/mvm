@@ -534,7 +534,7 @@ rm -f /nix/var/nix/gcroots/mvm-warm-latest 2>/dev/null || true
 # Copy the artifacts the host expects into /out. A plain mkGuest
 # workload image is a *bare ext4 file* ($NIX_OUT is the rootfs
 # itself; libkrun boots its bundled libkrunfw kernel, so no vmlinux
-# is emitted). Builder / dev-shell images are a *directory* carrying
+# is emitted). Builder / interactive images are a *directory* carrying
 # `vmlinux` + `rootfs.ext4`. Accept either `vmlinux` / `Image` /
 # `bzImage` for the kernel across flake conventions.
 if [ -f "$NIX_OUT" ]; then

@@ -361,7 +361,7 @@ fn run_cargo_zigbuild(
         .unwrap_or_else(|e| panic!("copy {} → {}: {e}", built.display(), out.display()));
 }
 
-/// Cross-compile the guest runtime binaries (one invocation, dev-shell feature)
+/// Cross-compile the guest runtime binaries (one invocation, interactive feature)
 /// to the static musl `target`, copying them into `out_dir`. Same zig/rustup
 /// handling as `run_cargo_zigbuild`.
 fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &str, out_dir: &Path) {
@@ -369,7 +369,7 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "[build.rs] cargo zigbuild --release --target {target} -p mvm-agentd \
          --bin mvm-guest-agent --bin mvm-guest-netinit --bin mvm-guest-netd \
          --bin mvm-oci-init --bin mvm-oci-entrypoint --bin mvm-verity-init \
-         --bin mvm-egress-client --features mvm-agentd/dev-shell \
+         --bin mvm-egress-client --features mvm-agentd/interactive \
          --features mvm-agentd/addons"
     );
     let (cargo, rustc) = rustup_cargo_and_rustc(strip_glibc(target));
@@ -396,7 +396,7 @@ fn run_guest_zigbuild(root: &Path, target_dir: &Path, target: &str, zig_pin: &st
         "--bin",
         "mvm-egress-client",
         "--features",
-        "mvm-agentd/dev-shell",
+        "mvm-agentd/interactive",
         "--features",
         "mvm-agentd/addons",
     ])

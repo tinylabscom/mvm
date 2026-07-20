@@ -138,10 +138,10 @@
           inherit pkgs;
           lib = pkgs.lib;
           mvmSrc = workspace;
-          # No dev-shell — the overlay ships the production agent.
+          # No interactive — the overlay ships the production agent.
           # The `prod-agent-no-exec` CI gate asserts
           # `mvm_guest_agent::do_exec` is absent from this binary.
-          withDevShell = false;
+          withInteractive = false;
         };
 
       mvmGuestDevFor = system:
@@ -152,7 +152,7 @@
           inherit pkgs;
           lib = pkgs.lib;
           mvmSrc = workspace;
-          withDevShell = true;
+          withInteractive = true;
         };
 
       # mvm-runner — the function-workload entrypoint runner.
@@ -335,7 +335,7 @@
               "$staging/lib/libgcc_s.so.1"
 
             cp ${guest}/bin/mvm-guest-agent "$staging/agent"
-            cp ${guestDev}/bin/mvm-guest-agent "$staging/agent-dev-shell"
+            cp ${guestDev}/bin/mvm-guest-agent "$staging/agent-interactive"
             cp ${guest}/bin/mvm-seccomp-apply "$staging/seccomp-apply"
             cp ${guest}/bin/mvm-guest-netinit    "$staging/netinit"
             cp ${guest}/bin/mvm-guest-netd       "$staging/netd"
@@ -344,7 +344,7 @@
             cp ${addonDns}/bin/mvm-addon-dns "$staging/addon-dns"
             cp ${exitReport}/bin/mvm-exit-report "$staging/exit-report"
             relocate_runtime_exe "$staging/agent"
-            relocate_runtime_exe "$staging/agent-dev-shell"
+            relocate_runtime_exe "$staging/agent-interactive"
             relocate_runtime_exe "$staging/seccomp-apply"
             relocate_runtime_exe "$staging/netinit"
             relocate_runtime_exe "$staging/netd"

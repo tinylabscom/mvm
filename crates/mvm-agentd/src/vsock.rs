@@ -203,13 +203,13 @@ pub enum GuestRequest {
     /// (`PRIMED_MARKER_PATH`); the agent reports its presence. Used by the
     /// host's warm-snapshot barrier to seal a deterministic, fully-warmed base.
     PrimedStatus,
-    /// Run a command inside the guest (dev-only, requires dev-shell feature + SecurityPolicy).
+    /// Run a command inside the guest (dev-only, requires interactive feature + SecurityPolicy).
     Exec {
         command: String,
         stdin: Option<String>,
         timeout_secs: Option<u64>,
     },
-    /// Tier-2 batched exec (dev-shell only): stage files, then run a sequence of
+    /// Tier-2 batched exec (interactive only): stage files, then run a sequence of
     /// argv commands in-guest in a single round-trip, returning one buffered
     /// outcome per command. The chain stops at the first non-zero exit. This is
     /// the one-round-trip counterpart to the host driving `FsWrite` + `Exec`
@@ -437,7 +437,7 @@ pub enum GuestRequest {
     // host caller against a prod agent gets a typed
     // `ProcErrorKind::UnsupportedInProduction` rather than a
     // transport error. The agent-side **handler** lives in
-    // `crate::process_rpc`, gated behind the `dev-shell` feature —
+    // `crate::process_rpc`, gated behind the `interactive` feature —
     // which means the function symbols are absent from prod builds.
     // The combined `prod-agent-runentry-contract` CI gate asserts
     // this symbol contract.
@@ -549,7 +549,7 @@ pub enum GuestRequest {
     /// `mvmctl session reap`.
     UpdateIdleTimeout { secs: u64 },
     /// Run user-supplied source code in the wrapper's native
-    /// interpreter. Dev-only — gated behind the agent's `dev-shell`
+    /// interpreter. Dev-only — gated behind the agent's `interactive`
     /// feature flag, same fence as `Exec`. The host
     /// (`mvmctl session run-code`) provides additional gating: the
     /// session must be `mode=Dev`.
@@ -769,7 +769,7 @@ pub struct ReadinessReport {
 /// is the dispatcher-side gate that rejects out-of-profile verbs
 /// *before* the per-variant handler runs. Complemented by the
 /// compile-time symbol-absence story (`do_exec`, `do_run_code`,
-/// process RPC handlers gated by `dev-shell`).
+/// process RPC handlers gated by `interactive`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RequestClass {
     /// Allowed under `SealedProd` and `Dev` profiles. Includes the
@@ -1033,10 +1033,10 @@ pub enum GuestResponse {
     /// whose `is_terminal` returns true (`Exit` or `Error`). The
     /// host reads frames in a loop until terminal.
     EntrypointEvent(EntrypointEvent),
-    /// One event in the streaming response of an `Exec` call (dev-shell
+    /// One event in the streaming response of an `Exec` call (interactive
     /// only). Terminated by `ExecEvent::Exit`.
     ExecEvent(ExecEvent),
-    /// Buffered outcomes of an `ExecBatch` call (dev-shell only), one per
+    /// Buffered outcomes of an `ExecBatch` call (interactive only), one per
     /// command in request order (truncated at the first non-zero exit).
     ExecBatchResult { outcomes: Vec<ExecOutcomeWire> },
     /// Ack for a `RunDetached` call: the detached workload was spawned
@@ -2301,7 +2301,7 @@ pub struct ExecOutcomeWire {
     pub peak_rss_kib: Option<u64>,
 }
 
-/// One event in the response stream of an `Exec` call (dev-shell only).
+/// One event in the response stream of an `Exec` call (interactive only).
 /// The agent emits a sequence of these for a single `Exec` request,
 /// terminated by `Exit`. The host reads frames in a loop until terminal.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -3092,7 +3092,7 @@ where
 /// Send an `Exec` request and stream its response. Invokes `on_event`
 /// for each `Stdout`/`Stderr` chunk as it arrives; returns the terminal
 /// `Exit` or `TimedOut`. Exec carries no `GuestCapability` — the agent
-/// gates it at compile time via the `dev-shell` feature — so this does
+/// gates it at compile time via the `interactive` feature — so this does
 /// a plain protocol hello (no capability requirement).
 pub fn send_exec_streaming<F>(
     stream: &mut UnixStream,
@@ -3121,7 +3121,7 @@ where
 /// there is exactly one response frame. Its exit is reported to the
 /// host's workload-exit port by the agent's reaper, not over this
 /// stream. Like `Exec`, `RunDetached` carries no `GuestCapability` — the
-/// agent gates it at compile time via the `dev-shell` feature — so this
+/// agent gates it at compile time via the `interactive` feature — so this
 /// does a plain protocol hello.
 pub fn send_run_detached(
     stream: &mut UnixStream,

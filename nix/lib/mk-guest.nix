@@ -150,11 +150,11 @@ let
     if dev == null then entrypointKind == "shell"
     else dev;
   isSealed = !isDev;
-  # Whether the agent is compiled with the `dev-shell` Cargo feature.
+  # Whether the agent is compiled with the `interactive` Cargo feature.
   # Identical to `isDev` today, named separately because it is the
-  # console-wiring fact (see `mvmMeta.withDevShell`) — distinct from the
+  # console-wiring fact (see `mvmMeta.withInteractive`) — distinct from the
   # accessible/sealed classification it happens to track.
-  withDevShell = isDev;
+  withInteractive = isDev;
 
   extraFileLabel = path:
     let
@@ -215,7 +215,7 @@ let
   # builder VM is what makes this buildable on hosts without native
   # Linux Nix.
   #
-  # The `dev-shell` Cargo feature gates the `do_exec` RPC handler
+  # The `interactive` Cargo feature gates the `do_exec` RPC handler
   # (the `prod-agent-no-exec` CI gate). We tie it to
   # `isDev` here so the same `mkGuest` call:
   #
@@ -227,7 +227,7 @@ let
   #
   # Either way the binary is the production Rust build, not a stub.
   guestAgentPkg = pkgs.callPackage ../packages/mvm-guest-agent.nix {
-    inherit mvmSrc withDevShell;
+    inherit mvmSrc withInteractive;
   };
 
   # In-guest host.audit.v1 driver — test fixture, baked only when
@@ -781,8 +781,8 @@ let
       if [ -x /usr/local/bin/mvm-guest-agent ]; then
         MVM_AGENT_BIN=/usr/local/bin/mvm-guest-agent
       fi
-    elif [ "$MVM_VARIANT" = dev ] && [ -x /mvm/runtime/agent-dev-shell ]; then
-      MVM_AGENT_BIN=/mvm/runtime/agent-dev-shell
+    elif [ "$MVM_VARIANT" = dev ] && [ -x /mvm/runtime/agent-interactive ]; then
+      MVM_AGENT_BIN=/mvm/runtime/agent-interactive
     elif [ -x /mvm/runtime/agent ]; then
       MVM_AGENT_BIN=/mvm/runtime/agent
     elif [ "$MVM_RUNTIME_SOURCE_POLICY" = required_overlay ]; then
@@ -946,7 +946,7 @@ let
   nameFile = pkgs.writeText "mvm-name" "${name}\n";
 
   # Verb-trust policy — baked into sealed images only (`isSealed`).
-  # Absent on dev images (withDevShell = true). Sealed images fail
+  # Absent on dev images (withInteractive = true). Sealed images fail
   # closed: control RPCs require a launch-provisioned grant.
   verbTrustFile = pkgs.writeText "mvm-verb-trust"
     ''{"version":1,"require_grant":true,"grant_key_source":"launch_provisioned"}'';
@@ -1326,13 +1326,13 @@ let
     accessible = isDev;
     sealed = isSealed;
     entrypointKind = entrypointKind;
-    # True iff the agent is built with the `dev-shell`
+    # True iff the agent is built with the `interactive`
     # Cargo feature — which gates BOTH `do_exec` AND the PTY-over-vsock
-    # interactive console (claim 15). `withDevShell == true`
+    # interactive console (claim 15). `withInteractive == true`
     # means a dev image whose console is wired; `false` is a sealed prod
     # agent with no interactive surface. mvmctl / admission gates read this
     # to refuse interactive access to a sealed image.
-    withDevShell = withDevShell;
+    withInteractive = withInteractive;
     initSystem = "busybox";
     # Single 300ms boot-budget floor across
     # every backend. Custom /init + trimmed kernel + direct vmlinux

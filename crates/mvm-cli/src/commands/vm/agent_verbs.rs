@@ -23,7 +23,7 @@ pub(crate) fn image_is_sealed(rootfs_path: &std::path::Path) -> bool {
 /// baked-entrypoint run, on a non-dev profile, of a **sealed** image qualifies:
 /// those issue only ProdSafe verbs and the image's agent has no console/exec
 /// baked in. An interactive PTY (ConsoleOpen) or ad-hoc command (Exec) needs
-/// DevOnly verbs; a dev profile stays permissive by contract; and a dev-shell /
+/// DevOnly verbs; a dev profile stays permissive by contract; and an interactive /
 /// OCI image (not sealed) must stay reachable via `machine exec` / `console`.
 pub(crate) fn grant_eligible(
     pty: bool,
@@ -122,7 +122,7 @@ mod tests {
     fn grant_eligible_only_for_nonpty_noargv_nondev_sealed() {
         // Baked-entrypoint, prod profile, SEALED image → eligible.
         assert!(grant_eligible(false, false, false, true));
-        // Same run but the image is NOT sealed (dev-shell / OCI) → NOT eligible.
+        // Same run but the image is NOT sealed (interactive / OCI) → NOT eligible.
         assert!(!grant_eligible(false, false, false, false));
         // Interactive (pty) → NOT eligible even when sealed.
         assert!(!grant_eligible(true, false, false, true));

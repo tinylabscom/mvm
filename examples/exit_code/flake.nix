@@ -33,7 +33,7 @@
   # `entrypoint.command = [ "/bin/busybox" "sh" "-c" "exit 7" ]`
   #
   # The `command` form → mkGuest infers sealed/prod (dev = false),
-  # builds the agent without `dev-shell` (no console, no do_exec),
+  # builds the agent without `interactive` (no console, no do_exec),
   # and writes the rendered command to /etc/mvm/entrypoint (mode 0500).
   # /init sources it, captures $?, reports, poweroffs.
   #
@@ -57,7 +57,7 @@
           default = mvm.lib.${system}.mkGuest {
             name = "exit-code-7";
 
-            # `command` form → sealed/prod image, no dev-shell.
+            # `command` form → sealed/prod image, no interactive.
             # mkGuest renders this to /etc/mvm/entrypoint; /init sources it,
             # captures $?, calls mvm-exit-report, poweroffs.
             # busybox is already in the rootfs as /bin/busybox.

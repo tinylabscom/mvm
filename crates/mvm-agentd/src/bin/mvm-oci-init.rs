@@ -16,7 +16,7 @@ mod linux {
 
     const AGENT_FALLBACK: &str = "/usr/local/bin/mvm-guest-agent";
     const AGENT_OVERLAY: &str = "/mvm/runtime/agent";
-    const AGENT_OVERLAY_DEV_SHELL: &str = "/mvm/runtime/agent-dev-shell";
+    const AGENT_OVERLAY_INTERACTIVE: &str = "/mvm/runtime/agent-interactive";
     const NETINIT_FALLBACK: &str = "/usr/local/bin/mvm-guest-netinit";
     const NETINIT_OVERLAY: &str = "/mvm/runtime/netinit";
     const EGRESS_CLIENT: &str = "/usr/local/bin/mvm-egress-client";
@@ -283,7 +283,7 @@ mod linux {
             (
                 mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
                 mvm_core::security::AgentProfile::Dev,
-            ) => &[AGENT_OVERLAY_DEV_SHELL],
+            ) => &[AGENT_OVERLAY_INTERACTIVE],
             (
                 mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
                 mvm_core::security::AgentProfile::SealedProd
@@ -292,7 +292,7 @@ mod linux {
             (
                 mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
                 mvm_core::security::AgentProfile::Dev,
-            ) => &[AGENT_OVERLAY_DEV_SHELL, AGENT_OVERLAY, AGENT_FALLBACK],
+            ) => &[AGENT_OVERLAY_INTERACTIVE, AGENT_OVERLAY, AGENT_FALLBACK],
             (
                 mvm_core::vm_backend::RuntimeSourcePolicy::PreferOverlay,
                 mvm_core::security::AgentProfile::SealedProd
@@ -515,13 +515,13 @@ mod linux {
         }
 
         #[test]
-        fn resolve_guest_agent_for_dev_required_overlay_prefers_dev_shell_overlay() {
+        fn resolve_guest_agent_for_dev_required_overlay_prefers_interactive_overlay() {
             let got = resolve_guest_agent_for(
                 mvm_core::vm_backend::RuntimeSourcePolicy::RequiredOverlay,
                 mvm_core::security::AgentProfile::Dev,
-                |path| path == Path::new(AGENT_OVERLAY_DEV_SHELL),
+                |path| path == Path::new(AGENT_OVERLAY_INTERACTIVE),
             );
-            assert_eq!(got, Some(PathBuf::from(AGENT_OVERLAY_DEV_SHELL)));
+            assert_eq!(got, Some(PathBuf::from(AGENT_OVERLAY_INTERACTIVE)));
         }
 
         #[test]

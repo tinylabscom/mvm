@@ -2,7 +2,7 @@
 # ADR-001 §W4.3 (claim 4) + ADR-005 §W5 — production guest-agent symbol contract.
 #
 # On the `mvm-guest-agent` binary built in its PRODUCTION configuration (no
-# `dev-shell` feature), assert:
+# `interactive` feature), assert:
 #
 #   1. `handle_run_entrypoint` is PRESENT — the constrained RunEntrypoint
 #      handler ships (ADR-005 §W5). It is `#[inline(never)]` precisely so it
@@ -10,10 +10,10 @@
 #      the symbol table was stripped and the absence check below would be
 #      meaningless (vacuously true), so we fail instead of trusting it.
 #   2. `do_exec` is ABSENT — the dev-only `sh -c` exec path did not leak into a
-#      non-dev-shell build (claim 4 / W4.3). A compromised guest service must
+#      non-interactive build (claim 4 / W4.3). A compromised guest service must
 #      not be able to reach an arbitrary-command handler.
 #
-# Then a POSITIVE CONTROL: built WITH `dev-shell`, `do_exec` MUST be detectable.
+# Then a POSITIVE CONTROL: built WITH `interactive`, `do_exec` MUST be detectable.
 # This proves the detector works (so #2 can't silently pass against a renamed
 # symbol) — if `do_exec` is ever renamed, this turns the lane red and points
 # here, instead of letting the no-exec assertion rot into a no-op.
@@ -30,7 +30,7 @@ set -euo pipefail
 PKG=mvm-agentd
 BIN=mvm-guest-agent
 
-echo "::group::Build production agent (release, no dev-shell)"
+echo "::group::Build production agent (release, no interactive)"
 CARGO_PROFILE_RELEASE_STRIP=false \
   cargo build --release --locked -p "$PKG" --bin "$BIN" --no-default-features
 echo "::endgroup::"
@@ -50,23 +50,23 @@ fi
 
 if grep -q 'mvm_guest_agent.*do_exec' <<<"$prod_syms"; then
   echo "::error::claim 4 / ADR-001 §W4.3: do_exec is PRESENT in the production agent." >&2
-  echo "The dev-only \`sh -c\` exec path leaked into a non-dev-shell build." >&2
+  echo "The dev-only \`sh -c\` exec path leaked into a non-interactive build." >&2
   grep 'mvm_guest_agent.*do_exec' <<<"$prod_syms" >&2 || true
   fail=1
 else
   echo "ok: do_exec absent from the production agent (claim 4 / W4.3)"
 fi
 
-echo "::group::Positive control — build WITH dev-shell; do_exec MUST be detectable"
+echo "::group::Positive control — build WITH interactive; do_exec MUST be detectable"
 CARGO_PROFILE_RELEASE_STRIP=false \
   cargo build --release --locked -p "$PKG" --bin "$BIN" \
-    --no-default-features --features dev-shell \
+    --no-default-features --features interactive \
     --target-dir target/claim4-poscontrol
 echo "::endgroup::"
 if grep -q 'mvm_guest_agent.*do_exec' <<<"$(nm "target/claim4-poscontrol/release/$BIN")"; then
-  echo "ok: positive control — do_exec is detectable when dev-shell is enabled"
+  echo "ok: positive control — do_exec is detectable when interactive is enabled"
 else
-  echo "::error::Positive control FAILED: do_exec not found even WITH dev-shell on." >&2
+  echo "::error::Positive control FAILED: do_exec not found even WITH interactive on." >&2
   echo "The symbol was probably renamed. Update this script's grep so the production" >&2
   echo "absence assertion stays meaningful (otherwise it silently passes regardless)." >&2
   fail=1
