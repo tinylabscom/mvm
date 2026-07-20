@@ -4,7 +4,7 @@
 //! Tier 1 (connection reuse): the builder opens a single stream, pipelines the
 //! `FsWrite` staging frames, then the `Exec` / `RunEntrypoint` frame(s) on that
 //! same stream instead of reconnecting per call. Wall-clock duration is
-//! measured host-side. The argv (`Exec`) surface is the dev-shell debug path;
+//! measured host-side. The argv (`Exec`) surface is the interactive debug path;
 //! `run_entrypoint` routes through the production no-argv path.
 
 use std::os::unix::net::UnixStream;
@@ -81,7 +81,7 @@ impl<'a> ExecBuilder<'a> {
         self
     }
 
-    /// The command to run (dev-shell `Exec` path). Call again / use [`chain`]
+    /// The command to run (interactive `Exec` path). Call again / use [`chain`]
     /// to append more commands run sequentially on the same stream.
     ///
     /// [`chain`]: ExecBuilder::chain
@@ -111,7 +111,7 @@ impl<'a> ExecBuilder<'a> {
         self
     }
 
-    /// Stage the files, then run the dev-shell argv command(s) — returns the
+    /// Stage the files, then run the interactive argv command(s) — returns the
     /// last command's outcome (or the first failing one).
     pub fn output(self) -> Result<ExecOutcome> {
         let mut stream = self.connect()?;
@@ -142,7 +142,7 @@ impl<'a> ExecBuilder<'a> {
     /// Tier-2: run the whole staged batch (files + every command) in **one
     /// round-trip** via `ExecBatch`, returning one outcome per command run
     /// (truncated at the first non-zero exit). `peak_rss_kib` is agent-measured
-    /// on this path. Requires a `dev-shell` guest agent.
+    /// on this path. Requires an `interactive` guest agent.
     pub fn batch(self) -> Result<Vec<ExecOutcome>> {
         let mut stream = self.connect()?;
         run_batch(&mut stream, &self.stages, &self.commands, self.timeout)
@@ -219,7 +219,7 @@ fn run_batch(
 }
 
 /// Single-quote each argv element so spaces/metacharacters don't re-split when
-/// the dev-shell agent runs the command through a shell.
+/// the interactive agent runs the command through a shell.
 fn shell_join(argv: &[String]) -> String {
     argv.iter()
         .map(|a| format!("'{}'", a.replace('\'', r"'\''")))

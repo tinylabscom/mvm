@@ -1105,7 +1105,7 @@ fn configure_pre_net(ctx: &KrunContext) -> Result<sys::Context, Error> {
         // bundled libkrunfw kernel (TSI + vsock). When the declared kernel
         // file is absent, materialize the bundled one at that path (idempotent;
         // the `Raw` set_kernel below loads the file directly, so the bundled
-        // load/entry addrs aren't needed here). Builder / dev-shell images
+        // load/entry addrs aren't needed here). Builder / interactive images
         // carry a real built kernel and skip this. Single source for every
         // caller (up / invoke / run) so none re-implements the fallback.
         if !Path::new(kernel_path).exists() {

@@ -1,11 +1,11 @@
-//! Streaming exec core (dev-shell only). Runs `sh -c <command>` and emits
+//! Streaming exec core (interactive only). Runs `sh -c <command>` and emits
 //! `ExecEvent` chunks via an `emit` closure as the child produces output,
 //! returning the terminal `Exit`. The wire-writing lives in the agent bin
 //! (`do_exec_streaming`); this core is closure-driven so it is unit-
 //! testable without a vsock `File`. Mirrors `process_rpc::spawn_drain` +
 //! the `handle_proc_wait` sleep-poll loop (the in-repo streaming idiom —
 //! mvm-guest has no `libc::poll` usage).
-#![cfg(feature = "dev-shell")]
+#![cfg(feature = "interactive")]
 
 use crate::vsock::ExecEvent;
 use std::io::{Read, Write};

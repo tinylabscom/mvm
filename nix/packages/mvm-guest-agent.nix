@@ -28,7 +28,7 @@
 #
 # ## Features
 #
-# `dev-shell` is opt-in. With it, the agent accepts the `Exec`
+# `interactive` is opt-in. With it, the agent accepts the `Exec`
 # vsock request and shells out arbitrary commands — required for
 # `mvmctl exec`/`mvmctl console` against dev images. Without it
 # (production), the `Exec` symbol is absent — the
@@ -37,7 +37,7 @@
 { pkgs
 , lib
 , mvmSrc
-, withDevShell ? false
+, withInteractive ? false
 }:
 
 pkgs.rustPlatform.buildRustPackage {
@@ -67,8 +67,8 @@ pkgs.rustPlatform.buildRustPackage {
     # the host tunnel worker over vsock. netinit spawns it only when the
     # `mvm.network_tunnel=` cmdline token is present; inert otherwise.
     "--bin" "mvm-guest-netd"
-  ] ++ lib.optionals withDevShell [
-    "--features" "mvm-agentd/dev-shell"
+  ] ++ lib.optionals withInteractive [
+    "--features" "mvm-agentd/interactive"
   ];
 
   # Same selection for the `nix flake check`-equivalent test run.

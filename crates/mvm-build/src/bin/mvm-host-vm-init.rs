@@ -337,7 +337,7 @@ pub(crate) fn setup_dev_fd_symlinks(dev_root: &std::path::Path) -> Result<(), St
 // ============================================================================
 //
 // The builder/dev VM bakes `mvm-guest-agent` (mkGuest, via the
-// `entrypoint.shell = "/bin/sh"` → dev-shell build) but PID 1 here never
+// `entrypoint.shell = "/bin/sh"` → interactive build) but PID 1 here never
 // forked it, so vsock port 5252 stayed unbound on builder/dev VMs — only
 // workload VMs ran the agent. This init forks the agent under
 // setpriv exactly as the workload `/init` does (nix/lib/mk-guest.nix), so

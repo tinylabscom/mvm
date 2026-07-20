@@ -4,7 +4,7 @@
   # A minimal sealed (prod) workload whose PID-1 command never exits, so the
   # VM stays resident long enough to checkpoint / fork / pause / resume and be
   # probed over the guest-agent vsock. The `command` form makes mkGuest infer
-  # the sealed/prod image (agent built without the dev-shell console). The
+  # the sealed/prod image (agent built without the interactive console). The
   # `github:tinylabscom/mvm` pin is load-bearing: a source-checkout `mvmctl machine run`
   # rewrites it to the in-repo flake, so this builds without a release round-trip.
 

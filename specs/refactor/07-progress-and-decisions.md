@@ -100,9 +100,8 @@ Full descriptions and acceptance gates for every item above: [06-execution-plan.
   Cheap symmetry step when picked up: add an aarch64 case to
   `nix/tests/mk-guest-eval.nix` (currently pins `x86_64-linux`, a pure-eval
   metadata test, not an image build).
-- **`dev-shell` → `interactive` feature rename.** The feature gates the workload
-  microVM console + `do_exec` + run-code (claims 4/15); the name misleads (reads
-  as the removed builder-VM shell). Rename touches the Cargo feature, the
-  `#[cfg]` sites, `mkGuest`'s `withDevShell`, `nix/tests/mk-guest-eval.nix`, the
-  two `check-prod-agent-no-{console,exec}.sh` scripts, and claim 4/15 prose. Its
-  own slice, after the branch is green (it edits the claim-enforcing CI scripts).
+- ~~**`dev-shell` → `interactive` feature rename.**~~ Done. The Cargo feature
+  (`mvm-agentd`, `mvm-build`), every `#[cfg]` site, `mkGuest`'s `withDevShell`
+  → `withInteractive`, `nix/tests/mk-guest-eval.nix`, the two
+  `check-prod-agent-no-{console,exec}.sh` scripts, CI, and claim 4/15 prose
+  (CLAUDE.md + ADR-001) now read `interactive`.
