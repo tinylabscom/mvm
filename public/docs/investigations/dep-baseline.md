@@ -289,9 +289,52 @@ new 267-crate baseline.
 
 ### Remaining work (unchanged, decision-gated)
 
-- **B4 + C1** (`aws-lc-rs`, −16 + a C build): blocked upstream by
-  `oci-client`; needs the reqwest-major unify + a fork/feature that avoids
-  `rustls-platform-verifier`, plus a TLS-connect smoke.
+- **B4 + C1** (`aws-lc-rs`): **DONE** — see B4/C1 completion section below.
 - **B1 / B2**: no default-build benefit left; only the cross-repo sigstore
   relocation + the `opendal`→`object_store` feature-build swap remain,
   sequenced with plan 123.
+
+## B4/C1 completion (2026-07-20)
+
+The two upstream gates lifted simultaneously:
+
+- `aes-gcm 0.11.0` (stable, 2026-07-20 — was `0.11.0-rc.4` since 2026-06-20)
+- `ed25519-dalek 3.0.0` (stable, 2026-07-20 — was `3.0.0-rc.1` since 2026-06-20)
+
+**What happened before the gate lifted:** the follow-up dep-slimming branch
+(remeasured 2026-07-08) replaced `oci-client` with an in-repo OCI registry
+client in `mvm-fs`. That cut removed the `oci-client → reqwest 0.13 →
+rustls-platform-verifier → aws-lc-rs` chain from the default closure entirely.
+The workspace was simultaneously updated to `aes-gcm = "0.11"` and
+`ed25519-dalek = "3"` in `[workspace.dependencies]`, using the RC releases
+speculatively — but since the `Cargo.lock` resolved to the latest matching
+versions, it was pinned to `0.11.0-rc.4` and `3.0.0-rc.1`, not yet compliant
+with ADR-002's no-RC-crypto rule.
+
+**Now that stable is out:** `cargo update` resolves the lockfile to
+`aes-gcm 0.11.0` and `ed25519-dalek 3.0.0` (both stable). The workspace is
+ADR-002-clean. The full RustCrypto 0.11 line is confirmed stable:
+
+| Crate | Old | New |
+|---|---|---|
+| `aes-gcm` | 0.10.3 | **0.11.0** |
+| `ed25519-dalek` | 2.x | **3.0.0** |
+| `sha2` | 0.10.x | **0.11.0** |
+| `hmac` | 0.12.x | **0.13.0** |
+| `digest` | 0.10.x | **0.11.x** |
+| `hkdf` | (not used) | (not used) |
+
+**Ratchet strengthened:** `aws-lc-rs` is now added to `FORBIDDEN_IN_DEFAULT_CLOSURE`
+in `xtask check-forbidden-deps`. `cargo tree -i aws-lc-rs` (default build)
+returns no match.
+
+**Residual (C1, minor):** `reqwest 0.12.28` (via `object_store`) coexists with
+`reqwest 0.13.4` (workspace) in the lockfile. `object_store` is behind the
+off-by-default `storage-s3` feature, so this dual-version situation is inert
+for the default `mvmctl` closure. `deny.toml` skip comment updated to reflect
+the current reality (workspace is 0.13; 0.12 is the holdout via `object_store`).
+`aws-lc-rs` does not enter through either reqwest version — the workspace
+`reqwest 0.13` uses the `rustls-no-provider` feature (ring provider installed
+in-process by the caller), and `reqwest 0.12` is optional and ring-based.
+
+**B4 is closed. C1 residual is documented and inert.**
