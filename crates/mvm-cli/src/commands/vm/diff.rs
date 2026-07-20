@@ -59,11 +59,15 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// Like `fs::fs_request`, the `--hypervisor mock` fast path stays ahead of
 /// the `vsock_transport::for_vm` probe — which resolves the right socket per
 /// VMM (Firecracker's `v.sock`, or the per-port UNIX socket libkrun/QEMU
-/// expose) but is unaware of the in-memory mock backend.
+/// expose) but is unaware of the in-memory mock backend. Gated behind
+/// `test-support` along with the mock backend itself.
 fn fs_diff(name: &str) -> Result<Vec<FsChange>> {
-    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
-    if mock_dir.join("runtime").join("v.sock").exists() {
-        return mvm_agentd::vsock::query_fs_diff(&mock_dir.to_string_lossy());
+    #[cfg(feature = "test-support")]
+    {
+        let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
+        if mock_dir.join("runtime").join("v.sock").exists() {
+            return mvm_agentd::vsock::query_fs_diff(&mock_dir.to_string_lossy());
+        }
     }
     let mut stream =
         mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;

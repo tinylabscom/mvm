@@ -153,7 +153,10 @@ impl Drop for WarmLease {
     }
 }
 
-#[cfg(test)]
+// Every test below drives `WarmLease` through `MockBackend`, the only
+// hermetic `VmBackend` test double available — so the whole module is
+// gated behind `test-support` along with the mock it exercises.
+#[cfg(all(test, feature = "test-support"))]
 mod tests {
     use super::*;
     use crate::MockBackend;

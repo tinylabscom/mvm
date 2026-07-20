@@ -14,6 +14,7 @@
 
 use crate::backend::{AnyBackend, BackendTier, FirecrackerBackend};
 use crate::libkrun::LibkrunBackend;
+#[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
 use crate::wasm_backend::WasmBackend;
@@ -122,6 +123,25 @@ macro_rules! backend_catalog {
     };
 }
 
+/// Construct the mock descriptor's `AnyBackend`. The descriptor row stays in
+/// the catalog in every build (so `"mock"` keeps resolving as a recognised
+/// selector — `mvmctl doctor`, the catalog-matrix test, and the generic
+/// descriptor-driven consumers all still see it), but the mock backend
+/// itself only exists behind `test-support`. Outside that feature this
+/// falls back to the same default `instantiate_kind` would otherwise be
+/// unable to express for a variant that doesn't compile in — callers that
+/// need a hard refusal instead of this fallback use
+/// [`AnyBackend::require_hypervisor_selectable`] ahead of resolution.
+#[cfg(feature = "test-support")]
+fn mock_constructor() -> AnyBackend {
+    AnyBackend::Mock(MockBackend::new())
+}
+
+#[cfg(not(feature = "test-support"))]
+fn mock_constructor() -> AnyBackend {
+    AnyBackend::default_backend()
+}
+
 backend_catalog![
     {
         kind: Firecracker,
@@ -172,7 +192,7 @@ backend_catalog![
         kind: Mock,
         selector: "mock",
         aliases: [],
-        constructor: AnyBackend::Mock(MockBackend::new()),
+        constructor: mock_constructor(),
         tier: Tier3,
         marker_file: None,
         started_vm_probe_order: None,

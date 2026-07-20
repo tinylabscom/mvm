@@ -74,7 +74,14 @@ pub mod image;
 pub mod kvm;
 pub mod libkrun;
 pub mod microvm;
+/// The hermetic in-memory `MockBackend` — see its module docs for the
+/// security posture. Gated behind `test-support` so it never compiles into
+/// a production `mvmctl` binary.
+#[cfg(feature = "test-support")]
 pub mod mock;
+/// In-process mock of the in-guest vsock agent, paired with [`mock`].
+/// Gated the same way — test-only, never in a production build.
+#[cfg(feature = "test-support")]
 pub mod mock_guest_agent;
 pub mod netinit_audit;
 pub mod network;
@@ -131,6 +138,7 @@ pub use base::shell_mock;
 
 pub use backend::{AnyBackend, FirecrackerBackend, FirecrackerConfig};
 pub use libkrun::LibkrunBackend;
+#[cfg(feature = "test-support")]
 pub use mock::MockBackend;
 /// Derive a workload's packet-tunnel launch config from its egress policy. The
 /// admitted launch path (`mvmctl`) calls this to enable the L3 forwarding tunnel

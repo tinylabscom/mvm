@@ -35,8 +35,10 @@ use mvm_core::client::dto::{
 use mvm_core::client::{MvmClient, MvmError, Result};
 use mvm_core::config::vm_state_dir;
 use mvm_core::vm_backend::{SnapshotCapability, VmStartConfig, WarmStartError};
+#[cfg(feature = "test-support")]
+use mvm_runtime::vm::instance_snapshot::CannedIO;
 use mvm_runtime::vm::instance_snapshot::{
-    CannedIO, FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, VsockPrimedSignalSource,
+    FirecrackerIO, SnapshotIO, VsockPostRestoreSignal, VsockPrimedSignalSource,
     await_primed_barrier, pause_and_seal, signal_post_restore, verify_and_resume,
 };
 use mvm_runtime::vm::name_registry::{VmNameRegistry, VmRegistration};
@@ -92,8 +94,13 @@ impl LocalBackend {
     /// Pick the `SnapshotIO` matching this client's backend. The mock writes
     /// deterministic `CannedIO` stub bytes so the seal/verify round-trip runs
     /// without a real Firecracker socket; every other backend drives
-    /// `FirecrackerIO` against the running VM's UDS control socket.
+    /// `FirecrackerIO` against the running VM's UDS control socket. The mock
+    /// arm is gated behind `test-support` along with `is_mock()`'s only
+    /// possible `true` outcome — outside that feature `AnyBackend::Mock`
+    /// doesn't exist, so `is_mock()` is always `false` and this falls
+    /// straight through to the real Firecracker path.
     fn snapshot_io_for(&self, vm_name: &str) -> Result<Box<dyn SnapshotIO>> {
+        #[cfg(feature = "test-support")]
         if self.is_mock() {
             let dir = mvm_runtime::MockBackend::vm_dir(vm_name);
             if !dir.exists() {
@@ -850,16 +857,23 @@ impl MvmClient for LocalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "test-support")]
     use mvm_core::util::test_env::TestEnv;
 
+    // Only the mock-driven `LocalBackend` tests below need an isolated
+    // `MVM_HOME` (they boot/list/stop machines against real on-disk state);
+    // gated together with the mock backend those tests exercise.
+    #[cfg(feature = "test-support")]
     static DATA_DIR_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    #[cfg(feature = "test-support")]
     struct IsolatedDataDir {
         _lock: std::sync::MutexGuard<'static, ()>,
         _env: TestEnv,
         dir: tempfile::TempDir,
     }
 
+    #[cfg(feature = "test-support")]
     impl IsolatedDataDir {
         fn new() -> Self {
             let lock = DATA_DIR_TEST_LOCK
@@ -976,6 +990,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn list_over_mock_backend_succeeds() {
         // `list_machines` unions the host-wide backend scan + name registry, so
         // isolate the data dir or leftover real `~/.mvm/vms` state leaks in.
@@ -1026,6 +1041,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn run_boots_admitted_plan_from_materialized_rootfs() {
         let data = IsolatedDataDir::new();
         let rootfs = data.path().join("rootfs.ext4");
@@ -1055,6 +1071,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn remove_drops_the_machine_from_list_and_is_idempotent() {
         let data = IsolatedDataDir::new();
         let rootfs = data.path().join("rootfs.ext4");
@@ -1098,6 +1115,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn stop_machine_falls_back_to_configured_backend_and_is_idempotent() {
         // A mock-driven VM writes no pid marker, so `for_started_vm` finds no
         // owning VMM and the stop must fall back to this client's configured
@@ -1194,6 +1212,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn pause_seals_and_resume_verifies_over_mock_canned_io() {
         // The mock snapshot transport keys off the mock VM's per-VM dir existing.
         let _data = IsolatedDataDir::new();
@@ -1220,6 +1239,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn pause_on_absent_mock_vm_is_error() {
         let _data = IsolatedDataDir::new();
         let be = LocalBackend::with_hypervisor("mock");
@@ -1239,7 +1259,9 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     /// Persist a minimal image-backed spec named `name` into the current
-    /// `MVM_HOME`-derived machine state dir.
+    /// `MVM_HOME`-derived machine state dir. Only used by the
+    /// `reconfigure_*` tests below, which all drive the mock backend.
+    #[cfg(feature = "test-support")]
     fn persist_test_spec(name: &str) {
         use mvm_runtime::machine::persist::{
             MACHINE_SPEC_SCHEMA_VERSION, MachineSpec as PersistSpec, save_machine_spec,
@@ -1268,6 +1290,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn reconfigure_refuses_network_changes_on_local_backend() {
         let _data = IsolatedDataDir::new();
         persist_test_spec("web");
@@ -1290,6 +1313,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn reconfigure_refuses_allow_host_changes_on_local_backend() {
         let _data = IsolatedDataDir::new();
         persist_test_spec("web2");
@@ -1312,6 +1336,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn reconfigure_unknown_machine_is_error() {
         let _data = IsolatedDataDir::new();
         let be = LocalBackend::with_hypervisor("mock");
@@ -1333,6 +1358,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn reconfigure_stopped_machine_updates_spec_and_returns_stopped() {
         let _data = IsolatedDataDir::new();
         persist_test_spec("myapp");
@@ -1359,6 +1385,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn reconfigure_rejects_zero_cpus() {
         let _data = IsolatedDataDir::new();
         persist_test_spec("zero-cpu-machine");
@@ -1386,6 +1413,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "test-support")]
     async fn reconfigure_noop_returns_stopped_without_overwriting_spec() {
         let _data = IsolatedDataDir::new();
         persist_test_spec("noop-machine");

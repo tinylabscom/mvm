@@ -160,6 +160,12 @@ tar.workspace = true
 hex.workspace = true
 # `TestEnv` env-var guard for env-mutating tests (reaper / substitution_endpoint).
 mvm-core = { workspace = true, features = ["test-support"] }
+# `plan_admission`'s own tests drive `AnyBackend::from_hypervisor("mock")` —
+# the hermetic in-memory backend — end-to-end through `admit_and_start`. The
+# mock is gated behind `test-support` in mvm-runtime so it never ships in a
+# production binary; force it on for this crate's own test build the same
+# way the `mvm-core` entry above does.
+mvm-runtime = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "test-util"] }
 # jailer property tests re-spawn under SECCOMP_PROBE=1 before main.
 ctor = "0.2"

@@ -56,3 +56,15 @@ pub fn backend_stop_by_name(hypervisor: &str, name: &str) -> Result<()> {
             reason: format!("{e:#}"),
         })
 }
+
+/// Refuse a `--hypervisor` name the current build cannot select (e.g. `mock`
+/// on a build without the `test-support` feature) before any machine
+/// construction — mirrors the CLI's former inline
+/// `AnyBackend::require_hypervisor_selectable` guard.
+pub fn require_hypervisor_selectable(name: &str) -> Result<()> {
+    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(name).map_err(|e| {
+        MvmError::Backend {
+            reason: format!("{e:#}"),
+        }
+    })
+}
