@@ -1,21 +1,14 @@
 //! Registry client for fetching addon artifacts.
 //!
-//! Two implementations live in this module:
-//!
-//! - [`LocalRegistry`]: a directory-backed registry useful for test
-//!   harnesses and offline development. Reads pre-published artifacts
-//!   from a fixed filesystem layout (see [`LocalRegistry`] docs).
-//!   Verifies sha256 round-trip but does NOT verify sigstore signatures
-//!   (the wire format is stored verbatim; signature checks land with
-//!   the real registry client).
-//! - [`HttpRegistry`]: stub. Real sigstore-keyless verification,
-//!   Rekor inclusion-proof checks, and HTTP transport land in a
-//!   follow-up patch.
+//! [`LocalRegistry`] is a directory-backed registry useful for test
+//! harnesses and offline development. Reads pre-published artifacts
+//! from a fixed filesystem layout (see [`LocalRegistry`] docs).
+//! Verifies sha256 round-trip but does NOT verify sigstore signatures
+//! (the wire format is stored verbatim; signature checks land with
+//! the real registry client).
 //!
 //! The [`Registry`] trait is shaped so the consumer-side compile
-//! pipeline can mock it cleanly in compile-time error tests, and so a
-//! `LocalRegistry` can stand in for `HttpRegistry` everywhere registry
-//! resolution is needed.
+//! pipeline can mock it cleanly in compile-time error tests.
 
 use crate::addon::manifest::{self, AddonManifest};
 use serde::{Deserialize, Serialize};
@@ -49,9 +42,9 @@ pub struct ResolvedVersion {
     pub yanked: bool,
 }
 
-/// Registry client surface. Implementations: `HttpRegistry` (real),
-/// `LocalRegistry` (directory-backed; used by test harnesses and by
-/// hermetic `mvm compile`), and test fakes.
+/// Registry client surface. Implementations: `LocalRegistry`
+/// (directory-backed; used by test harnesses and by hermetic
+/// `mvm compile`) and test fakes.
 pub trait Registry {
     /// List addon names in the registry, optionally filtered to those
     /// containing `pattern` as a substring (case-insensitive).
@@ -142,9 +135,8 @@ impl std::error::Error for RegistryError {}
 // LocalRegistry — directory-backed
 // ────────────────────────────────────────────────────────────────────
 
-/// Directory-backed registry. Useful for test harnesses, offline
-/// development, and as the v1 reference shape for the future
-/// `HttpRegistry`.
+/// Directory-backed registry. Useful for test harnesses and offline
+/// development.
 ///
 /// Filesystem layout (rooted at `LocalRegistry::root`):
 ///
@@ -156,9 +148,9 @@ impl std::error::Error for RegistryError {}
 ///       manifest.toml         # canonical manifest bytes
 ///       artifact.tar.gz       # canonical artifact bytes
 ///       sbom.json             # SPDX SBOM bytes
-///       signature.bundle      # sigstore-keyless cert + sig (placeholder
-///                             # — wire-compatible with HttpRegistry once
-///                             # sigstore verification lands)
+///       signature.bundle      # sigstore-keyless cert + sig (placeholder;
+///                             # real sigstore verification lands in a
+///                             # follow-up)
 /// ```
 ///
 /// `index.toml` per-name shape:
@@ -423,79 +415,6 @@ fn split_ref(r: &str) -> Option<(&str, &str)> {
 
 fn hex_sha256(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
-}
-
-// ────────────────────────────────────────────────────────────────────
-// HttpRegistry — stub
-// ────────────────────────────────────────────────────────────────────
-
-/// Stub HTTP registry. Returns `Unreachable` for every call; the real
-/// implementation lands when sigstore-keyless verification is wired.
-pub struct HttpRegistry {
-    pub base_url: String,
-}
-
-impl HttpRegistry {
-    pub fn new(base_url: impl Into<String>) -> Self {
-        Self {
-            base_url: base_url.into(),
-        }
-    }
-}
-
-impl Registry for HttpRegistry {
-    fn names(&self, _pattern: Option<&str>) -> Result<Vec<String>, RegistryError> {
-        Err(RegistryError::Unreachable {
-            name: "<root>".to_string(),
-            detail: format!(
-                "HttpRegistry::names is not implemented yet ({}); sigstore-keyless verification + HTTP fetch land in a follow-up.",
-                self.base_url
-            ),
-        })
-    }
-
-    fn versions(&self, name: &str) -> Result<Vec<ResolvedVersion>, RegistryError> {
-        Err(RegistryError::Unreachable {
-            name: name.to_string(),
-            detail: format!(
-                "HttpRegistry::versions is not implemented yet ({}); \
-                 sigstore-keyless verification + HTTP fetch land in a \
-                 follow-up patch.",
-                self.base_url
-            ),
-        })
-    }
-
-    fn resolve(&self, name: &str, _requested: &str) -> Result<ResolvedVersion, RegistryError> {
-        Err(RegistryError::Unreachable {
-            name: name.to_string(),
-            detail: format!(
-                "HttpRegistry::resolve is not implemented yet ({}).",
-                self.base_url
-            ),
-        })
-    }
-
-    fn manifest(&self, version: &ResolvedVersion) -> Result<AddonManifest, RegistryError> {
-        Err(RegistryError::Unreachable {
-            name: version.r#ref.clone(),
-            detail: "HttpRegistry::manifest is not implemented yet.".to_string(),
-        })
-    }
-
-    fn tarball(&self, version: &ResolvedVersion) -> Result<Vec<u8>, RegistryError> {
-        Err(RegistryError::Unreachable {
-            name: version.r#ref.clone(),
-            detail: "HttpRegistry::tarball is not implemented yet.".to_string(),
-        })
-    }
-
-    fn sbom(&self, version: &ResolvedVersion) -> Result<Vec<u8>, RegistryError> {
-        Err(RegistryError::Unreachable {
-            name: version.r#ref.clone(),
-            detail: "HttpRegistry::sbom is not implemented yet.".to_string(),
-        })
-    }
 }
 
 #[cfg(test)]

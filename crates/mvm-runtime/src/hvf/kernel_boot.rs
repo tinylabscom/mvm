@@ -475,9 +475,6 @@ fn boot_kernel_impl(params: KernelBootUntilParams<'_>) -> Result<KernelBootResul
     if dtb.len() > FDT_MAX_SIZE as usize {
         return Err(HvfError::BadKernel);
     }
-    if let Ok(path) = std::env::var("MVM_HVF_DUMP_DTB") {
-        let _ = std::fs::write(path, &dtb);
-    }
 
     kernel.load_into(&mut guest_ram, load_off)?;
     guest_ram.copy_at(dtb_off, &dtb)?;

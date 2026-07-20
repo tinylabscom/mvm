@@ -112,7 +112,7 @@ Then unify + retire the old paths:
 - [ ] Extract inline `#[cfg(test)]` modules from the 39 oversized files (cheap; drops many under 1500).
 - [ ] Module-decompose the genuinely large bodies: `libkrun_builder`, `microvm`, `mvm-guest-agent`, `host-vm-init`, `doctor`, `unpack`, `image`, `vsock`.
 - [ ] Split giant functions: `handle_client` (734 → per-verb handlers via a verb-handler trait), `run_inner`, `configure_flake_microvm_*`, `build_supervisor_config`, `unpack_layer` (per entry-type). Builders for multi-field config structs.
-- [ ] Delete dead/stub code: `mvm/src/vm/egress_proxy.rs` (L7 stub), `mvm/src/storage/` dm-thin substrate, `HttpRegistry` SDK addons, the `MVM_HVF_DUMP_DTB` debug gate; gate `mock` backends behind `test-support`.
+- [~] Delete dead/stub code: removed `crates/mvm-runtime/src/vm/egress_proxy.rs` (dead L7 stub), the `MVM_HVF_DUMP_DTB` debug gate, and the `HttpRegistry` SDK stub. **`storage/{pool,thin}.rs` dm-thin substrate is NOT dead** — it backs the live `mvmctl storage info`/`gc` verbs (`ThinPoolImpl`/`DeviceMapperBackend`), so it was kept. Still pending: gate `mock` backends behind `test-support`.
 - [ ] Security fix: broker config currently parsed **unsigned** — verify signature before parse.
 - Gate: **0 non-test files > 1500 lines**; no `todo!`/`unimplemented!` on a production path; dead modules gone.
 
