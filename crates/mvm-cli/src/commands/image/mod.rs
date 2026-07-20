@@ -133,7 +133,7 @@ pub(in crate::commands) struct CachedOciImage {
     rootfs_path: Option<String>,
     /// Runtime identity (crate version + epoch) of the guest agent/netinit
     /// baked into `rootfs_path`. A mismatch with the running mvmctl forces
-    /// re-materialization so a stale agent — e.g. one predating the dev-shell
+    /// re-materialization so a stale agent — e.g. one predating the interactive
     /// exec handler — is never reused. Absent on entries written before the
     /// tag existed, which therefore read as stale and re-materialize.
     #[serde(default)]
@@ -335,7 +335,7 @@ pub(in crate::commands) fn oci_cache_root() -> PathBuf {
 /// script) changes such that already-materialized rootfs images must be
 /// re-sealed. Folded with the crate version into [`oci_runtime_tag`]; a
 /// stale rootfs then re-materializes instead of booting an outdated agent.
-/// Epoch 1 introduces the dev-shell exec handler in the OCI agent. Epoch 2 adds
+/// Epoch 1 introduces the interactive exec handler in the OCI agent. Epoch 2 adds
 /// the detached-workload handler — a rootfs sealed with an older agent would
 /// reject the run-detached request, so it must re-materialize. Epoch 3 moves
 /// `mvm-egress-client` onto the runtime overlay contract: cached injected

@@ -154,7 +154,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// Open the per-VM guest-console capture sink. OUTPUT-ONLY by
 /// construction (write-only, create+truncate): the guest console
 /// streams here and NO host-readable fd is ever attached as console
-/// input. The sole interactive path into a guest is the dev-shell-gated
+/// input. The sole interactive path into a guest is the interactive-gated
 /// agent vsock console (claim 15 — no interactive access to a sealed prod
 /// microVM), absent from sealed prod agents. Centralized so the write-only
 /// invariant lives in one place.
@@ -1550,7 +1550,7 @@ mod tests {
         // claim 15: the backend captures the guest console
         // to a WRITE-ONLY sink — there is no host fd from which the guest
         // could read console input. The only interactive path is the
-        // dev-shell-gated agent vsock console, which a sealed prod agent
+        // interactive-gated agent vsock console, which a sealed prod agent
         // does not link.
         use std::io::{Read, Write};
         let tmp = tempfile::tempdir().expect("tempdir");

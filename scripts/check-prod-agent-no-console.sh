@@ -3,7 +3,7 @@
 #
 # The agent-served PTY-over-vsock console (crates/mvm-agentd/src/console.rs) is
 # the SINGLE dev-only interactive path into a guest. On the `mvm-guest-agent`
-# binary built in its PRODUCTION configuration (no `dev-shell` feature), assert:
+# binary built in its PRODUCTION configuration (no `interactive` feature), assert:
 #
 #   1. `handle_run_entrypoint` is PRESENT — the constrained RunEntrypoint
 #      handler ships (ADR-005 §W5). It is `#[inline(never)]` precisely so it
@@ -11,11 +11,11 @@
 #      the symbol table was stripped and the absence check below would be
 #      meaningless (vacuously true), so we fail instead of trusting it.
 #   2. The console relay is ABSENT — `mvm_agentd::console` is gated behind
-#      `dev-shell`, so a sealed prod agent must not link `open_session` /
+#      `interactive`, so a sealed prod agent must not link `open_session` /
 #      `run_console_relay` / `resize_active_session`. No interactive path can
 #      reach a sealed workload (claim 15), mirroring the `do_exec` no-exec gate.
 #
-# Then a POSITIVE CONTROL: built WITH `dev-shell`, the console symbol MUST be
+# Then a POSITIVE CONTROL: built WITH `interactive`, the console symbol MUST be
 # detectable. This proves the detector works (so #2 can't silently pass against
 # a renamed/inlined symbol) — if the gate or the symbol changes, this turns the
 # lane red and points here, instead of letting the absence assertion rot.
@@ -38,7 +38,7 @@ PKG=mvm-agentd
 BIN=mvm-guest-agent
 CONSOLE_SYM='mvm_agentd.*console.*(open_session|run_console_relay|resize_active_session)'
 
-echo "::group::Build production agent (release, no dev-shell)"
+echo "::group::Build production agent (release, no interactive)"
 CARGO_PROFILE_RELEASE_STRIP=false \
   cargo build --release --locked -p "$PKG" --bin "$BIN" --no-default-features
 echo "::endgroup::"
@@ -58,23 +58,23 @@ fi
 
 if grep -qE "$CONSOLE_SYM" <<<"$prod_syms"; then
   echo "::error::claim 15 / Plan 165 WS-C: console relay is PRESENT in the production agent." >&2
-  echo "The dev-only PTY-over-vsock console leaked into a non-dev-shell build." >&2
+  echo "The dev-only PTY-over-vsock console leaked into a non-interactive build." >&2
   grep -E "$CONSOLE_SYM" <<<"$prod_syms" >&2 || true
   fail=1
 else
   echo "ok: console relay absent from the production agent (claim 15)"
 fi
 
-echo "::group::Positive control — build WITH dev-shell; console relay MUST be detectable"
+echo "::group::Positive control — build WITH interactive; console relay MUST be detectable"
 CARGO_PROFILE_RELEASE_STRIP=false \
   cargo build --release --locked -p "$PKG" --bin "$BIN" \
-    --no-default-features --features dev-shell \
+    --no-default-features --features interactive \
     --target-dir target/claim15-poscontrol
 echo "::endgroup::"
 if grep -qE "$CONSOLE_SYM" <<<"$(nm "target/claim15-poscontrol/release/$BIN")"; then
-  echo "ok: positive control — console relay is detectable when dev-shell is enabled"
+  echo "ok: positive control — console relay is detectable when interactive is enabled"
 else
-  echo "::error::Positive control FAILED: console relay not found even WITH dev-shell on." >&2
+  echo "::error::Positive control FAILED: console relay not found even WITH interactive on." >&2
   echo "The symbol was probably renamed or inlined away. Update this script's grep so the" >&2
   echo "production absence assertion stays meaningful (otherwise it silently passes)." >&2
   fail=1

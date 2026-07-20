@@ -121,7 +121,7 @@ in
 
   # ── Override path (uids = { ... } argument) ───────────────────
 
-  rootless_dev_shell_via_uids_override =
+  rootless_interactive_via_uids_override =
     let
       g = mkGuest {
         name = "rootless-dev";
@@ -184,24 +184,24 @@ in
 
   # ── Dev console wiring ────────────────────────────────────────
   #
-  # `withDevShell` is the console-wiring fact: it gates the agent's
-  # PTY-over-vsock relay (and `do_exec`) via the `dev-shell` Cargo
+  # `withInteractive` is the console-wiring fact: it gates the agent's
+  # PTY-over-vsock relay (and `do_exec`) via the `interactive` Cargo
   # feature. A dev image wires the interactive console; a sealed
   # image has no console symbol. These assert the surfaced metadata
   # tracks the entrypoint classification AND its dev/sealed override.
 
-  dev_shell_image_wires_console = (meta shellGuest).withDevShell == true
+  interactive_image_wires_console = (meta shellGuest).withInteractive == true
     && (meta shellGuest).accessible == true
     && (meta shellGuest).entrypointKind == "shell";
 
-  sealed_command_image_has_no_console = (meta commandGuest).withDevShell == false
+  sealed_command_image_has_no_console = (meta commandGuest).withInteractive == false
     && (meta commandGuest).sealed == true;
 
   # dev=true on a command entrypoint still wires the console
-  dev_override_command_wires_console = (meta commandAccessibleGuest).withDevShell == true;
+  dev_override_command_wires_console = (meta commandAccessibleGuest).withInteractive == true;
 
   # dev=false on a shell entrypoint drops the console
-  sealed_override_shell_has_no_console = (meta shellSealedGuest).withDevShell == false;
+  sealed_override_shell_has_no_console = (meta shellSealedGuest).withInteractive == false;
 
   # ── SSH ban invariants ────────────────────────────────────────
   #

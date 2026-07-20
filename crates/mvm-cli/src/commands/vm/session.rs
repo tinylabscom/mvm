@@ -815,7 +815,7 @@ fn cmd_run_code(args: RunCodeArgs) -> Result<()> {
 /// the structured `RunCode` verb rather than a shell-quote of the
 /// code body. The agent's `/etc/mvm/wrapper.json`-based dispatch
 /// picks the right interpreter; if the wrapper's language is
-/// unknown or the agent was built without `dev-shell`, the response
+/// unknown or the agent was built without `interactive`, the response
 /// surfaces the refusal directly.
 fn dispatch_run_code(
     id: &SessionId,
@@ -835,7 +835,7 @@ fn dispatch_run_code(
         .connect(mvm_agentd::vsock::GUEST_AGENT_PORT)
         .with_context(|| format!("Connecting to guest agent on {:?}", record.vm_name))?;
     // Hard cutover requires hello before any operational request.
-    // `RunCode` is a dev-shell request not
+    // `RunCode` is an interactive request not
     // covered by the closed `GuestCapability` enum, so request no
     // specific capability — the hello alone unblocks dispatch.
     let _ = mvm_agentd::vsock::negotiate_protocol(&mut stream, Vec::new())
@@ -902,7 +902,7 @@ fn require_dev_mode(
 /// the existing `Exec` vsock verb. Streams stdout/stderr to mvmctl's
 /// own streams; exits non-zero with the wrapper's exit code on failure.
 ///
-/// Note: `Exec` is dev-only on the guest side (gated by the `dev-shell`
+/// Note: `Exec` is dev-only on the guest side (gated by the `interactive`
 /// agent feature). This verb is itself gated by
 /// `require_dev_mode` above, but if the session's substrate VM was
 /// somehow built with a prod agent the underlying call will fail

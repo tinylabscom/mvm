@@ -221,7 +221,7 @@ the source gap analysis is at
    on a flipped data block.
 4. **The guest agent does not contain `do_exec` in production
    builds.** `prod-agent-no-exec` job in `.github/workflows/ci.yml`
-   builds the agent without `dev-shell` and asserts the
+   builds the agent without `interactive` and asserts the
    `mvm_guest_agent::do_exec` symbol is absent (W4.3).
 5. **Vsock framing + supervisor-config JSON are fuzzed.** `cargo-fuzz`
    targets at `crates/mvm-guest/fuzz/` cover `GuestRequest` and
@@ -362,8 +362,8 @@ the source gap analysis is at
 15. **No interactive access to a sealed production microVM.** The sole
     interactive path into a guest is the agent-served PTY-over-vsock
     console (`crates/mvm-guest/src/console.rs`), which is gated behind
-    the `dev-shell` Cargo feature — so a sealed prod agent (built
-    `--no-default-features`, `withDevShell = false` in `mkGuest`) links
+    the `interactive` Cargo feature — so a sealed prod agent (built
+    `--no-default-features`, `withInteractive = false` in `mkGuest`) links
     no console symbol, exactly mirroring claim 4's `do_exec` exclusion.
     Plan 165 WS-C. Five independent layers: (1) only the dev `/init`
     variant serves a shell; (2) the prod rootfs is dm-verity sealed
@@ -373,7 +373,7 @@ the source gap analysis is at
     `prod_console_attachment_has_no_input`); (4) the host
     `enforce_accessible_gate` refuses `mvmctl console` on a sealed VM
     (`console_refused_on_sealed_image`); (5) the agent console + `do_exec`
-    are `dev-shell`-gated. CI: the `prod-agent-no-console` symbol-grep job
+    are `interactive`-gated. CI: the `prod-agent-no-console` symbol-grep job
     in `.github/workflows/security.yml` (`scripts/check-prod-agent-no-console.sh`)
     asserts the console symbol is absent from a production agent build,
     sibling to `prod-agent-runentry-contract`. Serial-console passthrough

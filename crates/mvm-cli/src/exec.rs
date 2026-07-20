@@ -7,8 +7,8 @@
 //! surface.
 //!
 //! Dev-mode only: the guest agent's Exec handler is gated at compile time
-//! by the `dev-shell` Cargo feature. Production guest binaries are built
-//! without `dev-shell`, so the handler is not present and `exec` returns
+//! by the `interactive` Cargo feature. Production guest binaries are built
+//! without `interactive`, so the handler is not present and `exec` returns
 //! "exec not available" regardless of any runtime configuration.
 
 use anyhow::{Context, Result, anyhow};
@@ -2684,7 +2684,7 @@ mod tests {
 
     #[test]
     fn interactive_sealed_run_leaves_dev_console_unset() {
-        // A sealed image has no dev-shell agent; pre-opening sockets is
+        // A sealed image has no interactive agent; pre-opening sockets is
         // wasteful. enforce_accessible_gate refuses the attach separately.
         assert!(!transient_run_dev_console(true, true));
     }

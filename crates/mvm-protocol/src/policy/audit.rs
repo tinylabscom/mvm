@@ -277,7 +277,7 @@ pub enum LocalAuditKind {
     // surface available behind the session id. The session id IS the
     // capability: anyone with read access to
     // `<mvm_home>/run/sessions/<id>.json` can attach. Every
-    // dev-shell entry point therefore lands in the audit log so a
+    // interactive entry point therefore lands in the audit log so a
     // forensics pass can reconstruct who-attached-when even after
     // the session record is reaped.
     /// `mvmctl session start <template>` registered a new session.

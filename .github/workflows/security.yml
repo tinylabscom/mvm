@@ -75,7 +75,7 @@ jobs:
   # ── Lane 2: Production-agent symbol contract ─────────────────────
   # ADR-001 §W4.3 + ADR-005 §W5 — combined contract on the production
   # guest agent binary. ONE build, ONE step, BOTH assertions:
-  #   • mvm_guest_agent::do_exec is ABSENT (W4.3 — no dev-shell leak)
+  #   • mvm_guest_agent::do_exec is ABSENT (W4.3 — no interactive leak)
   #   • mvm_guest_agent::handle_run_entrypoint is PRESENT (W5 — the
   #     constrained RunEntrypoint handler ships).
   # Asserting both on the *same* binary in a single step prevents
@@ -104,10 +104,10 @@ jobs:
 
   # ── Lane 1b: No interactive console in a sealed prod agent ────────
   # claim 15 / Plan 165 WS-C. The PTY-over-vsock console is the single
-  # dev-only interactive path; it's gated behind `dev-shell`, so a prod
+  # dev-only interactive path; it's gated behind `interactive`, so a prod
   # agent must not link it. Asserts the relay symbol is ABSENT (with a
   # handle_run_entrypoint canary against a stripped table) and a
-  # positive control that it IS detectable WITH dev-shell.
+  # positive control that it IS detectable WITH interactive.
   prod-agent-no-console:
     name: Guest agent — no interactive console (claim 15, Plan 165 WS-C)
     runs-on: ubuntu-latest

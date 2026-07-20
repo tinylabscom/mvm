@@ -4,7 +4,7 @@
 //! must not bake the host control plane (`mvmctl`) or the resident
 //! builder daemon (`mvm-builderd`). Those are host / builder-VM tools;
 //! the workload guest is a sealed, headless payload. mkGuest
-//! (`nix/lib/mk-guest.nix`) is the workload + dev-shell image builder, so
+//! (`nix/lib/mk-guest.nix`) is the workload + interactive image builder, so
 //! this gate asserts its own code never installs those binaries.
 //!
 //! Source-grep, not a build: like `check-guest-agent-in-all-images`, this

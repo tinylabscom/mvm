@@ -17,7 +17,7 @@ const PROBE_MEM_MIB: u32 = 2048;
 
 /// Resolved inputs for one benchmarked boot. `kernel`/`rootfs` come
 /// from the same `ensure_default_microvm_image()` `mvmctl up` uses —
-/// the canonical runtime image, NOT the dev-shell rootfs.
+/// the canonical runtime image, NOT the interactive rootfs.
 // Fields are read by the live `boot_measure_once` + the HostDescriptor
 // kernel-sha; until then only the test reads them.
 #[allow(dead_code)]

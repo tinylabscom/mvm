@@ -7,7 +7,7 @@
 //! Note: `mvmctl mcp` is *always* present in CLI builds (no Cargo
 //! feature gate at the host level), matching `mvmctl exec`'s pattern.
 //! The guest-side `Exec` handler is the actual gate — production guest
-//! agents are built without `dev-shell`, so the
+//! agents are built without `interactive`, so the
 //! `tools/call run` dispatch returns "exec not available" instead of
 //! executing. This composition is intentional: the MCP server is
 //! useful when pointed at dev VMs, harmless when pointed at prod ones.

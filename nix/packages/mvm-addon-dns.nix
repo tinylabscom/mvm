@@ -5,7 +5,7 @@
 # `/init` only activates it when a zone file is present (see
 # `nix/lib/mk-guest.nix::initScript`).
 #
-# Always built without any dev-shell-style feature flag — the DNS
+# Always built without any interactive-style feature flag — the DNS
 # binary has no `do_exec`-equivalent surface and the same artifact is
 # safe for dev and prod images.
 #

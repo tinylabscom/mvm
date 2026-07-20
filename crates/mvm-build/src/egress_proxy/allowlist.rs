@@ -74,7 +74,7 @@ pub const PRODUCTION_HOSTNAMES: &[&str] = &[
 pub const ALLOWED_PORT: u16 = 443;
 
 /// Compiled allowlist. Owns its hostnames so a runtime override
-/// (gated behind `dev-shell` in `main.rs`) can supply a different
+/// (gated behind `interactive` in `main.rs`) can supply a different
 /// list per-test without mutating a global.
 #[derive(Debug, Clone)]
 pub struct Allowlist {
@@ -85,7 +85,7 @@ pub struct Allowlist {
 impl Allowlist {
     /// Build the production allowlist — the four allowed
     /// hostnames + port 443. This is what `main.rs` constructs
-    /// when the `dev-shell` feature is **off** (i.e., the binary
+    /// when the `interactive` feature is **off** (i.e., the binary
     /// shipped inside the builder VM). No env-var override; the
     /// allowlist is baked into the binary.
     pub fn production() -> Self {
@@ -96,7 +96,7 @@ impl Allowlist {
     }
 
     /// Build a custom allowlist from `hosts` + `port`. Intended
-    /// only for tests (the `dev-shell` feature in `main.rs` reads
+    /// only for tests (the `interactive` feature in `main.rs` reads
     /// `MVM_EGRESS_ALLOWLIST` and feeds it through here).
     ///
     /// Empty `hosts` returns an allowlist that refuses everything;
