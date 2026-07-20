@@ -1182,7 +1182,7 @@ pub fn restore_from_template_snapshot(
         lock_file = lock_file,
         config = config_drive,
         secrets = secrets_drive,
-        vsock = &vsock_path,
+        vsock = vsock_path,
         socket = abs_socket,
         vmstate = vmstate_path,
         mem = mem_path,
@@ -1193,10 +1193,7 @@ pub fn restore_from_template_snapshot(
     api_patch_socket(&abs_socket, "/vm", r#"{"state": "Resumed"}"#)?;
 
     // Make vsock socket accessible
-    if let Err(e) = run_in_vm(&format!(
-        "sudo chmod 0666 {vsock_path} 2>/dev/null",
-        vsock_path = &vsock_path,
-    )) {
+    if let Err(e) = run_in_vm(&format!("sudo chmod 0666 {vsock_path} 2>/dev/null")) {
         warn!("failed to chmod vsock socket: {e}");
     }
 
@@ -1926,7 +1923,7 @@ pub fn diagnose_vm(name: &str) -> Result<DiagnoseResult> {
     let vsock_path = firecracker_vsock_uds_path(&abs_dir);
     let sock_check = run_in_vm_stdout(&format!(
         "[ -S '{vsock}' ] && echo yes || echo no",
-        vsock = &vsock_path,
+        vsock = vsock_path,
     ))?;
     result.vsock_exists = sock_check.trim() == "yes";
     if !result.vsock_exists && result.fc_alive {
