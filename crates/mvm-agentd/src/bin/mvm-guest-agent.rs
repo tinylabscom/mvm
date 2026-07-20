@@ -2237,6 +2237,20 @@ fn walk_dir(dir: &std::path::Path, strip_prefix: &str, changes: &mut Vec<FsChang
     }
 }
 
+/// Shared references every per-verb handler needs: the state Arcs
+/// threaded through `accept`, plus the connection file itself. Most
+/// handlers only touch one or two fields; the handful of streaming
+/// verbs (`Exec`, `RunEntrypoint`, `RunCode`, `ProcWait`) write
+/// intermediate frames to `file` before returning their terminal
+/// response.
+struct HandlerCtx<'a> {
+    file: &'a mut std::fs::File,
+    state: &'a Arc<Mutex<AgentState>>,
+    integration_state: &'a Arc<Mutex<IntegrationState>>,
+    probe_state: &'a Arc<Mutex<ProbeState>>,
+    boot_state: &'a Arc<AgentBootState>,
+}
+
 fn handle_client(
     fd: RawFd,
     state: &Arc<Mutex<AgentState>>,
@@ -2294,7 +2308,6 @@ fn handle_client(
     };
 
     let active_profile = boot_state.profile;
-    let boot_at = boot_state.boot_at;
 
     // Profile gate. Reject dev-only verbs in sealed-prod *before*
     // the per-variant handler runs. The gate returns a typed
@@ -2331,6 +2344,14 @@ fn handle_client(
         return;
     }
 
+    let mut ctx = HandlerCtx {
+        file: &mut file,
+        state,
+        integration_state,
+        probe_state,
+        boot_state,
+    };
+
     let resp = match req {
         // The hello-prelude loop above guarantees `req` is not a
         // ProtocolHello, but keep an explicit, loud panic to catch
@@ -2340,249 +2361,54 @@ fn handle_client(
             unreachable!("protocol hello reached operational dispatch")
         }
 
-        GuestRequest::Ping => GuestResponse::Pong,
-
-        GuestRequest::WorkerStatus => {
-            let (status, last_busy_at) = match state.lock() {
-                Ok(s) => (s.status.clone(), s.last_busy_at.clone()),
-                Err(_) => ("unknown".to_string(), None),
-            };
-            GuestResponse::WorkerStatus {
-                status,
-                last_busy_at,
-            }
+        GuestRequest::Ping => handle_ping(),
+        GuestRequest::WorkerStatus => handle_worker_status(&mut ctx),
+        GuestRequest::SleepPrep { drain_timeout_secs } => handle_sleep_prep(drain_timeout_secs),
+        GuestRequest::Wake => handle_wake(&mut ctx),
+        GuestRequest::IntegrationStatus => handle_integration_status(&mut ctx),
+        GuestRequest::CheckpointIntegrations { integrations } => {
+            handle_checkpoint_integrations(integrations)
         }
-
-        GuestRequest::SleepPrep {
-            drain_timeout_secs: _,
-        } => {
-            let (success, detail) = do_sleep_prep();
-            GuestResponse::SleepPrepAck {
-                success,
-                detail: Some(detail),
-            }
-        }
-
-        GuestRequest::Wake => {
-            // Reset monitoring state after wake from snapshot.
-            if let Ok(mut s) = state.lock() {
-                s.status = "idle".to_string();
-                s.last_busy_at = None;
-            }
-            GuestResponse::WakeAck { success: true }
-        }
-
-        GuestRequest::IntegrationStatus => GuestResponse::IntegrationStatusReport {
-            integrations: build_integration_reports(integration_state, boot_at),
-        },
-
-        GuestRequest::CheckpointIntegrations { integrations: _ } => {
-            GuestResponse::CheckpointResult {
-                success: true,
-                failed: vec![],
-                detail: None,
-            }
-        }
-
-        GuestRequest::ProbeStatus => GuestResponse::ProbeStatusReport {
-            probes: build_probe_reports(probe_state),
-        },
-
-        GuestRequest::PrimedStatus => GuestResponse::PrimedStatusReport {
-            primed: mvm_agentd::vsock::workload_is_primed_at(std::path::Path::new(
-                mvm_agentd::vsock::PRIMED_MARKER_PATH,
-            )),
-        },
-
+        GuestRequest::ProbeStatus => handle_probe_status(&mut ctx),
+        GuestRequest::PrimedStatus => handle_primed_status(),
         GuestRequest::PostRestore {
             token,
             grant_envelope,
-        } => {
-            // First, rotate the VMGenID: feed the host-minted token to the
-            // process-resident reseeder. Its state is captured in the snapshot,
-            // so two clones of one snapshot both diverge from the captured
-            // value when the host delivers each a distinct fresh token. A
-            // zero token (no-rotation restore) is a no-op.
-            let reseeded = matches!(
-                reseed_on_post_restore(token),
-                mvm_agentd::genid::GenIdAction::Reseeded
-            );
-            // Re-pin the verb grant if the host sent a fresh envelope. This
-            // covers restore across a plan change (a fork mints a fresh
-            // host-signed grant with the child's new session_id/plan_nonce and
-            // may widen the verb set). The envelope is verified against the
-            // boot-pinned host-signer anchor — NOT the self-attested key inside
-            // the envelope, which any caller able to deliver a PostRestore could
-            // forge. With no boot anchor there is nothing to trust the envelope
-            // against, so the re-pin is refused (fail closed).
-            if let Some(env) = grant_envelope.as_ref() {
-                match boot_state.host_signer_key() {
-                    Some(anchor) => {
-                        let (_, current_grant) = boot_state.grant_state();
-                        if let Some(g) = mvm_agentd::vsock::re_pin_verb_grant(
-                            env,
-                            current_grant.as_ref(),
-                            &anchor,
-                            chrono::Utc::now(),
-                        ) {
-                            boot_state.set_verb_grant(g);
-                        }
-                    }
-                    None => eprintln!(
-                        "mvm-guest-agent: PostRestore re-pin refused — no boot-pinned host-signer anchor"
-                    ),
-                }
-            }
-            // Then send SIGUSR1 to PID 1 to trigger drive remount + service restart.
-            let result = std::process::Command::new("kill")
-                .args(["-USR1", "1"])
-                .output();
-            match result {
-                Ok(out) if out.status.success() => GuestResponse::PostRestoreAck {
-                    success: true,
-                    detail: Some("post-restore signal sent to init".to_string()),
-                    reseeded,
-                },
-                Ok(out) => GuestResponse::PostRestoreAck {
-                    success: false,
-                    detail: Some(format!(
-                        "kill failed: {}",
-                        String::from_utf8_lossy(&out.stderr)
-                    )),
-                    reseeded,
-                },
-                Err(e) => GuestResponse::PostRestoreAck {
-                    success: false,
-                    detail: Some(format!("failed to send signal: {}", e)),
-                    reseeded,
-                },
-            }
-        }
+        } => handle_post_restore(&mut ctx, token, grant_envelope),
 
-        #[cfg(feature = "dev-shell")]
         GuestRequest::Exec {
             command,
             stdin,
             timeout_secs,
-        } => {
-            eprintln!("[audit] exec request: {:?}", command);
-            do_exec_streaming(&mut file, &command, stdin.as_deref(), timeout_secs)
-        }
+        } => handle_exec(&mut ctx, command, stdin, timeout_secs),
 
-        #[cfg(not(feature = "dev-shell"))]
-        GuestRequest::Exec { .. } => GuestResponse::Error {
-            message: "exec not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access".to_string(),
-        },
-
-        #[cfg(feature = "dev-shell")]
         GuestRequest::ExecBatch {
             stages,
             commands,
             timeout_secs,
-        } => {
-            eprintln!(
-                "[audit] exec-batch request: {} stages, {} commands",
-                stages.len(),
-                commands.len()
-            );
-            do_exec_batch(&stages, &commands, timeout_secs)
-        }
+        } => handle_exec_batch(stages, commands, timeout_secs),
 
-        #[cfg(not(feature = "dev-shell"))]
-        GuestRequest::ExecBatch { .. } => GuestResponse::Error {
-            message: "exec-batch not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                .to_string(),
-        },
-
-        #[cfg(feature = "dev-shell")]
         GuestRequest::RunCode { code, timeout_secs } => {
-            // Stateless v1: read /etc/mvm/wrapper.json to learn the
-            // wrapper's language, then dispatch a fresh interpreter
-            // subprocess. A future v2 will route through the
-            // warm-process pool's persistent wrapper for stateful
-            // eval; wire shape stays identical.
-            //
-            // Code body is NOT logged (matches `mvmctl session
-            // run-code`'s host-side audit posture — argv / code can
-            // carry user-typed secrets).
-            eprintln!("[audit] run-code request");
-            do_run_code(&mut file, &code, timeout_secs)
+            handle_run_code(&mut ctx, code, timeout_secs)
         }
-
-        #[cfg(not(feature = "dev-shell"))]
-        GuestRequest::RunCode { .. } => GuestResponse::Error {
-            message: "run-code not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                .to_string(),
-        },
 
         GuestRequest::RunEntrypoint {
             stdin,
             timeout_secs,
             env,
-        } => {
-            // Distinguish "validation hasn't completed yet"
-            // (Starting → NotReady, transient) from
-            // "validation failed" (Failed → EntrypointInvalid,
-            // terminal). Snapshot once so the decision is consistent
-            // even if a concurrent background-thread update flips
-            // state mid-handler.
-            if matches!(boot_state.snapshot().entrypoint, ComponentState::Starting) {
-                GuestResponse::EntrypointEvent(EntrypointEvent::Error {
-                    kind: RunEntrypointError::NotReady,
-                    message: "entrypoint validation in progress; poll ReadinessStatus and retry"
-                        .to_string(),
-                })
-            } else {
-                handle_run_entrypoint(&mut file, stdin, timeout_secs, env)
-            }
-        }
+        } => handle_run_entrypoint_request(&mut ctx, stdin, timeout_secs, env),
 
-        #[cfg(feature = "dev-shell")]
-        GuestRequest::RunDetached { argv, env } => {
-            // Argv is NOT logged: it can carry user-typed secrets, mirroring
-            // the run-code audit posture.
-            eprintln!("[audit] run-detached request: {} args", argv.len());
-            do_run_detached(argv, env)
-        }
+        GuestRequest::RunDetached { argv, env } => handle_run_detached(argv, env),
 
-        #[cfg(not(feature = "dev-shell"))]
-        GuestRequest::RunDetached { .. } => GuestResponse::Error {
-            message: "run-detached not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                .to_string(),
-        },
+        GuestRequest::FsDiff => handle_fs_diff(),
 
-        GuestRequest::FsDiff => {
-            // Walk the overlay upper dir to find changes since boot.
-            // The overlay upper dir is typically at /overlay/upper when
-            // the rootfs is mounted read-only with an overlay.
-            let changes = collect_fs_diff();
-            GuestResponse::FsDiffResult { changes }
-        }
+        GuestRequest::StartPortForward { guest_port } => handle_start_port_forward(guest_port),
 
-        GuestRequest::StartPortForward { guest_port } => {
-            let vsock_port = mvm_agentd::vsock::PORT_FORWARD_BASE + guest_port as u32;
-            eprintln!("port-fwd: starting vsock:{vsock_port} → tcp://localhost:{guest_port}");
-            std::thread::spawn(move || {
-                run_port_forwarder(vsock_port, guest_port);
-            });
-            GuestResponse::PortForwardStarted {
-                guest_port,
-                vsock_port,
-            }
-        }
         GuestRequest::StartUnixSocketForward {
             guest_path,
             host_vsock_port,
             socket_mode,
-        } => match start_unix_socket_forwarder(&guest_path, host_vsock_port, socket_mode) {
-            Ok(()) => GuestResponse::UnixSocketForwardStarted {
-                guest_path,
-                host_vsock_port,
-            },
-            Err(err) => GuestResponse::Error {
-                message: format!("unix socket forward failed: {err}"),
-            },
-        },
+        } => handle_start_unix_socket_forward(guest_path, host_vsock_port, socket_mode),
 
         // PTY-over-vsock console — the single dev-only interactive path. The
         // relay lives behind `#[cfg(feature = "dev-shell")]` so its symbols are
@@ -2590,139 +2416,32 @@ fn handle_client(
         // `do_exec` gate). The protocol profile gate
         // above already rejects these verbs in sealed-prod, but the compile-time
         // gate is the load-bearing guarantee — no console code is even linked.
-        #[cfg(feature = "dev-shell")]
         GuestRequest::ConsoleOpen {
             cols,
             rows,
             env,
             argv,
-        } => {
-            // Check security policy — console requires access.console = true.
-            // When no policy file is provisioned (dev mode), use permissive defaults.
-            let policy = mvm_agentd::builder_agent::load_security_policy()
-                .ok()
-                .flatten()
-                .unwrap_or_else(mvm_core::security::SecurityPolicy::dev_defaults);
-            let console_allowed = policy.access.console;
-            if !console_allowed {
-                return write_response(
-                    &mut file,
-                    &GuestResponse::Error {
-                        message: "console rejected: access.console not enabled in security policy"
-                            .to_string(),
-                    },
-                );
-            }
-            match mvm_agentd::console::open_session(cols, rows, &env, &argv) {
-                Ok(session) => {
-                    let session_id = session.session_id;
-                    let data_port = session.data_port;
-                    eprintln!("console: opened session {session_id}, data port {data_port}");
+        } => handle_console_open(cols, rows, env, argv),
 
-                    // Run the relay in a background thread
-                    std::thread::spawn(move || {
-                        let exit_code = mvm_agentd::console::run_console_relay(&session);
-                        eprintln!("console: session {session_id} ended, exit code {exit_code}");
-                    });
+        GuestRequest::ConsoleClose { session_id } => handle_console_close(session_id),
 
-                    GuestResponse::ConsoleOpened {
-                        session_id,
-                        data_port,
-                    }
-                }
-                Err(e) => GuestResponse::Error {
-                    message: format!("console open failed: {e}"),
-                },
-            }
-        }
-
-        #[cfg(not(feature = "dev-shell"))]
-        GuestRequest::ConsoleOpen { .. } => GuestResponse::Error {
-            message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                .to_string(),
-        },
-
-        #[cfg(feature = "dev-shell")]
-        GuestRequest::ConsoleClose { session_id } => {
-            // Console sessions end when the shell exits or the host disconnects.
-            // Explicit close is a no-op if already closed.
-            if mvm_agentd::console::is_active() {
-                GuestResponse::Error {
-                    message: "explicit close not yet supported — disconnect to end session"
-                        .to_string(),
-                }
-            } else if let Some(exit_code) = mvm_agentd::console::completed_exit_code(session_id) {
-                GuestResponse::ConsoleExited {
-                    session_id,
-                    exit_code,
-                }
-            } else {
-                GuestResponse::ConsoleExited {
-                    session_id,
-                    exit_code: 0,
-                }
-            }
-        }
-
-        #[cfg(not(feature = "dev-shell"))]
-        GuestRequest::ConsoleClose { .. } => GuestResponse::Error {
-            message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                .to_string(),
-        },
-
-        #[cfg(feature = "dev-shell")]
         GuestRequest::ConsoleResize {
             session_id,
             cols,
             rows,
-        } => {
-            if mvm_agentd::console::resize_active_session(cols, rows) {
-                eprintln!("console: resized to {cols}x{rows}");
-                GuestResponse::ConsoleResized { session_id }
-            } else {
-                GuestResponse::Error {
-                    message: "no active console session to resize".to_string(),
-                }
-            }
-        }
-
-        #[cfg(not(feature = "dev-shell"))]
-        GuestRequest::ConsoleResize { .. } => GuestResponse::Error {
-            message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                .to_string(),
-        },
+        } => handle_console_resize(session_id, cols, rows),
 
         // Report whether boot-time entrypoint validation succeeded.
         // Used by `mvmctl doctor` against a
         // running guest. Prod-safe — no inputs, no secrets in the
         // response (just a path + reason string).
-        GuestRequest::EntrypointStatus => match VALIDATED_ENTRYPOINT.get() {
-            Some(Ok(v)) => GuestResponse::EntrypointStatusReport {
-                ok: true,
-                path: Some(v.resolved.display().to_string()),
-                detail: None,
-            },
-            Some(Err(msg)) => GuestResponse::EntrypointStatusReport {
-                ok: false,
-                path: None,
-                detail: Some(msg.clone()),
-            },
-            // With background init, `None` means validation is still
-            // running, not "never ran".
-            None => GuestResponse::EntrypointStatusReport {
-                ok: false,
-                path: None,
-                detail: Some("entrypoint validation in progress".to_string()),
-            },
-        },
+        GuestRequest::EntrypointStatus => handle_entrypoint_status(),
 
         // Structured readiness snapshot. Cheap — a single mutex
         // lock + struct copy. Designed to be the
         // verb a host polls during `mvmctl wait <vm> --for ...`
         // without back-pressure on the rest of the agent.
-        GuestRequest::ReadinessStatus => {
-            GuestResponse::ReadinessStatusReport(boot_state.snapshot())
-        }
+        GuestRequest::ReadinessStatus => handle_readiness_status(&mut ctx),
 
         // FS RPC verbs. Production-safe surface backed by
         // `mvm_agentd::fs_rpc::handle_with_defaults`: every path
@@ -2735,66 +2454,28 @@ fn handle_client(
             offset,
             length,
             ..
-        } => GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
-            mvm_agentd::fs_rpc::FsRequest::Read {
-                path: &path,
-                offset,
-                length,
-            },
-        )),
+        } => handle_fs_read(path, offset, length),
         GuestRequest::FsWrite {
             path,
             content,
             mode,
             create_parents,
             ..
-        } => GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
-            mvm_agentd::fs_rpc::FsRequest::Write {
-                path: &path,
-                content: &content,
-                mode,
-                create_parents,
-            },
-        )),
-        GuestRequest::FsList { path, .. } => {
-            GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
-                mvm_agentd::fs_rpc::FsRequest::List { path: &path },
-            ))
-        }
+        } => handle_fs_write(path, content, mode, create_parents),
+        GuestRequest::FsList { path, .. } => handle_fs_list(path),
         GuestRequest::FsStat {
             path,
             follow_symlinks,
-        } => GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
-            mvm_agentd::fs_rpc::FsRequest::Stat {
-                path: &path,
-                follow_symlinks,
-            },
-        )),
+        } => handle_fs_stat(path, follow_symlinks),
         GuestRequest::FsMkdir {
             path,
             mode,
             parents,
-        } => GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
-            mvm_agentd::fs_rpc::FsRequest::Mkdir {
-                path: &path,
-                mode,
-                parents,
-            },
-        )),
+        } => handle_fs_mkdir(path, mode, parents),
         GuestRequest::FsRemove {
             path, recursive, ..
-        } => GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
-            mvm_agentd::fs_rpc::FsRequest::Remove {
-                path: &path,
-                recursive,
-            },
-        )),
-        GuestRequest::FsMove { from, to, .. } => GuestResponse::FsResult(
-            mvm_agentd::fs_rpc::handle_with_defaults(mvm_agentd::fs_rpc::FsRequest::Move {
-                from: &from,
-                to: &to,
-            }),
-        ),
+        } => handle_fs_remove(path, recursive),
+        GuestRequest::FsMove { from, to, .. } => handle_fs_move(from, to),
 
         // Process control verbs. Dev-only — the handler lives behind
         // `#[cfg(feature = "dev-shell")]` so its symbols are stripped
@@ -2808,126 +2489,17 @@ fn handle_client(
             cwd,
             stdin,
             timeout_secs: _, // applied during ProcWait
-        } => {
-            #[cfg(feature = "dev-shell")]
-            {
-                let caps = mvm_agentd::process_rpc::Caps::production();
-                GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_start(
-                    proc_registry(),
-                    &caps,
-                    &argv,
-                    &env,
-                    cwd.as_deref(),
-                    &stdin,
-                ))
-            }
-            #[cfg(not(feature = "dev-shell"))]
-            {
-                let _ = (argv, env, cwd, stdin);
-                GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-                    kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-                    message:
-                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                            .to_string(),
-                })
-            }
-        }
-        GuestRequest::ProcList => {
-            #[cfg(feature = "dev-shell")]
-            {
-                GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_list(proc_registry()))
-            }
-            #[cfg(not(feature = "dev-shell"))]
-            {
-                GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-                    kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-                    message:
-                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                            .to_string(),
-                })
-            }
-        }
-        GuestRequest::ProcSignal { pid_token, signum } => {
-            #[cfg(feature = "dev-shell")]
-            {
-                GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_signal(
-                    proc_registry(),
-                    &pid_token,
-                    signum,
-                ))
-            }
-            #[cfg(not(feature = "dev-shell"))]
-            {
-                let _ = (pid_token, signum);
-                GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-                    kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-                    message:
-                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                            .to_string(),
-                })
-            }
-        }
+        } => handle_proc_start(argv, env, cwd, stdin),
+        GuestRequest::ProcList => handle_proc_list(),
+        GuestRequest::ProcSignal { pid_token, signum } => handle_proc_signal(pid_token, signum),
         GuestRequest::ProcSendInput { pid_token, bytes } => {
-            #[cfg(feature = "dev-shell")]
-            {
-                let caps = mvm_agentd::process_rpc::Caps::production();
-                GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_send_input(
-                    proc_registry(),
-                    &caps,
-                    &pid_token,
-                    &bytes,
-                ))
-            }
-            #[cfg(not(feature = "dev-shell"))]
-            {
-                let _ = (pid_token, bytes);
-                GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-                    kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-                    message:
-                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                            .to_string(),
-                })
-            }
+            handle_proc_send_input(pid_token, bytes)
         }
-        GuestRequest::ProcKill { pid_token } => {
-            #[cfg(feature = "dev-shell")]
-            {
-                GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_kill(
-                    proc_registry(),
-                    &pid_token,
-                ))
-            }
-            #[cfg(not(feature = "dev-shell"))]
-            {
-                let _ = pid_token;
-                GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
-                    kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-                    message:
-                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                            .to_string(),
-                })
-            }
-        }
+        GuestRequest::ProcKill { pid_token } => handle_proc_kill(pid_token),
         GuestRequest::ProcWait {
             pid_token,
             timeout_secs,
-        } => {
-            #[cfg(feature = "dev-shell")]
-            {
-                let terminal = handle_proc_wait_streaming(&mut file, &pid_token, timeout_secs);
-                GuestResponse::ProcWaitEvent(terminal)
-            }
-            #[cfg(not(feature = "dev-shell"))]
-            {
-                let _ = (pid_token, timeout_secs);
-                GuestResponse::ProcWaitEvent(mvm_agentd::vsock::ProcWaitEvent::Error {
-                    kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
-                    message:
-                        "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
-                            .to_string(),
-                })
-            }
-        }
+        } => handle_proc_wait(&mut ctx, pid_token, timeout_secs),
 
         // virtio-fs volume mount/unmount. Production-safe; every
         // host-supplied path runs through
@@ -2937,13 +2509,9 @@ fn handle_client(
             volume_name,
             guest_path,
             read_only,
-        } => GuestResponse::VolumeMountResult(mvm_agentd::volume::handle_mount(
-            &volume_name,
-            &guest_path,
-            read_only,
-        )),
+        } => handle_mount_volume(volume_name, guest_path, read_only),
         GuestRequest::UnmountVolume { guest_path, force } => {
-            GuestResponse::VolumeMountResult(mvm_agentd::volume::handle_unmount(&guest_path, force))
+            handle_unmount_volume(guest_path, force)
         }
 
         // Substrate-side mirror of `mvmctl session set-timeout`. If
@@ -2954,22 +2522,651 @@ fn handle_client(
         // is active, the verb is a no-op acknowledged with
         // `applied_secs = 0`; the host-side reaper remains the only
         // enforcement on cold-path-only builds.
-        GuestRequest::UpdateIdleTimeout { secs } => match WARM_POOL.get() {
-            Some(Some(pool)) => {
-                let previous = pool.set_idle_timeout(secs);
-                GuestResponse::UpdateIdleTimeoutAck {
-                    previous_secs: previous,
-                    applied_secs: secs,
-                }
-            }
-            _ => GuestResponse::UpdateIdleTimeoutAck {
-                previous_secs: 0,
-                applied_secs: 0,
-            },
-        },
+        GuestRequest::UpdateIdleTimeout { secs } => handle_update_idle_timeout(secs),
     };
 
     write_response(&mut file, &resp);
+}
+
+fn handle_ping() -> GuestResponse {
+    GuestResponse::Pong
+}
+
+fn handle_worker_status(ctx: &mut HandlerCtx) -> GuestResponse {
+    let (status, last_busy_at) = match ctx.state.lock() {
+        Ok(s) => (s.status.clone(), s.last_busy_at.clone()),
+        Err(_) => ("unknown".to_string(), None),
+    };
+    GuestResponse::WorkerStatus {
+        status,
+        last_busy_at,
+    }
+}
+
+fn handle_sleep_prep(_drain_timeout_secs: u64) -> GuestResponse {
+    let (success, detail) = do_sleep_prep();
+    GuestResponse::SleepPrepAck {
+        success,
+        detail: Some(detail),
+    }
+}
+
+fn handle_wake(ctx: &mut HandlerCtx) -> GuestResponse {
+    // Reset monitoring state after wake from snapshot.
+    if let Ok(mut s) = ctx.state.lock() {
+        s.status = "idle".to_string();
+        s.last_busy_at = None;
+    }
+    GuestResponse::WakeAck { success: true }
+}
+
+fn handle_integration_status(ctx: &mut HandlerCtx) -> GuestResponse {
+    GuestResponse::IntegrationStatusReport {
+        integrations: build_integration_reports(ctx.integration_state, ctx.boot_state.boot_at),
+    }
+}
+
+fn handle_checkpoint_integrations(_integrations: Vec<String>) -> GuestResponse {
+    GuestResponse::CheckpointResult {
+        success: true,
+        failed: vec![],
+        detail: None,
+    }
+}
+
+fn handle_probe_status(ctx: &mut HandlerCtx) -> GuestResponse {
+    GuestResponse::ProbeStatusReport {
+        probes: build_probe_reports(ctx.probe_state),
+    }
+}
+
+fn handle_primed_status() -> GuestResponse {
+    GuestResponse::PrimedStatusReport {
+        primed: mvm_agentd::vsock::workload_is_primed_at(std::path::Path::new(
+            mvm_agentd::vsock::PRIMED_MARKER_PATH,
+        )),
+    }
+}
+
+fn handle_post_restore(
+    ctx: &mut HandlerCtx,
+    token: [u8; mvm_core::crypto::vmgenid::GENID_BYTES],
+    grant_envelope: Option<mvm_core::protocol::vm_backend::VerbGrantEnvelope>,
+) -> GuestResponse {
+    // First, rotate the VMGenID: feed the host-minted token to the
+    // process-resident reseeder. Its state is captured in the snapshot,
+    // so two clones of one snapshot both diverge from the captured
+    // value when the host delivers each a distinct fresh token. A
+    // zero token (no-rotation restore) is a no-op.
+    let reseeded = matches!(
+        reseed_on_post_restore(token),
+        mvm_agentd::genid::GenIdAction::Reseeded
+    );
+    // Re-pin the verb grant if the host sent a fresh envelope. This
+    // covers restore across a plan change (a fork mints a fresh
+    // host-signed grant with the child's new session_id/plan_nonce and
+    // may widen the verb set). The envelope is verified against the
+    // boot-pinned host-signer anchor — NOT the self-attested key inside
+    // the envelope, which any caller able to deliver a PostRestore could
+    // forge. With no boot anchor there is nothing to trust the envelope
+    // against, so the re-pin is refused (fail closed).
+    if let Some(env) = grant_envelope.as_ref() {
+        match ctx.boot_state.host_signer_key() {
+            Some(anchor) => {
+                let (_, current_grant) = ctx.boot_state.grant_state();
+                if let Some(g) = mvm_agentd::vsock::re_pin_verb_grant(
+                    env,
+                    current_grant.as_ref(),
+                    &anchor,
+                    chrono::Utc::now(),
+                ) {
+                    ctx.boot_state.set_verb_grant(g);
+                }
+            }
+            None => eprintln!(
+                "mvm-guest-agent: PostRestore re-pin refused — no boot-pinned host-signer anchor"
+            ),
+        }
+    }
+    // Then send SIGUSR1 to PID 1 to trigger drive remount + service restart.
+    let result = std::process::Command::new("kill")
+        .args(["-USR1", "1"])
+        .output();
+    match result {
+        Ok(out) if out.status.success() => GuestResponse::PostRestoreAck {
+            success: true,
+            detail: Some("post-restore signal sent to init".to_string()),
+            reseeded,
+        },
+        Ok(out) => GuestResponse::PostRestoreAck {
+            success: false,
+            detail: Some(format!(
+                "kill failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )),
+            reseeded,
+        },
+        Err(e) => GuestResponse::PostRestoreAck {
+            success: false,
+            detail: Some(format!("failed to send signal: {}", e)),
+            reseeded,
+        },
+    }
+}
+
+#[cfg(feature = "dev-shell")]
+fn handle_exec(
+    ctx: &mut HandlerCtx,
+    command: String,
+    stdin: Option<String>,
+    timeout_secs: Option<u64>,
+) -> GuestResponse {
+    eprintln!("[audit] exec request: {:?}", command);
+    do_exec_streaming(ctx.file, &command, stdin.as_deref(), timeout_secs)
+}
+
+#[cfg(not(feature = "dev-shell"))]
+fn handle_exec(
+    ctx: &mut HandlerCtx,
+    command: String,
+    stdin: Option<String>,
+    timeout_secs: Option<u64>,
+) -> GuestResponse {
+    let _ = (ctx, command, stdin, timeout_secs);
+    GuestResponse::Error {
+        message: "exec not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access".to_string(),
+    }
+}
+
+#[cfg(feature = "dev-shell")]
+fn handle_exec_batch(
+    stages: Vec<mvm_agentd::vsock::StageFile>,
+    commands: Vec<Vec<String>>,
+    timeout_secs: Option<u64>,
+) -> GuestResponse {
+    eprintln!(
+        "[audit] exec-batch request: {} stages, {} commands",
+        stages.len(),
+        commands.len()
+    );
+    do_exec_batch(&stages, &commands, timeout_secs)
+}
+
+#[cfg(not(feature = "dev-shell"))]
+fn handle_exec_batch(
+    stages: Vec<mvm_agentd::vsock::StageFile>,
+    commands: Vec<Vec<String>>,
+    timeout_secs: Option<u64>,
+) -> GuestResponse {
+    let _ = (stages, commands, timeout_secs);
+    GuestResponse::Error {
+        message: "exec-batch not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+            .to_string(),
+    }
+}
+
+#[cfg(feature = "dev-shell")]
+fn handle_run_code(ctx: &mut HandlerCtx, code: String, timeout_secs: Option<u64>) -> GuestResponse {
+    // Stateless v1: read /etc/mvm/wrapper.json to learn the
+    // wrapper's language, then dispatch a fresh interpreter
+    // subprocess. A future v2 will route through the
+    // warm-process pool's persistent wrapper for stateful
+    // eval; wire shape stays identical.
+    //
+    // Code body is NOT logged (matches `mvmctl session
+    // run-code`'s host-side audit posture — argv / code can
+    // carry user-typed secrets).
+    eprintln!("[audit] run-code request");
+    do_run_code(ctx.file, &code, timeout_secs)
+}
+
+#[cfg(not(feature = "dev-shell"))]
+fn handle_run_code(ctx: &mut HandlerCtx, code: String, timeout_secs: Option<u64>) -> GuestResponse {
+    let _ = (ctx, code, timeout_secs);
+    GuestResponse::Error {
+        message: "run-code not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+            .to_string(),
+    }
+}
+
+/// `RunEntrypoint` arm: distinguish "validation hasn't completed yet"
+/// (Starting → NotReady, transient) from "validation failed"
+/// (Failed → EntrypointInvalid, terminal) before delegating to the
+/// real handler. Snapshot once so the decision is consistent even if
+/// a concurrent background-thread update flips state mid-handler.
+fn handle_run_entrypoint_request(
+    ctx: &mut HandlerCtx,
+    stdin: Vec<u8>,
+    timeout_secs: u64,
+    env: Vec<(String, String)>,
+) -> GuestResponse {
+    if matches!(
+        ctx.boot_state.snapshot().entrypoint,
+        ComponentState::Starting
+    ) {
+        GuestResponse::EntrypointEvent(EntrypointEvent::Error {
+            kind: RunEntrypointError::NotReady,
+            message: "entrypoint validation in progress; poll ReadinessStatus and retry"
+                .to_string(),
+        })
+    } else {
+        handle_run_entrypoint(ctx.file, stdin, timeout_secs, env)
+    }
+}
+
+#[cfg(feature = "dev-shell")]
+fn handle_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
+    // Argv is NOT logged: it can carry user-typed secrets, mirroring
+    // the run-code audit posture.
+    eprintln!("[audit] run-detached request: {} args", argv.len());
+    do_run_detached(argv, env)
+}
+
+#[cfg(not(feature = "dev-shell"))]
+fn handle_run_detached(argv: Vec<String>, env: Vec<(String, String)>) -> GuestResponse {
+    let _ = (argv, env);
+    GuestResponse::Error {
+        message: "run-detached not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+            .to_string(),
+    }
+}
+
+fn handle_fs_diff() -> GuestResponse {
+    // Walk the overlay upper dir to find changes since boot.
+    // The overlay upper dir is typically at /overlay/upper when
+    // the rootfs is mounted read-only with an overlay.
+    let changes = collect_fs_diff();
+    GuestResponse::FsDiffResult { changes }
+}
+
+fn handle_start_port_forward(guest_port: u16) -> GuestResponse {
+    let vsock_port = mvm_agentd::vsock::PORT_FORWARD_BASE + guest_port as u32;
+    eprintln!("port-fwd: starting vsock:{vsock_port} → tcp://localhost:{guest_port}");
+    std::thread::spawn(move || {
+        run_port_forwarder(vsock_port, guest_port);
+    });
+    GuestResponse::PortForwardStarted {
+        guest_port,
+        vsock_port,
+    }
+}
+
+fn handle_start_unix_socket_forward(
+    guest_path: String,
+    host_vsock_port: u32,
+    socket_mode: u32,
+) -> GuestResponse {
+    match start_unix_socket_forwarder(&guest_path, host_vsock_port, socket_mode) {
+        Ok(()) => GuestResponse::UnixSocketForwardStarted {
+            guest_path,
+            host_vsock_port,
+        },
+        Err(err) => GuestResponse::Error {
+            message: format!("unix socket forward failed: {err}"),
+        },
+    }
+}
+
+#[cfg(feature = "dev-shell")]
+fn handle_console_open(
+    cols: u16,
+    rows: u16,
+    env: Vec<(String, String)>,
+    argv: Vec<String>,
+) -> GuestResponse {
+    // Check security policy — console requires access.console = true.
+    // When no policy file is provisioned (dev mode), use permissive defaults.
+    let policy = mvm_agentd::builder_agent::load_security_policy()
+        .ok()
+        .flatten()
+        .unwrap_or_else(mvm_core::security::SecurityPolicy::dev_defaults);
+    let console_allowed = policy.access.console;
+    if !console_allowed {
+        return GuestResponse::Error {
+            message: "console rejected: access.console not enabled in security policy".to_string(),
+        };
+    }
+    match mvm_agentd::console::open_session(cols, rows, &env, &argv) {
+        Ok(session) => {
+            let session_id = session.session_id;
+            let data_port = session.data_port;
+            eprintln!("console: opened session {session_id}, data port {data_port}");
+
+            // Run the relay in a background thread
+            std::thread::spawn(move || {
+                let exit_code = mvm_agentd::console::run_console_relay(&session);
+                eprintln!("console: session {session_id} ended, exit code {exit_code}");
+            });
+
+            GuestResponse::ConsoleOpened {
+                session_id,
+                data_port,
+            }
+        }
+        Err(e) => GuestResponse::Error {
+            message: format!("console open failed: {e}"),
+        },
+    }
+}
+
+#[cfg(not(feature = "dev-shell"))]
+fn handle_console_open(
+    cols: u16,
+    rows: u16,
+    env: Vec<(String, String)>,
+    argv: Vec<String>,
+) -> GuestResponse {
+    let _ = (cols, rows, env, argv);
+    GuestResponse::Error {
+        message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+            .to_string(),
+    }
+}
+
+#[cfg(feature = "dev-shell")]
+fn handle_console_close(session_id: u32) -> GuestResponse {
+    // Console sessions end when the shell exits or the host disconnects.
+    // Explicit close is a no-op if already closed.
+    if mvm_agentd::console::is_active() {
+        GuestResponse::Error {
+            message: "explicit close not yet supported — disconnect to end session".to_string(),
+        }
+    } else if let Some(exit_code) = mvm_agentd::console::completed_exit_code(session_id) {
+        GuestResponse::ConsoleExited {
+            session_id,
+            exit_code,
+        }
+    } else {
+        GuestResponse::ConsoleExited {
+            session_id,
+            exit_code: 0,
+        }
+    }
+}
+
+#[cfg(not(feature = "dev-shell"))]
+fn handle_console_close(session_id: u32) -> GuestResponse {
+    let _ = session_id;
+    GuestResponse::Error {
+        message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+            .to_string(),
+    }
+}
+
+#[cfg(feature = "dev-shell")]
+fn handle_console_resize(session_id: u32, cols: u16, rows: u16) -> GuestResponse {
+    if mvm_agentd::console::resize_active_session(cols, rows) {
+        eprintln!("console: resized to {cols}x{rows}");
+        GuestResponse::ConsoleResized { session_id }
+    } else {
+        GuestResponse::Error {
+            message: "no active console session to resize".to_string(),
+        }
+    }
+}
+
+#[cfg(not(feature = "dev-shell"))]
+fn handle_console_resize(session_id: u32, cols: u16, rows: u16) -> GuestResponse {
+    let _ = (session_id, cols, rows);
+    GuestResponse::Error {
+        message: "console not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+            .to_string(),
+    }
+}
+
+fn handle_entrypoint_status() -> GuestResponse {
+    match VALIDATED_ENTRYPOINT.get() {
+        Some(Ok(v)) => GuestResponse::EntrypointStatusReport {
+            ok: true,
+            path: Some(v.resolved.display().to_string()),
+            detail: None,
+        },
+        Some(Err(msg)) => GuestResponse::EntrypointStatusReport {
+            ok: false,
+            path: None,
+            detail: Some(msg.clone()),
+        },
+        // With background init, `None` means validation is still
+        // running, not "never ran".
+        None => GuestResponse::EntrypointStatusReport {
+            ok: false,
+            path: None,
+            detail: Some("entrypoint validation in progress".to_string()),
+        },
+    }
+}
+
+fn handle_readiness_status(ctx: &mut HandlerCtx) -> GuestResponse {
+    GuestResponse::ReadinessStatusReport(ctx.boot_state.snapshot())
+}
+
+fn handle_fs_read(path: String, offset: Option<u64>, length: u64) -> GuestResponse {
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
+        mvm_agentd::fs_rpc::FsRequest::Read {
+            path: &path,
+            offset,
+            length,
+        },
+    ))
+}
+
+fn handle_fs_write(
+    path: String,
+    content: Vec<u8>,
+    mode: u32,
+    create_parents: bool,
+) -> GuestResponse {
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
+        mvm_agentd::fs_rpc::FsRequest::Write {
+            path: &path,
+            content: &content,
+            mode,
+            create_parents,
+        },
+    ))
+}
+
+fn handle_fs_list(path: String) -> GuestResponse {
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
+        mvm_agentd::fs_rpc::FsRequest::List { path: &path },
+    ))
+}
+
+fn handle_fs_stat(path: String, follow_symlinks: bool) -> GuestResponse {
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
+        mvm_agentd::fs_rpc::FsRequest::Stat {
+            path: &path,
+            follow_symlinks,
+        },
+    ))
+}
+
+fn handle_fs_mkdir(path: String, mode: u32, parents: bool) -> GuestResponse {
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
+        mvm_agentd::fs_rpc::FsRequest::Mkdir {
+            path: &path,
+            mode,
+            parents,
+        },
+    ))
+}
+
+fn handle_fs_remove(path: String, recursive: bool) -> GuestResponse {
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
+        mvm_agentd::fs_rpc::FsRequest::Remove {
+            path: &path,
+            recursive,
+        },
+    ))
+}
+
+fn handle_fs_move(from: String, to: String) -> GuestResponse {
+    GuestResponse::FsResult(mvm_agentd::fs_rpc::handle_with_defaults(
+        mvm_agentd::fs_rpc::FsRequest::Move {
+            from: &from,
+            to: &to,
+        },
+    ))
+}
+
+fn handle_proc_start(
+    argv: Vec<String>,
+    env: std::collections::BTreeMap<String, String>,
+    cwd: Option<String>,
+    stdin: Vec<u8>,
+) -> GuestResponse {
+    #[cfg(feature = "dev-shell")]
+    {
+        let caps = mvm_agentd::process_rpc::Caps::production();
+        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_start(
+            proc_registry(),
+            &caps,
+            &argv,
+            &env,
+            cwd.as_deref(),
+            &stdin,
+        ))
+    }
+    #[cfg(not(feature = "dev-shell"))]
+    {
+        let _ = (argv, env, cwd, stdin);
+        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
+            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
+            message:
+                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+                    .to_string(),
+        })
+    }
+}
+
+fn handle_proc_list() -> GuestResponse {
+    #[cfg(feature = "dev-shell")]
+    {
+        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_list(proc_registry()))
+    }
+    #[cfg(not(feature = "dev-shell"))]
+    {
+        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
+            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
+            message:
+                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+                    .to_string(),
+        })
+    }
+}
+
+fn handle_proc_signal(pid_token: String, signum: i32) -> GuestResponse {
+    #[cfg(feature = "dev-shell")]
+    {
+        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_signal(
+            proc_registry(),
+            &pid_token,
+            signum,
+        ))
+    }
+    #[cfg(not(feature = "dev-shell"))]
+    {
+        let _ = (pid_token, signum);
+        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
+            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
+            message:
+                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+                    .to_string(),
+        })
+    }
+}
+
+fn handle_proc_send_input(pid_token: String, bytes: Vec<u8>) -> GuestResponse {
+    #[cfg(feature = "dev-shell")]
+    {
+        let caps = mvm_agentd::process_rpc::Caps::production();
+        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_send_input(
+            proc_registry(),
+            &caps,
+            &pid_token,
+            &bytes,
+        ))
+    }
+    #[cfg(not(feature = "dev-shell"))]
+    {
+        let _ = (pid_token, bytes);
+        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
+            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
+            message:
+                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+                    .to_string(),
+        })
+    }
+}
+
+fn handle_proc_kill(pid_token: String) -> GuestResponse {
+    #[cfg(feature = "dev-shell")]
+    {
+        GuestResponse::ProcResult(mvm_agentd::process_rpc::handle_proc_kill(
+            proc_registry(),
+            &pid_token,
+        ))
+    }
+    #[cfg(not(feature = "dev-shell"))]
+    {
+        let _ = pid_token;
+        GuestResponse::ProcResult(mvm_agentd::vsock::ProcResult::Error {
+            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
+            message:
+                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+                    .to_string(),
+        })
+    }
+}
+
+fn handle_proc_wait(
+    ctx: &mut HandlerCtx,
+    pid_token: String,
+    timeout_secs: Option<u64>,
+) -> GuestResponse {
+    #[cfg(feature = "dev-shell")]
+    {
+        let terminal = handle_proc_wait_streaming(ctx.file, &pid_token, timeout_secs);
+        GuestResponse::ProcWaitEvent(terminal)
+    }
+    #[cfg(not(feature = "dev-shell"))]
+    {
+        let _ = (ctx, pid_token, timeout_secs);
+        GuestResponse::ProcWaitEvent(mvm_agentd::vsock::ProcWaitEvent::Error {
+            kind: mvm_agentd::vsock::ProcErrorKind::UnsupportedInProduction,
+            message:
+                "process control not available on a production workload: this is a dev-only control verb, absent from sealed agents — run a dev-tier workload for interactive/exec access"
+                    .to_string(),
+        })
+    }
+}
+
+fn handle_mount_volume(volume_name: String, guest_path: String, read_only: bool) -> GuestResponse {
+    GuestResponse::VolumeMountResult(mvm_agentd::volume::handle_mount(
+        &volume_name,
+        &guest_path,
+        read_only,
+    ))
+}
+
+fn handle_unmount_volume(guest_path: String, force: bool) -> GuestResponse {
+    GuestResponse::VolumeMountResult(mvm_agentd::volume::handle_unmount(&guest_path, force))
+}
+
+fn handle_update_idle_timeout(secs: u64) -> GuestResponse {
+    match WARM_POOL.get() {
+        Some(Some(pool)) => {
+            let previous = pool.set_idle_timeout(secs);
+            GuestResponse::UpdateIdleTimeoutAck {
+                previous_secs: previous,
+                applied_secs: secs,
+            }
+        }
+        _ => GuestResponse::UpdateIdleTimeoutAck {
+            previous_secs: 0,
+            applied_secs: 0,
+        },
+    }
 }
 
 // ============================================================================
