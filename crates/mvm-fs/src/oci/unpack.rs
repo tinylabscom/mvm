@@ -1220,127 +1220,46 @@ pub fn unpack_layer<R: Read>(
             }
         };
         let entry_type = entry.header().entry_type();
+        let ctx = EntryCtx {
+            rooted: &rooted,
+            rel_path: &rel_path,
+            raw_path: &raw_path,
+            target: &target,
+        };
         match entry_type {
-            tar::EntryType::Regular | tar::EntryType::Continuous => {
-                match classify_whiteout(&raw_path) {
-                    WhiteoutKind::None => match rooted.write_regular_file(
-                        &rel_path,
-                        &mut entry,
-                        &raw_path,
-                        options,
-                        &mut report,
-                    ) {
-                        Ok(()) => {
-                            report.files_written += 1;
-                            apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
-                            current_layer_paths.insert(rel_path.clone());
-                        }
-                        Err(refuse) => report.refused.push(RefusedEntry {
-                            raw_path: raw_path.clone(),
-                            reason: refuse,
-                        }),
-                    },
-                    WhiteoutKind::Opaque => {
-                        // Parent-of-marker is the directory we're
-                        // clearing.
-                        let parent_rel = rel_path.parent().unwrap_or_else(|| Path::new(""));
-                        match rooted.apply_opaque_whiteout(parent_rel, &current_layer_paths) {
-                            Ok(()) => report.opaque_markers_applied += 1,
-                            Err(refuse) => report.refused.push(RefusedEntry {
-                                raw_path: raw_path.clone(),
-                                reason: refuse,
-                            }),
-                        }
-                    }
-                    WhiteoutKind::Regular(name_suffix) => {
-                        // Sibling target = `<parent_of_marker>/<name_suffix>`.
-                        let parent_rel = rel_path.parent().unwrap_or_else(|| Path::new(""));
-                        let sibling_rel = parent_rel.join(OsStr::from_bytes(name_suffix));
-                        match rooted.apply_regular_whiteout(&sibling_rel, &current_layer_paths) {
-                            Ok(()) => report.whiteouts_applied += 1,
-                            Err(refuse) => report.refused.push(RefusedEntry {
-                                raw_path: raw_path.clone(),
-                                reason: refuse,
-                            }),
-                        }
-                    }
-                    WhiteoutKind::Malformed => {
-                        report.refused.push(RefusedEntry {
-                            raw_path: raw_path.clone(),
-                            reason: RefusalReason::MalformedHeader,
-                        });
-                    }
-                }
+            tar::EntryType::Regular | tar::EntryType::Continuous => unpack_regular_entry(
+                &mut entry,
+                &ctx,
+                entry_xattrs,
+                options,
+                &mut current_layer_paths,
+                &mut report,
+            ),
+            tar::EntryType::Directory => {
+                unpack_directory_entry(&ctx, entry_xattrs, &mut current_layer_paths, &mut report)
             }
-            tar::EntryType::Directory => match rooted.create_directory(&rel_path) {
-                Ok(created) => {
-                    if created {
-                        report.dirs_created += 1;
-                    }
-                    apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
-                    current_layer_paths.insert(rel_path.clone());
-                }
-                Err(refuse) => report.refused.push(RefusedEntry {
-                    raw_path: raw_path.clone(),
-                    reason: refuse,
-                }),
-            },
-            tar::EntryType::Symlink => {
-                let link_target = entry.link_name_bytes().map(|b| b.into_owned());
-                match rooted.write_symlink(&rel_path, link_target.as_deref()) {
-                    Ok(()) => {
-                        report.symlinks_written += 1;
-                        apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
-                        current_layer_paths.insert(rel_path.clone());
-                    }
-                    Err(refuse) => report.refused.push(RefusedEntry {
-                        raw_path: raw_path.clone(),
-                        reason: refuse,
-                    }),
-                }
-            }
-            tar::EntryType::Link => {
-                let link_target = entry.link_name_bytes().map(|b| b.into_owned());
-                match rooted.materialize_hardlink(
-                    link_target.as_deref(),
-                    &rel_path,
-                    options,
-                    &current_layer_paths,
-                ) {
-                    Ok(HardlinkAction::Linked) => {
-                        report.hardlinks_written += 1;
-                        apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
-                        current_layer_paths.insert(rel_path.clone());
-                    }
-                    Ok(HardlinkAction::Copied) => {
-                        report.hardlink_copies_written += 1;
-                        apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
-                        current_layer_paths.insert(rel_path.clone());
-                    }
-                    Err(refuse) => report.refused.push(RefusedEntry {
-                        raw_path: raw_path.clone(),
-                        reason: refuse,
-                    }),
-                }
-            }
-            tar::EntryType::Char | tar::EntryType::Block => {
-                match rooted.materialize_device_node(&entry, &rel_path, &raw_path) {
-                    #[cfg(target_os = "linux")]
-                    Ok(DeviceNodeAction::Materialized) => {
-                        report.device_nodes_written += 1;
-                        apply_collected_xattrs(&target, &raw_path, entry_xattrs, &mut report);
-                        current_layer_paths.insert(rel_path.clone());
-                    }
-                    #[cfg(not(target_os = "linux"))]
-                    Ok(DeviceNodeAction::Skipped) => {
-                        report.device_nodes_skipped += 1;
-                    }
-                    Err(refuse) => report.refused.push(RefusedEntry {
-                        raw_path: raw_path.clone(),
-                        reason: refuse,
-                    }),
-                }
-            }
+            tar::EntryType::Symlink => unpack_symlink_entry(
+                &entry,
+                &ctx,
+                entry_xattrs,
+                &mut current_layer_paths,
+                &mut report,
+            ),
+            tar::EntryType::Link => unpack_hardlink_entry(
+                &entry,
+                &ctx,
+                options,
+                entry_xattrs,
+                &mut current_layer_paths,
+                &mut report,
+            ),
+            tar::EntryType::Char | tar::EntryType::Block => unpack_device_entry(
+                &entry,
+                &ctx,
+                entry_xattrs,
+                &mut current_layer_paths,
+                &mut report,
+            ),
             _ => {
                 report.refused.push(RefusedEntry {
                     raw_path,
@@ -1351,6 +1270,219 @@ pub fn unpack_layer<R: Read>(
     }
 
     Ok(report)
+}
+
+/// Per-entry inputs threaded from `unpack_layer`'s tar-iteration loop
+/// into each entry-type handler below — the values every handler needs
+/// to materialize its entry through `rooted` and to record the outcome
+/// against the shared `raw_path`/`target` pair. `options`, `report`, and
+/// `current_layer_paths` travel alongside `ctx` as separate arguments
+/// rather than folded in here, since each handler borrows them with
+/// different mutability (or, for `options`, not every handler needs it).
+struct EntryCtx<'a> {
+    rooted: &'a Rooted<'a>,
+    rel_path: &'a Path,
+    raw_path: &'a [u8],
+    target: &'a Path,
+}
+
+/// Materialize a `Regular`/`Continuous` tar entry: either write the
+/// file, or — when the leaf filename carries the OCI whiteout marker —
+/// apply the corresponding whiteout instead of writing a file.
+fn unpack_regular_entry<R: Read>(
+    entry: &mut tar::Entry<R>,
+    ctx: &EntryCtx,
+    entry_xattrs: Vec<PendingXattr>,
+    options: &UnpackOptions,
+    current_layer_paths: &mut HashSet<PathBuf>,
+    report: &mut UnpackReport,
+) {
+    match classify_whiteout(ctx.raw_path) {
+        WhiteoutKind::None => {
+            match ctx
+                .rooted
+                .write_regular_file(ctx.rel_path, entry, ctx.raw_path, options, report)
+            {
+                Ok(()) => {
+                    report.files_written += 1;
+                    apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
+                    current_layer_paths.insert(ctx.rel_path.to_path_buf());
+                }
+                Err(refuse) => report.refused.push(RefusedEntry {
+                    raw_path: ctx.raw_path.to_vec(),
+                    reason: refuse,
+                }),
+            }
+        }
+        WhiteoutKind::Opaque => {
+            // Parent-of-marker is the directory we're clearing.
+            let parent_rel = ctx.rel_path.parent().unwrap_or_else(|| Path::new(""));
+            match ctx
+                .rooted
+                .apply_opaque_whiteout(parent_rel, current_layer_paths)
+            {
+                Ok(()) => report.opaque_markers_applied += 1,
+                Err(refuse) => report.refused.push(RefusedEntry {
+                    raw_path: ctx.raw_path.to_vec(),
+                    reason: refuse,
+                }),
+            }
+        }
+        WhiteoutKind::Regular(name_suffix) => {
+            // Sibling target = `<parent_of_marker>/<name_suffix>`.
+            let parent_rel = ctx.rel_path.parent().unwrap_or_else(|| Path::new(""));
+            let sibling_rel = parent_rel.join(OsStr::from_bytes(name_suffix));
+            match ctx
+                .rooted
+                .apply_regular_whiteout(&sibling_rel, current_layer_paths)
+            {
+                Ok(()) => report.whiteouts_applied += 1,
+                Err(refuse) => report.refused.push(RefusedEntry {
+                    raw_path: ctx.raw_path.to_vec(),
+                    reason: refuse,
+                }),
+            }
+        }
+        WhiteoutKind::Malformed => {
+            report.refused.push(RefusedEntry {
+                raw_path: ctx.raw_path.to_vec(),
+                reason: RefusalReason::MalformedHeader,
+            });
+        }
+    }
+}
+
+/// Materialize a `Directory` tar entry.
+fn unpack_directory_entry(
+    ctx: &EntryCtx,
+    entry_xattrs: Vec<PendingXattr>,
+    current_layer_paths: &mut HashSet<PathBuf>,
+    report: &mut UnpackReport,
+) {
+    match ctx.rooted.create_directory(ctx.rel_path) {
+        Ok(created) => {
+            if created {
+                report.dirs_created += 1;
+            }
+            apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
+            current_layer_paths.insert(ctx.rel_path.to_path_buf());
+        }
+        Err(refuse) => report.refused.push(RefusedEntry {
+            raw_path: ctx.raw_path.to_vec(),
+            reason: refuse,
+        }),
+    }
+}
+
+/// Materialize a `Symlink` tar entry.
+fn unpack_symlink_entry<R: Read>(
+    entry: &tar::Entry<R>,
+    ctx: &EntryCtx,
+    entry_xattrs: Vec<PendingXattr>,
+    current_layer_paths: &mut HashSet<PathBuf>,
+    report: &mut UnpackReport,
+) {
+    let link_target = entry.link_name_bytes().map(|b| b.into_owned());
+    match ctx
+        .rooted
+        .write_symlink(ctx.rel_path, link_target.as_deref())
+    {
+        Ok(()) => {
+            report.symlinks_written += 1;
+            apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
+            current_layer_paths.insert(ctx.rel_path.to_path_buf());
+        }
+        Err(refuse) => report.refused.push(RefusedEntry {
+            raw_path: ctx.raw_path.to_vec(),
+            reason: refuse,
+        }),
+    }
+}
+
+/// Materialize a `Link` (hardlink) tar entry.
+fn unpack_hardlink_entry<R: Read>(
+    entry: &tar::Entry<R>,
+    ctx: &EntryCtx,
+    options: &UnpackOptions,
+    entry_xattrs: Vec<PendingXattr>,
+    current_layer_paths: &mut HashSet<PathBuf>,
+    report: &mut UnpackReport,
+) {
+    let link_target = entry.link_name_bytes().map(|b| b.into_owned());
+    match ctx.rooted.materialize_hardlink(
+        link_target.as_deref(),
+        ctx.rel_path,
+        options,
+        current_layer_paths,
+    ) {
+        Ok(HardlinkAction::Linked) => {
+            report.hardlinks_written += 1;
+            apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
+            current_layer_paths.insert(ctx.rel_path.to_path_buf());
+        }
+        Ok(HardlinkAction::Copied) => {
+            report.hardlink_copies_written += 1;
+            apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
+            current_layer_paths.insert(ctx.rel_path.to_path_buf());
+        }
+        Err(refuse) => report.refused.push(RefusedEntry {
+            raw_path: ctx.raw_path.to_vec(),
+            reason: refuse,
+        }),
+    }
+}
+
+/// Materialize a `Char`/`Block` device-node tar entry. Only the
+/// allow-listed pseudo-devices land, and only on Linux — see
+/// [`Rooted::materialize_device_node`].
+#[cfg(target_os = "linux")]
+fn unpack_device_entry<R: Read>(
+    entry: &tar::Entry<R>,
+    ctx: &EntryCtx,
+    entry_xattrs: Vec<PendingXattr>,
+    current_layer_paths: &mut HashSet<PathBuf>,
+    report: &mut UnpackReport,
+) {
+    match ctx
+        .rooted
+        .materialize_device_node(entry, ctx.rel_path, ctx.raw_path)
+    {
+        Ok(DeviceNodeAction::Materialized) => {
+            report.device_nodes_written += 1;
+            apply_collected_xattrs(ctx.target, ctx.raw_path, entry_xattrs, report);
+            current_layer_paths.insert(ctx.rel_path.to_path_buf());
+        }
+        Err(refuse) => report.refused.push(RefusedEntry {
+            raw_path: ctx.raw_path.to_vec(),
+            reason: refuse,
+        }),
+    }
+}
+
+/// Non-Linux fallback: allow-listed device nodes are skipped outright
+/// (the later ext4/rootfs pipeline drops device nodes and the guest
+/// mounts devtmpfs anyway), so neither the xattrs nor the current-layer
+/// path set need updating — see [`Rooted::materialize_device_node`].
+#[cfg(not(target_os = "linux"))]
+fn unpack_device_entry<R: Read>(
+    entry: &tar::Entry<R>,
+    ctx: &EntryCtx,
+    _entry_xattrs: Vec<PendingXattr>,
+    _current_layer_paths: &mut HashSet<PathBuf>,
+    report: &mut UnpackReport,
+) {
+    match ctx
+        .rooted
+        .materialize_device_node(entry, ctx.rel_path, ctx.raw_path)
+    {
+        Ok(DeviceNodeAction::Skipped) => {
+            report.device_nodes_skipped += 1;
+        }
+        Err(refuse) => report.refused.push(RefusedEntry {
+            raw_path: ctx.raw_path.to_vec(),
+            reason: refuse,
+        }),
+    }
 }
 
 #[derive(Debug)]
