@@ -16,6 +16,7 @@ use crate::hvf_backend::HvfBackend;
 use crate::image::RuntimeVolume;
 use crate::libkrun::LibkrunBackend;
 use crate::microvm::{DriveFile, FlakeRunConfig};
+#[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use crate::qemu::QemuBackend;
 use crate::wasm_backend::WasmBackend;
@@ -490,7 +491,10 @@ pub enum AnyBackend {
     /// the host. Selected only via explicit `--hypervisor mock`;
     /// `auto_select` never falls through here. See
     /// [`crate::mock::MockBackend`] for the rationale and security
-    /// profile (Tier 3 / claims unknown).
+    /// profile (Tier 3 / claims unknown). Gated behind `test-support` so
+    /// this variant — and the mock backend it wraps — never compiles into
+    /// a production `mvmctl` binary.
+    #[cfg(feature = "test-support")]
     Mock(MockBackend),
     /// Raw HVF — Hypervisor.framework on macOS / Apple silicon,
     /// driven by the unified `vmm::run` loop via the detached
@@ -538,6 +542,11 @@ impl AnyBackend {
     /// Supported: `"firecracker"` (default), `"qemu"` (Linux dev/test),
     /// `"hvf"` (in-house Hypervisor.framework VMM, macOS), `"libkrun"`
     /// (Linux KVM / macOS HVF). Unknown names fall back to Firecracker.
+    /// `"mock"` resolves to the hermetic in-memory test double only in a
+    /// `test-support` build; outside it, `"mock"` is unrecognised the same
+    /// way a typo is and falls back to Firecracker too — call
+    /// [`Self::require_hypervisor_selectable`] first at a user-facing
+    /// `--hypervisor` boundary to refuse it loudly instead.
     pub fn from_hypervisor(name: &str) -> Self {
         // The runner isn't const-constructible, so it can't live in the catalog
         // table; special-case its opt-in selector before the descriptor lookup.
@@ -548,6 +557,24 @@ impl AnyBackend {
         catalog::descriptor_for_selector(name)
             .map(|descriptor| descriptor.instantiate())
             .unwrap_or_else(Self::default_backend)
+    }
+
+    /// Refuse a `--hypervisor` name this build cannot actually select,
+    /// instead of letting it silently resolve to a different backend.
+    /// `from_hypervisor` degrades *any* unrecognised name (including a
+    /// plain typo) to the Firecracker default; that tolerance is wrong for
+    /// `"mock"` specifically outside a `test-support` build, because
+    /// `"mock"` is a real, documented selector the caller deliberately
+    /// typed — silently substituting Firecracker for it would run the
+    /// wrong backend instead of failing. Call this before
+    /// [`Self::from_hypervisor`] at any user-facing `--hypervisor` entry
+    /// point that documents the `mock` selector (e.g. `mvmctl
+    /// pause`/`resume`).
+    pub fn require_hypervisor_selectable(name: &str) -> Result<()> {
+        if name == "mock" && !cfg!(feature = "test-support") {
+            anyhow::bail!("the mock backend is only available in test-support builds");
+        }
+        Ok(())
     }
 
     /// Select the best backend for the current platform.
@@ -642,6 +669,7 @@ impl AnyBackend {
             Self::Firecracker(backend) => backend,
             Self::Libkrun(backend) => backend,
             Self::Qemu(backend) => backend,
+            #[cfg(feature = "test-support")]
             Self::Mock(backend) => backend,
             Self::Hvf(backend) => backend,
             Self::HvfRunner(backend) => backend,
@@ -658,6 +686,7 @@ impl AnyBackend {
             }
             Self::Libkrun(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Qemu(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
+            #[cfg(feature = "test-support")]
             Self::Mock(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::Hvf(backend) => std::sync::Arc::new(backend) as std::sync::Arc<dyn VmBackend>,
             Self::HvfRunner(backend) => {
@@ -710,6 +739,7 @@ impl AnyBackend {
         match self {
             AnyBackend::Firecracker(b) => Some(b),
             AnyBackend::Libkrun(b) => Some(b),
+            #[cfg(feature = "test-support")]
             AnyBackend::Mock(b) => Some(b),
             AnyBackend::Qemu(_) => None,
             // HVF carries untrusted workloads: a real mkGuest workload boot, a
@@ -1060,10 +1090,47 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "test-support")]
     fn test_any_backend_from_hypervisor_mock() {
         let backend = AnyBackend::from_hypervisor("mock");
         assert_eq!(backend.name(), "mock");
         assert!(matches!(backend, AnyBackend::Mock(_)));
+    }
+
+    #[test]
+    #[cfg(not(feature = "test-support"))]
+    fn from_hypervisor_mock_falls_back_outside_test_support() {
+        // Outside `test-support`, `"mock"` is unrecognised the same way a
+        // typo is — `from_hypervisor` itself stays infallible and degrades
+        // to the Firecracker default. `require_hypervisor_selectable` is
+        // the fail-closed check a user-facing `--hypervisor` boundary uses
+        // instead of relying on this fallback.
+        let backend = AnyBackend::from_hypervisor("mock");
+        assert_eq!(backend.name(), "firecracker");
+    }
+
+    #[test]
+    fn require_hypervisor_selectable_refuses_mock_without_test_support() {
+        let result = AnyBackend::require_hypervisor_selectable("mock");
+        if cfg!(feature = "test-support") {
+            assert!(result.is_ok(), "test-support build must allow mock");
+        } else {
+            let err = result.expect_err("mock must be refused outside test-support");
+            assert!(
+                err.to_string().contains("test-support"),
+                "error must name the missing feature: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn require_hypervisor_selectable_allows_every_other_name() {
+        for name in ["firecracker", "libkrun", "qemu", "hvf", "unknown-typo"] {
+            assert!(
+                AnyBackend::require_hypervisor_selectable(name).is_ok(),
+                "{name}: must never be refused"
+            );
+        }
     }
 
     #[test]
@@ -1405,15 +1472,21 @@ mod tests {
 
     #[test]
     fn tier_classification_locks_each_backend_variant() {
-        let cases: &[(&str, BackendTier)] = &[
+        let mut cases: Vec<(&str, BackendTier)> = vec![
             ("firecracker", BackendTier::Tier1),
             ("libkrun", BackendTier::Tier2),
             ("qemu", BackendTier::Tier2),
-            ("mock", BackendTier::Tier3),
         ];
+        // No `AnyBackend::Mock`/`MockBackend` reference here — just a name +
+        // tier pair — so a plain runtime check (not `#[cfg]`) is enough to
+        // keep this test-support-agnostic and `mut` genuinely used in both
+        // configs.
+        if cfg!(feature = "test-support") {
+            cases.push(("mock", BackendTier::Tier3));
+        }
         for (name, expected) in cases {
             let b = AnyBackend::from_hypervisor(name);
-            assert_eq!(b.tier(), *expected, "{name}: tier mismatch");
+            assert_eq!(b.tier(), expected, "{name}: tier mismatch");
         }
     }
 
@@ -1424,7 +1497,10 @@ mod tests {
         // long-standing per-backend tier declaration. `AnyBackend::tier()`
         // is the closed-enum view of the same fact. Bumping one without
         // the other is a regression — keep them wired.
-        let names = ["firecracker", "libkrun", "qemu", "mock"];
+        let mut names = vec!["firecracker", "libkrun", "qemu"];
+        if cfg!(feature = "test-support") {
+            names.push("mock");
+        }
         for name in names {
             let b = AnyBackend::from_hypervisor(name);
             let enum_tier = b.tier();
@@ -1452,7 +1528,11 @@ mod tests {
     fn as_workload_backend_some_for_workload_variants() {
         // mock is included: it is the hermetic lifecycle test double that
         // stands in for a workload backend on the admitted path.
-        for name in ["firecracker", "libkrun", "hvf", "mock"] {
+        let mut names = vec!["firecracker", "libkrun", "hvf"];
+        if cfg!(feature = "test-support") {
+            names.push("mock");
+        }
+        for name in names {
             let backend = AnyBackend::from_hypervisor(name);
             assert!(
                 backend.as_workload_backend().is_some(),
@@ -1525,23 +1605,37 @@ mod tests {
         );
     }
 
+    /// Isolates the `AnyBackend::Mock` construction (unavailable outside
+    /// `test-support`) behind a function that's always defined, so its only
+    /// caller can `.extend(..)` unconditionally instead of needing a
+    /// `#[cfg]`'d `push` — which would otherwise make the collection's
+    /// `mut` binding spuriously unused in a non-`test-support` build.
+    #[cfg(feature = "test-support")]
+    fn mock_variant_for_ssh_check() -> Option<(&'static str, AnyBackend)> {
+        Some(("mock", AnyBackend::Mock(MockBackend::new())))
+    }
+    #[cfg(not(feature = "test-support"))]
+    fn mock_variant_for_ssh_check() -> Option<(&'static str, AnyBackend)> {
+        None
+    }
+
     #[test]
     fn no_backend_advertises_production_ssh() {
         // The capability layer encodes the SSH ban: no backend may advertise an
         // in-guest SSH server. A future backend that flips this trips here.
         // Covers every `AnyBackend` variant, including both hvf entry points
         // (the raw backend and the WorkloadRunner-driven role-runner path).
-        let backends: [(&str, AnyBackend); 6] = [
+        let mut backends: Vec<(&str, AnyBackend)> = vec![
             ("firecracker", AnyBackend::Firecracker(FirecrackerBackend)),
             ("libkrun", AnyBackend::Libkrun(LibkrunBackend)),
             ("qemu", AnyBackend::Qemu(QemuBackend)),
-            ("mock", AnyBackend::Mock(MockBackend::new())),
             ("hvf", AnyBackend::Hvf(HvfBackend)),
             (
                 "hvf_runner",
                 AnyBackend::HvfRunner(WorkloadRunner::new(HvfDriver::new(), RealEndpointSpawner)),
             ),
         ];
+        backends.extend(mock_variant_for_ssh_check());
         for (name, backend) in backends {
             assert!(
                 !backend.capabilities().production_ssh,

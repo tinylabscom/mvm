@@ -5,6 +5,7 @@
 use crate::backend::{AnyBackend, FirecrackerBackend};
 use crate::hvf_backend::HvfBackend;
 use crate::libkrun::LibkrunBackend;
+#[cfg(feature = "test-support")]
 use crate::mock::MockBackend;
 use anyhow::{Result, anyhow};
 use mvm_core::vm_backend::VmBackend;
@@ -75,6 +76,7 @@ impl WorkloadBackend for HvfBackend {
 // workload, so it stands in for a workload backend on the admitted path in
 // tests. `QemuBackend` (a real dev/test VMM) is deliberately NOT a
 // `WorkloadBackend`: it is the meaningful Tier-2 carve-out.
+#[cfg(feature = "test-support")]
 impl WorkloadBackend for MockBackend {
     fn egress_substitution_transport(&self) -> EgressSubstitutionTransport {
         EgressSubstitutionTransport::None
@@ -125,6 +127,7 @@ mod tests {
         assert_is_workload_backend::<FirecrackerBackend>();
         assert_is_workload_backend::<LibkrunBackend>();
         assert_is_workload_backend::<HvfBackend>();
+        #[cfg(feature = "test-support")]
         assert_is_workload_backend::<MockBackend>();
     }
 
@@ -156,6 +159,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "test-support")]
     fn mock_declares_none() {
         let transport = MockBackend::new().egress_substitution_transport();
         assert_eq!(transport, EgressSubstitutionTransport::None);
@@ -201,11 +205,16 @@ mod tests {
 
     #[test]
     fn transparent_egress_terminator_requirement_refuses_proxy_only_backends() {
+        #[cfg(feature = "test-support")]
         let mock = MockBackend::new();
-        for backend in [
+        #[cfg(feature = "test-support")]
+        let backends: Vec<&dyn WorkloadBackend> = vec![
             &HvfBackend as &dyn WorkloadBackend,
             &mock as &dyn WorkloadBackend,
-        ] {
+        ];
+        #[cfg(not(feature = "test-support"))]
+        let backends: Vec<&dyn WorkloadBackend> = vec![&HvfBackend as &dyn WorkloadBackend];
+        for backend in backends {
             let err = match require_transparent_egress_terminator(backend) {
                 Ok(()) => panic!("{} should not satisfy the terminator gate", backend.name()),
                 Err(e) => e,

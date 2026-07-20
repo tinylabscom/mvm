@@ -539,6 +539,14 @@ template-registry-s3 = [
     "mvm-cli/template-registry-s3",
 ]
 
+# Dev/test-only: the hermetic in-memory `MockBackend` + `--hypervisor mock`.
+# Off by default so the shipped `mvmctl` binary never carries the Tier-3 mock
+# backend; this workspace's own `tests/audit_emissions_live.rs` (which spawns
+# `mvmctl --hypervisor mock` as a subprocess and drives `MockGuestAgent`
+# in-process) needs it turned on. `mvm-runtime` is named directly too since
+# this crate depends on it straight, not only through `mvm-cli`.
+test-support = ["mvm-cli/test-support", "mvm-runtime/test-support"]
+
 [profile.release]
 opt-level = 3
 strip = true

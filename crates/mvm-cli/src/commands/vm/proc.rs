@@ -132,9 +132,12 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// mock backend.
 fn proc_request(name: &str, req: GuestRequest) -> Result<ProcResult> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
-    if mock_dir.join("runtime").join("v.sock").exists() {
-        return mvm_agentd::vsock::send_proc_request(&mock_dir.to_string_lossy(), req);
+    #[cfg(feature = "test-support")]
+    {
+        let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
+        if mock_dir.join("runtime").join("v.sock").exists() {
+            return mvm_agentd::vsock::send_proc_request(&mock_dir.to_string_lossy(), req);
+        }
     }
     let mut stream =
         mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
@@ -150,14 +153,17 @@ fn proc_wait<F: FnMut(&ProcWaitEvent)>(
     on_event: F,
 ) -> Result<ProcWaitEvent> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
-    if mock_dir.join("runtime").join("v.sock").exists() {
-        return mvm_agentd::vsock::send_proc_wait(
-            &mock_dir.to_string_lossy(),
-            token,
-            timeout,
-            on_event,
-        );
+    #[cfg(feature = "test-support")]
+    {
+        let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
+        if mock_dir.join("runtime").join("v.sock").exists() {
+            return mvm_agentd::vsock::send_proc_wait(
+                &mock_dir.to_string_lossy(),
+                token,
+                timeout,
+                on_event,
+            );
+        }
     }
     let mut stream =
         mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;

@@ -168,12 +168,17 @@ pub(in crate::commands) fn run(_cli: &Cli, args: Args, _cfg: &MvmConfig) -> Resu
 /// — so `mvmctl fs`/`cp` work regardless of which backend launched the VM.
 /// The `--hypervisor mock` fast path (a mock agent at the VM dir's
 /// `runtime/v.sock`) stays ahead of the probe since `for_vm` is unaware of
-/// the in-memory mock backend.
+/// the in-memory mock backend. Gated behind `test-support` along with the
+/// mock backend itself — a production build never has a mock VM dir to
+/// find, so it goes straight to the real probe.
 pub(super) fn fs_request(name: &str, req: GuestRequest) -> Result<FsResult> {
     validate_vm_name(name).with_context(|| format!("Invalid VM name: {:?}", name))?;
-    let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
-    if mock_dir.join("runtime").join("v.sock").exists() {
-        return mvm_agentd::vsock::send_fs_request(&mock_dir.to_string_lossy(), req);
+    #[cfg(feature = "test-support")]
+    {
+        let mock_dir = mvm_runtime::MockBackend::vm_dir(name);
+        if mock_dir.join("runtime").join("v.sock").exists() {
+            return mvm_agentd::vsock::send_fs_request(&mock_dir.to_string_lossy(), req);
+        }
     }
     let mut stream =
         mvm_runtime::vsock_transport::for_vm(name)?.connect(mvm_agentd::vsock::GUEST_AGENT_PORT)?;
