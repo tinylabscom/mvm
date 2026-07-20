@@ -374,13 +374,10 @@ fn ensure_libkrun_runtime_source_supported(config: &VmStartConfig) -> Result<()>
     Ok(())
 }
 
-fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<SupervisorConfig> {
-    let kernel = config
-        .kernel_path
-        .as_deref()
-        .ok_or_else(|| anyhow!("libkrun backend requires a kernel path"))?;
-    let (kernel, kernel_format) = libkrun_kernel_for_host(kernel)?;
-    let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
+/// Assemble the guest kernel cmdline: the verity or default base string plus
+/// every optional token layered on top, in the exact order the guest
+/// `/init` expects them.
+fn build_guest_cmdline(config: &VmStartConfig, state_dir: &Path) -> String {
     // Append the `mvm.uvols=` param so the dev VM's `mvm-host-vm-init`
     // mounts user volumes at their guest paths (no-op when there are
     // none; harmless for workload guests whose `/init` ignores it).
@@ -443,28 +440,14 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         cmdline.push(' ');
         cmdline.push_str(&token);
     }
-    // Workload-independent KrunContext (kernel + resources + vsock + gateway), shared
-    // verbatim with the standby spawn so the two paths can't drift. The cold path
-    // then sets the workload rootfs + user volumes below.
-    let mut krun = krun_context_base(
-        &config.name,
-        &kernel,
-        vcpus,
-        config.memory_mib,
-        &cmdline,
-        state_dir,
-    );
-    krun = krun
-        .with_kernel_format(kernel_format)
-        .with_console_output(vm_console_log(&config.name).display().to_string());
-    // A tunnel run adds the guest→worker vsock port: libkrun proxies the guest's
-    // connect to the UDS the tunnel worker bound (before start_enter) at
-    // `<state_dir>/vsock-<port>.sock`. Conditional so non-tunnel launches and the
-    // warm-standby base don't register an inert port.
-    if config.network_tunnel.is_some() {
-        krun = krun
-            .add_host_listen_port(mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT);
-    }
+    cmdline
+}
+
+/// Attach the workload rootfs (plus its dm-verity sidecar and the runtime
+/// overlay disk) to `krun`. Verity boots carry `root`/`root-verity` disks
+/// and an initramfs; non-verity boots set `rootfs_path` directly and, when a
+/// runtime overlay is present, attach it as a plain read-only `/dev/vdb`.
+fn attach_workload_rootfs(mut krun: KrunContext, config: &VmStartConfig) -> KrunContext {
     if libkrun_verity_enabled(config) {
         krun.initramfs_path =
             libkrun_effective_initrd(config).map(|p| p.to_string_lossy().into_owned());
@@ -495,33 +478,23 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
             krun = krun.add_disk("runtime", overlay.to_string(), true);
         }
     }
+    krun
+}
 
-    // A dev-accessible managed machine (`machine run -t` / `machine shell` /
-    // `up --console`) pre-opens the interactive-console data range. libkrun
-    // binds one host UDS listener per registered port (`listen=true`, host
-    // dials → guest's vsock server), so the agent's dynamic
-    // `CONSOLE_PORT_BASE + session_id` data port is unreachable unless it was
-    // declared here. Left out of `krun_context_base` so the warm-standby base
-    // (no `VmStartConfig` yet) stays unchanged.
-    if config.dev_console {
-        for port in mvm_agentd::vsock::dev_console_data_ports() {
-            krun = krun.add_vsock_port(port);
-        }
-    }
-
-    // User-supplied volumes (--volume / MVM_VOLUMES). A directory share
-    // is a virtio-fs device; a disk image is an extra virtio-blk device.
-    // Tag/id `uvol{idx}` is the coordination key the guest mount manifest
-    // uses to mount each at its requested guest path. Disk images are
-    // sparse-created by the CLI orchestrator before start; a RO disk image
-    // is RO at the hypervisor (krun_add_disk takes read_only).
-    //
-    // libkrun's `krun_add_virtiofs` has NO host-side read-only
-    // toggle, so a "read-only" virtio-fs share would only be ro by the
-    // guest's own mount flag — a compromised guest could remount it rw.
-    // Rather than make a false ro promise, refuse it and point at the
-    // hypervisor-enforced alternatives. (HVF/Firecracker enforce ro shares
-    // natively; this restriction is libkrun-specific.)
+/// Attach the user-supplied volumes (`--volume` / `MVM_VOLUMES`) to `krun`.
+/// A directory share is a virtio-fs device; a disk image is an extra
+/// virtio-blk device. Tag/id `uvol{idx}` is the coordination key the guest
+/// mount manifest uses to mount each at its requested guest path. Disk
+/// images are sparse-created by the CLI orchestrator before start; a RO
+/// disk image is RO at the hypervisor (krun_add_disk takes read_only).
+///
+/// libkrun's `krun_add_virtiofs` has NO host-side read-only
+/// toggle, so a "read-only" virtio-fs share would only be ro by the
+/// guest's own mount flag — a compromised guest could remount it rw.
+/// Rather than make a false ro promise, refuse it and point at the
+/// hypervisor-enforced alternatives. (HVF/Firecracker enforce ro shares
+/// natively; this restriction is libkrun-specific.)
+fn attach_user_volumes(mut krun: KrunContext, config: &VmStartConfig) -> Result<KrunContext> {
     for (idx, vol) in config.volumes.iter().enumerate() {
         let tag = format!("uvol{idx}");
         krun = match vol.kind {
@@ -544,36 +517,98 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
             }
         };
     }
+    Ok(krun)
+}
 
-    // `tenant_id` flows into the per-VM audit-chain path
-    // (`workload_audit_path`) that the host-services broker spawns against —
-    // even on the legacy/no-bridge path where the substrate stays all-None. So
-    // validate it here regardless of `plan_json`: an unsafe tenant (e.g. a
-    // path-traversal label) must be refused before `start()` reaches the broker
-    // spawn, independent of whether the gateway bridge is engaged. A path-
-    // injection guard, not just the bridge's input check.
+/// Assemble the per-workload [`KrunContext`]: the workload-independent base
+/// (kernel + resources + vsock + gateway), shared verbatim with the standby
+/// spawn so the two paths can't drift, plus the cold-path additions —
+/// console capture, the tunnel host-listen port, the workload rootfs, the
+/// dev-console data ports, and any user-supplied volumes.
+fn build_workload_krun_context(
+    config: &VmStartConfig,
+    kernel: &str,
+    kernel_format: KernelFormat,
+    vcpus: u8,
+    cmdline: &str,
+    state_dir: &Path,
+) -> Result<KrunContext> {
+    let mut krun = krun_context_base(
+        &config.name,
+        kernel,
+        vcpus,
+        config.memory_mib,
+        cmdline,
+        state_dir,
+    );
+    krun = krun
+        .with_kernel_format(kernel_format)
+        .with_console_output(vm_console_log(&config.name).display().to_string());
+    // A tunnel run adds the guest→worker vsock port: libkrun proxies the guest's
+    // connect to the UDS the tunnel worker bound (before start_enter) at
+    // `<state_dir>/vsock-<port>.sock`. Conditional so non-tunnel launches and the
+    // warm-standby base don't register an inert port.
+    if config.network_tunnel.is_some() {
+        krun = krun
+            .add_host_listen_port(mvm_core::protocol::network_tunnel::NETWORK_TUNNEL_GUEST_PORT);
+    }
+    krun = attach_workload_rootfs(krun, config);
+
+    // A dev-accessible managed machine (`machine run -t` / `machine shell` /
+    // `up --console`) pre-opens the interactive-console data range. libkrun
+    // binds one host UDS listener per registered port (`listen=true`, host
+    // dials → guest's vsock server), so the agent's dynamic
+    // `CONSOLE_PORT_BASE + session_id` data port is unreachable unless it was
+    // declared here. Left out of `krun_context_base` so the warm-standby base
+    // (no `VmStartConfig` yet) stays unchanged.
+    if config.dev_console {
+        for port in mvm_agentd::vsock::dev_console_data_ports() {
+            krun = krun.add_vsock_port(port);
+        }
+    }
+
+    attach_user_volumes(krun, config)
+}
+
+/// Validate the tenant label and resolve the gateway-bridge audit substrate
+/// (paths).
+///
+/// `tenant_id` flows into the per-VM audit-chain path
+/// (`workload_audit_path`) that the host-services broker spawns against —
+/// even on the legacy/no-bridge path where the substrate stays all-None. So
+/// the tenant is validated here regardless of `plan_json`: an unsafe tenant
+/// (e.g. a path-traversal label) must be refused before `start()` reaches
+/// the broker spawn, independent of whether the gateway bridge is engaged. A
+/// path-injection guard, not just the bridge's input check.
+///
+/// Substrate resolution is gated on `plan_json` — the bridge supervisor's
+/// actual input — NOT on `tenant_id`: a substrate without a plan is what the
+/// supervisor rejects as "cfg.plan missing on bridge path". An admitted
+/// workload carries both `tenant_id` and `plan_json`, so the default
+/// workload path reaches the enforcing bridge; dev/builder starts keep
+/// `plan_json` absent and stay on the legacy `run_supervisor` path with an
+/// all-None substrate. (`compute_audit_substrate` re-validates the tenant —
+/// harmless after the guard above.)
+fn resolve_audit_substrate(
+    config: &VmStartConfig,
+) -> Result<crate::audit_substrate::AuditSubstrate> {
     if let Some(tenant) = config.tenant_id.as_deref() {
         crate::audit_substrate::validate_tenant_id(tenant)?;
     }
-
-    // Resolve the gateway-bridge audit substrate (paths). Gated on `plan_json`
-    // — the bridge supervisor's actual input — NOT on `tenant_id`: a substrate
-    // without a plan is what the supervisor rejects as "cfg.plan missing on
-    // bridge path". An admitted workload carries both `tenant_id` and
-    // `plan_json`, so the default workload path reaches the enforcing bridge;
-    // dev/builder starts keep `plan_json` absent and stay on the legacy
-    // `run_supervisor` path with an all-None substrate. (`compute_audit_
-    // substrate` re-validates the tenant — harmless after the guard above.)
-    let substrate = if config.plan_json.is_some() {
+    Ok(if config.plan_json.is_some() {
         crate::audit_substrate::compute_audit_substrate(&config.name, config.tenant_id.as_deref())?
     } else {
         crate::audit_substrate::AuditSubstrate::default()
-    };
+    })
+}
 
-    // Parse the signed-plan + bundle envelopes from VmStartConfig.
-    // libkrun_sys::SupervisorConfig carries them as Option<serde_json::Value>
-    // so the supervisor can re-verify the envelope without typed coupling
-    // to `mvm_core::plan` at the parse boundary.
+/// Parse the signed-plan + bundle envelopes from `VmStartConfig`.
+/// `libkrun_sys::SupervisorConfig` carries them as `Option<serde_json::Value>`
+/// so the supervisor can re-verify the envelope without typed coupling
+/// to `mvm_core::plan` at the parse boundary.
+fn parse_plan_and_bundle(
+    config: &VmStartConfig,
+) -> Result<(Option<serde_json::Value>, Option<serde_json::Value>)> {
     let plan = match config.plan_json.as_deref() {
         Some(s) => Some(
             serde_json::from_str(s)
@@ -588,6 +623,21 @@ fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<S
         ),
         None => None,
     };
+    Ok((plan, bundle))
+}
+
+fn build_supervisor_config(config: &VmStartConfig, state_dir: &Path) -> Result<SupervisorConfig> {
+    let kernel = config
+        .kernel_path
+        .as_deref()
+        .ok_or_else(|| anyhow!("libkrun backend requires a kernel path"))?;
+    let (kernel, kernel_format) = libkrun_kernel_for_host(kernel)?;
+    let vcpus = u8::try_from(config.cpus.clamp(1, u32::from(u8::MAX))).unwrap_or(u8::MAX);
+    let cmdline = build_guest_cmdline(config, state_dir);
+    let krun =
+        build_workload_krun_context(config, &kernel, kernel_format, vcpus, &cmdline, state_dir)?;
+    let substrate = resolve_audit_substrate(config)?;
+    let (plan, bundle) = parse_plan_and_bundle(config)?;
 
     Ok(SupervisorConfig {
         krun,
