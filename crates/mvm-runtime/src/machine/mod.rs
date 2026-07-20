@@ -371,6 +371,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "test-support")]
     fn produced_config_is_launchable_by_a_backend() {
         // Prove the translation yields a config a backend accepts: the mock
         // (the VmBackend test double) starts it and records a running VM.

@@ -59,6 +59,7 @@ pub(in crate::commands) struct ResumeArgs {
 
 pub(in crate::commands) fn run_pause(_cli: &Cli, args: PauseArgs, _cfg: &MvmConfig) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
+    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(&args.hypervisor)?;
 
     let client = LocalBackend::with_hypervisor(&args.hypervisor);
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -91,6 +92,7 @@ pub(in crate::commands) fn run_resume(
     _cfg: &MvmConfig,
 ) -> Result<()> {
     validate_vm_name(&args.name).with_context(|| format!("Invalid VM name: {:?}", args.name))?;
+    mvm_runtime::backend::AnyBackend::require_hypervisor_selectable(&args.hypervisor)?;
 
     let client = LocalBackend::with_hypervisor(&args.hypervisor);
     let runtime = tokio::runtime::Builder::new_current_thread()

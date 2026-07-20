@@ -56,6 +56,12 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 which.workspace = true
 
+[[example]]
+name = "verification_loop"
+# Drives the `WarmLease`/`ExecBuilder` DX layer against the hermetic mock
+# backend so the example runs on any host; needs the mock compiled in.
+required-features = ["test-support"]
+
 [build-dependencies]
 hex.workspace = true
 toml.workspace = true
@@ -125,6 +131,12 @@ manifest-verify = [
     "mvm-core/manifest-verify",
 ]
 template-registry-s3 = ["mvm-runtime/template-registry-s3"]
+# Forwards to `mvm-runtime/test-support` + `mvm-client/test-support`: the
+# hermetic in-memory `MockBackend` and the `--hypervisor mock` fast paths in
+# `fs`/`proc`/`diff` that key off it. Off by default so the mock — a Tier-3
+# test double with none of the security claims — never ships in a production
+# `mvmctl` binary; the test suite and the `verification_loop` example turn it on.
+test-support = ["mvm-runtime/test-support", "mvm-client/test-support"]
 
 [lints]
 workspace = true

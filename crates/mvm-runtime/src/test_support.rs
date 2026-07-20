@@ -5,7 +5,7 @@ use std::os::unix::net::UnixListener;
 #[cfg(test)]
 use std::path::Path;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 use crate::mock_guest_agent::MockGuestAgent;
 
 #[cfg(test)]
@@ -61,7 +61,7 @@ pub(crate) fn bind_unix_listener(path: &Path) -> Option<UnixListener> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-support"))]
 pub(crate) fn start_mock_guest_agent(vm_dir: &Path) -> Option<MockGuestAgent> {
     match MockGuestAgent::start(vm_dir) {
         Ok(agent) => Some(agent),
