@@ -128,8 +128,10 @@ attestation-tdx = []
 # host↔guest RPC surface embeds (`AgentProfile`, `BackpressureReason`), so
 # `mvm-agentd`'s `emit_protocol_schema` bin can emit the protocol schema.
 # Off by default: the schema is a build-time codegen input, never linked
-# into the runtime. Keeps the default closure schemars-free.
-schema = ["dep:schemars"]
+# into the runtime. Keeps the default closure schemars-free. Forwards to
+# `mvm-protocol/schema` because the RPC surface embeds mvm-protocol plan
+# types (e.g. `VerbGrant`) that need their JsonSchema derive turned on too.
+schema = ["dep:schemars", "mvm-protocol/schema"]
 
 # Emit the host-services broker JSON Schema (the in-guest SDK type-codegen
 # input). `required-features` keeps `schemars` out of any default build — the
