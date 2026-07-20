@@ -14,8 +14,8 @@
 //!   Nix bodies bundled with addons. v1 is parse-only (rejects malformed
 //!   Nix); AST-level merging arrives with the in-VM addon tier.
 //! - `registry` — registry client surface plus a directory-backed
-//!   `LocalRegistry` (test / offline) and an `HttpRegistry` skeleton
-//!   (real sigstore-keyless verification lands in a follow-up).
+//!   `LocalRegistry` (test / offline; real sigstore-keyless
+//!   verification lands in a follow-up).
 //! - `archive` — deterministic `.tar.gz` packaging of an addon
 //!   directory: sorted entries, mtime = 0, normalized mode bits,
 //!   gzip with no filename header.
