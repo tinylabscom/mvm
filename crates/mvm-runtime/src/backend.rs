@@ -567,9 +567,9 @@ impl AnyBackend {
     /// `"mock"` is a real, documented selector the caller deliberately
     /// typed — silently substituting Firecracker for it would run the
     /// wrong backend instead of failing. Call this before
-    /// [`Self::from_hypervisor`] / [`crate::LibkrunBackend`]-style
-    /// resolution at any user-facing `--hypervisor` entry point that
-    /// documents the `mock` selector (e.g. `mvmctl pause`/`resume`).
+    /// [`Self::from_hypervisor`] at any user-facing `--hypervisor` entry
+    /// point that documents the `mock` selector (e.g. `mvmctl
+    /// pause`/`resume`).
     pub fn require_hypervisor_selectable(name: &str) -> Result<()> {
         if name == "mock" && !cfg!(feature = "test-support") {
             anyhow::bail!("the mock backend is only available in test-support builds");
